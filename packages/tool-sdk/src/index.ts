@@ -17,6 +17,21 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   execute(input: TInput, signal: AbortSignal): Promise<TOutput> | TOutput
 }
 
+export class ToolRegistry {
+  private readonly definitions = new Map<string, ToolDefinition<any, any>>()
+  register<TInput, TOutput>(definition: ToolDefinition<TInput, TOutput>): void {
+    if (!definition.manifest.name || this.definitions.has(definition.manifest.name)) throw new Error(`TOOL_ALREADY_REGISTERED:${definition.manifest.name}`)
+    this.definitions.set(definition.manifest.name, definition)
+  }
+  get(name: string): ToolDefinition<any, any> | undefined { return this.definitions.get(name) }
+  list(): ToolManifest[] { return [...this.definitions.values()].map((definition) => structuredClone(definition.manifest)) }
+  async execute(name: string, input: unknown, signal: AbortSignal): Promise<unknown> {
+    const definition = this.definitions.get(name)
+    if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`)
+    return definition.execute(input, signal)
+  }
+}
+
 function schemaToJsonSchema(schema: ZodTypeAny): Record<string, unknown> {
   const typeName = schema._def.typeName as string
   if (typeName === z.ZodFirstPartyTypeKind.ZodObject) {
