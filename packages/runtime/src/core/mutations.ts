@@ -29,7 +29,7 @@ export function apply(state: RuntimeState, mutations: Mutation[]): void {
       case 'publishResult': state.results.set(mutation.record.id, mutation.record); break
       case 'setGlobal': state.agents.get(mutation.agentId)!.globalVersions.set(mutation.version, mutation.value); state.agents.get(mutation.agentId)!.latestGlobalVersion = mutation.version; break
       case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version }; break }
-      case 'appendEvent': state.events.push({ ...mutation.event, seq: state.nextIds.event++ }); break
+      case 'appendEvent': { const seq = state.nextIds.event++; state.events.push({ ...mutation.event, seq, id: mutation.event.id ?? `event-${seq}` }); break }
       case 'setNow': state.now = mutation.now; break
     }
   }

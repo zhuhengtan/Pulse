@@ -270,6 +270,7 @@ export interface LLMRequestProjection {
 
 export interface RuntimeEvent {
   seq: number
+  id?: string
   type: string
   laneId?: LaneId
   effectId?: EffectId
