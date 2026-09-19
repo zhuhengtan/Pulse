@@ -87,4 +87,19 @@ describe('runtime control boundaries', () => {
     expect(outcome.status).toBe('failed')
     expect(runtime.state.events.some((event) => event.type === 'progress.no_progress_detected')).toBe(true)
   })
+
+  it('commits Step mutations before dispatch and requeues a claimed Effect after persistence recovery', () => {
+    const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
+    const program: LaneProgram = { id: 'outbox-runtime', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('outbox-runtime', 'done') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('outbox-runtime', 'done') } }
+    const { agentId } = runtime.createAgent('outbox', program)
+    runtime.tick()
+    expect(runtime.mutationLog.size).toBe(1)
+    expect(runtime.outbox.claimed().map((entry) => entry.effectId)).toEqual(['effect-1'])
+    const recovered = new PulseRuntime({ persistence: runtime.exportPersistence(), effectExecutor: async () => await new Promise(() => undefined) })
+    expect(recovered.outbox.pending().map((entry) => entry.effectId)).toEqual(['effect-1'])
+    expect(recovered.state.events.some((event) => event.type === 'outbox.requeued')).toBe(true)
+    expect(recovered.state.agents.has(agentId)).toBe(true)
+  })
 })

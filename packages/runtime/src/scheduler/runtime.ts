@@ -1,4 +1,4 @@
-import { apply } from '../core/mutations.js'
+import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.js'
 import { createAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
@@ -8,6 +8,8 @@ import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
 import { FactInbox } from '../core/inbox.js'
 import { observeProgress } from '../lifecycle/watchdog.js'
+import { EffectOutbox } from '../storage/outbox.js'
+import { exportRuntimePersistence, importRuntimePersistence, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number }
 export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput }
@@ -25,6 +27,7 @@ export interface RuntimeConfig {
   maxConsecutiveControlErrors?: number
   maxRuntimeMs?: number
   watchdogNoProgressThreshold?: number
+  persistence?: RuntimePersistenceSnapshot
   effectExecutor?: EffectExecutor
 }
 
@@ -37,6 +40,8 @@ function outcomeForLane(lane: LaneRecord): Outcome | undefined {
 
 export class PulseRuntime {
   readonly state: RuntimeState
+  readonly mutationLog: MutationLog
+  readonly outbox: EffectOutbox
   readonly clock: VirtualClock
   readonly ready: ReadyQueue
   readonly quarantine = new QuarantineScope()
@@ -54,7 +59,15 @@ export class PulseRuntime {
   private factWaiters: Array<() => void> = []
 
   constructor(config: RuntimeConfig = {}) {
-    this.state = createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }) })
+    const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
+    this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }) })
+    this.mutationLog = restored?.mutationLog ?? new MutationLog()
+    this.outbox = restored?.outbox ?? new EffectOutbox()
+    if (restored) {
+      const recovery = this.outbox.recover(this.state)
+      for (const id of recovery.requeued) this.state.events.push({ seq: this.state.nextIds.event++, type: 'outbox.requeued', data: id })
+      for (const id of recovery.unknown) this.state.events.push({ seq: this.state.nextIds.event++, type: 'outbox.discarded', data: id })
+    }
     this.clock = new VirtualClock()
     this.ready = new ReadyQueue(config.agingIntervalMs ?? 1000, config.agingCap ?? Number.POSITIVE_INFINITY)
     this.maxSteps = config.maxLaneStepsPerTick ?? 32
@@ -74,6 +87,7 @@ export class PulseRuntime {
     return { agentId: agent.id, laneId: root.id }
   }
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
+  exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox) }
 
   enqueueHostCommand(command: HostCommand): void {
     this.factInbox.enqueue(command, `host-command-${this.hostCommandSeq++}`)
@@ -114,7 +128,8 @@ export class PulseRuntime {
           this.enqueueLane(lane.id)
         }
       } else {
-        apply(this.state, result.mutations)
+        commitMutationTransaction(this.state, this.mutationLog, `step:${lane.id}:${lane.version + 1}`, result.mutations, this.state.now)
+        for (const mutation of result.mutations) if (mutation.op === 'insertEffect') this.outbox.enqueue(mutation.record, this.state.now)
         const updated = this.state.lanes.get(lane.id)
         if (updated) delete updated.consecutiveControlErrors
         if (updated && updated.pendingResumeInput) delete updated.pendingResumeInput
@@ -174,6 +189,7 @@ export class PulseRuntime {
     const resultId = `result-${this.state.nextIds.result++}`
     const outcome: Outcome = effectiveStatus === 'succeeded' ? { status: effectiveStatus, resultRef: resultId } : { status: effectiveStatus, ...(error ? { error } : {}) }
     effect.outcome = outcome
+    this.outbox.ack(`${effect.id}:${effect.attemptId}`)
     const attempt = effect.attempts?.at(-1)
     if (attempt) { attempt.executionState = effect.executionState; attempt.sideEffectState = effect.sideEffectState; attempt.settledAt = this.state.now; if (error) attempt.error = error }
     if (effectiveStatus === 'succeeded') this.state.results.set(resultId, { id: resultId, effectId, value: execution.value, privacy: execution.privacy ?? 'public', derivedFrom: [] })
@@ -256,6 +272,8 @@ export class PulseRuntime {
     for (const effect of queued) {
       if (effect.state !== 'queued' || this.executions.has(effect.id)) continue
       if (effect.concurrencyClass !== 'none' && this.runningCount(effect.concurrencyClass) >= this.state.maxRunning[effect.concurrencyClass]) continue
+      const outboxEntry = this.outbox.enqueue(effect, this.state.now)
+      if (outboxEntry.state === 'claimed' || !this.outbox.claim(outboxEntry.id)) continue
       effect.state = 'running'
       effect.executionState = 'running'
       const attempt: import('../core/types.js').AttemptRecord = { id: effect.attemptId, effectId: effect.id, executionState: 'running', sideEffectState: effect.sideEffectState, startedAt: this.state.now }
