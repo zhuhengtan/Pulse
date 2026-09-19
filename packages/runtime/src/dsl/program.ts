@@ -65,7 +65,7 @@ export class StepBuilder<TState = JsonValue> {
     this.handlers.set(name, (ctx) => {
       const instruction = typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: ctx.laneState })
       const inputs = options.inputs?.(ctx) ?? {}
-      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: asJson({ task: options.task, instruction, inputs, schema: options.schema.description ?? 'structured' }) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: submit }
+      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: asJson({ task: options.task, instruction, inputs, schema: options.schema.description ?? 'structured' }) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
     })
     this.handlers.set(submit, (ctx) => ({ next: decode }))
     this.handlers.set(decode, (ctx) => {

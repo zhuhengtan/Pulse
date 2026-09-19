@@ -69,6 +69,7 @@ export interface LaneRecord {
   enqueueSeq: number
   readySince: number
   ownedEffectIds: Set<EffectId>
+  closingResult?: { value: JsonValue; privacy: PrivacyLabel }
 }
 
 export interface EffectRecord {
@@ -82,11 +83,30 @@ export interface EffectRecord {
   state: EffectState
   attemptId: string
   attemptNo: number
-  executionState: 'local' | 'running' | 'succeeded' | 'failed' | 'remote_unknown'
-  sideEffectState: 'none' | 'applied' | 'unknown'
+  executionState: 'local' | 'running' | 'succeeded' | 'failed' | 'remote_unknown' | 'local_closed' | 'settled'
+  sideEffectState: 'none' | 'applied' | 'known' | 'unknown'
+  attempts?: AttemptRecord[]
+  cancelRequested?: { reason: string; at: number }
+  schedulePriority?: number
+  inheritedFloor?: number
+  deadlineAt?: number
+  cancelGraceMs?: number
+  idempotencyKey?: string
+  sideEffectPolicy?: 'none' | 'read' | 'write'
   retryAt?: number
   outcome?: Outcome
   toolCallId?: string
+}
+
+export interface AttemptRecord {
+  id: string
+  effectId: EffectId
+  executionState: EffectRecord['executionState']
+  sideEffectState: EffectRecord['sideEffectState']
+  startedAt?: number
+  settledAt?: number
+  error?: RuntimeError
+  remoteStatusRef?: JsonValue
 }
 
 export interface ResultRecord {
@@ -148,6 +168,12 @@ export interface EffectSubmission {
   input: JsonValue
   wait?: boolean
   privacy?: PrivacyLabel
+  priority?: number
+  deadlineAt?: number
+  cancelGraceMs?: number
+  idempotencyKey?: string
+  sideEffectPolicy?: 'none' | 'read' | 'write'
+  toolCallId?: string
 }
 
 export interface ForkLaneSpec {
@@ -245,10 +271,12 @@ export interface RuntimeState {
   events: RuntimeEvent[]
   nextIds: { agent: number; lane: number; effect: number; wait: number; result: number; event: number }
   maxTotalLanes: number
+  maxQueuedEffects: number
+  maxRunning: Record<ConcurrencyClass, number>
 }
 
-export function createRuntimeState(maxTotalLanes = 64): RuntimeState {
-  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, event: 1 }, maxTotalLanes }
+export function createRuntimeState(maxTotalLanes = 64, options: { maxQueuedEffects?: number; maxRunning?: Partial<Record<ConcurrencyClass, number>> } = {}): RuntimeState {
+  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, event: 1 }, maxTotalLanes, maxQueuedEffects: options.maxQueuedEffects ?? 256, maxRunning: { llm: 4, tool: 16, agent: 4, none: Number.POSITIVE_INFINITY, ...(options.maxRunning ?? {}) } }
 }
 
 export function privacyRank(label: PrivacyLabel): number { return label === 'public' ? 0 : label === 'cloud_allowed' ? 1 : 2 }

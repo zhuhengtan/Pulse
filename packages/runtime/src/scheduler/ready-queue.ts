@@ -24,6 +24,7 @@ export class ReadyQueue {
 
 export class PriorityInheritance {
   private readonly floors = new Map<string, Map<string, number>>()
+  clear(): void { this.floors.clear() }
   raise(targetLaneId: string, consumerId: string, score: number): void { if (!this.floors.has(targetLaneId)) this.floors.set(targetLaneId, new Map()); this.floors.get(targetLaneId)!.set(consumerId, score) }
   release(targetLaneId: string, consumerId: string): void { this.floors.get(targetLaneId)?.delete(consumerId) }
   floor(targetLaneId: string): number | undefined { const values = [...(this.floors.get(targetLaneId)?.values() ?? [])]; return values.length ? Math.max(...values) : undefined }

@@ -1,5 +1,6 @@
 import { error } from '../core/errors.js'
 import { apply } from '../core/mutations.js'
+import { DependencyGraph } from '../dependencies/graph.js'
 import type { ValidationResult, Mutation } from '../core/mutations.js'
 import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction } from '../core/types.js'
 
@@ -27,6 +28,13 @@ function resolveTarget(value: TargetRef | LocalRef, locals: Map<string, TargetRe
 function targetOutcome(state: RuntimeState, target: TargetRef): Outcome | undefined {
   if (target.kind === 'lane') return state.lanes.get(target.id)?.status === 'succeeded' ? { status: 'succeeded' } : state.lanes.get(target.id)?.status === 'failed' ? { status: 'failed' } : state.lanes.get(target.id)?.status === 'cancelled' ? { status: 'cancelled' } : undefined
   return state.effects.get(target.id)?.outcome
+}
+
+function hasDependencyCycle(state: RuntimeState, extra: Array<{ from: TargetRef; to: TargetRef; kind?: 'wait' | 'ownership' }>): boolean {
+  const graph = new DependencyGraph()
+  for (const wait of state.waits.values()) if (wait.state === 'pending') for (const dependency of wait.spec.dependencies) graph.add({ kind: 'lane', id: wait.laneId }, dependency.target as TargetRef)
+  for (const edge of extra) graph.add(edge.from, edge.to, edge.kind ?? 'wait')
+  return graph.hasCycle()
 }
 
 function validateWait(state: RuntimeState, laneId: string, spec: WaitSpec, locals: Map<string, TargetRef>, newTargets: Map<string, TargetRef>): string | undefined {
@@ -113,6 +121,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   let laneCounter = state.nextIds.lane + state.lanes.size
   let waitCounter = state.nextIds.wait + state.waits.size
   let resultCounter = state.nextIds.result + state.results.size
+  let queuedEffectCount = [...state.effects.values()].filter((effect) => effect.state === 'queued' && effect.concurrencyClass !== 'none').length
 
   if (output.contextDelta) {
     const applied = applyContextDelta(state, workingLane, output.contextDelta, mutations)
@@ -129,6 +138,9 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   for (const action of actions) {
     if (action.type === 'submit_effects') {
       if (action.effects.length === 0) return { rejection: error('EMPTY_EFFECT_BATCH', 'submit_effects requires at least one effect') }
+      const newQueued = action.effects.filter((submission) => submission.concurrencyClass !== 'none').length
+      if (queuedEffectCount + newQueued > state.maxQueuedEffects) return { rejection: error('EFFECT_QUEUE_FULL', 'effect queue capacity would be exceeded') }
+      queuedEffectCount += newQueued
       const batchTargets = new Map<string, TargetRef>()
       for (const submission of action.effects) {
         if (seenEffectKeys.has(submission.key)) return { rejection: error('DUPLICATE_EFFECT_KEY', submission.key) }
@@ -137,12 +149,13 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         const target = { kind: 'effect' as const, id }
         batchTargets.set(submission.key, target)
         localTargets.set(submission.key, target)
-        const effect: EffectRecord = { id, agentId: lane.agentId, ownerLaneId: lane.id, key: submission.key, kind: submission.kind, concurrencyClass: submission.concurrencyClass, input: clone(submission.input), state: 'queued', attemptId: `${id}-attempt-1`, attemptNo: 1, executionState: 'local', sideEffectState: 'none' }
+        const effect: EffectRecord = { id, agentId: lane.agentId, ownerLaneId: lane.id, key: submission.key, kind: submission.kind, concurrencyClass: submission.concurrencyClass, input: clone(submission.input), state: 'queued', attemptId: `${id}-attempt-1`, attemptNo: 1, executionState: 'local', sideEffectState: 'none', ...(submission.priority === undefined ? {} : { schedulePriority: submission.priority }), ...(submission.deadlineAt === undefined ? {} : { deadlineAt: submission.deadlineAt }), ...(submission.cancelGraceMs === undefined ? {} : { cancelGraceMs: submission.cancelGraceMs }), ...(submission.idempotencyKey === undefined ? {} : { idempotencyKey: submission.idempotencyKey }), ...(submission.sideEffectPolicy === undefined ? {} : { sideEffectPolicy: submission.sideEffectPolicy }), ...(submission.toolCallId === undefined ? {} : { toolCallId: submission.toolCallId }) }
         mutations.push({ op: 'insertEffect', record: effect })
         workingLane.ownedEffectIds.add(id)
       }
       if (action.wait) {
         const spec: WaitSpec = { dependencies: action.effects.map((submission) => ({ key: submission.key, target: batchTargets.get(submission.key)!, condition: 'settled' as const })), mode: 'all', onUnsatisfied: action.wait.onUnsatisfied, ...(action.wait.onCancelled ? { onCancelled: action.wait.onCancelled } : {}), reason: action.wait.reason ?? 'effect' }
+        if (hasDependencyCycle(state, spec.dependencies.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: dependency.target as TargetRef })))) return { rejection: error('DEPENDENCY_CYCLE', 'Wait would create a dependency cycle') }
         addWait(state, workingLane, spec, batchTargets, mutations, `wait-${waitCounter++}`)
       }
     } else if (action.type === 'fork') {
@@ -172,9 +185,16 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
           addWait(state, record, waitSpec, resolved, mutations, `wait-${waitCounter++}`)
         }
       }
+      if (!action.join) {
+        const forkEdges = action.lanes.flatMap((child) => (child.dependsOn ?? []).map((dependency) => ({ from: siblingTargets.get(child.key)!, to: resolveTarget(dependency.target, siblingTargets) ?? resolveTarget(dependency.target, localTargets)! })))
+        if (forkEdges.some((edge) => !edge.to) || hasDependencyCycle(state, forkEdges)) return { rejection: error('DEPENDENCY_CYCLE', 'Fork dependencies would create a cycle') }
+      }
       if (action.join) {
         const deps = action.lanes.map((child) => ({ key: child.key, target: siblingTargets.get(child.key)!, condition: action.join!.condition }))
         const spec: WaitSpec = { dependencies: deps, mode: 'all', onUnsatisfied: action.join.onUnsatisfied, ...(action.join.onCancelled ? { onCancelled: action.join.onCancelled } : {}), reason: 'join' }
+        const forkEdges = action.lanes.flatMap((child) => (child.dependsOn ?? []).map((dependency) => ({ from: siblingTargets.get(child.key)!, to: resolveTarget(dependency.target, siblingTargets) ?? resolveTarget(dependency.target, localTargets)! })))
+        forkEdges.push(...deps.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: dependency.target as TargetRef })))
+        if (forkEdges.some((edge) => !edge.to) || hasDependencyCycle(state, forkEdges)) return { rejection: error('DEPENDENCY_CYCLE', 'Fork dependencies would create a cycle') }
         addWait(state, workingLane, spec, siblingTargets, mutations, `wait-${waitCounter++}`)
       }
     } else if (action.type === 'wait') {
@@ -185,13 +205,22 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       }
       const waitError = validateWait(state, lane.id, action.spec, localTargets, targets)
       if (waitError) return { rejection: error(waitError, 'Wait rejected') }
+      if (hasDependencyCycle(state, action.spec.dependencies.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: resolveTarget(dependency.target, localTargets)! })))) return { rejection: error('DEPENDENCY_CYCLE', 'Wait would create a dependency cycle') }
       addWait(state, workingLane, action.spec, targets, mutations, `wait-${waitCounter++}`)
     } else if (action.type === 'cancel_lane') {
       if (action.laneId === lane.id || !descendants(state, lane.id, action.laneId)) return { rejection: error('CANCEL_NOT_OWNER', 'a Lane can only cancel its own descendants') }
       const target = state.lanes.get(action.laneId)!
       mutations.push({ op: 'setLane', laneId: target.id, record: { ...laneCopy(target), status: 'cancelled', version: target.version + 1 } })
     } else if (action.type === 'propose_cancel') {
-      if (!state.lanes.has(action.laneId)) return { rejection: error('UNKNOWN_LANE', action.laneId) }
+      const target = state.lanes.get(action.laneId)
+      if (!target) return { rejection: error('UNKNOWN_LANE', action.laneId) }
+      if (target.ownerLaneId && target.ownerLaneId !== lane.id) {
+        const owner = laneCopy(state.lanes.get(target.ownerLaneId)!)
+        const proposal = { type: 'cancel_lane' as const, laneId: target.id, reason: action.reason, fromLaneId: lane.id }
+        const existing = owner.pendingResumeInput?.type === 'control_proposal' ? owner.pendingResumeInput.proposals : []
+        owner.pendingResumeInput = { type: 'control_proposal', proposals: [...existing, proposal] }
+        mutations.push({ op: 'setLane', laneId: owner.id, record: { ...owner, version: owner.version + 1 } })
+      }
     } else if (action.type === 'adopt_context') {
       if (output.contextDelta) return { rejection: error('CONFLICTING_ADOPT', 'explicit adopt conflicts with adoptCommittedContext') }
       const version = action.version === 'latest' ? state.agents.get(lane.agentId)!.latestGlobalVersion : action.version
@@ -200,6 +229,22 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
     } else if (action.type === 'complete') {
       const activeChildren = [...lane.children].some((childId) => !['succeeded', 'failed', 'cancelled'].includes(state.lanes.get(childId)?.status ?? 'cancelled'))
       if (activeChildren && (action.children ?? 'reject_if_active') === 'reject_if_active') return { rejection: error('CHILDREN_STILL_ACTIVE', 'complete requires an explicit child join or cancellation') }
+      if (activeChildren && action.children === 'await') {
+        const dependencies = [...lane.children].filter((childId) => !['succeeded', 'failed', 'cancelled'].includes(state.lanes.get(childId)?.status ?? 'cancelled')).map((childId) => ({ key: childId, target: { kind: 'lane' as const, id: childId }, condition: 'settled' as const }))
+        if (hasDependencyCycle(state, dependencies.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: dependency.target, kind: 'wait' as const })))) return { rejection: error('DEPENDENCY_CYCLE', 'closing wait would create a dependency cycle') }
+        workingLane.closingResult = { value: clone(action.result), privacy: action.privacy ?? 'public' }
+        addWait(state, workingLane, { dependencies, mode: 'all', onUnsatisfied: 'resume_with_error', reason: 'join' }, new Map(dependencies.map((dependency) => [dependency.key, dependency.target] as const)), mutations, `wait-${waitCounter++}`)
+        workingLane.status = 'waiting'
+        mutations.push({ op: 'setLane', laneId: lane.id, record: { ...workingLane, version: lane.version + 1 } })
+        mutations.push({ op: 'appendEvent', event: { type: 'lane.closing', laneId: lane.id } })
+        return { mutations }
+      }
+      if (activeChildren && action.children === 'cancel') {
+        for (const childId of lane.children) {
+          const child = state.lanes.get(childId)
+          if (child && !['succeeded', 'failed', 'cancelled'].includes(child.status)) mutations.push({ op: 'setLane', laneId: child.id, record: { ...laneCopy(child), status: 'cancelled', version: child.version + 1 } })
+        }
+      }
       const resultId = `result-${resultCounter++}`
       mutations.push({ op: 'publishResult', record: { id: resultId, value: clone(action.result), privacy: action.privacy ?? 'public', derivedFrom: [] } })
       workingLane.status = 'succeeded'

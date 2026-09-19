@@ -1,7 +1,7 @@
 import { apply } from '../core/mutations.js'
 import { createAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
-import { ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
+import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
 import type { EffectRecord, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord } from '../core/types.js'
 import { createRuntimeState } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
@@ -9,7 +9,7 @@ import { PulseSession } from '../dsl/session.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number }
 export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput }
-export interface EffectExecution { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; sideEffectState?: 'none' | 'applied' | 'unknown' }
+export interface EffectExecution { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled' }
 export type EffectExecutor = (effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<EffectExecution>
 
 export interface RuntimeConfig {
@@ -17,6 +17,8 @@ export interface RuntimeConfig {
   agingIntervalMs?: number
   agingCap?: number
   maxTotalLanes?: number
+  maxQueuedEffects?: number
+  maxRunning?: Partial<Record<'llm' | 'tool' | 'agent' | 'none', number>>
   effectExecutor?: EffectExecutor
 }
 
@@ -32,6 +34,7 @@ export class PulseRuntime {
   readonly clock: VirtualClock
   readonly ready: ReadyQueue
   readonly quarantine = new QuarantineScope()
+  readonly priorityInheritance = new PriorityInheritance()
   private readonly programs = new Map<string, LaneProgram>()
   private readonly executions = new Map<string, { controller: AbortController; promise: Promise<void> }>()
   private readonly executor: EffectExecutor
@@ -39,7 +42,7 @@ export class PulseRuntime {
   private readonly maxSteps: number
 
   constructor(config: RuntimeConfig = {}) {
-    this.state = createRuntimeState(config.maxTotalLanes ?? 64)
+    this.state = createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }) })
     this.clock = new VirtualClock()
     this.ready = new ReadyQueue(config.agingIntervalMs ?? 1000, config.agingCap ?? Number.POSITIVE_INFINITY)
     this.maxSteps = config.maxLaneStepsPerTick ?? 32
@@ -80,6 +83,7 @@ export class PulseRuntime {
       } else {
         apply(this.state, result.mutations)
         const updated = this.state.lanes.get(lane.id)
+        if (updated && updated.pendingResumeInput) delete updated.pendingResumeInput
         if (updated?.status === 'ready') this.enqueueLane(updated.id)
         this.enqueueNewReadyLanes()
         this.refreshWaits()
@@ -107,15 +111,47 @@ export class PulseRuntime {
   completeEffect(effectId: string, execution: EffectExecution, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded', error?: RuntimeError): void {
     const effect = this.state.effects.get(effectId)
     if (!effect || effect.outcome) return
-    effect.state = status
-    effect.executionState = status === 'succeeded' ? 'succeeded' : status === 'cancelled' ? 'failed' : 'failed'
+    const running = this.executions.get(effectId)
+    if (running) { running.controller.abort(); this.executions.delete(effectId) }
+    if (execution.executionState === 'remote_unknown') { this.markRemoteUnknown(effectId, execution.sideEffectState ?? 'none'); return }
+    const effectiveStatus = execution.status ?? status
+    effect.state = effectiveStatus
+    effect.executionState = effectiveStatus === 'succeeded' ? 'succeeded' : effectiveStatus === 'cancelled' ? 'failed' : 'failed'
     effect.sideEffectState = execution.sideEffectState ?? 'none'
     const resultId = `result-${this.state.nextIds.result++}`
-    const outcome: Outcome = status === 'succeeded' ? { status, resultRef: resultId } : { status, ...(error ? { error } : {}) }
+    const outcome: Outcome = effectiveStatus === 'succeeded' ? { status: effectiveStatus, resultRef: resultId } : { status: effectiveStatus, ...(error ? { error } : {}) }
     effect.outcome = outcome
-    if (status === 'succeeded') this.state.results.set(resultId, { id: resultId, effectId, value: execution.value, privacy: execution.privacy ?? 'public', derivedFrom: [] })
+    const attempt = effect.attempts?.at(-1)
+    if (attempt) { attempt.executionState = effect.executionState; attempt.sideEffectState = effect.sideEffectState; attempt.settledAt = this.state.now; if (error) attempt.error = error }
+    if (effectiveStatus === 'succeeded') this.state.results.set(resultId, { id: resultId, effectId, value: execution.value, privacy: execution.privacy ?? 'public', derivedFrom: [] })
     this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
     this.refreshWaits()
+    this.dispatchQueuedEffects()
+  }
+
+  markRemoteUnknown(effectId: string, sideEffectState: 'none' | 'applied' | 'known' | 'unknown'): void {
+    const effect = this.state.effects.get(effectId)
+    if (!effect || effect.outcome) return
+    const running = this.executions.get(effectId)
+    if (running) { running.controller.abort(); this.executions.delete(effectId) }
+    effect.executionState = 'remote_unknown'
+    effect.sideEffectState = sideEffectState
+    const attempt = effect.attempts?.at(-1)
+    if (attempt) { attempt.executionState = 'remote_unknown'; attempt.sideEffectState = sideEffectState; attempt.settledAt = this.state.now }
+    if (sideEffectState === 'unknown') { effect.state = 'reconcile_required'; this.quarantine.add(effect.id, this.state.now, 'in_doubt') }
+    else {
+      effect.state = 'failed'
+      effect.outcome = { status: 'failed', error: { code: 'REMOTE_UNKNOWN', message: 'Remote execution outcome is unknown but no side effect was recorded.' } }
+      this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.remote_unknown', effectId, data: { executionState: 'remote_unknown', sideEffectState } })
+    }
+    this.refreshWaits()
+  }
+
+  reconcileEffect(effectId: string, value: JsonValue, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded'): void {
+    const effect = this.state.effects.get(effectId)
+    if (!effect || effect.state !== 'reconcile_required') return
+    this.quarantine.reconcile(effectId)
+    this.completeEffect(effectId, { value, sideEffectState: 'known' }, status)
   }
 
   cancelEffect(effectId: string, graceMs = 0): void {
@@ -138,15 +174,21 @@ export class PulseRuntime {
   }
 
   private dispatchQueuedEffects(): void {
-    for (const effect of this.state.effects.values()) {
+    const queued = [...this.state.effects.values()].filter((effect) => effect.state === 'queued' && !this.executions.has(effect.id)).sort((a, b) => (Math.max(a.schedulePriority ?? 0, a.inheritedFloor ?? Number.NEGATIVE_INFINITY) - Math.max(b.schedulePriority ?? 0, b.inheritedFloor ?? Number.NEGATIVE_INFINITY)) || a.id.localeCompare(b.id))
+    for (const effect of queued) {
       if (effect.state !== 'queued' || this.executions.has(effect.id)) continue
+      if (effect.concurrencyClass !== 'none' && this.runningCount(effect.concurrencyClass) >= this.state.maxRunning[effect.concurrencyClass]) continue
       effect.state = 'running'
       effect.executionState = 'running'
+      const attempt: import('../core/types.js').AttemptRecord = { id: effect.attemptId, effectId: effect.id, executionState: 'running', sideEffectState: effect.sideEffectState, startedAt: this.state.now }
+      effect.attempts = [...(effect.attempts ?? []), attempt]
       const controller = new AbortController()
-      const promise = this.executor(effect, controller.signal).then((execution) => this.completeEffect(effect.id, execution)).catch((cause) => this.completeEffect(effect.id, { value: null }, 'failed', { code: 'EFFECT_FAILED', message: cause instanceof Error ? cause.message : String(cause) })).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
+      const promise = this.executor(effect, controller.signal).then((execution) => this.completeEffect(effect.id, execution)).catch((cause) => { this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.dispatch_failed', effectId: effect.id, data: { message: cause instanceof Error ? cause.message : String(cause) } }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', { code: 'EFFECT_FAILED', message: cause instanceof Error ? cause.message : String(cause) }) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
       this.executions.set(effect.id, { controller, promise })
     }
   }
+
+  private runningCount(concurrencyClass: import('../core/types.js').ConcurrencyClass): number { return [...this.state.effects.values()].filter((effect) => effect.concurrencyClass === concurrencyClass && effect.state === 'running').length }
 
   private enqueueNewReadyLanes(): void {
     for (const lane of this.state.lanes.values()) if (lane.status === 'ready' && !this.ready.has(lane.id)) this.enqueueLane(lane.id)
@@ -175,11 +217,51 @@ export class PulseRuntime {
           wait.state = 'unsatisfied'; wait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error: unsatisfied }
           const lane = this.state.lanes.get(wait.laneId); if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'failed'; delete lane.activeWaitId; lane.version++ }
           changed = true
-        } else if (!pending && !unsatisfied) {
-          wait.state = 'satisfied'; wait.resolution = { waitId: wait.id, status: 'satisfied', dependencies: observations }
+        } else if (unsatisfied && !pending) {
+          wait.state = 'unsatisfied'
+          wait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error: unsatisfied }
           const lane = this.state.lanes.get(wait.laneId)
           if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'ready'; delete lane.activeWaitId; lane.pendingResumeInput = { type: 'wait', resolution: wait.resolution }; this.enqueueLane(lane.id) }
           changed = true
+        } else if (!pending && !unsatisfied) {
+          wait.state = 'satisfied'; wait.resolution = { waitId: wait.id, status: 'satisfied', dependencies: observations }
+          const lane = this.state.lanes.get(wait.laneId)
+          if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) {
+            delete lane.activeWaitId
+            if (lane.closingResult) {
+              const resultId = `result-${this.state.nextIds.result++}`
+              this.state.results.set(resultId, { id: resultId, value: lane.closingResult.value, privacy: lane.closingResult.privacy, derivedFrom: [] })
+              lane.status = 'succeeded'; delete lane.closingResult
+              this.state.events.push({ seq: this.state.nextIds.event++, type: 'lane.succeeded', laneId: lane.id, data: resultId })
+            } else { lane.status = 'ready'; lane.pendingResumeInput = { type: 'wait', resolution: wait.resolution }; this.enqueueLane(lane.id) }
+          }
+          changed = true
+        }
+      }
+    }
+    this.recomputePriorityInheritance()
+  }
+
+  private recomputePriorityInheritance(): void {
+    this.priorityInheritance.clear()
+    for (const effect of this.state.effects.values()) delete effect.inheritedFloor
+    for (const wait of this.state.waits.values()) {
+      if (wait.state !== 'pending') continue
+      const consumer = this.state.lanes.get(wait.laneId)
+      if (!consumer) continue
+      for (const dependency of wait.spec.dependencies) {
+        const target = dependency.target as TargetRef
+        if (target.kind === 'lane') {
+          const lane = this.state.lanes.get(target.id)
+          if (lane && lane.status === 'ready') { this.priorityInheritance.raise(lane.id, consumer.id, consumer.priority); const inheritedFloor = this.priorityInheritance.floor(lane.id); this.ready.enqueue({ ...readyItemFromLane(lane), ...(inheritedFloor === undefined ? {} : { inheritedFloor }) }) }
+        } else {
+          const effect = this.state.effects.get(target.id)
+          if (effect && effect.state === 'queued') {
+            this.priorityInheritance.raise(effect.id, consumer.id, consumer.priority)
+            const inheritedFloor = this.priorityInheritance.floor(effect.id)
+            if (inheritedFloor === undefined) delete effect.inheritedFloor
+            else effect.inheritedFloor = inheritedFloor
+          }
         }
       }
     }
