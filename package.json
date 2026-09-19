@@ -1,0 +1,21 @@
+{
+  "name": "pulse",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:live": "vitest run tests/live --passWithNoTests",
+    "check": "tsc -b --pretty false && vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "zod": "^3.24.1"
+  }
+}
