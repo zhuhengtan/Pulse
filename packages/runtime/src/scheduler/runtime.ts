@@ -165,6 +165,7 @@ export class PulseRuntime {
       this.dispatchQueuedEffects()
       progressed++
     }
+    this.completeFinishedChildAgents()
     return progressed
   }
 
@@ -197,6 +198,16 @@ export class PulseRuntime {
 
   private hasPendingHostInteraction(): boolean { return [...this.state.effects.values()].some((effect) => effect.kind === 'human' && !effect.outcome) }
   private waitForFact(): Promise<void> { return new Promise((resolve) => this.factWaiters.push(resolve)) }
+  private completeFinishedChildAgents(): void {
+    for (const effect of this.state.effects.values()) {
+      if (effect.kind !== 'agent' || !effect.childAgentId || effect.outcome) continue
+      const child = this.state.agents.get(effect.childAgentId)
+      const root = child ? this.state.lanes.get(child.rootLaneId) : undefined
+      if (!child || !root || !['succeeded', 'failed', 'cancelled'].includes(root.status)) continue
+      const status = root.status === 'succeeded' ? 'succeeded' : root.status === 'cancelled' ? 'cancelled' : 'failed'
+      this.completeEffect(effect.id, { value: { agentId: child.id, status } }, status, status === 'failed' ? { code: 'CHILD_AGENT_FAILED', message: 'Child Agent failed.' } : undefined)
+    }
+  }
 
   completeEffect(effectId: string, execution: EffectExecution, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded', error?: RuntimeError): void {
     const effect = this.state.effects.get(effectId)
@@ -319,6 +330,18 @@ export class PulseRuntime {
         this.clock.schedule(delayMs, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: { firedAt: this.clock.now() } }); resolveTimer() })
         if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.clock.schedule(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
         if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.clock.timers.schedule(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))
+        continue
+      }
+      if (effect.kind === 'agent' && !this.customExecutor) {
+        const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+        const programId = input.programId
+        const programVersion = input.programVersion
+        const goal = input.goal
+        const childProgram = typeof programId === 'string' && typeof programVersion === 'string' ? this.programs.get(`${programId}@${programVersion}`) : undefined
+        if (!childProgram || typeof goal !== 'string') { this.completeEffect(effect.id, { value: null }, 'failed', { code: 'INVALID_AGENT_EFFECT_INPUT', message: 'Agent Effect requires a registered program and goal.' }); continue }
+        const child = this.createAgent(goal, childProgram)
+        effect.childAgentId = child.agentId
+        this.state.events.push({ seq: this.state.nextIds.event++, type: 'agent.effect_started', effectId: effect.id, data: child.agentId })
         continue
       }
       const promise = this.executor(effect, controller.signal).then((execution) => this.completeEffect(effect.id, execution)).catch((cause) => { this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.dispatch_failed', effectId: effect.id, data: { message: cause instanceof Error ? cause.message : String(cause) } }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', { code: 'EFFECT_FAILED', message: cause instanceof Error ? cause.message : String(cause) }) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })

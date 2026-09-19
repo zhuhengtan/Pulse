@@ -116,6 +116,7 @@ export interface EffectRecord {
   retryAt?: number
   outcome?: Outcome
   toolCallId?: string
+  childAgentId?: AgentId
 }
 
 export interface AttemptRecord {
