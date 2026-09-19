@@ -13,6 +13,7 @@ export class QuarantineScope {
   private readonly entries = new Map<string, QuarantineEntry>()
   add(effectId: string, unresolvedAt: number, reason = 'cancel_grace_elapsed'): void { this.entries.set(effectId, { effectId, unresolvedAt, reason }) }
   reconcile(effectId: string): boolean { return this.entries.delete(effectId) }
+  abandon(effectId: string): boolean { return this.entries.delete(effectId) }
   has(effectId: string): boolean { return this.entries.has(effectId) }
   get unresolvedEffectIds(): string[] { return [...this.entries.keys()] }
   run<T>(work: () => T): { value: T; unresolvedEffectIds: string[] } { return { value: work(), unresolvedEffectIds: this.unresolvedEffectIds } }

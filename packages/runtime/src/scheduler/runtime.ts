@@ -207,6 +207,20 @@ export class PulseRuntime {
     this.completeEffect(effectId, { value, sideEffectState: 'known' }, status)
   }
 
+  abandonEffect(effectId: string): void {
+    const effect = this.state.effects.get(effectId)
+    if (!effect || effect.state !== 'reconcile_required') return
+    if (!this.quarantine.abandon(effectId)) return
+    effect.state = 'failed'
+    effect.executionState = 'local_closed'
+    effect.sideEffectState = 'unknown'
+    effect.outcome = { status: 'failed', error: { code: 'RESOURCE_ABANDONED', message: 'Host abandoned reconciliation for an unknown side effect.' } }
+    const lane = this.state.lanes.get(effect.ownerLaneId)
+    if (lane?.unresolvedEffectIds) lane.unresolvedEffectIds = lane.unresolvedEffectIds.filter((id) => id !== effectId)
+    this.state.events.push({ seq: this.state.nextIds.event++, type: 'resource.abandoned', effectId, data: { code: 'RESOURCE_ABANDONED' } })
+    this.refreshWaits()
+  }
+
   cancelEffect(effectId: string, graceMs = 0): void {
     this.requestEffectCancellation(effectId, 'USER_REQUESTED', graceMs)
   }

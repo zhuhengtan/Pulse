@@ -44,6 +44,22 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.effects.get('effect-1')?.state).toBe('reconcile_required')
   })
 
+  it('supports explicit quarantine abandonment without claiming side-effect absence', async () => {
+    const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
+    const program: LaneProgram = { id: 'abandon-quarantine', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, sideEffectPolicy: 'write', cancelGraceMs: 1 }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('abandon-quarantine', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('abandon-quarantine', 'finish') } }
+    const { agentId } = runtime.createAgent('abandon', program)
+    runtime.tick()
+    runtime.cancelAgent(agentId)
+    runtime.clock.advance(1)
+    runtime.abandonEffect('effect-1')
+    expect(runtime.quarantine.unresolvedEffectIds).toEqual([])
+    expect(runtime.state.effects.get('effect-1')?.outcome?.error?.code).toBe('RESOURCE_ABANDONED')
+    expect(runtime.state.effects.get('effect-1')?.sideEffectState).toBe('unknown')
+    expect(runtime.state.events.some((event) => event.type === 'resource.abandoned')).toBe(true)
+  })
+
   it('does not report success when a root Lane is blocked without runnable work', async () => {
     const runtime = new PulseRuntime({ maxRunning: { tool: 0 } })
     const program: LaneProgram = { id: 'blocked', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'blocked', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('blocked', 'done') }) }
