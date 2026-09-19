@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { ContextBuilder, InMemoryModelRegistry, ModelFallbackController, ModelRouter, OutputValidationError, appendHistory, createAgent, createRuntimeState, modelFallbackError, validateActionToolCalls, validateAdapterResult, validateStructuredOutput, MemoryStorage } from '@pulse/runtime'
+import { ContextBuilder, InMemoryModelRegistry, ModelFallbackController, ModelRouter, OutputValidationError, PulseRuntime, appendHistory, createAgent, createRuntimeState, modelFallbackError, stableSerialize, validateActionToolCalls, validateAdapterResult, validateStructuredOutput, MemoryStorage } from '@pulse/runtime'
 import { FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, runShell } from '@pulse/adapters'
 import { defineTool } from '@pulse/tool-sdk'
 
@@ -19,6 +19,7 @@ describe('M1-3 context, models and adapters', () => {
     const withHistory = appendHistory(root, { instruction: 'one', resultRefs: ['r1'], output: { ok: true }, privacy: 'public' })
     const second = builder.build({ agent, lane: withHistory, resultRefs: ['r1'], instruction: 'two', system: 'system', policy: { p: 1 }, tools: { tool: 'v1' }, toolSetId: 'tools@1' })
     expect(second.blocks.slice(0, 4)).toEqual(first.blocks.slice(0, 4))
+    expect(stableSerialize(second.blocks.slice(0, 4))).toBe(stableSerialize(first.blocks.slice(0, 4)))
     expect(second.blocks[4]?.kind).toBe('history')
     expect(second.contextSpec.laneSnapshotVersion).toBe(1)
     expect(first.prefixHash).not.toBe(second.prefixHash)
@@ -103,5 +104,14 @@ describe('M1-3 context, models and adapters', () => {
     storage.put('small', '12345')
     expect(() => storage.put('large', '01234567890')).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
     expect(storage.get('small')).toBe('12345')
+  })
+
+  it('keeps Step state inspection detached from live Runtime state', () => {
+    const runtime = new PulseRuntime()
+    const program = { id: 'snapshot', version: '1', step: ({ state }: { state: any }) => { state.now = 999; state.lanes.clear(); return { actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'snapshot', programVersion: '1', step: 'done', locals: {} } } } }
+    const { laneId } = runtime.createAgent('snapshot', program)
+    runtime.tick()
+    expect(runtime.state.now).toBe(0)
+    expect(runtime.state.lanes.has(laneId)).toBe(true)
   })
 })
