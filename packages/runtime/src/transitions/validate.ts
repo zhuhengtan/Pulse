@@ -2,7 +2,8 @@ import { error } from '../core/errors.js'
 import { apply } from '../core/mutations.js'
 import { DependencyGraph } from '../dependencies/graph.js'
 import type { ValidationResult, Mutation } from '../core/mutations.js'
-import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction } from '../core/types.js'
+import { privacyRank, strictestPrivacy } from '../core/types.js'
+import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel } from '../core/types.js'
 
 const isLocal = (value: TargetRef | LocalRef): value is LocalRef => 'local' in value
 const clone = <T>(value: T): T => structuredClone(value)
@@ -99,6 +100,16 @@ function addWait(state: RuntimeState, lane: LaneRecord, spec: WaitSpec, targets:
   mutations.push({ op: 'insertWait', record: wait })
   lane.activeWaitId = nextId
   lane.status = 'waiting'
+}
+
+function derivedPrivacy(state: RuntimeState, refs: string[]): { privacy?: PrivacyLabel; error?: string } {
+  const labels: PrivacyLabel[] = []
+  for (const ref of refs) {
+    const result = state.results.get(ref)
+    if (!result) return { error: 'UNKNOWN_RESULT_REF' }
+    labels.push(result.privacy)
+  }
+  return { privacy: strictestPrivacy(labels) }
 }
 
 export function validateStep(state: RuntimeState, laneId: string, output: LaneStepOutput): ValidationResult {
@@ -246,7 +257,11 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         }
       }
       const resultId = `result-${resultCounter++}`
-      mutations.push({ op: 'publishResult', record: { id: resultId, value: clone(action.result), privacy: action.privacy ?? 'public', derivedFrom: [] } })
+      const derived = derivedPrivacy(state, action.derivedFrom ?? [])
+      if (derived.error) return { rejection: error(derived.error, 'Result provenance references an unknown result') }
+      if (action.privacy !== undefined && derived.privacy !== undefined && privacyRank(action.privacy) < privacyRank(derived.privacy)) return { rejection: error('PRIVACY_DOWNGRADE_WITHOUT_PROOF', 'Result privacy cannot be broader than its sources') }
+      const privacy = strictestPrivacy([derived.privacy ?? 'public', action.privacy ?? 'public'])
+      mutations.push({ op: 'publishResult', record: { id: resultId, value: clone(action.result), privacy, derivedFrom: [...(action.derivedFrom ?? [])] } })
       workingLane.status = 'succeeded'
       mutations.push({ op: 'setLane', laneId: lane.id, record: { ...workingLane, version: lane.version + 1 } })
       mutations.push({ op: 'appendEvent', event: { type: 'lane.succeeded', laneId: lane.id, data: resultId } })

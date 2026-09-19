@@ -214,8 +214,8 @@ export interface ForkAction extends RuntimeActionBase {
 }
 export interface CancelLaneAction extends RuntimeActionBase { type: 'cancel_lane'; laneId: LaneId; reason: 'SUPERSEDED' | 'USER_REQUESTED' | 'POLICY' }
 export interface ProposeCancelAction extends RuntimeActionBase { type: 'propose_cancel'; laneId: LaneId; reason: 'SUPERSEDED' | 'POLICY' }
-export interface CompleteAction extends RuntimeActionBase { type: 'complete'; result: JsonValue; privacy?: PrivacyLabel; children?: 'reject_if_active' | 'cancel' | 'await' }
-export interface FailAction extends RuntimeActionBase { type: 'fail'; error: RuntimeError; privacy?: PrivacyLabel }
+export interface CompleteAction extends RuntimeActionBase { type: 'complete'; result: JsonValue; privacy?: PrivacyLabel; derivedFrom?: ResultRef[]; children?: 'reject_if_active' | 'cancel' | 'await' }
+export interface FailAction extends RuntimeActionBase { type: 'fail'; error: RuntimeError; privacy?: PrivacyLabel; derivedFrom?: ResultRef[] }
 export interface AdoptContextAction extends RuntimeActionBase { type: 'adopt_context'; version: ContextVersion | 'latest' }
 
 export type RuntimeAction = SubmitEffectsAction | WaitAction | ForkAction | CancelLaneAction | ProposeCancelAction | CompleteAction | FailAction | AdoptContextAction
