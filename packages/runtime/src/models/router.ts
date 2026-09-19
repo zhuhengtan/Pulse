@@ -91,12 +91,14 @@ function toModelFallbackError(cause: unknown): ModelFallbackError | undefined {
 export type OutputValidationLayer = 'adapter' | 'structured' | 'action'
 
 export class OutputValidationError extends Error {
-  constructor(readonly layer: OutputValidationLayer, readonly code: string, message: string) { super(message) }
+  constructor(readonly layer: OutputValidationLayer, readonly code: string, message: string) { super(`${code}: ${message}`) }
 }
 
 export function validateAdapterResult(result: LLMResult): LLMResult {
   if (typeof result.text !== 'string' || !Array.isArray(result.toolCalls) || !['stop', 'tool_calls', 'length', 'error'].includes(result.finishReason)) throw new OutputValidationError('adapter', 'INVALID_PROVIDER_RESPONSE', 'Provider response is not a normalized LLMResult')
   if (result.toolCalls.some((call) => typeof call.toolCallId !== 'string' || typeof call.name !== 'string' || call.name.length === 0)) throw new OutputValidationError('adapter', 'INVALID_TOOL_CALL', 'Normalized tool call is missing a stable id or name')
+  if (result.finishReason === 'tool_calls' && result.toolCalls.length === 0) throw new OutputValidationError('adapter', 'INVALID_TOOL_CALL_FINISH_REASON', 'tool_calls finish reason requires at least one tool call')
+  if (result.finishReason !== 'tool_calls' && result.toolCalls.length > 0) throw new OutputValidationError('adapter', 'UNEXPECTED_TOOL_CALL', 'A non-tool finish reason cannot contain tool calls')
   return result
 }
 
