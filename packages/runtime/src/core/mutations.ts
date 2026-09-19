@@ -1,4 +1,4 @@
-import type { RuntimeEvent, RuntimeState, RuntimeError, ContextVersion, JsonValue, LaneRecord, EffectRecord, WaitRecord, ResultRecord, ContextDelta, LaneId, WaitId, EffectId } from './types.js'
+import type { RuntimeEvent, RuntimeState, RuntimeError, ContextVersion, JsonValue, LaneRecord, EffectRecord, WaitRecord, ResultRecord, ContextDelta, LaneId, WaitId, EffectId, HistoryRecord } from './types.js'
 
 export type Mutation =
   | { op: 'setLane'; laneId: LaneId; record: LaneRecord }
@@ -9,7 +9,7 @@ export type Mutation =
   | { op: 'insertWait'; record: WaitRecord }
   | { op: 'publishResult'; record: ResultRecord }
   | { op: 'setGlobal'; agentId: string; version: ContextVersion; value: JsonValue }
-  | { op: 'setLaneContext'; laneId: LaneId; value: JsonValue; version: ContextVersion }
+  | { op: 'setLaneContext'; laneId: LaneId; value: JsonValue; version: ContextVersion; history?: HistoryRecord[] }
   | { op: 'appendEvent'; event: Omit<RuntimeEvent, 'seq'> }
   | { op: 'setNow'; now: number }
 
@@ -28,7 +28,7 @@ export function apply(state: RuntimeState, mutations: Mutation[]): void {
       case 'insertWait': state.waits.set(mutation.record.id, mutation.record); break
       case 'publishResult': state.results.set(mutation.record.id, mutation.record); break
       case 'setGlobal': state.agents.get(mutation.agentId)!.globalVersions.set(mutation.version, mutation.value); state.agents.get(mutation.agentId)!.latestGlobalVersion = mutation.version; break
-      case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version }; break }
+      case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version, ...(mutation.history === undefined ? {} : { history: structuredClone(mutation.history) }) }; break }
       case 'appendEvent': { const seq = state.nextIds.event++; state.events.push({ ...mutation.event, seq, id: mutation.event.id ?? `event-${seq}` }); break }
       case 'setNow': state.now = mutation.now; break
     }

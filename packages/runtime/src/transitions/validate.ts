@@ -3,7 +3,7 @@ import { apply } from '../core/mutations.js'
 import { DependencyGraph } from '../dependencies/graph.js'
 import type { ValidationResult, Mutation } from '../core/mutations.js'
 import { privacyRank, strictestPrivacy } from '../core/types.js'
-import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel } from '../core/types.js'
+import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord } from '../core/types.js'
 
 const isLocal = (value: TargetRef | LocalRef): value is LocalRef => 'local' in value
 const clone = <T>(value: T): T => structuredClone(value)
@@ -56,12 +56,21 @@ function validateWait(state: RuntimeState, laneId: string, spec: WaitSpec, local
   return undefined
 }
 
-function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: ContextDelta, mutations: Mutation[]): { nextVersion: number; error?: string } {
+function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: ContextDelta, mutations: Mutation[]): { nextVersion: number; error?: string; history?: HistoryRecord[] } {
   const base = delta.target === 'global' ? state.agents.get(lane.agentId)!.latestGlobalVersion : lane.context.version
   if (delta.baseVersion !== base) return { nextVersion: base, error: 'CONTEXT_VERSION_CONFLICT' }
   const paths: string[][] = []
+  let history = structuredClone(lane.context.history)
   for (const op of delta.ops) {
-    if (op.op !== 'compact_history' && (!op.path || op.path.length === 0)) return { nextVersion: base, error: 'INVALID_CONTEXT_PATH' }
+    if (op.op === 'compact_history') {
+      const upToSeq = op.upToSeq
+      const summary = op.summary
+      if (delta.target !== 'lane' || upToSeq === undefined || summary === undefined || !Number.isInteger(upToSeq) || upToSeq < 1) return { nextVersion: base, error: 'INVALID_HISTORY_COMPACTION' }
+      if (!history.some((record) => record.seq <= upToSeq)) return { nextVersion: base, error: 'INVALID_HISTORY_COMPACTION' }
+      history = [{ seq: upToSeq, instruction: '[history compacted]', resultRefs: [], output: clone(summary), privacy: delta.privacy ?? 'public' }, ...history.filter((record) => record.seq > upToSeq)]
+      continue
+    }
+    if (!op.path || op.path.length === 0) return { nextVersion: base, error: 'INVALID_CONTEXT_PATH' }
     if (op.path?.[0] === 'history') return { nextVersion: base, error: 'HISTORY_IS_APPEND_ONLY' }
     for (const existing of paths) {
       if (op.path && (existing.every((value, index) => op.path?.[index] === value) || op.path.every((value, index) => existing[index] === value))) return { nextVersion: base, error: 'CONTEXT_PATH_CONFLICT' }
@@ -90,8 +99,8 @@ function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: Context
   }
   const nextVersion = base + 1
   if (delta.target === 'global') mutations.push({ op: 'setGlobal', agentId: lane.agentId, version: nextVersion, value: result })
-  else mutations.push({ op: 'setLaneContext', laneId: lane.id, version: nextVersion, value: result })
-  return { nextVersion }
+  else mutations.push({ op: 'setLaneContext', laneId: lane.id, version: nextVersion, value: result, ...(history.length === lane.context.history.length && history.every((record, index) => record.seq === lane.context.history[index]?.seq) ? {} : { history }) })
+  return { nextVersion, ...(delta.target === 'lane' ? { history } : {}) }
 }
 
 function addWait(state: RuntimeState, lane: LaneRecord, spec: WaitSpec, targets: Map<string, TargetRef>, mutations: Mutation[], nextId: string): void {
@@ -139,7 +148,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
     if (applied.error) return { rejection: error(applied.error, 'ContextDelta rejected') }
     if (output.contextDelta.target === 'lane') {
       const nextValue = mutations[mutations.length - 1]
-      if (nextValue?.op === 'setLaneContext') workingLane.context = { ...workingLane.context, state: nextValue.value, version: applied.nextVersion }
+      if (nextValue?.op === 'setLaneContext') workingLane.context = { ...workingLane.context, state: nextValue.value, version: applied.nextVersion, ...(nextValue.history === undefined ? {} : { history: structuredClone(nextValue.history) }) }
     }
     if (output.adoptCommittedContext && output.contextDelta.target !== 'global') return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'adoptCommittedContext requires a global ContextDelta') }
     if (output.contextDelta.proposal && output.adoptCommittedContext) return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'proposals cannot be adopted in the same transaction') }
@@ -301,7 +310,7 @@ function requireMutations(): typeof import('../core/mutations.js') {
         case 'insertWait': state.waits.set(mutation.record.id, mutation.record); break
         case 'publishResult': state.results.set(mutation.record.id, mutation.record); break
         case 'setGlobal': { const agent = state.agents.get(mutation.agentId)!; agent.globalVersions.set(mutation.version, mutation.value); agent.latestGlobalVersion = mutation.version; break }
-        case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version }; break }
+        case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version, ...(mutation.history === undefined ? {} : { history: structuredClone(mutation.history) }) }; break }
         case 'appendEvent': state.events.push({ ...mutation.event, seq: state.nextIds.event++ }); break
         case 'setNow': state.now = mutation.now; break
       }
