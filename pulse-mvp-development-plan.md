@@ -294,7 +294,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
    - 实现简单驻内存 hard cap、大小预估和 `SESSION_STORAGE_LIMIT_EXCEEDED`；M1 不实现精细 pin/compact，不能把未落盘数据标记为 persisted
 
 #### 验收门禁 Gate 3
-- [x] 稳定前缀测试：固定块顺序、Global/Lane 版本和 History 追加行为通过测试；完整逐字节前缀增长对比仍待补强。
+- [x] 稳定前缀测试：固定块顺序、Global/Lane 版本、History 追加行为和前缀稳定序列化通过测试。
 - [x] Provider Fixture 测试：OpenAI-compatible / Anthropic 响应归一化为统一 `LLMResult`，Pulse `toolCallId` 正确映射；Fixture 不等于真实 Provider 已接入。
 - [x] 本地与云端隐私阻断：`local_only` 投影只保留可信本地候选。
 - [x] 输出分层校验：非法 Provider 响应、structured schema 失败和 Action/权限失败分别产生对应错误；被拒输出不进入 Lane history，Tool 调用必须在下一同步 Step 提交。
@@ -328,7 +328,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
    - 使用 Mock 模型执行阻塞性全流程验证；真实模型（如已接入的 Provider）通过独立 Live Smoke 执行，不把单次模型成功作为内核 Gate。
 
 #### 验收门禁 Gate 4
-- [x] DSL 编译不变量：宏步展开、JSON ResumePoint 与 `Date`/随机数/外部 I/O 源码违规扫描通过；完整运行时冻结 harness 仍待补强。
+- [x] DSL 编译不变量：宏步展开、JSON ResumePoint、`Date`/随机数/外部 I/O 源码违规扫描，以及 Step 对 Runtime 状态的隔离测试通过。
 - [x] 结构化自愈验证：非规范输出触发一次带错误信息的新 LLM Effect 并成功解析。
 - [x] 慢消费者背压保护：在 `session.stream()` 人为阻塞消费的情况下，Runtime 内部调度 Tick 耗时不受任何影响。
 - [x] 端到端实战全绿：Mock 环境成功执行登录排障 Main/Fork/Join/Synthesize 流程并汇总证据。
@@ -365,7 +365,8 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `9b9544a`：模型候选 Fallback（同一 `EffectId`、递增 `AttemptId`、未知副作用禁止重放）、三层输出错误和 Shell 进程组取消。
 - `e81abc4`：Host drain 队列和慢消费者 session 回归测试。
 - `f9d4ec9`：late wakeup、StepTransaction 原子拒绝、动态依赖环、隐含收尾边、依赖优先级继承和不可抢占回归测试。
-- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，5 个测试文件、44 个测试通过。Live Smoke 仍为可选的真实 Provider 集成验证，未将其冒烟结果冒充内核证明。
+- `eac0d48`：稳定前缀逐字节序列化与 Step 只读 Runtime 状态隔离回归测试。
+- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，5 个测试文件、45 个测试通过。Live Smoke 仍为可选的真实 Provider 集成验证，未将其冒烟结果冒充内核证明。
 
 ## 6. 实施时间线与任务清单（Checklist）
 
