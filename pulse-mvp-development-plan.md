@@ -233,32 +233,32 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - [x] 两 Lane 独立等待（A 等长工具不阻塞 B 多轮推进）
 - [x] Lane 启动依赖（A 成功前 B 绝不执行任何业务 step）
 - [x] all 汇聚等待（所有条件满足后只恢复一次）
-- [ ] success 上游失败优雅处理
-- [ ] settled 上游失败/取消汇总
-- [ ] onCancelled: ignore 不使 Join 失败
-- [ ] 上游先完成、后注册 Wait 绝不丢失唤醒
-- [ ] LocalRef 同批提交并等待原子生效
-- [ ] 多 Wait 来源原子拒绝 (`MULTIPLE_WAIT_SOURCES`)
-- [ ] StepTransaction 全部拒绝：Context、Lane、Effect、Cancel Intent、ResumePoint 和 Events 均不部分提交
-- [ ] 多 Action 原子提交：同一 Step 的 ContextDelta、后代 `cancel_lane` 与 `submit_effects` 必须整体成功或整体拒绝
+- [x] success 上游失败优雅处理
+- [x] settled 上游失败/取消汇总
+- [x] onCancelled: ignore 不使 Join 失败
+- [x] 上游先完成、后注册 Wait 绝不丢失唤醒
+- [x] LocalRef 同批提交并等待原子生效
+- [x] 多 Wait 来源原子拒绝 (`MULTIPLE_WAIT_SOURCES`)
+- [x] StepTransaction 全部拒绝：Context、Lane、Effect、Cancel Intent、ResumePoint 和 Events 均不部分提交
+- [x] 多 Action 原子提交：同一 Step 的 ContextDelta、后代 `cancel_lane` 与 `submit_effects` 必须整体成功或整体拒绝
 - [x] 迟到完成事件 no-op，终态不被改写
-- [ ] 依赖闭环动态拒绝
-- [ ] 隐含收尾边死锁正确性校验
+- [x] 依赖闭环动态拒绝
+- [x] 隐含收尾边死锁正确性校验
 - [x] Fork 参数非法整批回滚，不留下半创建 Lane
 - [x] 优先级与 aging 排序严格生效
 - [x] 防饥饿测试：老旧低优先级工作获得派发机会
-- [ ] 依赖优先级继承正确穿透到 queued 工作
-- [ ] 不可抢占运行：提权不强行中断在途 Attempt
+- [x] 依赖优先级继承正确穿透到 queued 工作
+- [x] 不可抢占运行：提权不强行中断在途 Attempt
 - [x] shared/exclusive 锁隔离与防写饥饿
-- [ ] 并发槽位满整批背压拒绝
-- [ ] Human/Timer 确认不占执行槽位
+- [x] 并发槽位满整批背压拒绝
+- [x] Human/Timer 确认不占执行槽位
 - [x] 自有子任务取消传播，共享依赖不被误取消
-- [ ] 兄弟 Lane 禁止直接互相 cancel（只能 propose）
+- [x] 兄弟 Lane 禁止直接互相 cancel（只能 propose）
 - [x] 完成与取消并发竞争一致性
 - [x] executionState 与 sideEffectState 分离记录
 - [x] QuarantineScope 正常接收超时未确认 Effect，`run()` 正常返回
 - [x] 重试 attemptId 自增而 effectId 不变，退避走时间轮
-- [ ] Host 命令在 drain 期间只入队不重入
+- [x] Host 命令在 drain 期间只入队不重入
 
 以上是代表性门禁条目；完整测试矩阵必须从主架构第 26 节所有标记为 M0 的场景同步生成，新增或变更架构验收项时 CI 必须提示测试矩阵缺项。
 
@@ -297,9 +297,9 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - [x] 稳定前缀测试：固定块顺序、Global/Lane 版本和 History 追加行为通过测试；完整逐字节前缀增长对比仍待补强。
 - [x] Provider Fixture 测试：OpenAI-compatible / Anthropic 响应归一化为统一 `LLMResult`，Pulse `toolCallId` 正确映射；Fixture 不等于真实 Provider 已接入。
 - [x] 本地与云端隐私阻断：`local_only` 投影只保留可信本地候选。
-- [ ] 输出分层校验：非法 Provider 响应、structured schema 失败和 Action/权限失败分别产生对应错误；被拒输出不进入 Lane history，Tool 调用必须在下一同步 Step 提交。
-- [ ] 模型 Fallback 测试：对可重试且已本地关闭的失败切换第二候选，维持相同的 EffectId；对 `remote_unknown + sideEffectState=unknown` 或 `duplicateExecutionPolicy='forbid'` 的情况不得直接重复派发。
-- [ ] Shell 进程组清理：对长时间运行的死循环脚本触发取消，验证系统无残留僵尸进程。
+- [x] 输出分层校验：非法 Provider 响应、structured schema 失败和 Action/权限失败分别产生对应错误；被拒输出不进入 Lane history，Tool 调用必须在下一同步 Step 提交。
+- [x] 模型 Fallback 测试：对可重试且已本地关闭的失败切换第二候选，维持相同的 EffectId；对 `remote_unknown + sideEffectState=unknown` 或 `duplicateExecutionPolicy='forbid'` 的情况不得直接重复派发。
+- [x] Shell 进程组清理：对长时间运行的死循环脚本触发取消，验证系统无残留僵尸进程。
 
 ---
 
@@ -330,7 +330,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 #### 验收门禁 Gate 4
 - [x] DSL 编译不变量：宏步展开、JSON ResumePoint 与 `Date`/随机数/外部 I/O 源码违规扫描通过；完整运行时冻结 harness 仍待补强。
 - [x] 结构化自愈验证：非规范输出触发一次带错误信息的新 LLM Effect 并成功解析。
-- [ ] 慢消费者背压保护：在 `session.stream()` 人为阻塞消费的情况下，Runtime 内部调度 Tick 耗时不受任何影响。
+- [x] 慢消费者背压保护：在 `session.stream()` 人为阻塞消费的情况下，Runtime 内部调度 Tick 耗时不受任何影响。
 - [x] 端到端实战全绿：Mock 环境成功执行登录排障 Main/Fork/Join/Synthesize 流程并汇总证据。
 - [ ] Live Smoke（可选）：在真实 Provider 环境下验证请求投影、`LLMResult` 归一化、工具调用关联、隐私阻断和取消收尾；失败只记录 Provider 集成问题，不否定确定性 Gate。
 
@@ -358,6 +358,14 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 ```
 
 ---
+
+### 5.1 当前实现与测试证据（2026-09-20）
+
+- `f7e55a1`：M0 admission、依赖闭环、等待终态、收尾 join/cancel、并发槽位、远端未知副作用隔离与优先级继承实现；`tests/m0-acceptance.test.ts` 覆盖 11 项验收。
+- `9b9544a`：模型候选 Fallback（同一 `EffectId`、递增 `AttemptId`、未知副作用禁止重放）、三层输出错误和 Shell 进程组取消。
+- `e81abc4`：Host drain 队列和慢消费者 session 回归测试。
+- `f9d4ec9`：late wakeup、StepTransaction 原子拒绝、动态依赖环、隐含收尾边、依赖优先级继承和不可抢占回归测试。
+- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，5 个测试文件、44 个测试通过。Live Smoke 仍为可选的真实 Provider 集成验证，未将其冒烟结果冒充内核证明。
 
 ## 6. 实施时间线与任务清单（Checklist）
 
