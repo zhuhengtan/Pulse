@@ -13,7 +13,7 @@ import { exportRuntimePersistence, importRuntimePersistence, type RuntimePersist
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number }
 export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput }
-export interface EffectExecution { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled' }
+export interface EffectExecution { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled'; metadata?: JsonValue }
 export type EffectExecutor = (effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<EffectExecution>
 type HostCommand = { type: 'reply'; effectId: string; value: JsonValue } | { type: 'cancel'; agentId: string; reason: string }
 
@@ -200,6 +200,7 @@ export class PulseRuntime {
     if (attempt) { attempt.executionState = effect.executionState; attempt.sideEffectState = effect.sideEffectState; attempt.settledAt = this.state.now; if (error) attempt.error = error }
     if (effectiveStatus === 'succeeded') this.state.results.set(resultId, { id: resultId, effectId, value: execution.value, privacy: execution.privacy ?? 'public', derivedFrom: [] })
     this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
+    if (execution.metadata !== undefined) this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.execution_metadata', effectId, data: execution.metadata })
     this.refreshWaits()
     this.dispatchQueuedEffects()
   }
