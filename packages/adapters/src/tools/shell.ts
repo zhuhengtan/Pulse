@@ -6,10 +6,15 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     const child = spawn(command, args, { cwd: options.cwd, shell: false, detached: process.platform !== 'win32' })
     let stdout = ''; let stderr = ''; let truncated = false
     const append = (target: 'stdout' | 'stderr', chunk: Buffer): void => { const value = chunk.toString(); const current = target === 'stdout' ? stdout : stderr; const next = current + value; if (Buffer.byteLength(next) > max) { truncated = true; const limited = next.slice(0, max); if (target === 'stdout') stdout = limited; else stderr = limited } else if (target === 'stdout') stdout = next; else stderr = next }
-    const timer = options.timeoutMs ? setTimeout(() => child.kill('SIGTERM'), options.timeoutMs) : undefined
-    const abort = (): void => { child.kill('SIGTERM'); setTimeout(() => { if (!child.killed) child.kill('SIGKILL') }, 250) }
+    let closed = false
+    const signalProcessGroup = (signal: NodeJS.Signals): void => {
+      if (process.platform !== 'win32' && child.pid) { try { process.kill(-child.pid, signal); return } catch { /* process group may already be gone */ } }
+      child.kill(signal)
+    }
+    const timer = options.timeoutMs ? setTimeout(() => signalProcessGroup('SIGTERM'), options.timeoutMs) : undefined
+    const abort = (): void => { signalProcessGroup('SIGTERM'); setTimeout(() => { if (!closed) signalProcessGroup('SIGKILL') }, 250) }
     if (options.signal) { if (options.signal.aborted) abort(); else options.signal.addEventListener('abort', abort, { once: true }) }
     child.stdout.on('data', (chunk: Buffer) => append('stdout', chunk)); child.stderr.on('data', (chunk: Buffer) => append('stderr', chunk))
-    child.on('error', reject); child.on('close', (code) => { if (timer) clearTimeout(timer); resolve({ code, stdout, stderr, truncated }) })
+    child.on('error', reject); child.on('close', (code) => { closed = true; if (timer) clearTimeout(timer); resolve({ code, stdout, stderr, truncated }) })
   })
 }

@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { ContextBuilder, InMemoryModelRegistry, ModelRouter, appendHistory, createAgent, createRuntimeState, MemoryStorage } from '@pulse/runtime'
+import { ContextBuilder, InMemoryModelRegistry, ModelFallbackController, ModelRouter, OutputValidationError, appendHistory, createAgent, createRuntimeState, modelFallbackError, validateActionToolCalls, validateAdapterResult, validateStructuredOutput, MemoryStorage } from '@pulse/runtime'
 import { FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, runShell } from '@pulse/adapters'
 import { defineTool } from '@pulse/tool-sdk'
 
@@ -44,6 +44,27 @@ describe('M1-3 context, models and adapters', () => {
     expect(openai.finishReason).toBe('tool_calls')
   })
 
+  it('validates provider, structured, and action output as separate layers', () => {
+    const result = validateAdapterResult({ text: '', structured: { ok: true }, toolCalls: [{ toolCallId: 'pulse-tool-1', name: 'read', input: {} }], finishReason: 'tool_calls' })
+    expect(validateStructuredOutput(result, z.object({ ok: z.boolean() }))).toEqual({ ok: true })
+    expect(() => validateActionToolCalls(result, new Set(['write']))).toThrowError(OutputValidationError)
+    expect(() => validateStructuredOutput({ ...result, structured: { ok: 'bad' } }, z.object({ ok: z.boolean() }))).toThrowError(/Structured output/)
+    expect(() => validateAdapterResult({ ...result, finishReason: 'invalid' as never })).toThrowError(/normalized LLMResult/)
+  })
+
+  it('falls back across candidates with one stable EffectId and blocks in-doubt replay', async () => {
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'first', providerId: 'mock', tasks: ['plan'], capabilities: { maxContextTokens: 100 }, priority: 2 })
+    registry.register({ id: 'second', providerId: 'mock', tasks: ['plan'], capabilities: { maxContextTokens: 100 }, priority: 1 })
+    const candidates = new ModelRouter(registry).route('plan', 'public')
+    const controller = new ModelFallbackController()
+    const attempts: string[] = []
+    const result = await controller.execute('effect-1', candidates, async (attempt) => { attempts.push(`${attempt.effectId}:${attempt.attemptId}`); if (attempt.attemptNo === 1) throw modelFallbackError({ retryable: true, localClosed: true, sideEffectState: 'none', cause: new Error('retry') }); return { text: 'ok', toolCalls: [], finishReason: 'stop' } })
+    expect(result.result.text).toBe('ok')
+    expect(attempts).toEqual(['effect-1:effect-1-attempt-1', 'effect-1:effect-1-attempt-2'])
+    await expect(controller.execute('effect-2', candidates, async () => { throw modelFallbackError({ retryable: true, localClosed: true, sideEffectState: 'unknown', cause: new Error('in doubt') }) })).rejects.toThrow('in doubt')
+  })
+
   it('creates an auditable tool manifest from Zod schemas', async () => {
     const tool = defineTool({ name: 'echo', description: 'Echo', input: z.object({ text: z.string() }), output: z.object({ text: z.string() }), sideEffectPolicy: 'none', execute: (input) => input })
     expect(tool.manifest.inputSchema).toMatchObject({ type: 'object', required: ['text'] })
@@ -62,6 +83,19 @@ describe('M1-3 context, models and adapters', () => {
       expect(result.truncated).toBe(true)
       expect(await readFile(join(root, 'nested/file.txt'), 'utf8')).toBe('ok')
     } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('cancels a shell process group instead of leaving a spawned child running', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulse-shell-'))
+    const marker = join(root, 'leaked.txt')
+    const script = 'const {spawn}=require("node:child_process"); const fs=require("node:fs"); spawn(process.execPath,["-e",`setTimeout(()=>fs.writeFileSync(${JSON.stringify(marker)},"leaked"),400)`],{stdio:"ignore"}); setTimeout(()=>{},10000)'
+    const controller = new AbortController()
+    const pending = runShell(process.execPath, ['-e', script], { signal: controller.signal })
+    setTimeout(() => controller.abort(), 25)
+    await pending
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    await expect(readFile(marker, 'utf8')).rejects.toThrow()
+    await rm(root, { recursive: true, force: true })
   })
 
   it('rejects memory writes beyond the M1 hard cap', () => {
