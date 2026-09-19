@@ -10,6 +10,7 @@ export type LaneStatus = 'ready' | 'running' | 'waiting' | 'closing' | 'succeede
 export type EffectState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'retry_wait' | 'reconcile_required'
 export type ConcurrencyClass = 'llm' | 'tool' | 'agent' | 'none'
 export type OutcomeStatus = 'succeeded' | 'failed' | 'cancelled'
+export interface ResourceLockSpec { resource: string; mode: 'shared' | 'exclusive' }
 
 export interface RuntimeError {
   code: string
@@ -117,6 +118,7 @@ export interface EffectRecord {
   outcome?: Outcome
   toolCallId?: string
   childAgentId?: AgentId
+  locks?: ResourceLockSpec[]
 }
 
 export interface AttemptRecord {
@@ -199,6 +201,7 @@ export interface EffectSubmission {
   duplicateExecutionPolicy?: 'allow' | 'forbid'
   maxUnknownAttempts?: number
   toolCallId?: string
+  locks?: ResourceLockSpec[]
 }
 
 export interface ForkLaneSpec {

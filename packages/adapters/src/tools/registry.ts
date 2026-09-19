@@ -14,7 +14,9 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
     const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, import('@pulse/runtime').JsonValue> : {}
     const name = input.name
     if (typeof name !== 'string') throw new Error('INVALID_TOOL_EFFECT_INPUT')
+    const definition = registry.get(name)
+    if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`)
     const output = await registry.execute(name, input.arguments ?? {}, signal)
-    return { value: toJson(output), sideEffectState: effect.sideEffectPolicy === 'write' ? 'applied' : 'none', executionState: 'succeeded' }
+    return { value: toJson(output), sideEffectState: definition.manifest.sideEffectPolicy === 'write' ? 'applied' : 'none', executionState: 'succeeded' }
   }
 }

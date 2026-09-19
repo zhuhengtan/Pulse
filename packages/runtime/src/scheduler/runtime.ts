@@ -10,6 +10,7 @@ import { FactInbox } from '../core/inbox.js'
 import { observeProgress } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
 import { exportRuntimePersistence, importRuntimePersistence, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
+import { ResourceLockManager } from './locks.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number }
 export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput }
@@ -49,9 +50,12 @@ export class PulseRuntime {
   readonly ready: ReadyQueue
   readonly quarantine = new QuarantineScope()
   readonly priorityInheritance = new PriorityInheritance()
+  readonly resourceLocks = new ResourceLockManager()
   readonly factInbox = new FactInbox<HostCommand>()
   private readonly programs = new Map<string, LaneProgram>()
   private readonly executions = new Map<string, { controller: AbortController; promise: Promise<void>; timeoutTimer?: string; deadlineTimer?: string; cancelTimer?: string }>()
+  private readonly lockReleases = new Map<string, Array<() => void>>()
+  private readonly lockBlocked = new Set<string>()
   private readonly executor: EffectExecutor
   private readonly customExecutor: boolean
   private enqueueSeq = 1
@@ -222,6 +226,7 @@ export class PulseRuntime {
     const resultId = `result-${this.state.nextIds.result++}`
     const outcome: Outcome = effectiveStatus === 'succeeded' ? { status: effectiveStatus, resultRef: resultId } : { status: effectiveStatus, ...(error ? { error } : {}) }
     effect.outcome = outcome
+    this.releaseEffectLocks(effectId)
     this.outbox.ack(`${effect.id}:${effect.attemptId}`)
     const attempt = effect.attempts?.at(-1)
     if (attempt) { attempt.executionState = effect.executionState; attempt.sideEffectState = effect.sideEffectState; attempt.settledAt = this.state.now; if (error) attempt.error = error }
@@ -247,6 +252,7 @@ export class PulseRuntime {
       effect.outcome = { status: 'failed', error: { code: 'REMOTE_UNKNOWN', message: 'Remote execution outcome is unknown but no side effect was recorded.' } }
       this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.remote_unknown', effectId, data: { executionState: 'remote_unknown', sideEffectState } })
     }
+    this.releaseEffectLocks(effectId)
     this.refreshWaits()
   }
 
@@ -265,6 +271,7 @@ export class PulseRuntime {
     effect.executionState = 'local_closed'
     effect.sideEffectState = 'unknown'
     effect.outcome = { status: 'failed', error: { code: 'RESOURCE_ABANDONED', message: 'Host abandoned reconciliation for an unknown side effect.' } }
+    this.releaseEffectLocks(effectId)
     const lane = this.state.lanes.get(effect.ownerLaneId)
     if (lane?.unresolvedEffectIds) lane.unresolvedEffectIds = lane.unresolvedEffectIds.filter((id) => id !== effectId)
     this.state.events.push({ seq: this.state.nextIds.event++, type: 'resource.abandoned', effectId, data: { code: 'RESOURCE_ABANDONED' } })
@@ -307,7 +314,9 @@ export class PulseRuntime {
       if (effect.state !== 'queued' || this.executions.has(effect.id)) continue
       if (effect.concurrencyClass !== 'none' && this.runningCount(effect.concurrencyClass) >= this.state.maxRunning[effect.concurrencyClass]) continue
       const outboxEntry = this.outbox.enqueue(effect, this.state.now)
-      if (outboxEntry.state === 'claimed' || !this.outbox.claim(outboxEntry.id)) continue
+      if (outboxEntry.state === 'claimed') continue
+      if (!this.acquireEffectLocks(effect)) continue
+      if (!this.outbox.claim(outboxEntry.id)) { this.releaseEffectLocks(effect.id); continue }
       effect.state = 'running'
       effect.executionState = 'running'
       const attempt: import('../core/types.js').AttemptRecord = { id: effect.attemptId, effectId: effect.id, executionState: 'running', sideEffectState: effect.sideEffectState, startedAt: this.state.now }
@@ -378,6 +387,7 @@ export class PulseRuntime {
     const execution = this.executions.get(effectId)
     if (!effect || effect.outcome) return
     if (execution) { execution.controller.abort(); this.executions.delete(effectId) }
+    this.releaseEffectLocks(effectId)
     effect.executionState = 'remote_unknown'
     effect.sideEffectState = effect.sideEffectPolicy === 'write' ? 'unknown' : 'none'
     effect.state = effect.sideEffectState === 'unknown' ? 'reconcile_required' : 'cancelled'
@@ -394,6 +404,33 @@ export class PulseRuntime {
   }
 
   private runningCount(concurrencyClass: import('../core/types.js').ConcurrencyClass): number { return [...this.state.effects.values()].filter((effect) => effect.concurrencyClass === concurrencyClass && effect.state === 'running').length }
+
+  private acquireEffectLocks(effect: EffectRecord): boolean {
+    const specs = [...(effect.locks ?? [])].sort((a, b) => a.resource.localeCompare(b.resource) || a.mode.localeCompare(b.mode))
+    const releases: Array<() => void> = []
+    for (const [index, spec] of specs.entries()) {
+      const release = this.resourceLocks.tryAcquire(spec.resource, spec.mode, `${effect.id}:${effect.attemptId}:${index}`)
+      if (!release) {
+        for (const held of releases.reverse()) held()
+        if (!this.lockBlocked.has(effect.id)) {
+          this.lockBlocked.add(effect.id)
+          this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.lock_blocked', effectId: effect.id, data: { resource: spec.resource, mode: spec.mode } })
+        }
+        return false
+      }
+      releases.push(release)
+    }
+    if (releases.length) this.lockReleases.set(effect.id, releases)
+    this.lockBlocked.delete(effect.id)
+    return true
+  }
+
+  private releaseEffectLocks(effectId: string): void {
+    const releases = this.lockReleases.get(effectId)
+    if (!releases) return
+    this.lockReleases.delete(effectId)
+    for (const release of releases.reverse()) release()
+  }
 
   private enqueueNewReadyLanes(): void {
     for (const lane of this.state.lanes.values()) if (lane.status === 'ready' && !this.ready.has(lane.id)) this.enqueueLane(lane.id)

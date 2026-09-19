@@ -16,6 +16,17 @@ export class ResourceLockManager {
     })
   }
 
+  tryAcquire(resource: string, mode: LockMode, requestId = `lock-${++this.seq}`): (() => void) | undefined {
+    const holders = this.holders.get(resource) ?? new Map<string, LockMode>()
+    const queue = this.queues.get(resource) ?? []
+    if (queue.length > 0) return undefined
+    if (mode === 'exclusive' && holders.size > 0) return undefined
+    if (mode === 'shared' && [...holders.values()].some((heldMode) => heldMode === 'exclusive')) return undefined
+    holders.set(requestId, mode)
+    this.holders.set(resource, holders)
+    return () => this.release(resource, requestId)
+  }
+
   private canGrant(resource: string, request: Request): boolean {
     const holders = this.holders.get(resource) ?? new Map()
     if (request.mode === 'shared' && [...holders.values()].some((mode) => mode === 'exclusive')) return false
