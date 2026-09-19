@@ -26,4 +26,18 @@ describe('built-in Child Agent Effect host', () => {
     expect((await runtime.start(agentId).outcome()).status).toBe('failed')
     expect(runtime.state.effects.get('effect-1')?.outcome?.error?.code).toBe('INVALID_AGENT_EFFECT_INPUT')
   })
+
+  it('limits Child Agent recursion and records parent/depth metadata', async () => {
+    const runtime = new PulseRuntime({ maxAgentDepth: 1 })
+    const recursive: LaneProgram = { id: 'recursive', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'nested', kind: 'agent', concurrencyClass: 'agent', input: { goal: 'nested', programId: 'recursive', programVersion: '1' } }], wait: { onUnsatisfied: 'fail_lane' } }], next: point('recursive', 'done') }
+      : { actions: [{ type: 'complete', result: { done: true } }], next: point('recursive', 'done') } }
+    runtime.register(recursive)
+    const parent: LaneProgram = { id: 'recursive-parent', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'child', kind: 'agent', concurrencyClass: 'agent', input: { goal: 'child', programId: recursive.id, programVersion: recursive.version } }], wait: { onUnsatisfied: 'fail_lane' } }], next: point('recursive-parent', 'done') }) }
+    const { agentId } = runtime.createAgent('parent', parent)
+    expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+    const child = [...runtime.state.agents.values()].find((agent) => agent.parentAgentId === agentId)
+    expect(child?.depth).toBe(1)
+    expect([...runtime.state.effects.values()].some((effect) => effect.outcome?.error?.code === 'MAX_AGENT_DEPTH')).toBe(true)
+  })
 })

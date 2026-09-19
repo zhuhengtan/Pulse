@@ -29,13 +29,14 @@ export interface RuntimeConfig {
   maxConsecutiveControlErrors?: number
   maxRuntimeMs?: number
   sessionId?: string
+  maxAgentDepth?: number
   watchdogNoProgressThreshold?: number
   persistence?: RuntimePersistenceSnapshot
   effectExecutor?: EffectExecutor
 }
 
 export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' }
-export interface AgentCreateRequest { goal: string; program: LaneProgram; agentId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec }
+export interface AgentCreateRequest { goal: string; program: LaneProgram; agentId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string }
 
 function outcomeForLane(lane: LaneRecord): Outcome | undefined {
   if (lane.status === 'succeeded') return { status: 'succeeded', ...(lane.resultRef === undefined ? {} : { resultRef: lane.resultRef }) }
@@ -65,6 +66,7 @@ export class PulseRuntime {
   private readonly maxConsecutiveControlErrors: number
   private readonly maxRuntimeMs?: number
   private readonly watchdogNoProgressThreshold: number
+  private readonly maxAgentDepth: number
   private readonly sessionId: string
   private hostCommandSeq = 1
   private factWaiters: Array<() => void> = []
@@ -86,6 +88,7 @@ export class PulseRuntime {
     this.maxConsecutiveControlErrors = config.maxConsecutiveControlErrors ?? 2
     if (config.maxRuntimeMs !== undefined) this.maxRuntimeMs = config.maxRuntimeMs
     this.watchdogNoProgressThreshold = config.watchdogNoProgressThreshold ?? 3
+    this.maxAgentDepth = config.maxAgentDepth ?? 1
     this.customExecutor = config.effectExecutor !== undefined
     this.executor = config.effectExecutor ?? (async () => ({ value: null }))
   }
@@ -106,7 +109,10 @@ export class PulseRuntime {
       initialGlobal = structuredClone(value)
     }
     this.register(request.program)
-    const { agent, root } = createAgent(this.state, request.goal, { programId: request.program.id, programVersion: request.program.version, step: (request.program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(initialGlobal === undefined ? {} : { initialGlobal }) })
+    if (this.state.lanes.size >= this.state.maxTotalLanes) throw new Error('MAX_TOTAL_LANES')
+    const parent = request.parentAgentId === undefined ? undefined : this.state.agents.get(request.parentAgentId)
+    if (request.parentAgentId !== undefined && !parent) throw new Error(`PARENT_AGENT_NOT_FOUND:${request.parentAgentId}`)
+    const { agent, root } = createAgent(this.state, request.goal, { programId: request.program.id, programVersion: request.program.version, step: (request.program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(initialGlobal === undefined ? {} : { initialGlobal }), ...(request.parentAgentId === undefined ? {} : { parentAgentId: request.parentAgentId, depth: (parent?.depth ?? 0) + 1 }) })
     root.enqueueSeq = this.enqueueSeq++
     agent.state = 'running'
     this.ready.enqueue(readyItemFromLane(root))
@@ -301,7 +307,7 @@ export class PulseRuntime {
     const agent = this.state.agents.get(agentId)
     if (!agent || ['succeeded', 'failed', 'cancelled'].includes(agent.state ?? '')) return
     agent.state = 'cancelling'
-    for (const lane of this.state.lanes.values()) if (lane.agentId === agentId && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'cancelled'; lane.version++; this.emit({ type: 'lane.cancelling', laneId: lane.id, data: reason }); for (const effectId of lane.ownedEffectIds) this.requestEffectCancellation(effectId, reason, this.state.effects.get(effectId)?.cancelGraceMs ?? 0) }
+    for (const lane of this.state.lanes.values()) if (lane.agentId === agentId && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'cancelled'; lane.version++; this.emit({ type: 'lane.cancelling', laneId: lane.id, data: reason }); for (const effectId of lane.ownedEffectIds) { const childAgentId = this.state.effects.get(effectId)?.childAgentId; if (childAgentId) this.cancelAgent(childAgentId, reason); this.requestEffectCancellation(effectId, reason, this.state.effects.get(effectId)?.cancelGraceMs ?? 0) } }
     agent.state = 'cancelled'
     this.emit({ type: 'agent.cancelled', data: reason })
   }
@@ -387,7 +393,9 @@ export class PulseRuntime {
         const goal = input.goal
         const childProgram = typeof programId === 'string' && typeof programVersion === 'string' ? this.programs.get(`${programId}@${programVersion}`) : undefined
         if (!childProgram || typeof goal !== 'string') { this.completeEffect(effect.id, { value: null }, 'failed', { code: 'INVALID_AGENT_EFFECT_INPUT', message: 'Agent Effect requires a registered program and goal.' }); continue }
-        const child = this.createAgent(goal, childProgram)
+        const parent = this.state.agents.get(effect.agentId)
+        if ((parent?.depth ?? 0) >= this.maxAgentDepth) { this.completeEffect(effect.id, { value: null }, 'failed', { code: 'MAX_AGENT_DEPTH', message: 'Child Agent depth limit exceeded.' }); continue }
+        const child = this.createAgent({ goal, program: childProgram, parentAgentId: effect.agentId })
         effect.childAgentId = child.agentId
         this.emit({ type: 'agent.effect_started', effectId: effect.id, data: child.agentId })
         continue

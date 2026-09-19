@@ -63,6 +63,8 @@ export interface AgentRecord {
   globalVersions: Map<ContextVersion, JsonValue>
   latestGlobalVersion: ContextVersion
   maxActiveLanes: number
+  parentAgentId?: AgentId
+  depth?: number
 }
 
 export interface LaneRecord {
