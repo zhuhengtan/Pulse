@@ -19,6 +19,8 @@ export interface RuntimeConfig {
   maxTotalLanes?: number
   maxQueuedEffects?: number
   maxRunning?: Partial<Record<'llm' | 'tool' | 'agent' | 'none', number>>
+  maxConsecutiveControlErrors?: number
+  maxRuntimeMs?: number
   effectExecutor?: EffectExecutor
 }
 
@@ -36,16 +38,20 @@ export class PulseRuntime {
   readonly quarantine = new QuarantineScope()
   readonly priorityInheritance = new PriorityInheritance()
   private readonly programs = new Map<string, LaneProgram>()
-  private readonly executions = new Map<string, { controller: AbortController; promise: Promise<void> }>()
+  private readonly executions = new Map<string, { controller: AbortController; promise: Promise<void>; timeoutTimer?: string; deadlineTimer?: string; cancelTimer?: string }>()
   private readonly executor: EffectExecutor
   private enqueueSeq = 1
   private readonly maxSteps: number
+  private readonly maxConsecutiveControlErrors: number
+  private readonly maxRuntimeMs?: number
 
   constructor(config: RuntimeConfig = {}) {
     this.state = createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }) })
     this.clock = new VirtualClock()
     this.ready = new ReadyQueue(config.agingIntervalMs ?? 1000, config.agingCap ?? Number.POSITIVE_INFINITY)
     this.maxSteps = config.maxLaneStepsPerTick ?? 32
+    this.maxConsecutiveControlErrors = config.maxConsecutiveControlErrors ?? 2
+    if (config.maxRuntimeMs !== undefined) this.maxRuntimeMs = config.maxRuntimeMs
     this.executor = config.effectExecutor ?? (async () => ({ value: null }))
   }
 
@@ -54,6 +60,7 @@ export class PulseRuntime {
     this.register(program)
     const { agent, root } = createAgent(this.state, goal, { programId: program.id, programVersion: program.version, step: (program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, agentId === undefined ? {} : { agentId })
     root.enqueueSeq = this.enqueueSeq++
+    agent.state = 'running'
     this.ready.enqueue(readyItemFromLane(root))
     return { agentId: agent.id, laneId: root.id }
   }
@@ -63,6 +70,7 @@ export class PulseRuntime {
 
   tick(): number {
     this.state.now = this.clock.now()
+    if (this.maxRuntimeMs !== undefined && this.state.now >= this.maxRuntimeMs) for (const agent of this.state.agents.values()) if (agent.state === 'running') this.cancelAgent(agent.id, 'TIMEOUT')
     for (const timer of this.clock.timers.due(this.state.now)) timer.callback()
     let progressed = 0
     while (progressed < this.maxSteps) {
@@ -77,16 +85,23 @@ export class PulseRuntime {
       catch (cause) { this.failLane(lane, { code: 'STEP_FAILED', message: cause instanceof Error ? cause.message : String(cause) }); continue }
       const result = validateStep(this.state, lane.id, output)
       if ('rejection' in result) {
-        lane.pendingResumeInput = { type: 'control_error', error: result.rejection, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
-        this.state.events.push({ seq: this.state.nextIds.event++, type: 'step.rejected', laneId: lane.id, data: result.rejection as unknown as JsonValue })
-        this.enqueueLane(lane.id)
+        const consecutive = (lane.consecutiveControlErrors ?? 0) + 1
+        lane.consecutiveControlErrors = consecutive
+        if (consecutive >= this.maxConsecutiveControlErrors) this.failLane(lane, { code: 'CONTROL_ERROR_LOOP', message: 'Lane exceeded the consecutive control error limit.', details: { lastError: result.rejection as unknown as JsonValue } })
+        else {
+          lane.pendingResumeInput = { type: 'control_error', error: result.rejection, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
+          this.state.events.push({ seq: this.state.nextIds.event++, type: 'step.rejected', laneId: lane.id, data: result.rejection as unknown as JsonValue })
+          this.enqueueLane(lane.id)
+        }
       } else {
         apply(this.state, result.mutations)
         const updated = this.state.lanes.get(lane.id)
+        if (updated) delete updated.consecutiveControlErrors
         if (updated && updated.pendingResumeInput) delete updated.pendingResumeInput
         if (updated?.status === 'ready') this.enqueueLane(updated.id)
         this.enqueueNewReadyLanes()
         this.refreshWaits()
+        this.propagateCancelledLanes()
       }
       this.dispatchQueuedEffects()
       progressed++
@@ -103,7 +118,11 @@ export class PulseRuntime {
       else if (work === 0) await new Promise<void>((resolve) => setImmediate(resolve))
     }
     const root = [...this.state.lanes.values()].find((lane) => lane.ownerLaneId === undefined)
-    return { status: root?.status === 'failed' ? 'failed' : root?.status === 'cancelled' ? 'cancelled' : 'succeeded', unresolvedEffectIds: this.quarantine.unresolvedEffectIds }
+    const status = root?.status === 'succeeded' ? 'succeeded' : root?.status === 'cancelled' ? 'cancelled' : 'failed'
+    if (root && !['succeeded', 'failed', 'cancelled'].includes(root.status)) this.state.events.push({ seq: this.state.nextIds.event++, type: 'runtime.idle_blocked', laneId: root.id, data: { status: root.status } })
+    const agent = root ? this.state.agents.get(root.agentId) : undefined
+    if (agent && ['succeeded', 'failed', 'cancelled'].includes(root?.status ?? 'failed')) agent.state = status
+    return { status, unresolvedEffectIds: this.quarantine.unresolvedEffectIds }
   }
 
   async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)) } }
@@ -114,7 +133,7 @@ export class PulseRuntime {
     const running = this.executions.get(effectId)
     if (running) { running.controller.abort(); this.executions.delete(effectId) }
     if (execution.executionState === 'remote_unknown') { this.markRemoteUnknown(effectId, execution.sideEffectState ?? 'none'); return }
-    const effectiveStatus = execution.status ?? status
+    const effectiveStatus = effect.cancelRequested && (execution.status ?? status) === 'succeeded' ? 'cancelled' : (execution.status ?? status)
     effect.state = effectiveStatus
     effect.executionState = effectiveStatus === 'succeeded' ? 'succeeded' : effectiveStatus === 'cancelled' ? 'failed' : 'failed'
     effect.sideEffectState = execution.sideEffectState ?? 'none'
@@ -155,11 +174,22 @@ export class PulseRuntime {
   }
 
   cancelEffect(effectId: string, graceMs = 0): void {
-    const running = this.executions.get(effectId)
-    if (!running) { const effect = this.state.effects.get(effectId); if (effect && !effect.outcome) this.completeEffect(effectId, { value: null }, 'cancelled'); return }
-    running.controller.abort()
-    if (graceMs === 0) this.quarantine.add(effectId, this.state.now)
-    else this.clock.schedule(graceMs, () => { if (this.executions.has(effectId)) this.quarantine.add(effectId, this.state.now) })
+    this.requestEffectCancellation(effectId, 'USER_REQUESTED', graceMs)
+  }
+
+  cancelAgent(agentId: string, reason: 'USER_REQUESTED' | 'SUPERSEDED' | 'POLICY' | 'TIMEOUT' = 'USER_REQUESTED'): void {
+    const agent = this.state.agents.get(agentId)
+    if (!agent || ['succeeded', 'failed', 'cancelled'].includes(agent.state ?? '')) return
+    agent.state = 'cancelling'
+    for (const lane of this.state.lanes.values()) if (lane.agentId === agentId && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'cancelled'; lane.version++; this.state.events.push({ seq: this.state.nextIds.event++, type: 'lane.cancelling', laneId: lane.id, data: reason }); for (const effectId of lane.ownedEffectIds) this.requestEffectCancellation(effectId, reason, this.state.effects.get(effectId)?.cancelGraceMs ?? 0) }
+    agent.state = 'cancelled'
+    this.state.events.push({ seq: this.state.nextIds.event++, type: 'agent.cancelled', data: reason })
+  }
+
+  explain(laneId?: string): JsonValue {
+    const lanes = [...this.state.lanes.values()].filter((lane) => laneId === undefined || lane.id === laneId).map((lane) => ({ id: lane.id, agentId: lane.agentId, status: lane.status, goal: lane.goal, basePriority: lane.priority, effectivePriority: this.ready.snapshot(this.state.now).find((item) => item.laneId === lane.id)?.effectivePriority ?? lane.priority, activeWaitId: lane.activeWaitId ?? null, consecutiveControlErrors: lane.consecutiveControlErrors ?? 0, unresolvedEffectIds: lane.unresolvedEffectIds ?? [] }))
+    const effects = [...this.state.effects.values()].filter((effect) => laneId === undefined || effect.ownerLaneId === laneId).map((effect) => ({ id: effect.id, state: effect.state, executionState: effect.executionState, sideEffectState: effect.sideEffectState, attemptId: effect.attemptId, inheritedFloor: effect.inheritedFloor ?? null, deadlineAt: effect.deadlineAt ?? null }))
+    return { now: this.state.now, lanes, effects, quarantine: this.quarantine.unresolvedEffectIds }
   }
 
   retryEffect(effectId: string, delayMs: number): void {
@@ -183,9 +213,54 @@ export class PulseRuntime {
       const attempt: import('../core/types.js').AttemptRecord = { id: effect.attemptId, effectId: effect.id, executionState: 'running', sideEffectState: effect.sideEffectState, startedAt: this.state.now }
       effect.attempts = [...(effect.attempts ?? []), attempt]
       const controller = new AbortController()
+      const executionRecord: { controller: AbortController; promise: Promise<void>; timeoutTimer?: string; deadlineTimer?: string; cancelTimer?: string } = { controller, promise: Promise.resolve() }
       const promise = this.executor(effect, controller.signal).then((execution) => this.completeEffect(effect.id, execution)).catch((cause) => { this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.dispatch_failed', effectId: effect.id, data: { message: cause instanceof Error ? cause.message : String(cause) } }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', { code: 'EFFECT_FAILED', message: cause instanceof Error ? cause.message : String(cause) }) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
-      this.executions.set(effect.id, { controller, promise })
+      executionRecord.promise = promise
+      if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.clock.schedule(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
+      if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.clock.timers.schedule(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))
+      this.executions.set(effect.id, executionRecord)
     }
+  }
+
+  private expireEffect(effectId: string, reason: 'ATTEMPT_TIMEOUT' | 'TIMEOUT'): void {
+    const effect = this.state.effects.get(effectId)
+    const execution = this.executions.get(effectId)
+    if (!effect || effect.outcome || !execution) return
+    effect.cancelRequested = { reason, at: this.state.now = this.clock.now() }
+    execution.controller.abort()
+    this.state.events.push({ seq: this.state.nextIds.event++, type: 'limit.rejected', effectId, data: { code: reason } })
+    this.quarantineEffect(effectId, reason, effect.cancelGraceMs ?? 0)
+  }
+
+  private requestEffectCancellation(effectId: string, reason: string, graceMs: number): void {
+    const effect = this.state.effects.get(effectId)
+    if (!effect || effect.outcome) return
+    effect.cancelRequested = { reason, at: this.state.now }
+    this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.cancel_requested', effectId, data: { reason } })
+    if (!this.executions.has(effectId)) { this.completeEffect(effectId, { value: null }, 'cancelled', { code: 'CANCELLED', message: reason }); return }
+    this.executions.get(effectId)!.controller.abort()
+    if (graceMs === 0) this.quarantineEffect(effectId, reason, 0)
+    else this.executions.get(effectId)!.cancelTimer = this.clock.schedule(graceMs, () => this.quarantineEffect(effectId, reason, 0))
+  }
+
+  private quarantineEffect(effectId: string, reason: string, _graceMs: number): void {
+    const effect = this.state.effects.get(effectId)
+    const execution = this.executions.get(effectId)
+    if (!effect || effect.outcome) return
+    if (execution) { execution.controller.abort(); this.executions.delete(effectId) }
+    effect.executionState = 'remote_unknown'
+    effect.sideEffectState = effect.sideEffectPolicy === 'write' ? 'unknown' : 'none'
+    effect.state = effect.sideEffectState === 'unknown' ? 'reconcile_required' : 'cancelled'
+    if (effect.state === 'cancelled') effect.outcome = { status: 'cancelled', error: { code: reason, message: reason } }
+    this.quarantine.add(effectId, this.state.now, reason)
+    const lane = this.state.lanes.get(effect.ownerLaneId)
+    if (lane) lane.unresolvedEffectIds = [...new Set([...(lane.unresolvedEffectIds ?? []), effectId])]
+    this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.quarantined', effectId, data: { reason, state: effect.state } })
+    this.refreshWaits()
+  }
+
+  private propagateCancelledLanes(): void {
+    for (const lane of this.state.lanes.values()) if (lane.status === 'cancelled') for (const effectId of lane.ownedEffectIds) this.requestEffectCancellation(effectId, 'LANE_CANCELLED', this.state.effects.get(effectId)?.cancelGraceMs ?? 0)
   }
 
   private runningCount(concurrencyClass: import('../core/types.js').ConcurrencyClass): number { return [...this.state.effects.values()].filter((effect) => effect.concurrencyClass === concurrencyClass && effect.state === 'running').length }

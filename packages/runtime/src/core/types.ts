@@ -47,6 +47,10 @@ export interface LaneContext {
 export interface AgentRecord {
   id: AgentId
   rootLaneId: LaneId
+  goal?: string
+  state?: 'created' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled'
+  policyId?: string
+  limitsId?: string
   globalVersions: Map<ContextVersion, JsonValue>
   latestGlobalVersion: ContextVersion
   maxActiveLanes: number
@@ -70,6 +74,9 @@ export interface LaneRecord {
   readySince: number
   ownedEffectIds: Set<EffectId>
   closingResult?: { value: JsonValue; privacy: PrivacyLabel }
+  consecutiveControlErrors?: number
+  pendingOutcome?: Outcome
+  unresolvedEffectIds?: EffectId[]
 }
 
 export interface EffectRecord {
@@ -91,8 +98,12 @@ export interface EffectRecord {
   inheritedFloor?: number
   deadlineAt?: number
   cancelGraceMs?: number
+  attemptTimeoutMs?: number
   idempotencyKey?: string
   sideEffectPolicy?: 'none' | 'read' | 'write'
+  retryPolicy?: { maxAttempts: number; initialBackoffMs: number; maxBackoffMs: number; jitter: boolean }
+  duplicateExecutionPolicy?: 'allow' | 'forbid'
+  maxUnknownAttempts?: number
   retryAt?: number
   outcome?: Outcome
   toolCallId?: string
@@ -171,8 +182,12 @@ export interface EffectSubmission {
   priority?: number
   deadlineAt?: number
   cancelGraceMs?: number
+  attemptTimeoutMs?: number
   idempotencyKey?: string
   sideEffectPolicy?: 'none' | 'read' | 'write'
+  retryPolicy?: { maxAttempts: number; initialBackoffMs: number; maxBackoffMs: number; jitter: boolean }
+  duplicateExecutionPolicy?: 'allow' | 'forbid'
+  maxUnknownAttempts?: number
   toolCallId?: string
 }
 
