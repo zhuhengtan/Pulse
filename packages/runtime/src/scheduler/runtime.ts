@@ -38,7 +38,7 @@ export interface WarmStartSpec { agentId: string; globalVersion?: number | 'late
 export interface AgentCreateRequest { goal: string; program: LaneProgram; agentId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec }
 
 function outcomeForLane(lane: LaneRecord): Outcome | undefined {
-  if (lane.status === 'succeeded') return { status: 'succeeded' }
+  if (lane.status === 'succeeded') return { status: 'succeeded', ...(lane.resultRef === undefined ? {} : { resultRef: lane.resultRef }) }
   if (lane.status === 'failed') return { status: 'failed' }
   if (lane.status === 'cancelled') return { status: 'cancelled' }
   return undefined
@@ -512,7 +512,7 @@ export class PulseRuntime {
             if (lane.closingResult) {
               const resultId = `result-${this.state.nextIds.result++}`
               this.state.results.set(resultId, { id: resultId, value: lane.closingResult.value, privacy: lane.closingResult.privacy, derivedFrom: [] })
-              lane.status = 'succeeded'; delete lane.closingResult
+              lane.status = 'succeeded'; lane.resultRef = resultId; delete lane.closingResult
               this.emit({ type: 'lane.succeeded', laneId: lane.id, data: resultId })
             } else { lane.status = 'ready'; lane.pendingResumeInput = { type: 'wait', resolution: wait.resolution }; this.enqueueLane(lane.id) }
           }

@@ -274,6 +274,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       const privacy = strictestPrivacy([derived.privacy ?? 'public', action.privacy ?? 'public'])
       mutations.push({ op: 'publishResult', record: { id: resultId, value: clone(action.result), privacy, derivedFrom: [...(action.derivedFrom ?? [])] } })
       workingLane.status = 'succeeded'
+      workingLane.resultRef = resultId
       mutations.push({ op: 'setLane', laneId: lane.id, record: { ...workingLane, version: lane.version + 1 } })
       mutations.push({ op: 'appendEvent', event: { type: 'lane.succeeded', laneId: lane.id, data: resultId } })
       return { mutations }

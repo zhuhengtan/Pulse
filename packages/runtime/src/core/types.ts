@@ -83,6 +83,7 @@ export interface LaneRecord {
   readySince: number
   ownedEffectIds: Set<EffectId>
   closingResult?: { value: JsonValue; privacy: PrivacyLabel }
+  resultRef?: ResultRef
   consecutiveControlErrors?: number
   pendingOutcome?: Outcome
   unresolvedEffectIds?: EffectId[]
@@ -138,6 +139,7 @@ export interface ResultRecord {
   value: JsonValue
   privacy: PrivacyLabel
   derivedFrom: string[]
+  summary?: JsonValue
 }
 
 export interface DependencySpec {

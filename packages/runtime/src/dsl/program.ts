@@ -1,19 +1,31 @@
 import { z, type ZodTypeAny } from 'zod'
 import type { LaneProgram, LaneStepContext } from '../scheduler/runtime.js'
-import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, RuntimeAction, RuntimeState, ResumeInput } from '../core/types.js'
+import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel } from '../core/types.js'
 
 export type NextStepTarget<TState = unknown> = string | { step: string }
 export interface InstructionView<TState> { goal: string; state: TState }
 export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; events?: string[] }
+export interface HistoryRecordMeta { seq: number; resultRefs: ResultRef[]; privacy: PrivacyLabel }
+export interface ResultMeta { ref: ResultRef; privacy: PrivacyLabel; derivedFrom: string[]; summary?: JsonValue }
 export interface StepContext<TState = JsonValue> {
   lane: Readonly<LaneRecord>
   state: Readonly<RuntimeState>
   goal: string
+  global: Readonly<JsonValue>
+  globalVersion: number
   laneState: TState
+  history: ReadonlyArray<HistoryRecordMeta>
+  now: number
+  watchdog?: ProgressWatchdogState
   resumeInput?: ResumeInput
   getResult(ref: ResultRef): JsonValue | undefined
+  results: { meta(ref: ResultRef): ResultMeta | undefined; summary(ref: ResultRef): JsonValue | undefined }
   mutateLane(mutator: (draft: TState) => void): void
-  proposeGlobal(delta: Omit<ContextDelta, 'target' | 'baseVersion' | 'proposal'>): void
+  proposeGlobal(delta: { ops: ContextOp[]; privacy?: PrivacyLabel }): void
+  commitGlobal(delta: { ops: ContextOp[]; privacy?: PrivacyLabel; adoptImmediately?: boolean }): void
+  adoptContext(version: number | 'latest'): void
+  cancelLane(target: LaneId, reason: 'SUPERSEDED' | 'USER_REQUESTED' | 'POLICY'): void
+  proposeCancel(target: LaneId, reason: 'SUPERSEDED' | 'POLICY'): void
   trace(message: string): void
 }
 
@@ -35,17 +47,30 @@ function asJson(value: unknown): JsonValue { return value as JsonValue }
 
 function findResult(context: LaneStepContext, ref: ResultRef): JsonValue | undefined { return context.state.results.get(ref)?.value }
 
-function makeContext<TState>(context: LaneStepContext, initialState: TState): { ctx: StepContext<TState>; getDelta: () => ContextDelta | undefined } {
+function makeContext<TState>(context: LaneStepContext, initialState: TState): { ctx: StepContext<TState>; getDelta: () => ContextDelta | undefined; getActions: () => RuntimeAction[]; getAdoptImmediately: () => boolean } {
   const draft = clone(initialState)
   let delta: ContextDelta | undefined
+  const actions: RuntimeAction[] = []
+  let adoptImmediately = false
+  const agent = context.state.agents.get(context.lane.agentId)
+  const globalVersion = context.lane.contextSnapshotVersion
+  const global = clone(agent?.globalVersions.get(globalVersion) ?? {})
+  const history = context.lane.context.history.map((record: HistoryRecord): HistoryRecordMeta => ({ seq: record.seq, resultRefs: [...record.resultRefs], privacy: record.privacy }))
+  const resultMeta = (ref: ResultRef): ResultMeta | undefined => { const result = context.state.results.get(ref); return result ? { ref, privacy: result.privacy, derivedFrom: [...result.derivedFrom], ...(result.summary === undefined ? {} : { summary: clone(result.summary) }) } : undefined }
+  const globalDelta = (value: { ops: ContextOp[]; privacy?: PrivacyLabel; proposal: boolean }): void => { delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, ops: clone(value.ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal } }
   const ctx: StepContext<TState> = {
-    lane: context.lane, state: context.state, goal: context.lane.goal, laneState: draft, ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}),
+    lane: context.lane, state: context.state, goal: context.lane.goal, global, globalVersion, laneState: draft, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}),
     getResult: (ref) => findResult(context, ref),
+    results: { meta: resultMeta, summary: (ref) => resultMeta(ref)?.summary },
     mutateLane: (mutator) => { mutator(draft); delta = { target: 'lane', baseVersion: context.lane.context.version, ops: Object.entries(draft as Record<string, unknown>).map(([key, value]) => ({ op: 'set' as const, path: [key], value: asJson(value) })) } },
-    proposeGlobal: (value) => { delta = { ...value, target: 'global', baseVersion: context.state.agents.get(context.lane.agentId)?.latestGlobalVersion ?? 0, proposal: true } },
+    proposeGlobal: (value) => globalDelta({ ...value, proposal: true }),
+    commitGlobal: (value) => { globalDelta({ ...value, proposal: false }); adoptImmediately = value.adoptImmediately ?? false },
+    adoptContext: (version) => actions.push({ type: 'adopt_context', version }),
+    cancelLane: (laneId, reason) => actions.push({ type: 'cancel_lane', laneId, reason }),
+    proposeCancel: (laneId, reason) => actions.push({ type: 'propose_cancel', laneId, reason }),
     trace: (_message) => { /* ObservationInbox wiring is host-owned; no Runtime state mutation occurs inside Step. */ },
   }
-  return { ctx, getDelta: () => delta }
+  return { ctx, getDelta: () => delta, getActions: () => actions, getAdoptImmediately: () => adoptImmediately }
 }
 
 export class StepBuilder<TState = JsonValue> {
@@ -93,7 +118,24 @@ export class StepBuilder<TState = JsonValue> {
     this.handlers.set(name, () => ({ actions: [{ type: 'fork', lanes: Object.entries(options.lanes).map(([key, lane]) => ({ key, goal: lane.goal, program: { programId: lane.program.programId, programVersion: lane.program.programVersion, step: lane.program.step ?? 'start', locals: lane.program.locals ?? {} }, ...(lane.dependsOn ? { dependsOn: lane.dependsOn } : {}) })), join: { condition: options.condition ?? 'settled', onUnsatisfied: 'resume_with_error' } }], next: options.next })); return this
   }
   addDynamicForkStep(name: string, options: { lanes: (ctx: StepContext<TState>) => Record<string, { goal: string; program: { programId: string; programVersion: string } }>; next: NextStepTarget }): this { this.handlers.set(name, (ctx) => ({ actions: [{ type: 'fork', lanes: Object.entries(options.lanes(ctx)).map(([key, lane]) => ({ key, goal: lane.goal, program: { ...lane.program, step: 'start', locals: {} } })), join: { condition: 'settled', onUnsatisfied: 'resume_with_error' } }], next: options.next })); return this }
-  addMergeStep(name: string, options: { task: string; next: NextStepTarget }): this { this.handlers.set(name, () => ({ actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: { task: options.task, merge: true } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:decode` })); this.handlers.set(`${name}:decode`, () => ({ next: options.next })); return this }
+  addMergeStep(name: string, options: { task: string; next: NextStepTarget; sources?: { proposals?: 'joined' | LaneId[]; outcomes?: 'joined' | LaneId[] }; instruction?: string | ((ctx: StepContext<TState>) => string); schema?: ZodTypeAny; onSynthesized?: (value: unknown, ctx: StepContext<TState>) => NextStepTarget }): this {
+    this.handlers.set(name, (ctx) => {
+      const joined = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef ? [dependency.outcome.resultRef] : []) : []
+      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: { task: options.task, merge: true, sources: joined, ...(options.instruction === undefined ? {} : { instruction: typeof options.instruction === 'string' ? options.instruction : options.instruction(ctx) }) } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:decode` }
+    })
+    this.handlers.set(`${name}:decode`, (ctx) => {
+      const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined
+      const ref = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined
+      const value = ref ? ctx.getResult(ref) : undefined
+      if (options.schema) {
+        const parsed = options.schema.safeParse(value)
+        if (!parsed.success) return { next: options.next }
+        return { next: options.onSynthesized ? options.onSynthesized(parsed.data, ctx) : options.next }
+      }
+      return { next: options.onSynthesized ? options.onSynthesized(value, ctx) : options.next }
+    })
+    return this
+  }
   addWaitStep(name: string, spec: { dependencies: Array<{ key: string; target: { kind: 'lane' | 'effect'; id: string }; condition: 'success' | 'settled' }>; next: NextStepTarget }): this { this.handlers.set(name, () => ({ actions: [{ type: 'wait', spec: { ...spec, mode: 'all', onUnsatisfied: 'resume_with_error', reason: 'dependency' } }], next: spec.next })); return this }
   addHumanStep<TOutput extends ZodTypeAny>(name: string, options: { prompt: string | ((view: InstructionView<TState>) => string); schema: TOutput; onReply: (reply: z.infer<TOutput>, ctx: StepContext<TState>) => NextStepTarget; onTimeout?: (ctx: StepContext<TState>) => NextStepTarget; timeoutMs?: number }): this {
     const decode = `${name}:decode`
@@ -109,7 +151,7 @@ export class StepBuilder<TState = JsonValue> {
   }
   build(entry = this.handlers.has('start') ? 'start' : [...this.handlers.keys()][0] ?? 'start'): LaneProgramDefinition {
     if (!this.handlers.has(entry)) this.handlers.set(entry, () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: entry }))
-    const definition: LaneProgramDefinition = { id: this.config.id, version: this.config.version, entry, steps: [...this.handlers.keys()], debugSources: [...this.handlers.values()].map((handler) => handler.toString()), ...(this.config.system === undefined ? {} : { system: this.config.system }), ...(this.config.toolSet === undefined ? {} : { toolSet: this.config.toolSet }), step: (context) => { const handler = this.handlers.get(context.lane.resume.step) ?? this.handlers.get(entry)!; const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState; const { ctx, getDelta } = makeContext(context, state); const result = handler(ctx); const delta = result.contextDelta ?? getDelta(); return { ...(result.actions ? { actions: result.actions } : { actions: [] }), next: { programId: this.config.id, programVersion: this.config.version, step: target(result.next), locals: result.locals ?? ctx.lane.resume.locals }, ...(delta ? { contextDelta: delta } : {}), ...(result.adoptCommittedContext ? { adoptCommittedContext: true } : {}) } } }
+    const definition: LaneProgramDefinition = { id: this.config.id, version: this.config.version, entry, steps: [...this.handlers.keys()], debugSources: [...this.handlers.values()].map((handler) => handler.toString()), ...(this.config.system === undefined ? {} : { system: this.config.system }), ...(this.config.toolSet === undefined ? {} : { toolSet: this.config.toolSet }), step: (context) => { const handler = this.handlers.get(context.lane.resume.step) ?? this.handlers.get(entry)!; const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState; const { ctx, getDelta, getActions, getAdoptImmediately } = makeContext(context, state); const result = handler(ctx); const delta = result.contextDelta ?? getDelta(); return { actions: [...getActions(), ...(result.actions ?? [])], next: { programId: this.config.id, programVersion: this.config.version, step: target(result.next), locals: result.locals ?? ctx.lane.resume.locals }, ...(delta ? { contextDelta: delta } : {}), ...((result.adoptCommittedContext || getAdoptImmediately()) ? { adoptCommittedContext: true } : {}) } } }
     return definition
   }
 }
