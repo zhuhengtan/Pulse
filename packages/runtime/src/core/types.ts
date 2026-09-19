@@ -282,11 +282,35 @@ export interface LLMRequestProjection {
 }
 
 export interface RuntimeEvent {
+  id: string
+  schemaVersion: number
+  sessionId: string
   seq: number
-  id?: string
+  timestamp: number
   type: string
+  txId?: string
+  agentId?: AgentId
   laneId?: LaneId
   effectId?: EffectId
+  attemptId?: string
+  causationId?: string
+  payload: JsonValue
+  data?: JsonValue
+}
+
+export interface RuntimeEventInput {
+  id?: string
+  schemaVersion?: number
+  sessionId?: string
+  type: string
+  timestamp?: number
+  txId?: string
+  agentId?: AgentId
+  laneId?: LaneId
+  effectId?: EffectId
+  attemptId?: string
+  causationId?: string
+  payload?: JsonValue
   data?: JsonValue
 }
 

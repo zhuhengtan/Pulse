@@ -4,6 +4,7 @@ import { DependencyGraph } from '../dependencies/graph.js'
 import type { ValidationResult, Mutation } from '../core/mutations.js'
 import { privacyRank, strictestPrivacy } from '../core/types.js'
 import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord } from '../core/types.js'
+import { appendRuntimeEvent } from '../core/events.js'
 
 const isLocal = (value: TargetRef | LocalRef): value is LocalRef => 'local' in value
 const clone = <T>(value: T): T => structuredClone(value)
@@ -312,7 +313,7 @@ function requireMutations(): typeof import('../core/mutations.js') {
         case 'publishResult': state.results.set(mutation.record.id, mutation.record); break
         case 'setGlobal': { const agent = state.agents.get(mutation.agentId)!; agent.globalVersions.set(mutation.version, mutation.value); agent.latestGlobalVersion = mutation.version; break }
         case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version, ...(mutation.history === undefined ? {} : { history: structuredClone(mutation.history) }) }; break }
-        case 'appendEvent': state.events.push({ ...mutation.event, seq: state.nextIds.event++ }); break
+        case 'appendEvent': appendRuntimeEvent(state, mutation.event); break
         case 'setNow': state.now = mutation.now; break
       }
     }

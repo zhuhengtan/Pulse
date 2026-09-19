@@ -11,6 +11,7 @@ import { observeProgress } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
 import { exportRuntimePersistence, importRuntimePersistence, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
 import { ResourceLockManager } from './locks.js'
+import { appendRuntimeEvent } from '../core/events.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number }
 export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput }
@@ -27,6 +28,7 @@ export interface RuntimeConfig {
   maxRunning?: Partial<Record<'llm' | 'tool' | 'agent' | 'none', number>>
   maxConsecutiveControlErrors?: number
   maxRuntimeMs?: number
+  sessionId?: string
   watchdogNoProgressThreshold?: number
   persistence?: RuntimePersistenceSnapshot
   effectExecutor?: EffectExecutor
@@ -63,18 +65,20 @@ export class PulseRuntime {
   private readonly maxConsecutiveControlErrors: number
   private readonly maxRuntimeMs?: number
   private readonly watchdogNoProgressThreshold: number
+  private readonly sessionId: string
   private hostCommandSeq = 1
   private factWaiters: Array<() => void> = []
 
   constructor(config: RuntimeConfig = {}) {
     const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
     this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }) })
+    this.sessionId = config.sessionId ?? 'session-local'
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
     if (restored) {
       const recovery = this.outbox.recover(this.state)
-      for (const id of recovery.requeued) this.state.events.push({ seq: this.state.nextIds.event++, type: 'outbox.requeued', data: id })
-      for (const id of recovery.unknown) this.state.events.push({ seq: this.state.nextIds.event++, type: 'outbox.discarded', data: id })
+      for (const id of recovery.requeued) this.emit({ type: 'outbox.requeued', data: id })
+      for (const id of recovery.unknown) this.emit({ type: 'outbox.discarded', data: id })
     }
     this.clock = new VirtualClock()
     this.ready = new ReadyQueue(config.agingIntervalMs ?? 1000, config.agingCap ?? Number.POSITIVE_INFINITY)
@@ -111,6 +115,8 @@ export class PulseRuntime {
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
   exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox) }
 
+  private emit(event: import('../core/types.js').RuntimeEventInput): void { appendRuntimeEvent(this.state, event, { sessionId: this.sessionId, timestamp: this.state.now }) }
+
   enqueueHostCommand(command: HostCommand): void {
     this.factInbox.enqueue(command, `host-command-${this.hostCommandSeq++}`)
     for (const resolve of this.factWaiters.splice(0)) resolve()
@@ -121,10 +127,10 @@ export class PulseRuntime {
   tick(): number {
     this.state.now = this.clock.now()
     for (const envelope of this.factInbox.drain()) {
-      this.state.events.push({ seq: this.state.nextIds.event++, id: envelope.eventId, type: 'command.enqueued', data: envelope.fact as unknown as JsonValue })
+      this.emit({ id: envelope.eventId, type: 'command.enqueued', data: envelope.fact as unknown as JsonValue })
       if (envelope.fact.type === 'reply') this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value })
       else this.cancelAgent(envelope.fact.agentId, 'USER_REQUESTED')
-      this.state.events.push({ seq: this.state.nextIds.event++, type: 'command.applied', data: { eventId: envelope.eventId } })
+      this.emit({ type: 'command.applied', data: { eventId: envelope.eventId } })
     }
     if (this.maxRuntimeMs !== undefined && this.state.now >= this.maxRuntimeMs) for (const agent of this.state.agents.values()) if (agent.state === 'running') this.cancelAgent(agent.id, 'TIMEOUT')
     for (const timer of this.clock.timers.due(this.state.now)) timer.callback()
@@ -146,11 +152,11 @@ export class PulseRuntime {
         if (consecutive >= this.maxConsecutiveControlErrors) this.failLane(lane, { code: 'CONTROL_ERROR_LOOP', message: 'Lane exceeded the consecutive control error limit.', details: { lastError: result.rejection as unknown as JsonValue } })
         else {
           lane.pendingResumeInput = { type: 'control_error', error: result.rejection, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
-          this.state.events.push({ seq: this.state.nextIds.event++, type: 'step.rejected', laneId: lane.id, data: result.rejection as unknown as JsonValue })
+          this.emit({ type: 'step.rejected', laneId: lane.id, data: result.rejection as unknown as JsonValue })
           this.enqueueLane(lane.id)
         }
       } else {
-        commitMutationTransaction(this.state, this.mutationLog, `step:${lane.id}:${lane.version + 1}`, result.mutations, this.state.now)
+        commitMutationTransaction(this.state, this.mutationLog, `step:${lane.id}:${lane.version + 1}`, result.mutations, this.state.now, this.sessionId)
         for (const mutation of result.mutations) if (mutation.op === 'insertEffect') this.outbox.enqueue(mutation.record, this.state.now)
         const updated = this.state.lanes.get(lane.id)
         if (updated) delete updated.consecutiveControlErrors
@@ -158,7 +164,7 @@ export class PulseRuntime {
         if (updated) {
           const watchdog = observeProgress(lane, output, this.state, lane.progressWatchdog, { noProgressThreshold: this.watchdogNoProgressThreshold })
           updated.progressWatchdog = watchdog.state
-          if (!watchdog.progressed) this.state.events.push({ seq: this.state.nextIds.event++, type: watchdog.state.interventionLevel >= 3 ? 'progress.no_progress_detected' : 'progress.intervention_applied', laneId: lane.id, data: { noProgressCount: watchdog.state.noProgressCount, interventionLevel: watchdog.state.interventionLevel } })
+          if (!watchdog.progressed) this.emit({ type: watchdog.state.interventionLevel >= 3 ? 'progress.no_progress_detected' : 'progress.intervention_applied', laneId: lane.id, data: { noProgressCount: watchdog.state.noProgressCount, interventionLevel: watchdog.state.interventionLevel } })
           if (watchdog.state.interventionLevel >= 3 && !['succeeded', 'failed', 'cancelled'].includes(updated.status)) this.failLane(updated, { code: 'NO_PROGRESS_DETECTED', message: 'Lane made no observable progress within the watchdog threshold.' })
         }
         if (updated?.status === 'ready') this.enqueueLane(updated.id)
@@ -194,7 +200,7 @@ export class PulseRuntime {
     }
     const root = [...this.state.lanes.values()].find((lane) => lane.ownerLaneId === undefined)
     const status = root?.status === 'succeeded' ? 'succeeded' : root?.status === 'cancelled' ? 'cancelled' : 'failed'
-    if (root && !['succeeded', 'failed', 'cancelled'].includes(root.status)) this.state.events.push({ seq: this.state.nextIds.event++, type: 'runtime.idle_blocked', laneId: root.id, data: { status: root.status } })
+    if (root && !['succeeded', 'failed', 'cancelled'].includes(root.status)) this.emit({ type: 'runtime.idle_blocked', laneId: root.id, data: { status: root.status } })
     const agent = root ? this.state.agents.get(root.agentId) : undefined
     if (agent && ['succeeded', 'failed', 'cancelled'].includes(root?.status ?? 'failed')) agent.state = status
     return { status, unresolvedEffectIds: this.quarantine.unresolvedEffectIds }
@@ -240,8 +246,8 @@ export class PulseRuntime {
     this.releaseEffectLocks(effectId)
     this.outbox.ack(`${effect.id}:${effect.attemptId}`)
     if (effectiveStatus === 'succeeded') this.state.results.set(resultId, { id: resultId, effectId, value: execution.value, privacy: execution.privacy ?? 'public', derivedFrom: [] })
-    this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
-    if (execution.metadata !== undefined) this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.execution_metadata', effectId, data: execution.metadata })
+    this.emit({ type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
+    if (execution.metadata !== undefined) this.emit({ type: 'effect.execution_metadata', effectId, data: execution.metadata })
     this.refreshWaits()
     this.dispatchQueuedEffects()
   }
@@ -259,7 +265,7 @@ export class PulseRuntime {
     else {
       effect.state = 'failed'
       effect.outcome = { status: 'failed', error: { code: 'REMOTE_UNKNOWN', message: 'Remote execution outcome is unknown but no side effect was recorded.' } }
-      this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.remote_unknown', effectId, data: { executionState: 'remote_unknown', sideEffectState } })
+      this.emit({ type: 'effect.remote_unknown', effectId, data: { executionState: 'remote_unknown', sideEffectState } })
     }
     this.releaseEffectLocks(effectId)
     this.refreshWaits()
@@ -283,7 +289,7 @@ export class PulseRuntime {
     this.releaseEffectLocks(effectId)
     const lane = this.state.lanes.get(effect.ownerLaneId)
     if (lane?.unresolvedEffectIds) lane.unresolvedEffectIds = lane.unresolvedEffectIds.filter((id) => id !== effectId)
-    this.state.events.push({ seq: this.state.nextIds.event++, type: 'resource.abandoned', effectId, data: { code: 'RESOURCE_ABANDONED' } })
+    this.emit({ type: 'resource.abandoned', effectId, data: { code: 'RESOURCE_ABANDONED' } })
     this.refreshWaits()
   }
 
@@ -295,9 +301,9 @@ export class PulseRuntime {
     const agent = this.state.agents.get(agentId)
     if (!agent || ['succeeded', 'failed', 'cancelled'].includes(agent.state ?? '')) return
     agent.state = 'cancelling'
-    for (const lane of this.state.lanes.values()) if (lane.agentId === agentId && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'cancelled'; lane.version++; this.state.events.push({ seq: this.state.nextIds.event++, type: 'lane.cancelling', laneId: lane.id, data: reason }); for (const effectId of lane.ownedEffectIds) this.requestEffectCancellation(effectId, reason, this.state.effects.get(effectId)?.cancelGraceMs ?? 0) }
+    for (const lane of this.state.lanes.values()) if (lane.agentId === agentId && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'cancelled'; lane.version++; this.emit({ type: 'lane.cancelling', laneId: lane.id, data: reason }); for (const effectId of lane.ownedEffectIds) this.requestEffectCancellation(effectId, reason, this.state.effects.get(effectId)?.cancelGraceMs ?? 0) }
     agent.state = 'cancelled'
-    this.state.events.push({ seq: this.state.nextIds.event++, type: 'agent.cancelled', data: reason })
+    this.emit({ type: 'agent.cancelled', data: reason })
   }
 
   explain(laneId?: string): JsonValue {
@@ -329,12 +335,12 @@ export class PulseRuntime {
     effect.attemptNo += 1
     effect.attemptId = `${effect.id}-attempt-${effect.attemptNo}`
     effect.retryAt = this.state.now + delayMs
-    this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.retry_scheduled', effectId: effect.id, data: { previousAttemptId, nextAttemptId: effect.attemptId, delayMs, ...(error ? { error } : {}) } as unknown as JsonValue })
+    this.emit({ type: 'effect.retry_scheduled', effectId: effect.id, data: { previousAttemptId, nextAttemptId: effect.attemptId, delayMs, ...(error ? { error } : {}) } as unknown as JsonValue })
     this.clock.timers.schedule(effect.retryAt, () => {
       if (!effect.outcome && effect.state === 'retry_wait') {
         effect.state = 'queued'
         delete effect.retryAt
-        this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.retry_ready', effectId: effect.id, data: effect.attemptId })
+        this.emit({ type: 'effect.retry_ready', effectId: effect.id, data: effect.attemptId })
         this.dispatchQueuedEffects()
       }
     })
@@ -356,7 +362,7 @@ export class PulseRuntime {
       effect.attempts = [...(effect.attempts ?? []), attempt]
       const controller = new AbortController()
       if (effect.kind === 'human' && !this.customExecutor) {
-        this.state.events.push({ seq: this.state.nextIds.event++, type: 'human.requested', effectId: effect.id, data: effect.input })
+        this.emit({ type: 'human.requested', effectId: effect.id, data: effect.input })
         if (effect.attemptTimeoutMs !== undefined) this.clock.schedule(effect.attemptTimeoutMs, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: null }, 'failed', { code: 'ATTEMPT_TIMEOUT', message: 'Human response timed out.' }) })
         if (effect.deadlineAt !== undefined) this.clock.timers.schedule(effect.deadlineAt, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: null }, 'failed', { code: 'TIMEOUT', message: 'Human response deadline exceeded.' }) })
         continue
@@ -383,10 +389,10 @@ export class PulseRuntime {
         if (!childProgram || typeof goal !== 'string') { this.completeEffect(effect.id, { value: null }, 'failed', { code: 'INVALID_AGENT_EFFECT_INPUT', message: 'Agent Effect requires a registered program and goal.' }); continue }
         const child = this.createAgent(goal, childProgram)
         effect.childAgentId = child.agentId
-        this.state.events.push({ seq: this.state.nextIds.event++, type: 'agent.effect_started', effectId: effect.id, data: child.agentId })
+        this.emit({ type: 'agent.effect_started', effectId: effect.id, data: child.agentId })
         continue
       }
-      const promise = this.executor(effect, controller.signal).then((execution) => this.completeEffect(effect.id, execution)).catch((cause) => { this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.dispatch_failed', effectId: effect.id, data: { message: cause instanceof Error ? cause.message : String(cause) } }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', { code: 'EFFECT_FAILED', message: cause instanceof Error ? cause.message : String(cause) }) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
+      const promise = this.executor(effect, controller.signal).then((execution) => this.completeEffect(effect.id, execution)).catch((cause) => { this.emit({ type: 'effect.dispatch_failed', effectId: effect.id, data: { message: cause instanceof Error ? cause.message : String(cause) } }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', { code: 'EFFECT_FAILED', message: cause instanceof Error ? cause.message : String(cause) }) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
       executionRecord.promise = promise
       if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.clock.schedule(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
       if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.clock.timers.schedule(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))
@@ -400,7 +406,7 @@ export class PulseRuntime {
     if (!effect || effect.outcome || !execution) return
     effect.cancelRequested = { reason, at: this.state.now = this.clock.now() }
     execution.controller.abort()
-    this.state.events.push({ seq: this.state.nextIds.event++, type: 'limit.rejected', effectId, data: { code: reason } })
+    this.emit({ type: 'limit.rejected', effectId, data: { code: reason } })
     this.quarantineEffect(effectId, reason, effect.cancelGraceMs ?? 0)
   }
 
@@ -408,7 +414,7 @@ export class PulseRuntime {
     const effect = this.state.effects.get(effectId)
     if (!effect || effect.outcome) return
     effect.cancelRequested = { reason, at: this.state.now }
-    this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.cancel_requested', effectId, data: { reason } })
+    this.emit({ type: 'effect.cancel_requested', effectId, data: { reason } })
     if (!this.executions.has(effectId)) { this.completeEffect(effectId, { value: null }, 'cancelled', { code: 'CANCELLED', message: reason }); return }
     this.executions.get(effectId)!.controller.abort()
     if (graceMs === 0) this.quarantineEffect(effectId, reason, 0)
@@ -428,7 +434,7 @@ export class PulseRuntime {
     this.quarantine.add(effectId, this.state.now, reason)
     const lane = this.state.lanes.get(effect.ownerLaneId)
     if (lane) lane.unresolvedEffectIds = [...new Set([...(lane.unresolvedEffectIds ?? []), effectId])]
-    this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.quarantined', effectId, data: { reason, state: effect.state } })
+    this.emit({ type: 'effect.quarantined', effectId, data: { reason, state: effect.state } })
     this.refreshWaits()
   }
 
@@ -447,7 +453,7 @@ export class PulseRuntime {
         for (const held of releases.reverse()) held()
         if (!this.lockBlocked.has(effect.id)) {
           this.lockBlocked.add(effect.id)
-          this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.lock_blocked', effectId: effect.id, data: { resource: spec.resource, mode: spec.mode } })
+          this.emit({ type: 'effect.lock_blocked', effectId: effect.id, data: { resource: spec.resource, mode: spec.mode } })
         }
         return false
       }
@@ -469,7 +475,7 @@ export class PulseRuntime {
     for (const lane of this.state.lanes.values()) if (lane.status === 'ready' && !this.ready.has(lane.id)) this.enqueueLane(lane.id)
   }
 
-  private failLane(lane: LaneRecord, failure: RuntimeError): void { lane.status = 'failed'; lane.version++; this.state.events.push({ seq: this.state.nextIds.event++, type: 'lane.failed', laneId: lane.id, data: failure as unknown as JsonValue }); this.refreshWaits() }
+  private failLane(lane: LaneRecord, failure: RuntimeError): void { lane.status = 'failed'; lane.version++; this.emit({ type: 'lane.failed', laneId: lane.id, data: failure as unknown as JsonValue }); this.refreshWaits() }
 
   private refreshWaits(): void {
     let changed = true
@@ -507,7 +513,7 @@ export class PulseRuntime {
               const resultId = `result-${this.state.nextIds.result++}`
               this.state.results.set(resultId, { id: resultId, value: lane.closingResult.value, privacy: lane.closingResult.privacy, derivedFrom: [] })
               lane.status = 'succeeded'; delete lane.closingResult
-              this.state.events.push({ seq: this.state.nextIds.event++, type: 'lane.succeeded', laneId: lane.id, data: resultId })
+              this.emit({ type: 'lane.succeeded', laneId: lane.id, data: resultId })
             } else { lane.status = 'ready'; lane.pendingResumeInput = { type: 'wait', resolution: wait.resolution }; this.enqueueLane(lane.id) }
           }
           changed = true

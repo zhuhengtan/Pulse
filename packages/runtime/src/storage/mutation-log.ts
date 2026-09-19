@@ -113,10 +113,11 @@ export class MutationLog {
   }
 }
 
-export function commitMutationTransaction(state: RuntimeState, log: MutationLog, transactionId: string, mutations: Mutation[], committedAt = state.now): MutationLogEntry {
+export function commitMutationTransaction(state: RuntimeState, log: MutationLog, transactionId: string, mutations: Mutation[], committedAt = state.now, sessionId = 'session-unknown'): MutationLogEntry {
   const existing = log.findTransaction(transactionId)
   if (existing) return existing
-  const entry = log.append(transactionId, mutations, committedAt)
-  apply(state, entry.mutations)
+  const transactionalMutations = mutations.map((mutation) => mutation.op === 'appendEvent' && mutation.event.txId === undefined ? { ...mutation, event: { ...mutation.event, txId: transactionId } } : mutation)
+  const entry = log.append(transactionId, transactionalMutations, committedAt)
+  apply(state, entry.mutations, { sessionId, timestamp: committedAt })
   return entry
 }

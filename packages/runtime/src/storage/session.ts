@@ -1,5 +1,6 @@
-import type { AgentRecord, EffectRecord, JsonValue, LaneRecord, ResultRecord, RuntimeEvent, RuntimeState, WaitRecord } from '../core/types.js'
+import type { AgentRecord, EffectRecord, JsonValue, LaneRecord, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord } from '../core/types.js'
 import { createRuntimeState } from '../core/types.js'
+import { normalizeRuntimeEvent } from '../core/events.js'
 
 export interface SessionSnapshot {
   schemaVersion: 1
@@ -35,7 +36,7 @@ export function exportRuntimeState(state: RuntimeState): SessionSnapshot {
       effects: [...state.effects.entries()].map(([id, effect]) => [id, structuredClone(effect)]),
       waits: [...state.waits.entries()].map(([id, wait]) => [id, structuredClone(wait)]),
       results: [...state.results.entries()].map(([id, result]) => [id, structuredClone(result)]),
-      events: structuredClone(state.events),
+      events: state.events.map((event) => normalizeRuntimeEvent(event as unknown as RuntimeEventInput, event.seq, { sessionId: event.sessionId, timestamp: event.timestamp })),
       nextIds: { ...state.nextIds },
       maxTotalLanes: state.maxTotalLanes,
       maxQueuedEffects: state.maxQueuedEffects,
@@ -57,6 +58,6 @@ export function importRuntimeState(snapshot: SessionSnapshot | JsonValue): Runti
   for (const [id, effect] of value.state.effects) state.effects.set(id, structuredClone(effect))
   for (const [id, wait] of value.state.waits) state.waits.set(id, structuredClone(wait))
   for (const [id, result] of value.state.results) state.results.set(id, structuredClone(result))
-  state.events = structuredClone(value.state.events)
+  state.events = value.state.events.map((event) => normalizeRuntimeEvent(event as unknown as RuntimeEventInput, (event as RuntimeEvent).seq, { sessionId: (event as RuntimeEvent).sessionId, timestamp: (event as RuntimeEvent).timestamp }))
   return state
 }
