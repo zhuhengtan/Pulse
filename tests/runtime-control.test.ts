@@ -62,4 +62,13 @@ describe('runtime control boundaries', () => {
     runtime.tick()
     expect(runtime.explain(laneId)).toMatchObject({ lanes: [{ id: laneId, status: 'succeeded', consecutiveControlErrors: 0 }], effects: [{ id: 'effect-1', state: 'running' }] })
   })
+
+  it('terminates a repeated no-progress Step at watchdog level 3', async () => {
+    const runtime = new PulseRuntime({ watchdogNoProgressThreshold: 1, maxLaneStepsPerTick: 20 })
+    const program: LaneProgram = { id: 'watchdog-runtime', version: '1', step: () => ({ actions: [], next: point('watchdog-runtime', 'loop') }) }
+    const { agentId } = runtime.createAgent('loop', program)
+    const outcome = await runtime.start(agentId).outcome()
+    expect(outcome.status).toBe('failed')
+    expect(runtime.state.events.some((event) => event.type === 'progress.no_progress_detected')).toBe(true)
+  })
 })

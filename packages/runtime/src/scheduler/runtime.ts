@@ -7,6 +7,7 @@ import { createRuntimeState } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
 import { FactInbox } from '../core/inbox.js'
+import { observeProgress } from '../lifecycle/watchdog.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number }
 export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput }
@@ -23,6 +24,7 @@ export interface RuntimeConfig {
   maxRunning?: Partial<Record<'llm' | 'tool' | 'agent' | 'none', number>>
   maxConsecutiveControlErrors?: number
   maxRuntimeMs?: number
+  watchdogNoProgressThreshold?: number
   effectExecutor?: EffectExecutor
 }
 
@@ -47,6 +49,7 @@ export class PulseRuntime {
   private readonly maxSteps: number
   private readonly maxConsecutiveControlErrors: number
   private readonly maxRuntimeMs?: number
+  private readonly watchdogNoProgressThreshold: number
   private hostCommandSeq = 1
   private factWaiters: Array<() => void> = []
 
@@ -57,6 +60,7 @@ export class PulseRuntime {
     this.maxSteps = config.maxLaneStepsPerTick ?? 32
     this.maxConsecutiveControlErrors = config.maxConsecutiveControlErrors ?? 2
     if (config.maxRuntimeMs !== undefined) this.maxRuntimeMs = config.maxRuntimeMs
+    this.watchdogNoProgressThreshold = config.watchdogNoProgressThreshold ?? 3
     this.executor = config.effectExecutor ?? (async () => ({ value: null }))
   }
 
@@ -114,6 +118,12 @@ export class PulseRuntime {
         const updated = this.state.lanes.get(lane.id)
         if (updated) delete updated.consecutiveControlErrors
         if (updated && updated.pendingResumeInput) delete updated.pendingResumeInput
+        if (updated) {
+          const watchdog = observeProgress(lane, output, this.state, lane.progressWatchdog, { noProgressThreshold: this.watchdogNoProgressThreshold })
+          updated.progressWatchdog = watchdog.state
+          if (!watchdog.progressed) this.state.events.push({ seq: this.state.nextIds.event++, type: watchdog.state.interventionLevel >= 3 ? 'progress.no_progress_detected' : 'progress.intervention_applied', laneId: lane.id, data: { noProgressCount: watchdog.state.noProgressCount, interventionLevel: watchdog.state.interventionLevel } })
+          if (watchdog.state.interventionLevel >= 3 && !['succeeded', 'failed', 'cancelled'].includes(updated.status)) this.failLane(updated, { code: 'NO_PROGRESS_DETECTED', message: 'Lane made no observable progress within the watchdog threshold.' })
+        }
         if (updated?.status === 'ready') this.enqueueLane(updated.id)
         this.enqueueNewReadyLanes()
         this.refreshWaits()
