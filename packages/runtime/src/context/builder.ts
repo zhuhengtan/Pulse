@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { AgentRecord, LaneRecord, LLMContextSpec, LLMRequestProjection, PrivacyLabel, ResultRef, RuntimeState, JsonValue } from '../core/types.js'
+import type { AgentRecord, LaneRecord, LLMContextSpec, LLMRequestProjection, PrivacyLabel, ResultRef, RuntimeState, JsonValue, ContextDelta, ContextOp } from '../core/types.js'
 import { privacyRank, strictestPrivacy } from '../core/types.js'
 
 function stable(value: unknown): string {
@@ -59,3 +59,32 @@ export function appendHistory(lane: LaneRecord, record: { instruction: string; r
 
 export function stableSerialize(value: unknown): string { return stable(value) }
 export function contentHash(value: unknown): string { return hash(value) }
+
+export interface RebaseConflict { path: string[]; reason: 'changed_since_base' | 'append_target_changed' | 'history_compaction_requires_review' }
+export interface RebaseResult { delta?: ContextDelta; conflicts: RebaseConflict[] }
+
+function atPath(value: JsonValue, path: string[]): JsonValue | undefined {
+  let current: JsonValue | undefined = value
+  for (const part of path) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined
+    current = (current as Record<string, JsonValue>)[part]
+  }
+  return current
+}
+
+function equal(a: JsonValue | undefined, b: JsonValue | undefined): boolean { return stableSerialize(a) === stableSerialize(b) }
+
+export function rebaseContextDelta(delta: ContextDelta, baseState: JsonValue, currentState: JsonValue, currentVersion: number): RebaseResult {
+  const conflicts: RebaseConflict[] = []
+  for (const op of delta.ops) {
+    if (op.op === 'compact_history') { conflicts.push({ path: ['history'], reason: 'history_compaction_requires_review' }); continue }
+    const path = op.path ?? []
+    const baseValue = atPath(baseState, path)
+    const currentValue = atPath(currentState, path)
+    if (op.op === 'append') {
+      if (!Array.isArray(baseValue) || !Array.isArray(currentValue) || currentValue.length < baseValue.length || !baseValue.every((item, index) => equal(item, currentValue[index]))) conflicts.push({ path, reason: 'append_target_changed' })
+    } else if (!equal(baseValue, currentValue)) conflicts.push({ path, reason: 'changed_since_base' })
+  }
+  if (conflicts.length) return { conflicts }
+  return { conflicts: [], delta: { ...delta, baseVersion: currentVersion } }
+}
