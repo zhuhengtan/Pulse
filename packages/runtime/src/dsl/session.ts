@@ -9,6 +9,11 @@ export class PulseSession {
   async *stream(): AsyncIterable<SessionEvent> {
     let cursor = 0
     while (true) {
+      const oldest = this.runtime.state.events[0]?.seq
+      if (oldest !== undefined && cursor + 1 < oldest) {
+        yield { type: 'gap', seq: oldest, fromSeq: cursor + 1, toSeq: oldest - 1 }
+        cursor = oldest - 1
+      }
       const events = this.runtime.state.events.filter((event) => event.seq > cursor)
       for (const event of events) { cursor = event.seq; yield { type: 'fact', seq: event.seq, event } }
       const root = [...this.runtime.state.lanes.values()].find((lane) => lane.agentId === this.agentId && lane.ownerLaneId === undefined)
@@ -18,5 +23,6 @@ export class PulseSession {
   }
   snapshot(): JsonValue { return { agentId: this.agentId, lanes: [...this.runtime.state.lanes.values()].filter((lane) => lane.agentId === this.agentId).map((lane) => ({ id: lane.id, status: lane.status, step: lane.resume.step })), effects: [...this.runtime.state.effects.values()].filter((effect) => effect.agentId === this.agentId).map((effect) => ({ id: effect.id, state: effect.state })) } }
   async outcome(): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }> { return this.execution }
-  reply(effectId: string, value: JsonValue): void { this.runtime.completeEffect(effectId, { value }) }
+  reply(effectId: string, value: JsonValue): Promise<void> { this.runtime.enqueueHostCommand({ type: 'reply', effectId, value }); return Promise.resolve() }
+  cancel(reason: string): Promise<void> { this.runtime.enqueueHostCommand({ type: 'cancel', agentId: this.agentId, reason }); return Promise.resolve() }
 }

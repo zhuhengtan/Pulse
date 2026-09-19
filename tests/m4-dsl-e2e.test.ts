@@ -58,6 +58,22 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     await stream.return?.()
   })
 
+  it('reports a stream gap after fact history is compacted and routes host cancel through the inbox', async () => {
+    const runtime = new PulseRuntime()
+    const program = { id: 'gap-test', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'gap-test', programVersion: '1', step: 'done', locals: {} } }) }
+    const { agentId } = runtime.createAgent('gap', program)
+    runtime.tick()
+    const session = runtime.start(agentId)
+    runtime.state.events.push({ seq: 2, type: 'synthetic-2' }, { seq: 3, type: 'synthetic-3' })
+    runtime.state.events.splice(0, runtime.state.events.length - 1)
+    const first = await session.stream()[Symbol.asyncIterator]().next()
+    expect(first.value?.type).toBe('gap')
+    await session.cancel('test')
+    expect(runtime.factInbox.size).toBe(1)
+    runtime.tick()
+    expect(runtime.factInbox.size).toBe(0)
+  })
+
   it('runs the login troubleshooting Main/Fork/Join/Synthesize flow with Mock semantics', async () => {
     const { runtime, agentId } = createLoginTroubleshootingRuntime()
     const outcome = await runtime.start(agentId).outcome()

@@ -6,11 +6,13 @@ import type { EffectRecord, JsonValue, LaneRecord, LaneStepOutput, Outcome, Resu
 import { createRuntimeState } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
+import { FactInbox } from '../core/inbox.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number }
 export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput }
 export interface EffectExecution { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled' }
 export type EffectExecutor = (effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<EffectExecution>
+type HostCommand = { type: 'reply'; effectId: string; value: JsonValue } | { type: 'cancel'; agentId: string; reason: string }
 
 export interface RuntimeConfig {
   maxLaneStepsPerTick?: number
@@ -37,6 +39,7 @@ export class PulseRuntime {
   readonly ready: ReadyQueue
   readonly quarantine = new QuarantineScope()
   readonly priorityInheritance = new PriorityInheritance()
+  readonly factInbox = new FactInbox<HostCommand>()
   private readonly programs = new Map<string, LaneProgram>()
   private readonly executions = new Map<string, { controller: AbortController; promise: Promise<void>; timeoutTimer?: string; deadlineTimer?: string; cancelTimer?: string }>()
   private readonly executor: EffectExecutor
@@ -44,6 +47,8 @@ export class PulseRuntime {
   private readonly maxSteps: number
   private readonly maxConsecutiveControlErrors: number
   private readonly maxRuntimeMs?: number
+  private hostCommandSeq = 1
+  private factWaiters: Array<() => void> = []
 
   constructor(config: RuntimeConfig = {}) {
     this.state = createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }) })
@@ -66,10 +71,21 @@ export class PulseRuntime {
   }
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
 
+  enqueueHostCommand(command: HostCommand): void {
+    this.factInbox.enqueue(command, `host-command-${this.hostCommandSeq++}`)
+    for (const resolve of this.factWaiters.splice(0)) resolve()
+  }
+
   enqueueLane(laneId: string): void { const lane = this.state.lanes.get(laneId); if (lane && lane.status === 'ready') { lane.enqueueSeq = this.enqueueSeq++; lane.readySince = this.state.now; this.ready.enqueue(readyItemFromLane(lane)) } }
 
   tick(): number {
     this.state.now = this.clock.now()
+    for (const envelope of this.factInbox.drain()) {
+      this.state.events.push({ seq: this.state.nextIds.event++, id: envelope.eventId, type: 'command.enqueued', data: envelope.fact as unknown as JsonValue })
+      if (envelope.fact.type === 'reply') this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value })
+      else this.cancelAgent(envelope.fact.agentId, 'USER_REQUESTED')
+      this.state.events.push({ seq: this.state.nextIds.event++, type: 'command.applied', data: { eventId: envelope.eventId } })
+    }
     if (this.maxRuntimeMs !== undefined && this.state.now >= this.maxRuntimeMs) for (const agent of this.state.agents.values()) if (agent.state === 'running') this.cancelAgent(agent.id, 'TIMEOUT')
     for (const timer of this.clock.timers.due(this.state.now)) timer.callback()
     let progressed = 0
@@ -113,8 +129,13 @@ export class PulseRuntime {
     for (let tick = 0; tick < maxTicks; tick++) {
       const work = this.tick()
       this.refreshWaits()
-      if (this.ready.size === 0 && this.executions.size === 0) break
+      if (this.ready.size === 0 && this.executions.size === 0) {
+        if (this.factInbox.size > 0) continue
+        if (this.hasPendingHostInteraction()) { await this.waitForFact(); continue }
+        break
+      }
       if (work === 0 && this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise))
+      else if (work === 0 && this.factInbox.size === 0 && this.hasPendingHostInteraction()) await this.waitForFact()
       else if (work === 0) await new Promise<void>((resolve) => setImmediate(resolve))
     }
     const root = [...this.state.lanes.values()].find((lane) => lane.ownerLaneId === undefined)
@@ -126,6 +147,9 @@ export class PulseRuntime {
   }
 
   async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)) } }
+
+  private hasPendingHostInteraction(): boolean { return [...this.state.effects.values()].some((effect) => effect.kind === 'human' && !effect.outcome) }
+  private waitForFact(): Promise<void> { return new Promise((resolve) => this.factWaiters.push(resolve)) }
 
   completeEffect(effectId: string, execution: EffectExecution, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded', error?: RuntimeError): void {
     const effect = this.state.effects.get(effectId)
