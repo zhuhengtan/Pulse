@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { CancellationScope, HostCommandQueue, PulseRuntime, QuarantineScope, ReadyQueue, ResourceLockManager, VirtualClock } from '@pulse/runtime'
 
-const point = (step: string) => ({ programId: 'scheduler-test', programVersion: '1', step, locals: {} })
+const point = (step: string, programId = 'scheduler-test') => ({ programId, programVersion: '1', step, locals: {} })
 
 describe('M1-2 scheduler and lifecycle primitives', () => {
   it('advances a virtual clock and fires timers deterministically', () => {
@@ -122,6 +122,52 @@ describe('M1-2 scheduler and lifecycle primitives', () => {
     await runtime.waitForIdle()
     expect(runtime.state.lanes.get(root.laneId)?.status).toBe('succeeded')
     expect(runtime.state.waits.size).toBe(3)
+  })
+
+  it('inherits a waiting consumer priority into queued work and releases it after wakeup', () => {
+    const runtime = new PulseRuntime({ maxRunning: { tool: 0 } })
+    const program = { id: 'inheritance', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'queued', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' as const } }], next: point('done') }) }
+    const { laneId } = runtime.createAgent('high priority consumer', program)
+    runtime.state.lanes.get(laneId)!.priority = 10
+    runtime.tick()
+    const effect = [...runtime.state.effects.values()][0]!
+    expect(effect.state).toBe('queued')
+    expect(effect.inheritedFloor).toBe(10)
+  })
+
+  it('does not preempt a running attempt when a higher-priority lane becomes ready', async () => {
+    let release: (() => void) | undefined
+    let calls = 0
+    const runtime = new PulseRuntime({ maxRunning: { tool: 1 }, effectExecutor: async () => { calls++; if (calls === 1) await new Promise<void>((resolve) => { release = resolve }); return { value: { ok: true } } } })
+    const program = { id: 'non-preemptive', version: '1', step: ({ lane }: { lane: any }) => lane.resume.step === 'start' ? { actions: [{ type: 'submit_effects', effects: [{ key: lane.goal, kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' as const } }], next: point('done', 'non-preemptive') } : { actions: [{ type: 'complete', result: { ok: true } }], next: point('done', 'non-preemptive') } }
+    const low = runtime.createAgent('low', program)
+    runtime.tick()
+    const high = runtime.createAgent('high', program)
+    runtime.state.lanes.get(high.laneId)!.priority = 100
+    runtime.tick()
+    expect(calls).toBe(1)
+    expect([...runtime.state.effects.values()].find((effect) => effect.key === 'low')?.state).toBe('running')
+    release?.()
+    await runtime.waitForIdle()
+    expect(runtime.state.lanes.get(low.laneId)?.status).toBe('succeeded')
+  })
+
+  it('awaits active children through an implicit closing edge before succeeding', async () => {
+    let release: (() => void) | undefined
+    const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise((resolve) => { release = () => resolve({ value: null }) }) })
+    const childPoint = (step: string) => ({ programId: 'closing', programVersion: '1', step, locals: {} })
+    const program = { id: 'closing', version: '1', step: ({ lane }: { lane: any }) => {
+      if (lane.goal === 'parent' && lane.resume.step === 'start') return { actions: [{ type: 'fork', lanes: [{ key: 'child', goal: 'child', priority: 10, program: childPoint('child') }] }], next: childPoint('close') }
+      if (lane.goal === 'parent' && lane.resume.step === 'close') return { actions: [{ type: 'complete', result: { joined: true }, children: 'await' as const }], next: childPoint('close') }
+      if (lane.resume.step === 'child') return { actions: [{ type: 'submit_effects', effects: [{ key: 'child-work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' as const } }], next: childPoint('child-done') }
+      return { actions: [{ type: 'complete', result: { child: true } }], next: childPoint('child-done') }
+    } }
+    const { agentId, laneId } = runtime.createAgent('parent', program)
+    runtime.tick()
+    expect(runtime.state.lanes.get(laneId)?.status).toBe('waiting')
+    release?.()
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(runtime.state.lanes.get(laneId)?.status).toBe('succeeded')
   })
 
   it('publishes an effect outcome only once for late completion events', () => {

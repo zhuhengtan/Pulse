@@ -28,22 +28,20 @@ describe('M0 acceptance matrix', () => {
     release?.()
   })
 
-  it('does not lose a completion that happens before a Wait is registered', () => {
-    const state = createRuntimeState()
-    const { root } = createAgent(state, 'late wait', point('start'))
-    const first = validateStep(state, root.id, { actions: [{ type: 'submit_effects', effects: [{ key: 'one', kind: 'tool', concurrencyClass: 'tool', input: {} }] }], next: point('wait') })
-    expect('mutations' in first).toBe(true)
-    if (!('mutations' in first)) return
-    apply(state, first.mutations)
-    const effect = [...state.effects.values()][0]!
-    effect.state = 'succeeded'; effect.outcome = { status: 'succeeded', resultRef: 'result-late' }
-    state.results.set('result-late', { id: 'result-late', effectId: effect.id, value: { ok: true }, privacy: 'public', derivedFrom: [] })
-    const second = validateStep(state, root.id, { actions: [{ type: 'wait', spec: { mode: 'all', dependencies: [{ key: 'one', target: { kind: 'effect', id: effect.id }, condition: 'success' }], onUnsatisfied: 'resume_with_error', reason: 'dependency' } }], next: point('done') })
-    expect('mutations' in second).toBe(true)
-    if ('mutations' in second) apply(state, second.mutations)
-    const wait = [...state.waits.values()][0]!
-    expect(wait.state).toBe('pending')
-    expect(state.effects.get(effect.id)?.outcome?.status).toBe('succeeded')
+  it('does not lose a completion that happens before a Wait is registered', async () => {
+    const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
+    const program: LaneProgram = { id: 'late-wait', version: '1', step: ({ lane, resumeInput }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'one', kind: 'tool', concurrencyClass: 'tool', input: {} }] }], next: point('wait', 'late-wait') }
+      : lane.resume.step === 'wait'
+        ? { actions: [{ type: 'wait', spec: { mode: 'all', dependencies: [{ key: 'one', target: { kind: 'effect', id: 'effect-1' }, condition: 'success' }], onUnsatisfied: 'resume_with_error', reason: 'dependency' } }], next: point('done', 'late-wait') }
+        : { actions: [{ type: 'complete', result: { resumed: resumeInput?.type } }], next: point('done', 'late-wait') } }
+    const { agentId } = runtime.createAgent('late wait', program)
+    runtime.tick()
+    runtime.completeEffect('effect-1', { value: { ok: true } })
+    runtime.tick()
+    runtime.tick()
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect([...runtime.state.waits.values()][0]?.state).toBe('satisfied')
   })
 
   it('rejects dynamic sibling cycles and leaves no created lanes', () => {
@@ -115,6 +113,18 @@ describe('M0 acceptance matrix', () => {
     if ('mutations' in cancel) apply(state, cancel.mutations)
     expect(state.lanes.get(child.id)?.status).toBe('cancelled')
     expect(state.lanes.get(root.id)?.status).toBe('succeeded')
+  })
+
+  it('atomically rejects context, effect, cancel intent, resume and event proposals', () => {
+    const state = createRuntimeState()
+    const { root } = createAgent(state, 'atomic resume', point('start'))
+    const other = createAgent(state, 'other', point('start')).root
+    const before = structuredClone(state)
+    const result = validateStep(state, root.id, { contextDelta: { target: 'lane', baseVersion: 0, ops: [{ op: 'set', path: ['x'], value: 1 }] }, actions: [{ type: 'submit_effects', effects: [{ key: 'effect', kind: 'tool', concurrencyClass: 'tool', input: {} }] }, { type: 'cancel_lane', laneId: other.id, reason: 'POLICY' }], next: { ...point('next'), step: '' } })
+    expect('rejection' in result && result.rejection.code).toBe('INVALID_RESUME_POINT')
+    expect(state.effects.size).toBe(before.effects.size)
+    expect(state.events).toEqual(before.events)
+    expect(state.lanes.get(root.id)?.context.state).toEqual(before.lanes.get(root.id)?.context.state)
   })
 
   it('retains in_doubt side effects in reconcile_required quarantine and can reconcile', () => {
