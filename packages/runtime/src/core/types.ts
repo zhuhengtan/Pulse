@@ -44,6 +44,14 @@ export interface LaneContext {
   state: JsonValue
 }
 
+export interface ProgressWatchdogState {
+  window: string[]
+  noProgressCount: number
+  interventionLevel: 0 | 1 | 2 | 3
+  lastFingerprint?: string
+  lastReason?: string
+}
+
 export interface AgentRecord {
   id: AgentId
   rootLaneId: LaneId
@@ -77,6 +85,7 @@ export interface LaneRecord {
   consecutiveControlErrors?: number
   pendingOutcome?: Outcome
   unresolvedEffectIds?: EffectId[]
+  progressWatchdog?: ProgressWatchdogState
 }
 
 export interface EffectRecord {
