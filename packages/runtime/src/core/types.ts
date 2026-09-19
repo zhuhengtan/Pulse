@@ -204,6 +204,29 @@ export interface LaneStepOutput {
   locals?: JsonValue
 }
 
+export interface LLMContextSpec {
+  globalSnapshotVersion: ContextVersion
+  laneSnapshotVersion: ContextVersion
+  resultRefs: ResultRef[]
+  eventIds: string[]
+  toolSetId: string
+  instruction: string
+  privacy: PrivacyLabel
+  privacyRefs: string[]
+}
+
+export interface LLMRequestProjection {
+  contextSpec: LLMContextSpec
+  blocks: Array<{ kind: 'system' | 'policy' | 'tools' | 'global' | 'history' | 'lane' | 'events' | 'results' | 'instruction'; content: JsonValue }>
+  prefixHash: string
+  projectionHash: string
+  builderVersion: string
+  policyVersion: string
+  toolSetVersion: string
+  privacy: PrivacyLabel
+  privacyRefs: string[]
+}
+
 export interface RuntimeEvent {
   seq: number
   type: string
