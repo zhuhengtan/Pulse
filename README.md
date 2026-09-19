@@ -109,7 +109,7 @@ flowchart TB
     L2[Lane B snapshot = v1]
     G2 -.->|不会自动漂移| L1
     G2 -.->|不会自动漂移| L2
-    L1 -->|adopt_context(v2)| L1b[Lane A snapshot = v2]
+    L1 -->|adopt v2| L1b[Lane A snapshot = v2]
     L2 -->|继续读取| L2
 ```
 
