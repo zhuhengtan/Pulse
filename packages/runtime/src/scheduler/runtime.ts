@@ -31,6 +31,9 @@ export interface RuntimeConfig {
   effectExecutor?: EffectExecutor
 }
 
+export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' }
+export interface AgentCreateRequest { goal: string; program: LaneProgram; agentId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec }
+
 function outcomeForLane(lane: LaneRecord): Outcome | undefined {
   if (lane.status === 'succeeded') return { status: 'succeeded' }
   if (lane.status === 'failed') return { status: 'failed' }
@@ -80,9 +83,22 @@ export class PulseRuntime {
   }
 
   register(program: LaneProgram): void { this.programs.set(`${program.id}@${program.version}`, program) }
-  createAgent(goal: string, program: LaneProgram, agentId?: string): { agentId: string; laneId: string } {
-    this.register(program)
-    const { agent, root } = createAgent(this.state, goal, { programId: program.id, programVersion: program.version, step: (program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, agentId === undefined ? {} : { agentId })
+  createAgent(request: AgentCreateRequest): { agentId: string; laneId: string }
+  createAgent(goal: string, program: LaneProgram, agentId?: string): { agentId: string; laneId: string }
+  createAgent(goalOrRequest: string | AgentCreateRequest, program?: LaneProgram, agentId?: string): { agentId: string; laneId: string } {
+    const request: AgentCreateRequest = typeof goalOrRequest === 'string' ? { goal: goalOrRequest, program: program!, ...(agentId === undefined ? {} : { agentId }) } : goalOrRequest
+    const warmStart = request.warmStart
+    let initialGlobal: JsonValue | undefined
+    if (warmStart) {
+      const source = this.state.agents.get(warmStart.agentId)
+      if (!source) throw new Error(`WARM_START_SOURCE_NOT_FOUND:${warmStart.agentId}`)
+      const version = warmStart.globalVersion === 'latest' || warmStart.globalVersion === undefined ? source.latestGlobalVersion : warmStart.globalVersion
+      const value = source.globalVersions.get(version)
+      if (value === undefined) throw new Error(`WARM_START_VERSION_NOT_FOUND:${version}`)
+      initialGlobal = structuredClone(value)
+    }
+    this.register(request.program)
+    const { agent, root } = createAgent(this.state, request.goal, { programId: request.program.id, programVersion: request.program.version, step: (request.program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(initialGlobal === undefined ? {} : { initialGlobal }) })
     root.enqueueSeq = this.enqueueSeq++
     agent.state = 'running'
     this.ready.enqueue(readyItemFromLane(root))
