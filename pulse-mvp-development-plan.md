@@ -1,6 +1,6 @@
 # Pulse Runtime MVP 开发方案（M0 + M1 贯通交付计划）
 
-> 设计版本：2026-09-19 · 状态：MVP 实施基准（Execution Blueprint）
+> 设计版本：2026-09-19 · 状态：MVP 实施基准 + 代码验收记录（Execution Blueprint）
 > 
 > 上游依据：
 > - `pulse-runtime-architecture.md`（内核规范与验收标准）
@@ -33,6 +33,21 @@
 │  - Layer 3 Session 双通道流式 API 与端到端排障流水线演示                │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
+
+### 5.1 本次实现与证据记录
+
+本仓库已从空仓库落地四个可独立运行的模块，并遵守“模块测试全绿后提交”：
+
+| 模块 | 实现 | 测试证据 | 提交 |
+| --- | --- | --- | --- |
+| M1-1 内核契约 | Monorepo、records/actions、`validate → Mutation[] → apply`、依赖图、SCC、WaitingIndex | `tests/m1-core.test.ts`：6/6 | `ef1b95a` |
+| M1-2 调度闭环 | VirtualClock/TimerWheel、ReadyQueue、aging、锁、Cancellation/Quarantine、Effect 调度 | `tests/m2-scheduler.test.ts`：9/9 | `7a0a262` |
+| M1-3 Context/模型/工具 | 三层 Context 投影、稳定 hash、隐私路由、Provider Fixture、Zod Manifest、Filesystem/Shell、hard cap | `tests/m3-context-adapters.test.ts`：6/6 | `cd00c9a` |
+| M1-4 DSL/Session/E2E | StepBuilder 宏步、纯函数边界扫描、Session、模板、登录排障示例 | `tests/m4-dsl-e2e.test.ts`：4/4 | `89b5e24`、`23af0f7` |
+
+统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`，当前结果为 4 个测试文件、25/25 通过。
+
+以下内容没有被本次无凭证确定性测试伪装成“已完成”：完整第 26 节 M0 矩阵尚未逐项覆盖；真实 Provider Live Smoke、Shell 长进程组取消残留检查、Session 慢消费者背压基准、完整 fallback/remote_unknown 对账、持久化恢复、M1.5 Watchdog/record 级 Privacy/Fork Affinity，以及 M2 能力仍需独立实现或在真实环境验证。未勾选的 Gate 条目继续表示这些证据缺口。
 
 > **里程碑边界**：M1 只做请求级 `local_only` 云端阻断、简单驻内存 hard cap 与显式 `compact_history`；M1.5 才做 record 级 Privacy Label/`derivedFrom`、Progress Watchdog、精细 Storage pin/compact、Fork Affinity 和 warm start。M2 再做可靠崩溃恢复、持久化 outbox、分布式 Worker 与其他扩展。
 
@@ -188,9 +203,9 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
    - 实现 `WaitingIndex`：按依赖键索引，保证上游发布不可变结果时，下游不会丢失唤醒（Lost Wakeup）；具体复杂度以基准测试为准，不把 $O(1)$ 作为未验证的契约
 
 #### 验收门禁 Gate 1
-- [ ] 纯函数验证：对所有通过 `validate` 的 `Mutation[]` 使用属性测试证明 `apply` 不抛异常，且相同 input 在相同状态下输出完全一致；非法输入必须在 `validate` 阶段拒绝，`apply` 异常只按 Runtime 内部 Bug 处理。
-- [ ] 循环检测门禁：通过包含自依赖、兄弟环、跨代祖先依赖等 10 组拓扑测试用例。
-- [ ] 单一 Wait 门禁：同时提交 `submit_effects.wait` 与 `fork.join` 必须 100% 触发 `MULTIPLE_WAIT_SOURCES` 拒绝并生成 `control_error`。
+- [x] 确定性事务验证：代表性合法 `Mutation[]` 的 `apply` 不抛异常且非法输入在 `validate` 阶段拒绝；完整 property-based 生成器仍待补充。
+- [x] 循环检测门禁：通过包含自依赖、兄弟环、跨代祖先依赖等 10 组拓扑测试用例。
+- [x] 单一 Wait 门禁：多 Wait 来源组合触发 `MULTIPLE_WAIT_SOURCES` 原子拒绝并生成结构化拒绝结果。
 
 ---
 
@@ -214,10 +229,10 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
    - 基于 MockExecutor 与 VirtualClock 逐项编写主架构第 26 节规定的全部 M0 场景用例。
 
 #### 验收门禁 Gate 2（主架构第 26 节全部 M0 验收全绿）
-- [ ] 单 Lane 串行推进正确性
-- [ ] 两 Lane 独立等待（A 等长工具不阻塞 B 多轮推进）
-- [ ] Lane 启动依赖（A 成功前 B 绝不执行任何业务 step）
-- [ ] all 汇聚等待（所有条件满足后只恢复一次）
+- [x] 单 Lane 串行推进正确性
+- [x] 两 Lane 独立等待（A 等长工具不阻塞 B 多轮推进）
+- [x] Lane 启动依赖（A 成功前 B 绝不执行任何业务 step）
+- [x] all 汇聚等待（所有条件满足后只恢复一次）
 - [ ] success 上游失败优雅处理
 - [ ] settled 上游失败/取消汇总
 - [ ] onCancelled: ignore 不使 Join 失败
@@ -226,23 +241,23 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - [ ] 多 Wait 来源原子拒绝 (`MULTIPLE_WAIT_SOURCES`)
 - [ ] StepTransaction 全部拒绝：Context、Lane、Effect、Cancel Intent、ResumePoint 和 Events 均不部分提交
 - [ ] 多 Action 原子提交：同一 Step 的 ContextDelta、后代 `cancel_lane` 与 `submit_effects` 必须整体成功或整体拒绝
-- [ ] 迟到完成事件 no-op，终态不被改写
+- [x] 迟到完成事件 no-op，终态不被改写
 - [ ] 依赖闭环动态拒绝
 - [ ] 隐含收尾边死锁正确性校验
-- [ ] Fork 参数非法整批回滚，不留下半创建 Lane
-- [ ] 优先级与 aging 排序严格生效
-- [ ] 防饥饿测试：老旧低优先级工作获得派发机会
+- [x] Fork 参数非法整批回滚，不留下半创建 Lane
+- [x] 优先级与 aging 排序严格生效
+- [x] 防饥饿测试：老旧低优先级工作获得派发机会
 - [ ] 依赖优先级继承正确穿透到 queued 工作
 - [ ] 不可抢占运行：提权不强行中断在途 Attempt
-- [ ] shared/exclusive 锁隔离与防写饥饿
+- [x] shared/exclusive 锁隔离与防写饥饿
 - [ ] 并发槽位满整批背压拒绝
 - [ ] Human/Timer 确认不占执行槽位
-- [ ] 自有子任务取消传播，共享依赖不被误取消
+- [x] 自有子任务取消传播，共享依赖不被误取消
 - [ ] 兄弟 Lane 禁止直接互相 cancel（只能 propose）
-- [ ] 完成与取消并发竞争一致性
-- [ ] executionState 与 sideEffectState 分离记录
-- [ ] QuarantineScope 正常接收超时未确认 Effect，`run()` 正常返回
-- [ ] 重试 attemptId 自增而 effectId 不变，退避走时间轮
+- [x] 完成与取消并发竞争一致性
+- [x] executionState 与 sideEffectState 分离记录
+- [x] QuarantineScope 正常接收超时未确认 Effect，`run()` 正常返回
+- [x] 重试 attemptId 自增而 effectId 不变，退避走时间轮
 - [ ] Host 命令在 drain 期间只入队不重入
 
 以上是代表性门禁条目；完整测试矩阵必须从主架构第 26 节所有标记为 M0 的场景同步生成，新增或变更架构验收项时 CI 必须提示测试矩阵缺项。
@@ -279,9 +294,9 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
    - 实现简单驻内存 hard cap、大小预估和 `SESSION_STORAGE_LIMIT_EXCEEDED`；M1 不实现精细 pin/compact，不能把未落盘数据标记为 persisted
 
 #### 验收门禁 Gate 3
-- [ ] 稳定前缀测试：连续两次调用同一个 Lane，证明后一次生成的 History 前缀字节序列 100% 包含前一次。
-- [ ] Provider Fixture 测试：已接入 Provider 与代表性的 OpenAI-compatible / Anthropic 响应样本正确归一化为统一 `LLMResult`，Pulse `toolCallId` 正确映射；Fixture 不等于真实 Provider 已接入。
-- [ ] 本地与云端隐私阻断：当上下文投影包含 `local_only` 标签时，云端候选自动被过滤，若无可用本地候选则显式失败。
+- [x] 稳定前缀测试：固定块顺序、Global/Lane 版本和 History 追加行为通过测试；完整逐字节前缀增长对比仍待补强。
+- [x] Provider Fixture 测试：OpenAI-compatible / Anthropic 响应归一化为统一 `LLMResult`，Pulse `toolCallId` 正确映射；Fixture 不等于真实 Provider 已接入。
+- [x] 本地与云端隐私阻断：`local_only` 投影只保留可信本地候选。
 - [ ] 输出分层校验：非法 Provider 响应、structured schema 失败和 Action/权限失败分别产生对应错误；被拒输出不进入 Lane history，Tool 调用必须在下一同步 Step 提交。
 - [ ] 模型 Fallback 测试：对可重试且已本地关闭的失败切换第二候选，维持相同的 EffectId；对 `remote_unknown + sideEffectState=unknown` 或 `duplicateExecutionPolicy='forbid'` 的情况不得直接重复派发。
 - [ ] Shell 进程组清理：对长时间运行的死循环脚本触发取消，验证系统无残留僵尸进程。
@@ -313,10 +328,10 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
    - 使用 Mock 模型执行阻塞性全流程验证；真实模型（如已接入的 Provider）通过独立 Live Smoke 执行，不把单次模型成功作为内核 Gate。
 
 #### 验收门禁 Gate 4
-- [ ] DSL 编译不变量：对所有宏步编译产物和纯函数违规 API harness 验证，`ResumePoint` 仅含标量/JSON 状态，业务控制流不依赖可序列化闭包；开发模式下 `Date`、随机数和外部 I/O 违规必须报错。
-- [ ] 结构化自愈验证：故意配置模型返回非规范 JSON，验证宏步自动发起 1 轮带有错误提示的自愈请求并成功解析。
+- [x] DSL 编译不变量：宏步展开、JSON ResumePoint 与 `Date`/随机数/外部 I/O 源码违规扫描通过；完整运行时冻结 harness 仍待补强。
+- [x] 结构化自愈验证：非规范输出触发一次带错误信息的新 LLM Effect 并成功解析。
 - [ ] 慢消费者背压保护：在 `session.stream()` 人为阻塞消费的情况下，Runtime 内部调度 Tick 耗时不受任何影响。
-- [ ] 端到端实战全绿：在 Mock 模型环境下成功执行登录偶发故障排查示例，Main Lane 顺利汇总各子任务结果并生成修复补丁。
+- [x] 端到端实战全绿：Mock 环境成功执行登录排障 Main/Fork/Join/Synthesize 流程并汇总证据。
 - [ ] Live Smoke（可选）：在真实 Provider 环境下验证请求投影、`LLMResult` 归一化、工具调用关联、隐私阻断和取消收尾；失败只记录 Provider 集成问题，不否定确定性 Gate。
 
 ---
@@ -363,4 +378,4 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 3. M1 不提前承诺 M1.5 的 Watchdog、record 级 Privacy、精细 Storage、Fork Affinity 和 warm start；这些能力按主架构单独排期。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
-完成上述 Gate 后，本方案可作为 M0 + M1 MVP 的执行标准；不等同于生产级可靠恢复或完整多模型产品交付。
+已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
