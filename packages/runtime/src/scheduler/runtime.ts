@@ -180,6 +180,8 @@ export class PulseRuntime {
       if (this.ready.size === 0 && this.executions.size === 0) {
         if (this.factInbox.size > 0) continue
         if (this.hasPendingHostInteraction()) { await this.waitForFact(); continue }
+        const nextAt = this.clock.timers.nextAt()
+        if (nextAt !== undefined && nextAt > this.clock.now()) { this.clock.set(nextAt); continue }
         break
       }
       if (work === 0 && this.executions.size) {
@@ -223,13 +225,20 @@ export class PulseRuntime {
     effect.state = effectiveStatus
     effect.executionState = effectiveStatus === 'succeeded' ? 'succeeded' : effectiveStatus === 'cancelled' ? 'failed' : 'failed'
     effect.sideEffectState = execution.sideEffectState ?? 'none'
+    const attempt = effect.attempts?.at(-1)
+    if (attempt) { attempt.executionState = effect.executionState; attempt.sideEffectState = effect.sideEffectState; attempt.settledAt = this.state.now; if (error) attempt.error = error }
+    const settledAttemptId = effect.attemptId
+    if (effectiveStatus === 'failed' && this.scheduleRetry(effect, error)) {
+      this.releaseEffectLocks(effectId)
+      this.outbox.ack(`${effect.id}:${settledAttemptId}`)
+      this.refreshWaits()
+      return
+    }
     const resultId = `result-${this.state.nextIds.result++}`
     const outcome: Outcome = effectiveStatus === 'succeeded' ? { status: effectiveStatus, resultRef: resultId } : { status: effectiveStatus, ...(error ? { error } : {}) }
     effect.outcome = outcome
     this.releaseEffectLocks(effectId)
     this.outbox.ack(`${effect.id}:${effect.attemptId}`)
-    const attempt = effect.attempts?.at(-1)
-    if (attempt) { attempt.executionState = effect.executionState; attempt.sideEffectState = effect.sideEffectState; attempt.settledAt = this.state.now; if (error) attempt.error = error }
     if (effectiveStatus === 'succeeded') this.state.results.set(resultId, { id: resultId, effectId, value: execution.value, privacy: execution.privacy ?? 'public', derivedFrom: [] })
     this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
     if (execution.metadata !== undefined) this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.execution_metadata', effectId, data: execution.metadata })
@@ -300,12 +309,36 @@ export class PulseRuntime {
   retryEffect(effectId: string, delayMs: number): void {
     const effect = this.state.effects.get(effectId)
     if (!effect || effect.outcome) return
+    this.scheduleRetry(effect, undefined, delayMs)
+  }
+
+  private scheduleRetry(effect: EffectRecord, error?: RuntimeError, forcedDelayMs?: number): boolean {
+    if (effect.cancelRequested || (!forcedDelayMs && !effect.retryPolicy)) return false
+    if (forcedDelayMs === undefined && effect.retryPolicy) {
+      if (effect.attemptNo >= effect.retryPolicy.maxAttempts) return false
+      if (effect.sideEffectState === 'unknown') return false
+      if (effect.sideEffectState === 'applied' && effect.duplicateExecutionPolicy !== 'allow') return false
+    }
+    const policy = effect.retryPolicy
+    const baseDelay = forcedDelayMs ?? Math.min(policy!.maxBackoffMs, policy!.initialBackoffMs * (2 ** Math.max(0, effect.attemptNo - 1)))
+    const jitter = forcedDelayMs === undefined && policy?.jitter ? Math.floor(baseDelay / 2) : 0
+    const delayMs = baseDelay + jitter
+    const previousAttemptId = effect.attemptId
     effect.state = 'retry_wait'
+    effect.executionState = 'local'
     effect.attemptNo += 1
     effect.attemptId = `${effect.id}-attempt-${effect.attemptNo}`
-    effect.executionState = 'local'
     effect.retryAt = this.state.now + delayMs
-    this.clock.timers.schedule(effect.retryAt, () => { if (!effect.outcome) { effect.state = 'queued'; delete effect.retryAt; this.dispatchQueuedEffects() } })
+    this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.retry_scheduled', effectId: effect.id, data: { previousAttemptId, nextAttemptId: effect.attemptId, delayMs, ...(error ? { error } : {}) } as unknown as JsonValue })
+    this.clock.timers.schedule(effect.retryAt, () => {
+      if (!effect.outcome && effect.state === 'retry_wait') {
+        effect.state = 'queued'
+        delete effect.retryAt
+        this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.retry_ready', effectId: effect.id, data: effect.attemptId })
+        this.dispatchQueuedEffects()
+      }
+    })
+    return true
   }
 
   private dispatchQueuedEffects(): void {
