@@ -10,7 +10,7 @@ const point = (id: string, step: string) => ({ programId: id, programVersion: '1
 describe('Tool SDK to Runtime Effect host', () => {
   it('executes a registered typed tool and preserves tool correlation', async () => {
     const registry = new ToolRegistry()
-    registry.register(defineTool({ name: 'add', description: 'adds', input: z.object({ a: z.number(), b: z.number() }), output: z.object({ sum: z.number() }), execute: ({ a, b }) => ({ sum: a + b }) }))
+    registry.register(defineTool({ name: 'add', version: '2', description: 'adds', input: z.object({ a: z.number(), b: z.number() }), output: z.object({ sum: z.number() }), summarize: (output) => ({ sum: output.sum }), execute: ({ a, b }) => ({ sum: a + b }) }))
     const runtime = new PulseRuntime({ effectExecutor: createToolEffectExecutor(registry) })
     const program: LaneProgram = { id: 'tool-host', version: '1', step: ({ lane, resumeInput }) => lane.resume.step === 'start'
       ? { actions: [{ type: 'submit_effects', effects: [{ key: 'add-call', toolCallId: 'pulse-tool-1', kind: 'tool', concurrencyClass: 'tool', input: { name: 'add', arguments: { a: 2, b: 3 } } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('tool-host', 'finish') }
@@ -19,6 +19,9 @@ describe('Tool SDK to Runtime Effect host', () => {
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
     expect([...runtime.state.results.values()].some((result) => JSON.stringify(result.value).includes('result'))).toBe(true)
     expect(runtime.state.effects.get('effect-1')?.toolCallId).toBe('pulse-tool-1')
+    const result = [...runtime.state.results.values()].find((item) => item.effectId === 'effect-1')
+    expect(result?.summary).toEqual({ sum: 5 })
+    expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.payload).includes('"toolVersion":"2"'))).toBe(true)
   })
 
   it('rejects unknown tools through the normal dispatch failure path', async () => {

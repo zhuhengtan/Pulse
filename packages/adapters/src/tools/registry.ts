@@ -16,7 +16,9 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
     if (typeof name !== 'string') throw new Error('INVALID_TOOL_EFFECT_INPUT')
     const definition = registry.get(name)
     if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`)
-    const output = await registry.execute(name, input.arguments ?? {}, signal)
-    return { value: toJson(output), sideEffectState: definition.manifest.sideEffectPolicy === 'write' ? 'applied' : 'none', executionState: 'succeeded' }
+    const detailed = await registry.executeDetailed(name, input.arguments ?? {}, signal)
+    const summary = detailed.summary === undefined ? undefined : toJson(detailed.summary)
+    if (summary !== undefined && JSON.stringify(summary).length > 4096) throw new Error('TOOL_SUMMARY_TOO_LARGE')
+    return { value: toJson(detailed.output), ...(summary === undefined ? {} : { summary }), sideEffectState: definition.manifest.sideEffectPolicy === 'write' ? 'applied' : 'none', executionState: 'succeeded', metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs } }
   }
 }
