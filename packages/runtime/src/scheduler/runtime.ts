@@ -50,6 +50,7 @@ export class PulseRuntime {
   private readonly programs = new Map<string, LaneProgram>()
   private readonly executions = new Map<string, { controller: AbortController; promise: Promise<void>; timeoutTimer?: string; deadlineTimer?: string; cancelTimer?: string }>()
   private readonly executor: EffectExecutor
+  private readonly customExecutor: boolean
   private enqueueSeq = 1
   private readonly maxSteps: number
   private readonly maxConsecutiveControlErrors: number
@@ -74,6 +75,7 @@ export class PulseRuntime {
     this.maxConsecutiveControlErrors = config.maxConsecutiveControlErrors ?? 2
     if (config.maxRuntimeMs !== undefined) this.maxRuntimeMs = config.maxRuntimeMs
     this.watchdogNoProgressThreshold = config.watchdogNoProgressThreshold ?? 3
+    this.customExecutor = config.effectExecutor !== undefined
     this.executor = config.effectExecutor ?? (async () => ({ value: null }))
   }
 
@@ -159,7 +161,11 @@ export class PulseRuntime {
         if (this.hasPendingHostInteraction()) { await this.waitForFact(); continue }
         break
       }
-      if (work === 0 && this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise))
+      if (work === 0 && this.executions.size) {
+        const nextAt = this.clock.timers.nextAt()
+        if (nextAt !== undefined && nextAt > this.clock.now()) { this.clock.set(nextAt); continue }
+        await Promise.race([...this.executions.values()].map((execution) => execution.promise))
+      }
       else if (work === 0 && this.factInbox.size === 0 && this.hasPendingHostInteraction()) await this.waitForFact()
       else if (work === 0) await new Promise<void>((resolve) => setImmediate(resolve))
     }
@@ -279,7 +285,25 @@ export class PulseRuntime {
       const attempt: import('../core/types.js').AttemptRecord = { id: effect.attemptId, effectId: effect.id, executionState: 'running', sideEffectState: effect.sideEffectState, startedAt: this.state.now }
       effect.attempts = [...(effect.attempts ?? []), attempt]
       const controller = new AbortController()
+      if (effect.kind === 'human' && !this.customExecutor) {
+        this.state.events.push({ seq: this.state.nextIds.event++, type: 'human.requested', effectId: effect.id, data: effect.input })
+        if (effect.attemptTimeoutMs !== undefined) this.clock.schedule(effect.attemptTimeoutMs, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: null }, 'failed', { code: 'ATTEMPT_TIMEOUT', message: 'Human response timed out.' }) })
+        if (effect.deadlineAt !== undefined) this.clock.timers.schedule(effect.deadlineAt, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: null }, 'failed', { code: 'TIMEOUT', message: 'Human response deadline exceeded.' }) })
+        continue
+      }
       const executionRecord: { controller: AbortController; promise: Promise<void>; timeoutTimer?: string; deadlineTimer?: string; cancelTimer?: string } = { controller, promise: Promise.resolve() }
+      if (effect.kind === 'timer' && !this.customExecutor) {
+        const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+        const delayMs = input.delayMs
+        if (typeof delayMs !== 'number' || !Number.isFinite(delayMs) || delayMs < 0) { this.completeEffect(effect.id, { value: null }, 'failed', { code: 'INVALID_TIMER', message: 'Timer Effect requires a non-negative delayMs.' }); continue }
+        let resolveTimer!: () => void
+        executionRecord.promise = new Promise<void>((resolve) => { resolveTimer = resolve })
+        this.executions.set(effect.id, executionRecord)
+        this.clock.schedule(delayMs, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: { firedAt: this.clock.now() } }); resolveTimer() })
+        if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.clock.schedule(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
+        if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.clock.timers.schedule(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))
+        continue
+      }
       const promise = this.executor(effect, controller.signal).then((execution) => this.completeEffect(effect.id, execution)).catch((cause) => { this.state.events.push({ seq: this.state.nextIds.event++, type: 'effect.dispatch_failed', effectId: effect.id, data: { message: cause instanceof Error ? cause.message : String(cause) } }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', { code: 'EFFECT_FAILED', message: cause instanceof Error ? cause.message : String(cause) }) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
       executionRecord.promise = promise
       if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.clock.schedule(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
