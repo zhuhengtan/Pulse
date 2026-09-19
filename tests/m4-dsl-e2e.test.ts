@@ -41,6 +41,23 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     expect(session.snapshot()).toMatchObject({ agentId })
   })
 
+  it('keeps runtime progress independent from a slow stream consumer', async () => {
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { ok: true } }) })
+    const program = {
+      id: 'slow-consumer', version: '1',
+      step: ({ lane, resumeInput }: { lane: any; resumeInput?: any }) => lane.resume.step === 'start'
+        ? { actions: [{ type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: 'slow-consumer', programVersion: '1', step: 'finish', locals: {} } }
+        : { actions: [{ type: 'complete', result: { resumed: resumeInput?.type } }], next: { programId: 'slow-consumer', programVersion: '1', step: 'finish', locals: {} } },
+    }
+    const { agentId } = runtime.createAgent('slow consumer', program)
+    const session = runtime.start(agentId)
+    const stream = session.stream()[Symbol.asyncIterator]()
+    await stream.next()
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await expect(Promise.race([session.outcome(), new Promise((_, reject) => setTimeout(() => reject(new Error('runtime blocked by consumer')), 200))])).resolves.toMatchObject({ status: 'succeeded' })
+    await stream.return?.()
+  })
+
   it('runs the login troubleshooting Main/Fork/Join/Synthesize flow with Mock semantics', async () => {
     const { runtime, agentId } = createLoginTroubleshootingRuntime()
     const outcome = await runtime.start(agentId).outcome()

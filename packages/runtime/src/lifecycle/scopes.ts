@@ -17,3 +17,16 @@ export class QuarantineScope {
   get unresolvedEffectIds(): string[] { return [...this.entries.keys()] }
   run<T>(work: () => T): { value: T; unresolvedEffectIds: string[] } { return { value: work(), unresolvedEffectIds: this.unresolvedEffectIds } }
 }
+
+export class HostCommandQueue {
+  private draining = false
+  private readonly pending: Array<() => void> = []
+  enqueue(command: () => void): void { if (this.draining) this.pending.push(command); else command() }
+  beginDrain(): void { this.draining = true }
+  finishDrain(): void {
+    this.draining = false
+    const commands = this.pending.splice(0)
+    for (const command of commands) command()
+  }
+  get size(): number { return this.pending.length }
+}

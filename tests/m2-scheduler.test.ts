@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CancellationScope, PulseRuntime, QuarantineScope, ReadyQueue, ResourceLockManager, VirtualClock } from '@pulse/runtime'
+import { CancellationScope, HostCommandQueue, PulseRuntime, QuarantineScope, ReadyQueue, ResourceLockManager, VirtualClock } from '@pulse/runtime'
 
 const point = (step: string) => ({ programId: 'scheduler-test', programVersion: '1', step, locals: {} })
 
@@ -59,6 +59,19 @@ describe('M1-2 scheduler and lifecycle primitives', () => {
     expect(result).toEqual({ value: 'done', unresolvedEffectIds: ['effect-1'] })
     expect(quarantine.reconcile('effect-1')).toBe(true)
     expect(quarantine.unresolvedEffectIds).toEqual([])
+  })
+
+  it('queues host commands during drain and executes them only after drain completes', () => {
+    const queue = new HostCommandQueue()
+    const calls: string[] = []
+    queue.beginDrain()
+    queue.enqueue(() => calls.push('cancel'))
+    queue.enqueue(() => calls.push('reconcile'))
+    expect(calls).toEqual([])
+    expect(queue.size).toBe(2)
+    queue.finishDrain()
+    expect(calls).toEqual(['cancel', 'reconcile'])
+    expect(queue.size).toBe(0)
   })
 
   it('lets one lane wait without blocking another lane', async () => {
