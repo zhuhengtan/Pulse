@@ -1,0 +1,51 @@
+import { describe, expect, it } from 'vitest'
+import { z } from 'zod'
+import { PulseRuntime, assertProgramPure, defineLaneProgram } from '@pulse/runtime'
+import { createLoginTroubleshootingRuntime } from '../examples/login-troubleshooting/index.js'
+
+describe('M1-4 DSL and end-to-end workflow', () => {
+  it('compiles a structured macro step into synchronous submit/decode steps', async () => {
+    const program = defineLaneProgram({ id: 'dsl-test', version: '1', state: z.object({ answer: z.string().optional() }) }, (builder) => {
+      builder.addStructuredLLMStep('plan', { task: 'plan', instruction: (view) => `Goal: ${view.goal}`, schema: z.object({ answer: z.string() }), onSuccess: (data, ctx) => { ctx.mutateLane((draft) => { draft.answer = data.answer }); return 'finish' } })
+      builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' }))
+    })
+    assertProgramPure(program)
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => ({ value: effect.key === 'plan-llm' ? { answer: 'deterministic' } : {} }) })
+    const { agentId, laneId } = runtime.createAgent('plan login fix', program)
+    const outcome = await runtime.start(agentId).outcome()
+    expect(outcome.status).toBe('succeeded')
+    expect(runtime.state.lanes.get(laneId)?.context.state).toEqual({ answer: 'deterministic' })
+  })
+
+  it('self-corrects one invalid structured output without mutating rejected history', async () => {
+    let calls = 0
+    const program = defineLaneProgram({ id: 'self-correct', version: '1' }, (builder) => {
+      builder.addStructuredLLMStep('plan', { task: 'plan', instruction: 'return JSON', schema: z.object({ ok: z.boolean() }), selfCorrect: { maxRounds: 1 }, onSuccess: () => 'finish' })
+      builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { done: true } }], next: 'finish' }))
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async () => { calls++; return { value: calls === 1 ? { invalid: true } : { ok: true } } } })
+    const { agentId } = runtime.createAgent('correct', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(calls).toBe(2)
+  })
+
+  it('streams a read-only event mirror and exposes a final outcome', async () => {
+    const runtime = new PulseRuntime()
+    const program = { id: 'session-test', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'session-test', programVersion: '1', step: 'done', locals: {} } }) }
+    const { agentId } = runtime.createAgent('session', program)
+    const session = runtime.start(agentId)
+    const events: string[] = []
+    for await (const event of session.stream()) events.push(event.type)
+    expect(events).toContain('fact')
+    expect((await session.outcome()).status).toBe('succeeded')
+    expect(session.snapshot()).toMatchObject({ agentId })
+  })
+
+  it('runs the login troubleshooting Main/Fork/Join/Synthesize flow with Mock semantics', async () => {
+    const { runtime, agentId } = createLoginTroubleshootingRuntime()
+    const outcome = await runtime.start(agentId).outcome()
+    expect(outcome.status).toBe('succeeded')
+    expect([...runtime.state.lanes.values()].filter((lane) => lane.goal === 'analyze' || lane.goal === 'tests')).toHaveLength(2)
+    expect(runtime.state.events.some((event) => event.type === 'lane.succeeded')).toBe(true)
+  })
+})

@@ -5,8 +5,9 @@ import { ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
 import type { EffectRecord, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord } from '../core/types.js'
 import { createRuntimeState } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
+import { PulseSession } from '../dsl/session.js'
 
-export interface LaneStepContext { lane: Readonly<LaneRecord>; resumeInput?: ResumeInput; now: number }
+export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number }
 export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput }
 export interface EffectExecution { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; sideEffectState?: 'none' | 'applied' | 'unknown' }
 export type EffectExecutor = (effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<EffectExecution>
@@ -48,11 +49,12 @@ export class PulseRuntime {
   register(program: LaneProgram): void { this.programs.set(`${program.id}@${program.version}`, program) }
   createAgent(goal: string, program: LaneProgram, agentId?: string): { agentId: string; laneId: string } {
     this.register(program)
-    const { agent, root } = createAgent(this.state, goal, { programId: program.id, programVersion: program.version, step: 'start', locals: {} }, agentId === undefined ? {} : { agentId })
+    const { agent, root } = createAgent(this.state, goal, { programId: program.id, programVersion: program.version, step: (program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, agentId === undefined ? {} : { agentId })
     root.enqueueSeq = this.enqueueSeq++
     this.ready.enqueue(readyItemFromLane(root))
     return { agentId: agent.id, laneId: root.id }
   }
+  start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
 
   enqueueLane(laneId: string): void { const lane = this.state.lanes.get(laneId); if (lane && lane.status === 'ready') { lane.enqueueSeq = this.enqueueSeq++; lane.readySince = this.state.now; this.ready.enqueue(readyItemFromLane(lane)) } }
 
@@ -68,7 +70,7 @@ export class PulseRuntime {
       const program = this.programs.get(`${lane.resume.programId}@${lane.resume.programVersion}`)
       if (!program) { this.failLane(lane, { code: 'PROGRAM_NOT_REGISTERED', message: `${lane.resume.programId}@${lane.resume.programVersion}` }); continue }
       let output: LaneStepOutput
-      try { output = program.step({ lane: structuredClone(lane), ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), now: this.state.now }) }
+      try { output = program.step({ lane: structuredClone(lane), state: this.state, ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), now: this.state.now }) }
       catch (cause) { this.failLane(lane, { code: 'STEP_FAILED', message: cause instanceof Error ? cause.message : String(cause) }); continue }
       const result = validateStep(this.state, lane.id, output)
       if ('rejection' in result) {

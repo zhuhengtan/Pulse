@@ -109,14 +109,18 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   const localTargets = new Map<string, TargetRef>()
   const forkTargets = new Map<string, TargetRef>()
   const seenEffectKeys = new Set<string>()
-  let effectCounter = state.nextIds.effect
-  let laneCounter = state.nextIds.lane
-  let waitCounter = state.nextIds.wait
-  let resultCounter = state.nextIds.result
+  let effectCounter = state.nextIds.effect + state.effects.size
+  let laneCounter = state.nextIds.lane + state.lanes.size
+  let waitCounter = state.nextIds.wait + state.waits.size
+  let resultCounter = state.nextIds.result + state.results.size
 
   if (output.contextDelta) {
     const applied = applyContextDelta(state, workingLane, output.contextDelta, mutations)
     if (applied.error) return { rejection: error(applied.error, 'ContextDelta rejected') }
+    if (output.contextDelta.target === 'lane') {
+      const nextValue = mutations[mutations.length - 1]
+      if (nextValue?.op === 'setLaneContext') workingLane.context = { ...workingLane.context, state: nextValue.value, version: applied.nextVersion }
+    }
     if (output.adoptCommittedContext && output.contextDelta.target !== 'global') return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'adoptCommittedContext requires a global ContextDelta') }
     if (output.contextDelta.proposal && output.adoptCommittedContext) return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'proposals cannot be adopted in the same transaction') }
     if (output.contextDelta.target === 'global' && output.adoptCommittedContext) workingLane.contextSnapshotVersion = applied.nextVersion
