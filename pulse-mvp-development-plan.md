@@ -63,14 +63,14 @@
 | Host 调用预算 | Runtime 在派发前执行总 Attempt/LLM/Tool 次数准入，达到上限时原子失败排队 Effect；已结算 Provider cost 按 currency 累计并可从事件恢复 | `tests/runtime-control.test.ts` | `51cf23d` |
 | 动态工具检索与 Context 接入 | Tool Registry 支持 tags、文本相关性、side-effect/concurrency 过滤和稳定排序；查询结果编译为带稳定版本的 ToolSet 并写入下一次 LLM Context | `tests/tool-discovery.test.ts`、`tests/tool-host.test.ts` | `88970c4`、`480a81a` |
 | Checkpoint 事实事件截断 | Checkpoint 保存状态与日志水位后截断已纳入快照的事实事件；恢复后的 Session 通过 `gap` 要求 Host 重同步，并对事件水位 fail-closed 校验 | `tests/storage-outbox.test.ts`、`tests/m4-dsl-e2e.test.ts` | `2ea2a6b`、`e86093a` |
-| Worker 执行边界 | `WorkerCoordinator` 提供 Worker 注册、lease、幂等键、取消、过期回收和 Runtime `EffectExecutor` 适配 | `tests/worker-coordinator.test.ts` | `d221466` |
+| Worker 执行边界 | `WorkerCoordinator` 提供 Worker 注册、lease、幂等键、取消、过期回收和 Runtime `EffectExecutor` 适配；adapters 提供 HTTP claim/renew/complete/fail 与 polling Worker | `tests/worker-coordinator.test.ts`、`tests/worker-http.test.ts` | `d221466`、`2250df2` |
 | Host 工具权限 | Tool Registry deny 优先的 allow/deny 策略作用于 list/discover/ToolSet/execute/admission；参数仍由 Zod schema fail-closed 校验 | `tests/tool-context.test.ts`、`tests/tool-host.test.ts` | `a333a98` |
 | Fork Affinity 组内依赖 | 相同 Program 的亲和折叠支持组内 `dependsOn` 拓扑排序、成功/已结算条件、成员结果注入与失败传播；组外依赖仍保持 fail-closed | `tests/fork-affinity.test.ts` | `c0bb520` |
 | 可复用 ReAct Lane 模板 | `defineReActLane` 保留最终 `resultRef`，支持模板级 `system/toolSet`、`outputSchema` 与 `historyCompaction`，模型请求继续走统一 ContextBuilder | `tests/dsl-host-macros.test.ts` | `6151318` |
 | 进程级恢复验收 | 子进程先持久化在途写 Effect 后被 `SIGKILL`，父进程通过真实文件后端恢复 `reconcile_required`、Quarantine 与资源锁隔离 | `tests/storage-outbox.test.ts`、`tests/process-recovery-child.ts` | `29a8e4c` |
 | RecoverableTool executionRef | `defineTool` 可声明执行引用，ToolRegistry/Executor 在成功或中断后持久化该引用；真实文件写入中断后可通过引用完成 reconcile | `tests/tool-host.test.ts` | `748c66f` |
 
-统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 43 个测试文件、186/186 通过，`pnpm build` 也已通过。
+统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 44 个测试文件、188/188 通过，`pnpm build` 也已通过。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -408,7 +408,8 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `2ea2a6b`：Checkpoint 在持久化状态快照和 Mutation 日志水位后截断事实事件前缀，恢复时保留 `eventsCompactedThrough`，Session 以 `gap` 事件触发 Host 重同步。
 - `e86093a`：拒绝非法 checkpoint `eventWatermark` 与 `eventsCompactedThrough`，避免 malformed snapshot 改写恢复后的事件游标。
 - `d221466`：`WorkerCoordinator` 增加多 Worker 注册、lease claim、幂等提交、主动取消、过期 lease 回收和 Runtime `EffectExecutor` 适配；确定性测试覆盖重试 attempt、并发 Worker、取消及旧 lease late settlement 丢弃。
-- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，43 个测试文件、186 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- `2250df2`：Runtime Worker lease 暴露远程 claim/renew/complete/fail 协议；adapters 增加 HTTP Coordinator Server、Client、polling Worker 和 HTTP EffectExecutor，测试覆盖真实本机 HTTP 往返、heartbeat 与 Runtime Effect 闭环。
+- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，44 个测试文件、188 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
@@ -424,7 +425,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | 动态工具检索 | 确定性目录检索和 Context ToolSet 编译已实现 | 已按查询生成稳定版本的工具集合并写入 LLM Context；仍需按宿主权限/隐私策略做生产级准入，验证真实远程模型看到的 schema 与 tool-call 往返 |
 | Host 工具权限 | 单进程 allow/deny 和 Zod 参数约束已实现 | deny 优先策略已经覆盖 Registry 目录、动态 ToolSet、执行和 admission；更细 workspace/网络权限、审计系统和生产策略配置仍需宿主接入 |
 | Checkpoint / 事实事件保留 | 单进程 checkpoint 截断与恢复 gap 已实现 | 事实状态、Mutation 水位、事件截断水位和 Session gap 已有测试；外部归档索引、跨进程故障注入和生产存储仍需验证 |
-| Worker 执行与迁移 | 单进程 lease coordinator 与 Runtime 适配已实现 | 已验证 Worker 注册、幂等键、取消、过期 lease recovery、多 Worker 并发和旧 lease late settlement 丢弃；真实网络/进程间 transport、共享 durable lease store、heartbeat、Worker 迁移和故障注入仍需验证 |
+| Worker 执行与迁移 | 本地 HTTP lease transport、polling Worker 和 Runtime 适配已实现 | 已验证真实 HTTP claim/renew/complete/fail、短 lease heartbeat、多 Worker 语义和 Runtime Effect 闭环；生产级 TLS/auth、共享 durable lease store、跨主机故障注入、Worker 迁移和网络分区仍需验证 |
 | 运行观测 | Runtime 侧已有只读出口、可持久化 exporter、聚合和告警规则 | `inspect/explain`、`telemetry()`、JSONL exporter 和有界聚合器已覆盖 route 排除原因、provider/model slot、Attempt usage/cost、峰值与阈值告警；外部生产指标系统接入仍需宿主配置 |
 
 ## 6. 实施时间线与任务清单（Checklist）
@@ -443,7 +444,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 本方案继承并落地《Pulse Runtime 架构设计》与《Pulse Application DSL 规范》：
 1. 以主架构第 26 节的 M0/M1 标注为唯一验收来源，不重复维护场景数量。
 2. M1 的真实 Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder、Session 和确定性端到端示例已贯通；其他 Provider 与真实网络任务属于独立集成验证。
-3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity（含可安全组的 DSL series collapse）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、correlated telemetry、JSONL exporter、聚合和告警规则、单进程 lease-based Worker coordinator、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、生产级持久化事务边界、真实网络/进程间 Worker transport、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
+3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity（含可安全组的 DSL series collapse）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、correlated telemetry、JSONL exporter、聚合和告警规则、HTTP lease-based Worker transport、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、生产级持久化事务边界、生产级 Worker TLS/auth 与 durable lease store、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
 已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
