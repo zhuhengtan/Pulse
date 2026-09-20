@@ -41,6 +41,7 @@ export interface ModelRouteMetrics {
   cachedInputTokens: number
   inputTokens: number
 }
+export interface AdaptiveRouteSnapshot { schemaVersion: 1; metrics: Array<[string, ModelRouteMetrics]> }
 
 export class InMemoryModelRegistry implements ModelRegistry {
   private readonly candidates: ModelCandidate[] = []
@@ -91,6 +92,26 @@ export class AdaptiveModelRouter extends ModelRouter {
       explorationWeight: policy.explorationWeight ?? 0.25,
       targetLatencyMs: policy.targetLatencyMs ?? 1_000,
       targetCost: policy.targetCost ?? 1,
+    }
+  }
+
+  static fromSnapshot(registry: ModelRegistry, snapshot: AdaptiveRouteSnapshot, policy: AdaptiveRoutePolicy = {}): AdaptiveModelRouter {
+    const router = new AdaptiveModelRouter(registry, policy)
+    router.restore(snapshot)
+    return router
+  }
+
+  snapshot(): AdaptiveRouteSnapshot { return { schemaVersion: 1, metrics: [...this.feedback.entries()].map(([id, metrics]) => [id, { ...metrics }]) } }
+
+  restore(snapshot: AdaptiveRouteSnapshot): void {
+    if (snapshot.schemaVersion !== 1 || !Array.isArray(snapshot.metrics)) throw new Error('INVALID_ADAPTIVE_ROUTE_SNAPSHOT')
+    const known = new Set(this.registry.list().map((candidate) => candidate.id))
+    this.feedback.clear()
+    for (const entry of snapshot.metrics) {
+      if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || !known.has(entry[0])) throw new Error('INVALID_ADAPTIVE_ROUTE_SNAPSHOT')
+      const metrics = entry[1]
+      if (!metrics || !Number.isInteger(metrics.attempts) || metrics.attempts < 0 || !Number.isInteger(metrics.successes) || metrics.successes < 0 || !Number.isInteger(metrics.failures) || metrics.failures < 0 || metrics.successes + metrics.failures > metrics.attempts || !Object.values(metrics).every((value) => typeof value === 'number' && Number.isFinite(value) && value >= 0)) throw new Error('INVALID_ADAPTIVE_ROUTE_SNAPSHOT')
+      this.feedback.set(entry[0], { ...metrics })
     }
   }
 

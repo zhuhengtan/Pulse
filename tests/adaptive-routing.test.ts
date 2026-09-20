@@ -28,4 +28,19 @@ describe('adaptive model routing', () => {
     await expect(executor(effect, new AbortController().signal)).resolves.toMatchObject({ executionState: 'succeeded' })
     expect(router.metrics().get('feedback-model')).toMatchObject({ attempts: 1, successes: 1, qualityTotal: 1, latencyTotalMs: 3, costTotal: 0.02, cachedInputTokens: 4, inputTokens: 10 })
   })
+
+  it('round-trips adaptive feedback through a validated snapshot', () => {
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'model-a', providerId: 'p1', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 1 })
+    registry.register({ id: 'model-b', providerId: 'p2', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 2 })
+    const policy = { priorityWeight: 0.1, qualityWeight: 5, latencyWeight: 2, costWeight: 2, cacheWeight: 1, explorationWeight: 0 }
+    const router = new AdaptiveModelRouter(registry, policy)
+    router.recordFeedback({ modelId: 'model-a', outcome: 'succeeded', quality: 0.9, usage: { latencyMs: 20, inputTokens: 100, cachedInputTokens: 50, cost: { amount: 0.02, currency: 'USD', source: 'reported' } } })
+    router.recordFeedback({ modelId: 'model-b', outcome: 'failed', quality: 0, usage: { latencyMs: 200, inputTokens: 100, cachedInputTokens: 0, cost: { amount: 0.2, currency: 'USD', source: 'reported' } } })
+
+    const restored = AdaptiveModelRouter.fromSnapshot(registry, router.snapshot(), policy)
+    expect([...restored.metrics().entries()]).toEqual([...router.metrics().entries()])
+    expect(restored.route('reason', 'public').map((candidate) => candidate.id)).toEqual(router.route('reason', 'public').map((candidate) => candidate.id))
+    expect(() => restored.restore({ schemaVersion: 1, metrics: [['missing', { attempts: 1, successes: 1, failures: 0, qualityTotal: 1, latencyTotalMs: 0, latencySamples: 0, costTotal: 0, costSamples: 0, cachedInputTokens: 0, inputTokens: 0 }]] })).toThrow('INVALID_ADAPTIVE_ROUTE_SNAPSHOT')
+  })
 })
