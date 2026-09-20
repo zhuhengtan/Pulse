@@ -161,7 +161,7 @@ export class SqliteRuntimeContentStore implements RuntimeResultStore, RuntimeSna
       try {
         const current = database.prepare('SELECT payload FROM runtime_content WHERE namespace = ? AND ref = ?').get(this.namespace, ref)
         if (current && typeof current.payload === 'string') {
-          if (stableSerialize(JSON.parse(current.payload) as JsonValue) !== stableSerialize(value)) throw new Error('RUNTIME_CONTENT_CONFLICT')
+          if (stableSerialize(JSON.parse(current.payload) as JsonValue) !== stableSerialize(value)) throw new Error(`RUNTIME_CONTENT_CONFLICT:${this.namespace}:${ref}`)
         } else database.prepare('INSERT INTO runtime_content (namespace, ref, payload) VALUES (?, ?, ?)').run(this.namespace, ref, JSON.stringify(value))
         database.exec('COMMIT')
       } catch (cause) {
@@ -549,8 +549,15 @@ type SqliteDatabaseConstructor = new (path: string) => SqliteDatabase
 export class SqliteRuntimePersistenceBackend implements RuntimePersistenceBackend {
   private database: SqliteDatabase | undefined
   private tail: Promise<void> = Promise.resolve()
+  readonly resultStore: SqliteRuntimeContentStore
+  readonly snapshotStore: SqliteRuntimeContentStore
+  readonly eventArchive: SqliteRuntimeEventArchive
 
-  constructor(readonly filePath: string) {}
+  constructor(readonly filePath: string) {
+    this.resultStore = new SqliteRuntimeContentStore(filePath, 'result')
+    this.snapshotStore = new SqliteRuntimeContentStore(filePath, 'snapshot')
+    this.eventArchive = new SqliteRuntimeEventArchive(filePath)
+  }
 
   async load(): Promise<RuntimePersistenceSnapshot | undefined> {
     return this.enqueue(async () => {
@@ -586,6 +593,7 @@ export class SqliteRuntimePersistenceBackend implements RuntimePersistenceBacken
       this.database?.close()
       this.database = undefined
     })
+    await Promise.all([this.resultStore.close(), this.snapshotStore.close(), this.eventArchive.close()])
   }
 
   private open(): SqliteDatabase {

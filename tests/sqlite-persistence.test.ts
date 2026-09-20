@@ -26,7 +26,7 @@ describe('SQLite runtime persistence backend', () => {
     const snapshot = await backend.load()
     expect(snapshot?.integrity?.digest).toMatch(/^[a-f0-9]{64}$/)
 
-    const restored = new PulseRuntime({ persistence: snapshot, persistenceBackend: backend, programs: [program] })
+    const restored = await PulseRuntime.restore(backend, { programs: [program] })
     await expect(restored.start(agentId).outcome()).resolves.toMatchObject({ status: 'succeeded' })
     await backend.close()
   })
@@ -50,6 +50,26 @@ describe('SQLite runtime persistence backend', () => {
     const staleSnapshot = withRuntimePersistenceIntegrity(stale)
     await expect(backend.save(staleSnapshot, loaded!.integrity?.digest)).rejects.toThrow('RUNTIME_PERSISTENCE_CONFLICT')
     expect((await backend.load())?.state.state.now).toBe(11)
+    await backend.close()
+  })
+
+  it('integrates Result/Snapshot stores and EventArchive for checkpoint restore', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-sqlite-integrated-'))
+    directories.push(directory)
+    const backend = new SqliteRuntimePersistenceBackend(join(directory, 'pulse.db'))
+    const program: LaneProgram = { id: 'sqlite-integrated', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'complete', result: { durable: true } }], next: point('sqlite-integrated', 'finish') }
+      : { actions: [], next: point('sqlite-integrated', 'finish') } }
+    const runtime = new PulseRuntime()
+    const { agentId } = runtime.createAgent('integrated sqlite stores', program)
+    await expect(runtime.start(agentId).outcome()).resolves.toMatchObject({ status: 'succeeded' })
+    const snapshot = await runtime.checkpoint(backend)
+    expect(snapshot.resultBodies).toBe('external')
+    expect(snapshot.snapshotBodies).toBe('external')
+    expect(snapshot.eventArchive).toMatchObject({ through: expect.any(Number) })
+    expect(await backend.eventArchive.read(1)).not.toHaveLength(0)
+    const restored = await PulseRuntime.restore(backend, { programs: [program] })
+    expect([...restored.state.results.values()].some((result) => result.value && typeof result.value === 'object' && !Array.isArray(result.value) && result.value.durable === true)).toBe(true)
     await backend.close()
   })
 })
