@@ -69,19 +69,73 @@ export class ToolRegistry {
   resolveResources(name: string, input: unknown): ResourceClaim[] { const definition = this.definitions.get(name); if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`); return definition.resolveResources?.(input) ?? definition.manifest.resources ?? definition.manifest.locks }
 }
 
-function schemaToJsonSchema(schema: ZodTypeAny): Record<string, unknown> {
-  const typeName = schema._def.typeName as string
+function schemaToJsonSchema(schema: ZodTypeAny, seen = new Set<ZodTypeAny>()): Record<string, unknown> {
+  if (seen.has(schema)) throw new Error('UNSUPPORTED_SCHEMA_TYPE:recursive')
+  const nextSeen = new Set(seen).add(schema)
+  const definition = schema._def as Record<string, any>
+  const typeName = definition.typeName as string
   if (typeName === z.ZodFirstPartyTypeKind.ZodObject) {
-    const shape = (schema as z.ZodObject<any>)._def.shape()
-    return { type: 'object', properties: Object.fromEntries(Object.entries(shape).map(([key, value]) => [key, schemaToJsonSchema(value as ZodTypeAny)])), required: Object.entries(shape).filter(([, value]) => !(value as ZodTypeAny).isOptional()).map(([key]) => key) }
+    const shape = typeof definition.shape === 'function' ? definition.shape() : definition.shape
+    if (!shape || typeof shape !== 'object') throw new Error('INVALID_SCHEMA_DEFINITION:object')
+    const entries = Object.entries(shape as Record<string, ZodTypeAny>)
+    const required = entries.filter(([, value]) => !(value as ZodTypeAny).isOptional()).map(([key]) => key)
+    return {
+      type: 'object',
+      properties: Object.fromEntries(entries.map(([key, value]) => [key, schemaToJsonSchema(value, nextSeen)])),
+      ...(required.length ? { required } : {}),
+      ...(definition.unknownKeys === 'strict' ? { additionalProperties: false } : {}),
+    }
   }
-  if (typeName === z.ZodFirstPartyTypeKind.ZodArray) return { type: 'array', items: schemaToJsonSchema(schema._def.type) }
-  if (typeName === z.ZodFirstPartyTypeKind.ZodString) return { type: 'string' }
-  if (typeName === z.ZodFirstPartyTypeKind.ZodNumber) return { type: 'number' }
+  if (typeName === z.ZodFirstPartyTypeKind.ZodArray) return { type: 'array', items: schemaToJsonSchema(definition.type, nextSeen), ...(arrayChecks(definition.checks) ?? {}) }
+  if (typeName === z.ZodFirstPartyTypeKind.ZodString) return { type: 'string', ...(stringChecks(definition.checks) ?? {}) }
+  if (typeName === z.ZodFirstPartyTypeKind.ZodNumber) return { type: definition.isInt ? 'integer' : 'number', ...(numberChecks(definition.checks) ?? {}) }
   if (typeName === z.ZodFirstPartyTypeKind.ZodBoolean) return { type: 'boolean' }
-  if (typeName === z.ZodFirstPartyTypeKind.ZodOptional) return schemaToJsonSchema(schema._def.innerType)
-  if (typeName === z.ZodFirstPartyTypeKind.ZodEnum) return { type: 'string', enum: schema._def.values }
-  return {}
+  if (typeName === z.ZodFirstPartyTypeKind.ZodNull) return { type: 'null' }
+  if (typeName === z.ZodFirstPartyTypeKind.ZodOptional || typeName === z.ZodFirstPartyTypeKind.ZodDefault) return schemaToJsonSchema(definition.innerType, nextSeen)
+  if (typeName === z.ZodFirstPartyTypeKind.ZodNullable) return { anyOf: [schemaToJsonSchema(definition.innerType, nextSeen), { type: 'null' }] }
+  if (typeName === z.ZodFirstPartyTypeKind.ZodEnum) return { type: 'string', enum: [...definition.values] }
+  if (typeName === z.ZodFirstPartyTypeKind.ZodNativeEnum) return { enum: Object.values(definition.values).filter((value) => typeof value === 'string' || typeof value === 'number') }
+  if (typeName === z.ZodFirstPartyTypeKind.ZodLiteral) return { const: definition.value }
+  if (typeName === z.ZodFirstPartyTypeKind.ZodUnion || typeName === z.ZodFirstPartyTypeKind.ZodDiscriminatedUnion) {
+    const options = typeName === z.ZodFirstPartyTypeKind.ZodDiscriminatedUnion ? [...definition.options.values()] : definition.options
+    if (!Array.isArray(options) || options.length === 0) throw new Error('INVALID_SCHEMA_DEFINITION:union')
+    return { anyOf: options.map((option: ZodTypeAny) => schemaToJsonSchema(option, nextSeen)) }
+  }
+  throw new Error(`UNSUPPORTED_SCHEMA_TYPE:${typeName ?? 'unknown'}`)
+}
+
+function stringChecks(checks: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(checks)) return undefined
+  const result: Record<string, unknown> = {}
+  for (const check of checks as Array<Record<string, unknown>>) {
+    if (check.kind === 'min') result.minLength = check.value
+    else if (check.kind === 'max') result.maxLength = check.value
+    else if (check.kind === 'length') { result.minLength = check.value; result.maxLength = check.value }
+    else if (check.kind === 'regex' && check.regex instanceof RegExp) result.pattern = check.regex.source
+  }
+  return Object.keys(result).length ? result : undefined
+}
+
+function numberChecks(checks: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(checks)) return undefined
+  const result: Record<string, unknown> = {}
+  for (const check of checks as Array<Record<string, unknown>>) {
+    if (check.kind === 'min') result[check.inclusive === false ? 'exclusiveMinimum' : 'minimum'] = check.value
+    else if (check.kind === 'max') result[check.inclusive === false ? 'exclusiveMaximum' : 'maximum'] = check.value
+    else if (check.kind === 'int') result.type = 'integer'
+  }
+  return Object.keys(result).length ? result : undefined
+}
+
+function arrayChecks(checks: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(checks)) return undefined
+  const result: Record<string, unknown> = {}
+  for (const check of checks as Array<Record<string, unknown>>) {
+    if (check.kind === 'min') result.minItems = check.value
+    else if (check.kind === 'max') result.maxItems = check.value
+    else if (check.kind === 'length') { result.minItems = check.value; result.maxItems = check.value }
+  }
+  return Object.keys(result).length ? result : undefined
 }
 
 export function zodToJsonSchema(schema: ZodTypeAny): Record<string, unknown> { return schemaToJsonSchema(schema) }

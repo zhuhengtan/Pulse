@@ -59,12 +59,20 @@ describe('M1-3 context, models and adapters', () => {
     expect(openaiBody.tools[0].function.parameters).toEqual(request.blocks[1].content[0].inputSchema)
     expect(openaiBody.response_format.json_schema.schema).toEqual(schema)
     fetchMock.mockClear()
-    await new AnthropicAdapter('anthropic', { provider: 'anthropic', defaultModel: 'fallback' }).executeAttempt({ request, signal: new AbortController().signal, model: 'candidate', outputSchema: schema })
+    await new AnthropicAdapter('anthropic', { provider: 'anthropic', defaultModel: 'fallback', maxOutputTokens: 1234 }).executeAttempt({ request, signal: new AbortController().signal, model: 'candidate', outputSchema: schema })
     const anthropicBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
     expect(anthropicBody.model).toBe('candidate')
+    expect(anthropicBody.max_tokens).toBe(1234)
     expect(anthropicBody.tools[0].input_schema).toEqual(request.blocks[1].content[0].inputSchema)
     expect(anthropicBody.output_format.schema).toEqual(schema)
     vi.unstubAllGlobals()
+  })
+
+  it('fails closed when a Tool schema cannot be represented in JSON Schema', () => {
+    expect(() => defineTool({ name: 'unsupported', description: 'unsupported', input: z.date(), output: z.string(), execute: (input) => input.toISOString() })).toThrow('UNSUPPORTED_SCHEMA_TYPE:ZodDate')
+    const schema = z.object({ kind: z.literal('ok'), value: z.number().int().min(1) }).strict()
+    const tool = defineTool({ name: 'strict', description: 'strict', input: schema, output: z.string(), execute: () => 'ok' })
+    expect(tool.manifest.inputSchema).toEqual({ type: 'object', properties: { kind: { const: 'ok' }, value: { type: 'integer', minimum: 1 } }, required: ['kind', 'value'], additionalProperties: false })
   })
 
   it('validates provider, structured, and action output as separate layers', () => {
