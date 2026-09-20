@@ -74,10 +74,10 @@ describe('HTTP Worker transport', () => {
     try {
       await stale.register()
       await fresh.register()
-      const result = coordinator.submit({ job: 'reclaim' }, { taskId: 'reclaim-task', leaseMs: 5 })
+      const result = coordinator.submit({ job: 'reclaim' }, { taskId: 'reclaim-task', leaseMs: 100 })
       const lease = await stale.claim()
       expect(lease?.task.id).toBe('reclaim-task')
-      await new Promise((resolve) => setTimeout(resolve, 20))
+      await new Promise((resolve) => setTimeout(resolve, 150))
       const recovered = await fresh.claim()
       expect(recovered).toMatchObject({ task: { id: 'reclaim-task', attempt: 2 }, workerId: 'fresh' })
       await fresh.complete(recovered!.leaseId, { reclaimed: true })

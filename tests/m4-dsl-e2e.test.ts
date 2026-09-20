@@ -50,6 +50,17 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     expect(resultRefs.every((ref) => runtime.state.results.has(ref))).toBe(true)
   })
 
+  it('resolves a Session against its own Agent when multiple Agents share a Runtime', async () => {
+    const runtime = new PulseRuntime()
+    const failing = { id: 'session-failing', version: '1', step: () => ({ actions: [{ type: 'fail' as const, error: { code: 'EXPECTED', message: 'expected' } }], next: { programId: 'session-failing', programVersion: '1', step: 'done', locals: {} } }) }
+    const succeeding = { id: 'session-succeeding', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'session-succeeding', programVersion: '1', step: 'done', locals: {} } }) }
+    const first = runtime.createAgent('first', failing)
+    const second = runtime.createAgent('second', succeeding)
+
+    await expect(runtime.start(second.agentId).outcome()).resolves.toMatchObject({ status: 'succeeded' })
+    expect(runtime.state.lanes.get(runtime.state.agents.get(first.agentId)!.rootLaneId)?.status).toBe('failed')
+  })
+
   it('streams a read-only event mirror and exposes a final outcome', async () => {
     const runtime = new PulseRuntime()
     const program = { id: 'session-test', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'session-test', programVersion: '1', step: 'done', locals: {} } }) }

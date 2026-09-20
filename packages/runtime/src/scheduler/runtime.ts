@@ -494,6 +494,45 @@ export class PulseRuntime {
     return { status, unresolvedEffectIds: this.quarantine.unresolvedEffectIds }
   }
 
+  async runAgent(agentId: string, maxTicks = 10_000): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }> {
+    const agent = this.state.agents.get(agentId)
+    if (!agent) throw new Error(`UNKNOWN_AGENT:${agentId}`)
+    for (let tick = 0; tick < maxTicks; tick++) {
+      const work = this.tick()
+      await this.flushPersistence()
+      this.refreshWaits()
+      const root = this.state.lanes.get(agent.rootLaneId)
+      if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status)) {
+        const status: 'succeeded' | 'failed' | 'cancelled' = root.status === 'succeeded' ? 'succeeded' : root.status === 'cancelled' ? 'cancelled' : 'failed'
+        agent.state = status
+        this.schedulePersistence()
+        const effectIds = new Set([...this.state.effects.values()].filter((effect) => effect.agentId === agentId).map((effect) => effect.id))
+        await this.flushPersistence()
+        return { status, unresolvedEffectIds: this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)) }
+      }
+      if (this.ready.size === 0 && this.executions.size === 0) {
+        if (this.preparingLLMs.size) { await Promise.resolve(); continue }
+        if (this.factInbox.size > 0) continue
+        if (this.hasPendingHostInteraction(agentId)) { await this.waitForFact(); continue }
+        const nextAt = this.clock.timers.nextAt()
+        if (nextAt !== undefined && nextAt > this.clock.now()) { this.clock.set(nextAt); continue }
+        break
+      }
+      if (work === 0 && this.executions.size) {
+        const nextAt = this.clock.timers.nextAt()
+        if (nextAt !== undefined && nextAt > this.clock.now()) { this.clock.set(nextAt); continue }
+        const executions = [...this.executions.entries()].filter(([effectId]) => this.state.effects.get(effectId)?.agentId === agentId).map(([, execution]) => execution.promise)
+        if (executions.length) await Promise.race(executions)
+        else await Promise.resolve()
+      } else if (work === 0 && this.factInbox.size === 0 && this.hasPendingHostInteraction(agentId)) await this.waitForFact()
+      else if (work === 0) await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    const root = this.state.lanes.get(agent.rootLaneId)
+    if (root && !['succeeded', 'failed', 'cancelled'].includes(root.status)) this.emit({ type: 'runtime.idle_blocked', laneId: root.id, data: { status: root.status } })
+    const effectIds = new Set([...this.state.effects.values()].filter((effect) => effect.agentId === agentId).map((effect) => effect.id))
+    return { status: root?.status === 'succeeded' ? 'succeeded' : root?.status === 'cancelled' ? 'cancelled' : 'failed', unresolvedEffectIds: this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)) }
+  }
+
   async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await Promise.resolve() } }
 
   async shutdown(timeoutMs = 5_000): Promise<{ status: 'stopped' | 'timed_out'; unresolvedEffectIds: string[]; quarantine: string[] }> {
@@ -583,7 +622,7 @@ export class PulseRuntime {
     for (const lane of state.lanes.values()) if (lane.pendingResumeInput) policy.put('snapshot', `snapshot:resume:${lane.id}:${lane.version}`, lane.pendingResumeInput as unknown as JsonValue)
   }
 
-  private hasPendingHostInteraction(): boolean { return [...this.state.effects.values()].some((effect) => effect.kind === 'human' && !effect.outcome) }
+  private hasPendingHostInteraction(agentId?: string): boolean { return [...this.state.effects.values()].some((effect) => effect.kind === 'human' && !effect.outcome && (agentId === undefined || effect.agentId === agentId)) }
   private waitForFact(): Promise<void> { return new Promise((resolve) => this.factWaiters.push(resolve)) }
   private completeFinishedChildAgents(): void {
     for (const effect of this.state.effects.values()) {

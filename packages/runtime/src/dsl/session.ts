@@ -6,7 +6,7 @@ export interface PulseSessionSnapshot { schemaVersion: 1; agentId: string; now: 
 
 export class PulseSession {
   private readonly execution: Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }>
-  constructor(private readonly runtime: PulseRuntime, readonly agentId: string) { this.execution = runtime.run() }
+  constructor(private readonly runtime: PulseRuntime, readonly agentId: string) { this.execution = runtime.runAgent(agentId) }
   async *stream(fromSeq = 0): AsyncIterable<SessionEvent> {
     let cursor = fromSeq
     while (true) {
