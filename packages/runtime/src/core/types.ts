@@ -186,6 +186,7 @@ export interface ResultRecord {
   privacyTaints?: PrivacyTaint[]
   derivedFrom: ProvenanceRef[]
   summary?: JsonValue
+  normalized?: JsonValue
   downgrade?: {
     sourceRefs: ProvenanceRef[]
     targetPrivacy: 'cloud_allowed'

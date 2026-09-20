@@ -69,7 +69,7 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
     let value: JsonValue
     let artifact: EffectArtifactOutput | undefined
     try { value = toJson(detailed.output) } catch { value = null; artifact = artifactOutput(detailed.output) }
-    return { value, ...(artifact === undefined ? {} : { artifact }), ...(summary === undefined ? {} : { summary }), sideEffectState: definition.manifest.sideEffectPolicy === 'write' ? 'applied' : 'none', executionState: 'succeeded', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length, ...(artifact === undefined ? {} : { artifactMediaType: artifact.mediaType }) }, ...(observations.length ? { observations } : {}) }
+    return { value, ...(detailed.normalized === undefined ? {} : { normalized: toJson(detailed.normalized) }), ...(artifact === undefined ? {} : { artifact }), ...(summary === undefined ? {} : { summary }), sideEffectState: definition.manifest.sideEffectPolicy === 'write' ? 'applied' : 'none', executionState: 'succeeded', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length, ...(artifact === undefined ? {} : { artifactMediaType: artifact.mediaType }) }, ...(observations.length ? { observations } : {}) }
   }
 }
 

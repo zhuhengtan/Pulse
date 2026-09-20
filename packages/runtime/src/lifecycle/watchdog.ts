@@ -36,7 +36,10 @@ function actionSignature(output: LaneStepOutput): string {
 
 function resultSignature(output: LaneStepOutput, state: RuntimeState): string | undefined {
   const refs = output.actions.flatMap((action) => 'derivedFrom' in action && action.derivedFrom ? action.derivedFrom : [])
-  const results = refs.map((ref) => state.results.get(provenanceRefId(ref))?.value).filter((value): value is JsonValue => value !== undefined)
+  const results = refs.map((ref) => {
+    const result = state.results.get(provenanceRefId(ref))
+    return result?.normalized ?? result?.value
+  }).filter((value): value is JsonValue => value !== undefined)
   const terminalResults = output.actions.filter((action) => action.type === 'complete').map((action) => action.result)
   const all = [...results, ...terminalResults]
   return all.length ? contentHash(all.map((value) => canonical(value))) : undefined

@@ -105,13 +105,14 @@ export class ToolRegistry {
     const toolContext: ToolContext = 'aborted' in context ? { toolCallId: '', effectId: '', attemptId: '', agentId: '', laneId: '', signal: context, emit: () => {} } : context
     return definition.execute(input, toolContext)
   }
-  async executeDetailed(name: string, input: unknown, context: ToolContext | AbortSignal): Promise<{ output: unknown; summary?: JsonValue; manifest: ToolManifest }> {
+  async executeDetailed(name: string, input: unknown, context: ToolContext | AbortSignal): Promise<{ output: unknown; normalized?: JsonValue; summary?: JsonValue; manifest: ToolManifest }> {
     const definition = this.require(name)
     const toolContext: ToolContext = 'aborted' in context ? { toolCallId: '', effectId: '', attemptId: '', agentId: '', laneId: '', signal: context, emit: () => {} } : context
     const output = await definition.execute(input, toolContext)
     const summary = definition.summarize?.(output)
     if (summary !== undefined && Buffer.byteLength(JSON.stringify(summary), 'utf8') > (definition.manifest.maxResultSummaryBytes ?? 4096)) throw new Error('TOOL_SUMMARY_TOO_LARGE')
-    return { output, ...(summary === undefined ? {} : { summary }), manifest: structuredClone(definition.manifest) }
+    const normalized = definition.normalize?.(output)
+    return { output, ...(normalized === undefined ? {} : { normalized }), ...(summary === undefined ? {} : { summary }), manifest: structuredClone(definition.manifest) }
   }
   async reconcileDetailed(name: string, executionRef: JsonValue, context: ReconcileContext): Promise<ReconcileResult<unknown>> {
     const definition = this.require(name)
