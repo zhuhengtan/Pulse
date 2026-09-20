@@ -11,7 +11,10 @@ export interface PulseSessionSnapshot { schemaVersion: 1; agentId: string; now: 
 
 export class PulseSession {
   private readonly execution: Promise<Outcome>
+  /** Stable session handle used by the explicit warm-start API. */
+  readonly sessionId: string
   constructor(private readonly runtime: PulseRuntime, readonly agentId: string) {
+    this.sessionId = agentId
     this.execution = runtime.runAgent(agentId).then((result) => {
       const root = runtime.state.lanes.get(runtime.state.agents.get(agentId)?.rootLaneId ?? '')
       return {

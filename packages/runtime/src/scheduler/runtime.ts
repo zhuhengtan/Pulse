@@ -91,7 +91,11 @@ export interface RuntimeConfig {
 }
 
 export interface RuntimeBudgetConfig { maxTotalAttempts?: number; maxLLMAttempts?: number; maxToolAttempts?: number; maxCostByCurrency?: Record<string, number> }
-export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' | 'final'; include?: 'facts' | 'facts_and_findings'; relevanceRefs?: string[] }
+/**
+ * A warm start adopts the final Global Context from an explicit PulseSession.
+ * `agentId` remains a source-compatible alias for the pre-session API.
+ */
+export interface WarmStartSpec { sessionId?: string; agentId?: string; globalVersion?: number | 'latest' | 'final'; include?: 'facts' | 'facts_and_findings'; relevanceRefs?: string[] }
 export type AgentPriority = 'background' | 'normal' | 'high' | 'urgent'
 export interface AgentPolicyRef { id: string }
 export interface AgentLimits { id?: string; timeoutMs?: number; maxActiveLanes?: number }
@@ -363,8 +367,10 @@ export class PulseRuntime {
     let initialGlobalPrivacy: PrivacyMetadata | undefined
     let warmStartResultRefs: string[] = []
     if (warmStart) {
-      const source = this.state.agents.get(warmStart.agentId)
-      if (!source) throw new Error(`WARM_START_SOURCE_NOT_FOUND:${warmStart.agentId}`)
+      const sourceSessionId = warmStart.sessionId ?? warmStart.agentId
+      if (!sourceSessionId) throw new Error('WARM_START_SESSION_REQUIRED')
+      const source = this.state.agents.get(sourceSessionId)
+      if (!source) throw new Error(`WARM_START_SOURCE_NOT_FOUND:${sourceSessionId}`)
       const version = warmStart.globalVersion === 'latest' || warmStart.globalVersion === 'final' || warmStart.globalVersion === undefined ? source.latestGlobalVersion : warmStart.globalVersion
       const value = source.globalVersions.get(version)
       if (value === undefined) throw new Error(`WARM_START_VERSION_NOT_FOUND:${version}`)

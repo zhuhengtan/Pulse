@@ -19,6 +19,17 @@ describe('explicit warm start', () => {
     expect(sourceRecord.globalVersions.get(3)).toEqual({ facts: ['known'], privacy: 'local_only' })
   })
 
+  it('accepts the architecture-level sessionId from a PulseSession handle', () => {
+    const runtime = new PulseRuntime()
+    const program: LaneProgram = { id: 'warm-session', version: '1', step: () => ({ actions: [{ type: 'complete', result: {} }], next: { programId: 'warm-session', programVersion: '1', step: 'done', locals: {} } }) }
+    const source = runtime.createAgent('source', program)
+    const session = runtime.start(source.agentId)
+    runtime.state.agents.get(source.agentId)!.globalVersions.set(1, { fact: 'from-session' })
+    runtime.state.agents.get(source.agentId)!.latestGlobalVersion = 1
+    const adopted = runtime.createAgent({ goal: 'adopted', program, warmStart: { sessionId: session.sessionId, globalVersion: 'final' } })
+    expect(runtime.state.agents.get(adopted.agentId)?.globalVersions.get(0)).toEqual({ fact: 'from-session' })
+  })
+
   it('requires an explicit existing source and version', () => {
     const runtime = new PulseRuntime()
     const program: LaneProgram = { id: 'warm-error', version: '1', step: () => ({ actions: [], next: { programId: 'warm-error', programVersion: '1', step: 'done', locals: {} } }) }
