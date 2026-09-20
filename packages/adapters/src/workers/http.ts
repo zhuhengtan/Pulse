@@ -2,8 +2,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { createServer as createHttpsServer, type ServerOptions as HttpsServerOptions } from 'node:https'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
-import type { EffectExecution, EffectExecutor, EffectRecord, JsonValue, RuntimeError, WorkerHandler, WorkerLease, WorkerSubmitOptions, WorkerTaskRecord } from '@pulse/runtime'
-import { WorkerCoordinator } from '@pulse/runtime'
+import type { EffectExecution, EffectExecutor, EffectRecord, JsonValue, RuntimeError, WorkerCoordinatorContract, WorkerHandler, WorkerLease, WorkerSubmitOptions, WorkerTaskRecord } from '@pulse/runtime'
 
 interface JsonObject { [key: string]: JsonValue }
 
@@ -65,7 +64,7 @@ export interface WorkerHttpServerOptions {
   recoveryIntervalMs?: number
 }
 
-export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinator, options: WorkerHttpServerOptions = {}): Promise<WorkerHttpServer> {
+export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinatorContract, options: WorkerHttpServerOptions = {}): Promise<WorkerHttpServer> {
   const registrations = new Map<string, () => void>()
   const handler = async (request: IncomingMessage, response: import('node:http').ServerResponse): Promise<void> => {
     try {
