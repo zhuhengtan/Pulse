@@ -93,6 +93,7 @@
 | Effect 结算存储准入 | Artifact、Result、Lane、Correlation、closing Lane 终态与 Effect 结算先统一执行 storage admission；超限时整笔 Effect/Lane 失败，不产生半个 Artifact/Result，重试仍保持真实 Effect 身份 | `tests/result-summary-budget.test.ts`、`tests/retry-policy.test.ts`、`tests/m2-scheduler.test.ts` | `d267bb6`、本轮终态提交 |
 | 事实事件硬上限 fail-closed | Step/结算遇到无法容纳事实事件的 storage limit 时进入结构化失败终态；拒绝事件仅在可安全写入时追加，不抛异常、不重复排队 | `tests/result-summary-budget.test.ts` | 本轮事件压力提交 |
 | 结算后存储策略同步 | 直接 `completeEffect()` 结算后立即重建 Runtime StoragePolicy，后续准入不读取过期的驻内存占用 | `tests/storage-policy.test.ts` | 本轮存储同步提交 |
+| Storage residency 稳定性 | 同一内容重复进入 StoragePolicy 时保留已确认的 `persisted`/`compacted` 状态，避免同步过程重新物化驻内存正文 | `tests/storage-policy.test.ts` | 本轮 residency 提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
 统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、227/227 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
@@ -437,6 +438,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - 本轮终态提交：closing Lane 满足 Wait 时，最终 Result 通过同一 storage admission 与 MutationLog 提交；超限则 Lane 失败且不产生 `resultRef`。
 - 本轮事件压力提交：事实事件无法容纳时 fail-closed，避免 storage rejection 自身造成未捕获异常。
 - 本轮存储同步提交：直接 Effect 结算后立即刷新 StoragePolicy，避免后续准入使用过期占用。
+- 本轮 residency 提交：StoragePolicy 对相同内容保留已确认 residency，避免已落盘记录被重复算作 memory。
 - `2250df2`：Runtime Worker lease 暴露远程 claim/renew/complete/fail 协议；adapters 增加 HTTP Coordinator Server、Client、polling Worker 和 HTTP EffectExecutor，测试覆盖真实本机 HTTP 往返、heartbeat 与 Runtime Effect 闭环。
 - `685be10`：HTTP Worker Server/Client 增加 Bearer token 鉴权，未授权请求在任务访问前拒绝，并有回归测试。
 - `47791bd`：WorkerCoordinator 增加 schemaVersion=1 的 snapshot/restore；恢复时将 in-flight lease 重新入队，并让终态/幂等任务在重启后仍可返回结果。

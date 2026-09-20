@@ -70,6 +70,8 @@ describe('session storage policy', () => {
     policy.markPersisted()
     expect(policy.inspect()[0]).toMatchObject({ storageState: 'persisted', bytes: expect.any(Number) })
     expect(policy.get('result:r1')).toBeUndefined()
+    expect(policy.put('result', 'result:r1', { answer: 1 })).toMatchObject({ storageState: 'persisted' })
+    expect(policy.get('result:r1')).toBeUndefined()
   })
 
   it('refreshes runtime storage admission after direct Effect settlement', () => {

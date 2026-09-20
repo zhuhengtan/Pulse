@@ -41,10 +41,13 @@ export class SessionStoragePolicy {
   put(kind: StorageKind, key: string, value: JsonValue, pin = false): StoredRecord {
     const before = this.snapshot()
     const bytes = Buffer.byteLength(stableSerialize(value))
+    const hash = contentHash(value)
     const previous = this.records.get(key)
     if (previous && previous.kind !== kind) throw new Error('STORAGE_KEY_KIND_CONFLICT')
     const managedPin = previous === undefined && this.isManagedPinned(key) ? 1 : 0
-    const record: StoredRecord = { key, kind, storageState: 'memory', pinCount: (previous?.pinCount ?? 0) + (pin ? 1 : 0) + managedPin, bytes, hash: contentHash(value), value: structuredClone(value) }
+    const unchanged = previous !== undefined && previous.bytes === bytes && previous.hash === hash
+    const storageState = unchanged ? previous.storageState : 'memory'
+    const record: StoredRecord = { key, kind, storageState, pinCount: (previous?.pinCount ?? 0) + (pin ? 1 : 0) + managedPin, bytes, hash, ...(storageState === 'memory' ? { value: structuredClone(value) } : {}) }
     this.records.set(key, record)
     this.compactToFit(kind, key)
     if (this.memoryBytes(kind) > this.kindLimit(kind) || this.memoryBytes() > this.limits.maxTotalMemoryBytes) {
