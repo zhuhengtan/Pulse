@@ -1,4 +1,4 @@
-import type { RuntimeEventInput, RuntimeState, RuntimeError, ContextVersion, JsonValue, LaneRecord, EffectRecord, WaitRecord, ResultRecord, ArtifactRecord, ContextDelta, LaneId, WaitId, EffectId, HistoryRecord, MergeProposal, ToolCallCorrelation, PrivacyMetadata } from './types.js'
+import type { RuntimeEventInput, RuntimeState, RuntimeError, ContextVersion, JsonValue, LaneRecord, EffectRecord, WaitRecord, ResultRecord, FindingRecord, ArtifactRecord, ContextDelta, LaneId, WaitId, EffectId, HistoryRecord, MergeProposal, ToolCallCorrelation, PrivacyMetadata } from './types.js'
 import { appendRuntimeEvent } from './events.js'
 
 export type Mutation =
@@ -9,6 +9,7 @@ export type Mutation =
   | { op: 'insertEffect'; record: EffectRecord }
   | { op: 'insertWait'; record: WaitRecord }
   | { op: 'publishResult'; record: ResultRecord }
+  | { op: 'publishFinding'; record: FindingRecord }
   | { op: 'publishArtifact'; record: ArtifactRecord }
   | { op: 'setToolCallCorrelation'; record: ToolCallCorrelation }
   | { op: 'insertMergeProposal'; proposal: MergeProposal }
@@ -32,6 +33,12 @@ export function apply(state: RuntimeState, mutations: Mutation[], defaults: { se
       case 'insertEffect': state.effects.set(mutation.record.id, mutation.record); break
       case 'insertWait': state.waits.set(mutation.record.id, mutation.record); break
       case 'publishResult': state.results.set(mutation.record.id, mutation.record); break
+      case 'publishFinding': {
+        state.results.set(mutation.record.id, mutation.record)
+        const match = /^finding-(\d+)$/.exec(mutation.record.id)
+        if (match) state.nextIds.result = Math.max(state.nextIds.result, Number(match[1]) + 1)
+        break
+      }
       case 'publishArtifact': {
         state.artifacts.set(mutation.record.ref, mutation.record)
         const match = /^artifact-(\d+)$/.exec(mutation.record.ref)

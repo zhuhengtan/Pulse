@@ -572,6 +572,12 @@ function requireMutations(): typeof import('../core/mutations.js') {
         case 'insertEffect': state.effects.set(mutation.record.id, mutation.record); break
         case 'insertWait': state.waits.set(mutation.record.id, mutation.record); break
         case 'publishResult': state.results.set(mutation.record.id, mutation.record); break
+        case 'publishFinding': {
+          state.results.set(mutation.record.id, mutation.record)
+          const match = /^finding-(\d+)$/.exec(mutation.record.id)
+          if (match) state.nextIds.result = Math.max(state.nextIds.result, Number(match[1]) + 1)
+          break
+        }
         case 'setGlobal': { const agent = state.agents.get(mutation.agentId)!; agent.globalVersions.set(mutation.version, mutation.value); if (mutation.metadata) { if (!agent.globalPrivacy) agent.globalPrivacy = new Map(); agent.globalPrivacy.set(mutation.version, structuredClone(mutation.metadata)) } agent.latestGlobalVersion = mutation.version; break }
         case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version, ...(mutation.history === undefined ? {} : { history: structuredClone(mutation.history) }), ...(mutation.metadata === undefined ? {} : structuredClone(mutation.metadata)) }; break }
         case 'appendEvent': appendRuntimeEvent(state, mutation.event); break

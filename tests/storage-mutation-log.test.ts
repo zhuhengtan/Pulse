@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, commitMutationTransaction, createAgent, createRuntimeState, MutationLog, prepareArtifactPublication } from '@pulse/runtime'
+import { apply, commitMutationTransaction, createAgent, createRuntimeState, MutationLog, prepareArtifactPublication, prepareFindingPublication } from '@pulse/runtime'
 
 describe('mutation log and replay', () => {
   it('records idempotent transactions and replays Map/Set-bearing mutations', () => {
@@ -50,6 +50,22 @@ describe('mutation log and replay', () => {
     log.replay(restored)
     expect(restored.artifacts.get(record.ref)).toMatchObject({ ref: record.ref, contentBase64: record.contentBase64, agentId: agent.id })
     expect(restored.nextIds.artifact).toBe(2)
+  })
+
+  it('replays Finding publication and advances the shared result sequence', () => {
+    const state = createRuntimeState()
+    const { agent, root } = createAgent(state, 'finding replay', { programId: 'p', programVersion: '1', step: 'start', locals: {} })
+    const artifact = prepareArtifactPublication(state, { mediaType: 'text/plain', content: 'evidence', laneId: root.id })
+    commitMutationTransaction(state, new MutationLog(), 'artifact-for-finding', [{ op: 'publishArtifact', record: artifact }])
+    const record = prepareFindingPublication(state, { statement: 'Evidence is available.', evidenceRefs: [{ kind: 'artifact', ref: artifact.ref }], laneId: root.id })
+    const log = new MutationLog()
+    commitMutationTransaction(state, log, 'finding-transaction', [{ op: 'publishFinding', record }])
+    const restored = createRuntimeState()
+    createAgent(restored, 'finding replay', { programId: 'p', programVersion: '1', step: 'start', locals: {} }, agent.id)
+    restored.artifacts.set(artifact.ref, artifact)
+    log.replay(restored)
+    expect(restored.results.get(record.id)).toMatchObject({ kind: 'finding', statement: record.statement, evidenceRefs: record.evidenceRefs })
+    expect(restored.nextIds.result).toBe(2)
   })
 
   it('truncates through a checkpoint watermark while preserving sequence continuity', () => {

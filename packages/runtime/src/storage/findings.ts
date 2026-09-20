@@ -18,7 +18,7 @@ function sourceVisible(state: RuntimeState, laneId: LaneId, ref: DataRef): boole
   return artifact !== undefined && (artifact.agentId === undefined || artifact.agentId === lane.agentId)
 }
 
-export function publishFinding(state: RuntimeState, publication: FindingPublication): FindingRecord {
+export function prepareFindingPublication(state: RuntimeState, publication: FindingPublication): FindingRecord {
   if (!publication.statement.trim() || publication.statement.length > 4096) throw new Error('INVALID_FINDING_STATEMENT')
   if (publication.evidenceRefs.length === 0) throw new Error('FINDING_REQUIRES_EVIDENCE')
   const taintError = validatePrivacyTaints(publication.privacyTaints)
@@ -33,7 +33,7 @@ export function publishFinding(state: RuntimeState, publication: FindingPublicat
   const privacy = strictestPrivacy([publication.privacy ?? 'public', ...sourcePrivacy])
   if (publication.privacy !== undefined && privacyRank(publication.privacy) < privacyRank(strictestPrivacy(sourcePrivacy))) throw new Error('PRIVACY_DOWNGRADE_WITHOUT_PROOF')
   const sourceTaints = privacyTaintsForDerivedRefs(state, lane, publication.evidenceRefs)
-  const ref = publication.ref ?? `finding-${state.nextIds.result++}`
+  const ref = publication.ref ?? `finding-${state.nextIds.result}`
   if (state.results.has(ref)) throw new Error('FINDING_REF_ALREADY_EXISTS')
   const record: FindingRecord = {
     id: ref,
@@ -47,6 +47,17 @@ export function publishFinding(state: RuntimeState, publication: FindingPublicat
     ...(sourceTaints.length || publication.privacyTaints?.length ? { privacyTaints: [...sourceTaints, ...(publication.privacyTaints ?? [])] } : {}),
     derivedFrom: structuredClone(publication.evidenceRefs),
   }
-  state.results.set(ref, record)
   return structuredClone(record)
+}
+
+export function publishFinding(state: RuntimeState, publication: FindingPublication): FindingRecord {
+  const record = prepareFindingPublication(state, publication)
+  state.results.set(record.id, record)
+  advanceFindingId(state, record.id)
+  return structuredClone(record)
+}
+
+export function advanceFindingId(state: RuntimeState, ref: string): void {
+  const match = /^finding-(\d+)$/.exec(ref)
+  if (match) state.nextIds.result = Math.max(state.nextIds.result, Number(match[1]) + 1)
 }

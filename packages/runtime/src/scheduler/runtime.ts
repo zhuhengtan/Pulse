@@ -20,6 +20,7 @@ import { validateJsonSchema } from '../models/router.js'
 import { SessionStoragePolicy, type StoragePolicyConfig } from '../storage/policy.js'
 import { collectRuntimeTelemetry, type RuntimeTelemetryExporter, type RuntimeTelemetrySnapshot } from './telemetry.js'
 import { advanceArtifactId, markArtifactPersisted, pinArtifact, prepareArtifactPublication, readArtifact, unpinArtifact, type ArtifactPublication } from '../storage/artifacts.js'
+import { prepareFindingPublication, type FindingPublication } from '../storage/findings.js'
 import { runtimeErrorFromCause } from '../core/errors.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number; observe?: (event: { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }) => void }
@@ -845,6 +846,14 @@ export class PulseRuntime {
   publishArtifact(publication: ArtifactPublication): import('../core/types.js').ArtifactRecord {
     const record = prepareArtifactPublication(this.state, publication)
     commitMutationTransaction(this.state, this.mutationLog, `artifact:${record.ref}`, [{ op: 'publishArtifact', record }], this.state.now, this.sessionId)
+    this.syncStoragePolicy()
+    this.schedulePersistence()
+    return record
+  }
+
+  publishFinding(publication: FindingPublication): import('../core/types.js').FindingRecord {
+    const record = prepareFindingPublication(this.state, publication)
+    commitMutationTransaction(this.state, this.mutationLog, `finding:${record.id}`, [{ op: 'publishFinding', record }], this.state.now, this.sessionId)
     this.syncStoragePolicy()
     this.schedulePersistence()
     return record
