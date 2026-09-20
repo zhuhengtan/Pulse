@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { once } from 'node:events'
 import { OpenAICompatibleAdapter } from '@pulse/adapters'
-import type { LLMRequestProjection } from '@pulse/runtime'
+import { PulseRuntime, type LaneProgram, type LLMRequestProjection } from '@pulse/runtime'
 
 const request: LLMRequestProjection = {
   contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'http@1', instruction: 'Reply with OK.', privacy: 'public', privacyRefs: [] },
@@ -66,6 +66,25 @@ describe('Provider HTTP integration', () => {
       expect(chunks).toEqual(['O', 'K'])
       expect(result.text).toBe('OK')
       expect(result.toolCalls[0]).toMatchObject({ name: 'read', input: { path: 'a' } })
+    } finally { await server.close() }
+  })
+
+  it('runs a registered loopback Provider through the complete Runtime model path', async () => {
+    let body: Record<string, unknown> | undefined
+    const server = await startServer(async (req, res) => {
+      body = await readBody(req)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { content: 'RUNTIME_OK' }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1 } }))
+    })
+    try {
+      const runtime = new PulseRuntime()
+      runtime.models.register({ id: 'loopback-model', providerId: 'loopback', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 1, adapter: new OpenAICompatibleAdapter('loopback', { provider: 'openai', apiKey: 'loopback-secret', baseURL: server.url, defaultModel: 'loopback-model' }) })
+      runtime.modelRouter.register({ task: 'reason', candidates: ['loopback-model'] })
+      const program: LaneProgram = { id: 'loopback-runtime', version: '1', step: ({ lane }) => lane.resume.step === 'start' ? { actions: [{ type: 'submit_effects', effects: [{ key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: 'loopback-runtime', programVersion: '1', step: 'finish', locals: {} } } : { actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'loopback-runtime', programVersion: '1', step: 'finish', locals: {} } } }
+      const { agentId } = runtime.createAgent('loopback runtime', program)
+      await expect(runtime.run(agentId)).resolves.toMatchObject({ status: 'succeeded' })
+      expect(body).toMatchObject({ model: 'loopback-model', messages: expect.any(Array) })
+      expect([...runtime.state.results.values()].some((result) => result.value && typeof result.value === 'object' && !Array.isArray(result.value) && result.value.text === 'RUNTIME_OK')).toBe(true)
     } finally { await server.close() }
   })
 })
