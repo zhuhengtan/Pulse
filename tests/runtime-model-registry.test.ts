@@ -66,9 +66,13 @@ describe('Runtime model registry and task routes', () => {
     runtime.models.register({ id: 'refusing', providerId: 'p1', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 2, adapter: { executeAttempt: async () => { calls.push('refusing'); return { text: '', refusal: 'no', toolCalls: [], finishReason: 'refusal' } } } })
     runtime.models.register({ id: 'fallback', providerId: 'p2', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 1, adapter: { executeAttempt: async () => { calls.push('fallback'); return { text: 'ok', toolCalls: [], finishReason: 'stop' } } } })
     runtime.modelRouter.register({ task: 'reason', candidates: ['refusing', 'fallback'] })
-    const effect = { id: 'effect-refusal', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request: projection }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as any
-    await expect((runtime as any).executor(effect, new AbortController().signal)).resolves.toMatchObject({ value: { text: 'ok' } })
+    const program: LaneProgram = { id: 'runtime-model-fallback', version: '1', step: ({ lane }) => lane.resume.step === 'start' ? { actions: [{ type: 'submit_effects', effects: [{ key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request: projection } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: 'runtime-model-fallback', programVersion: '1', step: 'finish', locals: {} } } : { actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'runtime-model-fallback', programVersion: '1', step: 'finish', locals: {} } } }
+    const { agentId } = runtime.createAgent('fallback', program)
+    await expect(runtime.start(agentId).outcome()).resolves.toMatchObject({ status: 'succeeded' })
     expect(calls).toEqual(['refusing', 'fallback'])
+    const effect = [...runtime.state.effects.values()].find((candidate) => candidate.key === 'reason')
+    expect(effect?.attempts).toHaveLength(2)
+    expect(effect?.attempts?.map((attempt) => attempt.modelId)).toEqual(['refusing', 'fallback'])
   })
 
   it('honors an explicit retry policy across registered model candidates', async () => {

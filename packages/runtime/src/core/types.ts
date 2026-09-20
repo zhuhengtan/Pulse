@@ -171,6 +171,8 @@ export interface EffectRecord {
 export interface AttemptRecord {
   id: string
   effectId: EffectId
+  modelId?: string
+  providerId?: string
   executionState: EffectRecord['executionState']
   sideEffectState: EffectRecord['sideEffectState']
   startedAt?: number

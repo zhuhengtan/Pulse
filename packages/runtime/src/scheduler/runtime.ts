@@ -653,39 +653,40 @@ export class PulseRuntime {
     }
     const candidates = this.modelRouter.routeProjection(task, projection, requirements)
     const routes = this.modelRouter.diagnostics(task, projection.privacy, requirements)
-    const attempts: JsonValue[] = []
-    let lastError: unknown
     const maxAttempts = effect.retryPolicy?.maxAttempts ?? candidates.length
-    for (const candidate of candidates.slice(0, Math.max(0, maxAttempts))) {
-      if (candidate.adapter === undefined) continue
-      const attemptId = `${effect.id}-attempt-${attempts.length + 1}`
-      const startedAt = Date.now()
-      try {
-        const result = validateAdapterResult(await candidate.adapter.executeAttempt({ request: projection, signal, model: candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof requirements.maxOutputTokens === 'number' ? { maxOutputTokens: requirements.maxOutputTokens } : {}), ...(emitObservation === undefined ? {} : { onObservation: (chunk: string) => emitObservation({ type: 'chunk', data: chunk }) }) }))
-        const usage = result.usage === undefined ? { latencyMs: Math.max(0, Date.now() - startedAt) } : { ...result.usage, latencyMs: result.usage.latencyMs ?? Math.max(0, Date.now() - startedAt) }
-        attempts.push({ attemptId, attemptNo: attempts.length + 1, modelId: candidate.id, providerId: candidate.providerId, usage })
-        if (result.finishReason === 'refusal') {
-          lastError = Object.assign(new Error(result.refusal ?? 'Model refused the request.'), { code: 'MODEL_REFUSAL' })
-          this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'refused', ...(result.usage === undefined ? {} : { usage: result.usage }) })
-          continue
-        }
-        if (result.finishReason === 'error') {
-          lastError = Object.assign(new Error('Model adapter returned an error result.'), { code: 'MODEL_ERROR' })
-          this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'failed', ...(result.usage === undefined ? {} : { usage: result.usage }) })
-          continue
-        }
-        const output = input.outputSchema === undefined ? result : result.structured ?? result.text
-        if (input.outputSchema !== undefined && !validateJsonSchema(output, input.outputSchema)) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Provider output did not match the declared schema.' }, metadata: { selected: { id: candidate.id, providerId: candidate.providerId }, routes: asJsonValue(routes), attempts } }
-        this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'succeeded', ...(result.usage === undefined ? {} : { usage: result.usage }) })
-        return { value: asJsonValue(output), privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: { selected: { id: candidate.id, providerId: candidate.providerId }, routes: asJsonValue(routes), attempts } }
-      } catch (cause) {
-        lastError = cause
-        attempts.push({ attemptId, attemptNo: attempts.length + 1, modelId: candidate.id, providerId: candidate.providerId, error: cause instanceof Error ? cause.message : String(cause) })
-        this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'failed' })
+    const attemptNo = effect.attemptNo
+    const candidate = candidates[attemptNo - 1]
+    const attemptId = effect.attemptId
+    const metadata = (attempt: JsonValue): JsonValue => ({ selected: { id: candidate?.id ?? null, providerId: candidate?.providerId ?? null }, routes: asJsonValue(routes), attempts: [attempt] })
+    const canFallback = candidate !== undefined && attemptNo < Math.max(0, maxAttempts) && candidates[attemptNo] !== undefined
+    if (candidate === undefined) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: candidates.length === 0 ? 'NO_ELIGIBLE_MODEL' : 'MODEL_ATTEMPT_LIMIT_REACHED', message: candidates.length === 0 ? 'No model candidate satisfies the task, privacy, capability, and context requirements.' : 'No additional routed model candidate is available for this Effect.' }, metadata: { routes: asJsonValue(routes), attempts: [] } }
+    const attemptBase = { attemptId, attemptNo, modelId: candidate.id, providerId: candidate.providerId }
+    if (candidate.adapter === undefined) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'MODEL_ADAPTER_NOT_BOUND', message: `No adapter is bound to routed model ${candidate.id}.`, ...(canFallback ? { retryable: true } : {}) }, metadata: metadata(attemptBase) }
+    const startedAt = Date.now()
+    try {
+      const result = validateAdapterResult(await candidate.adapter.executeAttempt({ request: projection, signal, model: candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof requirements.maxOutputTokens === 'number' ? { maxOutputTokens: requirements.maxOutputTokens } : {}), ...(emitObservation === undefined ? {} : { onObservation: (chunk: string) => emitObservation({ type: 'chunk', data: chunk }) }) }))
+      const usage = result.usage === undefined ? { latencyMs: Math.max(0, Date.now() - startedAt) } : { ...result.usage, latencyMs: result.usage.latencyMs ?? Math.max(0, Date.now() - startedAt) }
+      const attempt = { ...attemptBase, usage }
+      if (result.finishReason === 'refusal') {
+        this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'refused', ...(result.usage === undefined ? {} : { usage: result.usage }) })
+        return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'MODEL_REFUSAL', message: result.refusal ?? 'Model refused the request.', ...(canFallback ? { retryable: true } : {}) }, metadata: metadata(attempt) }
       }
+      if (result.finishReason === 'error') {
+        this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'failed', ...(result.usage === undefined ? {} : { usage: result.usage }) })
+        return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'MODEL_ERROR', message: 'Model adapter returned an error result.', ...(canFallback ? { retryable: true } : {}) }, metadata: metadata(attempt) }
+      }
+      const output = input.outputSchema === undefined ? result : result.structured ?? result.text
+      if (input.outputSchema !== undefined && !validateJsonSchema(output, input.outputSchema)) {
+        this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'schema_rejected', ...(result.usage === undefined ? {} : { usage: result.usage }) })
+        return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Provider output did not match the declared schema.', ...(canFallback ? { retryable: true } : {}) }, metadata: metadata(attempt), rejectedOutput: { value: asJsonValue(output), privacy: projection.privacy, derivedFrom: [...(effect.derivedFrom ?? [])] } }
+      }
+      this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'succeeded', ...(result.usage === undefined ? {} : { usage: result.usage }) })
+      return { value: asJsonValue(output), privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: metadata({ ...attempt, usage }) }
+    } catch (cause) {
+      this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'failed' })
+      const error = runtimeErrorFromCause(cause, 'MODEL_EXECUTION_FAILED')
+      return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { ...error, ...(canFallback && error.retryable !== false ? { retryable: true } : {}) }, metadata: metadata({ ...attemptBase, error: error.message }) }
     }
-    const error = lastError === undefined ? { code: candidates.length === 0 ? 'NO_ELIGIBLE_MODEL' : 'MODEL_ADAPTER_NOT_BOUND', message: candidates.length === 0 ? 'No model candidate satisfies the task, privacy, capability, and context requirements.' : 'No routed model candidate has a bound adapter.' } : runtimeErrorFromCause(lastError, 'MODEL_EXECUTION_FAILED')
-    return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error, metadata: { routes: asJsonValue(routes), attempts } }
   }
   private journalEffect(effect: EffectRecord, transactionId: string, result?: import('../core/types.js').ResultRecord, events: import('../core/types.js').RuntimeEvent[] = [], lane?: LaneRecord, correlation?: ToolCallCorrelation, artifact?: ArtifactRecord): void {
     const mutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: structuredClone(effect) }]
@@ -1178,6 +1179,16 @@ export class PulseRuntime {
     const attempt = effect.attempts?.at(-1)
     if (attempt) { attempt.executionState = effect.executionState; attempt.sideEffectState = effect.sideEffectState; if (effectiveExecution.executionRef !== undefined) attempt.sideEffectRef = structuredClone(effectiveExecution.executionRef); attempt.settledAt = this.state.now; if (outputError) attempt.error = outputError }
     const settledAttemptId = effect.attemptId
+    if (effect.kind === 'llm' && effect.retryPolicy === undefined && effectiveStatus === 'failed') {
+      const metadata = execution.metadata
+      const routes = metadata && typeof metadata === 'object' && !Array.isArray(metadata) && Array.isArray((metadata as Record<string, JsonValue>).routes) ? (metadata as Record<string, JsonValue>).routes as JsonValue[] : []
+      const eligible = routes.filter((route) => route && typeof route === 'object' && !Array.isArray(route) && (route as Record<string, JsonValue>).accepted === true).length
+      effect.retryPolicy = { maxAttempts: Math.max(1, eligible), initialBackoffMs: 0, maxBackoffMs: 0, jitter: false }
+    }
+    const attemptMetadata = execution.metadata && typeof execution.metadata === 'object' && !Array.isArray(execution.metadata) ? execution.metadata as Record<string, JsonValue> : undefined
+    const selectedModel = attemptMetadata?.selected && typeof attemptMetadata.selected === 'object' && !Array.isArray(attemptMetadata.selected) ? attemptMetadata.selected as Record<string, JsonValue> : undefined
+    if (attempt && typeof selectedModel?.id === 'string') attempt.modelId = selectedModel.id
+    if (attempt && typeof selectedModel?.providerId === 'string') attempt.providerId = selectedModel.providerId
     if (effectiveStatus === 'failed' && this.scheduleRetry(effect, outputError)) {
       Object.assign(storedEffect, effect)
       this.releaseEffectLocks(effectId)
