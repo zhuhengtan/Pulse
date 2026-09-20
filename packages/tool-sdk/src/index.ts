@@ -1,5 +1,8 @@
 import { z, type ZodTypeAny } from 'zod'
 import { createHash } from 'node:crypto'
+import { matchesJsonSchema } from './schema.js'
+
+export { matchesJsonSchema } from './schema.js'
 
 export const TOOL_SDK_VERSION = '0.1.0'
 export type ConcurrencyClass = 'llm' | 'tool' | 'agent' | 'none'
@@ -80,7 +83,11 @@ export class ToolRegistry {
   get(name: string): ToolDefinition<any, any> | undefined { return this.isAllowed(name) ? this.definitions.get(name) : undefined }
   validateInput(name: string, input: unknown): unknown {
     const definition = this.require(name)
-    try { return definition.validateInput ? definition.validateInput(input) : input }
+    try {
+      const parsed = definition.validateInput ? definition.validateInput(input) : input
+      if (!definition.validateInput && !matchesJsonSchema(parsed, definition.manifest.inputSchema)) throw new Error('schema mismatch')
+      return parsed
+    }
     catch { throw new ToolError('INVALID_TOOL_INPUT', `Input does not match the manifest for tool ${name}.`, { retryable: false }) }
   }
   isAllowed(name: string): boolean { return this.policy.deny.has(name) === false && (this.policy.allow === undefined || this.policy.allow.has(name)) }
@@ -115,6 +122,7 @@ export class ToolRegistry {
     const definition = this.require(name)
     const toolContext: ToolContext = 'aborted' in context ? { toolCallId: '', effectId: '', attemptId: '', agentId: '', laneId: '', signal: context, emit: () => {} } : context
     const output = await definition.execute(input, toolContext)
+    if (!matchesJsonSchema(output, definition.manifest.outputSchema)) throw new ToolError('TOOL_OUTPUT_SCHEMA_VIOLATION', `Output does not match the manifest for tool ${name}.`, { retryable: false })
     const summary = definition.summarize?.(output)
     if (summary !== undefined && Buffer.byteLength(JSON.stringify(summary), 'utf8') > (definition.manifest.maxResultSummaryBytes ?? 4096)) throw new Error('TOOL_SUMMARY_TOO_LARGE')
     const normalized = definition.normalize?.(output)

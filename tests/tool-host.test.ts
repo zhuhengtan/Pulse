@@ -167,6 +167,15 @@ describe('Tool SDK to Runtime Effect host', () => {
     expect(runtime.state.effects.size).toBe(0)
   })
 
+  it('enforces JSON Schema for low-level manifest tools as well as defineTool tools', async () => {
+    const registry = new ToolRegistry()
+    registry.register({ manifest: { name: 'manual', version: '1', description: 'manual schema', inputSchema: { type: 'object', required: ['value'], properties: { value: { type: 'integer', minimum: 1 } }, additionalProperties: false }, outputSchema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } }, additionalProperties: false }, concurrencyClass: 'tool', locks: [], supportsAbortSignal: true, sideEffectPolicy: 'none', retrySafety: 'read_only', defaultTimeoutMs: 1000 }, execute: () => ({ ok: 'yes' }) })
+    expect(() => registry.admission('manual', { value: 0 })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_INPUT' }))
+    const executor = createToolEffectExecutor(registry)
+    const effect = { id: 'manual-effect', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'manual', kind: 'tool', concurrencyClass: 'tool', input: { name: 'manual', arguments: { value: 1 } }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as EffectRecord
+    await expect(executor(effect, new AbortController().signal)).rejects.toThrowError(expect.objectContaining({ code: 'TOOL_OUTPUT_SCHEMA_VIOLATION' }))
+  })
+
   it('compiles dynamic tool discovery into a versioned Context ToolSet', async () => {
     const registry = new ToolRegistry()
     registry.register(defineTool({ name: 'read-file', description: 'read a file', tags: ['filesystem', 'read'], input: z.object({ path: z.string() }), output: z.object({ text: z.string() }), execute: () => ({ text: '' }) }))
