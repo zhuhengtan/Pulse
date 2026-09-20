@@ -2,7 +2,7 @@ import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.
 import { buildAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
-import type { ArtifactRecord, EffectRecord, EffectSubmission, EffectState, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata, ProvenanceRef } from '../core/types.js'
+import type { ArtifactRecord, EffectRecord, EffectSubmission, EffectState, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, RuntimeEventInput, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata, ProvenanceRef } from '../core/types.js'
 import { createRuntimeState, effectivePrivacy, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, provenanceRefId, provenanceRefKind, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
@@ -1166,12 +1166,55 @@ export class PulseRuntime {
     const targetAgentSet = new Set(targetAgentIds)
     const targetLanes = [...this.state.lanes.values()].filter((lane) => targetAgentSet.has(lane.agentId) && !['succeeded', 'failed', 'cancelled'].includes(lane.status))
     const targetEffects = [...this.state.effects.values()].filter((effect) => targetAgentSet.has(effect.agentId) && !effect.outcome)
-    const cancellationEvents: import('../core/types.js').RuntimeEventInput[] = [
+    const cancellableEffects = targetEffects.filter((effect) => effect.childAgentId === undefined || this.state.agents.get(effect.childAgentId)?.detached !== true)
+    const cancellationEvents: RuntimeEventInput[] = [
       ...targetLanes.map((lane) => ({ type: 'lane.cancelling', laneId: lane.id, data: reason })),
-      ...targetEffects.filter((effect) => effect.childAgentId === undefined || this.state.agents.get(effect.childAgentId)?.detached !== true).map((effect) => ({ type: 'effect.cancel_requested', effectId: effect.id, data: { reason } })),
+      ...cancellableEffects.map((effect) => ({ type: 'effect.cancel_requested', effectId: effect.id, data: { reason } })),
+      ...cancellableEffects.flatMap((effect) => {
+        if (this.executions.has(effect.id) && (effect.cancelGraceMs ?? 0) === 0) {
+          const state = effect.sideEffectPolicy === 'write' ? 'reconcile_required' : 'cancelled'
+          return [{ type: 'effect.quarantined' as const, effectId: effect.id, data: { reason, state } }]
+        }
+        if (!this.executions.has(effect.id)) return [{ type: 'effect.settled', effectId: effect.id, data: { status: 'cancelled', error: { code: 'CANCELLED', message: reason } } }]
+        return [] as RuntimeEventInput[]
+      }),
       ...targetAgentIds.map((targetId) => ({ type: 'agent.cancelled', agentId: targetId, data: reason })),
     ]
-    this.assertStorageAdmission(cancellationEvents.map((event) => ({ op: 'appendEvent' as const, event })))
+    const cancellationPreflight: Mutation[] = [
+      ...additionalMutations.map((mutation) => structuredClone(mutation)),
+      ...cancellationEvents.map((event) => ({ op: 'appendEvent' as const, event })),
+      ...targetAgentIds.flatMap((targetId) => {
+        const current = this.state.agents.get(targetId)
+        if (!current) return []
+        const candidate = structuredClone(current)
+        candidate.state = 'cancelled'
+        return [{ op: 'setAgent' as const, agentId: targetId, record: candidate }]
+      }),
+      ...targetLanes.flatMap((lane) => {
+        const candidate = structuredClone(lane)
+        candidate.status = 'cancelled'
+        candidate.version++
+        candidate.unresolvedEffectIds = [...new Set([...(candidate.unresolvedEffectIds ?? []), ...cancellableEffects.filter((effect) => effect.ownerLaneId === lane.id && effect.sideEffectPolicy === 'write').map((effect) => effect.id)])]
+        return [{ op: 'setLane' as const, laneId: lane.id, record: candidate }]
+      }),
+      ...cancellableEffects.flatMap((effect) => {
+        const candidate = structuredClone(effect)
+        candidate.cancelRequested = { reason, at: this.state.now }
+        if (this.executions.has(effect.id) && (effect.cancelGraceMs ?? 0) === 0) {
+          candidate.executionState = 'remote_unknown'
+          candidate.sideEffectState = candidate.sideEffectPolicy === 'write' ? 'unknown' : 'none'
+          candidate.state = candidate.sideEffectState === 'unknown' ? 'reconcile_required' : 'cancelled'
+          if (candidate.state === 'cancelled') candidate.outcome = { status: 'cancelled', error: { code: reason, message: reason } }
+        } else if (!this.executions.has(effect.id)) {
+          candidate.state = 'cancelled'
+          candidate.executionState = 'failed'
+          candidate.sideEffectState = 'none'
+          candidate.outcome = { status: 'cancelled', error: { code: 'CANCELLED', message: reason } }
+        }
+        return [{ op: 'setEffect' as const, effectId: effect.id, record: candidate }]
+      }),
+    ]
+    this.assertStorageAdmission(cancellationPreflight)
     let commandApplied = additionalMutations.length === 0
     for (const [index, targetId] of targetAgentIds.entries()) {
       const committed = this.commitAgentState(targetId, 'cancelling', index === 0 && commandTransactionId ? commandTransactionId : `agent:${targetId}:cancelling:${this.state.now}`, index === 0 ? additionalMutations : [])
@@ -1194,8 +1237,7 @@ export class PulseRuntime {
       this.requestEffectCancellation(effect.id, reason, effect.cancelGraceMs ?? 0)
     }
     for (const targetId of targetAgentIds) {
-      this.commitAgentState(targetId, 'cancelled', `agent:${targetId}:cancelled:${this.state.now}`)
-      this.emit({ type: 'agent.cancelled', agentId: targetId, data: reason })
+      this.commitAgentState(targetId, 'cancelled', `agent:${targetId}:cancelled:${this.state.now}`, [{ op: 'appendEvent', event: { type: 'agent.cancelled', agentId: targetId, data: reason } }])
     }
     this.schedulePersistence()
     return commandApplied

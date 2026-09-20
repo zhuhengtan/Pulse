@@ -97,6 +97,32 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.events).toHaveLength(eventCount)
   })
 
+  it('pre-admits the complete Agent cancellation cascade before mutating any target', () => {
+    const build = () => {
+      const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 1_000_000 }, effectExecutor: async () => await new Promise(() => undefined) })
+      const program: LaneProgram = { id: 'cancel-cascade-admission', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+        ? { actions: [{ type: 'submit_effects', effects: [{ key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, sideEffectPolicy: 'write' }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('cancel-cascade-admission', 'finish') }
+        : { actions: [{ type: 'complete', result: { ok: true } }], next: point('cancel-cascade-admission', 'finish') } }
+      const { agentId, laneId } = runtime.createAgent('cancel cascade', program)
+      runtime.tick()
+      return { runtime, agentId, laneId }
+    }
+    const probe = build()
+    const beforeBytes = probe.runtime.storagePolicy.snapshot().records.filter((record) => record.kind === 'event').reduce((total, record) => total + record.bytes, 0)
+    probe.runtime.cancelAgent(probe.agentId)
+    const cancellationBytes = probe.runtime.storagePolicy.snapshot().records.filter((record) => record.kind === 'event').reduce((total, record) => total + record.bytes, 0) - beforeBytes
+
+    const candidate = build()
+    ;(candidate.runtime.storagePolicy as any).limits.maxEventLogBytes = beforeBytes + cancellationBytes - 1
+    const beforeEvents = candidate.runtime.state.events.length
+    const beforeLaneStatus = candidate.runtime.state.lanes.get(candidate.laneId)?.status
+    expect(() => candidate.runtime.cancelAgent(candidate.agentId)).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect(candidate.runtime.state.agents.get(candidate.agentId)?.state).toBe('running')
+    expect(candidate.runtime.state.lanes.get(candidate.laneId)?.status).toBe(beforeLaneStatus)
+    expect(candidate.runtime.state.effects.get('effect-1')).toMatchObject({ state: 'running', executionState: 'running' })
+    expect(candidate.runtime.state.events).toHaveLength(beforeEvents)
+  })
+
   it('rejects remote-unknown admission before mutating the Effect or quarantine', () => {
     const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 1 } })
     const { agentId, laneId } = runtime.createAgent('remote unknown admission', { id: 'remote-unknown-admission', version: '1', step: () => ({ actions: [], next: point('remote-unknown-admission', 'done') }) })
