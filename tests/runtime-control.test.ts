@@ -255,6 +255,25 @@ describe('runtime control boundaries', () => {
     expect(transaction?.mutations.map((mutation) => mutation.op)).toEqual(['setLane', 'appendEvent'])
   })
 
+  it('consumes control-error input and resets watchdog fields in the next Step transaction', () => {
+    const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
+    const program: LaneProgram = { id: 'consume-control-error', version: '1', step: ({ resumeInput }) => resumeInput?.type === 'control_error'
+      ? { actions: [{ type: 'complete', result: { recovered: true } }], next: point('consume-control-error', 'done') }
+      : { actions: [{ type: 'submit_effects', effects: [{ key: 'bad', kind: 'tool', concurrencyClass: 'tool', input: {}, locks: [{ resource: 'same', mode: 'shared' }, { resource: 'same', mode: 'exclusive' }] }] }], next: point('consume-control-error', 'retry') } }
+    const { laneId } = runtime.createAgent('consume control error', program)
+    runtime.tick()
+    const lane = runtime.state.lanes.get(laneId)!
+    expect(lane.pendingResumeInput?.type).toBe('control_error')
+    runtime.tick()
+    const recoveredLane = runtime.state.lanes.get(laneId)!
+    expect(recoveredLane.pendingResumeInput).toBeUndefined()
+    expect(recoveredLane.consecutiveControlErrors).toBeUndefined()
+    expect(recoveredLane.status).toBe('succeeded')
+    const transaction = runtime.mutationLog.entries.find((entry) => entry.transactionId === `step:${laneId}:2`)
+    const committedLane = transaction?.mutations.find((mutation) => mutation.op === 'setLane' && mutation.laneId === laneId)
+    expect(committedLane && committedLane.op === 'setLane' ? committedLane.record.pendingResumeInput : undefined).toBeUndefined()
+  })
+
   it('rebuilds ready work after persistence recovery', async () => {
     const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { ok: true } }) })
     const program: LaneProgram = { id: 'recover-ready', version: '1', step: ({ lane }) => lane.resume.step === 'start'

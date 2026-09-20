@@ -562,12 +562,13 @@ export class PulseRuntime {
       const lane = this.state.lanes.get(laneId)
       if (!lane || lane.status !== 'ready') continue
       const currentPressure = historyPressure(lane.context.history, this.state.historySoftTokens, this.state.historyHardTokens)
-      if (currentPressure) lane.historyPressure = currentPressure
-      else delete lane.historyPressure
+      const stepLane = structuredClone(lane)
+      if (currentPressure) stepLane.historyPressure = currentPressure
+      else delete stepLane.historyPressure
       const program = this.programs.get(`${lane.resume.programId}@${lane.resume.programVersion}`)
       if (!program) { this.failLane(lane, { code: 'PROGRAM_NOT_REGISTERED', message: `${lane.resume.programId}@${lane.resume.programVersion}` }); continue }
       let output: LaneStepOutput
-      const stepContext: LaneStepContext = { lane: structuredClone(lane), state: structuredClone(this.state), ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), now: this.state.now, observe: (event) => { this.observationInbox.enqueue({ ...event, agentId: lane.agentId, laneId: lane.id, timestamp: this.state.now }) } }
+      const stepContext: LaneStepContext = { lane: stepLane, state: structuredClone(this.state), ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), now: this.state.now, observe: (event) => { this.observationInbox.enqueue({ ...event, agentId: lane.agentId, laneId: lane.id, timestamp: this.state.now }) } }
       try { output = lane.series || program.seriesMember ? this.seriesStep(program, stepContext, lane.series) : program.step(stepContext) }
       catch (cause) {
         const failure: RuntimeError = { code: 'STEP_FAILED', message: cause instanceof Error ? cause.message : String(cause) }
@@ -602,23 +603,28 @@ export class PulseRuntime {
           }
           watchdogObservation = observation
         }
-        try { this.assertStorageAdmission(result.mutations) }
+        const watchdog = watchdogObservation ?? observeProgress(lane, preparedOutput, this.state, lane.progressWatchdog, { noProgressThreshold: this.watchdogNoProgressThreshold, repeatedActionThreshold: this.watchdogRepeatedActionThreshold })
+        const stepMutations = result.mutations.map((mutation) => {
+          if (mutation.op !== 'setLane' || mutation.laneId !== lane.id) return mutation
+          const nextLane = structuredClone(mutation.record)
+          delete nextLane.consecutiveControlErrors
+          delete nextLane.pendingResumeInput
+          nextLane.progressWatchdog = watchdog.state
+          return { ...mutation, record: nextLane }
+        })
+        if (!watchdog.progressed) stepMutations.push({ op: 'appendEvent', event: { type: watchdog.state.interventionLevel >= 3 ? 'progress.no_progress_detected' : 'progress.intervention_applied', laneId: lane.id, data: { noProgressCount: watchdog.state.noProgressCount, interventionLevel: watchdog.state.interventionLevel } } })
+        try { this.assertStorageAdmission(stepMutations) }
         catch (cause) {
           const storageError: RuntimeError = { code: 'SESSION_STORAGE_LIMIT_EXCEEDED', message: cause instanceof Error ? cause.message : String(cause) }
           this.failLane(lane, storageError)
           progressed++
           continue
         }
-        commitMutationTransaction(this.state, this.mutationLog, `step:${lane.id}:${lane.version + 1}`, result.mutations, this.state.now, this.sessionId)
-        for (const mutation of result.mutations) if (mutation.op === 'insertEffect') this.outbox.enqueue(mutation.record, this.state.now)
-        for (const mutation of result.mutations) if (mutation.op === 'insertWait') this.scheduleWaitDeadline(mutation.record)
+        commitMutationTransaction(this.state, this.mutationLog, `step:${lane.id}:${lane.version + 1}`, stepMutations, this.state.now, this.sessionId)
+        for (const mutation of stepMutations) if (mutation.op === 'insertEffect') this.outbox.enqueue(mutation.record, this.state.now)
+        for (const mutation of stepMutations) if (mutation.op === 'insertWait') this.scheduleWaitDeadline(mutation.record)
         const updated = this.state.lanes.get(lane.id)
-        if (updated) delete updated.consecutiveControlErrors
-        if (updated && updated.pendingResumeInput) delete updated.pendingResumeInput
         if (updated) {
-          const watchdog = watchdogObservation ?? observeProgress(lane, preparedOutput, this.state, lane.progressWatchdog, { noProgressThreshold: this.watchdogNoProgressThreshold, repeatedActionThreshold: this.watchdogRepeatedActionThreshold })
-          updated.progressWatchdog = watchdog.state
-          if (!watchdog.progressed) this.emit({ type: watchdog.state.interventionLevel >= 3 ? 'progress.no_progress_detected' : 'progress.intervention_applied', laneId: lane.id, data: { noProgressCount: watchdog.state.noProgressCount, interventionLevel: watchdog.state.interventionLevel } })
           if (watchdog.state.interventionLevel >= 3 && !['succeeded', 'failed', 'cancelled'].includes(updated.status)) this.failLane(updated, { code: 'NO_PROGRESS_DETECTED', message: 'Lane made no observable progress within the watchdog threshold.' })
         }
         if (updated?.status === 'ready') this.enqueueLane(updated.id)
