@@ -720,6 +720,8 @@ export async function hydrateRuntimeResultBodies(snapshot: RuntimePersistenceSna
       result.value = value
     }
   }
+  copy.resultBodies = 'inline'
+  delete copy.externalResultRefs
   delete copy.integrity
   return withRuntimePersistenceIntegrity(copy)
 }

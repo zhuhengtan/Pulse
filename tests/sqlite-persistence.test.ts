@@ -26,7 +26,7 @@ describe('SQLite runtime persistence backend', () => {
     const snapshot = await backend.load()
     expect(snapshot?.integrity?.digest).toMatch(/^[a-f0-9]{64}$/)
 
-    const restored = await PulseRuntime.restore(backend, { programs: [program] })
+    const restored = await PulseRuntime.restore(backend, { persistenceBackend: backend, programs: [program] })
     await expect(restored.start(agentId).outcome()).resolves.toMatchObject({ status: 'succeeded' })
     await backend.close()
   })
@@ -68,7 +68,7 @@ describe('SQLite runtime persistence backend', () => {
     expect(snapshot.snapshotBodies).toBe('external')
     expect(snapshot.eventArchive).toMatchObject({ through: expect.any(Number) })
     expect(await backend.eventArchive.read(1)).not.toHaveLength(0)
-    const restored = await PulseRuntime.restore(backend, { programs: [program] })
+    const restored = await PulseRuntime.restore(backend, { persistenceBackend: backend, programs: [program] })
     expect([...restored.state.results.values()].some((result) => result.value && typeof result.value === 'object' && !Array.isArray(result.value) && result.value.durable === true)).toBe(true)
     await backend.close()
   })

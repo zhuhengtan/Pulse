@@ -77,6 +77,8 @@ export interface RuntimeConfig {
   effectSubmissionPreparer?: (submission: EffectSubmission) => EffectSubmission
   telemetryExporter?: RuntimeTelemetryExporter
   persistenceBackend?: RuntimePersistenceBackend
+  /** Internal restore CAS baseline; differs from the hydrated envelope digest. */
+  persistenceExpectedDigest?: string
   budget?: RuntimeBudgetConfig
 }
 
@@ -182,7 +184,7 @@ export class PulseRuntime {
     const withSnapshots = loaded === undefined || backend.snapshotStore === undefined ? loaded : await hydrateRuntimeSnapshotBodies(loaded, backend.snapshotStore)
     const snapshot = withSnapshots === undefined || backend.resultStore === undefined ? withSnapshots : await hydrateRuntimeResultBodies(withSnapshots, backend.resultStore)
     if (snapshot?.resultBodies === 'external' && backend.resultStore === undefined) throw new Error('RUNTIME_RESULT_STORE_REQUIRED')
-    return new PulseRuntime(snapshot === undefined ? config : { ...config, persistence: snapshot })
+    return new PulseRuntime(snapshot === undefined ? config : { ...config, persistence: snapshot, ...(config.persistenceBackend === undefined || loaded?.integrity?.digest === undefined ? {} : { persistenceExpectedDigest: loaded.integrity.digest }) })
   }
 
   constructor(config: RuntimeConfig = {}) {
@@ -195,7 +197,7 @@ export class PulseRuntime {
     if (config.trustedSanitizerIds) for (const sanitizerId of config.trustedSanitizerIds) this.state.trustedSanitizerIds.add(sanitizerId)
     this.sessionId = config.sessionId ?? 'session-local'
     this.storagePolicy = restored?.storagePolicy ?? new SessionStoragePolicy(config.storagePolicy)
-    this.persistenceDigest = config.persistence?.integrity?.digest
+    this.persistenceDigest = config.persistenceExpectedDigest ?? config.persistence?.integrity?.digest
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
     this.factInbox = restored?.factInbox === undefined ? new FactInbox<HostCommand>() : FactInbox.fromSnapshot<HostCommand>(restored.factInbox as unknown as import('../core/inbox.js').FactInboxSnapshot<HostCommand>)
