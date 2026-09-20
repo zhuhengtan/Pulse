@@ -38,4 +38,20 @@ describe('history pressure and compaction', () => {
     expect(summarize.next.step).toBe('$compact:apply')
     expect(summarize.actions[0]).toMatchObject({ type: 'submit_effects', effects: [{ key: '$compact-summary', input: { task: 'summarize', upToSeq: 3 } }] })
   })
+
+  it('fails the compaction step when the summary Effect fails', () => {
+    const program = defineLaneProgram({ id: 'history', version: '1', historyCompaction: { summarizeTask: 'summarize', keepRecentRounds: 1 } }, (builder) => {
+      builder.addStep('work', () => ({ actions: [], next: 'work' }))
+    })
+    const state = createRuntimeState()
+    const { root } = createAgent(state, 'history', point('work'))
+    const lane = { ...root, resume: { ...root.resume, step: '$compact:apply', locals: { $sdk: { compactReturnStep: 'work', compactUpToSeq: 3 } } } }
+    const resumeInput = { type: 'wait' as const, resolution: { waitId: 'wait-1', status: 'satisfied' as const, dependencies: { summary: { state: 'settled' as const, target: { kind: 'effect' as const, id: 'effect-1' }, outcome: { status: 'failed' as const, error: { code: 'SUMMARY_FAILED', message: 'summary provider failed' } } } } } }
+    try {
+      program.step({ lane, state, now: 0, resumeInput })
+      throw new Error('expected compaction to fail')
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'SUMMARY_FAILED' })
+    }
+  })
 })

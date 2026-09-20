@@ -492,7 +492,13 @@ export class StepBuilder<TState = JsonValue> {
       })
       this.handlers.set(compactApply, (ctx) => {
         const sdk = sdkLocals(ctx.lane.resume.locals)
-        const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).find((item) => item.state === 'settled') : undefined
+        const resolution = ctx.resumeInput?.type === 'wait' ? ctx.resumeInput.resolution : undefined
+        const dependency = resolution ? Object.values(resolution.dependencies).find((item) => item.state === 'settled') : undefined
+        const runtimeError = dependency?.state === 'settled' ? dependency.outcome.error : undefined
+        if (runtimeError || resolution?.status !== 'satisfied') {
+          const error = runtimeError ?? resolution?.error ?? { code: 'HISTORY_COMPACTION_FAILED', message: 'History compaction did not produce a summary.', retryable: false }
+          throw Object.assign(new Error(error.message), error)
+        }
         const summaryRef = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined
         const returnStep = typeof sdk.compactReturnStep === 'string' ? sdk.compactReturnStep : entry
         const upToSeq = typeof sdk.compactUpToSeq === 'number' ? sdk.compactUpToSeq : undefined
