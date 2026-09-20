@@ -51,7 +51,7 @@
 | Provider 请求与 usage | modelId、工具 schema、structured output schema、uncached token、latency/cost 归一化与 metadata | `tests/m3-context-adapters.test.ts`、`tests/provider-host.test.ts` | `fa723c7` |
 | 自适应模型路由 | `AdaptiveModelRouter` 基于质量、延迟、价格、缓存和探索项重排合规候选；Provider Executor 自动记录 Attempt 反馈，并支持经过校验的 snapshot/restore | `tests/adaptive-routing.test.ts`、`tests/provider-host.test.ts` | `0d17d7c`、`4c65d38` |
 | DSL Draft 数组语义与运行诊断 | `push→append`、数组索引/splice/sort→整数组 set；explain 补充队列、等待、watchdog、preparation、execution metadata | `tests/dsl-context.test.ts`、`tests/runtime-control.test.ts` | `d5c6ef2`、`f57ae27` |
-| Mutation 事务预检 | clone 预检失败不写日志、不改变运行时；提交时保留 Lane/Effect 对象身份 | `tests/storage-mutation-log.test.ts` | `70c3534` |
+| Mutation 事务预检 | clone 预检失败不写日志、不改变运行时；提交时保留 Lane/Effect 对象身份；日志预备失败不消耗序号，状态 apply 与日志提交分层 | `tests/storage-mutation-log.test.ts` | `70c3534`、`6c89fe2` |
 | Tool Schema 与 Provider 上限 | 不支持的 Zod 类型构建时 fail-closed；Anthropic `maxOutputTokens` 不再写死 | `tests/m3-context-adapters.test.ts` | `e21907a` |
 | 持久化恢复边界 | `persisted` 驻留状态、backend restore、在途写副作用 quarantine、journal event `txId` 一致 | `tests/storage-policy.test.ts`、`tests/storage-outbox.test.ts` | `00d49f6`、`f7ba385`、`9b22fd3`、`c0e87f6` |
 | Result residency 元数据 | ResultRecord 保留 `storageState/pinCount`，并与 StoragePolicy 的 pin/持久化确认同步；residency 元数据不参与正文哈希 | `tests/storage-policy.test.ts` | 本轮 Result residency 提交 |
@@ -555,6 +555,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `02c0162`：Session `reply()`/`cancel()` 统一为真实 Promise API，非法 reason、跨 Agent Effect 和入队准入异常均以 reject 交付 Host。
 - `e29d501`：FactInbox 改为逐条处理，命令事务失败时恢复当前 Fact；重复重试不会再次写入同一 `command.enqueued` 镜像事件。
 - `6e1d295`：补充 Host Fact 存储拒绝后的恢复重试回归，验证命令最终应用且 `command.enqueued` 镜像保持幂等。
+- `6c89fe2`：MutationLog 增加 prepare/commit 分层；不可克隆 Mutation 的失败不会消耗日志序号，Runtime 状态 apply 使用独立副本，避免状态记录与日志共享可变引用。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
@@ -564,7 +565,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npx tsc -b --pretty false && npm test`，49 个测试文件、284 个测试通过；`npm run build` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，49 个测试文件、286 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
