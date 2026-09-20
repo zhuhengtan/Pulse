@@ -92,7 +92,7 @@ export interface LaneRecord {
   enqueueSeq: number
   readySince: number
   ownedEffectIds: Set<EffectId>
-  closingResult?: { value: JsonValue; privacy: PrivacyLabel }
+  closingResult?: { value: JsonValue; privacy: PrivacyLabel; derivedFrom?: ResultRef[] }
   resultRef?: ResultRef
   consecutiveControlErrors?: number
   pendingOutcome?: Outcome

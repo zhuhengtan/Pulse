@@ -343,10 +343,14 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
     } else if (action.type === 'complete') {
       const activeChildren = [...lane.children].some((childId) => !['succeeded', 'failed', 'cancelled'].includes(state.lanes.get(childId)?.status ?? 'cancelled'))
       if (activeChildren && (action.children ?? 'reject_if_active') === 'reject_if_active') return { rejection: error('CHILDREN_STILL_ACTIVE', 'complete requires an explicit child join or cancellation') }
+      const derived = derivedPrivacy(state, action.derivedFrom ?? [])
+      if (derived.error) return { rejection: error(derived.error, 'Result provenance references an unknown result') }
+      if (action.privacy !== undefined && derived.privacy !== undefined && privacyRank(action.privacy) < privacyRank(derived.privacy)) return { rejection: error('PRIVACY_DOWNGRADE_WITHOUT_PROOF', 'Result privacy cannot be broader than its sources') }
+      const privacy = strictestPrivacy([derived.privacy ?? 'public', action.privacy ?? 'public'])
       if (activeChildren && action.children === 'await') {
         const dependencies = [...lane.children].filter((childId) => !['succeeded', 'failed', 'cancelled'].includes(state.lanes.get(childId)?.status ?? 'cancelled')).map((childId) => ({ key: childId, target: { kind: 'lane' as const, id: childId }, condition: 'settled' as const }))
         if (hasDependencyCycle(state, dependencies.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: dependency.target, kind: 'wait' as const })))) return { rejection: error('DEPENDENCY_CYCLE', 'closing wait would create a dependency cycle') }
-        workingLane.closingResult = { value: clone(action.result), privacy: action.privacy ?? 'public' }
+        workingLane.closingResult = { value: clone(action.result), privacy, ...(action.derivedFrom === undefined ? {} : { derivedFrom: [...action.derivedFrom] }) }
         addWait(state, workingLane, { dependencies, mode: 'all', onUnsatisfied: 'resume_with_error', reason: 'join' }, new Map(dependencies.map((dependency) => [dependency.key, dependency.target] as const)), mutations, `wait-${waitCounter++}`)
         workingLane.status = 'waiting'
         mutations.push({ op: 'setLane', laneId: lane.id, record: { ...workingLane, version: lane.version + 1 } })
@@ -360,10 +364,6 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         }
       }
       const resultId = `result-${resultCounter++}`
-      const derived = derivedPrivacy(state, action.derivedFrom ?? [])
-      if (derived.error) return { rejection: error(derived.error, 'Result provenance references an unknown result') }
-      if (action.privacy !== undefined && derived.privacy !== undefined && privacyRank(action.privacy) < privacyRank(derived.privacy)) return { rejection: error('PRIVACY_DOWNGRADE_WITHOUT_PROOF', 'Result privacy cannot be broader than its sources') }
-      const privacy = strictestPrivacy([derived.privacy ?? 'public', action.privacy ?? 'public'])
       mutations.push({ op: 'publishResult', record: { id: resultId, value: clone(action.result), privacy, derivedFrom: [...(action.derivedFrom ?? [])] } })
       workingLane.status = 'succeeded'
       workingLane.resultRef = resultId

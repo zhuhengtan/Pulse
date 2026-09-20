@@ -653,7 +653,7 @@ export class PulseRuntime {
             delete lane.activeWaitId
             if (lane.closingResult) {
               const resultId = `result-${this.state.nextIds.result++}`
-              this.state.results.set(resultId, { id: resultId, value: lane.closingResult.value, privacy: lane.closingResult.privacy, derivedFrom: [] })
+              this.state.results.set(resultId, { id: resultId, value: lane.closingResult.value, privacy: lane.closingResult.privacy, derivedFrom: [...(lane.closingResult.derivedFrom ?? [])] })
               lane.status = 'succeeded'; lane.resultRef = resultId; delete lane.closingResult
               this.emit({ type: 'lane.succeeded', laneId: lane.id, data: resultId })
             } else { lane.status = 'ready'; lane.pendingResumeInput = { type: 'wait', resolution: wait.resolution }; this.enqueueLane(lane.id) }

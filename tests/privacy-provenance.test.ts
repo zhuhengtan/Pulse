@@ -39,4 +39,16 @@ describe('result privacy provenance', () => {
     expect((await effectRuntime.start(effectAgent.agentId).outcome()).status).toBe('succeeded')
     expect([...effectRuntime.state.results.values()].find((result) => result.effectId === 'effect-1')).toMatchObject({ privacy: 'local_only', derivedFrom: ['source'] })
   })
+
+  it('keeps provenance while a parent waits for children to finish', () => {
+    const state = createRuntimeState()
+    const { root } = createAgent(state, 'closing', { programId: 'p', programVersion: '1', step: 'start', locals: {} })
+    const fork = validateStep(state, root.id, { actions: [{ type: 'fork', lanes: [{ key: 'child', goal: 'child', program: { programId: 'p', programVersion: '1', step: 'start', locals: {} } }] }], next: { programId: 'p', programVersion: '1', step: 'wait', locals: {} } })
+    expect('rejection' in fork).toBe(false)
+    if (!('rejection' in fork)) apply(state, fork.mutations)
+    state.results.set('source', { id: 'source', value: {}, privacy: 'local_only', derivedFrom: [] })
+    const closing = validateStep(state, root.id, { actions: [{ type: 'complete', result: { done: true }, derivedFrom: ['source'], children: 'await' }], next: { programId: 'p', programVersion: '1', step: 'wait', locals: {} } })
+    expect('rejection' in closing).toBe(false)
+    if (!('rejection' in closing)) expect(closing.mutations.find((mutation) => mutation.op === 'setLane' && mutation.laneId === root.id)).toMatchObject({ record: { closingResult: { privacy: 'local_only', derivedFrom: ['source'] } } })
+  })
 })
