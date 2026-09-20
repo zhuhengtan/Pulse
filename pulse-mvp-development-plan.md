@@ -105,6 +105,7 @@
 | 结构化 DataRef / PrivacyRef | Result/Artifact/Effect/ContextDelta/Action provenance 支持结构化 `DataRef`；LLM 投影对 Result/Artifact 隐私来源保留 `{ kind, ref }` | `tests/artifacts.test.ts`、`tests/privacy-provenance.test.ts` | `616f23e`、`e519ab5` |
 | Step 纯度注册门禁 | Runtime 注册普通 `LaneProgram` 时自动检查 `Date.now/Math.random/fetch/await`，并覆盖 error boundary 与 series member，避免绕过主动 `assertProgramPure()` | `tests/runtime-control.test.ts`、`tests/m4-dsl-e2e.test.ts` | `69a20fe` |
 | Fork Affinity 组内依赖 | 相同 Program 的亲和折叠支持组内 `dependsOn` 拓扑排序、成功/已结算条件、成员结果注入与失败传播；运行时 `forkAffinity=coalesce` 自动合并可安全折叠的 Fork，并按原始成员 key 恢复 Join Outcome；组外依赖仍保持 fail-closed | `tests/fork-affinity.test.ts` | `c0bb520`、`2ec9f05` |
+| Fork Affinity 默认策略 | M1.5 后默认启用 `forkAffinity=advise`，显式 `off` 仍关闭亲和建议；旧快照缺省值按当前架构恢复为 `advise` | `tests/fork-affinity.test.ts` | `ee722a3` |
 | Session Agent 隔离 | `runtime.start(agentId)` 只等待指定 Agent；同一 Runtime 中其他 Agent/Detached scope 不会污染该 Session 的 outcome；计时器推进和终态持久化保持一致 | `tests/m4-dsl-e2e.test.ts`、`tests/dsl-host-macros.test.ts`、`tests/storage-outbox.test.ts` | `4c9668c` |
 | Agent-scoped Run API | `runtime.run(agentId)` 按指定 Agent 等待终态并返回其 Quarantine Effect；兼容保留无参和数字 tick 上限调用 | `tests/agent-creation.test.ts`、`tests/m4-dsl-e2e.test.ts` | `ced2266` |
 | Session 事实流隔离 | Session stream 只发出目标 Agent 的事实事件，但游标跨过共享 Runtime 的其他 Agent 事件；Host snapshot 同时暴露 Global Context privacy metadata | `tests/m4-dsl-e2e.test.ts`、`tests/warm-start.test.ts` | `fe9554a`、`596fecb` |
@@ -143,7 +144,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 49 个测试文件、277/277 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 49 个测试文件、278/278 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -549,7 +550,8 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `2c778e5`：创建阶段拒绝重复显式 Agent ID，并让自动 Agent ID 跳过已占用序号。
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
-- 当前确定性门禁：`npx tsc -b --pretty false && npm test`，49 个测试文件、277 个测试通过；`npm run build` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
+- 当前确定性门禁：`npx tsc -b --pretty false && npm test`，49 个测试文件、278 个测试通过；`npm run build` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
