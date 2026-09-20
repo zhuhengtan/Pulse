@@ -1,6 +1,6 @@
 # Pulse Runtime MVP 开发方案（M0 + M1 贯通交付计划）
 
-> 设计版本：2026-09-19 · 更新：2026-09-20 · 状态：MVP 实施基准 + 代码验收记录（Execution Blueprint）
+> 设计版本：2026-09-19 · 更新：2026-09-21 · 状态：MVP 实施基准 + 代码验收记录（Execution Blueprint）
 > 
 > 上游依据：
 > - `pulse-runtime-architecture.md`（内核规范与验收标准）
@@ -108,6 +108,7 @@
 | Session Agent 隔离 | `runtime.start(agentId)` 只等待指定 Agent；同一 Runtime 中其他 Agent/Detached scope 不会污染该 Session 的 outcome；计时器推进和终态持久化保持一致 | `tests/m4-dsl-e2e.test.ts`、`tests/dsl-host-macros.test.ts`、`tests/storage-outbox.test.ts` | `4c9668c` |
 | Agent-scoped Run API | `runtime.run(agentId)` 按指定 Agent 等待终态并返回其 Quarantine Effect；兼容保留无参和数字 tick 上限调用 | `tests/agent-creation.test.ts`、`tests/m4-dsl-e2e.test.ts` | `ced2266` |
 | Session 事实流隔离 | Session stream 只发出目标 Agent 的事实事件，但游标跨过共享 Runtime 的其他 Agent 事件；Host snapshot 同时暴露 Global Context privacy metadata | `tests/m4-dsl-e2e.test.ts`、`tests/warm-start.test.ts` | `fe9554a`、`596fecb` |
+| Session DSL 契约对齐 | `Session.snapshot()` 按规范返回异步 Promise；流事件提供规范字段 `kind`，同时保留兼容字段 `type` | `tests/m4-dsl-e2e.test.ts` | `89e6641` |
 | Worker durable lease | Worker snapshot/restore 增加原子文件后端；HTTP Coordinator 自动回收过期 lease，fresh Worker 可接管在途任务 | `tests/worker-coordinator.test.ts`、`tests/worker-http.test.ts` | `fe1fb95` |
 | HTTP telemetry exporter | Runtime telemetry 支持带超时、请求头和非 2xx 失败语义的 HTTP POST 导出 | `tests/observation-shutdown.test.ts` | `a4bf19d` |
 | 可复用 ReAct Lane 模板 | `defineReActLane` 保留最终 `resultRef`，支持模板级 `system/toolSet`、`outputSchema` 与 `historyCompaction`，模型请求继续走统一 ContextBuilder | `tests/dsl-host-macros.test.ts` | `6151318` |
@@ -539,6 +540,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `a4bf19d`：增加可超时、带鉴权请求头和非 2xx 失败语义的 HTTP telemetry exporter。
 - `8bb07e5`：Global/Lane Context 增加不改变业务 JSON 形状的 privacy metadata sidecar；版本、持久化恢复、ContextBuilder、ContextMerger 和 warm start 均保留该元数据。
 - `fe9554a` / `596fecb`：Session outcome 和 fact stream 均按 Agent 隔离，Host snapshot 暴露 Global Context privacy metadata。
+- `89e6641`：Session 对齐 DSL 规范，`snapshot()` 改为异步重同步接口，流事件增加 `kind` 并保留 `type` 兼容别名。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
