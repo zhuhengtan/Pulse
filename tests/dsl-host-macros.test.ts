@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { PulseRuntime, defineLaneProgram, definePlanAndExecuteLane, defineReActLane } from '@pulse/runtime'
+import { PulseRuntime, defineLaneProgram, definePlanAndExecuteLane, defineReActLane, defineScatterGatherLane } from '@pulse/runtime'
 
 describe('DSL Human/Timer host macros', () => {
   it('compiles addTimerStep into a timer wait and resumes on fire', async () => {
@@ -94,5 +94,22 @@ describe('DSL Human/Timer host macros', () => {
     const { agentId, laneId } = runtime.createAgent('bounded template', program)
     expect((await runtime.start(agentId).outcome()).status).toBe('failed')
     expect(runtime.state.lanes.get(laneId)?.failure).toMatchObject({ error: { code: 'MAX_TURNS_REACHED' } })
+  })
+
+  it('allows scatter-gather reducers to return a terminal target', async () => {
+    const worker = defineLaneProgram({ id: 'scatter-worker', version: '1' }, (builder) => {
+      builder.addStep('start', (ctx) => ({ actions: [{ type: 'complete', result: { item: ctx.goal } }], next: 'start' }))
+    })
+    const program = defineScatterGatherLane({
+      id: 'scatter-terminal',
+      items: () => ['a', 'b'],
+      worker: { programId: worker.id, programVersion: worker.version },
+      reducer: (outcomes) => ({ complete: { value: { count: outcomes.filter((outcome) => outcome.status === 'succeeded').length } } }),
+    })
+    const runtime = new PulseRuntime()
+    runtime.register(worker)
+    const { agentId, laneId } = runtime.createAgent('scatter terminal', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(runtime.state.results.get(runtime.state.lanes.get(laneId)?.resultRef as string)?.value).toEqual({ count: 2 })
   })
 })

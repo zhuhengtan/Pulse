@@ -1,4 +1,4 @@
-import { defineLaneProgram, type LaneProgramDefinition, type StepContext, type InstructionView } from './program.js'
+import { defineLaneProgram, type LaneProgramDefinition, type StepContext, type InstructionView, type NextStepTarget } from './program.js'
 import type { LaneProgram } from '../scheduler/runtime.js'
 import type { Outcome, JsonValue } from '../core/types.js'
 import type { ZodTypeAny } from 'zod'
@@ -80,7 +80,7 @@ export function definePlanAndExecuteLane(config: PlanAndExecuteConfig): LaneProg
   })
 }
 
-export function defineScatterGatherLane<TItem>(config: { id: string; version?: string; items: (ctx: StepContext) => TItem[]; worker: ProgramRef; batch?: number; reducer: (outcomes: Outcome[], ctx: StepContext) => string | { step: string } }): LaneProgramDefinition {
+export function defineScatterGatherLane<TItem>(config: { id: string; version?: string; items: (ctx: StepContext) => TItem[]; worker: ProgramRef; batch?: number; reducer: (outcomes: Outcome[], ctx: StepContext) => NextStepTarget }): LaneProgramDefinition {
   const batch = Math.max(1, Math.floor(config.batch ?? 1))
   return defineLaneProgram({ id: config.id, version: config.version ?? '1' }, (builder) => {
     builder.addDynamicForkStep('scatter', {
