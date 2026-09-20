@@ -265,4 +265,13 @@ describe('effect outbox and runtime persistence envelope', () => {
     const restored = new PulseRuntime({ persistence: runtime.exportPersistence() })
     expect(restored.storagePolicy.inspect().some((record) => record.key.startsWith('snapshot:lane:'))).toBe(true)
   })
+
+  it('rejects a tampered persistence envelope before recovery', () => {
+    const runtime = new PulseRuntime()
+    const snapshot = runtime.exportPersistence()
+    expect(snapshot.integrity).toMatchObject({ algorithm: 'sha256', digest: expect.stringMatching(/^[a-f0-9]{64}$/) })
+    const tampered = structuredClone(snapshot)
+    tampered.state.state.now = 99
+    expect(() => importRuntimePersistence(tampered)).toThrow('INVALID_RUNTIME_PERSISTENCE_INTEGRITY')
+  })
 })

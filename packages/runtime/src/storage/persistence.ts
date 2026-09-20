@@ -1,4 +1,5 @@
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { dirname } from 'node:path'
 import { parseContextSnapshotRef, provenanceRefId, provenanceRefKind } from '../core/types.js'
 import type { DataRef, JsonValue, ProvenanceRef, ResultRecord, RuntimeState } from '../core/types.js'
@@ -18,6 +19,7 @@ export interface RuntimePersistenceSnapshot {
   storage?: StoragePolicySnapshot
   factInbox?: FactInboxSnapshot
   checkpoint?: { schemaVersion: 1; logWatermark: number; eventWatermark?: number; state: SessionSnapshot }
+  integrity?: { algorithm: 'sha256'; digest: string }
 }
 
 export interface RuntimePersistenceBackend {
@@ -27,6 +29,17 @@ export interface RuntimePersistenceBackend {
 
 function hasTarget(state: SessionSnapshot['state'], target: { kind: string; id: string }): boolean {
   return target.kind === 'lane' ? state.lanes.some(([id]) => id === target.id) : target.kind === 'effect' ? state.effects.some(([id]) => id === target.id) : false
+}
+
+function withoutIntegrity(snapshot: RuntimePersistenceSnapshot | JsonValue): JsonValue {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return snapshot as JsonValue
+  const copy = structuredClone(snapshot) as Record<string, JsonValue>
+  delete copy.integrity
+  return copy as JsonValue
+}
+
+function integrityDigest(snapshot: RuntimePersistenceSnapshot | JsonValue): string {
+  return createHash('sha256').update(JSON.stringify(withoutIntegrity(snapshot))).digest('hex')
 }
 
 function hasDerivedReference(ref: ProvenanceRef, ownerLaneId: string, agents: Map<string, any>, lanes: Map<string, any>, results: Map<string, any>, artifacts: Map<string, any>): boolean {
@@ -95,6 +108,7 @@ export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceS
     for (const ref of proposal.delta.derivedFrom ?? []) if (!hasDerivedReference(ref, proposal.sourceLaneId, agents, lanes, results, artifacts)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:mergeProposal.derivedFrom:${id}`)
   }
   for (const entry of value.quarantine ?? []) if (!effects.has(entry.effectId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:quarantine:${entry.effectId}`)
+  if (value.integrity !== undefined && (value.integrity.algorithm !== 'sha256' || !/^[a-f0-9]{64}$/.test(value.integrity.digest) || value.integrity.digest !== integrityDigest(value))) throw new Error('INVALID_RUNTIME_PERSISTENCE_INTEGRITY')
 }
 
 export class FileRuntimePersistenceBackend implements RuntimePersistenceBackend {
@@ -133,7 +147,8 @@ export class FileRuntimePersistenceBackend implements RuntimePersistenceBackend 
 }
 
 export function exportRuntimePersistence(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, quarantine?: QuarantineScope, storagePolicy?: SessionStoragePolicy, factInbox?: FactInboxSnapshot): RuntimePersistenceSnapshot {
-  return { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: mutationLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }), ...(storagePolicy === undefined ? {} : { storage: storagePolicy.snapshot() }), ...(factInbox === undefined ? {} : { factInbox: structuredClone(factInbox) }) }
+  const snapshot: RuntimePersistenceSnapshot = { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: mutationLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }), ...(storagePolicy === undefined ? {} : { storage: storagePolicy.snapshot() }), ...(factInbox === undefined ? {} : { factInbox: structuredClone(factInbox) }) }
+  return { ...snapshot, integrity: { algorithm: 'sha256', digest: integrityDigest(snapshot) } }
 }
 
 export function exportRuntimeCheckpoint(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, quarantine?: QuarantineScope, storagePolicy?: SessionStoragePolicy, options: { compactEventsThrough?: number } = {}, factInbox?: FactInboxSnapshot): RuntimePersistenceSnapshot {
@@ -145,7 +160,8 @@ export function exportRuntimeCheckpoint(state: RuntimeState, mutationLog: Mutati
     checkpointState.state.events = checkpointState.state.events.filter((event) => event.seq > eventWatermark)
     checkpointState.state.eventsCompactedThrough = Math.max(checkpointState.state.eventsCompactedThrough ?? 0, eventWatermark)
   }
-  return { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: checkpointLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }), ...(storagePolicy === undefined ? {} : { storage: storagePolicy.snapshot() }), ...(factInbox === undefined ? {} : { factInbox: structuredClone(factInbox) }), checkpoint: { schemaVersion: 1, logWatermark: watermark, ...(eventWatermark === undefined ? {} : { eventWatermark }), state: checkpointState } }
+  const snapshot: RuntimePersistenceSnapshot = { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: checkpointLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }), ...(storagePolicy === undefined ? {} : { storage: storagePolicy.snapshot() }), ...(factInbox === undefined ? {} : { factInbox: structuredClone(factInbox) }), checkpoint: { schemaVersion: 1, logWatermark: watermark, ...(eventWatermark === undefined ? {} : { eventWatermark }), state: checkpointState } }
+  return { ...snapshot, integrity: { algorithm: 'sha256', digest: integrityDigest(snapshot) } }
 }
 
 export function serializeRuntimePersistence(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, storagePolicy?: SessionStoragePolicy): JsonValue {
