@@ -804,6 +804,7 @@ export class PulseRuntime {
       this.outbox.ack(`${effect.id}:${effect.attemptId}`)
       const storageEvent = this.tryEmit({ type: 'effect.settled', effectId, data: effect.outcome as unknown as JsonValue })
       this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:storage-rejected`, undefined, storageEvent === undefined ? [] : [storageEvent])
+      this.syncStoragePolicy()
       this.refreshWaits()
       this.schedulePersistence()
       return
@@ -824,6 +825,7 @@ export class PulseRuntime {
     const metadataEvent = execution.metadata === undefined ? undefined : this.emit({ type: 'effect.execution_metadata', effectId, data: execution.metadata })
     this.recordBudgetMetadata(execution.metadata)
     this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:settled`, result, [settledEvent, ...(metadataEvent ? [metadataEvent] : [])], journalLane, correlation, publishedArtifact)
+    this.syncStoragePolicy()
     this.refreshWaits()
     this.dispatchQueuedEffects()
     this.schedulePersistence()

@@ -71,4 +71,14 @@ describe('session storage policy', () => {
     expect(policy.inspect()[0]).toMatchObject({ storageState: 'persisted', bytes: expect.any(Number) })
     expect(policy.get('result:r1')).toBeUndefined()
   })
+
+  it('refreshes runtime storage admission after direct Effect settlement', () => {
+    const program: LaneProgram = { id: 'direct-settlement-storage', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: 'direct-settlement-storage', programVersion: '1', step: 'done', locals: {} } }) }
+    const runtime = new PulseRuntime()
+    runtime.createAgent('direct settlement', program)
+    runtime.tick()
+    const effect = runtime.state.effects.get('effect-1')!
+    runtime.completeEffect(effect.id, { value: { ok: true } })
+    expect(runtime.storagePolicy.inspect().some((record) => record.key === 'result:result-1')).toBe(true)
+  })
 })
