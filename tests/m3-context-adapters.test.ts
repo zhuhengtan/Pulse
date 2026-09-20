@@ -46,6 +46,8 @@ describe('M1-3 context, models and adapters', () => {
     expect(anthropic.toolCalls[0]?.toolCallId).toBe('pulse-tool-1')
     expect(openai.finishReason).toBe('tool_calls')
     expect(normalizeOpenAIResponse({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 3 } } }).usage).toMatchObject({ inputTokens: 10, outputTokens: 2, cachedInputTokens: 3, uncachedInputTokens: 7 })
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: null, refusal: 'not allowed' }, finish_reason: 'stop' }] })).toMatchObject({ finishReason: 'refusal', refusal: 'not allowed' })
+    expect(normalizeAnthropicResponse({ content: [{ type: 'refusal', text: 'not allowed' }], stop_reason: 'refusal' })).toMatchObject({ finishReason: 'refusal', refusal: 'not allowed' })
   })
 
   it('maps tool and structured-output contracts into real provider request bodies', async () => {

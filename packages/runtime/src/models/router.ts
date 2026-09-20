@@ -46,8 +46,9 @@ export class ModelRouter {
 export interface LLMResult {
   text: string
   structured?: unknown
+  refusal?: string
   toolCalls: Array<{ toolCallId: string; name: string; input: unknown }>
-  finishReason: 'stop' | 'tool_calls' | 'length' | 'error'
+  finishReason: 'stop' | 'tool_calls' | 'length' | 'error' | 'refusal'
   usage?: ModelUsage
   privacy?: PrivacyLabel
   derivedFrom?: string[]
@@ -165,10 +166,12 @@ export class OutputValidationError extends Error {
 }
 
 export function validateAdapterResult(result: LLMResult): LLMResult {
-  if (typeof result.text !== 'string' || !Array.isArray(result.toolCalls) || !['stop', 'tool_calls', 'length', 'error'].includes(result.finishReason)) throw new OutputValidationError('adapter', 'INVALID_PROVIDER_RESPONSE', 'Provider response is not a normalized LLMResult')
+  if (typeof result.text !== 'string' || !Array.isArray(result.toolCalls) || !['stop', 'tool_calls', 'length', 'error', 'refusal'].includes(result.finishReason)) throw new OutputValidationError('adapter', 'INVALID_PROVIDER_RESPONSE', 'Provider response is not a normalized LLMResult')
   if (result.toolCalls.some((call) => typeof call.toolCallId !== 'string' || typeof call.name !== 'string' || call.name.length === 0)) throw new OutputValidationError('adapter', 'INVALID_TOOL_CALL', 'Normalized tool call is missing a stable id or name')
   if (result.finishReason === 'tool_calls' && result.toolCalls.length === 0) throw new OutputValidationError('adapter', 'INVALID_TOOL_CALL_FINISH_REASON', 'tool_calls finish reason requires at least one tool call')
   if (result.finishReason !== 'tool_calls' && result.toolCalls.length > 0) throw new OutputValidationError('adapter', 'UNEXPECTED_TOOL_CALL', 'A non-tool finish reason cannot contain tool calls')
+  if (result.finishReason === 'refusal' && (!result.refusal || result.refusal.length === 0)) throw new OutputValidationError('adapter', 'INVALID_REFUSAL', 'A refusal finish reason requires a refusal message')
+  if (result.finishReason !== 'refusal' && result.refusal !== undefined) throw new OutputValidationError('adapter', 'UNEXPECTED_REFUSAL', 'A non-refusal result cannot contain a refusal message')
   return result
 }
 

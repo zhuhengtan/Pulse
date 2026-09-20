@@ -85,6 +85,7 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
         const output = validateAdapterResult(await provider.executeAttempt({ request: projection, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), onObservation: (chunk) => { observations.push({ type: 'chunk', data: chunk }) } }))
         const measuredUsage = output.usage === undefined ? { latencyMs: Math.max(0, Date.now() - startedAt) } : { ...output.usage, latencyMs: output.usage.latencyMs ?? Math.max(0, Date.now() - startedAt), ...(output.usage.uncachedInputTokens === undefined && output.usage.inputTokens !== undefined && output.usage.cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, output.usage.inputTokens - output.usage.cachedInputTokens) } : {}) }
         usage.set(attempt.attemptId, measuredUsage)
+        if (output.finishReason === 'refusal') throw new OutputValidationError('adapter', 'MODEL_REFUSAL', output.refusal ?? 'Provider refused the request.')
         if (input.outputSchema !== undefined) {
           const candidateValue = output.structured ?? output.text
           if (!validateJsonSchema(candidateValue, input.outputSchema)) {
@@ -101,9 +102,12 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
       } finally { for (const release of releases.reverse()) release() }
     }).catch((cause) => {
       if (failedForSchema && lastSchemaViolation !== undefined) return { result: { text: '', toolCalls: [], finishReason: 'error' as const }, candidate: candidates.at(-1)!, attempts: [], schemaRejected: lastSchemaViolation }
+      const inner = cause && typeof cause === 'object' && 'modelFallback' in cause ? (cause as { modelFallback?: { cause?: unknown } }).modelFallback?.cause : cause
+      if (inner instanceof OutputValidationError && inner.code === 'MODEL_REFUSAL') return { result: { text: '', refusal: inner.message, toolCalls: [], finishReason: 'refusal' as const }, candidate: candidates.at(-1)!, attempts: [], refused: true }
       throw cause
     })
     if ('schemaRejected' in result) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Provider output did not match the declared schema.' }, rejectedOutput: { value: result.schemaRejected, privacy: projection.privacy, derivedFrom: [...(effect.derivedFrom ?? [])] } }
+    if ('refused' in result) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'MODEL_REFUSAL', message: result.result.refusal ?? 'Provider refused the request.' } }
     const modelValue = input.outputSchema !== undefined || typeof input.schema === 'string' ? (result.result.structured ?? result.result.text) : result.result
     const value = toJson(modelValue)
     return { value, privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue), ...(observations.length ? { observations } : {}) }

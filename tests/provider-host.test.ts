@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createModelEffectExecutor, type ProviderAdapter } from '@pulse/adapters'
-import { ModelRouter, InMemoryModelRegistry, modelFallbackError, estimateProjectionTokens, type LLMRequestProjection, validateJsonSchema } from '@pulse/runtime'
+import { ModelRouter, InMemoryModelRegistry, modelFallbackError, estimateProjectionTokens, type LLMRequestProjection, validateAdapterResult, validateJsonSchema } from '@pulse/runtime'
 import { PulseRuntime } from '@pulse/runtime'
 import type { LaneProgram } from '@pulse/runtime'
 import { defineLaneProgram } from '@pulse/runtime'
@@ -16,6 +16,11 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     expect(validateJsonSchema({ name: 'ok', count: 2 }, schema)).toBe(false)
     expect(validateJsonSchema({ name: 'OK', count: 2, extra: true }, schema)).toBe(false)
     expect(validateJsonSchema({ name: 'OK', count: 4 }, schema)).toBe(false)
+  })
+
+  it('requires an explicit refusal message for refusal outputs', () => {
+    expect(() => validateAdapterResult({ text: '', toolCalls: [], finishReason: 'refusal' })).toThrow('INVALID_REFUSAL')
+    expect(() => validateAdapterResult({ text: '', refusal: 'not allowed', toolCalls: [], finishReason: 'refusal' })).not.toThrow()
   })
 
   it('filters candidates whose context window cannot fit the immutable projection', () => {
