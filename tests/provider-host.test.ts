@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createModelEffectExecutor, type ProviderAdapter } from '@pulse/adapters'
-import { ModelRouter, InMemoryModelRegistry, modelFallbackError, estimateProjectionTokens, type LLMRequestProjection } from '@pulse/runtime'
+import { ModelRouter, InMemoryModelRegistry, modelFallbackError, estimateProjectionTokens, type LLMRequestProjection, validateJsonSchema } from '@pulse/runtime'
 import { PulseRuntime } from '@pulse/runtime'
 import type { LaneProgram } from '@pulse/runtime'
 import { defineLaneProgram } from '@pulse/runtime'
@@ -10,6 +10,14 @@ const point = (id: string, step: string) => ({ programId: id, programVersion: '1
 const projection: LLMRequestProjection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'default', instruction: 'reason', privacy: 'local_only', privacyRefs: [] }, blocks: [{ kind: 'instruction', content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'default', privacy: 'local_only', privacyRefs: [] }
 
 describe('Provider Adapter to Runtime LLM Effect host', () => {
+  it('enforces strict JSON Schema boundaries and numeric/string constraints', () => {
+    const schema = { type: 'object', additionalProperties: false, required: ['name', 'count'], properties: { name: { type: 'string', pattern: '^[A-Z]', minLength: 2 }, count: { type: 'integer', minimum: 1, maximum: 3 } } }
+    expect(validateJsonSchema({ name: 'OK', count: 2 }, schema)).toBe(true)
+    expect(validateJsonSchema({ name: 'ok', count: 2 }, schema)).toBe(false)
+    expect(validateJsonSchema({ name: 'OK', count: 2, extra: true }, schema)).toBe(false)
+    expect(validateJsonSchema({ name: 'OK', count: 4 }, schema)).toBe(false)
+  })
+
   it('filters candidates whose context window cannot fit the immutable projection', () => {
     const registry = new InMemoryModelRegistry()
     registry.register({ id: 'too-small', providerId: 'p1', tasks: ['reason'], capabilities: { local: true, maxContextTokens: estimateProjectionTokens(projection) - 1 }, priority: 10 })
