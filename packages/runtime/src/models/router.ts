@@ -85,8 +85,10 @@ export class ModelRouter {
     return diagnostics.filter((item) => item.accepted && (allowed === undefined || allowed.includes(item.id))).map((item) => candidates.find((candidate) => candidate.id === item.id)!).filter(Boolean)
   }
   diagnostics(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}, estimatedTokens?: number): ModelRouteDiagnostic[] {
+    const preferred = this.routes.get(task)
     return this.registry.list().map((candidate) => {
       const reasons: string[] = []
+      if (preferred !== undefined && !preferred.includes(candidate.id)) reasons.push('TASK_ROUTE_EXCLUDED')
       if (!candidate.tasks.includes(task)) reasons.push('TASK_NOT_SUPPORTED')
       if (privacy === 'local_only' && candidate.capabilities.local !== true) reasons.push('PRIVACY_CLOUD_BLOCKED')
       for (const [key, value] of Object.entries(requirements)) if (key !== 'maxOutputTokens' && candidate.capabilities[key as keyof ModelCapabilities] !== value) reasons.push(`CAPABILITY_MISSING:${key}`)
