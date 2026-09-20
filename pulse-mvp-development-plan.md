@@ -54,6 +54,7 @@
 | Provider 请求与 usage | modelId、工具 schema、structured output schema、uncached token、latency/cost 归一化与 metadata | `tests/m3-context-adapters.test.ts`、`tests/provider-host.test.ts` | `fa723c7` |
 | Provider SSE 观测流 | OpenAI-compatible 与 Anthropic SSE 读取 `llm:chunk` 文本观测；工具参数只在完整流结束后归一化，不执行未闭合参数；非 SSE 响应安全回退 JSON | `tests/m3-context-adapters.test.ts` | `44c8608` |
 | Provider loopback HTTP 集成 | 通过真实本机 HTTP 栈验证 OpenAI-compatible JSON 请求、Bearer 认证、model/request body 映射，以及 SSE chunk 观测与完整 tool 参数收尾 | `tests/provider-http-integration.test.ts` | `b832af3` |
+| Registered Runtime Provider path | 通过真实本机 HTTP 栈验证 `runtime.models.register(adapter)` → `modelRouter` → 默认 LLM Executor → Effect/Wait/Result 的高层闭环 | `tests/provider-http-integration.test.ts` | `740c033` |
 | Program Registry / ProgramRef | 对外提供 `runtime.programs.register()`、ProgramRef 解析与版本校验；`createAgent` 支持已注册引用并拒绝未注册引用，同时保留直接传 LaneProgram 的兼容入口 | `tests/dsl-program-registry.test.ts` | `b879c5a` |
 | Runtime Model Registry / task route | 对外提供 `runtime.models.register()` 与 `runtime.modelRouter.register()`；按显式候选顺序结合任务、隐私、能力和上下文窗口过滤，保留 Adapter 注入边界 | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts` | `889db76` |
 | Registered Model Adapter execution | Model Registry 候选可绑定标准 Adapter；未注入自定义 `effectExecutor` 时，Runtime 自动完成路由、隐私/能力/窗口准入、归一化、结构化 schema 校验、候选 fallback 与 usage/route metadata | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts` | `b0fde85` |
@@ -203,7 +204,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、366/366 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、370/370 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -631,6 +632,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `6ff03ec`：默认模型 Executor 对 Provider refusal fail-closed，记录 refused feedback，并在同一 Effect 的后继候选中有界 fallback。
 - `f8985a5`：默认模型 Executor 对归一化 `finishReason: error` fail-closed，避免 Provider 错误被发布成成功 Result。
 - `f44fa95`：Program Registry 对 series member 循环引用先完整校验再原子注册，循环或失败不会留下部分 Program 记录。
+- `740c033`：通过真实 loopback HTTP 栈验证 `runtime.models.register(adapter)` → `modelRouter` → 默认 LLM Executor → Effect/Wait/Result 的完整高层路径。
 - `b2de59b`：`createAgent` 补齐 priority/policy/limits 契约，Agent root Lane 使用声明优先级，`maxActiveLanes` 与 `timeoutMs` 真实生效并可恢复。
 - `0ce2a6e`：在开发模式为 Step/ErrorBoundary 增加运行时纯度守卫，阻断动态全局 IO/时间/随机源访问并保持生产模式兼容。
 - `01b72c2`：`runtime.run()` / `runAgent()` 返回完整 Agent Outcome，包含根 Lane 结果引用、错误/取消信息和 quarantine 未决 Effect。
@@ -679,7 +681,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，68 个测试文件、369 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，68 个测试文件、370 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
