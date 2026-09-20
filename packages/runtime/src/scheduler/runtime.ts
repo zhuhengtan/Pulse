@@ -1382,10 +1382,21 @@ export class PulseRuntime {
   }
 
   private failLane(lane: LaneRecord, failure: RuntimeError): void {
-    lane.status = 'failed'
-    lane.failure = { error: structuredClone(failure), privacy: 'public' }
-    lane.version++
-    this.emit({ type: 'lane.failed', laneId: lane.id, data: failure as unknown as JsonValue })
+    const nextLane = structuredClone(lane)
+    nextLane.status = 'failed'
+    nextLane.failure = { error: structuredClone(failure), privacy: 'public' }
+    nextLane.version++
+    const event: import('../core/types.js').RuntimeEventInput = { type: 'lane.failed', laneId: lane.id, data: failure as unknown as JsonValue }
+    try {
+      this.assertStorageAdmission([{ op: 'setLane', laneId: lane.id, record: nextLane }, { op: 'appendEvent', event }])
+      commitMutationTransaction(this.state, this.mutationLog, `lane:${lane.id}:failed:${nextLane.version}`, [{ op: 'setLane', laneId: lane.id, record: nextLane }, { op: 'appendEvent', event }], this.state.now, this.sessionId)
+    } catch {
+      try {
+        this.assertStorageAdmission([{ op: 'setLane', laneId: lane.id, record: nextLane }])
+        commitMutationTransaction(this.state, this.mutationLog, `lane:${lane.id}:failed:${nextLane.version}`, [{ op: 'setLane', laneId: lane.id, record: nextLane }], this.state.now, this.sessionId)
+      } catch { return }
+    }
+    this.schedulePersistence()
     this.refreshWaits()
   }
 

@@ -24,6 +24,16 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.events.some((event) => event.type === 'lane.failed' && (event.data as any)?.code === 'ASYNC_STEP_FORBIDDEN')).toBe(true)
   })
 
+  it('still commits a Lane failure when the fact-event budget cannot fit the audit event', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 1 } })
+    const program: LaneProgram = { id: 'lane-failure-event-limit', version: '1', step: (() => Promise.resolve({ actions: [], next: point('lane-failure-event-limit', 'done') })) as unknown as LaneProgram['step'] }
+    const { laneId } = runtime.createAgent('lane failure event limit', program)
+    runtime.tick()
+    expect(runtime.state.lanes.get(laneId)?.status).toBe('failed')
+    expect(runtime.state.lanes.get(laneId)?.failure?.error.code).toBe('ASYNC_STEP_FORBIDDEN')
+    expect(runtime.state.events).toHaveLength(0)
+  })
+
   it('rejects impure Steps before they enter the scheduler', () => {
     const runtime = new PulseRuntime()
     const program: LaneProgram = { id: 'impure-step', version: '1', step: () => ({ actions: [{ type: 'complete', result: Date.now() }], next: point('impure-step', 'done') }) }
