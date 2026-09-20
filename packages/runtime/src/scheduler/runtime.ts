@@ -414,7 +414,15 @@ export class PulseRuntime {
     return plan
   }
 
-  private emit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent { return appendRuntimeEvent(this.state, event, { sessionId: this.sessionId, timestamp: this.state.now }) }
+  private emit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent {
+    const candidate = structuredClone(this.state)
+    appendRuntimeEvent(candidate, event, { sessionId: this.sessionId, timestamp: candidate.now })
+    const policy = this.storagePolicy.clone()
+    this.syncStoragePolicy(policy, candidate)
+    const emitted = appendRuntimeEvent(this.state, event, { sessionId: this.sessionId, timestamp: this.state.now })
+    this.syncStoragePolicy()
+    return emitted
+  }
   private assertRecoveryPrograms(): void {
     if (!this.enforcingRecoveryPrograms) return
     for (const lane of this.state.lanes.values()) {
