@@ -9,7 +9,7 @@ import { ContextBuilder, estimateHistoryTokens, historyPressure } from '../conte
 
 const isLocal = (value: TargetRef | LocalRef): value is LocalRef => 'local' in value
 const clone = <T>(value: T): T => structuredClone(value)
-const laneCopy = (lane: LaneRecord): LaneRecord => ({ ...lane, resume: clone(lane.resume), context: clone(lane.context), ...(lane.visibleResultRefs === undefined ? {} : { visibleResultRefs: new Set(lane.visibleResultRefs) }), children: new Set(lane.children), ownedEffectIds: new Set(lane.ownedEffectIds), ...(lane.pendingResumeInput === undefined ? {} : { pendingResumeInput: clone(lane.pendingResumeInput) }) })
+const laneCopy = (lane: LaneRecord): LaneRecord => ({ ...lane, resume: clone(lane.resume), context: clone(lane.context), ...(lane.visibleResultRefs === undefined ? {} : { visibleResultRefs: new Set(lane.visibleResultRefs) }), children: new Set(lane.children), ownedEffectIds: new Set(lane.ownedEffectIds), ...(lane.pendingResumeInput === undefined ? {} : { pendingResumeInput: clone(lane.pendingResumeInput) }), ...(lane.pendingOutcome === undefined ? {} : { pendingOutcome: clone(lane.pendingOutcome) }) })
 function mergePrivacyTaints(...groups: Array<readonly PrivacyTaint[] | undefined>): PrivacyTaint[] {
   const output: PrivacyTaint[] = []; const seen = new Set<string>()
   for (const group of groups) for (const taint of group ?? []) { const key = JSON.stringify(taint); if (!seen.has(key)) { seen.add(key); output.push(clone(taint)) } }
@@ -434,7 +434,14 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       seenCancelTargets.add(action.laneId)
       if (action.laneId === lane.id || !descendants(state, lane.id, action.laneId)) return { rejection: error('CANCEL_NOT_OWNER', 'a Lane can only cancel its own descendants') }
       const target = state.lanes.get(action.laneId)!
-      mutations.push({ op: 'setLane', laneId: target.id, record: { ...laneCopy(target), status: 'cancelled', cancelReason: action.reason, version: target.version + 1 } })
+      const targetCopy = laneCopy(target)
+      const preserveOutcome = (target.status === 'closing' || target.status === 'waiting') && target.closingResult !== undefined
+      if (preserveOutcome) targetCopy.pendingOutcome = { status: 'succeeded', result: clone(target.closingResult!.value) }
+      targetCopy.status = preserveOutcome ? 'cancelling' : 'cancelled'
+      targetCopy.cancelReason = action.reason
+      targetCopy.version = target.version + 1
+      mutations.push({ op: 'setLane', laneId: target.id, record: targetCopy })
+      if (preserveOutcome) mutations.push({ op: 'appendEvent', event: { type: 'lane.cancelling', laneId: target.id, data: action.reason } })
     } else if (action.type === 'propose_cancel') {
       if (seenCancelTargets.has(action.laneId)) return { rejection: error('DUPLICATE_CANCEL_TARGET', action.laneId) }
       seenCancelTargets.add(action.laneId)
@@ -514,7 +521,16 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       if (activeChildren && action.children === 'cancel') {
         for (const childId of lane.children) {
           const child = state.lanes.get(childId)
-          if (child && !['succeeded', 'failed', 'cancelled'].includes(child.status)) mutations.push({ op: 'setLane', laneId: child.id, record: { ...laneCopy(child), status: 'cancelled', cancelReason: 'POLICY', version: child.version + 1 } })
+          if (child && !['succeeded', 'failed', 'cancelled'].includes(child.status)) {
+            const childCopy = laneCopy(child)
+            const preserveOutcome = (child.status === 'closing' || child.status === 'waiting') && child.closingResult !== undefined
+            if (preserveOutcome) childCopy.pendingOutcome = { status: 'succeeded', result: clone(child.closingResult!.value) }
+            childCopy.status = preserveOutcome ? 'cancelling' : 'cancelled'
+            childCopy.cancelReason = 'POLICY'
+            childCopy.version = child.version + 1
+            mutations.push({ op: 'setLane', laneId: child.id, record: childCopy })
+            if (preserveOutcome) mutations.push({ op: 'appendEvent', event: { type: 'lane.cancelling', laneId: child.id, data: 'POLICY' } })
+          }
         }
       }
       const resultId = `result-${resultCounter++}`

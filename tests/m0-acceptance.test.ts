@@ -119,6 +119,21 @@ describe('M0 acceptance matrix', () => {
     expect(state.lanes.get(root.id)?.status).toBe('succeeded')
   })
 
+  it('preserves a closing child outcome when its owner cancels it', () => {
+    const state = createRuntimeState()
+    const { root } = createAgent(state, 'parent', point('start'))
+    const child = createAgent(state, 'child', point('start')).root
+    child.ownerLaneId = root.id
+    child.status = 'waiting'
+    child.closingResult = { value: { joined: true }, privacy: 'public' }
+    root.children.add(child.id)
+    state.lanes.set(child.id, child)
+    const cancel = validateStep(state, root.id, { actions: [{ type: 'cancel_lane', laneId: child.id, reason: 'SUPERSEDED' }], next: point('next') })
+    expect('mutations' in cancel).toBe(true)
+    if ('mutations' in cancel) apply(state, cancel.mutations)
+    expect(state.lanes.get(child.id)).toMatchObject({ status: 'cancelling', cancelReason: 'SUPERSEDED', pendingOutcome: { status: 'succeeded', result: { joined: true } } })
+  })
+
   it('atomically rejects context, effect, cancel intent, resume and event proposals', () => {
     const state = createRuntimeState()
     const { root } = createAgent(state, 'atomic resume', point('start'))

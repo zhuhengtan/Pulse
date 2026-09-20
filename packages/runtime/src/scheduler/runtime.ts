@@ -1602,7 +1602,7 @@ export class PulseRuntime {
   }
 
   private propagateCancelledLanes(): void {
-    for (const lane of this.state.lanes.values()) if (lane.status === 'cancelled') for (const effectId of lane.ownedEffectIds) {
+    for (const lane of this.state.lanes.values()) if (lane.status === 'cancelled' || lane.status === 'cancelling') for (const effectId of lane.ownedEffectIds) {
       const effect = this.state.effects.get(effectId)
       const childAgent = effect?.childAgentId === undefined ? undefined : this.state.agents.get(effect.childAgentId)
       if (childAgent?.detached === true) continue
