@@ -169,6 +169,12 @@ describe('M1-3 context, models and adapters', () => {
     await rm(root, { recursive: true, force: true })
   })
 
+  it('reports shell timeout and escalates after the grace period', async () => {
+    const result = await runShell(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], { timeoutMs: 25 })
+    expect(result.timedOut).toBe(true)
+    expect(result.aborted).toBe(false)
+  })
+
   it('rejects memory writes beyond the M1 hard cap', () => {
     const storage = new MemoryStorage(10)
     storage.put('small', '12345')
