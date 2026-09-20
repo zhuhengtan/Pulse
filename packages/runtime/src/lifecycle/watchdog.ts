@@ -68,7 +68,7 @@ export function observeProgress(lane: LaneRecord, output: LaneStepOutput, state:
   const repeatedActionCount = priorActions.filter((candidate) => candidate === action).length + 1
   const sameProgress = priorProgress.at(-1) === progress
   const progressed = prior.lastFingerprint === undefined || !sameProgress
-  const qualifies = sameProgress && repeatedActionCount >= repeatedThreshold
+  const qualifies = sameProgress && priorActions.includes(action) && repeatedActionCount >= repeatedThreshold
   const noProgressCount = qualifies ? prior.noProgressCount + 1 : sameProgress ? prior.noProgressCount : 0
   const reached = qualifies && noProgressCount >= threshold
   if (reached && options.admission) {

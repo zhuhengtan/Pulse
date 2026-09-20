@@ -588,8 +588,23 @@ export class PulseRuntime {
     this.assertStorageAdmission(mutations)
     commitMutationTransaction(this.state, this.mutationLog, `host-command:${eventId}:rejected`, mutations, this.state.now, this.sessionId)
   }
-  private prepareStepOutput(output: LaneStepOutput): LaneStepOutput {
-    return { ...output, actions: output.actions.map((action) => action.type === 'submit_effects' ? { ...action, effects: action.effects.map((effect) => this.effectSubmissionPreparer!(effect)) } : action) }
+  private prepareStepOutput(output: LaneStepOutput, lane?: Readonly<LaneRecord>): LaneStepOutput {
+    const reasoningFloor = lane?.progressWatchdog?.interventionLevel !== undefined && lane.progressWatchdog.interventionLevel >= 2 ? 'high' : undefined
+    return {
+      ...output,
+      actions: output.actions.map((action) => action.type === 'submit_effects' ? {
+        ...action,
+        effects: action.effects.map((effect) => {
+          const prepared = this.effectSubmissionPreparer!(effect)
+          if (reasoningFloor === undefined || prepared.kind !== 'llm' || !prepared.input || typeof prepared.input !== 'object' || Array.isArray(prepared.input)) return prepared
+          const input = prepared.input as Record<string, JsonValue>
+          const existing = input.requirements && typeof input.requirements === 'object' && !Array.isArray(input.requirements) ? input.requirements as Record<string, JsonValue> : {}
+          const current = existing.reasoning
+          if (current === 'high') return prepared
+          return { ...prepared, input: { ...input, requirements: { ...existing, reasoning: reasoningFloor } } }
+        }),
+      } : action),
+    }
   }
 
   private prepareRegisteredToolSubmission(submission: EffectSubmission): EffectSubmission {
@@ -816,7 +831,7 @@ export class PulseRuntime {
         continue
       }
       let preparedOutput: LaneStepOutput
-      try { preparedOutput = this.prepareStepOutput(output) }
+      try { preparedOutput = this.prepareStepOutput(output, lane) }
       catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause)
         const candidate = cause && typeof cause === 'object' ? cause as { code?: unknown } : undefined

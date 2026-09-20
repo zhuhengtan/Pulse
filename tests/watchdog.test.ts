@@ -48,4 +48,24 @@ describe('progress watchdog', () => {
     expect(runtime.state.events.some((event) => event.type === 'lane.failed' && JSON.stringify(event.data).includes('NO_PROGRESS_DETECTED'))).toBe(true)
     expect(runtime.state.events.some((event) => event.type === 'progress.intervention_applied' && JSON.stringify(event.data).includes('NO_PROGRESS_DETECTED'))).toBe(true)
   })
+
+  it('raises the minimum reasoning floor after level-two intervention', () => {
+    const runtime = new PulseRuntime({
+      maxLaneStepsPerTick: 1,
+      watchdogNoProgressThreshold: 1,
+      watchdogRepeatedActionThreshold: 1,
+      effectExecutor: async () => await new Promise(() => undefined),
+    })
+    const program: LaneProgram = { id: 'watchdog-reasoning-floor', version: '1', step: () => ({
+      actions: [{ type: 'submit_effects', effects: [{ key: 'same-llm', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', instruction: 'repeat' } }] }],
+      next: { programId: 'watchdog-reasoning-floor', programVersion: '1', step: 'loop', locals: {} },
+    }) }
+    const { laneId } = runtime.createAgent('raise reasoning', program)
+    for (let tick = 0; tick < 4; tick++) runtime.tick()
+    const lane = runtime.state.lanes.get(laneId)
+    expect(lane?.progressWatchdog?.interventionLevel).toBe(2)
+    expect(lane?.status).toBe('ready')
+    const effects = [...runtime.state.effects.values()]
+    expect(effects.at(-1)?.input).toMatchObject({ requirements: { reasoning: 'high' } })
+  })
 })
