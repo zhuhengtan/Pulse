@@ -389,7 +389,7 @@ export class StepBuilder<TState = JsonValue> {
     if (options.onJoin) this.handlers.set(joinStep, (ctx) => { const outcomes = new Map<string, Outcome>(); if (ctx.resumeInput?.type === 'wait') for (const [key, dependency] of Object.entries(ctx.resumeInput.resolution.dependencies)) if (dependency.state !== 'pending') outcomes.set(key, joinedOutcome(ctx, dependency, key)); return { next: options.onJoin!(outcomes, ctx) } })
     return this
   }
-  addMergeStep(name: string, options: { task: string; next: NextStepTarget; sources?: { proposals?: 'joined' | LaneId[]; outcomes?: 'joined' | LaneId[] }; instruction?: string | ((ctx: StepContext<TState>) => string); schema?: ZodTypeAny; onSynthesized?: (value: unknown, ctx: StepContext<TState>) => NextStepTarget }): this {
+  addMergeStep(name: string, options: { task?: string; next?: NextStepTarget; sources?: { proposals?: 'joined' | LaneId[]; outcomes?: 'joined' | LaneId[] }; instruction?: string | ((ctx: StepContext<TState>) => string); schema?: ZodTypeAny; onSynthesized?: (value: unknown, ctx: StepContext<TState>) => NextStepTarget; onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget }): this {
     this.handlers.set(name, (ctx) => {
       const dependencies = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies) : []
       const joinedLaneIds = new Set(dependencies.filter((dependency) => dependency.target.kind === 'lane').map((dependency) => dependency.target.id))
@@ -397,18 +397,24 @@ export class StepBuilder<TState = JsonValue> {
       const joined = dependencies.flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef && (outcomeSource === undefined || outcomeSource === 'joined' || outcomeSource.includes(dependency.target.id)) ? [dependency.outcome.resultRef] : [])
       const proposalSource = options.sources?.proposals
       const proposals = ctx.mergeProposals.filter((proposal) => proposalSource === undefined || (proposalSource === 'joined' ? joinedLaneIds.has(proposal.sourceLaneId) : proposalSource.includes(proposal.sourceLaneId)))
-      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, merge: true, sources: asJson(joined), proposals: asJson(proposals.map((proposal) => ({ id: proposal.id, sourceLaneId: proposal.sourceLaneId, delta: proposal.delta }))), ...(options.instruction === undefined ? {} : { instruction: typeof options.instruction === 'string' ? options.instruction : options.instruction(ctx) }) }), ...(joined.length ? { derivedFrom: joined } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:decode` }
+      const instruction = options.instruction === undefined ? undefined : boundedInstruction(typeof options.instruction === 'string' ? options.instruction : options.instruction(ctx))
+      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', merge: true, sources: asJson(joined), proposals: asJson(proposals.map((proposal) => ({ id: proposal.id, sourceLaneId: proposal.sourceLaneId, delta: proposal.delta }))), ...(instruction === undefined ? {} : { instruction }) }), ...(joined.length ? { derivedFrom: joined } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:decode` }
     })
     this.handlers.set(`${name}:decode`, (ctx) => {
       const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined
       const ref = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined
       const value = ref ? readResult(ctx, ref) : undefined
+      const fail = (runtimeError: RuntimeError): { next: NextStepTarget<TState> } => options.onError ? { next: options.onError(runtimeError, ctx) } : (() => { throw Object.assign(new Error(runtimeError.message), runtimeError) })()
       if (options.schema) {
         const parsed = options.schema.safeParse(value)
-        if (!parsed.success) return { next: options.next }
-        return { next: options.onSynthesized ? options.onSynthesized(parsed.data, ctx) : options.next }
+        if (!parsed.success) return fail({ code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Merge result did not match schema.', retryable: false, details: parsed.error.message })
+        const next = options.onSynthesized ? options.onSynthesized(parsed.data, ctx) : options.next
+        if (!next) return fail({ code: 'MERGE_TARGET_MISSING', message: 'Merge step requires onSynthesized or next.', retryable: false })
+        return { next }
       }
-      return { next: options.onSynthesized ? options.onSynthesized(value, ctx) : options.next }
+      const next = options.onSynthesized ? options.onSynthesized(value, ctx) : options.next
+      if (!next) return fail({ code: 'MERGE_TARGET_MISSING', message: 'Merge step requires onSynthesized or next.', retryable: false })
+      return { next }
     })
     return this
   }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { PulseRuntime, defineLaneProgram } from '@pulse/runtime'
+import { z } from 'zod'
 
 describe('MergeProposal isolation', () => {
   it('stores proposeGlobal without changing the committed Global version', async () => {
@@ -28,5 +29,32 @@ describe('MergeProposal isolation', () => {
     runtime.state.mergeProposals.set('hidden', { id: 'hidden', agentId, sourceLaneId: 'lane-hidden', baseGlobalVersion: 0, delta: { target: 'global', baseVersion: 0, proposal: true, ops: [{ op: 'set', path: ['hidden'], value: true }] }, createdAt: 2 })
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
     expect(mergeInput.proposals.map((proposal: any) => proposal.id)).toEqual(['allowed'])
+  })
+
+  it('uses the specification default task and onSynthesized as the terminal DSL出口', async () => {
+    let mergeInput: any
+    const program = defineLaneProgram({ id: 'merge-defaults', version: '1' }, (builder) => {
+      builder.addMergeStep('merge', {
+        schema: z.object({ ok: z.boolean() }),
+        onSynthesized: (value) => ({ complete: { value } }),
+      })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => { mergeInput = effect.input; return { value: { ok: true } } } })
+    const { agentId } = runtime.createAgent('merge defaults', program)
+
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(mergeInput.task).toBe('reason')
+    expect([...runtime.state.results.values()].at(-1)?.value).toEqual({ ok: true })
+  })
+
+  it('fails closed when the synthesized result violates its schema', async () => {
+    const program = defineLaneProgram({ id: 'merge-invalid', version: '1' }, (builder) => {
+      builder.addMergeStep('merge', { schema: z.object({ ok: z.boolean() }), onSynthesized: (value) => ({ complete: { value } }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { invalid: true } }) })
+    const { agentId, laneId } = runtime.createAgent('merge invalid', program)
+
+    expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+    expect(runtime.state.lanes.get(laneId)?.failure).toMatchObject({ error: { code: 'OUTPUT_SCHEMA_VIOLATION', retryable: false } })
   })
 })
