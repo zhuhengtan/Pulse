@@ -48,6 +48,7 @@
 | warm start / DSL | facts/findings 筛选、ResultRef 授权、递归 Draft Proxy、ReAct 完成回调只传 ResultRef | `tests/warm-start.test.ts`、`tests/dsl-context.test.ts`、`tests/m4-dsl-e2e.test.ts` | `79a993f`、`324f1bc`、`e6c228b` |
 | Runtime Storage 编排 | Runtime 自动登记 Event/Result/Snapshot/LLM Request，活动 Lane/Wait/未结算 Request/可见 ResultRef 幂等 pin；Step 提交前 clone 预检 hard limit | `tests/storage-policy.test.ts` | `43a9847` |
 | SQLite 持久化事务 | 提供 Node `node:sqlite` RuntimePersistenceBackend；WAL/FULL synchronous、单行快照、`BEGIN IMMEDIATE` 和 digest CAS 支持原子保存/恢复 | `tests/sqlite-persistence.test.ts` | `0372a5a` |
+| SQLite Result/Snapshot/EventArchive | 提供带 namespace 的 SQLite Result/Snapshot body store 与幂等冲突检测，以及按事件序号原子追加、范围读取的 SQLite EventArchive | `tests/sqlite-content-store.test.ts` | `b832588` |
 | LLM Preparation | bounded preparing/prepared 窗口、generation、迟到准备丢弃、explain 展示 | `tests/provider-host.test.ts` | `944c3ad` |
 | Provider 请求与 usage | modelId、工具 schema、structured output schema、uncached token、latency/cost 归一化与 metadata | `tests/m3-context-adapters.test.ts`、`tests/provider-host.test.ts` | `fa723c7` |
 | Provider SSE 观测流 | OpenAI-compatible 与 Anthropic SSE 读取 `llm:chunk` 文本观测；工具参数只在完整流结束后归一化，不执行未闭合参数；非 SSE 响应安全回退 JSON | `tests/m3-context-adapters.test.ts` | `44c8608` |
@@ -578,6 +579,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `a866a6c`：Agent Host Cancel 的确认事件并入首次 `setAgent(state=cancelling)` 事务，避免接受状态未提交时提前消费 Fact。
 - `7bfd5d8`：Agent 取消级联预审全部目标状态与事实事件，并将 `agent.cancelled` 事件并入 Agent 终态事务，拒绝后续存储失败造成半取消状态。
 - `44c8608`：Provider Adapter 支持 OpenAI-compatible/Anthropic SSE 文本观测，完整响应后再归一化 tool call，避免流式中间参数进入 Runtime。
+- `b832588`：增加 SQLite Result/Snapshot body store 与 EventArchive，支持跨实例幂等写、冲突拒绝和事件范围恢复读取。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
@@ -587,7 +589,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，52 个测试文件、294 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，53 个测试文件、296 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
