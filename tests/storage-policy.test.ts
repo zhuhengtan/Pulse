@@ -41,12 +41,13 @@ describe('session storage policy', () => {
     expect(policy.inspect().find((record) => record.key === 'r1')?.pinCount).toBe(0)
   })
 
-  it('automatically pins active lane snapshots and LLM requests', () => {
+  it('automatically pins active lane snapshots and LLM requests', async () => {
     let release!: () => void
     const program: LaneProgram = { id: 'storage-pins', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'request', kind: 'llm', concurrencyClass: 'llm', input: { request: {} } }] }], next: { programId: 'storage-pins', programVersion: '1', step: 'done', locals: {} } }) }
     const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1, effectExecutor: async (_effect, signal) => await new Promise((resolve) => { release = () => resolve({ value: { ok: true } }); signal.addEventListener('abort', () => resolve({ value: null }), { once: true }) }) })
     runtime.createAgent('pin active work', program)
     runtime.tick()
+    await Promise.resolve()
     const records = runtime.storagePolicy.inspect()
     expect(records.find((record) => record.key.startsWith('snapshot:lane:'))?.pinCount).toBeGreaterThan(0)
     expect(records.find((record) => record.key.startsWith('snapshot:request:'))?.pinCount).toBeGreaterThan(0)

@@ -84,4 +84,19 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     expect([...runtime.state.results.values()]).toContainEqual(expect.objectContaining({ kind: 'rejected_output', value: 'not-json' }))
     expect(runtime.state.effects.get('effect-1')?.outcome).toMatchObject({ error: { code: 'OUTPUT_SCHEMA_VIOLATION' }, rejectedOutputRefs: [expect.any(String)] })
   })
+
+  it('prepares LLM effects before dispatch without occupying the execution slot', async () => {
+    const calls: string[] = []
+    let release!: () => void
+    const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1, maxPreparingLLMs: 1, effectExecutor: async (effect) => { calls.push(effect.key); return await new Promise((resolve) => { release = () => resolve({ value: { ok: true } }) }) } })
+    const program: LaneProgram = { id: 'preparation', version: '1', step: ({ lane }) => lane.resume.step === 'start' ? { actions: [{ type: 'submit_effects', effects: [{ key: 'llm', kind: 'llm', concurrencyClass: 'llm', input: { request: projection } }] }], next: point('preparation', 'done') } : { actions: [{ type: 'complete', result: { ok: true } }], next: point('preparation', 'done') } }
+    const { agentId } = runtime.createAgent('prepare', program)
+    runtime.tick()
+    expect(calls).toEqual([])
+    expect(runtime.state.effects.get('effect-1')?.preparation?.state).toBe('preparing')
+    await Promise.resolve()
+    expect(calls).toEqual(['llm'])
+    release()
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+  })
 })

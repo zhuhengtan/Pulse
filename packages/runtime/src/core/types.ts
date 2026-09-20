@@ -130,6 +130,7 @@ export interface EffectRecord {
   duplicateExecutionPolicy?: 'allow' | 'forbid'
   maxUnknownAttempts?: number
   retryAt?: number
+  preparation?: { state: 'idle' | 'preparing' | 'prepared' | 'stale'; generation: number; projectionRef?: string }
   outcome?: Outcome
   toolCallId?: string
   llmEffectId?: EffectId

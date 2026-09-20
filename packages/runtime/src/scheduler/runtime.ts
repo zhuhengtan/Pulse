@@ -50,6 +50,8 @@ export interface RuntimeConfig {
   sessionId?: string
   maxAgentDepth?: number
   watchdogNoProgressThreshold?: number
+  maxPreparingLLMs?: number
+  maxPreparedLLMs?: number
   storagePolicy?: StoragePolicyConfig
   persistence?: RuntimePersistenceSnapshot
   effectExecutor?: EffectExecutor
@@ -105,6 +107,9 @@ export class PulseRuntime {
   private readonly maxRuntimeMs?: number
   private readonly watchdogNoProgressThreshold: number
   private readonly maxAgentDepth: number
+  private readonly maxPreparingLLMs: number
+  private readonly maxPreparedLLMs: number
+  private readonly preparingLLMs = new Set<string>()
   private readonly sessionId: string
   private hostCommandSeq = 1
   private factWaiters: Array<() => void> = []
@@ -141,6 +146,8 @@ export class PulseRuntime {
     if (config.maxRuntimeMs !== undefined) this.maxRuntimeMs = config.maxRuntimeMs
     this.watchdogNoProgressThreshold = config.watchdogNoProgressThreshold ?? 3
     this.maxAgentDepth = config.maxAgentDepth ?? 1
+    this.maxPreparingLLMs = config.maxPreparingLLMs ?? 2
+    this.maxPreparedLLMs = config.maxPreparedLLMs ?? 8
     this.customExecutor = config.effectExecutor !== undefined
     this.executor = config.effectExecutor ?? (async () => ({ value: null }))
     this.syncStoragePolicy()
@@ -335,6 +342,7 @@ export class PulseRuntime {
       const work = this.tick()
       this.refreshWaits()
       if (this.ready.size === 0 && this.executions.size === 0) {
+        if (this.preparingLLMs.size) { await Promise.resolve(); continue }
         if (this.factInbox.size > 0) continue
         if (this.hasPendingHostInteraction()) { await this.waitForFact(); continue }
         const nextAt = this.clock.timers.nextAt()
@@ -357,7 +365,7 @@ export class PulseRuntime {
     return { status, unresolvedEffectIds: this.quarantine.unresolvedEffectIds }
   }
 
-  async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)) } }
+  async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await Promise.resolve() } }
 
   async shutdown(timeoutMs = 5_000): Promise<{ status: 'stopped' | 'timed_out'; unresolvedEffectIds: string[]; quarantine: string[] }> {
     for (const agent of this.state.agents.values()) if (agent.state === 'running' || agent.state === 'cancelling') this.cancelAgent(agent.id, 'USER_REQUESTED')
@@ -572,8 +580,8 @@ export class PulseRuntime {
 
   explain(laneId?: string): JsonValue {
     const lanes = [...this.state.lanes.values()].filter((lane) => laneId === undefined || lane.id === laneId).map((lane) => ({ id: lane.id, agentId: lane.agentId, status: lane.status, goal: lane.goal, basePriority: lane.priority, effectivePriority: this.ready.snapshot(this.state.now).find((item) => item.laneId === lane.id)?.effectivePriority ?? lane.priority, activeWaitId: lane.activeWaitId ?? null, consecutiveControlErrors: lane.consecutiveControlErrors ?? 0, unresolvedEffectIds: lane.unresolvedEffectIds ?? [] }))
-    const effects = [...this.state.effects.values()].filter((effect) => laneId === undefined || effect.ownerLaneId === laneId).map((effect) => ({ id: effect.id, state: effect.state, executionState: effect.executionState, sideEffectState: effect.sideEffectState, attemptId: effect.attemptId, inheritedFloor: effect.inheritedFloor ?? null, deadlineAt: effect.deadlineAt ?? null }))
-    return { now: this.state.now, lanes, effects, quarantine: this.quarantine.unresolvedEffectIds }
+    const effects = [...this.state.effects.values()].filter((effect) => laneId === undefined || effect.ownerLaneId === laneId).map((effect) => ({ id: effect.id, state: effect.state, executionState: effect.executionState, sideEffectState: effect.sideEffectState, attemptId: effect.attemptId, inheritedFloor: effect.inheritedFloor ?? null, deadlineAt: effect.deadlineAt ?? null, preparation: effect.preparation ?? null }))
+    return { now: this.state.now, lanes, effects, preparation: { preparing: this.preparingLLMs.size, prepared: [...this.state.effects.values()].filter((effect) => effect.state === 'queued' && effect.preparation?.state === 'prepared').length, maxPreparing: this.maxPreparingLLMs, maxPrepared: this.maxPreparedLLMs }, quarantine: this.quarantine.unresolvedEffectIds }
   }
 
   retryEffect(effectId: string, delayMs: number): void {
@@ -599,6 +607,7 @@ export class PulseRuntime {
     effect.attemptNo += 1
     effect.attemptId = `${effect.id}-attempt-${effect.attemptNo}`
     effect.retryAt = this.state.now + delayMs
+    if (effect.kind === 'llm') { effect.preparation = { state: 'stale', generation: (effect.preparation?.generation ?? 0) + 1 } }
     this.emit({ type: 'effect.retry_scheduled', effectId: effect.id, data: { previousAttemptId, nextAttemptId: effect.attemptId, delayMs, ...(error ? { error } : {}) } as unknown as JsonValue })
     this.clock.timers.schedule(effect.retryAt, () => {
       if (!effect.outcome && effect.state === 'retry_wait') {
@@ -615,6 +624,7 @@ export class PulseRuntime {
     const queued = [...this.state.effects.values()].filter((effect) => effect.state === 'queued' && !this.executions.has(effect.id)).sort((a, b) => (Math.max(a.schedulePriority ?? 0, a.inheritedFloor ?? Number.NEGATIVE_INFINITY) - Math.max(b.schedulePriority ?? 0, b.inheritedFloor ?? Number.NEGATIVE_INFINITY)) || a.id.localeCompare(b.id))
     for (const effect of queued) {
       if (effect.state !== 'queued' || this.executions.has(effect.id)) continue
+      if (effect.kind === 'llm' && !this.prepareLLMEffect(effect)) continue
       if (effect.concurrencyClass !== 'none' && this.runningCount(effect.concurrencyClass) >= this.state.maxRunning[effect.concurrencyClass]) continue
       const outboxEntry = this.outbox.enqueue(effect, this.state.now)
       if (outboxEntry.state === 'claimed') continue
@@ -666,6 +676,31 @@ export class PulseRuntime {
       if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.clock.timers.schedule(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))
       this.executions.set(effect.id, executionRecord)
     }
+  }
+
+  private prepareLLMEffect(effect: EffectRecord): boolean {
+    if (effect.preparation?.state === 'prepared') return true
+    if (effect.preparation?.state === 'preparing') return false
+    if (this.preparingLLMs.size >= this.maxPreparingLLMs) return false
+    const preparedCount = [...this.state.effects.values()].filter((candidate) => candidate.state === 'queued' && candidate.preparation?.state === 'prepared').length
+    if (preparedCount >= this.maxPreparedLLMs) return false
+    const generation = (effect.preparation?.generation ?? 0) + 1
+    const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+    const request = input.request && typeof input.request === 'object' && !Array.isArray(input.request) ? input.request as Record<string, JsonValue> : undefined
+    effect.preparation = { state: 'preparing', generation, ...(typeof request?.projectionHash === 'string' ? { projectionRef: request.projectionHash } : {}) }
+    this.preparingLLMs.add(effect.id)
+    Promise.resolve().then(() => {
+      this.preparingLLMs.delete(effect.id)
+      if (effect.outcome || effect.state !== 'queued' || effect.preparation?.generation !== generation || effect.cancelRequested) {
+        if (effect.preparation?.generation === generation) effect.preparation = { state: 'stale', generation }
+        return
+      }
+      effect.preparation = { ...effect.preparation, state: 'prepared' }
+      this.emit({ type: 'llm.request_prepared', effectId: effect.id, data: { generation, projectionRef: effect.preparation.projectionRef ?? null } })
+      this.dispatchQueuedEffects()
+      this.syncStoragePolicy()
+    })
+    return false
   }
 
   private expireEffect(effectId: string, reason: 'ATTEMPT_TIMEOUT' | 'TIMEOUT'): void {
