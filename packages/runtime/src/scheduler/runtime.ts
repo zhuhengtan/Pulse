@@ -535,6 +535,7 @@ export class PulseRuntime {
       const envelope = this.factInbox.drain(1)[0]
       if (!envelope) break
       try {
+        let commandApplied = false
         if (!this.state.events.some((event) => event.id === envelope.eventId && event.type === 'command.enqueued')) this.emit({ id: envelope.eventId, type: 'command.enqueued', data: envelope.fact as unknown as JsonValue })
       if (envelope.fact.type === 'reply') {
         const effect = this.state.effects.get(envelope.fact.effectId)
@@ -555,15 +556,17 @@ export class PulseRuntime {
           nextLane.priority = envelope.fact.priority
           nextLane.version++
           const event = { type: 'lane.priority_changed' as const, laneId: lane.id, data: { previous: lane.priority, priority: nextLane.priority } }
-          const mutations: Mutation[] = [{ op: 'setLane', laneId: lane.id, record: nextLane }, { op: 'appendEvent', event }]
+          const appliedEvent = { type: 'command.applied' as const, data: { eventId: envelope.eventId } }
+          const mutations: Mutation[] = [{ op: 'setLane', laneId: lane.id, record: nextLane }, { op: 'appendEvent', event }, { op: 'appendEvent', event: appliedEvent }]
           this.assertStorageAdmission(mutations)
-          commitMutationTransaction(this.state, this.mutationLog, `lane:${lane.id}:priority:${nextLane.version}`, mutations, this.state.now, this.sessionId)
+          commitMutationTransaction(this.state, this.mutationLog, `host-command:${envelope.eventId}`, mutations, this.state.now, this.sessionId)
           Object.assign(lane, nextLane)
           this.state.lanes.set(lane.id, lane)
           if (lane.status === 'ready') this.ready.enqueue(readyItemFromLane(lane))
+          commandApplied = true
         }
       }
-      this.emit({ type: 'command.applied', data: { eventId: envelope.eventId } })
+      if (!commandApplied) this.emit({ type: 'command.applied', data: { eventId: envelope.eventId } })
       } catch (cause) {
         this.factInbox.restore(before)
         throw cause

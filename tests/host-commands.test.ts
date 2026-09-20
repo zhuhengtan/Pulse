@@ -40,6 +40,7 @@ describe('Host command API', () => {
     expect(transaction?.mutations).toEqual(expect.arrayContaining([
       expect.objectContaining({ op: 'setLane', laneId, record: expect.objectContaining({ priority: 9 }) }),
       expect.objectContaining({ op: 'appendEvent', event: expect.objectContaining({ type: 'lane.priority_changed', laneId }) }),
+      expect.objectContaining({ op: 'appendEvent', event: expect.objectContaining({ type: 'command.applied', data: { eventId: 'host-command-1' } }) }),
     ]))
     expect(runtime.inspectLane(laneId)).toMatchObject({ lanes: [{ id: laneId, basePriority: 9 }] })
   })
