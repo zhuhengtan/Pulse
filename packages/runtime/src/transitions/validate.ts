@@ -567,6 +567,7 @@ function requireMutations(): typeof import('../core/mutations.js') {
   return { apply: (state: RuntimeState, mutations: Mutation[]) => {
     for (const mutation of mutations) {
       switch (mutation.op) {
+        case 'setAgent': state.agents.set(mutation.agentId, mutation.record); break
         case 'setLane': state.lanes.set(mutation.laneId, mutation.record); break
         case 'setEffect': state.effects.set(mutation.effectId, mutation.record); break
         case 'setWait': state.waits.set(mutation.waitId, mutation.record); break

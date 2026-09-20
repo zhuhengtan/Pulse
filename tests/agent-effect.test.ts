@@ -79,6 +79,9 @@ describe('built-in Child Agent Effect host', () => {
     runtime.tick()
     expect(runtime.state.agents.get(childAgentId)?.state).toBe('succeeded')
     expect(runtime.state.effects.get('effect-1')?.outcome?.status).toBe('succeeded')
+    expect(runtime.mutationLog.entries.some((entry) =>
+      entry.mutations.some((mutation) => mutation.op === 'setAgent' && mutation.agentId === childAgentId && mutation.record.state === 'succeeded')
+    )).toBe(true)
     runtime.attachAgent(childAgentId)
     expect(runtime.backgroundAgents()).toEqual([])
   })

@@ -777,8 +777,8 @@ export class PulseRuntime {
       const root = child ? this.state.lanes.get(child.rootLaneId) : undefined
       if (!child || !root || !['succeeded', 'failed', 'cancelled'].includes(root.status)) continue
       const status = root.status === 'succeeded' ? 'succeeded' : root.status === 'cancelled' ? 'cancelled' : 'failed'
-      child.state = status
       this.completeEffect(effect.id, { value: { agentId: child.id, status } }, status, status === 'failed' ? { code: 'CHILD_AGENT_FAILED', message: 'Child Agent failed.' } : undefined)
+      if (effect.outcome) this.commitAgentState(child.id, status, `agent:${child.id}:settled:${effect.id}`)
     }
   }
 
@@ -1379,6 +1379,18 @@ export class PulseRuntime {
 
   private enqueueNewReadyLanes(): void {
     for (const lane of this.state.lanes.values()) if (lane.status === 'ready' && !this.ready.has(lane.id)) this.enqueueLane(lane.id)
+  }
+
+  private commitAgentState(agentId: string, state: 'created' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled', transactionId: string): boolean {
+    const agent = this.state.agents.get(agentId)
+    if (!agent || agent.state === state) return true
+    const nextAgent = structuredClone(agent)
+    nextAgent.state = state
+    const mutations: Mutation[] = [{ op: 'setAgent', agentId, record: nextAgent }]
+    try { this.assertStorageAdmission(mutations) } catch { return false }
+    commitMutationTransaction(this.state, this.mutationLog, transactionId, mutations, this.state.now, this.sessionId)
+    this.schedulePersistence()
+    return true
   }
 
   private failLane(lane: LaneRecord, failure: RuntimeError): void {

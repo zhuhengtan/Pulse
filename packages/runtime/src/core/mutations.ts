@@ -1,7 +1,8 @@
-import type { RuntimeEventInput, RuntimeState, RuntimeError, ContextVersion, JsonValue, LaneRecord, EffectRecord, WaitRecord, ResultRecord, FindingRecord, ArtifactRecord, ContextDelta, LaneId, WaitId, EffectId, HistoryRecord, MergeProposal, ToolCallCorrelation, PrivacyMetadata } from './types.js'
+import type { RuntimeEventInput, RuntimeState, RuntimeError, ContextVersion, JsonValue, AgentRecord, LaneRecord, EffectRecord, WaitRecord, ResultRecord, FindingRecord, ArtifactRecord, ContextDelta, LaneId, WaitId, EffectId, HistoryRecord, MergeProposal, ToolCallCorrelation, PrivacyMetadata } from './types.js'
 import { appendRuntimeEvent } from './events.js'
 
 export type Mutation =
+  | { op: 'setAgent'; agentId: string; record: AgentRecord }
   | { op: 'setLane'; laneId: LaneId; record: LaneRecord }
   | { op: 'setEffect'; effectId: EffectId; record: EffectRecord }
   | { op: 'setWait'; waitId: WaitId; record: WaitRecord }
@@ -26,6 +27,7 @@ export type ValidationResult = ValidationSuccess | ValidationFailure
 export function apply(state: RuntimeState, mutations: Mutation[], defaults: { sessionId?: string; timestamp?: number } = {}): void {
   for (const mutation of mutations) {
     switch (mutation.op) {
+      case 'setAgent': state.agents.set(mutation.agentId, mutation.record); break
       case 'setLane': state.lanes.set(mutation.laneId, mutation.record); break
       case 'setEffect': state.effects.set(mutation.effectId, mutation.record); break
       case 'setWait': state.waits.set(mutation.waitId, mutation.record); break
