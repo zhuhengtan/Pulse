@@ -90,6 +90,7 @@ export interface AgentRecord {
   state?: 'created' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled'
   policyId?: string
   limitsId?: string
+  deadlineAt?: number
   globalVersions: Map<ContextVersion, JsonValue>
   globalPrivacy?: Map<ContextVersion, PrivacyMetadata>
   latestGlobalVersion: ContextVersion

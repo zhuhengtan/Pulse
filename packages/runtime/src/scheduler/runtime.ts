@@ -90,10 +90,22 @@ export interface RuntimeConfig {
 
 export interface RuntimeBudgetConfig { maxTotalAttempts?: number; maxLLMAttempts?: number; maxToolAttempts?: number; maxCostByCurrency?: Record<string, number> }
 export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' | 'final'; include?: 'facts' | 'facts_and_findings'; relevanceRefs?: string[] }
-export interface AgentCreateRequest { goal: string; program: LaneProgram | ProgramRef; agentId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string; inheritedFloor?: number }
+export type AgentPriority = 'background' | 'normal' | 'high' | 'urgent'
+export interface AgentPolicyRef { id: string }
+export interface AgentLimits { id?: string; timeoutMs?: number; maxActiveLanes?: number }
+export interface AgentCreateRequest { goal: string; program: LaneProgram | ProgramRef; agentId?: string; priority?: number | AgentPriority; policy?: AgentPolicyRef; policyId?: string; limits?: AgentLimits; limitsId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string; inheritedFloor?: number }
 export interface BackgroundAgentInfo { agentId: string; rootLaneId: string; state: NonNullable<import('../core/types.js').AgentRecord['state']>; detached: true }
 
 function resultMetadata(value: JsonValue): { sizeBytes: number; contentHash: string } { return { sizeBytes: Buffer.byteLength(stableSerialize(value), 'utf8'), contentHash: contentHash(value) } }
+
+function priorityScore(priority: AgentCreateRequest['priority']): number | undefined {
+  if (priority === undefined) return undefined
+  if (typeof priority === 'number') {
+    if (!Number.isFinite(priority)) throw new Error('INVALID_AGENT_PRIORITY')
+    return priority
+  }
+  return { background: -1, normal: 0, high: 1, urgent: 2 }[priority]
+}
 
 export class ProgramRegistry {
   private readonly records = new Map<string, LaneProgram>()
@@ -317,6 +329,14 @@ export class PulseRuntime {
     const request: AgentCreateRequest = typeof goalOrRequest === 'string' ? { goal: goalOrRequest, program: program!, ...(agentId === undefined ? {} : { agentId }) } : goalOrRequest
     const programRef = 'programId' in request.program ? request.program : undefined
     const rootProgram: LaneProgram = programRef === undefined ? request.program as LaneProgram : this.programs.resolve(programRef)
+    const rootPriority = priorityScore(request.priority)
+    const policyId = request.policy?.id ?? request.policyId
+    const limitsId = request.limits?.id ?? request.limitsId
+    if (request.policy !== undefined && !request.policy.id) throw new Error('INVALID_AGENT_POLICY')
+    const timeoutMs = request.limits?.timeoutMs
+    if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs < 0)) throw new Error('INVALID_AGENT_TIMEOUT')
+    const maxActiveLanes = request.limits?.maxActiveLanes ?? request.maxActiveLanes
+    if (maxActiveLanes !== undefined && (!Number.isInteger(maxActiveLanes) || maxActiveLanes < 1)) throw new Error('INVALID_AGENT_LIMITS')
     const warmStart = request.warmStart
     let initialGlobal: JsonValue | undefined
     let initialGlobalPrivacy: PrivacyMetadata | undefined
@@ -344,7 +364,7 @@ export class PulseRuntime {
     const rootResume = programRef === undefined
       ? { programId: rootProgram.id, programVersion: rootProgram.version, step: (rootProgram as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }
       : { programId: rootProgram.id, programVersion: rootProgram.version, step: programRef.step ?? (rootProgram as LaneProgram & { entry?: string }).entry ?? 'start', locals: programRef.locals ?? {} }
-    const { agent, root, nextIds } = buildAgent(this.state, request.goal, rootResume, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(request.maxActiveLanes === undefined ? {} : { maxActiveLanes: request.maxActiveLanes }), ...(initialGlobal === undefined ? {} : { initialGlobal }), ...(initialGlobalPrivacy === undefined ? {} : { initialGlobalPrivacy }), ...(request.parentAgentId === undefined ? {} : { parentAgentId: request.parentAgentId, depth: (parent?.depth ?? 0) + 1 }), ...(request.inheritedFloor === undefined ? {} : { inheritedFloor: request.inheritedFloor }) })
+    const { agent, root, nextIds } = buildAgent(this.state, request.goal, rootResume, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(maxActiveLanes === undefined ? {} : { maxActiveLanes }), ...(rootPriority === undefined ? {} : { priority: rootPriority }), ...(initialGlobal === undefined ? {} : { initialGlobal }), ...(initialGlobalPrivacy === undefined ? {} : { initialGlobalPrivacy }), ...(request.parentAgentId === undefined ? {} : { parentAgentId: request.parentAgentId, depth: (parent?.depth ?? 0) + 1 }), ...(request.inheritedFloor === undefined ? {} : { inheritedFloor: request.inheritedFloor }), ...(policyId === undefined ? {} : { policyId }), ...(limitsId === undefined ? {} : { limitsId }), ...(timeoutMs === undefined ? {} : { deadlineAt: this.state.now + timeoutMs }) })
     if (warmStartResultRefs.length) root.visibleResultRefs = new Set(warmStartResultRefs)
     if (rootProgram.seriesKeys?.length && programRef === undefined) root.resume.locals = { $sdk: { series: { keys: [...rootProgram.seriesKeys], index: 0 } } }
     root.enqueueSeq = this.enqueueSeq++
@@ -667,7 +687,8 @@ export class PulseRuntime {
         throw cause
       }
     }
-    if (this.maxRuntimeAt !== undefined && this.state.now >= this.maxRuntimeAt) for (const agent of this.state.agents.values()) if (agent.state === 'running') this.cancelAgent(agent.id, 'TIMEOUT')
+    if (this.maxRuntimeAt !== undefined) for (const agent of this.state.agents.values()) if (agent.state === 'running' && this.state.now >= this.maxRuntimeAt) this.cancelAgent(agent.id, 'TIMEOUT')
+    for (const agent of this.state.agents.values()) if (agent.state === 'running' && agent.deadlineAt !== undefined && this.state.now >= agent.deadlineAt) this.cancelAgent(agent.id, 'TIMEOUT')
     for (const timer of this.clock.timers.due(this.state.now)) timer.callback()
     let progressed = 0
     while (progressed < this.maxSteps) {
