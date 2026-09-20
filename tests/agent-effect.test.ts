@@ -83,6 +83,8 @@ describe('built-in Child Agent Effect host', () => {
     expect(childSettlement?.mutations.some((mutation) => mutation.op === 'setAgent' && mutation.agentId === childAgentId && mutation.record.state === 'succeeded')).toBe(true)
     runtime.attachAgent(childAgentId)
     expect(runtime.backgroundAgents()).toEqual([])
+    expect(runtime.mutationLog.entries.some((entry) => entry.transactionId === `agent:${childAgentId}:detached`)).toBe(true)
+    expect(runtime.mutationLog.entries.some((entry) => entry.transactionId === `agent:${childAgentId}:attached`)).toBe(true)
   })
 
   it('does not partially detach an Agent when the audit event exceeds storage limits', () => {

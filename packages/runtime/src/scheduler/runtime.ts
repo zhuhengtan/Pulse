@@ -285,9 +285,13 @@ export class PulseRuntime {
     const agent = this.state.agents.get(agentId)
     if (!agent) throw new Error(`UNKNOWN_AGENT:${agentId}`)
     const event = { type: 'agent.detached' as const, agentId, data: { agentId } }
-    this.assertStorageAdmission([{ op: 'appendEvent', event }])
-    agent.detached = true
-    this.emit(event)
+    const nextAgent = structuredClone(agent)
+    nextAgent.detached = true
+    const mutations: Mutation[] = [{ op: 'setAgent', agentId, record: nextAgent }, { op: 'appendEvent', event }]
+    this.assertStorageAdmission(mutations)
+    commitMutationTransaction(this.state, this.mutationLog, `agent:${agentId}:detached`, mutations, this.state.now, this.sessionId)
+    Object.assign(agent, nextAgent)
+    this.state.agents.set(agentId, agent)
     this.schedulePersistence()
     return { agentId, rootLaneId: agent.rootLaneId, state: agent.state ?? 'created', detached: true }
   }
@@ -296,9 +300,14 @@ export class PulseRuntime {
     if (!agent) throw new Error(`UNKNOWN_AGENT:${agentId}`)
     if (!agent.detached) return
     const event = { type: 'agent.attached' as const, agentId, data: { agentId } }
-    this.assertStorageAdmission([{ op: 'appendEvent', event }])
+    const nextAgent = structuredClone(agent)
+    delete nextAgent.detached
+    const mutations: Mutation[] = [{ op: 'setAgent', agentId, record: nextAgent }, { op: 'appendEvent', event }]
+    this.assertStorageAdmission(mutations)
+    commitMutationTransaction(this.state, this.mutationLog, `agent:${agentId}:attached`, mutations, this.state.now, this.sessionId)
+    Object.assign(agent, nextAgent)
     delete agent.detached
-    this.emit(event)
+    this.state.agents.set(agentId, agent)
     this.schedulePersistence()
   }
   backgroundAgents(): BackgroundAgentInfo[] {
