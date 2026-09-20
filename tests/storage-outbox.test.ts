@@ -32,6 +32,24 @@ describe('effect outbox and runtime persistence envelope', () => {
     expect(exportRuntimePersistence(state, log, outbox).schemaVersion).toBe(1)
   })
 
+  it('marks Artifact residency persisted only after the backend acknowledges the save', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-artifact-persisted-'))
+    try {
+      const backend = new FileRuntimePersistenceBackend(join(directory, 'runtime.json'))
+      const runtime = new PulseRuntime()
+      const program = { id: 'artifact-persisted', version: '1', step: () => ({ actions: [], next: { programId: 'artifact-persisted', programVersion: '1', step: 'start', locals: {} } }) }
+      const { laneId } = runtime.createAgent('artifact persistence', program)
+      const artifact = runtime.publishArtifact({ mediaType: 'text/plain', content: 'durable', laneId })
+      expect(runtime.state.artifacts.get(artifact.ref)?.storageState).toBe('memory')
+      await expect(runtime.persist({ save: async () => { throw new Error('PERSISTENCE_UNAVAILABLE') } })).rejects.toThrow('PERSISTENCE_UNAVAILABLE')
+      expect(runtime.state.artifacts.get(artifact.ref)?.storageState).toBe('memory')
+      await runtime.persist(backend)
+      expect(runtime.state.artifacts.get(artifact.ref)?.storageState).toBe('persisted')
+      const restored = await PulseRuntime.restore(backend)
+      expect(restored.state.artifacts.get(artifact.ref)?.storageState).toBe('persisted')
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('rejects malformed persistence envelopes before recovery', () => {
     expect(() => importRuntimePersistence({ schemaVersion: 1 } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
     expect(() => importRuntimePersistence({ schemaVersion: 1, state: { state: {} }, mutationLog: {}, outbox: {} } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')

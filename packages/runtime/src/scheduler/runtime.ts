@@ -279,8 +279,9 @@ export class PulseRuntime {
   async persist(backend: RuntimePersistenceBackend): Promise<void> {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
-    await backend.save(exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine, persistedPolicy))
+    await backend.save(exportRuntimePersistence(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy))
     this.storagePolicy.markPersisted()
+    this.markArtifactsPersisted()
   }
   async flushPersistence(): Promise<void> {
     if (!this.persistenceBackend) return
@@ -295,9 +296,10 @@ export class PulseRuntime {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
     const eventWatermark = options.compactEventsThrough ?? this.state.events.at(-1)?.seq
-    const snapshot = exportRuntimeCheckpoint(this.state, this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark })
+    const snapshot = exportRuntimeCheckpoint(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark })
     await backend.save(snapshot)
     this.storagePolicy.markPersisted()
+    this.markArtifactsPersisted()
     const watermark = snapshot.checkpoint?.logWatermark ?? 0
     if (watermark > 0 && this.mutationLog.lastSequence >= watermark) this.mutationLog.truncateThrough(watermark)
     if (eventWatermark !== undefined) {
@@ -606,6 +608,16 @@ export class PulseRuntime {
       this.persistenceScheduled = false
       if (this.persistenceDirty) this.schedulePersistence()
     })
+  }
+
+  private persistenceState(): RuntimeState {
+    const state = structuredClone(this.state)
+    for (const artifact of state.artifacts.values()) artifact.storageState = 'persisted'
+    return state
+  }
+
+  private markArtifactsPersisted(): void {
+    for (const artifact of this.state.artifacts.values()) artifact.storageState = 'persisted'
   }
 
   private syncStoragePolicy(policy = this.storagePolicy, state = this.state): void {
