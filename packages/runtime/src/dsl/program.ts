@@ -271,13 +271,13 @@ export class StepBuilder<TState = JsonValue> {
     })
     return this
   }
-  addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; onFinish: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; onError?: (error: Error, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
+  addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; onFinish: ((resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>) | { text: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; structured?: { schema: ZodTypeAny; onParsed: (data: unknown, ctx: StepContext<TState>) => NextStepTarget<TState> } }; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
     const readTurns = (ctx: StepContext<TState>): number => { const sdk = sdkLocals(ctx.lane.resume.locals); const turn = sdk[`${name}Turns`]; return typeof turn === 'number' && Number.isInteger(turn) && turn >= 0 ? turn : 0 }
     const writeTurns = (ctx: StepContext<TState>, turns: number): JsonValue => { const locals = ctx.lane.resume.locals; const base = locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}; return { ...base, $sdk: { ...sdkLocals(locals), [`${name}Turns`]: turns } } }
     const resultRefFromWait = (ctx: StepContext<TState>): ResultRef | undefined => { const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined; return dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined }
     const resultRefsFromWait = (ctx: StepContext<TState>): ResultRef[] => ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef ? [dependency.outcome.resultRef] : []) : []
     const instruction = (ctx: StepContext<TState>): string => typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: ctx.laneState })
-    const submitModel = (ctx: StepContext<TState>, turn: number, resultRefs: ResultRef[] = [], artifactRefs: string[] = []): LaneStepOutput => { const dataRefs = [...new Set([...resultRefs, ...artifactRefs])]; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { ...(resultRefs.length ? { results: resultRefs } : {}), ...(artifactRefs.length ? { artifacts: artifactRefs } : {}) }, turn, ...(options.outputSchema === undefined ? {} : { outputSchema: zodJsonSchema(options.outputSchema) }), ...(options.toolAllow === undefined ? {} : { requirements: { toolCalling: true } }) }), ...(dataRefs.length ? { derivedFrom: dataRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn) }, locals: writeTurns(ctx, turn) } }
+    const submitModel = (ctx: StepContext<TState>, turn: number, resultRefs: ResultRef[] = [], artifactRefs: string[] = []): LaneStepOutput => { const dataRefs = [...new Set([...resultRefs, ...artifactRefs])]; const requirements = { ...(options.requirements ?? {}), ...(options.toolAllow === undefined ? {} : { toolCalling: true }) }; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { ...(resultRefs.length ? { results: resultRefs } : {}), ...(artifactRefs.length ? { artifacts: artifactRefs } : {}) }, turn, ...(options.outputSchema === undefined ? {} : { outputSchema: zodJsonSchema(options.outputSchema) }), ...(Object.keys(requirements).length ? { requirements } : {}) }), ...(dataRefs.length ? { derivedFrom: dataRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn) }, locals: writeTurns(ctx, turn) } }
     this.handlers.set(name, (ctx) => { const turn = readTurns(ctx) + 1; const inputs = options.inputs?.(ctx) ?? {}; const refs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? [])])]; const output = submitModel(ctx, turn, refs, [...new Set(inputs.artifacts ?? [])]); return { ...output, next: `${name}:decode` } })
     this.handlers.set(`${name}:tools`, (ctx) => { const turn = readTurns(ctx); const refs = resultRefsFromWait(ctx); return { ...submitModel(ctx, turn + 1, refs), next: `${name}:decode` } })
     this.handlers.set(`${name}:decode`, (ctx) => {
@@ -287,10 +287,13 @@ export class StepBuilder<TState = JsonValue> {
       const record = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, JsonValue> : undefined
       const finishReason = record?.finishReason
       const toolCalls = Array.isArray(record?.toolCalls) ? record.toolCalls : []
+      const fail = (runtimeError: RuntimeError): { next: NextStepTarget<TState> } => options.onError ? { next: options.onError(runtimeError, ctx) } : (() => { const error = Object.assign(new Error(runtimeError.message), runtimeError); throw error })()
+      const maxTurns = Math.max(1, Math.floor(options.maxTurns ?? 10))
+      const maxTurnsReached = (): { next: NextStepTarget<TState> } => options.onMaxTurns ? { next: options.onMaxTurns(ctx) } : fail({ code: 'MAX_TURNS_REACHED', message: `ReAct loop ${name} reached its maximum of ${maxTurns} turns.`, retryable: false })
       if (finishReason === 'tool_calls') {
-        if (turns >= (options.maxTurns ?? 10) || toolCalls.length === 0) return { next: options.onMaxTurns ? options.onMaxTurns(ctx) : `${name}:decode` }
+        if (turns >= maxTurns || toolCalls.length === 0) return maxTurnsReached()
         const invalidTool = toolCalls.find((call) => { const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}; const toolName = typeof item.name === 'string' ? item.name : ''; return !toolName || (options.toolAllow !== undefined && !options.toolAllow.includes(toolName)) })
-        if (invalidTool !== undefined) return { next: options.onError ? options.onError(new Error('ACTION_TOOL_NOT_ALLOWED'), ctx) : (options.onMaxTurns ? options.onMaxTurns(ctx) : `${name}:decode`) }
+        if (invalidTool !== undefined) return fail({ code: 'ACTION_TOOL_NOT_ALLOWED', message: 'Model requested a tool outside the ReAct allow-list.', retryable: false })
         const sourceEffectId = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).find((dependency) => dependency.state === 'settled' && dependency.target.kind === 'effect')?.target.id : undefined
         const effects = toolCalls.map((call, index) => {
           const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}
@@ -300,12 +303,20 @@ export class StepBuilder<TState = JsonValue> {
         })
         return { actions: [{ type: 'submit_effects', effects, wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:tools` }
       }
-      if (turns >= (options.maxTurns ?? 10)) return { next: options.onMaxTurns ? options.onMaxTurns(ctx) : `${name}:decode` }
+      if (turns >= maxTurns) return maxTurnsReached()
       if (options.outputSchema) {
         const parsed = options.outputSchema.safeParse(value)
-        if (!parsed.success) return { next: options.onError ? options.onError(new Error('OUTPUT_SCHEMA_VIOLATION'), ctx) : `${name}:decode` }
+        if (!parsed.success) return fail({ code: 'OUTPUT_SCHEMA_VIOLATION', message: 'ReAct result did not match outputSchema.', retryable: false, details: parsed.error.message })
       }
-      return ref ? { next: options.onFinish(ref, ctx) } : { next: options.onError ? options.onError(new Error('MISSING_RESULT_REF'), ctx) : `${name}:decode` }
+      if (!ref) return fail({ code: 'MISSING_RESULT_REF', message: 'ReAct result did not produce a ResultRef.', retryable: false })
+      if (typeof options.onFinish === 'function') return { next: options.onFinish(ref, ctx) }
+      if (options.onFinish.structured) {
+        const structuredValue = record?.structured ?? value
+        const parsed = options.onFinish.structured.schema.safeParse(structuredValue)
+        if (!parsed.success) return fail({ code: 'OUTPUT_SCHEMA_VIOLATION', message: 'ReAct structured result did not match schema.', retryable: false, details: parsed.error.message })
+        return { next: options.onFinish.structured.onParsed(parsed.data, ctx) }
+      }
+      return { next: options.onFinish.text(ref, ctx) }
     })
     return this
   }
