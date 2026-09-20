@@ -58,4 +58,13 @@ describe('Tool SDK to Runtime Effect host', () => {
     const prepared = prepare({ key: 'write', kind: 'tool', concurrencyClass: 'tool', input: { name: 'write-file', arguments: { path: 'a.txt' } } })
     expect(prepared).toMatchObject({ sideEffectPolicy: 'write', attemptTimeoutMs: 2500, locks: [{ resource: 'file:a.txt', mode: 'exclusive' }] })
   })
+
+  it('lets Runtime reconcile a quarantined effect and publish its terminal outcome', async () => {
+    const runtime = new PulseRuntime()
+    runtime.state.effects.set('effect-3', { id: 'effect-3', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'job', kind: 'tool', concurrencyClass: 'tool', input: {}, executionRef: 'job-3', state: 'reconcile_required', attemptId: 'attempt-3', attemptNo: 1, executionState: 'remote_unknown', sideEffectState: 'unknown' })
+    runtime.quarantine.add('effect-3', 0, 'in_doubt')
+    await expect(runtime.reconcileEffectWith('effect-3', async (executionRef) => ({ status: executionRef === 'job-3' ? 'succeeded' : 'unknown', output: { reconciled: true } }))).resolves.toMatchObject({ status: 'succeeded', output: { reconciled: true } })
+    expect(runtime.state.effects.get('effect-3')?.outcome).toMatchObject({ status: 'succeeded', resultRef: expect.any(String) })
+    expect(runtime.quarantine.has('effect-3')).toBe(false)
+  })
 })
