@@ -434,7 +434,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       seenCancelTargets.add(action.laneId)
       if (action.laneId === lane.id || !descendants(state, lane.id, action.laneId)) return { rejection: error('CANCEL_NOT_OWNER', 'a Lane can only cancel its own descendants') }
       const target = state.lanes.get(action.laneId)!
-      mutations.push({ op: 'setLane', laneId: target.id, record: { ...laneCopy(target), status: 'cancelled', version: target.version + 1 } })
+      mutations.push({ op: 'setLane', laneId: target.id, record: { ...laneCopy(target), status: 'cancelled', cancelReason: action.reason, version: target.version + 1 } })
     } else if (action.type === 'propose_cancel') {
       if (seenCancelTargets.has(action.laneId)) return { rejection: error('DUPLICATE_CANCEL_TARGET', action.laneId) }
       seenCancelTargets.add(action.laneId)
@@ -514,7 +514,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       if (activeChildren && action.children === 'cancel') {
         for (const childId of lane.children) {
           const child = state.lanes.get(childId)
-          if (child && !['succeeded', 'failed', 'cancelled'].includes(child.status)) mutations.push({ op: 'setLane', laneId: child.id, record: { ...laneCopy(child), status: 'cancelled', version: child.version + 1 } })
+          if (child && !['succeeded', 'failed', 'cancelled'].includes(child.status)) mutations.push({ op: 'setLane', laneId: child.id, record: { ...laneCopy(child), status: 'cancelled', cancelReason: 'POLICY', version: child.version + 1 } })
         }
       }
       const resultId = `result-${resultCounter++}`

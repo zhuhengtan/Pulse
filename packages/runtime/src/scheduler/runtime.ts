@@ -105,9 +105,10 @@ function warmStartGlobal(value: JsonValue, include: 'facts' | 'facts_and_finding
 }
 
 function outcomeForLane(lane: LaneRecord): Outcome | undefined {
-  if (lane.status === 'succeeded') return { status: 'succeeded', ...(lane.resultRef === undefined ? {} : { resultRef: lane.resultRef }) }
-  if (lane.status === 'failed') return { status: 'failed' }
-  if (lane.status === 'cancelled') return { status: 'cancelled' }
+  const unresolvedEffectIds = lane.unresolvedEffectIds === undefined || lane.unresolvedEffectIds.length === 0 ? {} : { unresolvedEffectIds: [...lane.unresolvedEffectIds] }
+  if (lane.status === 'succeeded') return { status: 'succeeded', ...(lane.resultRef === undefined ? {} : { resultRef: lane.resultRef }), ...unresolvedEffectIds }
+  if (lane.status === 'failed') return { status: 'failed', ...(lane.failure === undefined ? {} : { error: lane.failure.error }), ...unresolvedEffectIds }
+  if (lane.status === 'cancelled') return { status: 'cancelled', reason: lane.cancelReason ?? 'CANCELLED', ...unresolvedEffectIds }
   return undefined
 }
 
@@ -127,6 +128,7 @@ function outcomeForSeriesMember(state: RuntimeState, lane: LaneRecord, key: stri
     status,
     ...(record.result === undefined ? {} : { result: record.result }),
     ...(record.error && typeof record.error === 'object' && !Array.isArray(record.error) ? { error: record.error as unknown as RuntimeError } : {}),
+    ...(typeof record.reason === 'string' ? { reason: record.reason } : {}),
   }
 }
 
@@ -545,7 +547,7 @@ export class PulseRuntime {
       const record = seriesResults[dependency.key]
       const value = record && typeof record === 'object' && !Array.isArray(record) ? record as Record<string, JsonValue> : {}
       const status = value.status === 'succeeded' || value.status === 'failed' || value.status === 'cancelled' ? value.status : undefined
-      const outcome: Outcome = status === undefined ? { status: 'failed', error: { code: 'SERIES_DEPENDENCY_MISSING', message: `Series dependency ${dependency.key} is not settled.` } } : { status, ...(value.result === undefined ? {} : { result: value.result }), ...(value.error && typeof value.error === 'object' && !Array.isArray(value.error) ? { error: value.error as unknown as RuntimeError } : {}) }
+      const outcome: Outcome = status === undefined ? { status: 'failed', error: { code: 'SERIES_DEPENDENCY_MISSING', message: `Series dependency ${dependency.key} is not settled.` } } : { status, ...(value.result === undefined ? {} : { result: value.result }), ...(value.error && typeof value.error === 'object' && !Array.isArray(value.error) ? { error: value.error as unknown as RuntimeError } : {}), ...(typeof value.reason === 'string' ? { reason: value.reason } : {}) }
       return [dependency.key, { state: 'settled' as const, target: { kind: 'lane' as const, id: `series:${dependency.key}` }, outcome }]
     }))
     const blocked = memberDependencies.find((dependency) => dependency.condition === 'success' && dependencyObservations[dependency.key]?.outcome.status !== 'succeeded')
@@ -994,7 +996,7 @@ export class PulseRuntime {
     while (this.state.results.has(`result-${resultSequence}`)) resultSequence++
     const resultId = `result-${resultSequence}`
     const rejectedOutputId = effectiveStatus !== 'succeeded' && effectiveExecution.rejectedOutput ? resultId : undefined
-    const outcome: Outcome = effectiveStatus === 'succeeded' ? { status: effectiveStatus, resultRef: resultId } : { status: effectiveStatus, ...(outputError ? { error: outputError } : {}), ...(rejectedOutputId ? { rejectedOutputRefs: [rejectedOutputId] } : {}) }
+    const outcome: Outcome = effectiveStatus === 'succeeded' ? { status: effectiveStatus, resultRef: resultId } : { status: effectiveStatus, ...(outputError ? { error: outputError } : {}), ...(effectiveStatus === 'cancelled' ? { reason: outputError?.message ?? outputError?.code ?? 'CANCELLED' } : {}), ...(rejectedOutputId ? { rejectedOutputRefs: [rejectedOutputId] } : {}) }
     effect.outcome = outcome
     const ownerLane = this.state.lanes.get(effect.ownerLaneId)
     const sourcePrivacy = effect.derivedFrom?.flatMap((ref) => {
@@ -1249,6 +1251,7 @@ export class PulseRuntime {
       ...targetLanes.flatMap((lane) => {
         const candidate = structuredClone(lane)
         candidate.status = 'cancelled'
+        candidate.cancelReason = reason
         candidate.version++
         candidate.unresolvedEffectIds = [...new Set([...(candidate.unresolvedEffectIds ?? []), ...cancellableEffects.filter((effect) => effect.ownerLaneId === lane.id && effect.sideEffectPolicy === 'write').map((effect) => effect.id)])]
         return [{ op: 'setLane' as const, laneId: lane.id, record: candidate }]
@@ -1260,12 +1263,12 @@ export class PulseRuntime {
           candidate.executionState = 'remote_unknown'
           candidate.sideEffectState = candidate.sideEffectPolicy === 'write' ? 'unknown' : 'none'
           candidate.state = candidate.sideEffectState === 'unknown' ? 'reconcile_required' : 'cancelled'
-          if (candidate.state === 'cancelled') candidate.outcome = { status: 'cancelled', error: { code: reason, message: reason } }
+          if (candidate.state === 'cancelled') candidate.outcome = { status: 'cancelled', reason, error: { code: reason, message: reason } }
         } else if (!this.executions.has(effect.id)) {
           candidate.state = 'cancelled'
           candidate.executionState = 'failed'
           candidate.sideEffectState = 'none'
-          candidate.outcome = { status: 'cancelled', error: { code: 'CANCELLED', message: reason } }
+          candidate.outcome = { status: 'cancelled', reason, error: { code: 'CANCELLED', message: reason } }
         }
         return [{ op: 'setEffect' as const, effectId: effect.id, record: candidate }]
       }),
@@ -1279,6 +1282,7 @@ export class PulseRuntime {
     for (const lane of targetLanes) {
       const nextLane = structuredClone(lane)
       nextLane.status = 'cancelled'
+      nextLane.cancelReason = reason
       nextLane.version++
       const event = { type: 'lane.cancelling' as const, laneId: lane.id, data: reason }
       const mutations: Mutation[] = [{ op: 'setLane', laneId: lane.id, record: nextLane }, { op: 'appendEvent', event }]
@@ -1521,7 +1525,7 @@ export class PulseRuntime {
     candidate.executionState = 'remote_unknown'
     candidate.sideEffectState = candidate.sideEffectPolicy === 'write' ? 'unknown' : 'none'
     candidate.state = candidate.sideEffectState === 'unknown' ? 'reconcile_required' : 'cancelled'
-    if (candidate.state === 'cancelled') candidate.outcome = { status: 'cancelled', error: { code: reason, message: reason } }
+    if (candidate.state === 'cancelled') candidate.outcome = { status: 'cancelled', reason, error: { code: reason, message: reason } }
     const lane = this.state.lanes.get(effect.ownerLaneId)
     const candidateLane = lane === undefined ? undefined : structuredClone(lane)
     if (candidateLane) candidateLane.unresolvedEffectIds = [...new Set([...(candidateLane.unresolvedEffectIds ?? []), effectId])]

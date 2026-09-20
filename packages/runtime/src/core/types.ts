@@ -35,6 +35,8 @@ export interface Outcome {
   result?: JsonValue
   rejectedOutputRefs?: ResultRef[]
   error?: RuntimeError
+  reason?: string
+  unresolvedEffectIds?: EffectId[]
 }
 
 export interface ResumePoint {
@@ -119,6 +121,7 @@ export interface LaneRecord {
   ownedEffectIds: Set<EffectId>
   closingResult?: { value: JsonValue; privacy: PrivacyLabel; privacyTaints?: PrivacyTaint[]; derivedFrom?: ProvenanceRef[] }
   failure?: { error: RuntimeError; privacy: PrivacyLabel; derivedFrom?: ProvenanceRef[] }
+  cancelReason?: string
   resultRef?: ResultRef
   consecutiveControlErrors?: number
   pendingOutcome?: Outcome

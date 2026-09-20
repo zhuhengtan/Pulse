@@ -26,6 +26,7 @@ describe('M0 acceptance matrix', () => {
     runtime.tick()
     const effect = [...runtime.state.effects.values()][0]!
     runtime.completeEffect(effect.id, { value: null, status: 'cancelled' }, 'cancelled')
+    expect(runtime.state.effects.get(effect.id)?.outcome).toMatchObject({ status: 'cancelled', reason: 'CANCELLED' })
     await runtime.start(agentId).outcome()
     expect([...runtime.state.results.values()].some((result) => (result.value as any).wait === 'satisfied')).toBe(true)
     release?.()
