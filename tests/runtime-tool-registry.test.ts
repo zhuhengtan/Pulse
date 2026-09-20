@@ -13,6 +13,7 @@ describe('Runtime tool registry', () => {
     runtime.tools.register(echo)
     expect(runtime.tools.list()).toEqual([expect.objectContaining({ name: 'echo', version: '1' })])
     expect(runtime.tools.compileToolSet('default').tools.map((tool) => tool.name)).toEqual(['echo'])
+    expect(runtime.exportPersistence().compatibility?.toolVersions).toMatchObject({ echo: '1' })
   })
 
   it('keeps allow/deny policy and schema admission fail-closed', async () => {

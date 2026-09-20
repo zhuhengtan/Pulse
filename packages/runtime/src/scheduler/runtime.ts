@@ -528,14 +528,15 @@ export class PulseRuntime {
       if (effect.kind !== 'tool' || effect.toolVersion === undefined) continue
       const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
       const name = input.name
-      if (typeof name !== 'string' || this.toolVersions[name] !== effect.toolVersion) throw new Error(`TOOL_VERSION_UNAVAILABLE:${typeof name === 'string' ? `${name}@${effect.toolVersion}` : effect.toolVersion}`)
+      if (typeof name !== 'string' || this.currentToolVersions()[name] !== effect.toolVersion) throw new Error(`TOOL_VERSION_UNAVAILABLE:${typeof name === 'string' ? `${name}@${effect.toolVersion}` : effect.toolVersion}`)
     }
   }
   private persistenceCompatibility(): RuntimePersistenceCompatibility {
+    const toolVersions = this.currentToolVersions()
     return {
       schemaVersion: 1,
       programVersions: Object.fromEntries([...this.programs.entries()].map(([key, program]) => [key, program.version])),
-      toolVersions: { ...this.toolVersions },
+      toolVersions,
       ...(this.policyVersion === undefined ? {} : { policyVersion: this.policyVersion }),
       ...(this.routerVersion === undefined ? {} : { routerVersion: this.routerVersion }),
     }
@@ -545,9 +546,14 @@ export class PulseRuntime {
       const program = this.programs.get(key)
       if (!program || program.version !== version) throw new Error(`PROGRAM_VERSION_UNAVAILABLE:${key}`)
     }
-    for (const [name, version] of Object.entries(expected.toolVersions)) if (this.toolVersions[name] !== version) throw new Error(`TOOL_VERSION_UNAVAILABLE:${name}@${version}`)
+    const toolVersions = this.currentToolVersions()
+    for (const [name, version] of Object.entries(expected.toolVersions)) if (toolVersions[name] !== version) throw new Error(`TOOL_VERSION_UNAVAILABLE:${name}@${version}`)
     if (expected.policyVersion !== undefined && this.policyVersion !== expected.policyVersion) throw new Error(`POLICY_VERSION_UNAVAILABLE:${expected.policyVersion}`)
     if (expected.routerVersion !== undefined && this.routerVersion !== expected.routerVersion) throw new Error(`ROUTER_VERSION_UNAVAILABLE:${expected.routerVersion}`)
+  }
+
+  private currentToolVersions(): Record<string, string> {
+    return { ...this.toolVersions, ...Object.fromEntries(this.tools.list().map((manifest) => [manifest.name, manifest.version])) }
   }
   private tryEmit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent | undefined {
     try {
