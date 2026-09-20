@@ -11,7 +11,6 @@ export interface HistoryRecordMeta { seq: number; resultRefs: ResultRef[]; priva
 export interface ResultMeta { ref: ResultRef; privacy: PrivacyLabel; derivedFrom: string[]; summary?: JsonValue }
 export interface StepContext<TState = JsonValue> {
   lane: Readonly<LaneRecord>
-  state: Readonly<RuntimeState>
   goal: string
   global: Readonly<JsonValue>
   globalVersion: number
@@ -20,7 +19,6 @@ export interface StepContext<TState = JsonValue> {
   now: number
   watchdog?: ProgressWatchdogState
   resumeInput?: ResumeInput
-  getResult(ref: ResultRef): JsonValue | undefined
   results: { meta(ref: ResultRef): ResultMeta | undefined; summary(ref: ResultRef): JsonValue | undefined }
   mergeProposals: ReadonlyArray<MergeProposal>
   mutateLane(mutator: (draft: TState) => void): void
@@ -82,6 +80,10 @@ function zodJsonSchema(schema: ZodTypeAny): JsonValue {
 function resultVisible(context: LaneStepContext, ref: ResultRef): boolean { return context.lane.visibleResultRefs === undefined || context.lane.visibleResultRefs.has(ref) }
 function findResult(context: LaneStepContext, ref: ResultRef): JsonValue | undefined { return resultVisible(context, ref) ? context.state.results.get(ref)?.value : undefined }
 
+const RESULT_READER = Symbol('pulse.dsl.internal.result-reader')
+type InternalStepContext<TState> = StepContext<TState> & { [RESULT_READER]: (ref: ResultRef) => JsonValue | undefined }
+function readResult(ctx: StepContext, ref: ResultRef): JsonValue | undefined { return (ctx as InternalStepContext<JsonValue>)[RESULT_READER](ref) }
+
 function sdkLocals(locals: JsonValue): Record<string, JsonValue> {
   if (!locals || typeof locals !== 'object' || Array.isArray(locals)) return {}
   const value = (locals as Record<string, JsonValue>).$sdk
@@ -103,11 +105,11 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
   const globalVersion = context.lane.contextSnapshotVersion
   const global = clone(agent?.globalVersions.get(globalVersion) ?? {})
   const history = context.lane.context.history.map((record: HistoryRecord): HistoryRecordMeta => ({ seq: record.seq, resultRefs: [...record.resultRefs], privacy: record.privacy }))
-  const resultMeta = (ref: ResultRef): ResultMeta | undefined => { const result = resultVisible(context, ref) ? context.state.results.get(ref) : undefined; return result ? { ref, privacy: result.privacy, derivedFrom: [...result.derivedFrom], ...(result.summary === undefined ? {} : { summary: clone(result.summary) }) } : undefined }
+  const resultMeta = (ref: ResultRef): ResultMeta | undefined => { const result = resultVisible(context, ref) ? context.state.results.get(ref) : undefined; if (result) derivedRefs.add(ref); return result ? { ref, privacy: result.privacy, derivedFrom: [...result.derivedFrom], ...(result.summary === undefined ? {} : { summary: clone(result.summary) }) } : undefined }
   const globalDelta = (value: { ops: ContextOp[]; privacy?: PrivacyLabel; proposal: boolean }): void => { delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, sourceLaneId: context.lane.id, ops: clone(value.ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal } }
-  const ctx: StepContext<TState> = {
-    lane: context.lane, state: context.state, goal: context.lane.goal, global, globalVersion, laneState: draft, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}),
-    getResult: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return findResult(context, ref) },
+  const ctx: InternalStepContext<TState> = {
+    lane: context.lane, goal: context.lane.goal, global, globalVersion, laneState: draft, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}),
+    [RESULT_READER]: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return findResult(context, ref) },
     results: { meta: resultMeta, summary: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return resultMeta(ref)?.summary } },
     mergeProposals: [...context.state.mergeProposals.values()].filter((proposal) => proposal.agentId === context.lane.agentId).map((proposal) => clone(proposal)),
     mutateLane: (mutator) => { mutator((draftProxy?.draft ?? draft) as TState); const changes = draftProxy?.changes(); delta = { target: 'lane', baseVersion: context.lane.context.version, ops: changes?.ops.map((op) => op.op === 'set' ? { op: 'set' as const, path: op.path, value: asJson(op.value) } : op.op === 'append' ? { op: 'append' as const, path: op.path, value: asJson(op.value) } : { op: 'remove' as const, path: op.path }) ?? [] } },
@@ -149,7 +151,7 @@ export class StepBuilder<TState = JsonValue> {
       const input = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).find((dependency) => dependency.state !== 'pending') : undefined
       const ref = input?.state === 'settled' ? input.outcome.resultRef : undefined
       const rejectedRef = input?.state === 'settled' ? input.outcome.rejectedOutputRefs?.[0] : undefined
-      const value = rejectedRef ? ctx.getResult(rejectedRef) : ref ? ctx.getResult(ref) : undefined
+      const value = rejectedRef ? readResult(ctx, rejectedRef) : ref ? readResult(ctx, ref) : undefined
       const parsed = options.schema.safeParse(value)
       if (!parsed.success) {
         if (options.selfCorrect?.maxRounds === 0) return { next: options.onError ? options.onError(new Error('OUTPUT_SCHEMA_VIOLATION'), ctx) : decode }
@@ -174,7 +176,7 @@ export class StepBuilder<TState = JsonValue> {
     this.handlers.set(`${name}:decode`, (ctx) => {
       const turns = readTurns(ctx)
       const ref = resultRefFromWait(ctx)
-      const value = ref ? ctx.getResult(ref) ?? null : null
+      const value = ref ? readResult(ctx, ref) ?? null : null
       const record = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, JsonValue> : undefined
       const finishReason = record?.finishReason
       const toolCalls = Array.isArray(record?.toolCalls) ? record.toolCalls : []
@@ -221,7 +223,7 @@ export class StepBuilder<TState = JsonValue> {
     this.handlers.set(`${name}:decode`, (ctx) => {
       const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined
       const ref = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined
-      const value = ref ? ctx.getResult(ref) : undefined
+      const value = ref ? readResult(ctx, ref) : undefined
       if (options.schema) {
         const parsed = options.schema.safeParse(value)
         if (!parsed.success) return { next: options.next }
@@ -235,7 +237,7 @@ export class StepBuilder<TState = JsonValue> {
   addHumanStep<TOutput extends ZodTypeAny>(name: string, options: { prompt: string | ((view: InstructionView<TState>) => string); schema: TOutput; onReply: (reply: z.infer<TOutput>, ctx: StepContext<TState>) => NextStepTarget; onTimeout?: (ctx: StepContext<TState>) => NextStepTarget; timeoutMs?: number }): this {
     const decode = `${name}:decode`
     this.handlers.set(name, (ctx) => ({ actions: [{ type: 'submit_effects', effects: [{ key: `${name}-human`, kind: 'human', concurrencyClass: 'none', input: asJson({ prompt: typeof options.prompt === 'string' ? options.prompt : options.prompt({ goal: ctx.goal, state: ctx.laneState }) }), ...(options.timeoutMs === undefined ? {} : { attemptTimeoutMs: options.timeoutMs }) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }))
-    this.handlers.set(decode, (ctx) => { const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined; const ref = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined; const value = ref ? ctx.getResult(ref) : undefined; const parsed = options.schema.safeParse(value); if (parsed.success) return { next: options.onReply(parsed.data, ctx) }; return { next: options.onTimeout ? options.onTimeout(ctx) : decode } })
+    this.handlers.set(decode, (ctx) => { const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined; const ref = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined; const value = ref ? readResult(ctx, ref) : undefined; const parsed = options.schema.safeParse(value); if (parsed.success) return { next: options.onReply(parsed.data, ctx) }; return { next: options.onTimeout ? options.onTimeout(ctx) : decode } })
     return this
   }
   addTimerStep(name: string, options: { delayMs: number | ((ctx: StepContext<TState>) => number); onFire: (ctx: StepContext<TState>) => NextStepTarget }): this {

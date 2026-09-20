@@ -27,6 +27,8 @@ describe('DSL StepContext', () => {
   it('exposes fixed global/history metadata and compiles lane/global writes atomically', async () => {
     const program = defineLaneProgram({ id: 'dsl-context', version: '1', state: z.object({ touched: z.boolean().optional() }) }, (builder) => {
       builder.addStep('start', (ctx) => {
+        expect((ctx as any).getResult).toBeUndefined()
+        expect((ctx as any).state).toBeUndefined()
         expect(ctx.globalVersion).toBe(0)
         expect(ctx.global).toEqual({})
         expect(ctx.history).toEqual([])

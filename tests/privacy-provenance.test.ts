@@ -23,7 +23,7 @@ describe('result privacy provenance', () => {
 
   it('derives DSL terminal results and effect results from synchronous ResultRef reads', async () => {
     const terminalProgram = defineLaneProgram({ id: 'dsl-provenance-terminal', version: '1' }, (builder) => {
-      builder.addStep('start', (ctx) => { ctx.getResult('source'); return { actions: [{ type: 'complete', result: { ok: true } }], next: 'start' } })
+      builder.addStep('start', (ctx) => { ctx.results.meta('source'); return { actions: [{ type: 'complete', result: { ok: true } }], next: 'start' } })
     })
     const terminalRuntime = new PulseRuntime()
     const terminal = terminalRuntime.createAgent('terminal', terminalProgram)
@@ -33,7 +33,7 @@ describe('result privacy provenance', () => {
     expect([...terminalRuntime.state.results.values()].find((result) => result.id !== 'source')).toMatchObject({ privacy: 'local_only', derivedFrom: ['source'] })
 
     const effectProgram = defineLaneProgram({ id: 'dsl-provenance-effect', version: '1' }, (builder) => {
-      builder.addStep('start', (ctx) => { ctx.getResult('source'); return { actions: [{ type: 'submit_effects', effects: [{ key: 'derived-work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'finish' } })
+      builder.addStep('start', (ctx) => { ctx.results.meta('source'); return { actions: [{ type: 'submit_effects', effects: [{ key: 'derived-work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'finish' } })
       builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' }))
     })
     const effectRuntime = new PulseRuntime({ effectExecutor: async () => ({ value: { answer: 1 }, privacy: 'public' }) })
