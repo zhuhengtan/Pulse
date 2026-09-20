@@ -15,6 +15,8 @@ export interface WorkerTaskRecord {
   error?: RuntimeError
 }
 
+export interface WorkerLease { task: WorkerTaskRecord; workerId: string; leaseId: string }
+
 export type WorkerHandler = (payload: JsonValue, signal: AbortSignal) => Promise<JsonValue>
 export interface WorkerSubmitOptions { taskId?: string; idempotencyKey?: string; leaseMs?: number; signal?: AbortSignal }
 type Deferred = { promise: Promise<JsonValue>; resolve: (value: JsonValue) => void; reject: (error: unknown) => void }
@@ -34,18 +36,27 @@ export class WorkerCoordinator {
   private readonly deferreds = new Map<string, Deferred>()
   private readonly idempotency = new Map<string, string>()
   private readonly handlers = new Map<string, WorkerHandler>()
+  private readonly remoteWorkers = new Set<string>()
   private readonly activeLeases = new Map<string, { leaseId: string; controller: AbortController }>()
   private sequence = 1
 
   register(workerId: string, handler: WorkerHandler): () => void {
-    if (!workerId || this.handlers.has(workerId)) throw new Error(`WORKER_ALREADY_REGISTERED:${workerId}`)
+    if (!workerId || this.handlers.has(workerId) || this.remoteWorkers.has(workerId)) throw new Error(`WORKER_ALREADY_REGISTERED:${workerId}`)
     this.handlers.set(workerId, handler)
+    this.pump()
+    return () => this.unregister(workerId)
+  }
+
+  registerRemote(workerId: string): () => void {
+    if (!workerId || this.handlers.has(workerId) || this.remoteWorkers.has(workerId)) throw new Error(`WORKER_ALREADY_REGISTERED:${workerId}`)
+    this.remoteWorkers.add(workerId)
     this.pump()
     return () => this.unregister(workerId)
   }
 
   unregister(workerId: string): void {
     this.handlers.delete(workerId)
+    this.remoteWorkers.delete(workerId)
     const active = this.activeLeases.get(workerId)
     if (active) { active.controller.abort(); this.activeLeases.delete(workerId) }
     for (const task of this.tasks.values()) if (task.state === 'leased' && task.workerId === workerId) this.requeue(task)
@@ -85,6 +96,46 @@ export class WorkerCoordinator {
     return recovered
   }
 
+  claim(workerId: string, now = Date.now()): WorkerLease | undefined {
+    if (!this.handlers.has(workerId) && !this.remoteWorkers.has(workerId)) throw new Error(`UNKNOWN_WORKER:${workerId}`)
+    const active = this.activeLeases.get(workerId)
+    if (active !== undefined) {
+      const activeTask = [...this.tasks.values()].find((task) => task.state === 'leased' && task.workerId === workerId && task.leaseId === active.leaseId)
+      if (activeTask?.leaseExpiresAt !== undefined && activeTask.leaseExpiresAt <= now) {
+        active.controller.abort()
+        this.activeLeases.delete(workerId)
+        this.requeue(activeTask)
+      } else return undefined
+    }
+    const task = [...this.tasks.values()].find((candidate) => candidate.state === 'queued')
+    if (!task) return undefined
+    const lease = this.assign(workerId, task, now)
+    return { workerId, leaseId: lease.leaseId, task: structuredClone(task) }
+  }
+
+  renewLease(workerId: string, leaseId: string, now = Date.now(), leaseMs?: number): number | undefined {
+    const active = this.activeLeases.get(workerId)
+    const task = [...this.tasks.values()].find((candidate) => candidate.state === 'leased' && candidate.workerId === workerId && candidate.leaseId === leaseId)
+    if (active?.leaseId !== leaseId || !task) return undefined
+    const duration = leaseMs ?? task.leaseMs ?? 30_000
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error('INVALID_WORKER_LEASE')
+    task.leaseExpiresAt = now + duration
+    return task.leaseExpiresAt
+  }
+
+  completeRemote(workerId: string, leaseId: string, value: JsonValue): boolean {
+    return this.settleRemote(workerId, leaseId, () => this.completeTask(this.taskForLease(workerId, leaseId)!.id, leaseId, value))
+  }
+
+  failRemote(workerId: string, leaseId: string, error: RuntimeError): boolean {
+    return this.settleRemote(workerId, leaseId, () => this.failTask(this.taskForLease(workerId, leaseId)!.id, leaseId, error))
+  }
+
+  get(taskId: string): WorkerTaskRecord | undefined {
+    const task = this.tasks.get(taskId)
+    return task === undefined ? undefined : structuredClone(task)
+  }
+
   cancel(taskId: string, reason = 'WORKER_CANCELLED'): boolean {
     const task = this.tasks.get(taskId)
     if (!task || ['succeeded', 'failed', 'cancelled'].includes(task.state)) return false
@@ -104,23 +155,41 @@ export class WorkerCoordinator {
 
   private pump(): void {
     for (const [workerId, handler] of this.handlers) {
-      if (this.activeLeases.has(workerId)) continue
-      const task = [...this.tasks.values()].find((candidate) => candidate.state === 'queued')
-      if (!task) continue
-      const leaseId = `worker-lease-${this.sequence++}`
-      const controller = new AbortController()
-      const leaseMs = task.leaseMs ?? 30_000
-      task.state = 'leased'; task.attempt++; task.leaseId = leaseId; task.workerId = workerId; task.leaseExpiresAt = Date.now() + leaseMs
-      this.activeLeases.set(workerId, { leaseId, controller })
-      void handler(task.payload, controller.signal).then((value) => this.complete(task.id, leaseId, value)).catch((cause) => this.fail(task.id, leaseId, runtimeError(cause))).finally(() => {
+      const lease = this.claim(workerId)
+      if (!lease) continue
+      const controller = this.activeLeases.get(workerId)!.controller
+      void handler(lease.task.payload, controller.signal).then((value) => this.completeTask(lease.task.id, lease.leaseId, value)).catch((cause) => this.failTask(lease.task.id, lease.leaseId, runtimeError(cause))).finally(() => {
         const active = this.activeLeases.get(workerId)
-        if (active?.leaseId === leaseId) this.activeLeases.delete(workerId)
+        if (active?.leaseId === lease.leaseId) this.activeLeases.delete(workerId)
         this.pump()
       })
     }
   }
 
-  private complete(taskId: string, leaseId: string, value: JsonValue): boolean {
+  private assign(workerId: string, task: WorkerTaskRecord, now: number): { leaseId: string; controller: AbortController } {
+    const leaseId = `worker-lease-${this.sequence++}`
+    const controller = new AbortController()
+    const leaseMs = task.leaseMs ?? 30_000
+    task.state = 'leased'; task.attempt++; task.leaseId = leaseId; task.workerId = workerId; task.leaseExpiresAt = now + leaseMs
+    this.activeLeases.set(workerId, { leaseId, controller })
+    return { leaseId, controller }
+  }
+
+  private taskForLease(workerId: string, leaseId: string): WorkerTaskRecord | undefined {
+    const active = this.activeLeases.get(workerId)
+    if (active?.leaseId !== leaseId) return undefined
+    return [...this.tasks.values()].find((task) => task.state === 'leased' && task.workerId === workerId && task.leaseId === leaseId)
+  }
+
+  private settleRemote(workerId: string, leaseId: string, settle: () => boolean): boolean {
+    if (this.taskForLease(workerId, leaseId) === undefined) return false
+    const settled = settle()
+    if (settled) this.activeLeases.delete(workerId)
+    this.pump()
+    return settled
+  }
+
+  private completeTask(taskId: string, leaseId: string, value: JsonValue): boolean {
     const task = this.tasks.get(taskId)
     if (!task || task.state !== 'leased' || task.leaseId !== leaseId) return false
     task.state = 'succeeded'; task.result = structuredClone(value); delete task.leaseId; delete task.workerId; delete task.leaseExpiresAt
@@ -128,7 +197,7 @@ export class WorkerCoordinator {
     return true
   }
 
-  private fail(taskId: string, leaseId: string, error: RuntimeError): boolean {
+  private failTask(taskId: string, leaseId: string, error: RuntimeError): boolean {
     const task = this.tasks.get(taskId)
     if (!task || task.state !== 'leased' || task.leaseId !== leaseId) return false
     task.state = 'failed'; task.error = error; delete task.leaseId; delete task.workerId; delete task.leaseExpiresAt
