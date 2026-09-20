@@ -23,7 +23,7 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     const calls: string[] = []
     const providers = new Map<string, ProviderAdapter>([
       ['p1', { id: 'p1', name: 'first', executeAttempt: async () => { calls.push('p1'); throw modelFallbackError({ retryable: true, localClosed: true, sideEffectState: 'none', cause: new Error('temporary') }) } }],
-      ['p2', { id: 'p2', name: 'second', executeAttempt: async () => { calls.push('p2'); return { text: 'ok', toolCalls: [], finishReason: 'stop' } } }],
+      ['p2', { id: 'p2', name: 'second', executeAttempt: async () => { calls.push('p2'); return { text: 'ok', toolCalls: [], finishReason: 'stop', usage: { inputTokens: 12, outputTokens: 3, cachedInputTokens: 5 } } } }],
     ])
     const router = new ModelRouter(registry)
     const runtime = new PulseRuntime({ effectExecutor: createModelEffectExecutor({ router, providers }) })
@@ -34,5 +34,6 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
     expect(calls).toEqual(['p1', 'p2'])
     expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.data).includes('local-second'))).toBe(true)
+    expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.data).includes('cachedInputTokens'))).toBe(true)
   })
 })

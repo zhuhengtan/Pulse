@@ -9,8 +9,12 @@ function toJson(value: unknown): JsonValue {
   throw new Error('LLM_OUTPUT_NOT_SERIALIZABLE')
 }
 
-function candidateMetadata(candidate: ModelCandidate, attempts: Array<{ attemptId: string; attemptNo: number; candidate: ModelCandidate }>): JsonValue {
-  return { selected: { id: candidate.id, providerId: candidate.providerId }, attempts: attempts.map((attempt) => ({ attemptId: attempt.attemptId, attemptNo: attempt.attemptNo, modelId: attempt.candidate.id, providerId: attempt.candidate.providerId })) }
+function candidateMetadata(candidate: ModelCandidate, attempts: Array<{ attemptId: string; attemptNo: number; candidate: ModelCandidate }>, usage: ReadonlyMap<string, NonNullable<LLMResult['usage']>>): JsonValue {
+  return { selected: { id: candidate.id, providerId: candidate.providerId }, attempts: attempts.map((attempt) => {
+    const recorded = usage.get(attempt.attemptId)
+    const usageJson = recorded === undefined ? undefined : { ...(recorded.inputTokens === undefined ? {} : { inputTokens: recorded.inputTokens }), ...(recorded.outputTokens === undefined ? {} : { outputTokens: recorded.outputTokens }), ...(recorded.cachedInputTokens === undefined ? {} : { cachedInputTokens: recorded.cachedInputTokens }) }
+    return { attemptId: attempt.attemptId, attemptNo: attempt.attemptNo, modelId: attempt.candidate.id, providerId: attempt.candidate.providerId, ...(usageJson === undefined ? {} : { usage: usageJson }) }
+  }) }
 }
 
 export function createModelEffectExecutor(config: { router: ModelRouter; providers: ReadonlyMap<string, ProviderAdapter>; requirements?: Partial<ModelCandidate['capabilities']> }): EffectExecutor {
@@ -23,18 +27,20 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
     if (typeof task !== 'string' || !request || typeof request !== 'object' || Array.isArray(request)) throw new Error('INVALID_LLM_EFFECT_INPUT')
     const projection = request as unknown as LLMRequestProjection
     const observations: NonNullable<EffectExecution['observations']> = []
+    const usage = new Map<string, NonNullable<LLMResult['usage']>>()
     const candidates = config.router.routeProjection(task, projection, config.requirements)
     const result = await fallback.execute(effect.id, candidates, async (attempt) => {
       const provider = config.providers.get(attempt.candidate.providerId)
       if (!provider) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause: new Error(`UNKNOWN_PROVIDER:${attempt.candidate.providerId}`) })
       try {
         const output = validateAdapterResult(await provider.executeAttempt({ request: projection, signal, onObservation: (chunk) => observations.push({ type: 'chunk', data: chunk }) }))
+        if (output.usage) usage.set(attempt.attemptId, output.usage)
         return output
       } catch (cause) {
         throw modelFallbackError({ retryable: true, localClosed: true, sideEffectState: 'none', cause })
       }
     })
     const value = toJson(result.result)
-    return { value, privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: candidateMetadata(result.candidate, result.attempts), ...(observations.length ? { observations } : {}) }
+    return { value, privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: candidateMetadata(result.candidate, result.attempts, usage), ...(observations.length ? { observations } : {}) }
   }
 }
