@@ -49,7 +49,7 @@
 | Runtime Storage 编排 | Runtime 自动登记 Event/Result/Snapshot/LLM Request，活动 Lane/Wait/未结算 Request/可见 ResultRef 幂等 pin；Step 提交前 clone 预检 hard limit | `tests/storage-policy.test.ts` | `43a9847` |
 | LLM Preparation | bounded preparing/prepared 窗口、generation、迟到准备丢弃、explain 展示 | `tests/provider-host.test.ts` | `944c3ad` |
 | Provider 请求与 usage | modelId、工具 schema、structured output schema、uncached token、latency/cost 归一化与 metadata | `tests/m3-context-adapters.test.ts`、`tests/provider-host.test.ts` | `fa723c7` |
-| 自适应模型路由 | `AdaptiveModelRouter` 基于质量、延迟、价格、缓存和探索项重排合规候选；Provider Executor 自动记录 Attempt 反馈，静态 priority 仍作为确定性 tie-break | `tests/adaptive-routing.test.ts`、`tests/provider-host.test.ts` | `0d17d7c` |
+| 自适应模型路由 | `AdaptiveModelRouter` 基于质量、延迟、价格、缓存和探索项重排合规候选；Provider Executor 自动记录 Attempt 反馈，并支持经过校验的 snapshot/restore | `tests/adaptive-routing.test.ts`、`tests/provider-host.test.ts` | `0d17d7c`、`4c65d38` |
 | DSL Draft 数组语义与运行诊断 | `push→append`、数组索引/splice/sort→整数组 set；explain 补充队列、等待、watchdog、preparation、execution metadata | `tests/dsl-context.test.ts`、`tests/runtime-control.test.ts` | `d5c6ef2`、`f57ae27` |
 | Mutation 事务预检 | clone 预检失败不写日志、不改变运行时；提交时保留 Lane/Effect 对象身份 | `tests/storage-mutation-log.test.ts` | `70c3534` |
 | Tool Schema 与 Provider 上限 | 不支持的 Zod 类型构建时 fail-closed；Anthropic `maxOutputTokens` 不再写死 | `tests/m3-context-adapters.test.ts` | `e21907a` |
@@ -65,12 +65,16 @@
 | Checkpoint 事实事件截断 | Checkpoint 保存状态与日志水位后截断已纳入快照的事实事件；恢复后的 Session 通过 `gap` 要求 Host 重同步，并对事件水位 fail-closed 校验 | `tests/storage-outbox.test.ts`、`tests/m4-dsl-e2e.test.ts` | `2ea2a6b`、`e86093a` |
 | Worker 执行边界 | `WorkerCoordinator` 提供 Worker 注册、lease、幂等键、取消、过期回收、snapshot/restore 和 Runtime `EffectExecutor` 适配；adapters 提供带 Bearer 鉴权的 HTTP claim/renew/complete/fail 与 polling Worker | `tests/worker-coordinator.test.ts`、`tests/worker-http.test.ts` | `d221466`、`2250df2`、`685be10`、`47791bd` |
 | Host 工具权限 | Tool Registry deny 优先的 allow/deny 策略作用于 list/discover/ToolSet/execute/admission；参数仍由 Zod schema fail-closed 校验 | `tests/tool-context.test.ts`、`tests/tool-host.test.ts` | `a333a98` |
+| 叶子级隐私 taint | Result/History/Effect/Complete/LLM 投影传播叶子路径 taint；严格级别提升并阻断云端路由；ContextDelta 同时校验来源和 taint | `tests/privacy-provenance.test.ts` | `0e64cb0`、`8b9e3db` |
 | Fork Affinity 组内依赖 | 相同 Program 的亲和折叠支持组内 `dependsOn` 拓扑排序、成功/已结算条件、成员结果注入与失败传播；运行时 `forkAffinity=coalesce` 自动合并可安全折叠的 Fork，并按原始成员 key 恢复 Join Outcome；组外依赖仍保持 fail-closed | `tests/fork-affinity.test.ts` | `c0bb520`、`2ec9f05` |
+| Session Agent 隔离 | `runtime.start(agentId)` 只等待指定 Agent；同一 Runtime 中其他 Agent/Detached scope 不会污染该 Session 的 outcome；计时器推进和终态持久化保持一致 | `tests/m4-dsl-e2e.test.ts`、`tests/dsl-host-macros.test.ts`、`tests/storage-outbox.test.ts` | `4c9668c` |
+| Worker durable lease | Worker snapshot/restore 增加原子文件后端；HTTP Coordinator 自动回收过期 lease，fresh Worker 可接管在途任务 | `tests/worker-coordinator.test.ts`、`tests/worker-http.test.ts` | `fe1fb95` |
+| HTTP telemetry exporter | Runtime telemetry 支持带超时、请求头和非 2xx 失败语义的 HTTP POST 导出 | `tests/observation-shutdown.test.ts` | `a4bf19d` |
 | 可复用 ReAct Lane 模板 | `defineReActLane` 保留最终 `resultRef`，支持模板级 `system/toolSet`、`outputSchema` 与 `historyCompaction`，模型请求继续走统一 ContextBuilder | `tests/dsl-host-macros.test.ts` | `6151318` |
 | 进程级恢复验收 | 子进程先持久化在途写 Effect 后被 `SIGKILL`，父进程通过真实文件后端恢复 `reconcile_required`、Quarantine 与资源锁隔离 | `tests/storage-outbox.test.ts`、`tests/process-recovery-child.ts` | `29a8e4c` |
 | RecoverableTool executionRef | `defineTool` 可声明执行引用，ToolRegistry/Executor 在成功或中断后持久化该引用；真实文件写入中断后可通过引用完成 reconcile | `tests/tool-host.test.ts` | `748c66f` |
 
-统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 44 个测试文件、191/191 通过，`pnpm build` 也已通过。
+统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 44 个测试文件、199/199 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -398,7 +402,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `ad09a2f`：有界 `RuntimeTelemetryAggregator`、峰值统计、阈值告警和冷却窗口。
 - `290c559` / `b8f6aec` / `417ecb1`：恢复时重建 quarantine 资源锁、放弃后释放隔离锁、校验快照引用并对 malformed snapshot fail closed。
 - `7a2ed52` / `3bb7ac0`：配置 `persistenceBackend` 后由 Runtime Tick、异步 Effect 结算、取消和对账路径自动排队持久化；`run()`/`shutdown()` 等待最终 durable save，`flushPersistence()` 可显式冲刷，并以文件后端恢复成功 Agent。
-- `0d17d7c`：`AdaptiveModelRouter` 根据质量、延迟、价格、缓存和探索项重排候选；标准 Provider Executor 自动将 Attempt 结果写入路由反馈。
+- `0d17d7c` / `4c65d38`：`AdaptiveModelRouter` 根据质量、延迟、价格、缓存和探索项重排候选；标准 Provider Executor 自动将 Attempt 结果写入路由反馈，并可校验恢复跨进程 snapshot。
 - `e3ef1ce`：Child Agent 可转入 detached/background scope；父取消跳过 detached child 的取消传播，后台 Child 结束后仍完成原 Agent Effect，Runtime shutdown 继续统一收尾。
 - `396499f`：Runtime 对 JavaScript/强制转换后的异步 Step 返回值做同步边界检查，记录 `ASYNC_STEP_FORBIDDEN` 并 fail-closed。
 - `51cf23d`：Runtime 增加 Host 级 Attempt/LLM/Tool 次数预算与 currency cost 累计，排队阶段超限原子失败，恢复时从 `effect.execution_metadata` 重建费用使用量。
@@ -412,7 +416,11 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `685be10`：HTTP Worker Server/Client 增加 Bearer token 鉴权，未授权请求在任务访问前拒绝，并有回归测试。
 - `47791bd`：WorkerCoordinator 增加 schemaVersion=1 的 snapshot/restore；恢复时将 in-flight lease 重新入队，并让终态/幂等任务在重启后仍可返回结果。
 - `2ec9f05`：Runtime 增加 `forkAffinity=coalesce`；对兼容亲和组按内部依赖拓扑合并为 series Lane，并在 Join 阶段按原始成员 key 映射聚合 Outcome；不满足同 Program、同 Context 或组内依赖条件时保持原 Fork。
-- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，44 个测试文件、191 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- `0e64cb0` / `8b9e3db`：补齐 Result/History/Effect/Complete/LLM 投影的叶子级 Privacy Taint，并在 ContextDelta 校验来源、严格隐私级别和 taint 结构。
+- `4c9668c`：`runtime.start(agentId)` 改为调用 Agent-scoped 执行入口，修复多 Agent Runtime 下 Session outcome 串线，并覆盖 Timer/持久化收尾。
+- `fe1fb95`：Worker 增加原子文件持久化、恢复重排队和 HTTP 服务端自动 lease reaper。
+- `a4bf19d`：增加可超时、带鉴权请求头和非 2xx 失败语义的 HTTP telemetry exporter。
+- 当前确定性门禁：`npm exec tsc -b --pretty false && npm test`，44 个测试文件、199 个测试通过；`npm run build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
@@ -422,7 +430,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | Runtime Storage pin/retention | 确定性代码与后端快照已覆盖，生命周期自动落盘已接入 | 自动 pin、hard-limit 预检、compact、backend 确认后的 `persisted` 标记、restore，以及 Runtime `run()`/`shutdown()`/异步 Effect 结算自动持久化已有测试；旧 Snapshot/Result 外部索引与生产级写事务仍需实现 |
 | 崩溃恢复与副作用对账 | 进程级重启和本地真实写入对账已验证，远程副作用仍待验证 | 已补子进程 `SIGKILL` 后恢复、启动 quarantine、资源锁隔离，以及 `executionRef` 从 Tool 到 Runtime 的持久化链；仍缺真实远程写系统 reconcile 和生产环境的持久化事务边界证明 |
 | Provider 请求完整能力 | 确定性映射已覆盖，真实厂商仍待验证 | OpenAI-compatible/Anthropic 请求带 model、tool schema、structured schema，usage 已归一化；真实 endpoint 的字段兼容、计费口径、取消和 tool-call 往返仍需有效凭证 |
-| 动态模型路由 | 确定性反馈路由已实现 | `AdaptiveModelRouter` 已按质量、延迟、费用、缓存和探索项调整未来候选顺序，Executor 已自动采集反馈；仍需真实生产样本校准权重和跨进程持久化策略 |
+| 动态模型路由 | 确定性反馈路由与 snapshot/restore 已实现 | `AdaptiveModelRouter` 已按质量、延迟、费用、缓存和探索项调整未来候选顺序，Executor 已自动采集反馈；仍需真实生产样本校准权重和跨进程快照宿主接入 |
 | Detached/background scope | 单进程后台 scope 已实现 | detached Child Agent 的取消传播、查询、attach 和 Runtime shutdown 边界已有测试；跨进程/分布式 Worker 迁移仍未实现 |
 | Host 调用与费用限制 | 确定性调用预算已实现 | `maxTotalAttempts`、`maxLLMAttempts`、`maxToolAttempts` 和按 currency 的 cost 累计已接入 Runtime；真实账单口径、跨 Runtime 聚合和宿主策略配置仍需生产接入 |
 | 动态工具检索 | 确定性目录检索和 Context ToolSet 编译已实现 | 已按查询生成稳定版本的工具集合并写入 LLM Context；仍需按宿主权限/隐私策略做生产级准入，验证真实远程模型看到的 schema 与 tool-call 往返 |
@@ -430,7 +438,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | Checkpoint / 事实事件保留 | 单进程 checkpoint 截断与恢复 gap 已实现 | 事实状态、Mutation 水位、事件截断水位和 Session gap 已有测试；外部归档索引、跨进程故障注入和生产存储仍需验证 |
 | Fork Affinity | DSL 在收到建议后可安全折叠同 Program 组；Runtime 提供可选自动 coalesce | 已验证组内依赖拓扑、成员结果注入、失败传播、原始 Join key 恢复，以及 `forkAffinity=coalesce` 的通用运行时路径；复杂跨组/外部依赖保持不折叠，生产负载校准仍需验证 |
 | Worker 执行与迁移 | 本地 HTTP lease transport、Bearer 鉴权、polling Worker、snapshot/restore 和 Runtime 适配已实现 | 已验证真实 HTTP claim/renew/complete/fail、未授权拒绝、短 lease heartbeat、in-flight lease 恢复、多 Worker 语义和 Runtime Effect 闭环；生产级 TLS、密钥轮换、共享 durable lease store、跨主机故障注入、Worker 迁移和网络分区仍需验证 |
-| 运行观测 | Runtime 侧已有只读出口、可持久化 exporter、聚合和告警规则 | `inspect/explain`、`telemetry()`、JSONL exporter 和有界聚合器已覆盖 route 排除原因、provider/model slot、Attempt usage/cost、峰值与阈值告警；外部生产指标系统接入仍需宿主配置 |
+| 运行观测 | Runtime 侧已有只读出口、JSONL/HTTP exporter、聚合和告警规则 | `inspect/explain`、`telemetry()`、JSONL/HTTP exporter 和有界聚合器已覆盖 route 排除原因、provider/model slot、Attempt usage/cost、峰值与阈值告警；外部生产指标系统接入仍需宿主配置 |
 
 ## 6. 实施时间线与任务清单（Checklist）
 
@@ -448,7 +456,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 本方案继承并落地《Pulse Runtime 架构设计》与《Pulse Application DSL 规范》：
 1. 以主架构第 26 节的 M0/M1 标注为唯一验收来源，不重复维护场景数量。
 2. M1 的真实 Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder、Session 和确定性端到端示例已贯通；其他 Provider 与真实网络任务属于独立集成验证。
-3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity（含 DSL series collapse 与 Runtime 可选自动 coalesce）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、correlated telemetry、JSONL exporter、聚合和告警规则、Bearer-authenticated HTTP lease-based Worker transport、Worker snapshot/restore、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、生产级持久化事务边界、生产级 Worker TLS/密钥轮换与共享 durable lease store、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
+3. ResultRef 隔离、record/leaf Privacy、ContextDelta provenance、Watchdog、Fork Affinity（含 DSL series collapse 与 Runtime 可选自动 coalesce）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由及快照恢复、按 Agent 隔离的 Session、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、correlated telemetry、JSONL/HTTP exporter、聚合和告警规则、Bearer-authenticated HTTP lease-based Worker transport、Worker snapshot/restore、HTTP lease reaper、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、生产级持久化事务边界、生产级 Worker TLS/密钥轮换与共享 durable lease store、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
 已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
