@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EffectOutbox, FileRuntimePersistenceBackend, PulseRuntime, createRuntimeState, exportRuntimePersistence, importRuntimePersistence, MutationLog, serializeRuntimePersistence } from '@pulse/runtime'
+import { EffectOutbox, FileRuntimeContentStore, FileRuntimePersistenceBackend, PulseRuntime, createRuntimeState, exportRuntimePersistence, importRuntimePersistence, MutationLog, serializeRuntimePersistence } from '@pulse/runtime'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -86,6 +86,19 @@ describe('effect outbox and runtime persistence envelope', () => {
     expect(values.get(resultRef as string)).toEqual({ answer: 42 })
     const restored = await PulseRuntime.restore(backend, { programs: [program] })
     expect(restored.state.results.get(resultRef as string)?.value).toEqual({ answer: 42 })
+  })
+
+  it('provides an idempotent atomic file body store for Result and Snapshot contents', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-content-store-'))
+    try {
+      const store = new FileRuntimeContentStore(directory)
+      await store.save('result-1', { answer: 42 })
+      await store.save('result-1', { answer: 42 })
+      expect(await store.load('result-1')).toEqual({ answer: 42 })
+      await expect(store.save('result-1', { answer: 43 })).rejects.toThrow('RUNTIME_CONTENT_CONFLICT')
+      expect(await store.load('missing')).toBeUndefined()
+      await expect(store.save('', null)).rejects.toThrow('INVALID_RUNTIME_CONTENT_REF')
+    } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
   it('externalizes Context snapshot bodies while preserving stable snapshot indexes', async () => {

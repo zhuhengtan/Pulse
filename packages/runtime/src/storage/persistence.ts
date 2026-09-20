@@ -1,8 +1,9 @@
 import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { parseContextSnapshotRef, provenanceRefId, provenanceRefKind } from '../core/types.js'
 import type { DataRef, JsonValue, ProvenanceRef, ResultRecord, RuntimeEvent, RuntimeState } from '../core/types.js'
+import { stableSerialize } from '../context/builder.js'
 import { FactInbox, type FactInboxSnapshot } from '../core/inbox.js'
 import { exportRuntimeState, importRuntimeState, type SessionSnapshot } from './session.js'
 import { EffectOutbox, type OutboxSnapshot } from './outbox.js'
@@ -40,6 +41,84 @@ export interface RuntimeSnapshotStore {
 export interface RuntimeEventArchive {
   append(events: RuntimeEvent[]): Promise<void>
   read(fromSeq: number, toSeq?: number): Promise<RuntimeEvent[]>
+}
+
+interface RuntimeContentEnvelope {
+  schemaVersion: 1
+  ref: string
+  value: JsonValue
+}
+
+/** Atomic, idempotent file-backed body store usable as both ResultStore and SnapshotStore. */
+export class FileRuntimeContentStore implements RuntimeResultStore, RuntimeSnapshotStore {
+  constructor(readonly directory: string) {}
+
+  async save(ref: string, value: JsonValue): Promise<void> {
+    if (!ref) throw new Error('INVALID_RUNTIME_CONTENT_REF')
+    await mkdir(this.directory, { recursive: true })
+    const target = this.pathFor(ref)
+    await this.withLock(target, async () => {
+      const existing = await this.readEnvelope(target)
+      if (existing !== undefined) {
+        if (existing.ref !== ref) throw new Error('RUNTIME_CONTENT_REF_COLLISION')
+        if (stableSerialize(existing.value) !== stableSerialize(value)) throw new Error('RUNTIME_CONTENT_CONFLICT')
+        return
+      }
+      const temporaryPath = `${target}.tmp-${process.pid}-${Date.now()}-${process.hrtime.bigint().toString()}`
+      let handle: Awaited<ReturnType<typeof open>> | undefined
+      try {
+        handle = await open(temporaryPath, 'wx', 0o600)
+        const envelope: RuntimeContentEnvelope = { schemaVersion: 1, ref, value: structuredClone(value) }
+        await handle.writeFile(JSON.stringify(envelope), 'utf8')
+        await handle.sync()
+        await handle.close()
+        handle = undefined
+        await rename(temporaryPath, target)
+      } finally {
+        if (handle) await handle.close().catch(() => undefined)
+        await rm(temporaryPath, { force: true }).catch(() => undefined)
+      }
+    })
+  }
+
+  async load(ref: string): Promise<JsonValue | undefined> {
+    if (!ref) throw new Error('INVALID_RUNTIME_CONTENT_REF')
+    const envelope = await this.readEnvelope(this.pathFor(ref))
+    if (envelope === undefined) return undefined
+    if (envelope.ref !== ref) throw new Error('RUNTIME_CONTENT_REF_COLLISION')
+    return structuredClone(envelope.value)
+  }
+
+  private pathFor(ref: string): string { return join(this.directory, `${createHash('sha256').update(ref).digest('hex')}.json`) }
+
+  private async readEnvelope(path: string): Promise<RuntimeContentEnvelope | undefined> {
+    try {
+      const parsed = JSON.parse(await readFile(path, 'utf8')) as RuntimeContentEnvelope
+      if (!parsed || parsed.schemaVersion !== 1 || typeof parsed.ref !== 'string' || parsed.value === undefined) throw new Error('INVALID_RUNTIME_CONTENT')
+      return parsed
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      if (cause instanceof Error && cause.message === 'INVALID_RUNTIME_CONTENT') throw cause
+      throw new Error('INVALID_RUNTIME_CONTENT')
+    }
+  }
+
+  private async withLock<T>(target: string, work: () => Promise<T>): Promise<T> {
+    const lockPath = `${target}.lock`
+    const deadline = Date.now() + 30_000
+    let lock: Awaited<ReturnType<typeof open>> | undefined
+    while (lock === undefined) {
+      try { lock = await open(lockPath, 'wx', 0o600) }
+      catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause
+        const lockStat = await stat(lockPath).catch(() => undefined)
+        if (lockStat && Date.now() - lockStat.mtimeMs > 30_000) { await rm(lockPath, { force: true }); continue }
+        if (Date.now() >= deadline) throw new Error('RUNTIME_CONTENT_LOCK_TIMEOUT')
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+    }
+    try { return await work() } finally { await lock.close().catch(() => undefined); await rm(lockPath, { force: true }).catch(() => undefined) }
+  }
 }
 
 export interface RuntimePersistenceBackend {
