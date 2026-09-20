@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { createToolEffectExecutor } from '@pulse/adapters'
+import { createToolEffectExecutor, reconcileToolEffect } from '@pulse/adapters'
 import { defineTool, ToolRegistry } from '@pulse/tool-sdk'
 import { PulseRuntime } from '@pulse/runtime'
-import type { LaneProgram } from '@pulse/runtime'
+import type { EffectRecord, LaneProgram } from '@pulse/runtime'
 import { z } from 'zod'
 
 const point = (id: string, step: string) => ({ programId: id, programVersion: '1', step, locals: {} })
@@ -31,5 +31,12 @@ describe('Tool SDK to Runtime Effect host', () => {
     const { agentId } = runtime.createAgent('unknown', program)
     expect((await runtime.start(agentId).outcome()).status).toBe('failed')
     expect(runtime.state.events.some((event) => event.type === 'effect.dispatch_failed')).toBe(true)
+  })
+
+  it('reconciles an unknown write through the RecoverableTool contract', async () => {
+    const registry = new ToolRegistry()
+    registry.register(defineTool({ name: 'job', description: 'remote job', input: z.object({ id: z.string() }), output: z.object({ state: z.enum(['done', 'missing']) }), sideEffectPolicy: 'write', retrySafety: 'unsafe', reconcile: async (executionRef) => ({ status: executionRef === 'job-1' ? 'succeeded' : 'unknown', output: { state: 'done' } }), execute: () => ({ state: 'done' }) }))
+    const effect = { id: 'effect-1', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'job', kind: 'tool', concurrencyClass: 'tool', input: { name: 'job', arguments: { id: 'job-1' } }, executionRef: 'job-1', attemptId: 'attempt-1', attemptNo: 0, state: 'reconcile_required', executionState: 'remote_unknown', sideEffectState: 'unknown' } as unknown as EffectRecord
+    await expect(reconcileToolEffect(registry, effect, new AbortController().signal)).resolves.toEqual({ status: 'succeeded', output: { state: 'done' } })
   })
 })

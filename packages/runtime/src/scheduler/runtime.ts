@@ -32,7 +32,7 @@ export interface LaneProgram {
   seriesOnMemberFailure?: 'continue' | 'abort'
 }
 export interface EffectObservation { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }
-export interface EffectExecution { value: JsonValue; summary?: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled'; error?: RuntimeError; rejectedOutput?: { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; derivedFrom?: string[] }; metadata?: JsonValue; observations?: EffectObservation[] }
+export interface EffectExecution { value: JsonValue; summary?: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionRef?: JsonValue; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled'; error?: RuntimeError; rejectedOutput?: { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; derivedFrom?: string[] }; metadata?: JsonValue; observations?: EffectObservation[] }
 export type EffectExecutor = (effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<EffectExecution>
 type HostCommand = { type: 'reply'; effectId: string; value: JsonValue } | { type: 'cancel'; agentId: string; reason: string }
 
@@ -483,8 +483,9 @@ export class PulseRuntime {
     effect.state = effectiveStatus
     effect.executionState = effectiveStatus === 'succeeded' ? 'succeeded' : effectiveStatus === 'cancelled' ? 'failed' : 'failed'
     effect.sideEffectState = effectiveExecution.sideEffectState ?? 'none'
+    if (effectiveExecution.executionRef !== undefined) effect.executionRef = structuredClone(effectiveExecution.executionRef)
     const attempt = effect.attempts?.at(-1)
-    if (attempt) { attempt.executionState = effect.executionState; attempt.sideEffectState = effect.sideEffectState; attempt.settledAt = this.state.now; if (outputError) attempt.error = outputError }
+    if (attempt) { attempt.executionState = effect.executionState; attempt.sideEffectState = effect.sideEffectState; if (effectiveExecution.executionRef !== undefined) attempt.sideEffectRef = structuredClone(effectiveExecution.executionRef); attempt.settledAt = this.state.now; if (outputError) attempt.error = outputError }
     const settledAttemptId = effect.attemptId
     if (effectiveStatus === 'failed' && this.scheduleRetry(effect, outputError)) {
       this.releaseEffectLocks(effectId)
@@ -569,6 +570,14 @@ export class PulseRuntime {
     if (!effect || effect.state !== 'reconcile_required') return
     this.quarantine.reconcile(effectId)
     this.completeEffect(effectId, { value, sideEffectState: 'known' }, status)
+  }
+
+  async reconcileEffectWith(effectId: string, resolver: (executionRef: JsonValue | undefined, effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<{ status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; output?: JsonValue; error?: RuntimeError }>, signal = new AbortController().signal): Promise<{ status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; output?: JsonValue; error?: RuntimeError }> {
+    const effect = this.state.effects.get(effectId)
+    if (!effect || effect.state !== 'reconcile_required') return { status: 'unknown', error: { code: 'RECONCILE_NOT_REQUIRED', message: 'Effect is not waiting for reconciliation.' } }
+    const result = await resolver(effect.executionRef, effect, signal)
+    if (result.status === 'succeeded' || result.status === 'failed' || result.status === 'cancelled') this.reconcileEffect(effectId, result.output ?? null, result.status)
+    return result
   }
 
   abandonEffect(effectId: string): void {

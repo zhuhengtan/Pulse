@@ -117,6 +117,7 @@ export interface EffectRecord {
   attemptNo: number
   executionState: 'local' | 'running' | 'succeeded' | 'failed' | 'remote_unknown' | 'local_closed' | 'settled'
   sideEffectState: 'none' | 'applied' | 'known' | 'unknown'
+  executionRef?: JsonValue
   attempts?: AttemptRecord[]
   cancelRequested?: { reason: string; at: number }
   schedulePriority?: number
@@ -147,6 +148,7 @@ export interface AttemptRecord {
   settledAt?: number
   error?: RuntimeError
   remoteStatusRef?: JsonValue
+  sideEffectRef?: JsonValue
 }
 
 export interface ResultRecord {

@@ -1,5 +1,5 @@
-import type { EffectExecutor, EffectExecution } from '@pulse/runtime'
-import { ToolRegistry } from '@pulse/tool-sdk'
+import type { EffectExecutor, EffectExecution, EffectRecord, JsonValue } from '@pulse/runtime'
+import { ToolRegistry, type ReconcileResult } from '@pulse/tool-sdk'
 
 function toJson(value: unknown): import('@pulse/runtime').JsonValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') return value
@@ -31,4 +31,13 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
     if (summary !== undefined && JSON.stringify(summary).length > 4096) throw new Error('TOOL_SUMMARY_TOO_LARGE')
     return { value: toJson(detailed.output), ...(summary === undefined ? {} : { summary }), sideEffectState: definition.manifest.sideEffectPolicy === 'write' ? 'applied' : 'none', executionState: 'succeeded', metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length }, ...(observations.length ? { observations } : {}) }
   }
+}
+
+export async function reconcileToolEffect(registry: ToolRegistry, effect: Readonly<EffectRecord>, signal: AbortSignal): Promise<ReconcileResult<JsonValue>> {
+  if (effect.kind !== 'tool') throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`)
+  if (effect.executionRef === undefined) throw new Error('MISSING_TOOL_EXECUTION_REF')
+  const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+  if (typeof input.name !== 'string') throw new Error('INVALID_TOOL_EFFECT_INPUT')
+  const result = await registry.reconcileDetailed(input.name, effect.executionRef, { toolCallId: effect.toolCallId ?? '', effectId: effect.id, attemptId: effect.attemptId, agentId: effect.agentId, laneId: effect.ownerLaneId, signal })
+  return { status: result.status, ...(result.error === undefined ? {} : { error: result.error }), ...(result.output === undefined ? {} : { output: toJson(result.output) }) }
 }

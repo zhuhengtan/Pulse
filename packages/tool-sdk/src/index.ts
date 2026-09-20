@@ -66,6 +66,12 @@ export class ToolRegistry {
     if (summary !== undefined && JSON.stringify(summary).length > (definition.manifest.maxResultSummaryBytes ?? 4096)) throw new Error('TOOL_SUMMARY_TOO_LARGE')
     return { output, ...(summary === undefined ? {} : { summary }), manifest: structuredClone(definition.manifest) }
   }
+  async reconcileDetailed(name: string, executionRef: JsonValue, context: ReconcileContext): Promise<ReconcileResult<unknown>> {
+    const definition = this.definitions.get(name)
+    if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`)
+    if (!definition.reconcile) throw new Error(`TOOL_NOT_RECOVERABLE:${name}`)
+    return definition.reconcile(executionRef, context)
+  }
   resolveResources(name: string, input: unknown): ResourceClaim[] { const definition = this.definitions.get(name); if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`); return definition.resolveResources?.(input) ?? definition.manifest.resources ?? definition.manifest.locks }
 }
 
@@ -161,5 +167,5 @@ export function defineTool<TInput, TOutput>(config: {
   execute(input: TInput, context: ToolContext): Promise<TOutput> | TOutput
 }): ToolDefinition<TInput, TOutput> {
   const manifest: ToolManifest = { name: config.name, version: config.version ?? '1', description: config.description, inputSchema: zodToJsonSchema(config.input), outputSchema: zodToJsonSchema(config.output), concurrencyClass: config.concurrencyClass ?? 'tool', locks: config.locks ?? [], ...(config.resources === undefined ? {} : { resources: config.resources }), supportsAbortSignal: config.supportsAbortSignal ?? true, sideEffectPolicy: config.sideEffectPolicy ?? 'none', retrySafety: config.retrySafety ?? (config.sideEffectPolicy === 'write' ? 'unsafe' : 'read_only'), defaultTimeoutMs: config.defaultTimeoutMs ?? 30_000, ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }) }
-  return { manifest, execute: async (input, context) => config.output.parse(await config.execute(config.input.parse(input), context)), ...(config.resolveResources === undefined ? {} : { resolveResources: (input: TInput) => config.resolveResources!(input) }), ...(config.reconcile === undefined ? {} : { reconcile: config.reconcile }), ...(config.normalize === undefined ? {} : { normalize: config.normalize }), ...(config.summarize === undefined ? {} : { summarize: (output: TOutput) => config.summarize!(output) }) }
+  return { manifest, execute: async (input, context) => config.output.parse(await config.execute(config.input.parse(input), context)), ...(config.resolveResources === undefined ? {} : { resolveResources: (input: TInput) => config.resolveResources!(input) }), ...(config.reconcile === undefined ? {} : { reconcile: async (executionRef: JsonValue, context: ReconcileContext) => { const result = await config.reconcile!(executionRef, context); return result.status === 'succeeded' && result.output !== undefined ? { ...result, output: config.output.parse(result.output) } : result } }), ...(config.normalize === undefined ? {} : { normalize: config.normalize }), ...(config.summarize === undefined ? {} : { summarize: (output: TOutput) => config.summarize!(output) }) }
 }
