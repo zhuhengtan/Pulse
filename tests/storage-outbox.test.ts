@@ -283,6 +283,24 @@ describe('effect outbox and runtime persistence envelope', () => {
     expect(runtime.state.events).toHaveLength(0)
   })
 
+  it('keeps the current snapshot and events when the external archive is unavailable', async () => {
+    let saves = 0
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { ok: true } }) })
+    const program = { id: 'event-archive-failure', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'event-archive-failure', programVersion: '1', step: 'done', locals: {} } }) }
+    const { agentId } = runtime.createAgent('archive failure', program)
+    await runtime.start(agentId).outcome()
+    const eventCount = runtime.state.events.length
+    const backend = {
+      load: async () => undefined,
+      save: async () => { saves++ },
+      eventArchive: { append: async () => { throw new Error('ARCHIVE_UNAVAILABLE') }, read: async () => [] },
+    }
+    await expect(runtime.checkpoint(backend)).rejects.toThrow('ARCHIVE_UNAVAILABLE')
+    expect(saves).toBe(0)
+    expect(runtime.state.events).toHaveLength(eventCount)
+    expect(runtime.state.eventsCompactedThrough).toBeUndefined()
+  })
+
   it('compacts fact events at checkpoint and exposes a stream gap after restore', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-event-checkpoint-'))
     try {
