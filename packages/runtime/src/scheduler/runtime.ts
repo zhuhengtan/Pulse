@@ -892,11 +892,19 @@ export class PulseRuntime {
       effect.outcome = { status: 'failed', error: storageError }
       const failedAttempt = effect.attempts?.at(-1)
       if (failedAttempt) failedAttempt.error = storageError
+      const failureEvent: import('../core/types.js').RuntimeEventInput = { type: 'effect.settled', effectId, data: effect.outcome as unknown as JsonValue }
+      const failureMutations: Mutation[] = [{ op: 'setEffect', effectId, record: structuredClone(effect) }]
+      try {
+        this.assertStorageAdmission([...failureMutations, { op: 'appendEvent', event: failureEvent }])
+        failureMutations.push({ op: 'appendEvent', event: failureEvent })
+      } catch {
+        this.assertStorageAdmission(failureMutations)
+      }
+      commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${settledAttemptId}:storage-rejected`, failureMutations, this.state.now, this.sessionId)
       Object.assign(storedEffect, effect)
+      this.state.effects.set(effectId, storedEffect)
       this.releaseEffectLocks(effectId)
       this.outbox.ack(`${effect.id}:${effect.attemptId}`)
-      const storageEvent = this.tryEmit({ type: 'effect.settled', effectId, data: effect.outcome as unknown as JsonValue })
-      this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:storage-rejected`, undefined, storageEvent === undefined ? [] : [storageEvent])
       this.syncStoragePolicy()
       this.refreshWaits()
       this.schedulePersistence()

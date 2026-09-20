@@ -35,6 +35,7 @@ describe('Result summary budget', () => {
     expect(effect).toMatchObject({ state: 'failed', outcome: { status: 'failed', error: { code: 'SESSION_STORAGE_LIMIT_EXCEEDED' } } })
     expect(runtime.state.artifacts.size).toBe(0)
     expect(runtime.state.events.some((event) => event.type === 'effect.settled')).toBe(true)
+    expect(runtime.mutationLog.entries.some((entry) => entry.transactionId === 'effect:effect-1:effect-1-attempt-1:storage-rejected')).toBe(true)
   })
 
   it('fails a closing Lane instead of publishing an over-limit terminal Result', async () => {
