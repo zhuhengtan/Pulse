@@ -62,5 +62,6 @@ describe('DSL Human/Timer host macros', () => {
     const { agentId } = runtime.createAgent('react tools', program)
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
     expect(calls).toEqual(['reason-turn-1', 'reason-tool-1-1', 'reason-turn-2'])
+    expect(runtime.state.toolCallCorrelations.get('reason:1:provider-call-1')).toMatchObject({ llmEffectId: 'effect-1', toolEffectId: 'effect-2', resultRef: expect.any(String) })
   })
 })

@@ -12,6 +12,7 @@ function toJsonValue(value: unknown): JsonValue {
 export interface ActionDecoderOptions {
   allowedTools: ReadonlySet<string>
   wait?: boolean
+  llmEffectId?: string
 }
 
 export function decodeLLMActions(result: LLMResult, options: ActionDecoderOptions): RuntimeAction[] {
@@ -21,7 +22,7 @@ export function decodeLLMActions(result: LLMResult, options: ActionDecoderOption
   if (result.toolCalls.length === 0) throw new Error('INVALID_TOOL_CALL_FINISH_REASON')
   return [{
     type: 'submit_effects',
-    effects: result.toolCalls.map((call) => ({ key: `tool:${call.toolCallId}`, toolCallId: call.toolCallId, kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { toolCallId: call.toolCallId, name: call.name, arguments: toJsonValue(call.input) } })),
+    effects: result.toolCalls.map((call) => ({ key: `tool:${call.toolCallId}`, toolCallId: call.toolCallId, ...(options.llmEffectId === undefined ? {} : { llmEffectId: options.llmEffectId }), kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { toolCallId: call.toolCallId, name: call.name, arguments: toJsonValue(call.input) } })),
     ...(options.wait === false ? {} : { wait: { onUnsatisfied: 'resume_with_error' as const, reason: 'effect' as const } }),
   }]
 }

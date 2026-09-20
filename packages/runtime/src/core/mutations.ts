@@ -1,4 +1,4 @@
-import type { RuntimeEventInput, RuntimeState, RuntimeError, ContextVersion, JsonValue, LaneRecord, EffectRecord, WaitRecord, ResultRecord, ContextDelta, LaneId, WaitId, EffectId, HistoryRecord, MergeProposal } from './types.js'
+import type { RuntimeEventInput, RuntimeState, RuntimeError, ContextVersion, JsonValue, LaneRecord, EffectRecord, WaitRecord, ResultRecord, ContextDelta, LaneId, WaitId, EffectId, HistoryRecord, MergeProposal, ToolCallCorrelation } from './types.js'
 import { appendRuntimeEvent } from './events.js'
 
 export type Mutation =
@@ -9,6 +9,7 @@ export type Mutation =
   | { op: 'insertEffect'; record: EffectRecord }
   | { op: 'insertWait'; record: WaitRecord }
   | { op: 'publishResult'; record: ResultRecord }
+  | { op: 'setToolCallCorrelation'; record: ToolCallCorrelation }
   | { op: 'insertMergeProposal'; proposal: MergeProposal }
   | { op: 'removeMergeProposal'; proposalId: string }
   | { op: 'setGlobal'; agentId: string; version: ContextVersion; value: JsonValue }
@@ -30,6 +31,7 @@ export function apply(state: RuntimeState, mutations: Mutation[], defaults: { se
       case 'insertEffect': state.effects.set(mutation.record.id, mutation.record); break
       case 'insertWait': state.waits.set(mutation.record.id, mutation.record); break
       case 'publishResult': state.results.set(mutation.record.id, mutation.record); break
+      case 'setToolCallCorrelation': state.toolCallCorrelations.set(mutation.record.toolCallId, mutation.record); break
       case 'insertMergeProposal': state.mergeProposals.set(mutation.proposal.id, mutation.proposal); break
       case 'removeMergeProposal': state.mergeProposals.delete(mutation.proposalId); break
       case 'setGlobal': state.agents.get(mutation.agentId)!.globalVersions.set(mutation.version, mutation.value); state.agents.get(mutation.agentId)!.latestGlobalVersion = mutation.version; break

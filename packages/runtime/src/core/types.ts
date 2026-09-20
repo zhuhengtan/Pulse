@@ -132,6 +132,7 @@ export interface EffectRecord {
   retryAt?: number
   outcome?: Outcome
   toolCallId?: string
+  llmEffectId?: EffectId
   childAgentId?: AgentId
   locks?: ResourceLockSpec[]
 }
@@ -226,6 +227,7 @@ export interface EffectSubmission {
   duplicateExecutionPolicy?: 'allow' | 'forbid'
   maxUnknownAttempts?: number
   toolCallId?: string
+  llmEffectId?: EffectId
   locks?: ResourceLockSpec[]
 }
 
@@ -374,6 +376,7 @@ export interface RuntimeState {
   effects: Map<EffectId, EffectRecord>
   waits: Map<WaitId, WaitRecord>
   results: Map<ResultRef, ResultRecord>
+  toolCallCorrelations: Map<string, ToolCallCorrelation>
   mergeProposals: Map<string, MergeProposal>
   events: RuntimeEvent[]
   nextIds: { agent: number; lane: number; effect: number; wait: number; result: number; proposal: number; event: number }
@@ -385,8 +388,15 @@ export interface RuntimeState {
   historyHardTokens: number
 }
 
+export interface ToolCallCorrelation {
+  toolCallId: string
+  llmEffectId: EffectId
+  toolEffectId: EffectId
+  resultRef?: ResultRef
+}
+
 export function createRuntimeState(maxTotalLanes = 64, options: { maxQueuedEffects?: number; maxRunning?: Partial<Record<ConcurrencyClass, number>>; forkAffinity?: ForkAffinityMode; historySoftTokens?: number; historyHardTokens?: number } = {}): RuntimeState {
-  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), mergeProposals: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, proposal: 1, event: 1 }, maxTotalLanes, maxQueuedEffects: options.maxQueuedEffects ?? 256, maxRunning: { llm: 4, tool: 16, agent: 4, none: Number.POSITIVE_INFINITY, ...(options.maxRunning ?? {}) }, forkAffinity: options.forkAffinity ?? 'off', historySoftTokens: options.historySoftTokens ?? 8_000, historyHardTokens: options.historyHardTokens ?? 16_000 }
+  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), toolCallCorrelations: new Map(), mergeProposals: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, proposal: 1, event: 1 }, maxTotalLanes, maxQueuedEffects: options.maxQueuedEffects ?? 256, maxRunning: { llm: 4, tool: 16, agent: 4, none: Number.POSITIVE_INFINITY, ...(options.maxRunning ?? {}) }, forkAffinity: options.forkAffinity ?? 'off', historySoftTokens: options.historySoftTokens ?? 8_000, historyHardTokens: options.historyHardTokens ?? 16_000 }
 }
 
 export function privacyRank(label: PrivacyLabel): number { return label === 'public' ? 0 : label === 'cloud_allowed' ? 1 : 2 }

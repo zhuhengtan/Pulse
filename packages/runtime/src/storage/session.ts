@@ -1,4 +1,4 @@
-import type { AgentRecord, EffectRecord, JsonValue, LaneRecord, MergeProposal, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord } from '../core/types.js'
+import type { AgentRecord, EffectRecord, JsonValue, LaneRecord, MergeProposal, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord, ToolCallCorrelation } from '../core/types.js'
 import { createRuntimeState } from '../core/types.js'
 import { normalizeRuntimeEvent } from '../core/events.js'
 
@@ -11,6 +11,7 @@ export interface SessionSnapshot {
     effects: Array<[string, EffectRecord]>
     waits: Array<[string, WaitRecord]>
     results: Array<[string, ResultRecord]>
+    toolCallCorrelations?: Array<[string, ToolCallCorrelation]>
     mergeProposals: Array<[string, MergeProposal]>
     events: RuntimeEvent[]
     nextIds: RuntimeState['nextIds']
@@ -40,6 +41,7 @@ export function exportRuntimeState(state: RuntimeState): SessionSnapshot {
       effects: [...state.effects.entries()].map(([id, effect]) => [id, structuredClone(effect)]),
       waits: [...state.waits.entries()].map(([id, wait]) => [id, structuredClone(wait)]),
       results: [...state.results.entries()].map(([id, result]) => [id, structuredClone(result)]),
+      toolCallCorrelations: [...state.toolCallCorrelations.entries()].map(([id, correlation]) => [id, structuredClone(correlation)]),
       mergeProposals: [...state.mergeProposals.entries()].map(([id, proposal]) => [id, structuredClone(proposal)]),
       events: state.events.map((event) => normalizeRuntimeEvent(event as unknown as RuntimeEventInput, event.seq, { sessionId: event.sessionId, timestamp: event.timestamp })),
       nextIds: { ...state.nextIds },
@@ -69,6 +71,7 @@ export function importRuntimeState(snapshot: SessionSnapshot | JsonValue): Runti
   for (const [id, effect] of value.state.effects) state.effects.set(id, structuredClone(effect))
   for (const [id, wait] of value.state.waits) state.waits.set(id, structuredClone(wait))
   for (const [id, result] of value.state.results) state.results.set(id, structuredClone(result))
+  for (const [id, correlation] of value.state.toolCallCorrelations ?? []) state.toolCallCorrelations.set(id, structuredClone(correlation))
   for (const [id, proposal] of value.state.mergeProposals ?? []) state.mergeProposals.set(id, structuredClone(proposal))
   state.events = value.state.events.map((event) => normalizeRuntimeEvent(event as unknown as RuntimeEventInput, (event as RuntimeEvent).seq, { sessionId: (event as RuntimeEvent).sessionId, timestamp: (event as RuntimeEvent).timestamp }))
   return state

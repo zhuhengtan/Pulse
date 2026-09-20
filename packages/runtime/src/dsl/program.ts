@@ -180,11 +180,12 @@ export class StepBuilder<TState = JsonValue> {
         if (turns >= (options.maxTurns ?? 10) || toolCalls.length === 0) return { next: options.onMaxTurns ? options.onMaxTurns(ctx) : `${name}:decode` }
         const invalidTool = toolCalls.find((call) => { const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}; const toolName = typeof item.name === 'string' ? item.name : ''; return !toolName || (options.toolAllow !== undefined && !options.toolAllow.includes(toolName)) })
         if (invalidTool !== undefined) return { next: options.onError ? options.onError(new Error('ACTION_TOOL_NOT_ALLOWED'), ctx) : (options.onMaxTurns ? options.onMaxTurns(ctx) : `${name}:decode`) }
+        const sourceEffectId = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).find((dependency) => dependency.state === 'settled' && dependency.target.kind === 'effect')?.target.id : undefined
         const effects = toolCalls.map((call, index) => {
           const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}
           const originalId = typeof item.toolCallId === 'string' ? item.toolCallId : `call-${index + 1}`
           const toolName = typeof item.name === 'string' ? item.name : ''
-          return { key: `${name}-tool-${turns}-${index + 1}`, toolCallId: `${name}:${turns}:${originalId}`, kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { toolCallId: `${name}:${turns}:${originalId}`, name: toolName, arguments: item.input ?? {} } }
+          return { key: `${name}-tool-${turns}-${index + 1}`, toolCallId: `${name}:${turns}:${originalId}`, ...(sourceEffectId === undefined ? {} : { llmEffectId: sourceEffectId }), kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { toolCallId: `${name}:${turns}:${originalId}`, name: toolName, arguments: item.input ?? {} } }
         })
         return { actions: [{ type: 'submit_effects', effects, wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:tools` }
       }

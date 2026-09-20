@@ -2,7 +2,7 @@ import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.
 import { createAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
-import type { EffectRecord, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord } from '../core/types.js'
+import type { EffectRecord, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation } from '../core/types.js'
 import { createRuntimeState, strictestPrivacy } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
@@ -169,10 +169,11 @@ export class PulseRuntime {
   }
 
   private emit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent { return appendRuntimeEvent(this.state, event, { sessionId: this.sessionId, timestamp: this.state.now }) }
-  private journalEffect(effect: EffectRecord, transactionId: string, result?: import('../core/types.js').ResultRecord, events: import('../core/types.js').RuntimeEvent[] = [], lane?: LaneRecord): void {
+  private journalEffect(effect: EffectRecord, transactionId: string, result?: import('../core/types.js').ResultRecord, events: import('../core/types.js').RuntimeEvent[] = [], lane?: LaneRecord, correlation?: ToolCallCorrelation): void {
     const mutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: structuredClone(effect) }]
     if (result) mutations.push({ op: 'publishResult', record: structuredClone(result) })
     if (lane) mutations.push({ op: 'setLane', laneId: lane.id, record: structuredClone(lane) })
+    if (correlation) mutations.push({ op: 'setToolCallCorrelation', record: structuredClone(correlation) })
     for (const event of events) { const { seq: _seq, ...input } = event; mutations.push({ op: 'appendEvent', event: input }) }
     this.mutationLog.append(transactionId, mutations, this.state.now)
   }
@@ -398,9 +399,17 @@ export class PulseRuntime {
       }
       this.state.lanes.set(journalLane.id, journalLane)
     }
+    let correlation: ToolCallCorrelation | undefined
+    if (effect.kind === 'tool' && effect.toolCallId && result) {
+      const existing = this.state.toolCallCorrelations.get(effect.toolCallId)
+      if (existing) {
+        correlation = { ...existing, toolEffectId: effect.id, resultRef: result.id }
+        this.state.toolCallCorrelations.set(effect.toolCallId, correlation)
+      }
+    }
     const settledEvent = this.emit({ type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
     const metadataEvent = execution.metadata === undefined ? undefined : this.emit({ type: 'effect.execution_metadata', effectId, data: execution.metadata })
-    this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:settled`, result, [settledEvent, ...(metadataEvent ? [metadataEvent] : [])], journalLane)
+    this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:settled`, result, [settledEvent, ...(metadataEvent ? [metadataEvent] : [])], journalLane, correlation)
     this.refreshWaits()
     this.dispatchQueuedEffects()
   }
