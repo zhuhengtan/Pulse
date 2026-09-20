@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { EffectOutbox, FileRuntimePersistenceBackend, PulseRuntime, createRuntimeState, exportRuntimePersistence, importRuntimePersistence, MutationLog, serializeRuntimePersistence } from '@pulse/runtime'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 describe('effect outbox and runtime persistence envelope', () => {
   it('deduplicates logical attempts and recovers claimed work for redispatch', () => {
@@ -82,6 +83,30 @@ describe('effect outbox and runtime persistence envelope', () => {
       expect(restored.resourceLocks.isHeld('workspace', 'exclusive')).toBe(true)
       restored.abandonEffect('effect-1')
       expect(restored.resourceLocks.isHeld('workspace')).toBe(false)
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('recovers an in-flight write after the owning process is terminated', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-process-recovery-'))
+    try {
+      const filePath = join(directory, 'runtime.json')
+      const viteNodePackage = (await readdir(resolve('node_modules/.pnpm'))).find((name) => name.startsWith('vite-node@'))
+      if (!viteNodePackage) throw new Error('vite-node is required for process recovery test')
+      const child = spawn(process.execPath, [resolve('node_modules/.pnpm', viteNodePackage, 'node_modules/vite-node/vite-node.mjs'), '--script', resolve('tests/process-recovery-child.ts')], {
+        cwd: resolve('.'),
+        env: { ...process.env, PULSE_PROCESS_RECOVERY_CHILD: '1', PULSE_PROCESS_RECOVERY_PATH: filePath },
+        stdio: 'ignore',
+      })
+      const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
+        child.once('error', reject)
+        child.once('exit', (code, signal) => resolveExit({ code, signal }))
+      })
+      expect(exit.code).toBeNull()
+      expect(exit.signal).toBe('SIGKILL')
+      const restored = await PulseRuntime.restore(new FileRuntimePersistenceBackend(filePath))
+      expect(restored.state.effects.get('effect-1')?.state).toBe('reconcile_required')
+      expect(restored.quarantine.unresolvedEffectIds).toEqual(['effect-1'])
+      expect(restored.resourceLocks.isHeld('workspace', 'exclusive')).toBe(true)
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
