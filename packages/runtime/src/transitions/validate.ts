@@ -278,10 +278,11 @@ function prepareLLMInput(state: RuntimeState, lane: LaneRecord, submission: Subm
   const instruction = typeof input.instruction === 'string' ? input.instruction : input.task
   const rawInputs = input.inputs && typeof input.inputs === 'object' && !Array.isArray(input.inputs) ? input.inputs as Record<string, JsonValue> : {}
   const resultRefs = [...new Set([...(Array.isArray(rawInputs.results) ? rawInputs.results.filter((ref): ref is string => typeof ref === 'string') : []), ...(Array.isArray(rawInputs.findings) ? rawInputs.findings.filter((ref): ref is string => typeof ref === 'string') : []), ...(Array.isArray(rawInputs.rejectedOutputRefs) ? rawInputs.rejectedOutputRefs.filter((ref): ref is string => typeof ref === 'string') : [])])]
+  const artifactRefs = [...new Set(Array.isArray(rawInputs.artifacts) ? rawInputs.artifacts.filter((ref): ref is string => typeof ref === 'string') : [])]
   try {
     const agent = state.agents.get(lane.agentId)
     if (!agent) return { error: 'UNKNOWN_AGENT' }
-    const projection = new ContextBuilder(state).build({ agent, lane, resultRefs, instruction, ...(typeof input.system === 'string' ? { system: input.system } : {}), ...(input.policy === undefined ? {} : { policy: input.policy }), ...(input.tools === undefined ? {} : { tools: input.tools }), toolSetId: typeof input.toolSetId === 'string' ? input.toolSetId : 'default' })
+    const projection = new ContextBuilder(state).build({ agent, lane, resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), instruction, ...(typeof input.system === 'string' ? { system: input.system } : {}), ...(input.policy === undefined ? {} : { policy: input.policy }), ...(input.tools === undefined ? {} : { tools: input.tools }), toolSetId: typeof input.toolSetId === 'string' ? input.toolSetId : 'default' })
     return { input: { ...input, request: projection as unknown as JsonValue } }
   } catch (cause) {
     return { error: cause instanceof Error ? cause.message : 'INVALID_LLM_CONTEXT' }

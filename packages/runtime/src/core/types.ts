@@ -359,6 +359,7 @@ export interface LLMContextSpec {
   globalSnapshotVersion: ContextVersion
   laneSnapshotVersion: ContextVersion
   resultRefs: ResultRef[]
+  artifactRefs?: ArtifactRef[]
   eventIds: string[]
   toolSetId: string
   instruction: string
@@ -369,7 +370,7 @@ export interface LLMContextSpec {
 
 export interface LLMRequestProjection {
   contextSpec: LLMContextSpec
-  blocks: Array<{ kind: 'system' | 'policy' | 'tools' | 'global' | 'history' | 'lane' | 'events' | 'results' | 'instruction'; content: JsonValue }>
+  blocks: Array<{ kind: 'system' | 'policy' | 'tools' | 'global' | 'history' | 'lane' | 'events' | 'results' | 'artifacts' | 'instruction'; content: JsonValue }>
   prefixHash: string
   projectionHash: string
   builderVersion: string

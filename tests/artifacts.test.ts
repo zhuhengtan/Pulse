@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, createAgent, createRuntimeState, exportRuntimeState, importRuntimeState, publishArtifact, readArtifact, validateStep } from '@pulse/runtime'
+import { apply, ContextBuilder, createAgent, createRuntimeState, exportRuntimeState, importRuntimeState, publishArtifact, readArtifact, validateStep } from '@pulse/runtime'
 
 describe('Artifact store', () => {
   it('publishes immutable content with hash, pinning and session round-trip', () => {
@@ -22,6 +22,10 @@ describe('Artifact store', () => {
     expect(() => publishArtifact(state, { mediaType: 'application/json', content: '{}', laneId: root.id, privacy: 'public', derivedFrom: ['secret'] })).toThrow('PRIVACY_DOWNGRADE_WITHOUT_PROOF')
     const artifact = publishArtifact(state, { mediaType: 'application/json', content: '{}', laneId: root.id, derivedFrom: ['secret'] })
     expect(artifact.privacy).toBe('local_only')
+    const projection = new ContextBuilder(state).build({ agent: state.agents.get(root.agentId)!, lane: root, artifactRefs: [artifact.ref], instruction: 'inspect artifact', toolSetId: 'default' })
+    expect(projection.contextSpec.artifactRefs).toEqual([artifact.ref])
+    expect(projection.blocks.find((block) => block.kind === 'artifacts')?.content).toMatchObject([{ ref: artifact.ref, mediaType: 'application/json' }])
+    expect(projection.privacy).toBe('local_only')
     const output = validateStep(state, root.id, { actions: [{ type: 'complete', result: { artifact: artifact.ref }, derivedFrom: [artifact.ref] }], next: { programId: 'artifact', programVersion: '1', step: 'done', locals: {} } })
     expect('rejection' in output).toBe(false)
     if ('rejection' in output) return

@@ -6,7 +6,7 @@ import { createDraftProxy } from './context-proxy.js'
 
 export type NextStepTarget<TState = unknown> = string | { step: string }
 export interface InstructionView<TState> { goal: string; state: TState }
-export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; events?: string[] }
+export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; artifacts?: string[]; events?: string[] }
 export interface HistoryCompactionOptions { summarizeTask: string; keepRecentRounds: number }
 export interface HistoryRecordMeta { seq: number; resultRefs: ResultRef[]; privacy: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[] }
 export interface ResultMeta { ref: ResultRef; privacy: PrivacyLabel; derivedFrom: string[]; summary?: JsonValue }
@@ -244,7 +244,7 @@ export class StepBuilder<TState = JsonValue> {
     this.handlers.set(name, (ctx) => {
       const instruction = typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: ctx.laneState })
       const inputs = options.inputs?.(ctx) ?? {}
-      const inputResultRefs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? [])])]
+      const inputResultRefs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? []), ...(inputs.artifacts ?? [])])]
       const outputSchema = zodJsonSchema(options.schema)
       return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction, inputs: asJson(inputs), outputSchema, requirements: { structuredOutput: true } }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
     })
@@ -272,8 +272,8 @@ export class StepBuilder<TState = JsonValue> {
     const resultRefFromWait = (ctx: StepContext<TState>): ResultRef | undefined => { const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined; return dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined }
     const resultRefsFromWait = (ctx: StepContext<TState>): ResultRef[] => ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef ? [dependency.outcome.resultRef] : []) : []
     const instruction = (ctx: StepContext<TState>): string => typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: ctx.laneState })
-    const submitModel = (ctx: StepContext<TState>, turn: number, resultRefs: ResultRef[] = []): LaneStepOutput => ({ actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { results: resultRefs }, turn, ...(options.outputSchema === undefined ? {} : { outputSchema: zodJsonSchema(options.outputSchema) }), ...(options.toolAllow === undefined ? {} : { requirements: { toolCalling: true } }) }), ...(resultRefs.length ? { derivedFrom: resultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn) }, locals: writeTurns(ctx, turn) })
-    this.handlers.set(name, (ctx) => { const turn = readTurns(ctx) + 1; const inputs = options.inputs?.(ctx) ?? {}; const refs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? [])])]; const output = submitModel(ctx, turn, refs); return { ...output, next: `${name}:decode` } })
+    const submitModel = (ctx: StepContext<TState>, turn: number, resultRefs: ResultRef[] = [], artifactRefs: string[] = []): LaneStepOutput => { const dataRefs = [...new Set([...resultRefs, ...artifactRefs])]; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { ...(resultRefs.length ? { results: resultRefs } : {}), ...(artifactRefs.length ? { artifacts: artifactRefs } : {}) }, turn, ...(options.outputSchema === undefined ? {} : { outputSchema: zodJsonSchema(options.outputSchema) }), ...(options.toolAllow === undefined ? {} : { requirements: { toolCalling: true } }) }), ...(dataRefs.length ? { derivedFrom: dataRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn) }, locals: writeTurns(ctx, turn) } }
+    this.handlers.set(name, (ctx) => { const turn = readTurns(ctx) + 1; const inputs = options.inputs?.(ctx) ?? {}; const refs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? [])])]; const output = submitModel(ctx, turn, refs, [...new Set(inputs.artifacts ?? [])]); return { ...output, next: `${name}:decode` } })
     this.handlers.set(`${name}:tools`, (ctx) => { const turn = readTurns(ctx); const refs = resultRefsFromWait(ctx); return { ...submitModel(ctx, turn + 1, refs), next: `${name}:decode` } })
     this.handlers.set(`${name}:decode`, (ctx) => {
       const turns = readTurns(ctx)
