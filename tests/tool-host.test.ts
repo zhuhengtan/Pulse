@@ -156,6 +156,7 @@ describe('Tool SDK to Runtime Effect host', () => {
     registry.register(defineTool({ name: 'typed-write', description: 'typed write', input: z.object({ path: z.string() }), output: z.object({ ok: z.boolean() }), sideEffectPolicy: 'write', resolveResources: ({ path }) => [{ resource: `file:${path}`, mode: 'exclusive' }], execute: () => ({ ok: true }) }))
     const prepare = createToolEffectSubmissionPreparer(registry)
     expect(() => prepare({ key: 'invalid', kind: 'tool', concurrencyClass: 'tool', input: { name: 'typed-write', arguments: {} } })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_INPUT' }))
+    expect(() => prepare({ key: 'missing-name', kind: 'tool', concurrencyClass: 'tool', input: {} })).toThrow('INVALID_TOOL_EFFECT_INPUT')
     let executed = false
     const runtime = new PulseRuntime({ effectSubmissionPreparer: prepare, effectExecutor: async () => { executed = true; return { value: { ok: true } } } })
     const program: LaneProgram = { id: 'invalid-tool-input', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'invalid', kind: 'tool', concurrencyClass: 'tool', input: { name: 'typed-write', arguments: {} } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('invalid-tool-input', 'done') }) }
