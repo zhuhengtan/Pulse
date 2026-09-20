@@ -5,4 +5,4 @@ export interface ProviderAdapter {
   readonly name: string
   executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; model?: string; outputSchema?: JsonValue }): Promise<LLMResult>
 }
-export interface ProviderPresetConfig { provider: string; apiKey?: string; baseURL?: string; defaultModel?: string; extraHeaders?: Record<string, string> }
+export interface ProviderPresetConfig { provider: string; apiKey?: string; baseURL?: string; defaultModel?: string; maxOutputTokens?: number; extraHeaders?: Record<string, string> }
