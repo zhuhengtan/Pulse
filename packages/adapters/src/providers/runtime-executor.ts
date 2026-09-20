@@ -2,6 +2,34 @@ import type { EffectExecutor, EffectExecution, JsonValue, LLMRequestProjection, 
 import { ModelFallbackController, OutputValidationError, validateAdapterResult, validateJsonSchema, modelFallbackError } from '@pulse/runtime'
 import type { ProviderAdapter } from './types.js'
 
+class AsyncSlot {
+  private active = 0
+  private readonly pending: Array<{ signal: AbortSignal | undefined; resolve: (release: () => void) => void; reject: (error: unknown) => void }> = []
+  constructor(private readonly limit: number) {}
+  async acquire(signal?: AbortSignal): Promise<() => void> {
+    if (this.limit === Number.POSITIVE_INFINITY || this.active < this.limit) { this.active++; return () => this.release() }
+    if (signal?.aborted) throw new Error('EFFECT_CANCELLED')
+    return new Promise<() => void>((resolve, reject) => {
+      const request = { signal, resolve, reject }
+      const onAbort = (): void => { const index = this.pending.indexOf(request); if (index >= 0) this.pending.splice(index, 1); reject(new Error('EFFECT_CANCELLED')) }
+      if (signal) signal.addEventListener('abort', onAbort, { once: true })
+      this.pending.push(request)
+    })
+  }
+  private release(): void {
+    const next = this.pending.shift()
+    if (!next) { this.active = Math.max(0, this.active - 1); return }
+    if (next.signal?.aborted) { next.reject(new Error('EFFECT_CANCELLED')); this.release(); return }
+    next.resolve(() => this.release())
+  }
+}
+
+class SlotPool {
+  private readonly slots = new Map<string, AsyncSlot>()
+  constructor(private readonly limits: Readonly<Record<string, number>> = {}) {}
+  get(key: string): AsyncSlot { let slot = this.slots.get(key); if (!slot) { slot = new AsyncSlot(this.limits[key] ?? Number.POSITIVE_INFINITY); this.slots.set(key, slot) }; return slot }
+}
+
 function toJson(value: unknown): JsonValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') return value
   if (Array.isArray(value)) return value.map(toJson)
@@ -17,8 +45,10 @@ function candidateMetadata(candidate: ModelCandidate, attempts: Array<{ attemptI
   }) }
 }
 
-export function createModelEffectExecutor(config: { router: ModelRouter; providers: ReadonlyMap<string, ProviderAdapter>; requirements?: Partial<ModelCandidate['capabilities']> }): EffectExecutor {
+export function createModelEffectExecutor(config: { router: ModelRouter; providers: ReadonlyMap<string, ProviderAdapter>; requirements?: Partial<ModelCandidate['capabilities']>; maxConcurrentByProvider?: Readonly<Record<string, number>>; maxConcurrentByModel?: Readonly<Record<string, number>> }): EffectExecutor {
   const fallback = new ModelFallbackController()
+  const providerSlots = new SlotPool(config.maxConcurrentByProvider)
+  const modelSlots = new SlotPool(config.maxConcurrentByModel)
   return async (effect, signal): Promise<EffectExecution> => {
     if (effect.kind !== 'llm') throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`)
     const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
@@ -35,6 +65,10 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
     const result = await fallback.execute(effect.id, candidates, async (attempt) => {
       const provider = config.providers.get(attempt.candidate.providerId)
       if (!provider) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause: new Error(`UNKNOWN_PROVIDER:${attempt.candidate.providerId}`) })
+      const providerRelease = await providerSlots.get(attempt.candidate.providerId).acquire(signal)
+      let modelRelease: (() => void) | undefined
+      try { modelRelease = await modelSlots.get(attempt.candidate.id).acquire(signal) } catch (cause) { providerRelease(); throw cause }
+      const releases = [providerRelease, modelRelease]
       try {
         const output = validateAdapterResult(await provider.executeAttempt({ request: projection, signal, onObservation: (chunk) => observations.push({ type: 'chunk', data: chunk }) }))
         if (output.usage) usage.set(attempt.attemptId, output.usage)
@@ -50,7 +84,7 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
         return output
       } catch (cause) {
         throw modelFallbackError({ retryable: true, localClosed: true, sideEffectState: 'none', cause })
-      }
+      } finally { for (const release of releases.reverse()) release() }
     }).catch((cause) => {
       if (failedForSchema && lastSchemaViolation !== undefined) return { result: { text: '', toolCalls: [], finishReason: 'error' as const }, candidate: candidates.at(-1)!, attempts: [], schemaRejected: lastSchemaViolation }
       throw cause

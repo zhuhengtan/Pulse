@@ -51,4 +51,21 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     const { agentId } = runtime.createAgent('structured', program)
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
   })
+
+  it('enforces provider and model concurrency slots across simultaneous Effects', async () => {
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'shared-model', providerId: 'shared-provider', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 1 })
+    let active = 0
+    let maximum = 0
+    const providers = new Map<string, ProviderAdapter>([['shared-provider', { id: 'shared-provider', name: 'shared', executeAttempt: async () => { active++; maximum = Math.max(maximum, active); await new Promise((resolve) => setTimeout(resolve, 15)); active--; return { text: 'ok', toolCalls: [], finishReason: 'stop' } } }]])
+    const runtime = new PulseRuntime({ effectExecutor: createModelEffectExecutor({ router: new ModelRouter(registry), providers, maxConcurrentByProvider: { 'shared-provider': 1 }, maxConcurrentByModel: { 'shared-model': 1 } }) })
+    const program: LaneProgram = { id: 'provider-slots', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request: projection } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('provider-slots', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('provider-slots', 'finish') } }
+    const first = runtime.createAgent('first', program)
+    const second = runtime.createAgent('second', program)
+    const outcomes = await Promise.all([runtime.start(first.agentId).outcome(), runtime.start(second.agentId).outcome()])
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(['succeeded', 'succeeded'])
+    expect(maximum).toBe(1)
+  })
 })
