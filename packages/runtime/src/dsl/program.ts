@@ -25,8 +25,8 @@ export interface StepContext<TState = JsonValue> {
   results: { meta(ref: ResultRef): ResultMeta | undefined; summary(ref: ResultRef): JsonValue | undefined }
   mergeProposals: ReadonlyArray<MergeProposal>
   mutateLane(mutator: (draft: TState) => void): void
-  proposeGlobal(delta: { ops: ContextOp[]; privacy?: PrivacyLabel }): void
-  commitGlobal(delta: { ops: ContextOp[]; privacy?: PrivacyLabel; adoptImmediately?: boolean }): void
+  proposeGlobal(delta: { ops: ContextOp[] | ((draft: Record<string, JsonValue>) => void); privacy?: PrivacyLabel }): void
+  commitGlobal(delta: { ops: ContextOp[] | ((draft: Record<string, JsonValue>) => void); privacy?: PrivacyLabel; adoptImmediately?: boolean }): void
   adoptContext(version: number | 'latest'): void
   cancelLane(target: LaneId, reason: 'SUPERSEDED' | 'USER_REQUESTED' | 'POLICY'): void
   proposeCancel(target: LaneId, reason: 'SUPERSEDED' | 'POLICY'): void
@@ -230,13 +230,17 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
   const agent = context.state.agents.get(context.lane.agentId)
   const globalVersion = context.lane.contextSnapshotVersion
   const global = clone(agent?.globalVersions.get(globalVersion) ?? {})
+  const globalDraftProxy = global && typeof global === 'object' && !Array.isArray(global) ? createDraftProxy(global as Record<string, unknown>) : undefined
   if (agent) derivedRefs.add(globalContextRef(agent.id, globalVersion))
   derivedRefs.add(laneContextRef(context.lane.id, context.lane.context.version))
   collectResumeResultRefs(context.resumeInput, derivedRefs)
   for (const record of context.lane.context.history) for (const ref of record.resultRefs) derivedRefs.add(ref)
   const history = context.lane.context.history.map((record: HistoryRecord): HistoryRecordMeta => ({ seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), resultRefs: [...record.resultRefs], ...(record.resultSelection === undefined ? {} : { resultSelection: clone(record.resultSelection) }), ...(record.result === undefined ? {} : { result: record.result }), ...(record.findings === undefined ? {} : { findings: [...record.findings] }), privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: clone(record.privacyTaints) }) }))
   const resultMeta = (ref: ResultRef): ResultMeta | undefined => { const result = resultVisible(context, ref) ? context.state.results.get(ref) : undefined; if (result) derivedRefs.add(ref); return result ? { ref, privacy: result.privacy, derivedFrom: [...result.derivedFrom], ...(result.summary === undefined ? {} : { summary: clone(result.summary) }) } : undefined }
-  const globalDelta = (value: { ops: ContextOp[]; privacy?: PrivacyLabel; proposal: boolean }): void => { delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, sourceLaneId: context.lane.id, ops: clone(value.ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal } }
+  const globalDelta = (value: { ops: ContextOp[] | ((draft: Record<string, JsonValue>) => void); privacy?: PrivacyLabel; proposal: boolean }): void => {
+    const ops = typeof value.ops === 'function' ? (() => { if (!globalDraftProxy) throw Object.assign(new Error('GLOBAL_DRAFT_REQUIRES_OBJECT'), { code: 'GLOBAL_DRAFT_REQUIRES_OBJECT', retryable: false }); value.ops(globalDraftProxy.draft as Record<string, JsonValue>); return globalDraftProxy.changes().ops as ContextOp[] })() : value.ops
+    delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, sourceLaneId: context.lane.id, ops: clone(ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal }
+  }
   const ctx: InternalStepContext<TState> = {
     lane: context.lane, goal: context.lane.goal, global, globalVersion, laneState: draft, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}),
     [RESULT_READER]: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return findResult(context, ref) },

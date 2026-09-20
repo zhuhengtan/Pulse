@@ -33,7 +33,7 @@ describe('DSL StepContext', () => {
         expect(ctx.global).toEqual({})
         expect(ctx.history).toEqual([])
         expect(ctx.now).toBe(0)
-        ctx.commitGlobal({ ops: [{ op: 'set', path: ['ready'], value: true }], adoptImmediately: true })
+        ctx.commitGlobal({ ops: (draft) => { draft.ready = true }, adoptImmediately: true })
         return { next: 'finish' }
       })
       builder.addStep('finish', (ctx) => {
