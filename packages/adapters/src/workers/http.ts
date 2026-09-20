@@ -152,12 +152,13 @@ export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinato
   return { url, close: async () => { if (recoveryTimer) clearInterval(recoveryTimer); await new Promise<void>((resolve, reject) => { server.close((cause) => cause ? reject(cause) : resolve()) }) } }
 }
 
-export interface HttpWorkerClientOptions { baseUrl: string; workerId: string; pollMs?: number; authToken?: string; fetch?: typeof globalThis.fetch }
+export interface HttpWorkerClientOptions { baseUrl: string; workerId: string; pollMs?: number; authToken?: string; requestTimeoutMs?: number; fetch?: typeof globalThis.fetch }
 
 export class HttpWorkerClient {
   private readonly baseUrl: string
   private readonly workerId: string
   private readonly pollMs: number
+  private readonly requestTimeoutMs: number
   private readonly authToken: string | undefined
   private readonly fetcher: typeof globalThis.fetch
   private sequence = 1
@@ -167,17 +168,26 @@ export class HttpWorkerClient {
     this.baseUrl = options.baseUrl.replace(/\/$/, '')
     this.workerId = options.workerId
     this.pollMs = options.pollMs ?? 10
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000
+    if (!Number.isFinite(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) throw new Error('INVALID_WORKER_HTTP_TIMEOUT')
     this.authToken = options.authToken
     this.fetcher = options.fetch ?? globalThis.fetch
   }
 
   private async request(path: string, body: JsonObject): Promise<JsonValue> {
-    const response = await this.fetcher(`${this.baseUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(this.authToken === undefined ? {} : { authorization: `Bearer ${this.authToken}` }) }, body: JSON.stringify(body) })
-    const text = await response.text()
-    let value: JsonValue = null
-    try { value = text.length === 0 ? null : JSON.parse(text) as JsonValue } catch { throw new Error('WORKER_HTTP_INVALID_RESPONSE') }
-    if (!response.ok) throw new Error(object(value).error && typeof object(value).error === 'string' ? object(value).error as string : `WORKER_HTTP_${response.status}`)
-    return value
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs)
+    try {
+      const response = await this.fetcher(`${this.baseUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(this.authToken === undefined ? {} : { authorization: `Bearer ${this.authToken}` }) }, body: JSON.stringify(body), signal: controller.signal })
+      const text = await response.text()
+      let value: JsonValue = null
+      try { value = text.length === 0 ? null : JSON.parse(text) as JsonValue } catch { throw new Error('WORKER_HTTP_INVALID_RESPONSE') }
+      if (!response.ok) throw new Error(object(value).error && typeof object(value).error === 'string' ? object(value).error as string : `WORKER_HTTP_${response.status}`)
+      return value
+    } catch (cause) {
+      if (controller.signal.aborted) throw new Error('WORKER_HTTP_TIMEOUT')
+      throw cause
+    } finally { clearTimeout(timeout) }
   }
 
   async register(): Promise<void> { await this.request('/workers/register', { workerId: this.workerId }); }

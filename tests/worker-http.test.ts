@@ -87,6 +87,14 @@ describe('HTTP Worker transport', () => {
     } finally { await server.close() }
   })
 
+  it('bounds a hung Coordinator request during a network partition', async () => {
+    const hangingFetch: typeof globalThis.fetch = async (_input, init) => await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new Error('ABORT_ERR')), { once: true })
+    })
+    const client = new HttpWorkerClient({ baseUrl: 'http://unreachable.invalid', workerId: 'partitioned', requestTimeoutMs: 5, fetch: hangingFetch })
+    await expect(client.register()).rejects.toThrow('WORKER_HTTP_TIMEOUT')
+  })
+
   it('executes a Runtime Effect through an HTTP polling Worker with heartbeat renewal', async () => {
     const coordinator = new Coordinator()
     const server = await startWorkerCoordinatorServer(coordinator)
