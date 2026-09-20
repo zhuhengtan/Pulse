@@ -17,7 +17,7 @@ import { appendRuntimeEvent } from '../core/events.js'
 import { apply, type Mutation } from '../core/mutations.js'
 import { ContextMerger, type MergePlan } from '../context/merger.js'
 import { appendHistory, contentHash, historyPressure, stableSerialize } from '../context/builder.js'
-import { validateJsonSchema } from '../models/router.js'
+import { InMemoryModelRegistry, ModelRouter, validateJsonSchema, type ModelRegistry } from '../models/router.js'
 import { SessionStoragePolicy, type StoragePolicyConfig } from '../storage/policy.js'
 import { collectRuntimeTelemetry, type RuntimeTelemetryExporter, type RuntimeTelemetrySnapshot } from './telemetry.js'
 import { advanceArtifactId, markArtifactPersisted, pinArtifact, prepareArtifactPublication, readArtifact, unpinArtifact, type ArtifactPublication } from '../storage/artifacts.js'
@@ -74,6 +74,8 @@ export interface RuntimeConfig {
   storagePolicy?: StoragePolicyConfig
   persistence?: RuntimePersistenceSnapshot
   programs?: LaneProgram[]
+  models?: ModelRegistry
+  modelRouter?: ModelRouter
   toolVersions?: Record<string, string>
   policyVersion?: string
   routerVersion?: string
@@ -198,6 +200,8 @@ export class PulseRuntime {
   readonly factInbox: FactInbox<HostCommand>
   readonly observationInbox: ObservationInbox
   readonly programs = new ProgramRegistry()
+  readonly models: ModelRegistry
+  readonly modelRouter: ModelRouter
   private readonly executions = new Map<string, { controller: AbortController; promise: Promise<void>; timeoutTimer?: string; deadlineTimer?: string; cancelTimer?: string }>()
   private readonly lockReleases = new Map<string, Array<() => void>>()
   private readonly waitDeadlineTimers = new Map<string, string>()
@@ -232,6 +236,8 @@ export class PulseRuntime {
     const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
     this.enforcingRecoveryPrograms = restored !== undefined
     this.observationInbox = new ObservationInbox(config.maxObservationEntries ?? 4096, config.maxObservationBytes ?? 1_000_000)
+    this.models = config.models ?? config.modelRouter?.registry ?? new InMemoryModelRegistry()
+    this.modelRouter = config.modelRouter ?? new ModelRouter(this.models)
     this.toolVersions = { ...(config.toolVersions ?? {}) }
     this.policyVersion = config.policyVersion
     this.routerVersion = config.routerVersion

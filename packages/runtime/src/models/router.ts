@@ -12,6 +12,7 @@ export interface ModelUsage {
 export interface ModelCandidate { id: string; providerId: string; tasks: string[]; capabilities: ModelCapabilities; priority: number }
 export interface ModelRouteDiagnostic { id: string; providerId: string; accepted: boolean; reasons: string[] }
 export interface ModelRegistry { register(candidate: ModelCandidate): void; list(): ModelCandidate[] }
+export interface ModelRoute { task: string; candidates: string[] }
 export interface ModelRouteFeedback {
   modelId: string
   providerId?: string
@@ -55,14 +56,34 @@ export function estimateProjectionTokens(projection: LLMRequestProjection): numb
 }
 
 export class ModelRouter {
-  constructor(protected readonly registry: ModelRegistry) {}
-  route(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] { return this.rankCandidates(this.diagnostics(task, privacy, requirements).filter((item) => item.accepted).map((item) => this.registry.list().find((candidate) => candidate.id === item.id)!)) }
+  private readonly routes = new Map<string, string[]>()
+
+  constructor(public readonly registry: ModelRegistry) {}
+
+  register(route: ModelRoute): void {
+    if (!route.task || route.candidates.length === 0 || route.candidates.some((candidate) => !candidate)) throw new Error('INVALID_MODEL_ROUTE')
+    this.routes.set(route.task, [...new Set(route.candidates)])
+  }
+
+  route(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] { return this.rankCandidates(this.candidates(task, privacy, requirements), this.routes.get(task)) }
   routeProjection(task: string, projection: LLMRequestProjection, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] {
     const estimatedTokens = estimateProjectionTokens(projection) + (typeof requirements.maxOutputTokens === 'number' ? requirements.maxOutputTokens : 0)
-    return this.rankCandidates(this.diagnostics(task, projection.privacy, requirements, estimatedTokens).filter((item) => item.accepted).map((item) => this.registry.list().find((candidate) => candidate.id === item.id)!))
+    return this.rankCandidates(this.candidates(task, projection.privacy, requirements, estimatedTokens), this.routes.get(task))
   }
   recordFeedback(_feedback: ModelRouteFeedback): void {}
-  protected rankCandidates(candidates: ModelCandidate[]): ModelCandidate[] { return candidates.sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id)) }
+  protected rankCandidates(candidates: ModelCandidate[], preferredOrder?: string[]): ModelCandidate[] {
+    if (preferredOrder !== undefined) {
+      const order = new Map(preferredOrder.map((id, index) => [id, index]))
+      return candidates.sort((a, b) => (order.get(a.id) ?? Number.POSITIVE_INFINITY) - (order.get(b.id) ?? Number.POSITIVE_INFINITY) || b.priority - a.priority || a.id.localeCompare(b.id))
+    }
+    return candidates.sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
+  }
+  private candidates(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities>, estimatedTokens?: number): ModelCandidate[] {
+    const candidates = this.registry.list()
+    const allowed = this.routes.get(task)
+    const diagnostics = this.diagnostics(task, privacy, requirements, estimatedTokens)
+    return diagnostics.filter((item) => item.accepted && (allowed === undefined || allowed.includes(item.id))).map((item) => candidates.find((candidate) => candidate.id === item.id)!).filter(Boolean)
+  }
   diagnostics(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}, estimatedTokens?: number): ModelRouteDiagnostic[] {
     return this.registry.list().map((candidate) => {
       const reasons: string[] = []
@@ -138,7 +159,7 @@ export class AdaptiveModelRouter extends ModelRouter {
 
   metrics(): ReadonlyMap<string, ModelRouteMetrics> { return new Map([...this.feedback.entries()].map(([id, metrics]) => [id, { ...metrics }])) }
 
-  protected rankCandidates(candidates: ModelCandidate[]): ModelCandidate[] {
+  protected rankCandidates(candidates: ModelCandidate[], preferredOrder?: string[]): ModelCandidate[] {
     const score = (candidate: ModelCandidate): number => {
       const metrics = this.feedback.get(candidate.id)
       const attempts = metrics?.attempts ?? 0
@@ -148,6 +169,10 @@ export class AdaptiveModelRouter extends ModelRouter {
       const cache = metrics?.inputTokens ? Math.max(0, Math.min(1, (metrics.cachedInputTokens / metrics.inputTokens))) : 0
       const exploration = 1 / Math.sqrt(attempts + 1)
       return this.policy.priorityWeight * candidate.priority + this.policy.qualityWeight * quality + this.policy.latencyWeight * latency + this.policy.costWeight * cost + this.policy.cacheWeight * cache + this.policy.explorationWeight * exploration
+    }
+    if (preferredOrder !== undefined) {
+      const order = new Map(preferredOrder.map((id, index) => [id, index]))
+      return candidates.sort((a, b) => (order.get(a.id) ?? Number.POSITIVE_INFINITY) - (order.get(b.id) ?? Number.POSITIVE_INFINITY) || score(b) - score(a) || b.priority - a.priority || a.id.localeCompare(b.id))
     }
     return candidates.sort((a, b) => score(b) - score(a) || b.priority - a.priority || a.id.localeCompare(b.id))
   }
