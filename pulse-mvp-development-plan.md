@@ -53,6 +53,7 @@
 | Mutation 事务预检 | clone 预检失败不写日志、不改变运行时；提交时保留 Lane/Effect 对象身份 | `tests/storage-mutation-log.test.ts` | `70c3534` |
 | Tool Schema 与 Provider 上限 | 不支持的 Zod 类型构建时 fail-closed；Anthropic `maxOutputTokens` 不再写死 | `tests/m3-context-adapters.test.ts` | `e21907a` |
 | 持久化恢复边界 | `persisted` 驻留状态、backend restore、在途写副作用 quarantine、journal event `txId` 一致 | `tests/storage-policy.test.ts`、`tests/storage-outbox.test.ts` | `00d49f6`、`f7ba385`、`9b22fd3`、`c0e87f6` |
+| Runtime 生命周期自动持久化 | 配置 `persistenceBackend` 后，Tick/Effect 结算自动排队保存；`run()`、`shutdown()` 等待 durable save；显式 `flushPersistence()` 支持宿主主动冲刷 | `tests/storage-outbox.test.ts` | `7a2ed52` |
 | 运行观测 | 只读 telemetry 聚合 agent/lane/effect/attempt、route 排除、provider/model、slot wait、usage/cost | `tests/provider-host.test.ts` | `e68cae0` |
 | 输出预算与可恢复 Tool | `maxOutputTokens` 参与窗口预留、候选准入和 Provider 请求；structured schema 与最终 `outputSchema` 契约校验；保存 executionRef 并提供 RecoverableTool 对账入口 | `tests/provider-host.test.ts`、`tests/tool-host.test.ts`、`tests/m3-context-adapters.test.ts` | `d451014`、`b4461a8`、`83ebe38` |
 | 高级 Wait 与 Tool 准入 | Wait 支持 `any/quorum`、独立 deadline 和恢复重建；Tool Manifest 可在提交前注入可信锁、副作用策略与默认超时 | `tests/advanced-join.test.ts`、`tests/tool-host.test.ts` | `af1ff6f`、`f523c71`、`a95d4f5` |
@@ -61,7 +62,7 @@
 | 进程级恢复验收 | 子进程先持久化在途写 Effect 后被 `SIGKILL`，父进程通过真实文件后端恢复 `reconcile_required`、Quarantine 与资源锁隔离 | `tests/storage-outbox.test.ts`、`tests/process-recovery-child.ts` | `29a8e4c` |
 | RecoverableTool executionRef | `defineTool` 可声明执行引用，ToolRegistry/Executor 在成功或中断后持久化该引用；真实文件写入中断后可通过引用完成 reconcile | `tests/tool-host.test.ts` | `748c66f` |
 
-统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 40 个测试文件、170/170 通过，`pnpm build` 也已通过。
+统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 40 个测试文件、171/171 通过，`pnpm build` 也已通过。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -388,14 +389,15 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `639c6cb`：RuntimeTelemetryExporter、原子追加的 JSONL 文件 exporter 和显式 `runtime.exportTelemetry()` 宿主出口。
 - `ad09a2f`：有界 `RuntimeTelemetryAggregator`、峰值统计、阈值告警和冷却窗口。
 - `290c559` / `b8f6aec` / `417ecb1`：恢复时重建 quarantine 资源锁、放弃后释放隔离锁、校验快照引用并对 malformed snapshot fail closed。
-- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，40 个测试文件、170 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- `7a2ed52`：配置 `persistenceBackend` 后由 Runtime 生命周期自动排队持久化；`run()`/`shutdown()` 等待最终 durable save，`flushPersistence()` 可显式冲刷，并以文件后端恢复成功 Agent。
+- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，40 个测试文件、171 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
 | 验收项 | 当前状态 | 缺口 |
 | --- | --- | --- |
 | 真实 Provider Live Smoke | 已执行但被鉴权阻塞 | 请求已到真实 HTTP endpoint，当前返回 `PROVIDER_HTTP_401`；需要有效凭证验证 token、取消、structured output 和 tool-call 往返 |
-| Runtime Storage pin/retention | 确定性代码与后端快照已覆盖 | 自动 pin、hard-limit 预检、compact、backend 确认后的 `persisted` 标记和 restore 已有测试；旧 Snapshot/Result 外部索引与所有进程入口的统一写事务仍需生产实现 |
+| Runtime Storage pin/retention | 确定性代码与后端快照已覆盖，生命周期自动落盘已接入 | 自动 pin、hard-limit 预检、compact、backend 确认后的 `persisted` 标记、restore，以及 Runtime `run()`/`shutdown()` 自动持久化已有测试；旧 Snapshot/Result 外部索引与生产级写事务仍需实现 |
 | 崩溃恢复与副作用对账 | 进程级重启和本地真实写入对账已验证，远程副作用仍待验证 | 已补子进程 `SIGKILL` 后恢复、启动 quarantine、资源锁隔离，以及 `executionRef` 从 Tool 到 Runtime 的持久化链；仍缺真实远程写系统 reconcile 和生产环境的持久化事务边界证明 |
 | Provider 请求完整能力 | 确定性映射已覆盖，真实厂商仍待验证 | OpenAI-compatible/Anthropic 请求带 model、tool schema、structured schema，usage 已归一化；真实 endpoint 的字段兼容、计费口径、取消和 tool-call 往返仍需有效凭证 |
 | 运行观测 | Runtime 侧已有只读出口、可持久化 exporter、聚合和告警规则 | `inspect/explain`、`telemetry()`、JSONL exporter 和有界聚合器已覆盖 route 排除原因、provider/model slot、Attempt usage/cost、峰值与阈值告警；外部生产指标系统接入仍需宿主配置 |
@@ -416,7 +418,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 本方案继承并落地《Pulse Runtime 架构设计》与《Pulse Application DSL 规范》：
 1. 以主架构第 26 节的 M0/M1 标注为唯一验收来源，不重复维护场景数量。
 2. M1 的真实 Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder、Session 和确定性端到端示例已贯通；其他 Provider 与真实网络任务属于独立集成验证。
-3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity（含可安全组的 DSL series collapse）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、恢复锁重建、快照引用校验、Tool admission 默认锁、correlated telemetry、JSONL exporter、聚合和告警规则已实现并有确定性测试；真实 Provider smoke、远程副作用对账、生产级持久化事务边界和外部生产指标系统接入仍未勾选。
+3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity（含可安全组的 DSL series collapse）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、恢复锁重建、快照引用校验、Tool admission 默认锁、correlated telemetry、JSONL exporter、聚合和告警规则已实现并有确定性测试；真实 Provider smoke、远程副作用对账、生产级持久化事务边界和外部生产指标系统接入仍未勾选。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
 已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
