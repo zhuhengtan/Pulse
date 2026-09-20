@@ -130,6 +130,16 @@ describe('runtime control boundaries', () => {
     expect((await restored.start(created.agentId).outcome()).status).toBe('succeeded')
   })
 
+  it('stops recovery when an active Lane program version is unavailable', () => {
+    const runtime = new PulseRuntime()
+    const program: LaneProgram = { id: 'versioned-recovery', version: '1', step: () => ({ actions: [], next: point('versioned-recovery', 'done') }) }
+    runtime.createAgent('versioned', program)
+    const restored = new PulseRuntime({ persistence: runtime.exportPersistence() })
+    expect(() => restored.tick()).toThrow('PROGRAM_VERSION_UNAVAILABLE:versioned-recovery@1')
+    restored.register(program)
+    expect(() => restored.tick()).not.toThrow()
+  })
+
   it('fails queued Effects closed when the Runtime attempt budget is exhausted', async () => {
     const runtime = new PulseRuntime({ budget: { maxTotalAttempts: 1 }, effectExecutor: async () => ({ value: { ok: true } }) })
     const program: LaneProgram = { id: 'attempt-budget', version: '1', step: ({ lane }) => lane.resume.step === 'start'

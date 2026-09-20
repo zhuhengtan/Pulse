@@ -63,6 +63,7 @@ export interface RuntimeConfig {
   trustedSanitizerIds?: string[]
   storagePolicy?: StoragePolicyConfig
   persistence?: RuntimePersistenceSnapshot
+  programs?: LaneProgram[]
   effectExecutor?: EffectExecutor
   effectSubmissionPreparer?: (submission: EffectSubmission) => EffectSubmission
   telemetryExporter?: RuntimeTelemetryExporter
@@ -122,6 +123,7 @@ export class PulseRuntime {
   private shuttingDown = false
   private readonly telemetryExporter: RuntimeTelemetryExporter | undefined
   private readonly persistenceBackend: RuntimePersistenceBackend | undefined
+  private readonly enforcingRecoveryPrograms: boolean
   private readonly budget: RuntimeBudgetConfig
   private persistenceDigest: string | undefined
   private readonly budgetCost = new Map<string, number>()
@@ -167,6 +169,7 @@ export class PulseRuntime {
 
   constructor(config: RuntimeConfig = {}) {
     const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
+    this.enforcingRecoveryPrograms = restored !== undefined
     this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }), ...(config.forkAffinity === undefined ? {} : { forkAffinity: config.forkAffinity }), ...(config.historySoftTokens === undefined ? {} : { historySoftTokens: config.historySoftTokens }), ...(config.historyHardTokens === undefined ? {} : { historyHardTokens: config.historyHardTokens }), ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }), ...(config.trustedSanitizerIds === undefined ? {} : { trustedSanitizerIds: config.trustedSanitizerIds }) })
     if (config.trustedSanitizerIds) for (const sanitizerId of config.trustedSanitizerIds) this.state.trustedSanitizerIds.add(sanitizerId)
     this.sessionId = config.sessionId ?? 'session-local'
@@ -175,6 +178,7 @@ export class PulseRuntime {
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
     this.factInbox = restored?.factInbox === undefined ? new FactInbox<HostCommand>() : FactInbox.fromSnapshot<HostCommand>(restored.factInbox as unknown as import('../core/inbox.js').FactInboxSnapshot<HostCommand>)
+    for (const program of config.programs ?? []) this.register(program)
     const restoredCommandIds = this.factInbox.snapshot().seen.map((eventId) => /^host-command-(\d+)$/.exec(eventId)?.[1]).filter((value): value is string => value !== undefined).map(Number)
     if (restoredCommandIds.length) this.hostCommandSeq = Math.max(...restoredCommandIds) + 1
     if (restored?.quarantine) this.quarantine.restore(restored.quarantine)
@@ -330,6 +334,14 @@ export class PulseRuntime {
   }
 
   private emit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent { return appendRuntimeEvent(this.state, event, { sessionId: this.sessionId, timestamp: this.state.now }) }
+  private assertRecoveryPrograms(): void {
+    if (!this.enforcingRecoveryPrograms) return
+    for (const lane of this.state.lanes.values()) {
+      if (['succeeded', 'failed', 'cancelled'].includes(lane.status)) continue
+      const key = `${lane.resume.programId}@${lane.resume.programVersion}`
+      if (!this.programs.has(key)) throw new Error(`PROGRAM_VERSION_UNAVAILABLE:${key}`)
+    }
+  }
   private tryEmit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent | undefined {
     try {
       this.assertStorageAdmission([{ op: 'appendEvent', event }])
@@ -420,6 +432,7 @@ export class PulseRuntime {
   }
 
   tick(): number {
+    this.assertRecoveryPrograms()
     this.state.now = this.clock.now()
     for (const envelope of this.factInbox.drain()) {
       this.emit({ id: envelope.eventId, type: 'command.enqueued', data: envelope.fact as unknown as JsonValue })
