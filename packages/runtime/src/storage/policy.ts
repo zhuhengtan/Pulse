@@ -1,12 +1,13 @@
 import { contentHash, stableSerialize } from '../context/builder.js'
 import type { JsonValue } from '../core/types.js'
 
-export type StorageKind = 'event' | 'result' | 'snapshot'
+export type StorageKind = 'event' | 'result' | 'artifact' | 'snapshot'
 export type StorageState = 'memory' | 'persisted' | 'compacted'
 
 export interface StoragePolicyConfig {
   maxEventLogBytes?: number
   maxResultBytes?: number
+  maxArtifactBytes?: number
   maxSnapshotBytes?: number
   maxTotalMemoryBytes?: number
 }
@@ -34,7 +35,7 @@ export class SessionStoragePolicy {
   private readonly limits: Required<StoragePolicyConfig>
 
   constructor(config: StoragePolicyConfig = {}) {
-    this.limits = { maxEventLogBytes: config.maxEventLogBytes ?? 1_000_000, maxResultBytes: config.maxResultBytes ?? 1_000_000, maxSnapshotBytes: config.maxSnapshotBytes ?? 1_000_000, maxTotalMemoryBytes: config.maxTotalMemoryBytes ?? 4_000_000 }
+    this.limits = { maxEventLogBytes: config.maxEventLogBytes ?? 1_000_000, maxResultBytes: config.maxResultBytes ?? 1_000_000, maxArtifactBytes: config.maxArtifactBytes ?? 4_000_000, maxSnapshotBytes: config.maxSnapshotBytes ?? 1_000_000, maxTotalMemoryBytes: config.maxTotalMemoryBytes ?? 4_000_000 }
   }
 
   put(kind: StorageKind, key: string, value: JsonValue, pin = false): StoredRecord {
@@ -119,7 +120,7 @@ export class SessionStoragePolicy {
   }
 
   private memoryBytes(kind?: StorageKind): number { return [...this.records.values()].filter((record) => record.storageState === 'memory' && (kind === undefined || record.kind === kind)).reduce((total, record) => total + record.bytes, 0) }
-  private kindLimit(kind: StorageKind): number { return kind === 'event' ? this.limits.maxEventLogBytes : kind === 'result' ? this.limits.maxResultBytes : this.limits.maxSnapshotBytes }
+  private kindLimit(kind: StorageKind): number { return kind === 'event' ? this.limits.maxEventLogBytes : kind === 'result' ? this.limits.maxResultBytes : kind === 'artifact' ? this.limits.maxArtifactBytes : this.limits.maxSnapshotBytes }
   private require(key: string): StoredRecord { const record = this.records.get(key); if (!record) throw new Error(`UNKNOWN_STORAGE_KEY:${key}`); return record }
   private copyRecord(record: StoredRecord): StoredRecord { return { ...record, ...(record.value === undefined ? {} : { value: structuredClone(record.value) }) } }
   private isManagedPinned(key: string): boolean { return [...this.pinSources.values()].some((keys) => keys.has(key)) }

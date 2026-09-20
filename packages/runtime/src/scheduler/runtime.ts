@@ -597,9 +597,12 @@ export class PulseRuntime {
     }
     for (const agent of state.agents.values()) for (const [version] of agent.globalVersions) if ([...state.lanes.values()].some((lane) => lane.agentId === agent.id && !['succeeded', 'failed', 'cancelled'].includes(lane.status) && lane.contextSnapshotVersion === version)) pinKeys.add(`snapshot:global:${agent.id}:${version}`)
     for (const wait of state.waits.values()) if (wait.state === 'pending') pinKeys.add(`snapshot:wait:${wait.id}`)
+    for (const artifact of state.artifacts.values()) {
+      if (artifact.pinCount > 0) pinKeys.add(`artifact:${artifact.ref}`)
+    }
     for (const effect of state.effects.values()) {
       if (!effect.outcome && effect.kind === 'llm') pinKeys.add(`snapshot:request:${effect.id}:${effect.attemptId}`)
-      if (!effect.outcome) for (const ref of effect.derivedFrom ?? []) if (provenanceRefKind(ref) !== 'artifact') pinKeys.add(`result:${provenanceRefId(ref)}`)
+      if (!effect.outcome) for (const ref of effect.derivedFrom ?? []) pinKeys.add(`${provenanceRefKind(ref) === 'artifact' ? 'artifact' : 'result'}:${provenanceRefId(ref)}`)
     }
     policy.replacePinSource('runtime', pinKeys)
     for (const lane of state.lanes.values()) {
@@ -623,6 +626,7 @@ export class PulseRuntime {
       }
     }
     for (const result of state.results.values()) policy.put('result', `result:${result.id}`, result as unknown as JsonValue)
+    for (const artifact of state.artifacts.values()) policy.put('artifact', `artifact:${artifact.ref}`, artifact as unknown as JsonValue)
     for (const event of state.events) policy.put('event', `event:${event.id}`, event as unknown as JsonValue)
     for (const lane of state.lanes.values()) if (lane.pendingResumeInput) policy.put('snapshot', `snapshot:resume:${lane.id}:${lane.version}`, lane.pendingResumeInput as unknown as JsonValue)
   }
@@ -803,14 +807,15 @@ export class PulseRuntime {
 
   publishArtifact(publication: ArtifactPublication): import('../core/types.js').ArtifactRecord {
     const record = publishArtifact(this.state, publication)
+    this.syncStoragePolicy()
     this.schedulePersistence()
     return record
   }
 
   readArtifact(ref: string): Uint8Array { return readArtifact(this.state, ref) }
-  pinArtifact(ref: string): void { pinArtifact(this.state, ref); this.schedulePersistence() }
-  unpinArtifact(ref: string): void { unpinArtifact(this.state, ref); this.schedulePersistence() }
-  markArtifactPersisted(ref: string): void { markArtifactPersisted(this.state, ref); this.schedulePersistence() }
+  pinArtifact(ref: string): void { pinArtifact(this.state, ref); this.syncStoragePolicy(); this.schedulePersistence() }
+  unpinArtifact(ref: string): void { unpinArtifact(this.state, ref); this.syncStoragePolicy(); this.schedulePersistence() }
+  markArtifactPersisted(ref: string): void { markArtifactPersisted(this.state, ref); this.syncStoragePolicy(); this.schedulePersistence() }
 
   cancelAgent(agentId: string, reason: 'USER_REQUESTED' | 'SUPERSEDED' | 'POLICY' | 'TIMEOUT' = 'USER_REQUESTED'): void {
     const agent = this.state.agents.get(agentId)

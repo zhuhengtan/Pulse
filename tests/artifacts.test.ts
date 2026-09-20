@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, ContextBuilder, createAgent, createRuntimeState, exportRuntimeState, importRuntimeState, publishArtifact, readArtifact, validateStep } from '@pulse/runtime'
+import { apply, ContextBuilder, createAgent, createRuntimeState, exportRuntimeState, importRuntimeState, publishArtifact, readArtifact, validateStep, PulseRuntime } from '@pulse/runtime'
 
 describe('Artifact store', () => {
   it('publishes immutable content with hash, pinning and session round-trip', () => {
@@ -45,5 +45,15 @@ describe('Artifact store', () => {
     if ('rejection' in output) return
     apply(state, output.mutations)
     expect([...state.results.values()].at(-1)).toMatchObject({ derivedFrom: [{ kind: 'artifact', ref: source.ref }] })
+  })
+
+  it('accounts for Artifact residency and explicit pinning in storage policy', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxArtifactBytes: 1024 } })
+    const program = { id: 'artifact-policy', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'artifact-policy', programVersion: '1', step: 'done', locals: {} } }) }
+    const { laneId } = runtime.createAgent('artifact policy', program)
+    const record = runtime.publishArtifact({ mediaType: 'text/plain', content: 'hello', laneId })
+    expect(runtime.storagePolicy.inspect().find((item) => item.key === `artifact:${record.ref}`)).toMatchObject({ kind: 'artifact', storageState: 'memory' })
+    runtime.pinArtifact(record.ref)
+    expect(runtime.storagePolicy.inspect().find((item) => item.key === `artifact:${record.ref}`)?.pinCount).toBeGreaterThan(0)
   })
 })
