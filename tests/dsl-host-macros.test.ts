@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { PulseRuntime, defineLaneProgram, definePlanAndExecuteLane } from '@pulse/runtime'
+import { PulseRuntime, defineLaneProgram, definePlanAndExecuteLane, defineReActLane } from '@pulse/runtime'
 
 describe('DSL Human/Timer host macros', () => {
   it('compiles addTimerStep into a timer wait and resumes on fire', async () => {
@@ -63,5 +63,21 @@ describe('DSL Human/Timer host macros', () => {
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
     expect(calls).toEqual(['reason-turn-1', 'reason-tool-1-1', 'reason-turn-2'])
     expect(runtime.state.toolCallCorrelations.get('reason:1:provider-call-1')).toMatchObject({ llmEffectId: 'effect-1', toolEffectId: 'effect-2', resultRef: expect.any(String) })
+  })
+
+  it('keeps the ReAct template result and applies program-level model context', async () => {
+    const program = defineReActLane({ id: 'react-template', version: '1', system: 'You are a verifier.', toolSet: 'readonly', instruction: ({ goal }) => `Verify ${goal}`, outputSchema: z.object({ answer: z.string() }) })
+    const requests: any[] = []
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => { requests.push(effect.input); return { value: { answer: 'verified', finishReason: 'stop', toolCalls: [] } } } })
+    const { agentId, laneId } = runtime.createAgent('the login flow', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    const request = requests[0]?.request
+    expect(request.contextSpec.toolSetId).toBe('readonly')
+    expect(request.blocks.find((block: any) => block.kind === 'system')?.content).toBe('You are a verifier.')
+    const lane = runtime.state.lanes.get(laneId)!
+    const result = lane.resultRef ? runtime.state.results.get(lane.resultRef)?.value : undefined
+    const resultRef = result && typeof result === 'object' && !Array.isArray(result) ? result.resultRef : undefined
+    expect(typeof resultRef).toBe('string')
+    expect(runtime.state.results.get(resultRef as string)?.value).toMatchObject({ answer: 'verified', finishReason: 'stop' })
   })
 })

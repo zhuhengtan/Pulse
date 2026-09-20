@@ -1,12 +1,15 @@
-import { defineLaneProgram, type LaneProgramDefinition, type StepContext } from './program.js'
+import { defineLaneProgram, type LaneProgramDefinition, type StepContext, type InstructionView } from './program.js'
 import type { LaneProgram } from '../scheduler/runtime.js'
 import type { Outcome, JsonValue } from '../core/types.js'
 import type { ZodTypeAny } from 'zod'
 
 export interface ProgramRef { programId: string; programVersion: string; step?: string; locals?: JsonValue }
 
-export function defineReActLane(config: { id: string; version?: string; instruction: string; maxTurns?: number }): LaneProgramDefinition {
-  return defineLaneProgram({ id: config.id, version: config.version ?? '1' }, (builder) => { builder.addReActLoopStep('react', { instruction: config.instruction, ...(config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns }), onFinish: () => 'finish', onMaxTurns: () => 'finish' }); builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' })) })
+export function defineReActLane(config: { id: string; version?: string; system?: string; toolSet?: string; instruction: string | ((view: InstructionView<JsonValue>) => string); toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; historyCompaction?: { summarizeTask: string; keepRecentRounds: number } }): LaneProgramDefinition {
+  return defineLaneProgram({ id: config.id, version: config.version ?? '1', ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSet: config.toolSet }), ...(config.historyCompaction === undefined ? {} : { historyCompaction: config.historyCompaction }) }, (builder) => {
+    builder.addReActLoopStep('react', { instruction: config.instruction, ...(config.toolAllow === undefined ? {} : { toolAllow: config.toolAllow }), ...(config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns }), ...(config.outputSchema === undefined ? {} : { outputSchema: config.outputSchema }), onFinish: (resultRef, ctx) => { ctx.mutateLane((draft) => { if (draft && typeof draft === 'object' && !Array.isArray(draft)) (draft as Record<string, JsonValue>).resultRef = resultRef }); return 'finish' }, onMaxTurns: () => 'finish' })
+    builder.addStep('finish', (ctx) => ({ actions: [{ type: 'complete', result: ctx.laneState && typeof ctx.laneState === 'object' && !Array.isArray(ctx.laneState) ? { resultRef: (ctx.laneState as Record<string, JsonValue>).resultRef ?? null } : { resultRef: null } }], next: 'finish' }))
+  })
 }
 
 export function defineSeriesLane(config: { id: string; version?: string; steps: string[] } | { id: string; version?: string; member: LaneProgram | ProgramRef; keys?: string[]; onMemberFailure?: 'continue' | 'abort' }): LaneProgramDefinition {

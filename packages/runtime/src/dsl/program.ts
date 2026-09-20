@@ -46,6 +46,9 @@ type ErrorBoundaryHandler<TState> = (error: RuntimeError, ctx: StepContext<TStat
 function target(step: NextStepTarget): string { return typeof step === 'string' ? step : step.step }
 function clone<T>(value: T): T { return structuredClone(value) }
 function asJson(value: unknown): JsonValue { return value as JsonValue }
+function programLLMInput(config: { system?: string; toolSet?: string }, input: Record<string, JsonValue>): Record<string, JsonValue> {
+  return { ...input, ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSetId: config.toolSet }) }
+}
 
 interface AffinityAdviceGroup { keys: string[]; signals: string[] }
 
@@ -220,7 +223,7 @@ export class StepBuilder<TState = JsonValue> {
       const inputs = options.inputs?.(ctx) ?? {}
       const inputResultRefs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? [])])]
       const outputSchema = zodJsonSchema(options.schema)
-      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: asJson({ task: options.task, instruction, inputs, outputSchema, requirements: { structuredOutput: true } }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
+      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction, inputs: asJson(inputs), outputSchema, requirements: { structuredOutput: true } }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
     })
     this.handlers.set(submit, (ctx) => ({ next: decode }))
     this.handlers.set(decode, (ctx) => {
@@ -233,20 +236,20 @@ export class StepBuilder<TState = JsonValue> {
         if (options.selfCorrect?.maxRounds === 0) return { next: options.onError ? options.onError(new Error('OUTPUT_SCHEMA_VIOLATION'), ctx) : decode }
         const inputResultRefs = rejectedRef ? [rejectedRef] : []
         const outputSchema = zodJsonSchema(options.schema)
-        return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-correct`, kind: 'llm', concurrencyClass: 'llm', input: { task: options.task, instruction: `${typeof options.instruction === 'string' ? options.instruction : 'structured'}\nValidation errors: ${parsed.error.message}`, inputs: { rejectedOutputRefs: inputResultRefs }, outputSchema, requirements: { structuredOutput: true } }, ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
+        return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-correct`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction: `${typeof options.instruction === 'string' ? options.instruction : 'structured'}\nValidation errors: ${parsed.error.message}`, inputs: { rejectedOutputRefs: inputResultRefs }, outputSchema, requirements: { structuredOutput: true } }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
       }
       const next = options.onSuccess(parsed.data, ctx)
       return { next }
     })
     return this
   }
-  addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[]; maxTurns?: number; onFinish: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; onError?: (error: Error, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
+  addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; onFinish: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; onError?: (error: Error, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
     const readTurns = (ctx: StepContext<TState>): number => { const sdk = sdkLocals(ctx.lane.resume.locals); const turn = sdk[`${name}Turns`]; return typeof turn === 'number' && Number.isInteger(turn) && turn >= 0 ? turn : 0 }
     const writeTurns = (ctx: StepContext<TState>, turns: number): JsonValue => { const locals = ctx.lane.resume.locals; const base = locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}; return { ...base, $sdk: { ...sdkLocals(locals), [`${name}Turns`]: turns } } }
     const resultRefFromWait = (ctx: StepContext<TState>): ResultRef | undefined => { const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined; return dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined }
     const resultRefsFromWait = (ctx: StepContext<TState>): ResultRef[] => ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef ? [dependency.outcome.resultRef] : []) : []
     const instruction = (ctx: StepContext<TState>): string => typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: ctx.laneState })
-    const submitModel = (ctx: StepContext<TState>, turn: number, resultRefs: ResultRef[] = []): LaneStepOutput => ({ actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { results: resultRefs }, turn, ...(options.toolAllow === undefined ? {} : { requirements: { toolCalling: true } }) }, ...(resultRefs.length ? { derivedFrom: resultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn) }, locals: writeTurns(ctx, turn) })
+    const submitModel = (ctx: StepContext<TState>, turn: number, resultRefs: ResultRef[] = []): LaneStepOutput => ({ actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { results: resultRefs }, turn, ...(options.outputSchema === undefined ? {} : { outputSchema: zodJsonSchema(options.outputSchema) }), ...(options.toolAllow === undefined ? {} : { requirements: { toolCalling: true } }) }), ...(resultRefs.length ? { derivedFrom: resultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn) }, locals: writeTurns(ctx, turn) })
     this.handlers.set(name, (ctx) => { const turn = readTurns(ctx) + 1; const inputs = options.inputs?.(ctx) ?? {}; const refs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? [])])]; const output = submitModel(ctx, turn, refs); return { ...output, next: `${name}:decode` } })
     this.handlers.set(`${name}:tools`, (ctx) => { const turn = readTurns(ctx); const refs = resultRefsFromWait(ctx); return { ...submitModel(ctx, turn + 1, refs), next: `${name}:decode` } })
     this.handlers.set(`${name}:decode`, (ctx) => {
@@ -270,6 +273,10 @@ export class StepBuilder<TState = JsonValue> {
         return { actions: [{ type: 'submit_effects', effects, wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:tools` }
       }
       if (turns >= (options.maxTurns ?? 10)) return { next: options.onMaxTurns ? options.onMaxTurns(ctx) : `${name}:decode` }
+      if (options.outputSchema) {
+        const parsed = options.outputSchema.safeParse(value)
+        if (!parsed.success) return { next: options.onError ? options.onError(new Error('OUTPUT_SCHEMA_VIOLATION'), ctx) : `${name}:decode` }
+      }
       return ref ? { next: options.onFinish(ref, ctx) } : { next: options.onError ? options.onError(new Error('MISSING_RESULT_REF'), ctx) : `${name}:decode` }
     })
     return this
@@ -306,7 +313,7 @@ export class StepBuilder<TState = JsonValue> {
       const joined = dependencies.flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef && (outcomeSource === undefined || outcomeSource === 'joined' || outcomeSource.includes(dependency.target.id)) ? [dependency.outcome.resultRef] : [])
       const proposalSource = options.sources?.proposals
       const proposals = ctx.mergeProposals.filter((proposal) => proposalSource === undefined || (proposalSource === 'joined' ? joinedLaneIds.has(proposal.sourceLaneId) : proposalSource.includes(proposal.sourceLaneId)))
-      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: asJson({ task: options.task, merge: true, sources: joined, proposals: proposals.map((proposal) => ({ id: proposal.id, sourceLaneId: proposal.sourceLaneId, delta: proposal.delta })), ...(options.instruction === undefined ? {} : { instruction: typeof options.instruction === 'string' ? options.instruction : options.instruction(ctx) }) }), ...(joined.length ? { derivedFrom: joined } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:decode` }
+      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, merge: true, sources: asJson(joined), proposals: asJson(proposals.map((proposal) => ({ id: proposal.id, sourceLaneId: proposal.sourceLaneId, delta: proposal.delta }))), ...(options.instruction === undefined ? {} : { instruction: typeof options.instruction === 'string' ? options.instruction : options.instruction(ctx) }) }), ...(joined.length ? { derivedFrom: joined } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:decode` }
     })
     this.handlers.set(`${name}:decode`, (ctx) => {
       const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined
@@ -349,7 +356,7 @@ export class StepBuilder<TState = JsonValue> {
         const returnStep = typeof sdk.compactReturnStep === 'string' ? sdk.compactReturnStep : ctx.lane.resume.step
         if (upToSeq === undefined) return { next: returnStep === compactSummarize ? entry : returnStep, locals: { ...locals, $sdk: sdk } }
         return {
-          actions: [{ type: 'submit_effects', effects: [{ key: '$compact-summary', kind: 'llm', concurrencyClass: 'llm', input: { task: compaction.summarizeTask, historySeqs: candidates.map((record) => record.seq), upToSeq } }], wait: { onUnsatisfied: 'resume_with_error' } }],
+          actions: [{ type: 'submit_effects', effects: [{ key: '$compact-summary', kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: compaction.summarizeTask, historySeqs: candidates.map((record) => record.seq), upToSeq }) }], wait: { onUnsatisfied: 'resume_with_error' } }],
           next: compactApply,
           locals: { ...locals, $sdk: { ...sdk, compactPending: true, compactReturnStep: returnStep, compactUpToSeq: upToSeq } },
         }
