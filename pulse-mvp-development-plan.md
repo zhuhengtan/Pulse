@@ -63,9 +63,9 @@
 
 统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 40 个测试文件、170/170 通过，`pnpm build` 也已通过。
 
-以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、进程级故障注入后的完整崩溃恢复/副作用对账，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、恢复、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实进程/网络证据。
+以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
-> **里程碑边界**：M1 的 Context/模型/DSL 主链已经实现；record 级 Privacy、Progress Watchdog、Fork Affinity、warm start、ResultRef 隔离、结构化拒绝输出、持久化恢复入口和 correlated telemetry 已补入当前代码。真实崩溃故障注入、外部副作用对账和真实 Provider 验证仍保持独立 Gate，不用本地单测冒充完成。
+> **里程碑边界**：M1 的 Context/模型/DSL 主链已经实现；record 级 Privacy、Progress Watchdog、Fork Affinity、warm start、ResultRef 隔离、结构化拒绝输出、持久化恢复入口和 correlated telemetry 已补入当前代码。真实远程副作用对账、生产级持久化事务边界和真实 Provider 验证仍保持独立 Gate，不用本地测试冒充完成。
 
 ---
 
@@ -307,7 +307,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
    - 实现 `FilesystemTool`：安全路径沙箱校验、读写与列表
    - 实现 `ShellTool`：子进程组管理、POSIX 信号优雅终止、`cancelGraceMs` 超时升级与输出缓冲截断
 5. **M1 存储边界 (`packages/runtime/src/storage/`)**
-   - 已实现独立的驻内存 hard cap、大小预估、自动 pin/retention、显式 compact、backend 确认后的 `persisted` 驻留状态、`SESSION_STORAGE_LIMIT_EXCEEDED` 和统一恢复入口；进程级故障注入与外部副作用对账仍属于独立恢复 Gate
+   - 已实现独立的驻内存 hard cap、大小预估、自动 pin/retention、显式 compact、backend 确认后的 `persisted` 驻留状态、`SESSION_STORAGE_LIMIT_EXCEEDED` 和统一恢复入口；进程级 SIGKILL 恢复与本地文件副作用对账已有验收，真实远程副作用与生产事务边界仍属于独立恢复 Gate
 
 #### 验收门禁 Gate 3
 - [x] 稳定前缀测试：固定块顺序、Global/Lane 版本、History 追加行为和前缀稳定序列化通过测试。
@@ -416,7 +416,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 本方案继承并落地《Pulse Runtime 架构设计》与《Pulse Application DSL 规范》：
 1. 以主架构第 26 节的 M0/M1 标注为唯一验收来源，不重复维护场景数量。
 2. M1 的真实 Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder、Session 和确定性端到端示例已贯通；其他 Provider 与真实网络任务属于独立集成验证。
-3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity（含可安全组的 DSL series collapse）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore、恢复锁重建、快照引用校验、Tool admission 默认锁、correlated telemetry、JSONL exporter、聚合和告警规则已实现并有确定性测试；真实 Provider smoke、进程级故障恢复和外部生产指标系统接入仍未勾选。
+3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity（含可安全组的 DSL series collapse）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、恢复锁重建、快照引用校验、Tool admission 默认锁、correlated telemetry、JSONL exporter、聚合和告警规则已实现并有确定性测试；真实 Provider smoke、远程副作用对账、生产级持久化事务边界和外部生产指标系统接入仍未勾选。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
 已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
