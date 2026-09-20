@@ -270,7 +270,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         workingLane.ownedEffectIds.add(id)
       }
       if (action.wait) {
-        const spec: WaitSpec = { dependencies: action.effects.map((submission) => ({ key: submission.key, target: batchTargets.get(submission.key)!, condition: 'settled' as const })), mode: 'all', onUnsatisfied: action.wait.onUnsatisfied, ...(action.wait.onCancelled ? { onCancelled: action.wait.onCancelled } : {}), reason: action.wait.reason ?? 'effect' }
+        const spec: WaitSpec = { dependencies: action.effects.map((submission) => ({ key: submission.key, target: batchTargets.get(submission.key)!, condition: 'settled' as const })), mode: 'all', ...(action.wait.deadlineAt === undefined ? {} : { deadlineAt: action.wait.deadlineAt }), onUnsatisfied: action.wait.onUnsatisfied, ...(action.wait.onCancelled ? { onCancelled: action.wait.onCancelled } : {}), reason: action.wait.reason ?? 'effect' }
         if (hasDependencyCycle(state, spec.dependencies.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: dependency.target as TargetRef })))) return { rejection: error('DEPENDENCY_CYCLE', 'Wait would create a dependency cycle') }
         addWait(state, workingLane, spec, batchTargets, mutations, `wait-${waitCounter++}`)
       }
@@ -313,7 +313,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       if (action.join) {
         const deps = action.lanes.map((child) => ({ key: child.key, target: siblingTargets.get(child.key)!, condition: action.join!.condition }))
         const joinMode = action.join.mode ?? 'all'
-        const spec: WaitSpec = { dependencies: deps, mode: joinMode, ...(action.join.quorum === undefined ? {} : { quorum: action.join.quorum }), onUnsatisfied: action.join.onUnsatisfied, ...(action.join.onCancelled ? { onCancelled: action.join.onCancelled } : {}), reason: 'join' }
+        const spec: WaitSpec = { dependencies: deps, mode: joinMode, ...(action.join.quorum === undefined ? {} : { quorum: action.join.quorum }), ...(action.join.deadlineAt === undefined ? {} : { deadlineAt: action.join.deadlineAt }), onUnsatisfied: action.join.onUnsatisfied, ...(action.join.onCancelled ? { onCancelled: action.join.onCancelled } : {}), reason: 'join' }
         const forkEdges = action.lanes.flatMap((child) => (child.dependsOn ?? []).map((dependency) => ({ from: siblingTargets.get(child.key)!, to: resolveTarget(dependency.target, siblingTargets) ?? resolveTarget(dependency.target, localTargets)! })))
         forkEdges.push(...deps.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: dependency.target as TargetRef })))
         if (forkEdges.some((edge) => !edge.to) || hasDependencyCycle(state, forkEdges)) return { rejection: error('DEPENDENCY_CYCLE', 'Fork dependencies would create a cycle') }

@@ -253,14 +253,14 @@ export interface RuntimeActionBase { type: string }
 export interface SubmitEffectsAction extends RuntimeActionBase {
   type: 'submit_effects'
   effects: EffectSubmission[]
-  wait?: { onUnsatisfied: 'fail_lane' | 'resume_with_error'; onCancelled?: 'unsatisfied' | 'ignore'; reason?: WaitSpec['reason'] }
+  wait?: { onUnsatisfied: 'fail_lane' | 'resume_with_error'; onCancelled?: 'unsatisfied' | 'ignore'; reason?: WaitSpec['reason']; deadlineAt?: number }
 }
 export interface WaitAction extends RuntimeActionBase { type: 'wait'; spec: WaitSpec }
 export interface ForkAction extends RuntimeActionBase {
   type: 'fork'
   lanes: ForkLaneSpec[]
   affinityAck?: boolean
-  join?: { condition: 'success' | 'settled'; mode?: WaitSpec['mode']; quorum?: number; onUnsatisfied: 'fail_lane' | 'resume_with_error'; onCancelled?: 'unsatisfied' | 'ignore' }
+  join?: { condition: 'success' | 'settled'; mode?: WaitSpec['mode']; quorum?: number; deadlineAt?: number; onUnsatisfied: 'fail_lane' | 'resume_with_error'; onCancelled?: 'unsatisfied' | 'ignore' }
 }
 export interface CancelLaneAction extends RuntimeActionBase { type: 'cancel_lane'; laneId: LaneId; reason: 'SUPERSEDED' | 'USER_REQUESTED' | 'POLICY' }
 export interface ProposeCancelAction extends RuntimeActionBase { type: 'propose_cancel'; laneId: LaneId; reason: 'SUPERSEDED' | 'POLICY' }
