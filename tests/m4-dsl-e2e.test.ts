@@ -90,6 +90,24 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     await expect(session.snapshot()).resolves.toMatchObject({ agentId })
   })
 
+  it('deep-clones snapshots so host inspection cannot mutate runtime state', async () => {
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { answer: 42 } }) })
+    const program = { id: 'snapshot-isolation', version: '1', step: ({ lane }: any) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: { nested: { value: 1 } } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: 'snapshot-isolation', programVersion: '1', step: 'finish', locals: {} } }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'snapshot-isolation', programVersion: '1', step: 'finish', locals: {} } } }
+    const { agentId } = runtime.createAgent('snapshot isolation', program)
+    runtime.tick()
+    const session = runtime.start(agentId)
+    const snapshot = await session.snapshot()
+    const lane = snapshot.lanes[0] as any
+    const effect = snapshot.effects[0] as any
+    lane.context.state.mutated = true
+    effect.input.nested.value = 99
+    expect((runtime.state.lanes.get(lane.id)!.context.state as any).mutated).toBeUndefined()
+    expect((runtime.state.effects.get(effect.id)!.input as any).nested.value).toBe(1)
+    await session.cancel('test')
+  })
+
   it('keeps runtime progress independent from a slow stream consumer', async () => {
     const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { ok: true } }) })
     const program = {
