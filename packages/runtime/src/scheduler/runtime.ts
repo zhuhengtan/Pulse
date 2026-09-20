@@ -39,7 +39,10 @@ export interface EffectObservation { type: 'progress' | 'chunk' | 'trace' | 'war
 export interface EffectArtifactOutput { mediaType: string; content: Uint8Array | string; privacy?: 'public' | 'cloud_allowed' | 'local_only'; privacyTaints?: PrivacyTaint[]; derivedFrom?: ProvenanceRef[] }
 export interface EffectExecution { value: JsonValue; normalized?: JsonValue; artifact?: EffectArtifactOutput; summary?: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; privacyTaints?: PrivacyTaint[]; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionRef?: JsonValue; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled'; error?: RuntimeError; rejectedOutput?: { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; privacyTaints?: PrivacyTaint[]; derivedFrom?: ProvenanceRef[] }; metadata?: JsonValue; observations?: EffectObservation[] }
 export type EffectExecutor = (effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<EffectExecution>
-type HostCommand = { type: 'reply'; agentId: string; effectId: string; value: JsonValue } | { type: 'cancel'; agentId: string; reason: string }
+export type HostCommand =
+  | { type: 'reply'; agentId: string; effectId: string; value: JsonValue }
+  | { type: 'cancel'; agentId: string; reason: string }
+  | { type: 'set_lane_priority'; laneId: string; priority: number }
 
 export interface RuntimeConfig {
   maxLaneStepsPerTick?: number
@@ -281,6 +284,20 @@ export class PulseRuntime {
     return { agentId: agent.id, laneId: root.id }
   }
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
+  requestCancel(agentId: string, reason = 'USER_REQUESTED'): void {
+    if (!agentId) throw new Error('INVALID_AGENT_ID')
+    if (!reason) throw new Error('INVALID_CANCEL_REASON')
+    this.enqueueHostCommand({ type: 'cancel', agentId, reason })
+  }
+  setLanePriority(laneId: string, priority: number): void {
+    if (!laneId) throw new Error('INVALID_LANE_ID')
+    if (!Number.isFinite(priority)) throw new Error('INVALID_LANE_PRIORITY')
+    this.enqueueHostCommand({ type: 'set_lane_priority', laneId, priority })
+  }
+  inspectLane(laneId: string): JsonValue {
+    if (!laneId) throw new Error('INVALID_LANE_ID')
+    return this.explain(laneId)
+  }
   detachAgent(agentId: string): BackgroundAgentInfo {
     const agent = this.state.agents.get(agentId)
     if (!agent) throw new Error(`UNKNOWN_AGENT:${agentId}`)
@@ -484,7 +501,23 @@ export class PulseRuntime {
         const effect = this.state.effects.get(envelope.fact.effectId)
         if (effect?.agentId === envelope.fact.agentId && effect.kind === 'human' && !effect.outcome) this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value })
         else this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: effect?.agentId !== envelope.fact.agentId ? 'EFFECT_NOT_OWNED' : 'EFFECT_NOT_REPLYABLE' } })
-      } else this.cancelAgent(envelope.fact.agentId, 'USER_REQUESTED')
+      } else if (envelope.fact.type === 'cancel') this.cancelAgent(envelope.fact.agentId, envelope.fact.reason)
+      else {
+        const lane = this.state.lanes.get(envelope.fact.laneId)
+        if (!lane) this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: 'LANE_NOT_FOUND' } })
+        else if (['succeeded', 'failed', 'cancelled'].includes(lane.status)) this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: 'LANE_TERMINAL' } })
+        else {
+          const nextLane = structuredClone(lane)
+          nextLane.priority = envelope.fact.priority
+          const event = { type: 'lane.priority_changed' as const, laneId: lane.id, data: { previous: lane.priority, priority: nextLane.priority } }
+          const mutations: Mutation[] = [{ op: 'setLane', laneId: lane.id, record: nextLane }, { op: 'appendEvent', event }]
+          this.assertStorageAdmission(mutations)
+          commitMutationTransaction(this.state, this.mutationLog, `lane:${lane.id}:priority:${nextLane.version}`, mutations, this.state.now, this.sessionId)
+          Object.assign(lane, nextLane)
+          this.state.lanes.set(lane.id, lane)
+          if (lane.status === 'ready') this.ready.enqueue(readyItemFromLane(lane))
+        }
+      }
       this.emit({ type: 'command.applied', data: { eventId: envelope.eventId } })
     }
     if (this.maxRuntimeMs !== undefined && this.state.now >= this.maxRuntimeMs) for (const agent of this.state.agents.values()) if (agent.state === 'running') this.cancelAgent(agent.id, 'TIMEOUT')
@@ -1057,7 +1090,7 @@ export class PulseRuntime {
   unpinArtifact(ref: string): void { unpinArtifact(this.state, ref); this.syncStoragePolicy(); this.schedulePersistence() }
   markArtifactPersisted(ref: string): void { markArtifactPersisted(this.state, ref); this.syncStoragePolicy(); this.schedulePersistence() }
 
-  cancelAgent(agentId: string, reason: 'USER_REQUESTED' | 'SUPERSEDED' | 'POLICY' | 'TIMEOUT' = 'USER_REQUESTED'): void {
+  cancelAgent(agentId: string, reason = 'USER_REQUESTED'): void {
     const agent = this.state.agents.get(agentId)
     if (!agent || ['succeeded', 'failed', 'cancelled'].includes(agent.state ?? '')) return
     const targetAgentIds: string[] = []
