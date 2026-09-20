@@ -43,6 +43,12 @@ describe('effect outbox and runtime persistence envelope', () => {
     expect(() => importRuntimePersistence(snapshot)).toThrow('INVALID_RUNTIME_PERSISTENCE_REFERENCE:agent.rootLaneId:agent-1')
   })
 
+  it('rejects malformed checkpoint event watermarks before restore', () => {
+    const snapshot = exportRuntimePersistence(createRuntimeState(), new MutationLog(), new EffectOutbox())
+    snapshot.checkpoint = { schemaVersion: 1, logWatermark: 0, eventWatermark: -1, state: snapshot.state }
+    expect(() => importRuntimePersistence(snapshot)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
+  })
+
   it('writes a complete snapshot through an atomic temporary file', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-persistence-'))
     try {
