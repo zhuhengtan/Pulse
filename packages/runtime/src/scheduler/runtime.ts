@@ -23,6 +23,7 @@ import { collectRuntimeTelemetry, type RuntimeTelemetryExporter, type RuntimeTel
 import { advanceArtifactId, markArtifactPersisted, pinArtifact, prepareArtifactPublication, readArtifact, unpinArtifact, type ArtifactPublication } from '../storage/artifacts.js'
 import { prepareFindingPublication, type FindingPublication } from '../storage/findings.js'
 import { runtimeErrorFromCause } from '../core/errors.js'
+import { RuntimeToolRegistry } from '../tools/registry.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number; observe?: (event: { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }) => void }
 export interface LaneProgram {
@@ -76,6 +77,7 @@ export interface RuntimeConfig {
   programs?: LaneProgram[]
   models?: ModelRegistry
   modelRouter?: ModelRouter
+  tools?: RuntimeToolRegistry
   toolVersions?: Record<string, string>
   policyVersion?: string
   routerVersion?: string
@@ -214,6 +216,7 @@ export class PulseRuntime {
   readonly programs = new ProgramRegistry()
   readonly models: ModelRegistry
   readonly modelRouter: ModelRouter
+  readonly tools: RuntimeToolRegistry
   private readonly executions = new Map<string, { controller: AbortController; promise: Promise<void>; timeoutTimer?: string; deadlineTimer?: string; cancelTimer?: string }>()
   private readonly lockReleases = new Map<string, Array<() => void>>()
   private readonly waitDeadlineTimers = new Map<string, string>()
@@ -250,6 +253,7 @@ export class PulseRuntime {
     this.observationInbox = new ObservationInbox(config.maxObservationEntries ?? 4096, config.maxObservationBytes ?? 1_000_000)
     this.models = config.models ?? config.modelRouter?.registry ?? new InMemoryModelRegistry()
     this.modelRouter = config.modelRouter ?? new ModelRouter(this.models)
+    this.tools = config.tools ?? new RuntimeToolRegistry()
     this.toolVersions = { ...(config.toolVersions ?? {}) }
     this.policyVersion = config.policyVersion
     this.routerVersion = config.routerVersion
