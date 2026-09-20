@@ -9,10 +9,12 @@ describe('explicit warm start', () => {
     const source = runtime.createAgent('source', program)
     const sourceRecord = runtime.state.agents.get(source.agentId)!
     sourceRecord.globalVersions.set(3, { facts: ['known'], privacy: 'local_only' })
+    sourceRecord.globalPrivacy!.set(3, { privacy: 'local_only', privacyTaints: [{ path: ['facts'], privacy: 'local_only' }] })
     sourceRecord.latestGlobalVersion = 3
     const child = runtime.createAgent({ goal: 'warm child', program, warmStart: { agentId: source.agentId, globalVersion: 3 } })
     const childRecord = runtime.state.agents.get(child.agentId)!
     expect(childRecord.globalVersions.get(0)).toEqual({ facts: ['known'], privacy: 'local_only' })
+    expect(childRecord.globalPrivacy?.get(0)).toEqual({ privacy: 'local_only', privacyTaints: [{ path: ['facts'], privacy: 'local_only' }] })
     ;(childRecord.globalVersions.get(0) as any).facts.push('child-only')
     expect(sourceRecord.globalVersions.get(3)).toEqual({ facts: ['known'], privacy: 'local_only' })
   })
