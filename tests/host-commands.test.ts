@@ -67,5 +67,9 @@ describe('Host command API', () => {
     runtime.tick()
     expect(handle.status()).toBe('cancelled')
     expect(runtime.state.events.some((event) => event.type === 'command.applied')).toBe(true)
+    const settlement = runtime.mutationLog.entries.find((entry) => entry.mutations.some((mutation) => mutation.op === 'appendEvent' && mutation.event.type === 'effect.settled' && mutation.event.effectId === 'effect-1'))
+    expect(settlement?.mutations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ op: 'appendEvent', event: expect.objectContaining({ type: 'command.applied', data: { eventId: 'host-command-1' } }) }),
+    ]))
   })
 })

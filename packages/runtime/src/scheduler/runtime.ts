@@ -554,7 +554,7 @@ export class PulseRuntime {
         const effect = this.state.effects.get(envelope.fact.effectId)
         if (!effect || effect.agentId !== envelope.fact.agentId) { this.rejectHostCommand(envelope.eventId, 'EFFECT_NOT_OWNED'); commandApplied = true }
         else if (effect.outcome) { this.rejectHostCommand(envelope.eventId, 'EFFECT_ALREADY_SETTLED'); commandApplied = true }
-        else this.cancelEffect(envelope.fact.effectId, 0, envelope.fact.reason)
+        else commandApplied = this.cancelEffect(envelope.fact.effectId, 0, envelope.fact.reason, [{ op: 'appendEvent', event: { type: 'command.applied', data: { eventId: envelope.eventId } } }])
       } else {
         const lane = this.state.lanes.get(envelope.fact.laneId)
         if (!lane) { this.rejectHostCommand(envelope.eventId, 'LANE_NOT_FOUND'); commandApplied = true }
@@ -1124,8 +1124,8 @@ export class PulseRuntime {
     this.schedulePersistence()
   }
 
-  cancelEffect(effectId: string, graceMs = 0, reason = 'USER_REQUESTED'): void {
-    this.requestEffectCancellation(effectId, reason, graceMs)
+  cancelEffect(effectId: string, graceMs = 0, reason = 'USER_REQUESTED', additionalMutations: Mutation[] = []): boolean {
+    return this.requestEffectCancellation(effectId, reason, graceMs, additionalMutations)
   }
 
   publishArtifact(publication: ArtifactPublication): import('../core/types.js').ArtifactRecord {
@@ -1378,30 +1378,32 @@ export class PulseRuntime {
     this.schedulePersistence()
   }
 
-  private requestEffectCancellation(effectId: string, reason: string, graceMs: number): void {
+  private requestEffectCancellation(effectId: string, reason: string, graceMs: number, additionalMutations: Mutation[] = []): boolean {
     const effect = this.state.effects.get(effectId)
-    if (!effect || effect.outcome) return
+    if (!effect || effect.outcome) return false
     const cancelEvent: import('../core/types.js').RuntimeEventInput = { type: 'effect.cancel_requested', effectId, data: { reason } }
     if (this.executions.has(effectId) && graceMs === 0) {
-      this.quarantineEffect(effectId, reason, 0, cancelEvent)
-      return
+      return this.quarantineEffect(effectId, reason, 0, cancelEvent, additionalMutations)
     }
     const admitted = structuredClone(effect)
     admitted.cancelRequested = { reason, at: this.state.now }
-    this.assertStorageAdmission([{ op: 'setEffect', effectId, record: admitted }, { op: 'appendEvent', event: cancelEvent }])
-    commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${effect.attemptId}:cancel-requested`, [{ op: 'setEffect', effectId, record: admitted }, { op: 'appendEvent', event: cancelEvent }], this.state.now, this.sessionId)
+    const cancellationMutations: Mutation[] = [{ op: 'setEffect', effectId, record: admitted }, { op: 'appendEvent', event: cancelEvent }]
+    if (this.executions.has(effectId) && graceMs > 0) cancellationMutations.push(...additionalMutations.map((mutation) => structuredClone(mutation)))
+    this.assertStorageAdmission(cancellationMutations)
+    commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${effect.attemptId}:cancel-requested`, cancellationMutations, this.state.now, this.sessionId)
     Object.assign(effect, admitted)
     this.state.effects.set(effectId, effect)
-    if (!this.executions.has(effectId)) { this.completeEffect(effectId, { value: null }, 'cancelled', { code: 'CANCELLED', message: reason }); return }
+    if (!this.executions.has(effectId)) return this.completeEffect(effectId, { value: null }, 'cancelled', { code: 'CANCELLED', message: reason }, additionalMutations)
     this.executions.get(effectId)!.controller.abort()
     if (graceMs === 0) this.quarantineEffect(effectId, reason, 0)
     else this.executions.get(effectId)!.cancelTimer = this.clock.schedule(graceMs, () => this.quarantineEffect(effectId, reason, 0))
+    return this.executions.has(effectId) && graceMs > 0
   }
 
-  private quarantineEffect(effectId: string, reason: string, _graceMs: number, precedingEvent?: import('../core/types.js').RuntimeEventInput): void {
+  private quarantineEffect(effectId: string, reason: string, _graceMs: number, precedingEvent?: import('../core/types.js').RuntimeEventInput, additionalMutations: Mutation[] = []): boolean {
     const effect = this.state.effects.get(effectId)
     const execution = this.executions.get(effectId)
-    if (!effect || effect.outcome) return
+    if (!effect || effect.outcome) return false
     const candidate = structuredClone(effect)
     if (precedingEvent?.type === 'effect.cancel_requested' || precedingEvent?.type === 'limit.rejected') candidate.cancelRequested = { reason, at: this.state.now }
     candidate.executionState = 'remote_unknown'
@@ -1415,6 +1417,7 @@ export class PulseRuntime {
     const admission: Mutation[] = [{ op: 'setEffect', effectId, record: candidate }]
     if (candidateLane) admission.push({ op: 'setLane', laneId: candidateLane.id, record: candidateLane })
     if (precedingEvent) admission.push({ op: 'appendEvent', event: precedingEvent })
+    admission.push(...additionalMutations.map((mutation) => structuredClone(mutation)))
     admission.push({ op: 'appendEvent', event: quarantineEvent })
     this.assertStorageAdmission(admission)
     if (execution) { execution.controller.abort(); this.executions.delete(effectId) }
@@ -1426,6 +1429,7 @@ export class PulseRuntime {
     this.quarantine.add(effectId, this.state.now, reason)
     this.refreshWaits()
     this.schedulePersistence()
+    return true
   }
 
   private propagateCancelledLanes(): void {
