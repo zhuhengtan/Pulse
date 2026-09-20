@@ -5,7 +5,8 @@ import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, Pr
 import { createDraftProxy } from './context-proxy.js'
 
 export type NextStepTarget<TState = unknown> = string | { step: string } | { complete: { value?: JsonValue; privacy?: PrivacyLabel; children?: 'reject_if_active' | 'cancel' | 'await' } } | { fail: { code: string; message: string; retryable?: boolean; details?: JsonValue; privacy?: PrivacyLabel; derivedFrom?: ProvenanceRef[] } }
-export interface InstructionView<TState> { goal: string; state: TState }
+export type ScalarProjection<T> = T extends string | number | boolean | null ? T : T extends readonly unknown[] ? never : T extends object ? { [K in keyof T]: T[K] extends string | number | boolean | null ? T[K] : never } : never
+export interface InstructionView<TState> { goal: string; state: ScalarProjection<TState> }
 export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; artifacts?: string[]; events?: string[] }
 export interface HistoryCompactionOptions { summarizeTask: string; keepRecentRounds: number }
 export interface HistoryRecordMeta { seq: number; effectId?: string; resultRefs: ResultRef[]; resultSelection?: Array<{ ref: ResultRef; rule: string; hash: string }>; result?: ResultRef; findings?: ResultRef[]; privacy: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[] }
@@ -52,6 +53,15 @@ function target(step: NextStepTarget, fallback: string): { step: string; action?
 }
 function clone<T>(value: T): T { return structuredClone(value) }
 function asJson(value: unknown): JsonValue { return value as JsonValue }
+function scalarProjection(value: unknown): JsonValue {
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([, child]) => child === null || typeof child === 'string' || typeof child === 'number' || typeof child === 'boolean').map(([key, child]) => [key, child as JsonValue]))
+}
+function boundedInstruction(value: string): string {
+  if (Buffer.byteLength(value, 'utf8') > 2048) throw Object.assign(new Error('Instruction exceeds the 2 KB DSL limit.'), { code: 'INSTRUCTION_TOO_LARGE', retryable: false })
+  return value
+}
 function programLLMInput(config: { system?: string; toolSet?: string }, input: Record<string, JsonValue>): Record<string, JsonValue> {
   return { ...input, ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSetId: config.toolSet }) }
 }
@@ -247,7 +257,7 @@ export class StepBuilder<TState = JsonValue> {
   }): this {
     const submit = `${name}:submit`; const decode = `${name}:decode`
     this.handlers.set(name, (ctx) => {
-      const instruction = typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: ctx.laneState })
+      const instruction = boundedInstruction(typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: scalarProjection(ctx.laneState) as ScalarProjection<TState> }))
       const inputs = options.inputs?.(ctx) ?? {}
       const inputResultRefs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? []), ...(inputs.artifacts ?? [])])]
       const outputSchema = zodJsonSchema(options.schema)
@@ -264,7 +274,8 @@ export class StepBuilder<TState = JsonValue> {
         if (options.selfCorrect?.maxRounds === 0) return { next: options.onError ? options.onError(new Error('OUTPUT_SCHEMA_VIOLATION'), ctx) : decode }
         const inputResultRefs = rejectedRef ? [rejectedRef] : []
         const outputSchema = zodJsonSchema(options.schema)
-        return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-correct`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction: `${typeof options.instruction === 'string' ? options.instruction : 'structured'}\nValidation errors: ${parsed.error.message}`, inputs: { rejectedOutputRefs: inputResultRefs }, outputSchema, requirements: { structuredOutput: true } }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
+        const correctionInstruction = boundedInstruction(`${typeof options.instruction === 'string' ? options.instruction : 'structured'}\nValidation errors: ${parsed.error.message}`)
+        return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-correct`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction: correctionInstruction, inputs: { rejectedOutputRefs: inputResultRefs }, outputSchema, requirements: { structuredOutput: true } }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
       }
       const next = options.onSuccess(parsed.data, ctx)
       return { next }
@@ -276,7 +287,7 @@ export class StepBuilder<TState = JsonValue> {
     const writeTurns = (ctx: StepContext<TState>, turns: number): JsonValue => { const locals = ctx.lane.resume.locals; const base = locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}; return { ...base, $sdk: { ...sdkLocals(locals), [`${name}Turns`]: turns } } }
     const resultRefFromWait = (ctx: StepContext<TState>): ResultRef | undefined => { const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined; return dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined }
     const resultRefsFromWait = (ctx: StepContext<TState>): ResultRef[] => ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef ? [dependency.outcome.resultRef] : []) : []
-    const instruction = (ctx: StepContext<TState>): string => typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: ctx.laneState })
+    const instruction = (ctx: StepContext<TState>): string => boundedInstruction(typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: scalarProjection(ctx.laneState) as ScalarProjection<TState> }))
     const submitModel = (ctx: StepContext<TState>, turn: number, resultRefs: ResultRef[] = [], artifactRefs: string[] = []): LaneStepOutput => { const dataRefs = [...new Set([...resultRefs, ...artifactRefs])]; const requirements = { ...(options.requirements ?? {}), ...(options.toolAllow === undefined ? {} : { toolCalling: true }) }; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { ...(resultRefs.length ? { results: resultRefs } : {}), ...(artifactRefs.length ? { artifacts: artifactRefs } : {}) }, turn, ...(options.outputSchema === undefined ? {} : { outputSchema: zodJsonSchema(options.outputSchema) }), ...(Object.keys(requirements).length ? { requirements } : {}) }), ...(dataRefs.length ? { derivedFrom: dataRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn) }, locals: writeTurns(ctx, turn) } }
     this.handlers.set(name, (ctx) => { const turn = readTurns(ctx) + 1; const inputs = options.inputs?.(ctx) ?? {}; const refs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? [])])]; const output = submitModel(ctx, turn, refs, [...new Set(inputs.artifacts ?? [])]); return { ...output, next: `${name}:decode` } })
     this.handlers.set(`${name}:tools`, (ctx) => { const turn = readTurns(ctx); const refs = resultRefsFromWait(ctx); return { ...submitModel(ctx, turn + 1, refs), next: `${name}:decode` } })
@@ -383,9 +394,9 @@ export class StepBuilder<TState = JsonValue> {
     })
     return this
   }
-  addHumanStep<TOutput extends ZodTypeAny>(name: string, options: { prompt: string | ((view: InstructionView<TState>) => string); schema: TOutput; onReply: (reply: z.infer<TOutput>, ctx: StepContext<TState>) => NextStepTarget; onTimeout?: (ctx: StepContext<TState>) => NextStepTarget; timeoutMs?: number }): this {
+  addHumanStep<TOutput extends ZodTypeAny>(name: string, options: { prompt: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; schema: TOutput; onReply: (reply: z.infer<TOutput>, ctx: StepContext<TState>) => NextStepTarget; onTimeout?: (ctx: StepContext<TState>) => NextStepTarget; timeoutMs?: number }): this {
     const decode = `${name}:decode`
-    this.handlers.set(name, (ctx) => ({ actions: [{ type: 'submit_effects', effects: [{ key: `${name}-human`, kind: 'human', concurrencyClass: 'none', input: asJson({ prompt: typeof options.prompt === 'string' ? options.prompt : options.prompt({ goal: ctx.goal, state: ctx.laneState }) }), ...(options.timeoutMs === undefined ? {} : { attemptTimeoutMs: options.timeoutMs }) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }))
+    this.handlers.set(name, (ctx) => { const prompt = boundedInstruction(typeof options.prompt === 'string' ? options.prompt : options.prompt({ goal: ctx.goal, state: scalarProjection(ctx.laneState) as ScalarProjection<TState> })); const inputs = options.inputs?.(ctx) ?? {}; const inputResultRefs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? []), ...(inputs.artifacts ?? [])])]; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-human`, kind: 'human', concurrencyClass: 'none', input: asJson({ prompt, inputs }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}), ...(options.timeoutMs === undefined ? {} : { attemptTimeoutMs: options.timeoutMs }) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode } })
     this.handlers.set(decode, (ctx) => { const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined; const ref = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined; const value = ref ? readResult(ctx, ref) : undefined; const parsed = options.schema.safeParse(value); if (parsed.success) return { next: options.onReply(parsed.data, ctx) }; return { next: options.onTimeout ? options.onTimeout(ctx) : decode } })
     return this
   }

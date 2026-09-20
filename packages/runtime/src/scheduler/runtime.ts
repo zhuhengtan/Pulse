@@ -633,7 +633,7 @@ export class PulseRuntime {
       const stepContext: LaneStepContext = { lane: stepLane, state: structuredClone(this.state), ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), now: this.state.now, observe: (event) => { this.observationInbox.enqueue({ ...event, agentId: lane.agentId, laneId: lane.id, timestamp: this.state.now }) } }
       try { output = lane.series || program.seriesMember ? this.seriesStep(program, stepContext, lane.series) : program.step(stepContext) }
       catch (cause) {
-        const failure: RuntimeError = { code: 'STEP_FAILED', message: cause instanceof Error ? cause.message : String(cause) }
+        const failure: RuntimeError = runtimeErrorFromCause(cause, 'STEP_FAILED')
         if (!program.errorBoundary) { this.failLane(lane, failure); continue }
         try { output = program.errorBoundary(failure, stepContext) }
         catch (boundaryCause) { this.failLane(lane, { code: 'ERROR_BOUNDARY_FAILED', message: boundaryCause instanceof Error ? boundaryCause.message : String(boundaryCause) }); continue }
