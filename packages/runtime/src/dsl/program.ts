@@ -162,7 +162,7 @@ export class StepBuilder<TState = JsonValue> {
     })
     return this
   }
-  addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[]; maxTurns?: number; onFinish: (result: JsonValue, ctx: StepContext<TState>) => NextStepTarget<TState>; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; onError?: (error: Error, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
+  addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[]; maxTurns?: number; onFinish: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; onError?: (error: Error, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
     const readTurns = (ctx: StepContext<TState>): number => { const sdk = sdkLocals(ctx.lane.resume.locals); const turn = sdk[`${name}Turns`]; return typeof turn === 'number' && Number.isInteger(turn) && turn >= 0 ? turn : 0 }
     const writeTurns = (ctx: StepContext<TState>, turns: number): JsonValue => { const locals = ctx.lane.resume.locals; const base = locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}; return { ...base, $sdk: { ...sdkLocals(locals), [`${name}Turns`]: turns } } }
     const resultRefFromWait = (ctx: StepContext<TState>): ResultRef | undefined => { const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined; return dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined }
@@ -192,7 +192,7 @@ export class StepBuilder<TState = JsonValue> {
         return { actions: [{ type: 'submit_effects', effects, wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:tools` }
       }
       if (turns >= (options.maxTurns ?? 10)) return { next: options.onMaxTurns ? options.onMaxTurns(ctx) : `${name}:decode` }
-      return { next: options.onFinish(value, ctx) }
+      return ref ? { next: options.onFinish(ref, ctx) } : { next: options.onError ? options.onError(new Error('MISSING_RESULT_REF'), ctx) : `${name}:decode` }
     })
     return this
   }

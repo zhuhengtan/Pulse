@@ -35,8 +35,9 @@ describe('M1-4 DSL and end-to-end workflow', () => {
 
   it('keeps ReAct bookkeeping per Lane when one Program is reused by multiple Agents', async () => {
     const calls: string[] = []
+    const resultRefs: string[] = []
     const program = defineLaneProgram({ id: 'react-isolated', version: '1' }, (builder) => {
-      builder.addReActLoopStep('reason', { instruction: 'reason', onFinish: () => 'finish' })
+      builder.addReActLoopStep('reason', { instruction: 'reason', onFinish: (resultRef) => { resultRefs.push(resultRef); return 'finish' } })
       builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' }))
     })
     const runtime = new PulseRuntime({ effectExecutor: async (effect) => { calls.push(effect.key); return { value: { ok: true } } } })
@@ -45,6 +46,8 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     expect((await runtime.start(first.agentId).outcome()).status).toBe('succeeded')
     expect((await runtime.start(second.agentId).outcome()).status).toBe('succeeded')
     expect(calls.filter((key) => key === 'reason-turn-1')).toHaveLength(2)
+    expect(resultRefs).toHaveLength(2)
+    expect(resultRefs.every((ref) => runtime.state.results.has(ref))).toBe(true)
   })
 
   it('streams a read-only event mirror and exposes a final outcome', async () => {
