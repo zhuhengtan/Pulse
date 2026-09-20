@@ -46,8 +46,12 @@
 | ToolCallCorrelation | `toolCallId → LLM Effect → Tool Effect → ResultRef` 持久化及 ReAct 关联 | `tests/dsl-host-macros.test.ts` | `0d0ea33` |
 | 模型并发槽 | Runtime LLM 槽之外增加可取消 provider/model 槽 | `tests/provider-host.test.ts` | `015c959` |
 | warm start / DSL | facts/findings 筛选、ResultRef 授权、递归 Draft Proxy、ReAct 完成回调只传 ResultRef | `tests/warm-start.test.ts`、`tests/dsl-context.test.ts`、`tests/m4-dsl-e2e.test.ts` | `79a993f`、`324f1bc`、`e6c228b` |
+| Runtime Storage 编排 | Runtime 自动登记 Event/Result/Snapshot/LLM Request，活动 Lane/Wait/未结算 Request/可见 ResultRef 幂等 pin；Step 提交前 clone 预检 hard limit | `tests/storage-policy.test.ts` | `43a9847` |
+| LLM Preparation | bounded preparing/prepared 窗口、generation、迟到准备丢弃、explain 展示 | `tests/provider-host.test.ts` | `944c3ad` |
+| Provider 请求与 usage | modelId、工具 schema、structured output schema、uncached token、latency/cost 归一化与 metadata | `tests/m3-context-adapters.test.ts`、`tests/provider-host.test.ts` | `fa723c7` |
+| DSL Draft 数组语义与运行诊断 | `push→append`、数组索引/splice/sort→整数组 set；explain 补充队列、等待、watchdog、preparation、execution metadata | `tests/dsl-context.test.ts`、`tests/runtime-control.test.ts` | `d5c6ef2`、`f57ae27` |
 
-统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 39 个测试文件、135/135 通过，`pnpm build` 也已通过。
+统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 39 个测试文件、139/139 通过，`pnpm build` 也已通过。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：真实 Provider Live Smoke、生产级 Storage pin/retention 与持久化后端对接、故障注入后的完整崩溃恢复/副作用对账，以及真实网络下的 Provider 工具 schema/取消验证。未勾选的 Gate 条目继续表示这些证据缺口。
 
@@ -367,17 +371,17 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `9199fbd`：成功 LLMEffect history 归档；`9eda5b1` / `2009eaa`：JSON Schema、`rejected_output` 与 DSL 自愈链路。
 - `0d0ea33`：ToolCallCorrelation 持久化；`015c959`：Provider/Model 可取消并发槽。
 - `79a993f` / `324f1bc` / `e6c228b`：warm start 筛选、递归 Draft Proxy、ReAct 完成回调 ResultRef 契约。
-- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，39 个测试文件、135 个测试通过；`pnpm build` 通过。Live Smoke 仍为真实 Provider 集成验证，未将其冒烟结果冒充内核证明。
+- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，39 个测试文件、139 个测试通过；`pnpm build` 通过。Live Smoke 仍为真实 Provider 集成验证，未将其冒烟结果冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
 | 验收项 | 当前状态 | 缺口 |
 | --- | --- | --- |
 | 真实 Provider Live Smoke | 未执行 | 需要有效凭证、真实网络、真实 token/取消/工具调用证据；当前只有 Fixture 和可运行 HTTP Adapter |
-| Runtime Storage pin/retention | 部分完成 | `SessionStoragePolicy` 有单测，但活动 Lane、Wait、LLM Request、未消费输入和 ResultRef 尚未由 Runtime 自动建立/释放 pin 来源 |
+| Runtime Storage pin/retention | 代码侧已接通，生产侧仍有边界 | Runtime 已自动建立幂等 pin 并在 Step commit 前做 hard-limit 预检；仍缺真实持久化后端确认写入后的 `persisted` 状态、旧 Snapshot/Result 的可恢复索引和所有外部入口统一事务化 |
 | 崩溃恢复与副作用对账 | 部分完成 | 有快照、Mutation Log、Outbox 和恢复路径，但仍缺进程级故障注入、持久化事务边界和真实写副作用 reconcile 证明 |
-| Provider 请求完整能力 | 部分完成 | OpenAI-compatible/Anthropic Adapter 已能请求与归一化，但真实 provider 的 tool schema、structured schema、usage/cost/cache 口径仍需逐厂商验证 |
-| 生产运行观测 | 部分完成 | 本地 `inspect`/事件流可用；provider 槽排队、准备阶段、完整路由排除原因和成本指标仍不完整 |
+| Provider 请求完整能力 | 代码侧已补齐映射，仍需真实厂商验证 | OpenAI-compatible/Anthropic 请求已带 model、tool schema、structured schema，并归一化 usage；真实 endpoint 的字段兼容、计费口径、取消和 tool-call 往返仍需 live smoke |
+| 生产运行观测 | 基础诊断已完成，生产指标仍缺 | `inspect/explain` 已展示队列等待、Wait/锁阻塞、watchdog、preparation、执行 metadata；完整 route 排除原因、provider/model slot 等待和持久化 telemetry 仍需补齐 |
 
 ## 6. 实施时间线与任务清单（Checklist）
 
@@ -395,7 +399,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 本方案继承并落地《Pulse Runtime 架构设计》与《Pulse Application DSL 规范》：
 1. 以主架构第 26 节的 M0/M1 标注为唯一验收来源，不重复维护场景数量。
 2. M1 的真实 Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder、Session 和确定性端到端示例已贯通；其他 Provider 与真实网络任务属于独立集成验证。
-3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity、warm start、history 归档、结构化拒绝输出和 ToolCallCorrelation 已实现并有确定性测试；Runtime 自动 Storage pin/retention 与故障注入恢复仍未勾选。
+3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation 和 Provider 请求映射已实现并有确定性测试；真实 Provider smoke、可靠持久化恢复和生产级 telemetry 仍未勾选。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
 已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
