@@ -631,6 +631,11 @@ export class PulseRuntime {
           this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'refused', ...(result.usage === undefined ? {} : { usage: result.usage }) })
           continue
         }
+        if (result.finishReason === 'error') {
+          lastError = Object.assign(new Error('Model adapter returned an error result.'), { code: 'MODEL_ERROR' })
+          this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'failed', ...(result.usage === undefined ? {} : { usage: result.usage }) })
+          continue
+        }
         const output = input.outputSchema === undefined ? result : result.structured ?? result.text
         if (input.outputSchema !== undefined && !validateJsonSchema(output, input.outputSchema)) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Provider output did not match the declared schema.' }, metadata: { selected: { id: candidate.id, providerId: candidate.providerId }, routes: asJsonValue(routes), attempts } }
         this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'succeeded', ...(result.usage === undefined ? {} : { usage: result.usage }) })
