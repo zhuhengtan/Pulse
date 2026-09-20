@@ -134,6 +134,7 @@
 | Storage residency 稳定性 | 同一内容重复进入 StoragePolicy 时保留已确认的 `persisted`/`compacted` 状态，避免同步过程重新物化驻内存正文 | `tests/storage-policy.test.ts` | 本轮 residency 提交 |
 | Fact Inbox 持久化与 pin | 未消费 Host Fact 随 Runtime persistence 快照恢复，去重历史与 `host-command-N` 序号保持连续；队列期间 pin，消费后清理索引 | `tests/fact-inbox.test.ts`、`tests/storage-outbox.test.ts`、`tests/storage-policy.test.ts` | 本轮 Fact Inbox 提交 |
 | Host Fact Agent 隔离 | Reply Fact 携带 Agent 身份；Session API 与 Runtime apply 双重校验，跨 Agent Human Effect 响应被拒绝并记录 `command.rejected` | `tests/effect-hosts.test.ts` | 本轮 Host 隔离提交 |
+| Host Fact 失败保留 | Runtime 逐条消费 Fact；命令事务发生 storage admission 异常时恢复当前 Fact，避免 drain 后丢失事实并允许重试 | `tests/runtime-control.test.ts`、`tests/fact-inbox.test.ts`、`tests/storage-outbox.test.ts` | `e29d501` |
 | Host Reply 类型边界 | Reply 只允许未结算的 HumanEffect；Tool/Timer/其他 Effect 仍由各自 Executor 结算 | `tests/effect-hosts.test.ts` | 本轮 Reply 类型提交 |
 | Host Fact 存储准入原子性 | 排队 Host Fact 先在候选 Inbox/StoragePolicy 上预检；快照 hard limit 失败时不进入真实队列、不消耗命令序号、不留下半个 pin 记录 | `tests/storage-policy.test.ts` | 本轮 Host Fact 准入提交 |
 | Host 命令 API | `requestCancel()`、`setLanePriority()`、`inspectLane()` 已接入 FactInbox；优先级修改与审计事件通过同一 MutationLog 事务提交，递增 Lane version，排队期间不重入当前 Step | `tests/host-commands.test.ts` | `5cf3af9`、`d96dd00` |
@@ -149,7 +150,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 49 个测试文件、283/283 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 49 个测试文件、284/284 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -552,6 +553,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `ed61be0`：成功 Step 在同一事务中消费 `pendingResumeInput`、清除控制错误计数并提交 Watchdog 状态与事件，避免崩溃恢复时重复消费控制输入。
 - `11aa4d4`：Agent 终态 `setAgent` storage admission 失败时 fail-closed 抛出 `SESSION_STORAGE_LIMIT_EXCEEDED`，不再让 Lane 结果掩盖 Agent 状态未提交。
 - `02c0162`：Session `reply()`/`cancel()` 统一为真实 Promise API，非法 reason、跨 Agent Effect 和入队准入异常均以 reject 交付 Host。
+- `e29d501`：FactInbox 改为逐条处理，命令事务失败时恢复当前 Fact；重复重试不会再次写入同一 `command.enqueued` 镜像事件。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
@@ -561,7 +563,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npx tsc -b --pretty false && npm test`，49 个测试文件、283 个测试通过；`npm run build` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npx tsc -b --pretty false && npm test`，49 个测试文件、284 个测试通过；`npm run build` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
