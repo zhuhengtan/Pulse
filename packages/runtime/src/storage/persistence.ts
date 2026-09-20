@@ -18,6 +18,8 @@ export interface RuntimePersistenceSnapshot {
   quarantine?: QuarantineEntry[]
   storage?: StoragePolicySnapshot
   factInbox?: FactInboxSnapshot
+  snapshotBodies?: 'inline' | 'external'
+  externalSnapshotRefs?: string[]
   checkpoint?: { schemaVersion: 1; logWatermark: number; eventWatermark?: number; state: SessionSnapshot }
   resultBodies?: 'inline' | 'external'
   externalResultRefs?: string[]
@@ -26,6 +28,11 @@ export interface RuntimePersistenceSnapshot {
 }
 
 export interface RuntimeResultStore {
+  save(ref: string, value: JsonValue): Promise<void>
+  load(ref: string): Promise<JsonValue | undefined>
+}
+
+export interface RuntimeSnapshotStore {
   save(ref: string, value: JsonValue): Promise<void>
   load(ref: string): Promise<JsonValue | undefined>
 }
@@ -39,6 +46,7 @@ export interface RuntimePersistenceBackend {
   load(): Promise<RuntimePersistenceSnapshot | undefined>
   save(snapshot: RuntimePersistenceSnapshot, expectedDigest?: string): Promise<void>
   resultStore?: RuntimeResultStore
+  snapshotStore?: RuntimeSnapshotStore
   eventArchive?: RuntimeEventArchive
 }
 
@@ -86,6 +94,7 @@ function hasDerivedReference(ref: ProvenanceRef, ownerLaneId: string, agents: Ma
 
 export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceSnapshot | JsonValue): void {
   const value = snapshot as RuntimePersistenceSnapshot
+  if (value?.snapshotBodies === 'external' && (!Array.isArray(value.externalSnapshotRefs) || value.externalSnapshotRefs.some((ref) => typeof ref !== 'string' || ref.length === 0))) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
   if (value?.checkpoint?.eventWatermark !== undefined && (!Number.isInteger(value.checkpoint.eventWatermark) || value.checkpoint.eventWatermark < 0)) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
   if (value?.factInbox !== undefined) try { FactInbox.fromSnapshot(value.factInbox) } catch { throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT') }
   const state = value?.checkpoint?.state?.state ?? value?.state?.state
@@ -219,6 +228,64 @@ export async function externalizeRuntimeResultBodies(snapshot: RuntimePersistenc
   }
   copy.resultBodies = 'external'
   copy.externalResultRefs = [...refs].sort()
+  copy.snapshotBodies = 'inline'
+  delete copy.externalSnapshotRefs
+  delete copy.integrity
+  return withRuntimePersistenceIntegrity(copy)
+}
+
+function snapshotSessions(snapshot: RuntimePersistenceSnapshot): SessionSnapshot[] { return [snapshot.state, ...(snapshot.checkpoint === undefined ? [] : [snapshot.checkpoint.state])] }
+
+export async function externalizeRuntimeSnapshotBodies(snapshot: RuntimePersistenceSnapshot, store: RuntimeSnapshotStore): Promise<RuntimePersistenceSnapshot> {
+  const copy = structuredClone(snapshot)
+  const refs = new Set<string>(copy.externalSnapshotRefs ?? [])
+  for (const session of snapshotSessions(copy)) {
+    for (const [agentId, agent] of session.state.agents) {
+      for (const entry of agent.globalVersions) {
+        const version = entry[0]
+        const ref = `global:${agentId}:${version}`
+        await store.save(ref, entry[1])
+        entry[1] = null
+        refs.add(ref)
+      }
+    }
+    for (const [laneId, lane] of session.state.lanes) {
+      const ref = `lane:${laneId}:${lane.context.version}`
+      await store.save(ref, lane.context.state)
+      lane.context.state = null
+      refs.add(ref)
+    }
+  }
+  copy.snapshotBodies = 'external'
+  copy.externalSnapshotRefs = [...refs].sort()
+  delete copy.integrity
+  return withRuntimePersistenceIntegrity(copy)
+}
+
+export async function hydrateRuntimeSnapshotBodies(snapshot: RuntimePersistenceSnapshot, store: RuntimeSnapshotStore): Promise<RuntimePersistenceSnapshot> {
+  if (snapshot.snapshotBodies !== 'external') return snapshot
+  const copy = structuredClone(snapshot)
+  const refs = new Set(copy.externalSnapshotRefs ?? [])
+  for (const session of snapshotSessions(copy)) {
+    for (const [agentId, agent] of session.state.agents) {
+      for (const entry of agent.globalVersions) {
+        const ref = `global:${agentId}:${entry[0]}`
+        if (!refs.has(ref)) continue
+        const value = await store.load(ref)
+        if (value === undefined) throw new Error(`RUNTIME_SNAPSHOT_NOT_FOUND:${ref}`)
+        entry[1] = value
+      }
+    }
+    for (const [laneId, lane] of session.state.lanes) {
+      const ref = `lane:${laneId}:${lane.context.version}`
+      if (!refs.has(ref)) continue
+      const value = await store.load(ref)
+      if (value === undefined) throw new Error(`RUNTIME_SNAPSHOT_NOT_FOUND:${ref}`)
+      lane.context.state = value
+    }
+  }
+  copy.snapshotBodies = 'inline'
+  delete copy.externalSnapshotRefs
   delete copy.integrity
   return withRuntimePersistenceIntegrity(copy)
 }

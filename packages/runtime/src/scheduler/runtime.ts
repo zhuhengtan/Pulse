@@ -10,7 +10,7 @@ import { assertProgramPure } from '../dsl/program.js'
 import { FactInbox, ObservationInbox } from '../core/inbox.js'
 import { observeProgress, type ProgressObservation } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
-import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, hydrateRuntimeResultBodies, importRuntimePersistence, withRuntimePersistenceIntegrity, type RuntimePersistenceBackend, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
+import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, externalizeRuntimeSnapshotBodies, hydrateRuntimeResultBodies, hydrateRuntimeSnapshotBodies, importRuntimePersistence, withRuntimePersistenceIntegrity, type RuntimePersistenceBackend, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
 import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import { apply, type Mutation } from '../core/mutations.js'
@@ -166,7 +166,9 @@ export class PulseRuntime {
 
   static async restore(backend: RuntimePersistenceBackend, config: Omit<RuntimeConfig, 'persistence'> = {}): Promise<PulseRuntime> {
     const loaded = await backend.load()
-    const snapshot = loaded === undefined || backend.resultStore === undefined ? loaded : await hydrateRuntimeResultBodies(loaded, backend.resultStore)
+    if (loaded?.snapshotBodies === 'external' && backend.snapshotStore === undefined) throw new Error('RUNTIME_SNAPSHOT_STORE_REQUIRED')
+    const withSnapshots = loaded === undefined || backend.snapshotStore === undefined ? loaded : await hydrateRuntimeSnapshotBodies(loaded, backend.snapshotStore)
+    const snapshot = withSnapshots === undefined || backend.resultStore === undefined ? withSnapshots : await hydrateRuntimeResultBodies(withSnapshots, backend.resultStore)
     if (snapshot?.resultBodies === 'external' && backend.resultStore === undefined) throw new Error('RUNTIME_RESULT_STORE_REQUIRED')
     return new PulseRuntime(snapshot === undefined ? config : { ...config, persistence: snapshot })
   }
@@ -298,7 +300,8 @@ export class PulseRuntime {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
     const exported = exportRuntimePersistence(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, this.factInbox.snapshot())
-    const snapshot = backend.resultStore === undefined ? exported : await externalizeRuntimeResultBodies(exported, backend.resultStore)
+    const withResults = backend.resultStore === undefined ? exported : await externalizeRuntimeResultBodies(exported, backend.resultStore)
+    const snapshot = backend.snapshotStore === undefined ? withResults : await externalizeRuntimeSnapshotBodies(withResults, backend.snapshotStore)
     await backend.save(snapshot, backend === this.persistenceBackend ? this.persistenceDigest : undefined)
     if (backend === this.persistenceBackend) this.persistenceDigest = snapshot.integrity?.digest
     this.storagePolicy.markPersisted()
@@ -325,7 +328,8 @@ export class PulseRuntime {
     }
     const exported = exportRuntimeCheckpoint(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark }, this.factInbox.snapshot())
     const archived = backend.eventArchive === undefined || eventWatermark === undefined ? exported : withRuntimePersistenceIntegrity({ ...exported, eventArchive: { through: eventWatermark } })
-    const snapshot = backend.resultStore === undefined ? archived : await externalizeRuntimeResultBodies(archived, backend.resultStore)
+    const withResults = backend.resultStore === undefined ? archived : await externalizeRuntimeResultBodies(archived, backend.resultStore)
+    const snapshot = backend.snapshotStore === undefined ? withResults : await externalizeRuntimeSnapshotBodies(withResults, backend.snapshotStore)
     await backend.save(snapshot, backend === this.persistenceBackend ? this.persistenceDigest : undefined)
     if (backend === this.persistenceBackend) this.persistenceDigest = snapshot.integrity?.digest
     this.storagePolicy.markPersisted()

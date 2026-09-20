@@ -88,6 +88,30 @@ describe('effect outbox and runtime persistence envelope', () => {
     expect(restored.state.results.get(resultRef as string)?.value).toEqual({ answer: 42 })
   })
 
+  it('externalizes Context snapshot bodies while preserving stable snapshot indexes', async () => {
+    let saved: any
+    const values = new Map<string, any>()
+    const backend = {
+      load: async () => saved,
+      save: async (snapshot: any) => { saved = structuredClone(snapshot) },
+      snapshotStore: {
+        save: async (ref: string, value: any) => { values.set(ref, structuredClone(value)) },
+        load: async (ref: string) => values.has(ref) ? structuredClone(values.get(ref)) : undefined,
+      },
+    }
+    const runtime = new PulseRuntime()
+    const { agentId, laneId } = runtime.createAgent('external snapshots', { id: 'external-snapshots', version: '1', step: () => ({ actions: [], next: { programId: 'external-snapshots', programVersion: '1', step: 'done', locals: {} } }) })
+    await runtime.persist(backend)
+    expect(saved.snapshotBodies).toBe('external')
+    expect(saved.externalSnapshotRefs).toEqual(expect.arrayContaining([`global:${agentId}:0`, `lane:${laneId}:0`]))
+    expect(saved.state.state.agents.find(([id]: [string, unknown]) => id === agentId)?.[1].globalVersions[0][1]).toBeNull()
+    expect(saved.state.state.lanes.find(([id]: [string, unknown]) => id === laneId)?.[1].context.state).toBeNull()
+    const restored = await PulseRuntime.restore(backend)
+    expect(restored.state.agents.get(agentId)?.globalVersions.get(0)).toEqual({})
+    expect(restored.state.lanes.get(laneId)?.context.state).toEqual({})
+    await expect(PulseRuntime.restore({ load: async () => saved, save: async () => undefined })).rejects.toThrow('RUNTIME_SNAPSHOT_STORE_REQUIRED')
+  })
+
   it('rejects malformed persistence envelopes before recovery', () => {
     expect(() => importRuntimePersistence({ schemaVersion: 1 } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
     expect(() => importRuntimePersistence({ schemaVersion: 1, state: { state: {} }, mutationLog: {}, outbox: {} } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
