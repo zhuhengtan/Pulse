@@ -151,11 +151,12 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     expect(runtime.factInbox.size).toBe(0)
   })
 
-  it('runs the login troubleshooting Main/Fork/Join/Synthesize flow with Mock semantics', async () => {
+  it('runs the login troubleshooting Planner/Fork/Join/Verify flow with Mock semantics', async () => {
     const { runtime, agentId } = createLoginTroubleshootingRuntime()
     const outcome = await runtime.start(agentId).outcome()
     expect(outcome.status).toBe('succeeded')
-    expect([...runtime.state.lanes.values()].filter((lane) => lane.goal === 'analyze' || lane.goal === 'tests')).toHaveLength(2)
+    expect([...runtime.state.lanes.values()].filter((lane) => ['analyze', 'tests', 'fix'].includes(lane.goal))).toHaveLength(3)
+    expect([...runtime.state.results.values()].some((result) => result.value && typeof result.value === 'object' && !Array.isArray(result.value) && 'summary' in result.value)).toBe(true)
     expect(runtime.state.events.some((event) => event.type === 'lane.succeeded')).toBe(true)
   })
 })
