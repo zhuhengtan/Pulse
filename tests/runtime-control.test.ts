@@ -69,6 +69,19 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.events).toHaveLength(0)
   })
 
+  it('rejects immediate effect quarantine before mutating state when event storage admission fails', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 100_000 }, effectExecutor: async () => await new Promise(() => undefined) })
+    const program: LaneProgram = { id: 'quarantine-admission', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, sideEffectPolicy: 'write' }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('quarantine-admission', 'done') }) }
+    runtime.createAgent('quarantine admission', program)
+    runtime.tick()
+    ;(runtime.storagePolicy as any).limits.maxEventLogBytes = 1
+    const eventCount = runtime.state.events.length
+    expect(() => runtime.cancelEffect('effect-1')).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect(runtime.state.effects.get('effect-1')).toMatchObject({ state: 'running', executionState: 'running' })
+    expect(runtime.state.effects.get('effect-1')?.cancelRequested).toBeUndefined()
+    expect(runtime.state.events).toHaveLength(eventCount)
+  })
+
   it('supports explicit quarantine abandonment without claiming side-effect absence', async () => {
     const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
     const program: LaneProgram = { id: 'abandon-quarantine', version: '1', step: ({ lane }) => lane.resume.step === 'start'
