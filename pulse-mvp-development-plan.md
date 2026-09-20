@@ -60,12 +60,13 @@
 | 高级 Wait 与 Tool 准入 | Wait 支持 `any/quorum`、独立 deadline 和恢复重建；Tool Manifest 可在提交前注入可信锁、副作用策略与默认超时 | `tests/advanced-join.test.ts`、`tests/tool-host.test.ts` | `af1ff6f`、`f523c71`、`a95d4f5` |
 | Detached/background scope | Child Agent 可显式转入后台 scope；父取消不传播到 detached child，仍受 Runtime shutdown 约束，并支持查询与 attach | `tests/agent-effect.test.ts` | `e3ef1ce` |
 | Step 同步边界 | 运行时对未类型化的 Promise Step fail-closed，拒绝跨越同步 Step/异步 Effect 边界，不让 Tick 因非法返回结构崩溃 | `tests/runtime-control.test.ts` | `396499f` |
+| Host 调用预算 | Runtime 在派发前执行总 Attempt/LLM/Tool 次数准入，达到上限时原子失败排队 Effect；已结算 Provider cost 按 currency 累计并可从事件恢复 | `tests/runtime-control.test.ts` | `51cf23d` |
 | Fork Affinity 组内依赖 | 相同 Program 的亲和折叠支持组内 `dependsOn` 拓扑排序、成功/已结算条件、成员结果注入与失败传播；组外依赖仍保持 fail-closed | `tests/fork-affinity.test.ts` | `c0bb520` |
 | 可复用 ReAct Lane 模板 | `defineReActLane` 保留最终 `resultRef`，支持模板级 `system/toolSet`、`outputSchema` 与 `historyCompaction`，模型请求继续走统一 ContextBuilder | `tests/dsl-host-macros.test.ts` | `6151318` |
 | 进程级恢复验收 | 子进程先持久化在途写 Effect 后被 `SIGKILL`，父进程通过真实文件后端恢复 `reconcile_required`、Quarantine 与资源锁隔离 | `tests/storage-outbox.test.ts`、`tests/process-recovery-child.ts` | `29a8e4c` |
 | RecoverableTool executionRef | `defineTool` 可声明执行引用，ToolRegistry/Executor 在成功或中断后持久化该引用；真实文件写入中断后可通过引用完成 reconcile | `tests/tool-host.test.ts` | `748c66f` |
 
-统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 41 个测试文件、176/176 通过，`pnpm build` 也已通过。
+统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 41 个测试文件、177/177 通过，`pnpm build` 也已通过。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -396,7 +397,8 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `0d17d7c`：`AdaptiveModelRouter` 根据质量、延迟、价格、缓存和探索项重排候选；标准 Provider Executor 自动将 Attempt 结果写入路由反馈。
 - `e3ef1ce`：Child Agent 可转入 detached/background scope；父取消跳过 detached child 的取消传播，后台 Child 结束后仍完成原 Agent Effect，Runtime shutdown 继续统一收尾。
 - `396499f`：Runtime 对 JavaScript/强制转换后的异步 Step 返回值做同步边界检查，记录 `ASYNC_STEP_FORBIDDEN` 并 fail-closed。
-- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，41 个测试文件、176 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- `51cf23d`：Runtime 增加 Host 级 Attempt/LLM/Tool 次数预算与 currency cost 累计，排队阶段超限原子失败，恢复时从 `effect.execution_metadata` 重建费用使用量。
+- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，41 个测试文件、177 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
@@ -408,6 +410,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | Provider 请求完整能力 | 确定性映射已覆盖，真实厂商仍待验证 | OpenAI-compatible/Anthropic 请求带 model、tool schema、structured schema，usage 已归一化；真实 endpoint 的字段兼容、计费口径、取消和 tool-call 往返仍需有效凭证 |
 | 动态模型路由 | 确定性反馈路由已实现 | `AdaptiveModelRouter` 已按质量、延迟、费用、缓存和探索项调整未来候选顺序，Executor 已自动采集反馈；仍需真实生产样本校准权重和跨进程持久化策略 |
 | Detached/background scope | 单进程后台 scope 已实现 | detached Child Agent 的取消传播、查询、attach 和 Runtime shutdown 边界已有测试；跨进程/分布式 Worker 迁移仍未实现 |
+| Host 调用与费用限制 | 确定性调用预算已实现 | `maxTotalAttempts`、`maxLLMAttempts`、`maxToolAttempts` 和按 currency 的 cost 累计已接入 Runtime；真实账单口径、跨 Runtime 聚合和宿主策略配置仍需生产接入 |
 | 运行观测 | Runtime 侧已有只读出口、可持久化 exporter、聚合和告警规则 | `inspect/explain`、`telemetry()`、JSONL exporter 和有界聚合器已覆盖 route 排除原因、provider/model slot、Attempt usage/cost、峰值与阈值告警；外部生产指标系统接入仍需宿主配置 |
 
 ## 6. 实施时间线与任务清单（Checklist）
