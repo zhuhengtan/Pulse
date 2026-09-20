@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, defineLaneProgram } from '@pulse/runtime'
+import { PulseRuntime, VirtualClock, defineLaneProgram } from '@pulse/runtime'
 import { z } from 'zod'
 
 describe('DSL Human and instruction contracts', () => {
@@ -46,5 +46,19 @@ describe('DSL Human and instruction contracts', () => {
     expect((await session.outcome()).status).toBe('failed')
     expect(timedOut).toBe(false)
     expect([...runtime.state.lanes.values()].find((lane) => lane.status === 'failed')?.failure).toMatchObject({ error: { code: 'HUMAN_RESPONSE_SCHEMA_VIOLATION' } })
+  })
+
+  it('routes an actual human timeout to onTimeout', async () => {
+    let timedOut = false
+    const runtime = new PulseRuntime({ clock: new VirtualClock() })
+    const program = defineLaneProgram({ id: 'human-timeout', version: '1' }, (builder) => {
+      builder.addHumanStep('approve', { prompt: 'approve', schema: z.object({ approved: z.boolean() }), timeoutMs: 5, onReply: () => 'done', onTimeout: () => { timedOut = true; return 'done' } })
+      builder.addStep('done', () => ({ actions: [{ type: 'complete', result: { done: true } }], next: 'done' }))
+    })
+    const { agentId } = runtime.createAgent('human timeout', program)
+    runtime.tick()
+    runtime.clock.advance(5)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(timedOut).toBe(true)
   })
 })

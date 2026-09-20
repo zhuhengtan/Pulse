@@ -438,13 +438,36 @@ export class StepBuilder<TState = JsonValue> {
   addHumanStep<TOutput extends ZodTypeAny>(name: string, options: { prompt: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; schema: TOutput; onReply: (reply: z.infer<TOutput>, ctx: StepContext<TState>) => NextStepTarget; onTimeout?: (ctx: StepContext<TState>) => NextStepTarget; timeoutMs?: number }): this {
     const decode = `${name}:decode`
     this.handlers.set(name, (ctx) => { const prompt = boundedInstruction(typeof options.prompt === 'string' ? options.prompt : options.prompt({ goal: ctx.goal, state: scalarProjection(ctx.laneState) as ScalarProjection<TState> })); const inputs = options.inputs?.(ctx) ?? {}; const inputResultRefs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? []), ...(inputs.artifacts ?? [])])]; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-human`, kind: 'human', concurrencyClass: 'none', input: asJson({ prompt, inputs }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}), ...(options.timeoutMs === undefined ? {} : { attemptTimeoutMs: options.timeoutMs }) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode } })
-    this.handlers.set(decode, (ctx) => { const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined; if (dependency?.state === 'settled') { const ref = dependency.outcome.resultRef; const value = ref ? readResult(ctx, ref) : undefined; const parsed = options.schema.safeParse(value); if (parsed.success) return { next: options.onReply(parsed.data, ctx) }; throw Object.assign(new Error('Human reply did not match schema.'), { code: 'HUMAN_RESPONSE_SCHEMA_VIOLATION', message: 'Human reply did not match schema.', retryable: false, details: parsed.error.message }) } if (dependency?.state === 'ignored' || dependency?.state === 'pending' || ctx.resumeInput?.type === 'wait') return { next: options.onTimeout ? options.onTimeout(ctx) : decode }; throw Object.assign(new Error('Human response resolution is missing.'), { code: 'HUMAN_RESPONSE_MISSING', message: 'Human response resolution is missing.', retryable: false }) })
+    this.handlers.set(decode, (ctx) => {
+      const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined
+      if (dependency?.state === 'settled') {
+        const runtimeError = dependency.outcome.error
+        if (runtimeError) {
+          if ((runtimeError.code === 'ATTEMPT_TIMEOUT' || runtimeError.code === 'TIMEOUT') && options.onTimeout) return { next: options.onTimeout(ctx) }
+          throw Object.assign(new Error(runtimeError.message), runtimeError)
+        }
+        const ref = dependency.outcome.resultRef
+        const value = ref ? readResult(ctx, ref) : undefined
+        const parsed = options.schema.safeParse(value)
+        if (parsed.success) return { next: options.onReply(parsed.data, ctx) }
+        throw Object.assign(new Error('Human reply did not match schema.'), { code: 'HUMAN_RESPONSE_SCHEMA_VIOLATION', message: 'Human reply did not match schema.', retryable: false, details: parsed.error.message })
+      }
+      if (dependency?.state === 'pending') throw Object.assign(new Error('Human response is still pending.'), { code: 'HUMAN_RESPONSE_PENDING', message: 'Human response is still pending.', retryable: false })
+      if (ctx.resumeInput?.type === 'wait') throw Object.assign(new Error(ctx.resumeInput.resolution.error?.message ?? 'Human response was not received.'), ctx.resumeInput.resolution.error ?? { code: 'HUMAN_RESPONSE_UNSATISFIED', message: 'Human response was not received.', retryable: false })
+      throw Object.assign(new Error('Human response resolution is missing.'), { code: 'HUMAN_RESPONSE_MISSING', message: 'Human response resolution is missing.', retryable: false })
+    })
     return this
   }
   addTimerStep(name: string, options: { delayMs: number | ((ctx: StepContext<TState>) => number); onFire: (ctx: StepContext<TState>) => NextStepTarget }): this {
     const decode = `${name}:resume`
     this.handlers.set(name, (ctx) => ({ actions: [{ type: 'submit_effects', effects: [{ key: `${name}-timer`, kind: 'timer', concurrencyClass: 'none', input: { delayMs: typeof options.delayMs === 'number' ? options.delayMs : options.delayMs(ctx) } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }))
-    this.handlers.set(decode, (ctx) => ({ next: options.onFire(ctx) }))
+    this.handlers.set(decode, (ctx) => {
+      const resolution = ctx.resumeInput?.type === 'wait' ? ctx.resumeInput.resolution : undefined
+      const dependency = resolution ? Object.values(resolution.dependencies)[0] : undefined
+      const runtimeError = dependency?.state === 'settled' ? dependency.outcome.error : undefined
+      if (resolution?.status === 'satisfied' && runtimeError === undefined) return { next: options.onFire(ctx) }
+      throw Object.assign(new Error(runtimeError?.message ?? resolution?.error?.message ?? 'Timer did not fire.'), runtimeError ?? resolution?.error ?? { code: 'TIMER_NOT_FIRED', message: 'Timer did not fire.', retryable: false })
+    })
     return this
   }
   build(entry = this.handlers.has('start') ? 'start' : [...this.handlers.keys()][0] ?? 'start'): LaneProgramDefinition {

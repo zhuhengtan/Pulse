@@ -13,6 +13,19 @@ describe('DSL Human/Timer host macros', () => {
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
   })
 
+  it('does not run onFire when a timer effect fails validation', async () => {
+    let fired = false
+    const program = defineLaneProgram({ id: 'timer-failure', version: '1' }, (builder) => {
+      builder.addTimerStep('backoff', { delayMs: -1, onFire: () => { fired = true; return 'finish' } })
+      builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' }))
+    })
+    const runtime = new PulseRuntime()
+    const { agentId } = runtime.createAgent('timer failure', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+    expect(fired).toBe(false)
+    expect([...runtime.state.lanes.values()].find((lane) => lane.failure)?.failure).toMatchObject({ error: { code: 'INVALID_TIMER' } })
+  })
+
   it('compiles addHumanStep and validates the reply schema before onReply', async () => {
     const program = defineLaneProgram({ id: 'human-macro', version: '1' }, (builder) => {
       builder.addHumanStep('approve', { prompt: 'Approve?', schema: z.object({ approved: z.boolean() }), onReply: (reply) => reply.approved ? 'finish' : 'reject', onTimeout: () => 'reject' })
