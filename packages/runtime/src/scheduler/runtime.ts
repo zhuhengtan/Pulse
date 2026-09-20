@@ -93,6 +93,7 @@ export class PulseRuntime {
     this.sessionId = config.sessionId ?? 'session-local'
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
+    if (restored?.quarantine) this.quarantine.restore(restored.quarantine)
     if (restored) {
       const recovery = this.outbox.recover(this.state)
       for (const id of recovery.requeued) this.emit({ type: 'outbox.requeued', data: id })
@@ -148,10 +149,10 @@ export class PulseRuntime {
     return { agentId: agent.id, laneId: root.id }
   }
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
-  exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox) }
+  exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine) }
   async persist(backend: RuntimePersistenceBackend): Promise<void> { await backend.save(this.exportPersistence()) }
   async checkpoint(backend: RuntimePersistenceBackend): Promise<RuntimePersistenceSnapshot> {
-    const snapshot = exportRuntimeCheckpoint(this.state, this.mutationLog, this.outbox)
+    const snapshot = exportRuntimeCheckpoint(this.state, this.mutationLog, this.outbox, this.quarantine)
     await backend.save(snapshot)
     const watermark = snapshot.checkpoint?.logWatermark ?? 0
     if (watermark > 0 && this.mutationLog.lastSequence >= watermark) this.mutationLog.truncateThrough(watermark)
@@ -373,6 +374,7 @@ export class PulseRuntime {
       const unknownAttempts = effect.attempts?.filter((attempt) => attempt.executionState === 'remote_unknown').length ?? 0
       const settledAttemptId = effect.attemptId
       if (effect.duplicateExecutionPolicy === 'allow' && effect.maxUnknownAttempts !== undefined && unknownAttempts <= effect.maxUnknownAttempts && this.scheduleRetry(effect, { code: 'REMOTE_EXECUTION_UNKNOWN', message: 'Remote execution outcome is unknown.', details: { unknownAttempts } })) {
+        this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:remote-unknown-retry`)
         this.releaseEffectLocks(effectId)
         this.outbox.ack(`${effect.id}:${settledAttemptId}`)
         this.refreshWaits()
@@ -380,7 +382,8 @@ export class PulseRuntime {
       }
       effect.state = 'failed'
       effect.outcome = { status: 'failed', error: { code: 'REMOTE_UNKNOWN', message: 'Remote execution outcome is unknown but no side effect was recorded.' } }
-      this.emit({ type: 'effect.remote_unknown', effectId, data: { executionState: 'remote_unknown', sideEffectState } })
+      const remoteEvent = this.emit({ type: 'effect.remote_unknown', effectId, data: { executionState: 'remote_unknown', sideEffectState } })
+      this.journalEffect(effect, `effect:${effect.id}:${effect.attemptId}:remote-unknown`, undefined, [remoteEvent])
       this.releaseEffectLocks(effectId)
     }
     if (sideEffectState !== 'unknown') this.releaseEffectLocks(effectId)
@@ -405,7 +408,8 @@ export class PulseRuntime {
     if (effect.sideEffectState !== 'unknown') this.releaseEffectLocks(effectId)
     const lane = this.state.lanes.get(effect.ownerLaneId)
     if (lane?.unresolvedEffectIds) lane.unresolvedEffectIds = lane.unresolvedEffectIds.filter((id) => id !== effectId)
-    this.emit({ type: 'resource.abandoned', effectId, data: { code: 'RESOURCE_ABANDONED' } })
+    const abandonedEvent = this.emit({ type: 'resource.abandoned', effectId, data: { code: 'RESOURCE_ABANDONED' } })
+    this.journalEffect(effect, `effect:${effect.id}:${effect.attemptId}:abandoned`, undefined, [abandonedEvent])
     this.refreshWaits()
   }
 
@@ -552,7 +556,8 @@ export class PulseRuntime {
     this.quarantine.add(effectId, this.state.now, reason)
     const lane = this.state.lanes.get(effect.ownerLaneId)
     if (lane) lane.unresolvedEffectIds = [...new Set([...(lane.unresolvedEffectIds ?? []), effectId])]
-    this.emit({ type: 'effect.quarantined', effectId, data: { reason, state: effect.state } })
+    const quarantineEvent = this.emit({ type: 'effect.quarantined', effectId, data: { reason, state: effect.state } })
+    this.journalEffect(effect, `effect:${effect.id}:${effect.attemptId}:quarantined`, undefined, [quarantineEvent])
     this.refreshWaits()
   }
 

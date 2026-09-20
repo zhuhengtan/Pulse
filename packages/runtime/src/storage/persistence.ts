@@ -4,12 +4,14 @@ import type { JsonValue, RuntimeState } from '../core/types.js'
 import { exportRuntimeState, importRuntimeState, type SessionSnapshot } from './session.js'
 import { EffectOutbox, type OutboxSnapshot } from './outbox.js'
 import { MutationLog, type MutationLogSnapshot } from './mutation-log.js'
+import type { QuarantineEntry, QuarantineScope } from '../lifecycle/scopes.js'
 
 export interface RuntimePersistenceSnapshot {
   schemaVersion: 1
   state: SessionSnapshot
   mutationLog: MutationLogSnapshot
   outbox: OutboxSnapshot
+  quarantine?: QuarantineEntry[]
   checkpoint?: { schemaVersion: 1; logWatermark: number; state: SessionSnapshot }
 }
 
@@ -32,25 +34,25 @@ export class FileRuntimePersistenceBackend implements RuntimePersistenceBackend 
   }
 }
 
-export function exportRuntimePersistence(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox): RuntimePersistenceSnapshot {
-  return { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: mutationLog.snapshot(), outbox: outbox.snapshot() }
+export function exportRuntimePersistence(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, quarantine?: QuarantineScope): RuntimePersistenceSnapshot {
+  return { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: mutationLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }) }
 }
 
-export function exportRuntimeCheckpoint(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox): RuntimePersistenceSnapshot {
+export function exportRuntimeCheckpoint(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, quarantine?: QuarantineScope): RuntimePersistenceSnapshot {
   const watermark = mutationLog.lastSequence
   const checkpointLog = new MutationLog([], watermark)
-  return { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: checkpointLog.snapshot(), outbox: outbox.snapshot(), checkpoint: { schemaVersion: 1, logWatermark: watermark, state: exportRuntimeState(state) } }
+  return { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: checkpointLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }), checkpoint: { schemaVersion: 1, logWatermark: watermark, state: exportRuntimeState(state) } }
 }
 
 export function serializeRuntimePersistence(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox): JsonValue {
   return exportRuntimePersistence(state, mutationLog, outbox) as unknown as JsonValue
 }
 
-export function importRuntimePersistence(snapshot: RuntimePersistenceSnapshot | JsonValue): { state: RuntimeState; mutationLog: MutationLog; outbox: EffectOutbox } {
+export function importRuntimePersistence(snapshot: RuntimePersistenceSnapshot | JsonValue): { state: RuntimeState; mutationLog: MutationLog; outbox: EffectOutbox; quarantine?: QuarantineEntry[] } {
   const value = snapshot as RuntimePersistenceSnapshot
   if (!value || value.schemaVersion !== 1 || !value.state || !value.mutationLog || !value.outbox) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
   const mutationLog = MutationLog.fromSnapshot(value.mutationLog)
   const state = importRuntimeState(value.checkpoint?.state ?? value.state)
   if (value.checkpoint) mutationLog.replay(state)
-  return { state, mutationLog, outbox: EffectOutbox.fromSnapshot(value.outbox) }
+  return { state, mutationLog, outbox: EffectOutbox.fromSnapshot(value.outbox), ...(value.quarantine === undefined ? {} : { quarantine: value.quarantine.map((entry) => ({ ...entry })) }) }
 }

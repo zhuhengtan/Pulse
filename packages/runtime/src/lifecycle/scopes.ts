@@ -16,6 +16,8 @@ export class QuarantineScope {
   abandon(effectId: string): boolean { return this.entries.delete(effectId) }
   has(effectId: string): boolean { return this.entries.has(effectId) }
   get unresolvedEffectIds(): string[] { return [...this.entries.keys()] }
+  snapshot(): QuarantineEntry[] { return [...this.entries.values()].map((entry) => ({ ...entry })) }
+  restore(entries: QuarantineEntry[]): void { for (const entry of entries) this.entries.set(entry.effectId, { ...entry }) }
   run<T>(work: () => T): { value: T; unresolvedEffectIds: string[] } { return { value: work(), unresolvedEffectIds: this.unresolvedEffectIds } }
 }
 
