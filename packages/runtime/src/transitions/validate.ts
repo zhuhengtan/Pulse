@@ -3,7 +3,7 @@ import { apply } from '../core/mutations.js'
 import { DependencyGraph } from '../dependencies/graph.js'
 import type { ValidationResult, Mutation } from '../core/mutations.js'
 import { privacyRank, strictestPrivacy } from '../core/types.js'
-import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord } from '../core/types.js'
+import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord, ForkLaneSpec } from '../core/types.js'
 import { appendRuntimeEvent } from '../core/events.js'
 
 const isLocal = (value: TargetRef | LocalRef): value is LocalRef => 'local' in value
@@ -37,6 +37,50 @@ function hasDependencyCycle(state: RuntimeState, extra: Array<{ from: TargetRef;
   for (const wait of state.waits.values()) if (wait.state === 'pending') for (const dependency of wait.spec.dependencies) graph.add({ kind: 'lane', id: wait.laneId }, dependency.target as TargetRef)
   for (const edge of extra) graph.add(edge.from, edge.to, edge.kind ?? 'wait')
   return graph.hasCycle()
+}
+
+interface AffinityGroup { keys: string[]; signals: string[] }
+
+function overlap<T>(left: T[], right: T[]): number {
+  const a = new Set(left); const b = new Set(right)
+  if (a.size === 0 && b.size === 0) return 0
+  const intersection = [...a].filter((item) => b.has(item)).length
+  return intersection / Math.max(1, new Set([...a, ...b]).size)
+}
+
+function affinityGroups(lanes: ForkLaneSpec[]): AffinityGroup[] {
+  const groups: Array<{ keys: Set<string>; signals: Set<string> }> = []
+  const join = (left: number, right: number): void => {
+    if (left === right) return
+    const target = groups[left]!; const source = groups[right]!
+    for (const key of source.keys) target.keys.add(key)
+    for (const signal of source.signals) target.signals.add(signal)
+    groups.splice(right, 1)
+  }
+  for (let i = 0; i < lanes.length; i++) {
+    const lane = lanes[i]!
+    for (let j = 0; j < i; j++) {
+      const other = lanes[j]!
+      const signals: string[] = []
+      if (lane.affinityKey && lane.affinityKey === other.affinityKey) signals.push(`affinityKey:${lane.affinityKey}`)
+      const resources = (lane.resources ?? []).map((resource) => resource.resource)
+      const otherResources = (other.resources ?? []).map((resource) => resource.resource)
+      const resourceConflict = (lane.resources ?? []).some((resource) => (other.resources ?? []).some((candidate) => candidate.resource === resource.resource && (resource.mode === 'exclusive' || candidate.mode === 'exclusive')))
+      if (resourceConflict) signals.push('exclusive_resource_overlap')
+      if (overlap(resources, otherResources) > 0.5 && resources.length && otherResources.length) signals.push('shared_resource_overlap')
+      if (lane.toolSetId && lane.toolSetId === other.toolSetId && lane.workspacePath && other.workspacePath && (lane.workspacePath.startsWith(other.workspacePath) || other.workspacePath.startsWith(lane.workspacePath))) signals.push('toolset_workspace_prefix')
+      if (overlap(lane.inputResultRefs ?? [], other.inputResultRefs ?? []) > 0.5) signals.push('input_result_overlap')
+      if (!signals.length) continue
+      let left = groups.findIndex((group) => group.keys.has(other.key))
+      let right = groups.findIndex((group) => group.keys.has(lane.key))
+      if (left < 0) { groups.push({ keys: new Set([other.key]), signals: new Set() }); left = groups.length - 1 }
+      if (right < 0) { groups.push({ keys: new Set([lane.key]), signals: new Set() }); right = groups.length - 1 }
+      const group = groups[left]!
+      for (const signal of signals) group.signals.add(signal)
+      if (left !== right) join(left, right)
+    }
+  }
+  return groups.filter((group) => group.keys.size > 1).map((group) => ({ keys: [...group.keys].sort(), signals: [...group.signals].sort() })).sort((a, b) => a.keys[0]!.localeCompare(b.keys[0]!))
 }
 
 function validateWait(state: RuntimeState, laneId: string, spec: WaitSpec, locals: Map<string, TargetRef>, newTargets: Map<string, TargetRef>): string | undefined {
@@ -188,6 +232,10 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       }
     } else if (action.type === 'fork') {
       if (action.lanes.length === 0) return { rejection: error('EMPTY_FORK', 'fork requires at least one lane') }
+      if (state.forkAffinity === 'advise' && action.affinityAck !== true) {
+        const groups = affinityGroups(action.lanes)
+        if (groups.length) return { rejection: error('FORK_AFFINITY_COLLAPSIBLE', 'Fork contains lanes that share a likely context affinity group.', { groups } as unknown as JsonValue) }
+      }
       const siblingTargets = new Map<string, TargetRef>()
       for (const child of action.lanes) {
         if (forkTargets.has(child.key)) return { rejection: error('DUPLICATE_FORK_KEY', child.key) }

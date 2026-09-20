@@ -6,6 +6,7 @@ export type WaitId = string
 export type ResultRef = string
 export type ContextVersion = number
 export type PrivacyLabel = 'public' | 'cloud_allowed' | 'local_only'
+export type ForkAffinityMode = 'off' | 'advise'
 export type LaneStatus = 'ready' | 'running' | 'waiting' | 'closing' | 'succeeded' | 'failed' | 'cancelled'
 export type EffectState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'retry_wait' | 'reconcile_required'
 export type ConcurrencyClass = 'llm' | 'tool' | 'agent' | 'none'
@@ -221,6 +222,11 @@ export interface ForkLaneSpec {
   program: ResumePoint
   priority?: number
   contextVersion?: 'parent' | 'latest' | ContextVersion
+  affinityKey?: string
+  resources?: ResourceLockSpec[]
+  inputResultRefs?: ResultRef[]
+  toolSetId?: string
+  workspacePath?: string
   dependsOn?: Array<{ key: string; target: TargetRef | LocalRef; condition: 'success' | 'settled' }>
 }
 
@@ -234,6 +240,7 @@ export interface WaitAction extends RuntimeActionBase { type: 'wait'; spec: Wait
 export interface ForkAction extends RuntimeActionBase {
   type: 'fork'
   lanes: ForkLaneSpec[]
+  affinityAck?: boolean
   join?: { condition: 'success' | 'settled'; onUnsatisfied: 'fail_lane' | 'resume_with_error'; onCancelled?: 'unsatisfied' | 'ignore' }
 }
 export interface CancelLaneAction extends RuntimeActionBase { type: 'cancel_lane'; laneId: LaneId; reason: 'SUPERSEDED' | 'USER_REQUESTED' | 'POLICY' }
@@ -360,10 +367,11 @@ export interface RuntimeState {
   maxTotalLanes: number
   maxQueuedEffects: number
   maxRunning: Record<ConcurrencyClass, number>
+  forkAffinity: ForkAffinityMode
 }
 
-export function createRuntimeState(maxTotalLanes = 64, options: { maxQueuedEffects?: number; maxRunning?: Partial<Record<ConcurrencyClass, number>> } = {}): RuntimeState {
-  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), mergeProposals: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, proposal: 1, event: 1 }, maxTotalLanes, maxQueuedEffects: options.maxQueuedEffects ?? 256, maxRunning: { llm: 4, tool: 16, agent: 4, none: Number.POSITIVE_INFINITY, ...(options.maxRunning ?? {}) } }
+export function createRuntimeState(maxTotalLanes = 64, options: { maxQueuedEffects?: number; maxRunning?: Partial<Record<ConcurrencyClass, number>>; forkAffinity?: ForkAffinityMode } = {}): RuntimeState {
+  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), mergeProposals: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, proposal: 1, event: 1 }, maxTotalLanes, maxQueuedEffects: options.maxQueuedEffects ?? 256, maxRunning: { llm: 4, tool: 16, agent: 4, none: Number.POSITIVE_INFINITY, ...(options.maxRunning ?? {}) }, forkAffinity: options.forkAffinity ?? 'off' }
 }
 
 export function privacyRank(label: PrivacyLabel): number { return label === 'public' ? 0 : label === 'cloud_allowed' ? 1 : 2 }

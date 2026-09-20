@@ -28,6 +28,7 @@ export interface RuntimeConfig {
   maxTotalLanes?: number
   maxQueuedEffects?: number
   maxRunning?: Partial<Record<'llm' | 'tool' | 'agent' | 'none', number>>
+  forkAffinity?: 'off' | 'advise'
   maxConsecutiveControlErrors?: number
   maxRuntimeMs?: number
   sessionId?: string
@@ -75,7 +76,7 @@ export class PulseRuntime {
 
   constructor(config: RuntimeConfig = {}) {
     const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
-    this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }) })
+    this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }), ...(config.forkAffinity === undefined ? {} : { forkAffinity: config.forkAffinity }) })
     this.sessionId = config.sessionId ?? 'session-local'
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
@@ -187,12 +188,18 @@ export class PulseRuntime {
       const result = validateStep(this.state, lane.id, output)
       if ('rejection' in result) {
         const consecutive = (lane.consecutiveControlErrors ?? 0) + 1
-        lane.consecutiveControlErrors = consecutive
-        if (consecutive >= this.maxConsecutiveControlErrors) this.failLane(lane, { code: 'CONTROL_ERROR_LOOP', message: 'Lane exceeded the consecutive control error limit.', details: { lastError: result.rejection as unknown as JsonValue } })
-        else {
+        if (result.rejection.code === 'FORK_AFFINITY_COLLAPSIBLE') {
           lane.pendingResumeInput = { type: 'control_error', error: result.rejection, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
-          this.emit({ type: 'step.rejected', laneId: lane.id, data: result.rejection as unknown as JsonValue })
+          this.emit({ type: 'fork.affinity_advice', laneId: lane.id, data: result.rejection as unknown as JsonValue })
           this.enqueueLane(lane.id)
+        } else {
+          lane.consecutiveControlErrors = consecutive
+          if (consecutive >= this.maxConsecutiveControlErrors) this.failLane(lane, { code: 'CONTROL_ERROR_LOOP', message: 'Lane exceeded the consecutive control error limit.', details: { lastError: result.rejection as unknown as JsonValue } })
+          else {
+            lane.pendingResumeInput = { type: 'control_error', error: result.rejection, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
+            this.emit({ type: 'step.rejected', laneId: lane.id, data: result.rejection as unknown as JsonValue })
+            this.enqueueLane(lane.id)
+          }
         }
       } else {
         commitMutationTransaction(this.state, this.mutationLog, `step:${lane.id}:${lane.version + 1}`, result.mutations, this.state.now, this.sessionId)
