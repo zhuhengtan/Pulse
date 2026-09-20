@@ -70,6 +70,7 @@
 | DSL 结构化 LLM 自纠错边界 | 结构化输出 schema、requirements、execution/retry policy 贯穿初始与纠错 Effect；原始输入和拒绝输出引用保留；默认最多一轮纠错，连续失败转 `OUTPUT_SCHEMA_VIOLATION` | `tests/dsl-structured-contract.test.ts`、`tests/m4-dsl-e2e.test.ts` | `366ad32` |
 | DSL Fork 契约与依赖可见性 | `addParallelStep` 支持规范 `join` 与 `dependsOn.sibling`，`addDynamicForkStep` 支持 `proposal(ctx)`、动态 affinity 策略和完整 ProgramRef；Wait resolution 自动授予依赖结果可见性，保留旧 API | `tests/dsl-fork-contract.test.ts`、`tests/fork-affinity.test.ts`、`tests/m2-scheduler.test.ts` | `6393966` |
 | DSL Global Draft 写入 | `proposeGlobal/commitGlobal` 同时支持 `ContextOp[]` 与 Draft mutator，保持 privacy、proposal、adoptImmediately 和单 Step 事务语义 | `tests/dsl-context.test.ts`、`tests/merge-proposal.test.ts` | `251f077` |
+| DSL Merge 契约与 fail-closed | `addMergeStep` 默认 task 为 `reason`，支持仅由 `onSynthesized` 返回终态；instruction 受 2KB 限制，schema 失败转结构化 `OUTPUT_SCHEMA_VIOLATION`，不再静默跳转 | `tests/merge-proposal.test.ts` | `5e5bb53` |
 | Mutation 事务预检 | clone 预检失败不写日志、不改变运行时；提交时保留 Lane/Effect 对象身份；日志预备失败不消耗序号，状态 apply 与日志提交分层 | `tests/storage-mutation-log.test.ts` | `70c3534`、`6c89fe2` |
 | Tool Schema 与 Provider 上限 | 不支持的 Zod 类型构建时 fail-closed；Anthropic `maxOutputTokens` 不再写死；Tool 输入在资源准入前由 Zod/Manifest JSON Schema 校验，缺少工具名/非法输入转结构化 `control_error`，不入队、不执行；低级 Manifest 工具的 admission、直连执行与 Effect 执行入口统一校验输入，输出也必须符合声明 schema | `tests/m3-context-adapters.test.ts`、`tests/tool-host.test.ts` | `e21907a`、`7a2ad53`、`e7017f4`、`ae21915`、`2295730` |
 | 持久化恢复边界 | `persisted` 驻留状态、backend restore、在途写副作用 quarantine、journal event `txId` 一致 | `tests/storage-policy.test.ts`、`tests/storage-outbox.test.ts` | `00d49f6`、`f7ba385`、`9b22fd3`、`c0e87f6` |
@@ -179,7 +180,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 61 个测试文件、325/325 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 61 个测试文件、327/327 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -620,6 +621,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `366ad32`：结构化 LLM DSL 统一传递 schema/requirements、execution/retry policy；自纠错默认最多一轮，纠错保留原始输入与拒绝输出引用，连续失败转 `OUTPUT_SCHEMA_VIOLATION`；新增结构化契约回归。
 - `6393966`：Fork DSL 对齐规范 `join`、`dependsOn.sibling`、`proposal(ctx)` 和动态 affinity；Wait resolution 将兄弟 Lane 的结果加入可见引用，避免规范依赖链被错误拒绝；新增 Fork 契约回归。
 - `251f077`：`proposeGlobal/commitGlobal` 支持规范要求的 Draft mutator 写法，并保持 Global proposal/commit 与立即 adopt 的事务语义。
+- `5e5bb53`：Merge DSL 默认 `reason` task，支持 `onSynthesized` 独立返回终态；Merge instruction 受 2KB 限制，schema 不匹配转 `OUTPUT_SCHEMA_VIOLATION`，避免静默成功。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
@@ -629,7 +631,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，61 个测试文件、325 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，61 个测试文件、327 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
