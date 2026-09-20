@@ -1,6 +1,7 @@
 import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname } from 'node:path'
+import { createRequire } from 'node:module'
 import type { EffectExecution } from './runtime.js'
 import type { EffectRecord, JsonValue, RuntimeError } from '../core/types.js'
 
@@ -73,6 +74,77 @@ export class FileWorkerPersistenceBackend implements WorkerPersistenceBackend {
     })
     this.pending = operation.catch(() => undefined)
     await operation
+  }
+}
+
+interface WorkerSqliteStatement {
+  get(...params: unknown[]): Record<string, unknown> | undefined
+  run(...params: unknown[]): unknown
+}
+
+interface WorkerSqliteDatabase {
+  exec(sql: string): void
+  prepare(sql: string): WorkerSqliteStatement
+  close(): void
+}
+
+type WorkerSqliteDatabaseConstructor = new (path: string) => WorkerSqliteDatabase
+
+/** Durable SQLite snapshot backend for sharing WorkerCoordinator state between processes. */
+export class SqliteWorkerPersistenceBackend implements WorkerPersistenceBackend {
+  private database: WorkerSqliteDatabase | undefined
+  private tail: Promise<void> = Promise.resolve()
+
+  constructor(readonly filePath: string) {}
+
+  async load(): Promise<WorkerCoordinatorSnapshot | undefined> {
+    return this.enqueue(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true })
+      const row = this.open().prepare('SELECT payload FROM worker_snapshot WHERE id = 1').get()
+      if (!row) return undefined
+      if (typeof row.payload !== 'string') throw new Error('INVALID_WORKER_SNAPSHOT')
+      return JSON.parse(row.payload) as WorkerCoordinatorSnapshot
+    })
+  }
+
+  async save(snapshot: WorkerCoordinatorSnapshot, expectedDigest?: string): Promise<void> {
+    await this.enqueue(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true })
+      const database = this.open()
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        const current = database.prepare('SELECT digest FROM worker_snapshot WHERE id = 1').get()
+        const currentDigest = current && typeof current.digest === 'string' ? current.digest : undefined
+        if (expectedDigest !== undefined && currentDigest !== expectedDigest) throw new Error('WORKER_PERSISTENCE_CONFLICT')
+        database.prepare('INSERT INTO worker_snapshot (id, payload, digest) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, digest = excluded.digest').run(JSON.stringify(snapshot), snapshot.integrity?.digest ?? null)
+        database.exec('COMMIT')
+      } catch (cause) {
+        try { database.exec('ROLLBACK') } catch { /* transaction already closed */ }
+        throw cause
+      }
+    })
+  }
+
+  async close(): Promise<void> {
+    await this.enqueue(async () => {
+      this.database?.close()
+      this.database = undefined
+    })
+  }
+
+  private open(): WorkerSqliteDatabase {
+    if (this.database) return this.database
+    const require = createRequire(import.meta.url)
+    const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: WorkerSqliteDatabaseConstructor }
+    this.database = new DatabaseSync(this.filePath)
+    this.database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 30000; CREATE TABLE IF NOT EXISTS worker_snapshot (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL, digest TEXT)')
+    return this.database
+  }
+
+  private enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const operation = this.tail.then(work, work)
+    this.tail = operation.then(() => undefined, () => undefined)
+    return operation
   }
 }
 
