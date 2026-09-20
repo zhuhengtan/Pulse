@@ -697,6 +697,9 @@ export class PulseRuntime {
   }
 
   private syncStoragePolicy(policy = this.storagePolicy, state = this.state, factInbox = this.factInbox): void {
+    const transactional = policy === this.storagePolicy
+    const target = transactional ? policy.clone() : policy
+    const residency = new Map<string, { storageState: 'memory' | 'persisted'; pinCount: number }>()
     const pinKeys = new Set<string>()
     for (const lane of state.lanes.values()) {
       const active = !['succeeded', 'failed', 'cancelled'].includes(lane.status)
@@ -716,41 +719,52 @@ export class PulseRuntime {
       if (!effect.outcome) for (const ref of effect.derivedFrom ?? []) pinKeys.add(`${provenanceRefKind(ref) === 'artifact' ? 'artifact' : 'result'}:${provenanceRefId(ref)}`)
     }
     for (const envelope of factInbox.snapshot().queue) pinKeys.add(`snapshot:fact:${envelope.eventId}`)
-    policy.replacePinSource('runtime', pinKeys)
+    target.replacePinSource('runtime', pinKeys)
     for (const lane of state.lanes.values()) {
       const snapshotKey = `snapshot:lane:${lane.id}:${lane.context.version}`
-      policy.put('snapshot', snapshotKey, { laneId: lane.id, version: lane.context.version, context: lane.context, resume: lane.resume } as unknown as JsonValue)
+      target.put('snapshot', snapshotKey, { laneId: lane.id, version: lane.context.version, context: lane.context, resume: lane.resume } as unknown as JsonValue)
     }
     for (const agent of state.agents.values()) {
       for (const [version, value] of agent.globalVersions) {
         const key = `snapshot:global:${agent.id}:${version}`
-        policy.put('snapshot', key, { agentId: agent.id, version, value } as unknown as JsonValue)
+        target.put('snapshot', key, { agentId: agent.id, version, value } as unknown as JsonValue)
       }
     }
     for (const wait of state.waits.values()) {
       const key = `snapshot:wait:${wait.id}`
-      policy.put('snapshot', key, wait as unknown as JsonValue)
+      target.put('snapshot', key, wait as unknown as JsonValue)
     }
     for (const effect of state.effects.values()) {
       if (!effect.outcome && effect.kind === 'llm') {
         const key = `snapshot:request:${effect.id}:${effect.attemptId}`
-        policy.put('snapshot', key, { effectId: effect.id, attemptId: effect.attemptId, input: effect.input } as unknown as JsonValue)
+        target.put('snapshot', key, { effectId: effect.id, attemptId: effect.attemptId, input: effect.input } as unknown as JsonValue)
       }
     }
     for (const result of state.results.values()) {
       const policyValue = structuredClone(result) as import('../core/types.js').ResultRecord
       delete policyValue.storageState
       delete policyValue.pinCount
-      const stored = policy.put('result', `result:${result.id}`, policyValue as unknown as JsonValue)
-      result.storageState = stored.storageState === 'memory' ? 'memory' : 'persisted'
-      result.pinCount = stored.pinCount
+      const stored = target.put('result', `result:${result.id}`, policyValue as unknown as JsonValue)
+      residency.set(result.id, { storageState: stored.storageState === 'memory' ? 'memory' : 'persisted', pinCount: stored.pinCount })
     }
-    for (const artifact of state.artifacts.values()) policy.put('artifact', `artifact:${artifact.ref}`, artifact as unknown as JsonValue)
-    for (const event of state.events) policy.put('event', `event:${event.id}`, event as unknown as JsonValue)
-    for (const lane of state.lanes.values()) if (lane.pendingResumeInput) policy.put('snapshot', `snapshot:resume:${lane.id}:${lane.version}`, lane.pendingResumeInput as unknown as JsonValue)
+    for (const artifact of state.artifacts.values()) target.put('artifact', `artifact:${artifact.ref}`, artifact as unknown as JsonValue)
+    for (const event of state.events) target.put('event', `event:${event.id}`, event as unknown as JsonValue)
+    for (const lane of state.lanes.values()) if (lane.pendingResumeInput) target.put('snapshot', `snapshot:resume:${lane.id}:${lane.version}`, lane.pendingResumeInput as unknown as JsonValue)
     const factKeys = new Set(factInbox.snapshot().queue.map((envelope) => `snapshot:fact:${envelope.eventId}`))
-    for (const envelope of factInbox.snapshot().queue) policy.put('snapshot', `snapshot:fact:${envelope.eventId}`, envelope as unknown as JsonValue)
-    for (const record of policy.inspect()) if (record.key.startsWith('snapshot:fact:') && !factKeys.has(record.key)) policy.remove(record.key)
+    for (const envelope of factInbox.snapshot().queue) target.put('snapshot', `snapshot:fact:${envelope.eventId}`, envelope as unknown as JsonValue)
+    for (const record of target.inspect()) if (record.key.startsWith('snapshot:fact:') && !factKeys.has(record.key)) target.remove(record.key)
+    if (transactional) {
+      policy.replaceSnapshot(target.snapshot())
+      for (const [id, value] of residency) {
+        const result = state.results.get(id)
+        if (result) Object.assign(result, value)
+      }
+    } else {
+      for (const [id, value] of residency) {
+        const result = state.results.get(id)
+        if (result) Object.assign(result, value)
+      }
+    }
   }
 
   private hasPendingHostInteraction(agentId?: string): boolean { return [...this.state.effects.values()].some((effect) => effect.kind === 'human' && !effect.outcome && (agentId === undefined || effect.agentId === agentId)) }

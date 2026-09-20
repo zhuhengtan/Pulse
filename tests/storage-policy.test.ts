@@ -56,6 +56,21 @@ describe('session storage policy', () => {
     expect(runtime.storagePolicy.inspect().some((record) => record.key.startsWith('snapshot:fact:'))).toBe(false)
   })
 
+  it('keeps the live policy unchanged when a transactional rebuild cannot fit', () => {
+    const program: LaneProgram = { id: 'transactional-storage-rebuild', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'transactional-storage-rebuild', programVersion: '1', step: 'done', locals: {} } }) }
+    const runtime = new PulseRuntime()
+    runtime.createAgent('transactional rebuild', program)
+    runtime.tick()
+    const before = runtime.storagePolicy.snapshot()
+    const eventBytes = before.records.filter((record) => record.kind === 'event').reduce((total, record) => total + record.bytes, 0)
+    expect(eventBytes).toBeGreaterThan(0)
+    ;(runtime.storagePolicy as any).limits.maxEventLogBytes = eventBytes - 1
+    expect(() => runtime.tick()).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    const after = runtime.storagePolicy.snapshot()
+    expect(after.records).toEqual(before.records)
+    expect(after.pinSources).toEqual(before.pinSources)
+  })
+
   it('automatically pins active lane snapshots and LLM requests', async () => {
     let release!: () => void
     const program: LaneProgram = { id: 'storage-pins', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'request', kind: 'llm', concurrencyClass: 'llm', input: { request: {} } }] }], next: { programId: 'storage-pins', programVersion: '1', step: 'done', locals: {} } }) }

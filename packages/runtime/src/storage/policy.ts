@@ -94,6 +94,9 @@ export class SessionStoragePolicy {
 
   snapshot(): StoragePolicySnapshot { return { schemaVersion: 1, limits: { ...this.limits }, records: [...this.records.values()].map((record) => this.copyRecord(record)), pinSources: [...this.pinSources.entries()].map(([source, keys]) => [source, [...keys]]) } }
 
+  /** Atomically replace this policy with a previously validated candidate snapshot. */
+  replaceSnapshot(snapshot: StoragePolicySnapshot): void { this.restore(snapshot) }
+
   static fromSnapshot(snapshot: StoragePolicySnapshot | JsonValue): SessionStoragePolicy {
     const value = snapshot as StoragePolicySnapshot
     if (!value || value.schemaVersion !== 1 || !value.limits || !Array.isArray(value.records) || !Array.isArray(value.pinSources)) throw new Error('INVALID_STORAGE_POLICY_SNAPSHOT')
