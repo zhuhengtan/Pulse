@@ -274,6 +274,15 @@ describe('runtime control boundaries', () => {
     expect(committedLane && committedLane.op === 'setLane' ? committedLane.record.pendingResumeInput : undefined).toBeUndefined()
   })
 
+  it('does not hide Agent terminal-state storage rejection behind a Lane outcome', async () => {
+    const runtime = new PulseRuntime()
+    const program: LaneProgram = { id: 'agent-state-storage-rejection', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: point('agent-state-storage-rejection', 'done') }) }
+    const { agentId } = runtime.createAgent('agent state storage rejection', program)
+    ;(runtime.storagePolicy as any).limits.maxSnapshotBytes = 1
+    await expect(runtime.start(agentId).outcome()).rejects.toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect(runtime.state.agents.get(agentId)?.state).toBe('running')
+  })
+
   it('rebuilds ready work after persistence recovery', async () => {
     const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { ok: true } }) })
     const program: LaneProgram = { id: 'recover-ready', version: '1', step: ({ lane }) => lane.resume.step === 'start'

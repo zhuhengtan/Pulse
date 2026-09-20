@@ -1471,16 +1471,16 @@ export class PulseRuntime {
     for (const lane of this.state.lanes.values()) if (lane.status === 'ready' && !this.ready.has(lane.id)) this.enqueueLane(lane.id)
   }
 
-  private commitAgentState(agentId: string, state: 'created' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled', transactionId: string): boolean {
+  private commitAgentState(agentId: string, state: 'created' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled', transactionId: string): void {
     const agent = this.state.agents.get(agentId)
-    if (!agent || agent.state === state) return true
+    if (!agent || agent.state === state) return
     const nextAgent = structuredClone(agent)
     nextAgent.state = state
     const mutations: Mutation[] = [{ op: 'setAgent', agentId, record: nextAgent }]
-    try { this.assertStorageAdmission(mutations) } catch { return false }
+    try { this.assertStorageAdmission(mutations) }
+    catch (cause) { throw cause instanceof Error ? cause : new Error(String(cause)) }
     commitMutationTransaction(this.state, this.mutationLog, transactionId, mutations, this.state.now, this.sessionId)
     this.schedulePersistence()
-    return true
   }
 
   private commitLaneControlInput(lane: LaneRecord, input: ResumeInput, event: import('../core/types.js').RuntimeEventInput, patch: Partial<LaneRecord> = {}): boolean {
