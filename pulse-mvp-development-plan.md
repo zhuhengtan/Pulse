@@ -64,7 +64,7 @@
 | 自适应模型路由 | `AdaptiveModelRouter` 基于质量、延迟、价格、缓存和探索项重排合规候选；Provider Executor 自动记录 Attempt 反馈，并支持经过校验的 snapshot/restore | `tests/adaptive-routing.test.ts`、`tests/provider-host.test.ts` | `0d17d7c`、`4c65d38` |
 | DSL Draft 数组语义与运行诊断 | `push→append`、数组索引/splice/sort→整数组 set；explain 补充队列、等待、watchdog、preparation、execution metadata | `tests/dsl-context.test.ts`、`tests/runtime-control.test.ts` | `d5c6ef2`、`f57ae27` |
 | Mutation 事务预检 | clone 预检失败不写日志、不改变运行时；提交时保留 Lane/Effect 对象身份；日志预备失败不消耗序号，状态 apply 与日志提交分层 | `tests/storage-mutation-log.test.ts` | `70c3534`、`6c89fe2` |
-| Tool Schema 与 Provider 上限 | 不支持的 Zod 类型构建时 fail-closed；Anthropic `maxOutputTokens` 不再写死；Tool 输入在资源准入前由 Zod/Manifest JSON Schema 校验，缺少工具名/非法输入转结构化 `control_error`，不入队、不执行；低级 Manifest 工具输出也必须符合声明 schema | `tests/m3-context-adapters.test.ts`、`tests/tool-host.test.ts` | `e21907a`、`7a2ad53`、`e7017f4`、`ae21915` |
+| Tool Schema 与 Provider 上限 | 不支持的 Zod 类型构建时 fail-closed；Anthropic `maxOutputTokens` 不再写死；Tool 输入在资源准入前由 Zod/Manifest JSON Schema 校验，缺少工具名/非法输入转结构化 `control_error`，不入队、不执行；低级 Manifest 工具的 admission、直连执行与 Effect 执行入口统一校验输入，输出也必须符合声明 schema | `tests/m3-context-adapters.test.ts`、`tests/tool-host.test.ts` | `e21907a`、`7a2ad53`、`e7017f4`、`ae21915`、`2295730` |
 | 持久化恢复边界 | `persisted` 驻留状态、backend restore、在途写副作用 quarantine、journal event `txId` 一致 | `tests/storage-policy.test.ts`、`tests/storage-outbox.test.ts` | `00d49f6`、`f7ba385`、`9b22fd3`、`c0e87f6` |
 | Result residency 元数据 | ResultRecord 保留 `storageState/pinCount`，并与 StoragePolicy 的 pin/持久化确认同步；residency 元数据不参与正文哈希 | `tests/storage-policy.test.ts` | 本轮 Result residency 提交 |
 | Snapshot 外部索引与读穿 | Lane/Global Context Snapshot 正文可写入 SnapshotStore，持久化 envelope 只保留稳定引用；恢复时读穿，缺少 SnapshotStore fail-closed | `tests/storage-outbox.test.ts` | 本轮 SnapshotStore 提交 |
@@ -603,6 +603,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `7a2ad53`：Tool Registry 在资源准入前执行输入 schema 校验；未知/非法工具输入不再被 preparer 吞掉，Runtime 以结构化 `control_error` 拒绝并保持 Effect 未入队。
 - `e7017f4`：ToolEffect 缺少可信工具名时在 admission 阶段直接拒绝，避免无名 Effect 绕过准入进入派发队列。
 - `ae21915`：Tool SDK 对低级 Manifest 工具复用受支持的 JSON Schema 子集做输入准入与输出校验，避免绕过 `defineTool()` 的手写工具伪造成功结果。
+- `2295730`：ToolRegistry 的 `execute()` 与 `executeDetailed()` 入口统一执行 Manifest 输入校验和输出 schema 校验，消除直连调用绕过契约的路径。
 - `059d4d3`：FilesystemTool 对既有路径使用真实路径校验、对写入目标拒绝符号链接，阻断沙箱内链接逃逸到工作区外。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
