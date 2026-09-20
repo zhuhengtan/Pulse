@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import type { EffectExecution, EffectExecutor, EffectRecord, JsonValue, RuntimeError, WorkerHandler, WorkerLease, WorkerSubmitOptions, WorkerTaskRecord } from '@pulse/runtime'
 import { WorkerCoordinator } from '@pulse/runtime'
@@ -31,12 +32,35 @@ function send(response: import('node:http').ServerResponse, status: number, valu
 
 function errorMessage(cause: unknown): string { return cause instanceof Error ? cause.message : String(cause) }
 
+type AuthTokenSource = string | readonly string[]
+
+function secretEquals(left: string, right: string): boolean {
+  const leftHash = createHash('sha256').update(left).digest()
+  const rightHash = createHash('sha256').update(right).digest()
+  return timingSafeEqual(leftHash, rightHash)
+}
+
+function authorized(request: IncomingMessage, source: AuthTokenSource | undefined): boolean {
+  if (source === undefined) return true
+  const tokens = typeof source === 'string' ? [source] : source
+  const presented = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice('Bearer '.length) : undefined
+  return presented !== undefined && tokens.some((token) => secretEquals(presented, token))
+}
+
 export interface WorkerHttpServer {
   readonly url: string
   close(): Promise<void>
 }
 
-export interface WorkerHttpServerOptions { host?: string; port?: number; authToken?: string; recoveryIntervalMs?: number }
+export interface WorkerHttpServerOptions {
+  host?: string
+  port?: number
+  authToken?: string
+  authTokens?: readonly string[]
+  /** Resolve accepted credentials for every request so key rotation can overlap old and new tokens. */
+  authTokenProvider?: () => AuthTokenSource
+  recoveryIntervalMs?: number
+}
 
 export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinator, options: WorkerHttpServerOptions = {}): Promise<WorkerHttpServer> {
   const registrations = new Map<string, () => void>()
@@ -44,8 +68,8 @@ export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinato
     try {
       const method = request.method ?? 'GET'
       const path = request.url?.split('?')[0] ?? '/'
-      const configuredToken = options.authToken
-      if (configuredToken !== undefined && request.headers.authorization !== `Bearer ${configuredToken}`) { send(response, 401, { error: 'WORKER_HTTP_UNAUTHORIZED' }); return }
+      const configuredTokens = options.authTokenProvider?.() ?? options.authTokens ?? options.authToken
+      if (!authorized(request, configuredTokens)) { send(response, 401, { error: 'WORKER_HTTP_UNAUTHORIZED' }); return }
       if (method === 'GET' && path === '/health') { send(response, 200, { ok: true }); return }
       if (method !== 'POST') { send(response, 405, { error: 'WORKER_HTTP_METHOD_NOT_ALLOWED' }); return }
       const body = object(await readBody(request))

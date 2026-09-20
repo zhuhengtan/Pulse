@@ -39,6 +39,26 @@ describe('HTTP Worker transport', () => {
     } finally { await server.close() }
   })
 
+  it('supports overlapping token rotation without restarting the coordinator', async () => {
+    const coordinator = new Coordinator()
+    let acceptedTokens: readonly string[] = ['old-worker-token']
+    const server = await startWorkerCoordinatorServer(coordinator, { authTokenProvider: () => acceptedTokens })
+    const oldClient = new HttpWorkerClient({ baseUrl: server.url, workerId: 'old-worker', pollMs: 1, authToken: 'old-worker-token' })
+    const newClient = new HttpWorkerClient({ baseUrl: server.url, workerId: 'new-worker', pollMs: 1, authToken: 'new-worker-token' })
+    try {
+      await oldClient.register()
+      acceptedTokens = ['new-worker-token', 'old-worker-token']
+      await newClient.register()
+      acceptedTokens = ['new-worker-token']
+      await expect(oldClient.unregister()).rejects.toThrow('WORKER_HTTP_UNAUTHORIZED')
+      await expect(newClient.unregister()).resolves.toBeUndefined()
+    } finally {
+      await oldClient.unregister().catch(() => undefined)
+      await newClient.unregister().catch(() => undefined)
+      await server.close()
+    }
+  })
+
   it('executes a Runtime Effect through an HTTP polling Worker with heartbeat renewal', async () => {
     const coordinator = new Coordinator()
     const server = await startWorkerCoordinatorServer(coordinator)
