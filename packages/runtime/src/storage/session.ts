@@ -21,6 +21,7 @@ export interface SessionSnapshot {
     forkAffinity?: 'off' | 'advise'
     historySoftTokens?: number
     historyHardTokens?: number
+    trustedSanitizerIds?: string[]
   }
 }
 
@@ -51,6 +52,7 @@ export function exportRuntimeState(state: RuntimeState): SessionSnapshot {
       forkAffinity: state.forkAffinity,
       historySoftTokens: state.historySoftTokens,
       historyHardTokens: state.historyHardTokens,
+      trustedSanitizerIds: [...state.trustedSanitizerIds].sort(),
     },
   }
 }
@@ -60,7 +62,7 @@ export function serializeRuntimeState(state: RuntimeState): JsonValue { return e
 export function importRuntimeState(snapshot: SessionSnapshot | JsonValue): RuntimeState {
   const value = snapshot as SessionSnapshot
   if (!value || value.schemaVersion !== 1 || !value.state || !Array.isArray(value.state.agents) || !Array.isArray(value.state.lanes) || !Array.isArray(value.state.effects) || !Array.isArray(value.state.waits) || !Array.isArray(value.state.results) || !Array.isArray(value.state.events)) throw new Error('INVALID_SESSION_SNAPSHOT')
-  const state = createRuntimeState(value.state.maxTotalLanes, { maxQueuedEffects: value.state.maxQueuedEffects, maxRunning: { llm: decodeNumber(value.state.maxRunning.llm), tool: decodeNumber(value.state.maxRunning.tool), agent: decodeNumber(value.state.maxRunning.agent), none: decodeNumber(value.state.maxRunning.none) }, forkAffinity: value.state.forkAffinity ?? 'off', ...(value.state.historySoftTokens === undefined ? {} : { historySoftTokens: value.state.historySoftTokens }), ...(value.state.historyHardTokens === undefined ? {} : { historyHardTokens: value.state.historyHardTokens }) })
+  const state = createRuntimeState(value.state.maxTotalLanes, { maxQueuedEffects: value.state.maxQueuedEffects, maxRunning: { llm: decodeNumber(value.state.maxRunning.llm), tool: decodeNumber(value.state.maxRunning.tool), agent: decodeNumber(value.state.maxRunning.agent), none: decodeNumber(value.state.maxRunning.none) }, forkAffinity: value.state.forkAffinity ?? 'off', ...(value.state.historySoftTokens === undefined ? {} : { historySoftTokens: value.state.historySoftTokens }), ...(value.state.historyHardTokens === undefined ? {} : { historyHardTokens: value.state.historyHardTokens }), ...(value.state.trustedSanitizerIds === undefined ? {} : { trustedSanitizerIds: value.state.trustedSanitizerIds }) })
   state.now = value.state.now
   state.nextIds = { ...value.state.nextIds, proposal: value.state.nextIds.proposal ?? 1 }
   for (const [id, agent] of value.state.agents) state.agents.set(id, { ...agent, globalVersions: new Map(agent.globalVersions.map(([version, context]) => [version, structuredClone(context)] as [number, JsonValue])) })

@@ -352,8 +352,19 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       if (!action.outputRef || state.results.has(action.outputRef)) return { rejection: error('INVALID_PRIVACY_OUTPUT_REF', 'downgrade_privacy requires a fresh outputRef') }
       if (action.targetPrivacy !== 'cloud_allowed') return { rejection: error('INVALID_PRIVACY_TARGET', 'Only cloud_allowed is a supported downgrade target.') }
       if (action.sourceRefs.length === 0) return { rejection: error('EMPTY_PRIVACY_SOURCES', 'downgrade_privacy requires at least one source reference.') }
-      if (action.method === 'human_approval' && !action.approvalRef) return { rejection: error('MISSING_PRIVACY_APPROVAL', 'human_approval requires approvalRef.') }
-      if (action.method === 'sanitizer' && !action.sanitizerId) return { rejection: error('MISSING_PRIVACY_SANITIZER', 'sanitizer requires sanitizerId.') }
+      if (action.method === 'human_approval') {
+        if (!action.approvalRef) return { rejection: error('MISSING_PRIVACY_APPROVAL', 'human_approval requires approvalRef.') }
+        const approval = state.results.get(action.approvalRef)
+        if (!approval) return { rejection: error('UNKNOWN_PRIVACY_APPROVAL', 'approvalRef must reference a published approval result.') }
+        if (!resultVisible(lane, action.approvalRef)) return { rejection: error('RESULT_NOT_VISIBLE', 'approvalRef is not visible to this Lane.') }
+        const approvalValue = approval.value
+        const approved = approvalValue === true || (approvalValue && typeof approvalValue === 'object' && !Array.isArray(approvalValue) && (approvalValue as Record<string, JsonValue>).approved === true)
+        if (!approved) return { rejection: error('PRIVACY_APPROVAL_REQUIRED', 'approvalRef must contain an explicit approved=true decision.') }
+      }
+      if (action.method === 'sanitizer') {
+        if (!action.sanitizerId) return { rejection: error('MISSING_PRIVACY_SANITIZER', 'sanitizer requires sanitizerId.') }
+        if (!state.trustedSanitizerIds.has(action.sanitizerId)) return { rejection: error('UNTRUSTED_SANITIZER', `Sanitizer ${action.sanitizerId} is not trusted by the Runtime policy.`) }
+      }
       const sourcePrivacy = derivedPrivacy(state, lane, action.sourceRefs)
       if (sourcePrivacy.error) return { rejection: error(sourcePrivacy.error, 'Privacy downgrade references an unknown result.') }
       const result: import('../core/types.js').ResultRecord = {

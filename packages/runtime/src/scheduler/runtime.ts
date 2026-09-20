@@ -53,6 +53,7 @@ export interface RuntimeConfig {
   watchdogNoProgressThreshold?: number
   maxPreparingLLMs?: number
   maxPreparedLLMs?: number
+  trustedSanitizerIds?: string[]
   storagePolicy?: StoragePolicyConfig
   persistence?: RuntimePersistenceSnapshot
   effectExecutor?: EffectExecutor
@@ -122,7 +123,8 @@ export class PulseRuntime {
 
   constructor(config: RuntimeConfig = {}) {
     const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
-    this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }), ...(config.forkAffinity === undefined ? {} : { forkAffinity: config.forkAffinity }), ...(config.historySoftTokens === undefined ? {} : { historySoftTokens: config.historySoftTokens }), ...(config.historyHardTokens === undefined ? {} : { historyHardTokens: config.historyHardTokens }) })
+    this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }), ...(config.forkAffinity === undefined ? {} : { forkAffinity: config.forkAffinity }), ...(config.historySoftTokens === undefined ? {} : { historySoftTokens: config.historySoftTokens }), ...(config.historyHardTokens === undefined ? {} : { historyHardTokens: config.historyHardTokens }), ...(config.trustedSanitizerIds === undefined ? {} : { trustedSanitizerIds: config.trustedSanitizerIds }) })
+    if (config.trustedSanitizerIds) for (const sanitizerId of config.trustedSanitizerIds) this.state.trustedSanitizerIds.add(sanitizerId)
     this.sessionId = config.sessionId ?? 'session-local'
     this.storagePolicy = restored?.storagePolicy ?? new SessionStoragePolicy(config.storagePolicy)
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
