@@ -10,7 +10,7 @@ import { assertProgramPure } from '../dsl/program.js'
 import { FactInbox, ObservationInbox } from '../core/inbox.js'
 import { observeProgress, type ProgressObservation } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
-import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, externalizeRuntimeSnapshotBodies, hydrateRuntimeResultBodies, hydrateRuntimeSnapshotBodies, importRuntimePersistence, withRuntimePersistenceIntegrity, type RuntimePersistenceBackend, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
+import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, externalizeRuntimeSnapshotBodies, hydrateRuntimeResultBodies, hydrateRuntimeSnapshotBodies, importRuntimePersistence, withRuntimePersistenceIntegrity, type RuntimePersistenceBackend, type RuntimePersistenceCompatibility, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
 import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import { apply, type Mutation } from '../core/mutations.js'
@@ -70,6 +70,8 @@ export interface RuntimeConfig {
   persistence?: RuntimePersistenceSnapshot
   programs?: LaneProgram[]
   toolVersions?: Record<string, string>
+  policyVersion?: string
+  routerVersion?: string
   effectExecutor?: EffectExecutor
   effectSubmissionPreparer?: (submission: EffectSubmission) => EffectSubmission
   telemetryExporter?: RuntimeTelemetryExporter
@@ -131,6 +133,9 @@ export class PulseRuntime {
   private readonly persistenceBackend: RuntimePersistenceBackend | undefined
   private readonly enforcingRecoveryPrograms: boolean
   private readonly toolVersions: Readonly<Record<string, string>>
+  private readonly recoveryCompatibility: RuntimePersistenceCompatibility | undefined
+  private readonly policyVersion: string | undefined
+  private readonly routerVersion: string | undefined
   private readonly budget: RuntimeBudgetConfig
   private persistenceDigest: string | undefined
   private readonly budgetCost = new Map<string, number>()
@@ -183,6 +188,8 @@ export class PulseRuntime {
     const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
     this.enforcingRecoveryPrograms = restored !== undefined
     this.toolVersions = { ...(config.toolVersions ?? {}) }
+    this.policyVersion = config.policyVersion
+    this.routerVersion = config.routerVersion
     this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }), ...(config.forkAffinity === undefined ? {} : { forkAffinity: config.forkAffinity }), ...(config.historySoftTokens === undefined ? {} : { historySoftTokens: config.historySoftTokens }), ...(config.historyHardTokens === undefined ? {} : { historyHardTokens: config.historyHardTokens }), ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }), ...(config.trustedSanitizerIds === undefined ? {} : { trustedSanitizerIds: config.trustedSanitizerIds }) })
     if (config.trustedSanitizerIds) for (const sanitizerId of config.trustedSanitizerIds) this.state.trustedSanitizerIds.add(sanitizerId)
     this.sessionId = config.sessionId ?? 'session-local'
@@ -192,6 +199,7 @@ export class PulseRuntime {
     this.outbox = restored?.outbox ?? new EffectOutbox()
     this.factInbox = restored?.factInbox === undefined ? new FactInbox<HostCommand>() : FactInbox.fromSnapshot<HostCommand>(restored.factInbox as unknown as import('../core/inbox.js').FactInboxSnapshot<HostCommand>)
     for (const program of config.programs ?? []) this.register(program)
+    this.recoveryCompatibility = restored?.compatibility
     const restoredCommandIds = this.factInbox.snapshot().seen.map((eventId) => /^host-command-(\d+)$/.exec(eventId)?.[1]).filter((value): value is string => value !== undefined).map(Number)
     if (restoredCommandIds.length) this.hostCommandSeq = Math.max(...restoredCommandIds) + 1
     if (restored?.quarantine) this.quarantine.restore(restored.quarantine)
@@ -357,11 +365,11 @@ export class PulseRuntime {
   backgroundAgents(): BackgroundAgentInfo[] {
     return [...this.state.agents.values()].filter((agent) => agent.detached === true).map((agent) => ({ agentId: agent.id, rootLaneId: agent.rootLaneId, state: agent.state ?? 'created', detached: true }))
   }
-  exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine, this.storagePolicy, this.factInbox.snapshot()) }
+  exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine, this.storagePolicy, this.factInbox.snapshot(), this.persistenceCompatibility()) }
   async persist(backend: RuntimePersistenceBackend): Promise<void> {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
-    const exported = exportRuntimePersistence(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, this.factInbox.snapshot())
+    const exported = exportRuntimePersistence(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, this.factInbox.snapshot(), this.persistenceCompatibility())
     const withResults = backend.resultStore === undefined ? exported : await externalizeRuntimeResultBodies(exported, backend.resultStore)
     const snapshot = backend.snapshotStore === undefined ? withResults : await externalizeRuntimeSnapshotBodies(withResults, backend.snapshotStore)
     await backend.save(snapshot, backend === this.persistenceBackend ? this.persistenceDigest : undefined)
@@ -388,7 +396,7 @@ export class PulseRuntime {
       const events = this.state.events.filter((event) => event.seq >= fromSeq && event.seq <= eventWatermark)
       if (events.length) await backend.eventArchive.append(events)
     }
-    const exported = exportRuntimeCheckpoint(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark }, this.factInbox.snapshot())
+    const exported = exportRuntimeCheckpoint(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark }, this.factInbox.snapshot(), this.persistenceCompatibility())
     const archived = backend.eventArchive === undefined || eventWatermark === undefined ? exported : withRuntimePersistenceIntegrity({ ...exported, eventArchive: { through: eventWatermark } })
     const withResults = backend.resultStore === undefined ? archived : await externalizeRuntimeResultBodies(archived, backend.resultStore)
     const snapshot = backend.snapshotStore === undefined ? withResults : await externalizeRuntimeSnapshotBodies(withResults, backend.snapshotStore)
@@ -425,6 +433,7 @@ export class PulseRuntime {
   }
   private assertRecoveryPrograms(): void {
     if (!this.enforcingRecoveryPrograms) return
+    if (this.recoveryCompatibility !== undefined) this.assertRecoveryCompatibility(this.recoveryCompatibility)
     for (const lane of this.state.lanes.values()) {
       if (['succeeded', 'failed', 'cancelled'].includes(lane.status)) continue
       const key = `${lane.resume.programId}@${lane.resume.programVersion}`
@@ -437,6 +446,24 @@ export class PulseRuntime {
       const name = input.name
       if (typeof name !== 'string' || this.toolVersions[name] !== effect.toolVersion) throw new Error(`TOOL_VERSION_UNAVAILABLE:${typeof name === 'string' ? `${name}@${effect.toolVersion}` : effect.toolVersion}`)
     }
+  }
+  private persistenceCompatibility(): RuntimePersistenceCompatibility {
+    return {
+      schemaVersion: 1,
+      programVersions: Object.fromEntries([...this.programs.entries()].map(([key, program]) => [key, program.version])),
+      toolVersions: { ...this.toolVersions },
+      ...(this.policyVersion === undefined ? {} : { policyVersion: this.policyVersion }),
+      ...(this.routerVersion === undefined ? {} : { routerVersion: this.routerVersion }),
+    }
+  }
+  private assertRecoveryCompatibility(expected: RuntimePersistenceCompatibility): void {
+    for (const [key, version] of Object.entries(expected.programVersions)) {
+      const program = this.programs.get(key)
+      if (!program || program.version !== version) throw new Error(`PROGRAM_VERSION_UNAVAILABLE:${key}`)
+    }
+    for (const [name, version] of Object.entries(expected.toolVersions)) if (this.toolVersions[name] !== version) throw new Error(`TOOL_VERSION_UNAVAILABLE:${name}@${version}`)
+    if (expected.policyVersion !== undefined && this.policyVersion !== expected.policyVersion) throw new Error(`POLICY_VERSION_UNAVAILABLE:${expected.policyVersion}`)
+    if (expected.routerVersion !== undefined && this.routerVersion !== expected.routerVersion) throw new Error(`ROUTER_VERSION_UNAVAILABLE:${expected.routerVersion}`)
   }
   private tryEmit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent | undefined {
     try {

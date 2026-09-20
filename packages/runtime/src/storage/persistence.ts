@@ -26,7 +26,16 @@ export interface RuntimePersistenceSnapshot {
   resultBodies?: 'inline' | 'external'
   externalResultRefs?: string[]
   eventArchive?: { through: number }
+  compatibility?: RuntimePersistenceCompatibility
   integrity?: { algorithm: 'sha256'; digest: string }
+}
+
+export interface RuntimePersistenceCompatibility {
+  schemaVersion: 1
+  programVersions: Record<string, string>
+  toolVersions: Record<string, string>
+  policyVersion?: string
+  routerVersion?: string
 }
 
 export interface RuntimeResultStore {
@@ -417,6 +426,10 @@ function validateExternalBodyReferences(snapshot: RuntimePersistenceSnapshot): v
 
 export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceSnapshot | JsonValue): void {
   const value = snapshot as RuntimePersistenceSnapshot
+  if (value?.compatibility !== undefined) {
+    const compatibility = value.compatibility
+    if (compatibility.schemaVersion !== 1 || !compatibility.programVersions || !compatibility.toolVersions || Object.entries(compatibility.programVersions).some(([key, version]) => !key || typeof version !== 'string' || version.length === 0) || Object.entries(compatibility.toolVersions).some(([key, version]) => !key || typeof version !== 'string' || version.length === 0) || (compatibility.policyVersion !== undefined && typeof compatibility.policyVersion !== 'string') || (compatibility.routerVersion !== undefined && typeof compatibility.routerVersion !== 'string')) throw new Error('INVALID_RUNTIME_PERSISTENCE_COMPATIBILITY')
+  }
   if (value?.checkpoint?.eventWatermark !== undefined && (!Number.isInteger(value.checkpoint.eventWatermark) || value.checkpoint.eventWatermark < 0)) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
   if (value?.factInbox !== undefined) try { FactInbox.fromSnapshot(value.factInbox) } catch { throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT') }
   const state = value?.checkpoint?.state?.state ?? value?.state?.state
@@ -591,12 +604,12 @@ export class SqliteRuntimePersistenceBackend implements RuntimePersistenceBacken
   }
 }
 
-export function exportRuntimePersistence(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, quarantine?: QuarantineScope, storagePolicy?: SessionStoragePolicy, factInbox?: FactInboxSnapshot): RuntimePersistenceSnapshot {
-  const snapshot: RuntimePersistenceSnapshot = { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: mutationLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }), ...(storagePolicy === undefined ? {} : { storage: storagePolicy.snapshot() }), ...(factInbox === undefined ? {} : { factInbox: structuredClone(factInbox) }) }
+export function exportRuntimePersistence(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, quarantine?: QuarantineScope, storagePolicy?: SessionStoragePolicy, factInbox?: FactInboxSnapshot, compatibility?: RuntimePersistenceCompatibility): RuntimePersistenceSnapshot {
+  const snapshot: RuntimePersistenceSnapshot = { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: mutationLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }), ...(storagePolicy === undefined ? {} : { storage: storagePolicy.snapshot() }), ...(factInbox === undefined ? {} : { factInbox: structuredClone(factInbox) }), ...(compatibility === undefined ? {} : { compatibility: structuredClone(compatibility) }) }
   return { ...snapshot, integrity: { algorithm: 'sha256', digest: integrityDigest(snapshot) } }
 }
 
-export function exportRuntimeCheckpoint(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, quarantine?: QuarantineScope, storagePolicy?: SessionStoragePolicy, options: { compactEventsThrough?: number } = {}, factInbox?: FactInboxSnapshot): RuntimePersistenceSnapshot {
+export function exportRuntimeCheckpoint(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, quarantine?: QuarantineScope, storagePolicy?: SessionStoragePolicy, options: { compactEventsThrough?: number } = {}, factInbox?: FactInboxSnapshot, compatibility?: RuntimePersistenceCompatibility): RuntimePersistenceSnapshot {
   const watermark = mutationLog.lastSequence
   const checkpointLog = new MutationLog([], watermark)
   const checkpointState = exportRuntimeState(state)
@@ -605,7 +618,7 @@ export function exportRuntimeCheckpoint(state: RuntimeState, mutationLog: Mutati
     checkpointState.state.events = checkpointState.state.events.filter((event) => event.seq > eventWatermark)
     checkpointState.state.eventsCompactedThrough = Math.max(checkpointState.state.eventsCompactedThrough ?? 0, eventWatermark)
   }
-  const snapshot: RuntimePersistenceSnapshot = { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: checkpointLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }), ...(storagePolicy === undefined ? {} : { storage: storagePolicy.snapshot() }), ...(factInbox === undefined ? {} : { factInbox: structuredClone(factInbox) }), checkpoint: { schemaVersion: 1, logWatermark: watermark, ...(eventWatermark === undefined ? {} : { eventWatermark }), state: checkpointState } }
+  const snapshot: RuntimePersistenceSnapshot = { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: checkpointLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }), ...(storagePolicy === undefined ? {} : { storage: storagePolicy.snapshot() }), ...(factInbox === undefined ? {} : { factInbox: structuredClone(factInbox) }), ...(compatibility === undefined ? {} : { compatibility: structuredClone(compatibility) }), checkpoint: { schemaVersion: 1, logWatermark: watermark, ...(eventWatermark === undefined ? {} : { eventWatermark }), state: checkpointState } }
   return { ...snapshot, integrity: { algorithm: 'sha256', digest: integrityDigest(snapshot) } }
 }
 
@@ -707,12 +720,12 @@ export function serializeRuntimePersistence(state: RuntimeState, mutationLog: Mu
   return exportRuntimePersistence(state, mutationLog, outbox, undefined, storagePolicy) as unknown as JsonValue
 }
 
-export function importRuntimePersistence(snapshot: RuntimePersistenceSnapshot | JsonValue): { state: RuntimeState; mutationLog: MutationLog; outbox: EffectOutbox; quarantine?: QuarantineEntry[]; storagePolicy?: SessionStoragePolicy; factInbox?: FactInboxSnapshot } {
+export function importRuntimePersistence(snapshot: RuntimePersistenceSnapshot | JsonValue): { state: RuntimeState; mutationLog: MutationLog; outbox: EffectOutbox; quarantine?: QuarantineEntry[]; storagePolicy?: SessionStoragePolicy; factInbox?: FactInboxSnapshot; compatibility?: RuntimePersistenceCompatibility } {
   const value = snapshot as RuntimePersistenceSnapshot
   validateRuntimePersistenceSnapshot(value)
   if (value.snapshotBodies === 'external') throw new Error('RUNTIME_SNAPSHOT_STORE_REQUIRED')
   const mutationLog = MutationLog.fromSnapshot(value.mutationLog)
   const state = importRuntimeState(value.checkpoint?.state ?? value.state)
   if (value.checkpoint) mutationLog.replay(state)
-  return { state, mutationLog, outbox: EffectOutbox.fromSnapshot(value.outbox), ...(value.quarantine === undefined ? {} : { quarantine: value.quarantine.map((entry) => ({ ...entry })) }), ...(value.storage === undefined ? {} : { storagePolicy: SessionStoragePolicy.fromSnapshot(value.storage) }), ...(value.factInbox === undefined ? {} : { factInbox: structuredClone(value.factInbox) }) }
+  return { state, mutationLog, outbox: EffectOutbox.fromSnapshot(value.outbox), ...(value.quarantine === undefined ? {} : { quarantine: value.quarantine.map((entry) => ({ ...entry })) }), ...(value.storage === undefined ? {} : { storagePolicy: SessionStoragePolicy.fromSnapshot(value.storage) }), ...(value.factInbox === undefined ? {} : { factInbox: structuredClone(value.factInbox) }), ...(value.compatibility === undefined ? {} : { compatibility: structuredClone(value.compatibility) }) }
 }
