@@ -205,7 +205,10 @@ export class PulseRuntime {
           if (effect.sideEffectPolicy === 'write') { effect.state = 'reconcile_required'; effect.executionState = 'remote_unknown'; effect.sideEffectState = 'unknown'; this.quarantine.add(effect.id, this.state.now, 'recovery_in_doubt') }
           else { effect.state = 'queued'; effect.executionState = 'local' }
         }
-        if (effect.state === 'retry_wait' && effect.retryAt !== undefined) this.clock.timers.schedule(effect.retryAt, () => { if (!effect.outcome && effect.state === 'retry_wait') { effect.state = 'queued'; delete effect.retryAt; this.dispatchQueuedEffects() } })
+        if (effect.state === 'retry_wait' && effect.retryAt !== undefined) {
+          const attemptId = effect.attemptId
+          this.clock.timers.schedule(effect.retryAt, () => this.readyRetryEffect(effect.id, attemptId))
+        }
       }
       for (const effect of [...this.state.effects.values()].sort((left, right) => left.id.localeCompare(right.id))) if (effect.state === 'reconcile_required' && effect.sideEffectState === 'unknown') {
         const releases = [...(effect.locks ?? [])].sort((left, right) => left.resource.localeCompare(right.resource) || left.mode.localeCompare(right.mode)).map((lock, index) => this.resourceLocks.restoreHeld(lock.resource, lock.mode, `${effect.id}:${effect.attemptId}:recovery:${index}`))
@@ -229,6 +232,7 @@ export class PulseRuntime {
     if (restored) for (const event of this.state.events) if (event.type === 'effect.execution_metadata') this.recordBudgetMetadata(event.data ?? event.payload)
     this.customExecutor = config.effectExecutor !== undefined
     this.executor = config.effectExecutor ?? (async () => ({ value: null }))
+    if (restored) this.clock.set(this.state.now)
     this.syncStoragePolicy()
   }
 
@@ -1086,6 +1090,20 @@ export class PulseRuntime {
     this.schedulePersistence()
   }
 
+  private readyRetryEffect(effectId: string, attemptId: string): void {
+    const current = this.state.effects.get(effectId)
+    if (!current || current.outcome || current.state !== 'retry_wait' || current.attemptId !== attemptId) return
+    const ready = structuredClone(current)
+    ready.state = 'queued'
+    delete ready.retryAt
+    const readyEvent: import('../core/types.js').RuntimeEventInput = { type: 'effect.retry_ready', effectId: current.id, data: current.attemptId }
+    this.assertStorageAdmission([{ op: 'setEffect', effectId: current.id, record: ready }, { op: 'appendEvent', event: readyEvent }])
+    Object.assign(current, ready)
+    delete current.retryAt
+    this.emit(readyEvent)
+    this.dispatchQueuedEffects()
+  }
+
   private scheduleRetry(effect: EffectRecord, error?: RuntimeError, forcedDelayMs?: number): boolean {
     if (effect.cancelRequested || (!forcedDelayMs && !effect.retryPolicy)) return false
     if (forcedDelayMs === undefined && error?.retryable === false) return false
@@ -1110,19 +1128,7 @@ export class PulseRuntime {
     this.assertStorageAdmission([{ op: 'setEffect', effectId: effect.id, record: candidate }, { op: 'appendEvent', event: retryEvent }])
     Object.assign(effect, candidate)
     this.emit(retryEvent)
-    this.clock.timers.schedule(candidate.retryAt, () => {
-      const current = this.state.effects.get(effect.id)
-      if (current && !current.outcome && current.state === 'retry_wait' && current.attemptId === effect.attemptId) {
-        const ready = structuredClone(current)
-        ready.state = 'queued'
-        delete ready.retryAt
-        const readyEvent: import('../core/types.js').RuntimeEventInput = { type: 'effect.retry_ready', effectId: current.id, data: current.attemptId }
-        try { this.assertStorageAdmission([{ op: 'setEffect', effectId: current.id, record: ready }, { op: 'appendEvent', event: readyEvent }]) } catch { return }
-        Object.assign(current, ready)
-        this.emit(readyEvent)
-        this.dispatchQueuedEffects()
-      }
-    })
+    this.clock.timers.schedule(candidate.retryAt, () => this.readyRetryEffect(effect.id, candidate.attemptId))
     return true
   }
 
@@ -1460,7 +1466,6 @@ export class PulseRuntime {
   }
 
   private expireWait(waitId: string): void {
-    this.waitDeadlineTimers.delete(waitId)
     const wait = this.state.waits.get(waitId)
     if (!wait || wait.state !== 'pending') return
     const observations: Record<string, import('../core/types.js').DependencyObservation> = {}
@@ -1470,15 +1475,36 @@ export class PulseRuntime {
       observations[dependency.key] = outcome === undefined ? { state: 'pending', target } : outcome.status === 'cancelled' && wait.spec.onCancelled === 'ignore' ? { state: 'ignored', target, outcome } : { state: 'settled', target, outcome }
     }
     const error: RuntimeError = { code: 'WAIT_DEADLINE_EXCEEDED', message: 'Wait deadline exceeded.', details: { deadlineAt: wait.spec.deadlineAt ?? this.state.now } }
-    wait.state = 'unsatisfied'
-    wait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error }
+    const resolution = { waitId: wait.id, status: 'unsatisfied' as const, dependencies: observations, error }
+    const candidateWait = structuredClone(wait)
+    candidateWait.state = 'unsatisfied'
+    candidateWait.resolution = resolution
     const lane = this.state.lanes.get(wait.laneId)
-    if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) {
-      delete lane.activeWaitId
-      if (wait.spec.onUnsatisfied === 'fail_lane') { lane.status = 'failed'; lane.version++; this.emit({ type: 'lane.failed', laneId: lane.id, data: error as unknown as JsonValue }) }
-      else { lane.status = 'ready'; lane.pendingResumeInput = { type: 'wait', resolution: wait.resolution }; this.enqueueLane(lane.id) }
+    const candidateLane = lane === undefined ? undefined : structuredClone(lane)
+    const events: import('../core/types.js').RuntimeEventInput[] = []
+    if (candidateLane && !['succeeded', 'failed', 'cancelled'].includes(candidateLane.status)) {
+      delete candidateLane.activeWaitId
+      if (wait.spec.onUnsatisfied === 'fail_lane') {
+        candidateLane.status = 'failed'
+        candidateLane.version++
+        events.push({ type: 'lane.failed', laneId: candidateLane.id, data: error as unknown as JsonValue })
+      } else {
+        candidateLane.status = 'ready'
+        candidateLane.pendingResumeInput = { type: 'wait', resolution }
+      }
     }
-    this.emit({ type: 'wait.deadline_exceeded', laneId: wait.laneId, data: { waitId: wait.id, deadlineAt: wait.spec.deadlineAt ?? this.state.now } })
+    events.push({ type: 'wait.deadline_exceeded', laneId: wait.laneId, data: { waitId: wait.id, deadlineAt: wait.spec.deadlineAt ?? this.state.now } })
+    const mutations: Mutation[] = [{ op: 'setWait', waitId: wait.id, record: candidateWait }]
+    if (candidateLane) mutations.push({ op: 'setLane', laneId: candidateLane.id, record: candidateLane })
+    for (const event of events) mutations.push({ op: 'appendEvent', event })
+    try { this.assertStorageAdmission(mutations) } catch (cause) {
+      const timerId = this.clock.timers.schedule(this.clock.now(), () => this.expireWait(waitId))
+      this.waitDeadlineTimers.set(waitId, timerId)
+      throw cause
+    }
+    this.waitDeadlineTimers.delete(waitId)
+    commitMutationTransaction(this.state, this.mutationLog, `wait:${wait.id}:deadline:${wait.spec.deadlineAt ?? this.state.now}`, mutations, this.state.now, this.sessionId)
+    if (candidateLane && candidateLane.status === 'ready') this.enqueueLane(candidateLane.id)
     this.refreshWaits()
   }
 

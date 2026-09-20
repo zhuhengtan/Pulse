@@ -112,6 +112,39 @@ describe('effect outbox and runtime persistence envelope', () => {
     await expect(PulseRuntime.restore({ load: async () => saved, save: async () => undefined })).rejects.toThrow('RUNTIME_SNAPSHOT_STORE_REQUIRED')
   })
 
+  it('flushes overdue retry timers after restoring the persisted virtual time', async () => {
+    let saved: any
+    const backend = { load: async () => saved, save: async (snapshot: any) => { saved = structuredClone(snapshot) } }
+    const program = { id: 'restore-overdue-retry', version: '1', step: () => ({ actions: [], next: { programId: 'restore-overdue-retry', programVersion: '1', step: 'done', locals: {} } }) }
+    const runtime = new PulseRuntime({ maxRunning: { tool: 0 } })
+    const { agentId, laneId } = runtime.createAgent('overdue retry', program)
+    runtime.state.effects.set('effect-1', { id: 'effect-1', agentId, ownerLaneId: laneId, key: 'retry', kind: 'tool', concurrencyClass: 'tool', input: {}, state: 'retry_wait', retryAt: 0, attemptId: 'effect-1-attempt-2', attemptNo: 2, executionState: 'local', sideEffectState: 'none', retryPolicy: { maxAttempts: 3, initialBackoffMs: 1, maxBackoffMs: 1, jitter: false } } as any)
+    runtime.state.lanes.get(laneId)!.ownedEffectIds.add('effect-1')
+    await runtime.persist(backend)
+    const restored = await PulseRuntime.restore(backend, { programs: [program] })
+    expect(restored.state.effects.get('effect-1')?.state).toBe('queued')
+    expect(restored.state.effects.get('effect-1')?.retryAt).toBeUndefined()
+    expect(restored.state.events.some((event) => event.type === 'effect.retry_ready')).toBe(true)
+  })
+
+  it('flushes overdue wait deadlines after restoring the persisted virtual time', async () => {
+    let saved: any
+    const backend = { load: async () => saved, save: async (snapshot: any) => { saved = structuredClone(snapshot) } }
+    const program = { id: 'restore-overdue-wait', version: '1', step: () => ({ actions: [], next: { programId: 'restore-overdue-wait', programVersion: '1', step: 'done', locals: {} } }) }
+    const runtime = new PulseRuntime()
+    const { agentId, laneId } = runtime.createAgent('overdue wait', program)
+    runtime.state.lanes.get(laneId)!.status = 'waiting'
+    runtime.state.lanes.get(laneId)!.activeWaitId = 'wait-1'
+    runtime.state.waits.set('wait-1', { id: 'wait-1', laneId, state: 'pending', spec: { dependencies: [], mode: 'all', onUnsatisfied: 'resume_with_error', reason: 'dependency', deadlineAt: 0 } })
+    await runtime.persist(backend)
+    const restored = await PulseRuntime.restore(backend, { programs: [program] })
+    expect(restored.state.waits.get('wait-1')?.state).toBe('unsatisfied')
+    expect(restored.state.lanes.get(laneId)?.status).toBe('ready')
+    expect(restored.state.lanes.get(laneId)?.pendingResumeInput?.type).toBe('wait')
+    expect(restored.state.events.some((event) => event.type === 'wait.deadline_exceeded')).toBe(true)
+    expect(restored.state.agents.get(agentId)).toBeDefined()
+  })
+
   it('rejects malformed persistence envelopes before recovery', () => {
     expect(() => importRuntimePersistence({ schemaVersion: 1 } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
     expect(() => importRuntimePersistence({ schemaVersion: 1, state: { state: {} }, mutationLog: {}, outbox: {} } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')

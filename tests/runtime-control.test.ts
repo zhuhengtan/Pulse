@@ -109,6 +109,19 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.events).toHaveLength(0)
   })
 
+  it('rejects wait deadline settlement before mutating the Wait or Lane when event storage admission fails', () => {
+    const runtime = new PulseRuntime({ maxRunning: { tool: 0 }, storagePolicy: { maxEventLogBytes: 100_000 } })
+    const program: LaneProgram = { id: 'wait-deadline-admission', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'blocked', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { deadlineAt: 0, onUnsatisfied: 'resume_with_error' } }], next: point('wait-deadline-admission', 'done') }) }
+    runtime.createAgent('wait deadline admission', program)
+    runtime.tick()
+    const waitId = runtime.state.lanes.get('lane-1')?.activeWaitId
+    expect(waitId).toBeDefined()
+    ;(runtime.storagePolicy as any).limits.maxEventLogBytes = 1
+    expect(() => runtime.clock.advance(0)).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect(runtime.state.waits.get(waitId as string)?.state).toBe('pending')
+    expect(runtime.state.lanes.get('lane-1')?.status).toBe('waiting')
+  })
+
   it('supports explicit quarantine abandonment without claiming side-effect absence', async () => {
     const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
     const program: LaneProgram = { id: 'abandon-quarantine', version: '1', step: ({ lane }) => lane.resume.step === 'start'
