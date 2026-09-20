@@ -241,8 +241,8 @@ export class WorkerCoordinator {
   private schedulePersistence(): void {
     if (!this.persistenceBackend) return
     const snapshot = this.snapshot()
-    const operation = this.persistencePending.then(() => this.persistenceBackend!.save(snapshot))
-    this.persistencePending = operation.catch(() => undefined)
+    const operation = this.persistencePending.catch(() => undefined).then(() => this.persistenceBackend!.save(snapshot))
+    this.persistencePending = operation
   }
 
   private requeue(task: WorkerTaskRecord): void {

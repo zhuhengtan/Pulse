@@ -137,4 +137,11 @@ describe('lease-based WorkerCoordinator', () => {
     tampered.sequence = 99
     expect(() => WorkerCoordinator.restore(tampered)).toThrow('INVALID_WORKER_INTEGRITY')
   })
+
+  it('surfaces automatic persistence failures through flushPersistence', async () => {
+    const backend = { load: async () => undefined, save: async () => { throw new Error('WORKER_PERSISTENCE_UNAVAILABLE') } }
+    const coordinator = new WorkerCoordinator({ persistenceBackend: backend })
+    coordinator.registerRemote('durability-check')
+    await expect(coordinator.flushPersistence()).rejects.toThrow('WORKER_PERSISTENCE_UNAVAILABLE')
+  })
 })
