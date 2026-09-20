@@ -583,31 +583,20 @@ export class PulseRuntime {
       const result = validateStep(this.state, lane.id, preparedOutput)
       if ('rejection' in result) {
         const consecutive = (lane.consecutiveControlErrors ?? 0) + 1
+        const controlInput: ResumeInput = { type: 'control_error', error: result.rejection, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
         if (result.rejection.code === 'FORK_AFFINITY_COLLAPSIBLE') {
-          lane.pendingResumeInput = { type: 'control_error', error: result.rejection, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
-          this.emit({ type: 'fork.affinity_advice', laneId: lane.id, data: result.rejection as unknown as JsonValue })
-          this.enqueueLane(lane.id)
+          this.commitLaneControlInput(lane, controlInput, { type: 'fork.affinity_advice', laneId: lane.id, data: result.rejection as unknown as JsonValue })
         } else {
-          lane.consecutiveControlErrors = consecutive
           if (consecutive >= this.maxConsecutiveControlErrors) this.failLane(lane, { code: 'CONTROL_ERROR_LOOP', message: 'Lane exceeded the consecutive control error limit.', details: { lastError: result.rejection as unknown as JsonValue } })
-          else {
-            lane.pendingResumeInput = { type: 'control_error', error: result.rejection, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
-            this.emit({ type: 'step.rejected', laneId: lane.id, data: result.rejection as unknown as JsonValue })
-            this.enqueueLane(lane.id)
-          }
+          else this.commitLaneControlInput(lane, controlInput, { type: 'step.rejected', laneId: lane.id, data: result.rejection as unknown as JsonValue }, { consecutiveControlErrors: consecutive })
         }
       } else {
         let watchdogObservation: ProgressObservation | undefined
         if (preparedOutput.actions.some((action) => action.type === 'submit_effects')) {
           const observation = observeProgress(lane, preparedOutput, this.state, lane.progressWatchdog, { noProgressThreshold: this.watchdogNoProgressThreshold, repeatedActionThreshold: this.watchdogRepeatedActionThreshold, admission: true })
           if (observation.rejected) {
-            lane.progressWatchdog = observation.state
-            if (observation.state.interventionLevel >= 3) this.failLane(lane, observation.rejected)
-            else {
-              lane.pendingResumeInput = { type: 'control_error', error: observation.rejected, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
-              this.emit({ type: 'progress.intervention_applied', laneId: lane.id, data: observation.rejected as unknown as JsonValue })
-              this.enqueueLane(lane.id)
-            }
+            if (observation.state.interventionLevel >= 3) this.failLane(lane, observation.rejected, { progressWatchdog: observation.state })
+            else this.commitLaneControlInput(lane, { type: 'control_error', error: observation.rejected, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }, { type: 'progress.intervention_applied', laneId: lane.id, data: observation.rejected as unknown as JsonValue }, { progressWatchdog: observation.state })
             progressed++
             continue
           }
@@ -1488,8 +1477,28 @@ export class PulseRuntime {
     return true
   }
 
-  private failLane(lane: LaneRecord, failure: RuntimeError): void {
+  private commitLaneControlInput(lane: LaneRecord, input: ResumeInput, event: import('../core/types.js').RuntimeEventInput, patch: Partial<LaneRecord> = {}): boolean {
     const nextLane = structuredClone(lane)
+    nextLane.pendingResumeInput = structuredClone(input)
+    Object.assign(nextLane, structuredClone(patch))
+    nextLane.version = lane.version + 1
+    const mutations: Mutation[] = [{ op: 'setLane', laneId: lane.id, record: nextLane }, { op: 'appendEvent', event }]
+    try { this.assertStorageAdmission(mutations) }
+    catch (cause) {
+      this.failLane(lane, { code: 'SESSION_STORAGE_LIMIT_EXCEEDED', message: cause instanceof Error ? cause.message : String(cause) }, patch)
+      return false
+    }
+    commitMutationTransaction(this.state, this.mutationLog, `lane:${lane.id}:control-error:${nextLane.version}`, mutations, this.state.now, this.sessionId)
+    Object.assign(lane, nextLane)
+    this.state.lanes.set(lane.id, lane)
+    this.enqueueLane(lane.id)
+    this.schedulePersistence()
+    return true
+  }
+
+  private failLane(lane: LaneRecord, failure: RuntimeError, patch: Partial<LaneRecord> = {}): void {
+    const nextLane = structuredClone(lane)
+    Object.assign(nextLane, structuredClone(patch))
     nextLane.status = 'failed'
     nextLane.failure = { error: structuredClone(failure), privacy: 'public' }
     nextLane.version++

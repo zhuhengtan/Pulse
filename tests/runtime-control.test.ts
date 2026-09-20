@@ -242,6 +242,19 @@ describe('runtime control boundaries', () => {
     expect(recovered.state.agents.has(agentId)).toBe(true)
   })
 
+  it('commits control-error resume input and its audit event atomically', () => {
+    const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
+    const program: LaneProgram = { id: 'atomic-control-error', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'bad', kind: 'tool', concurrencyClass: 'tool', input: {}, locks: [{ resource: 'same', mode: 'shared' }, { resource: 'same', mode: 'exclusive' }] }] }], next: point('atomic-control-error', 'retry') }) }
+    const { laneId } = runtime.createAgent('atomic control error', program)
+    const lane = runtime.state.lanes.get(laneId)!
+    runtime.tick()
+    expect(runtime.state.lanes.get(laneId)).toBe(lane)
+    expect(lane.pendingResumeInput).toMatchObject({ type: 'control_error', error: { code: 'DUPLICATE_EFFECT_LOCK' } })
+    expect(lane.version).toBe(1)
+    const transaction = runtime.mutationLog.entries.find((entry) => entry.transactionId === `lane:${laneId}:control-error:1`)
+    expect(transaction?.mutations.map((mutation) => mutation.op)).toEqual(['setLane', 'appendEvent'])
+  })
+
   it('rebuilds ready work after persistence recovery', async () => {
     const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { ok: true } }) })
     const program: LaneProgram = { id: 'recover-ready', version: '1', step: ({ lane }) => lane.resume.step === 'start'
