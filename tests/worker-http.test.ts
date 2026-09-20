@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createHttpWorkerEffectExecutor, HttpWorkerClient, startHttpWorker, startWorkerCoordinatorServer } from '@pulse/adapters'
 import { PulseRuntime } from '@pulse/runtime'
-import type { JsonValue, LaneProgram, WorkerCoordinator } from '@pulse/runtime'
+import type { EffectRecord, JsonValue, LaneProgram, WorkerCoordinator } from '@pulse/runtime'
 import { WorkerCoordinator as Coordinator } from '@pulse/runtime'
 import { readFile } from 'node:fs/promises'
 import { request as httpsRequest } from 'node:https'
@@ -93,6 +93,26 @@ describe('HTTP Worker transport', () => {
     })
     const client = new HttpWorkerClient({ baseUrl: 'http://unreachable.invalid', workerId: 'partitioned', requestTimeoutMs: 5, fetch: hangingFetch })
     await expect(client.register()).rejects.toThrow('WORKER_HTTP_TIMEOUT')
+  })
+
+  it('routes an ambiguous remote write into reconciliation instead of retrying blindly', async () => {
+    const coordinator = new Coordinator()
+    const server = await startWorkerCoordinatorServer(coordinator)
+    const nativeFetch = globalThis.fetch
+    const partitionedFetch: typeof globalThis.fetch = async (input, init) => {
+      if (String(input).endsWith('/tasks/get')) throw new Error('fetch failed')
+      return nativeFetch(input, init)
+    }
+    const client = new HttpWorkerClient({ baseUrl: server.url, workerId: 'runtime-host', requestTimeoutMs: 50, fetch: partitionedFetch })
+    const executor = createHttpWorkerEffectExecutor(client)
+    const effect = { id: 'effect-remote-unknown', attemptId: 'effect-remote-unknown-attempt-1', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, state: 'running', executionState: 'running', sideEffectState: 'none', sideEffectPolicy: 'write' } as EffectRecord
+    try {
+      const result = await executor(effect, new AbortController().signal)
+      expect(result.executionState).toBe('remote_unknown')
+      expect(result.sideEffectState).toBe('unknown')
+      expect(result.executionRef).toMatchObject({ transport: 'http-worker', taskId: 'effect-remote-unknown:effect-remote-unknown-attempt-1' })
+      expect(coordinator.get('effect-remote-unknown:effect-remote-unknown-attempt-1')).toMatchObject({ state: 'queued' })
+    } finally { await server.close() }
   })
 
   it('executes a Runtime Effect through an HTTP polling Worker with heartbeat renewal', async () => {

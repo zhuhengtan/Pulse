@@ -258,7 +258,21 @@ export async function startHttpWorker(client: HttpWorkerClient, handler: WorkerH
 
 export function createHttpWorkerEffectExecutor(client: HttpWorkerClient, options: { leaseMs?: number } = {}): EffectExecutor {
   return async (effect: Readonly<EffectRecord>, signal: AbortSignal): Promise<EffectExecution> => {
-    const value = await client.submit({ effectId: effect.id, attemptId: effect.attemptId, kind: effect.kind, input: effect.input }, { taskId: `${effect.id}:${effect.attemptId}`, idempotencyKey: effect.idempotencyKey ?? `${effect.id}:${effect.attemptId}`, ...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }), signal })
-    return { value, executionState: 'succeeded', sideEffectState: 'none' }
+    const taskId = `${effect.id}:${effect.attemptId}`
+    const idempotencyKey = effect.idempotencyKey ?? taskId
+    const executionRef = { transport: 'http-worker', taskId, idempotencyKey }
+    const sideEffectState = effect.sideEffectPolicy === 'write' ? 'applied' as const : 'none' as const
+    try {
+      const value = await client.submit({ effectId: effect.id, attemptId: effect.attemptId, kind: effect.kind, input: effect.input }, { taskId, idempotencyKey, ...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }), signal })
+      return { value, executionState: 'succeeded', sideEffectState, executionRef }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      if (message === 'WORKER_CANCELLED' || message === 'WORKER_FAILED' || /^WORKER_HTTP_4\d\d$/.test(message)) throw cause
+      const task = await client.get(taskId).catch(() => undefined)
+      if (task?.state === 'succeeded') return { value: task.result ?? null, executionState: 'succeeded', sideEffectState, executionRef }
+      if (task?.state === 'failed') return { value: null, executionState: 'failed', sideEffectState: 'none', executionRef, error: task.error ?? { code: 'WORKER_FAILED', message: 'Remote Worker task failed.' } }
+      if (task?.state === 'cancelled') return { value: null, status: 'cancelled', executionState: 'failed', sideEffectState: 'none', executionRef, error: { code: 'WORKER_CANCELLED', message: 'Remote Worker task was cancelled.' } }
+      return { value: null, executionState: 'remote_unknown', sideEffectState: effect.sideEffectPolicy === 'write' ? 'unknown' : 'none', executionRef, error: { code: 'WORKER_EXECUTION_UNKNOWN', message: `Remote Worker task outcome is unknown: ${message}` } }
+    }
   }
 }
