@@ -17,7 +17,17 @@ import { ContextMerger, type MergePlan } from '../context/merger.js'
 import { historyPressure } from '../context/builder.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number }
-export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput; errorBoundary?: (error: RuntimeError, context: LaneStepContext) => LaneStepOutput }
+export interface LaneProgram {
+  id: string
+  version: string
+  entry?: string
+  step: (context: LaneStepContext) => LaneStepOutput
+  errorBoundary?: (error: RuntimeError, context: LaneStepContext) => LaneStepOutput
+  seriesMember?: { programId: string; programVersion: string }
+  seriesMemberProgram?: LaneProgram
+  seriesKeys?: string[]
+  seriesOnMemberFailure?: 'continue' | 'abort'
+}
 export interface EffectExecution { value: JsonValue; summary?: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled'; metadata?: JsonValue }
 export type EffectExecutor = (effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<EffectExecution>
 type HostCommand = { type: 'reply'; effectId: string; value: JsonValue } | { type: 'cancel'; agentId: string; reason: string }
@@ -111,7 +121,7 @@ export class PulseRuntime {
     this.executor = config.effectExecutor ?? (async () => ({ value: null }))
   }
 
-  register(program: LaneProgram): void { this.programs.set(`${program.id}@${program.version}`, program) }
+  register(program: LaneProgram): void { this.programs.set(`${program.id}@${program.version}`, program); if (program.seriesMemberProgram) this.register(program.seriesMemberProgram) }
   createAgent(request: AgentCreateRequest): { agentId: string; laneId: string }
   createAgent(goal: string, program: LaneProgram, agentId?: string): { agentId: string; laneId: string }
   createAgent(goalOrRequest: string | AgentCreateRequest, program?: LaneProgram, agentId?: string): { agentId: string; laneId: string } {
@@ -131,6 +141,7 @@ export class PulseRuntime {
     const parent = request.parentAgentId === undefined ? undefined : this.state.agents.get(request.parentAgentId)
     if (request.parentAgentId !== undefined && !parent) throw new Error(`PARENT_AGENT_NOT_FOUND:${request.parentAgentId}`)
     const { agent, root } = createAgent(this.state, request.goal, { programId: request.program.id, programVersion: request.program.version, step: (request.program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(initialGlobal === undefined ? {} : { initialGlobal }), ...(request.parentAgentId === undefined ? {} : { parentAgentId: request.parentAgentId, depth: (parent?.depth ?? 0) + 1 }) })
+    if (request.program.seriesKeys?.length) root.resume.locals = { $sdk: { series: { keys: [...request.program.seriesKeys], index: 0 } } }
     root.enqueueSeq = this.enqueueSeq++
     agent.state = 'running'
     this.ready.enqueue(readyItemFromLane(root))
@@ -161,6 +172,40 @@ export class PulseRuntime {
 
   enqueueLane(laneId: string): void { const lane = this.state.lanes.get(laneId); if (lane && lane.status === 'ready') { lane.enqueueSeq = this.enqueueSeq++; lane.readySince = this.state.now; this.ready.enqueue(readyItemFromLane(lane)) } }
 
+  private seriesStep(program: LaneProgram, context: LaneStepContext): LaneStepOutput {
+    const locals = context.lane.resume.locals && typeof context.lane.resume.locals === 'object' && !Array.isArray(context.lane.resume.locals) ? context.lane.resume.locals as Record<string, JsonValue> : {}
+    const sdkValue = locals.$sdk && typeof locals.$sdk === 'object' && !Array.isArray(locals.$sdk) ? locals.$sdk as Record<string, JsonValue> : {}
+    const seriesValue = sdkValue.series && typeof sdkValue.series === 'object' && !Array.isArray(sdkValue.series) ? sdkValue.series as Record<string, JsonValue> : {}
+    const keys = Array.isArray(seriesValue.keys) ? seriesValue.keys.filter((key): key is string => typeof key === 'string') : (program.seriesKeys ?? ['member'])
+    const index = typeof seriesValue.index === 'number' && Number.isInteger(seriesValue.index) && seriesValue.index >= 0 ? seriesValue.index : 0
+    const member = this.programs.get(`${program.seriesMember!.programId}@${program.seriesMember!.programVersion}`)
+    if (!member) return { actions: [{ type: 'fail', error: { code: 'PROGRAM_NOT_REGISTERED', message: `${program.seriesMember!.programId}@${program.seriesMember!.programVersion}` } }], next: { programId: program.id, programVersion: program.version, step: 'start', locals } }
+    if (index >= keys.length) return { actions: [{ type: 'complete', result: sdkValue.seriesResults ?? { results: {} } }], next: { programId: program.id, programVersion: program.version, step: 'start', locals } }
+    const memberLocals = sdkValue.memberLocals ?? {}
+    const memberLane = structuredClone(context.lane) as LaneRecord
+    memberLane.resume = { programId: member.id, programVersion: member.version, step: typeof sdkValue.memberStep === 'string' ? sdkValue.memberStep : (member as LaneProgram & { entry?: string }).entry ?? 'start', locals: structuredClone(memberLocals) }
+    memberLane.goal = `${context.lane.goal} [series:${keys[index]}]`
+    const output = member.step({ ...context, lane: memberLane })
+    const terminal = output.actions.find((action) => action.type === 'complete' || action.type === 'fail')
+    const seriesResults = sdkValue.seriesResults && typeof sdkValue.seriesResults === 'object' && !Array.isArray(sdkValue.seriesResults) ? sdkValue.seriesResults as Record<string, JsonValue> : {}
+    const nextLocals = (nextSdk: Record<string, JsonValue>): JsonValue => ({ ...locals, $sdk: nextSdk })
+    if (terminal?.type === 'fail') {
+      seriesResults[keys[index]!] = { status: 'failed', error: terminal.error as unknown as JsonValue }
+      if ((program.seriesOnMemberFailure ?? 'continue') === 'abort') return output
+    } else if (terminal?.type === 'complete') {
+      seriesResults[keys[index]!] = { status: 'succeeded', result: terminal.result }
+    }
+    if (terminal) {
+      const nextIndex = index + 1
+      const nextSdk: Record<string, JsonValue> = { ...sdkValue, series: { keys, index: nextIndex }, seriesResults }
+      delete nextSdk.memberStep; delete nextSdk.memberLocals
+      if (nextIndex >= keys.length) return { actions: [{ type: 'complete', result: { results: seriesResults } }], next: { programId: program.id, programVersion: program.version, step: 'start', locals: nextLocals(nextSdk) } }
+      return { actions: [], next: { programId: program.id, programVersion: program.version, step: 'start', locals: nextLocals(nextSdk) } }
+    }
+    const nextSdk: Record<string, JsonValue> = { ...sdkValue, series: { keys, index }, memberStep: output.next.step, memberLocals: output.next.locals }
+    return { ...output, next: { programId: program.id, programVersion: program.version, step: 'start', locals: nextLocals(nextSdk) } }
+  }
+
   tick(): number {
     this.state.now = this.clock.now()
     for (const envelope of this.factInbox.drain()) {
@@ -184,7 +229,7 @@ export class PulseRuntime {
       if (!program) { this.failLane(lane, { code: 'PROGRAM_NOT_REGISTERED', message: `${lane.resume.programId}@${lane.resume.programVersion}` }); continue }
       let output: LaneStepOutput
       const stepContext: LaneStepContext = { lane: structuredClone(lane), state: structuredClone(this.state), ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), now: this.state.now }
-      try { output = program.step(stepContext) }
+      try { output = program.seriesMember ? this.seriesStep(program, stepContext) : program.step(stepContext) }
       catch (cause) {
         const failure: RuntimeError = { code: 'STEP_FAILED', message: cause instanceof Error ? cause.message : String(cause) }
         if (!program.errorBoundary) { this.failLane(lane, failure); continue }
