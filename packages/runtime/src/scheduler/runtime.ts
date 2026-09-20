@@ -17,7 +17,7 @@ import { appendRuntimeEvent } from '../core/events.js'
 import { apply, type Mutation } from '../core/mutations.js'
 import { ContextMerger, type MergePlan } from '../context/merger.js'
 import { appendHistory, contentHash, historyPressure, stableSerialize } from '../context/builder.js'
-import { InMemoryModelRegistry, ModelRouter, validateAdapterResult, validateJsonSchema, type ModelCapabilities, type ModelRegistry, type ModelRouteRequirements } from '../models/router.js'
+import { assignRuntimeToolCallIds, InMemoryModelRegistry, ModelRouter, validateAdapterResult, validateJsonSchema, type ModelCapabilities, type ModelRegistry, type ModelRouteRequirements } from '../models/router.js'
 import { SessionStoragePolicy, type StoragePolicyConfig } from '../storage/policy.js'
 import { collectRuntimeTelemetry, type RuntimeTelemetryExporter, type RuntimeTelemetrySnapshot } from './telemetry.js'
 import { advanceArtifactId, markArtifactPersisted, pinArtifact, prepareArtifactPublication, readArtifact, unpinArtifact, type ArtifactPublication } from '../storage/artifacts.js'
@@ -664,7 +664,7 @@ export class PulseRuntime {
     if (candidate.adapter === undefined) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'MODEL_ADAPTER_NOT_BOUND', message: `No adapter is bound to routed model ${candidate.id}.`, ...(canFallback ? { retryable: true } : {}) }, metadata: metadata(attemptBase) }
     const startedAt = Date.now()
     try {
-      const result = validateAdapterResult(await candidate.adapter.executeAttempt({ request: projection, signal, model: candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof requirements.maxOutputTokens === 'number' ? { maxOutputTokens: requirements.maxOutputTokens } : {}), ...(emitObservation === undefined ? {} : { onObservation: (chunk: string) => emitObservation({ type: 'chunk', data: chunk }) }) }))
+      const result = assignRuntimeToolCallIds(validateAdapterResult(await candidate.adapter.executeAttempt({ request: projection, signal, model: candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof requirements.maxOutputTokens === 'number' ? { maxOutputTokens: requirements.maxOutputTokens } : {}), ...(emitObservation === undefined ? {} : { onObservation: (chunk: string) => emitObservation({ type: 'chunk', data: chunk }) }) })), effect.id)
       const usage = result.usage === undefined ? { latencyMs: Math.max(0, Date.now() - startedAt) } : { ...result.usage, latencyMs: result.usage.latencyMs ?? Math.max(0, Date.now() - startedAt) }
       const attempt = { ...attemptBase, usage }
       if (result.finishReason === 'refusal') {

@@ -206,6 +206,11 @@ export interface LLMResult {
   derivedFrom?: string[]
 }
 
+/** Provider call ids are adapter-local; Runtime owns the stable ToolCall id. */
+export function assignRuntimeToolCallIds(result: LLMResult, effectId: string): LLMResult {
+  return { ...result, toolCalls: result.toolCalls.map((call, index) => ({ ...call, toolCallId: `${effectId}:tool:${index + 1}` })) }
+}
+
 export function validateJsonSchema(value: unknown, schema: unknown): boolean {
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return false
   const document = schema as Record<string, unknown>

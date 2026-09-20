@@ -51,6 +51,15 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     expect(called).toBe(false)
   })
 
+  it('rewrites provider-native tool ids to the logical Effect id', async () => {
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'tool-model', providerId: 'tool-provider', tasks: ['reason'], capabilities: { local: true, toolCalling: true, maxContextTokens: 4096 }, priority: 1 })
+    const providers = new Map<string, ProviderAdapter>([['tool-provider', { id: 'tool-provider', name: 'tool', executeAttempt: async () => ({ text: '', toolCalls: [{ toolCallId: 'provider-id', name: 'read', input: {} }], finishReason: 'tool_calls' }) }]])
+    const executor = createModelEffectExecutor({ router: new ModelRouter(registry), providers })
+    const effect = { id: 'effect-tool-id', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request: projection }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as EffectRecord
+    await expect(executor(effect, new AbortController().signal)).resolves.toMatchObject({ value: { toolCalls: [{ toolCallId: 'effect-tool-id:tool:1' }] } })
+  })
+
   it('routes local_only requests, re-enters the queue for fallback, and records attempt metadata', async () => {
     const registry = new InMemoryModelRegistry()
     registry.register({ id: 'local-first', providerId: 'p1', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 2 })

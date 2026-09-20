@@ -59,6 +59,15 @@ describe('Runtime model registry and task routes', () => {
     expect([...runtime.state.results.values()].some((result) => result.value && typeof result.value === 'object' && !Array.isArray(result.value) && result.value.text === 'registered result')).toBe(true)
   })
 
+  it('assigns ToolCall ids to the logical Runtime Effect instead of reusing provider ids', async () => {
+    const projection: LLMRequestProjection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'default', instruction: 'reason', privacy: 'public', privacyRefs: [] }, blocks: [{ kind: 'instruction', content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'default', privacy: 'public', privacyRefs: [] }
+    const runtime = new PulseRuntime()
+    runtime.models.register({ id: 'tool-model', providerId: 'p1', tasks: ['reason'], capabilities: { toolCalling: true, maxContextTokens: 4096 }, priority: 1, adapter: { executeAttempt: async () => ({ text: '', toolCalls: [{ toolCallId: 'provider-native-id', name: 'read', input: {} }], finishReason: 'tool_calls' }) } })
+    runtime.modelRouter.register({ task: 'reason', candidates: ['tool-model'] })
+    const effect = { id: 'effect-tool-id', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request: projection }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as any
+    await expect((runtime as any).executor(effect, new AbortController().signal)).resolves.toMatchObject({ value: { toolCalls: [{ toolCallId: 'effect-tool-id:tool:1' }] } })
+  })
+
   it('fails a refusal and falls back to the next registered model', async () => {
     const projection: LLMRequestProjection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'default', instruction: 'reason', privacy: 'public', privacyRefs: [] }, blocks: [{ kind: 'instruction', content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'default', privacy: 'public', privacyRefs: [] }
     const runtime = new PulseRuntime()
