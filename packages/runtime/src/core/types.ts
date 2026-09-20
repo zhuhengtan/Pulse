@@ -176,7 +176,8 @@ export interface DependencySpec {
 
 export interface WaitSpec {
   dependencies: DependencySpec[]
-  mode: 'all'
+  mode: 'all' | 'any' | 'quorum'
+  quorum?: number
   onUnsatisfied: 'fail_lane' | 'resume_with_error'
   onCancelled?: 'unsatisfied' | 'ignore'
   reason: 'startup' | 'effect' | 'dependency' | 'join' | 'timer'
@@ -259,7 +260,7 @@ export interface ForkAction extends RuntimeActionBase {
   type: 'fork'
   lanes: ForkLaneSpec[]
   affinityAck?: boolean
-  join?: { condition: 'success' | 'settled'; onUnsatisfied: 'fail_lane' | 'resume_with_error'; onCancelled?: 'unsatisfied' | 'ignore' }
+  join?: { condition: 'success' | 'settled'; mode?: WaitSpec['mode']; quorum?: number; onUnsatisfied: 'fail_lane' | 'resume_with_error'; onCancelled?: 'unsatisfied' | 'ignore' }
 }
 export interface CancelLaneAction extends RuntimeActionBase { type: 'cancel_lane'; laneId: LaneId; reason: 'SUPERSEDED' | 'USER_REQUESTED' | 'POLICY' }
 export interface ProposeCancelAction extends RuntimeActionBase { type: 'propose_cancel'; laneId: LaneId; reason: 'SUPERSEDED' | 'POLICY' }

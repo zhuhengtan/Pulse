@@ -828,25 +828,32 @@ export class PulseRuntime {
         const observations: Record<string, import('../core/types.js').DependencyObservation> = {}
         let pending = false
         let unsatisfied: RuntimeError | undefined
+        let satisfied = 0
+        let ignored = 0
+        let pendingCount = 0
         for (const dependency of wait.spec.dependencies) {
           const target = dependency.target as TargetRef
           const outcome = target.kind === 'lane' ? outcomeForLane(this.state.lanes.get(target.id)!) : this.state.effects.get(target.id)?.outcome
-          if (!outcome) { observations[dependency.key] = { state: 'pending', target }; pending = true; continue }
-          if (outcome.status === 'cancelled' && wait.spec.onCancelled === 'ignore') observations[dependency.key] = { state: 'ignored', target, outcome }
+          if (!outcome) { observations[dependency.key] = { state: 'pending', target }; pending = true; pendingCount++; continue }
+          if (outcome.status === 'cancelled' && wait.spec.onCancelled === 'ignore') { observations[dependency.key] = { state: 'ignored', target, outcome }; ignored++ }
           else if (dependency.condition === 'success' && outcome.status !== 'succeeded') { observations[dependency.key] = { state: 'settled', target, outcome }; unsatisfied = { code: 'DEPENDENCY_FAILED', message: `${dependency.key} did not succeed` } }
-          else observations[dependency.key] = { state: 'settled', target, outcome }
+          else { observations[dependency.key] = { state: 'settled', target, outcome }; satisfied++ }
         }
-        if (unsatisfied && wait.spec.onUnsatisfied === 'fail_lane') {
-          wait.state = 'unsatisfied'; wait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error: unsatisfied }
+        const required = wait.spec.mode === 'all' ? wait.spec.dependencies.length - ignored : wait.spec.mode === 'any' ? 1 : wait.spec.quorum!
+        const modeSatisfied = satisfied >= required
+        const impossible = wait.spec.mode === 'all' ? Boolean(unsatisfied && !pending) : satisfied + pendingCount < required
+        const modeUnsatisfied = !modeSatisfied && (impossible || (!pending && satisfied < required))
+        if (modeUnsatisfied && wait.spec.onUnsatisfied === 'fail_lane') {
+          wait.state = 'unsatisfied'; wait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error: unsatisfied ?? { code: 'WAIT_QUORUM_UNREACHABLE', message: 'Wait can no longer satisfy its quorum.' } }
           const lane = this.state.lanes.get(wait.laneId); if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'failed'; delete lane.activeWaitId; lane.version++ }
           changed = true
-        } else if (unsatisfied && !pending) {
+        } else if (modeUnsatisfied && (!pending || wait.spec.mode !== 'all')) {
           wait.state = 'unsatisfied'
-          wait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error: unsatisfied }
+          wait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error: unsatisfied ?? { code: 'WAIT_QUORUM_UNREACHABLE', message: 'Wait can no longer satisfy its quorum.' } }
           const lane = this.state.lanes.get(wait.laneId)
           if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'ready'; delete lane.activeWaitId; lane.pendingResumeInput = { type: 'wait', resolution: wait.resolution }; this.enqueueLane(lane.id) }
           changed = true
-        } else if (!pending && !unsatisfied) {
+        } else if (modeSatisfied || (!pending && !unsatisfied && wait.spec.mode === 'all')) {
           wait.state = 'satisfied'; wait.resolution = { waitId: wait.id, status: 'satisfied', dependencies: observations }
           const lane = this.state.lanes.get(wait.laneId)
           if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) {

@@ -85,7 +85,9 @@ function affinityGroups(lanes: ForkLaneSpec[]): AffinityGroup[] {
 }
 
 function validateWait(state: RuntimeState, laneId: string, spec: WaitSpec, locals: Map<string, TargetRef>, newTargets: Map<string, TargetRef>): string | undefined {
-  if (spec.mode !== 'all' || spec.dependencies.some((dependency) => !dependency.key || !resolveTarget(dependency.target, newTargets.size ? newTargets : locals))) return 'INVALID_WAIT_DEPENDENCY'
+  if (!['all', 'any', 'quorum'].includes(spec.mode) || spec.dependencies.length === 0 || spec.dependencies.some((dependency) => !dependency.key || !resolveTarget(dependency.target, newTargets.size ? newTargets : locals))) return 'INVALID_WAIT_DEPENDENCY'
+  if (spec.mode === 'quorum' && (!Number.isInteger(spec.quorum) || spec.quorum! < 1 || spec.quorum! > spec.dependencies.length)) return 'INVALID_WAIT_QUORUM'
+  if (spec.mode !== 'quorum' && spec.quorum !== undefined) return 'INVALID_WAIT_QUORUM'
   const keys = new Set<string>()
   const targets = new Set<string>()
   for (const dependency of spec.dependencies) {
@@ -309,7 +311,8 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       }
       if (action.join) {
         const deps = action.lanes.map((child) => ({ key: child.key, target: siblingTargets.get(child.key)!, condition: action.join!.condition }))
-        const spec: WaitSpec = { dependencies: deps, mode: 'all', onUnsatisfied: action.join.onUnsatisfied, ...(action.join.onCancelled ? { onCancelled: action.join.onCancelled } : {}), reason: 'join' }
+        const joinMode = action.join.mode ?? 'all'
+        const spec: WaitSpec = { dependencies: deps, mode: joinMode, ...(action.join.quorum === undefined ? {} : { quorum: action.join.quorum }), onUnsatisfied: action.join.onUnsatisfied, ...(action.join.onCancelled ? { onCancelled: action.join.onCancelled } : {}), reason: 'join' }
         const forkEdges = action.lanes.flatMap((child) => (child.dependsOn ?? []).map((dependency) => ({ from: siblingTargets.get(child.key)!, to: resolveTarget(dependency.target, siblingTargets) ?? resolveTarget(dependency.target, localTargets)! })))
         forkEdges.push(...deps.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: dependency.target as TargetRef })))
         if (forkEdges.some((edge) => !edge.to) || hasDependencyCycle(state, forkEdges)) return { rejection: error('DEPENDENCY_CYCLE', 'Fork dependencies would create a cycle') }
