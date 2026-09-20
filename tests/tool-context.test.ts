@@ -35,4 +35,15 @@ describe('ToolContext and manifest contract', () => {
     const registry = new ToolRegistry()
     expect(() => registry.register(defineTool({ name: 'unsafe', description: 'unsafe', supportsAbortSignal: false, input: z.object({}), output: z.object({}), execute: () => ({}) }))).toThrow('TOOL_ABORT_SIGNAL_REQUIRED')
   })
+
+  it('enforces Host allow/deny policy before discovery, admission, and execution', async () => {
+    const registry = new ToolRegistry({ allow: ['read', 'blocked'], deny: ['blocked'] })
+    registry.register(defineTool({ name: 'read', description: 'read', tags: ['safe'], input: z.object({}), output: z.object({ ok: z.boolean() }), execute: () => ({ ok: true }) }))
+    registry.register(defineTool({ name: 'blocked', description: 'blocked', tags: ['unsafe'], input: z.object({}), output: z.object({ ok: z.boolean() }), execute: () => ({ ok: true }) }))
+    expect(registry.list().map((manifest) => manifest.name)).toEqual(['read'])
+    expect(registry.discover({}).map((result) => result.manifest.name)).toEqual(['read'])
+    expect(registry.get('blocked')).toBeUndefined()
+    expect(() => registry.admission('blocked', {})).toThrow('TOOL_NOT_ALLOWED:blocked')
+    await expect(registry.execute('blocked', {}, new AbortController().signal)).rejects.toThrow('TOOL_NOT_ALLOWED:blocked')
+  })
 })

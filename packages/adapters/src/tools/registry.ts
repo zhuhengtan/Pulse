@@ -14,6 +14,7 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
     const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, import('@pulse/runtime').JsonValue> : {}
     const name = input.name
     if (typeof name !== 'string') throw new Error('INVALID_TOOL_EFFECT_INPUT')
+    if (!registry.isAllowed(name)) throw new Error(`TOOL_NOT_ALLOWED:${name}`)
     const definition = registry.get(name)
     if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`)
     const toolContext = {
