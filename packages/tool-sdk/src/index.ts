@@ -35,6 +35,7 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   manifest: ToolManifest
   resourceAdmissionMode?: 'explicit' | 'default'
   execute(input: TInput, context: ToolContext): Promise<TOutput> | TOutput
+  executionRef?(input: TInput, context: ToolContext): JsonValue
   resolveResources?(input: TInput): ResourceClaim[]
   reconcile?(executionRef: JsonValue, context: ReconcileContext): Promise<ReconcileResult<TOutput>>
   normalize?(output: TOutput): JsonValue
@@ -73,6 +74,11 @@ export class ToolRegistry {
     if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`)
     if (!definition.reconcile) throw new Error(`TOOL_NOT_RECOVERABLE:${name}`)
     return definition.reconcile(executionRef, context)
+  }
+  executionRef(name: string, input: unknown, context: ToolContext): JsonValue | undefined {
+    const definition = this.definitions.get(name)
+    if (!definition || !definition.executionRef) return undefined
+    return definition.executionRef(input, context)
   }
   resolveResources(name: string, input: unknown): ResourceClaim[] {
     const definition = this.definitions.get(name)
@@ -177,7 +183,8 @@ export function defineTool<TInput, TOutput>(config: {
   normalize?: (output: TOutput) => JsonValue
   summarize?: (output: TOutput) => JsonValue
   execute(input: TInput, context: ToolContext): Promise<TOutput> | TOutput
+  executionRef?: (input: TInput, context: ToolContext) => JsonValue
 }): ToolDefinition<TInput, TOutput> {
   const manifest: ToolManifest = { name: config.name, version: config.version ?? '1', description: config.description, inputSchema: zodToJsonSchema(config.input), outputSchema: zodToJsonSchema(config.output), concurrencyClass: config.concurrencyClass ?? 'tool', locks: config.locks ?? [], ...(config.resources === undefined ? {} : { resources: config.resources }), supportsAbortSignal: config.supportsAbortSignal ?? true, sideEffectPolicy: config.sideEffectPolicy ?? 'none', retrySafety: config.retrySafety ?? (config.sideEffectPolicy === 'write' ? 'unsafe' : 'read_only'), defaultTimeoutMs: config.defaultTimeoutMs ?? 30_000, ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }) }
-  return { manifest, resourceAdmissionMode: config.resolveResources !== undefined || config.resources !== undefined || config.locks !== undefined ? 'explicit' : 'default', execute: async (input, context) => config.output.parse(await config.execute(config.input.parse(input), context)), ...(config.resolveResources === undefined ? {} : { resolveResources: (input: TInput) => config.resolveResources!(config.input.parse(input)) }), ...(config.reconcile === undefined ? {} : { reconcile: async (executionRef: JsonValue, context: ReconcileContext) => { const result = await config.reconcile!(executionRef, context); return result.status === 'succeeded' && result.output !== undefined ? { ...result, output: config.output.parse(result.output) } : result } }), ...(config.normalize === undefined ? {} : { normalize: config.normalize }), ...(config.summarize === undefined ? {} : { summarize: (output: TOutput) => config.summarize!(output) }) }
+  return { manifest, resourceAdmissionMode: config.resolveResources !== undefined || config.resources !== undefined || config.locks !== undefined ? 'explicit' : 'default', execute: async (input, context) => config.output.parse(await config.execute(config.input.parse(input), context)), ...(config.executionRef === undefined ? {} : { executionRef: (input: TInput, context: ToolContext) => config.executionRef!(config.input.parse(input), context) }), ...(config.resolveResources === undefined ? {} : { resolveResources: (input: TInput) => config.resolveResources!(config.input.parse(input)) }), ...(config.reconcile === undefined ? {} : { reconcile: async (executionRef: JsonValue, context: ReconcileContext) => { const result = await config.reconcile!(executionRef, context); return result.status === 'succeeded' && result.output !== undefined ? { ...result, output: config.output.parse(result.output) } : result } }), ...(config.normalize === undefined ? {} : { normalize: config.normalize }), ...(config.summarize === undefined ? {} : { summarize: (output: TOutput) => config.summarize!(output) }) }
 }
