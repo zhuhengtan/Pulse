@@ -82,4 +82,13 @@ describe('built-in Child Agent Effect host', () => {
     runtime.attachAgent(childAgentId)
     expect(runtime.backgroundAgents()).toEqual([])
   })
+
+  it('does not partially detach an Agent when the audit event exceeds storage limits', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 1 } })
+    const program: LaneProgram = { id: 'detach-storage-limit', version: '1', step: () => ({ actions: [], next: point('detach-storage-limit', 'done') }) }
+    const { agentId } = runtime.createAgent('detach storage limit', program)
+    expect(() => runtime.detachAgent(agentId)).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect(runtime.state.agents.get(agentId)?.detached).toBeUndefined()
+    expect(runtime.state.events).toHaveLength(0)
+  })
 })

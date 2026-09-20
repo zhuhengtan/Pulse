@@ -262,8 +262,10 @@ export class PulseRuntime {
   detachAgent(agentId: string): BackgroundAgentInfo {
     const agent = this.state.agents.get(agentId)
     if (!agent) throw new Error(`UNKNOWN_AGENT:${agentId}`)
+    const event = { type: 'agent.detached' as const, agentId, data: { agentId } }
+    this.assertStorageAdmission([{ op: 'appendEvent', event }])
     agent.detached = true
-    this.emit({ type: 'agent.detached', agentId, data: { agentId } })
+    this.emit(event)
     this.schedulePersistence()
     return { agentId, rootLaneId: agent.rootLaneId, state: agent.state ?? 'created', detached: true }
   }
@@ -271,8 +273,10 @@ export class PulseRuntime {
     const agent = this.state.agents.get(agentId)
     if (!agent) throw new Error(`UNKNOWN_AGENT:${agentId}`)
     if (!agent.detached) return
+    const event = { type: 'agent.attached' as const, agentId, data: { agentId } }
+    this.assertStorageAdmission([{ op: 'appendEvent', event }])
     delete agent.detached
-    this.emit({ type: 'agent.attached', agentId, data: { agentId } })
+    this.emit(event)
     this.schedulePersistence()
   }
   backgroundAgents(): BackgroundAgentInfo[] {
