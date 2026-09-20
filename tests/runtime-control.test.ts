@@ -109,6 +109,17 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.events).toHaveLength(0)
   })
 
+  it('does not partially mutate a retryable Remote Unknown when retry admission fails', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 100_000 } })
+    const { agentId, laneId } = runtime.createAgent('remote retry admission', { id: 'remote-retry-admission', version: '1', step: () => ({ actions: [], next: point('remote-retry-admission', 'done') }) })
+    const effect: EffectRecord = { id: 'effect-1', agentId, ownerLaneId: laneId, key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, state: 'running', attemptId: 'effect-1-attempt-1', attemptNo: 1, executionState: 'running', sideEffectState: 'none', duplicateExecutionPolicy: 'allow', maxUnknownAttempts: 2, retryPolicy: { maxAttempts: 2, initialBackoffMs: 1, maxBackoffMs: 1, jitter: false } }
+    runtime.state.effects.set(effect.id, effect)
+    runtime.state.lanes.get(laneId)!.ownedEffectIds.add(effect.id)
+    ;(runtime.storagePolicy as any).limits.maxEventLogBytes = 1
+    expect(() => runtime.markRemoteUnknown(effect.id, 'known')).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect(runtime.state.effects.get(effect.id)).toMatchObject({ state: 'running', attemptNo: 1, attemptId: 'effect-1-attempt-1', executionState: 'running' })
+  })
+
   it('rejects reconciliation abandonment before removing the quarantine entry', () => {
     const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 100_000 } })
     const { agentId, laneId } = runtime.createAgent('abandon admission', { id: 'abandon-admission', version: '1', step: () => ({ actions: [], next: point('abandon-admission', 'done') }) })

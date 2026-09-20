@@ -944,9 +944,9 @@ export class PulseRuntime {
         const settledAttemptId = candidate.attemptId
         const running = this.executions.get(effectId)
         if (running) { running.controller.abort(); this.executions.delete(effectId) }
-        Object.assign(effect, candidate)
-        if (this.scheduleRetry(effect, { code: 'REMOTE_EXECUTION_UNKNOWN', message: 'Remote execution outcome is unknown.', details: { unknownAttempts } })) {
-          this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:remote-unknown-retry`)
+        if (this.scheduleRetry(candidate, { code: 'REMOTE_EXECUTION_UNKNOWN', message: 'Remote execution outcome is unknown.', details: { unknownAttempts } })) {
+          const retried = this.state.effects.get(effectId)
+          if (retried) { Object.assign(effect, retried); this.state.effects.set(effectId, effect) }
           this.releaseEffectLocks(effectId)
           this.outbox.ack(`${effect.id}:${settledAttemptId}`)
           this.refreshWaits()
