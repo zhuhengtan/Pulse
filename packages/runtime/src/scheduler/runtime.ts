@@ -167,7 +167,7 @@ export class PulseRuntime {
   private enqueueSeq = 1
   private readonly maxSteps: number
   private readonly maxConsecutiveControlErrors: number
-  private readonly maxRuntimeMs?: number
+  private readonly maxRuntimeAt?: number
   private readonly watchdogNoProgressThreshold: number
   private readonly watchdogRepeatedActionThreshold: number
   private readonly maxAgentDepth: number
@@ -214,6 +214,10 @@ export class PulseRuntime {
     }
     this.clock = config.clock ?? new VirtualClock()
     if (!restored && config.clock) this.state.now = this.clock.now()
+    if (config.maxRuntimeMs !== undefined) {
+      if (!Number.isFinite(config.maxRuntimeMs) || config.maxRuntimeMs < 0) throw new Error('INVALID_MAX_RUNTIME')
+      this.maxRuntimeAt = this.state.now + config.maxRuntimeMs
+    }
     this.ready = new ReadyQueue(config.agingIntervalMs ?? 1000, config.agingCap ?? Number.POSITIVE_INFINITY)
     if (restored) {
       this.clock.set(this.state.now)
@@ -242,7 +246,6 @@ export class PulseRuntime {
     }
     this.maxSteps = config.maxLaneStepsPerTick ?? 32
     this.maxConsecutiveControlErrors = config.maxConsecutiveControlErrors ?? 2
-    if (config.maxRuntimeMs !== undefined) this.maxRuntimeMs = config.maxRuntimeMs
     this.watchdogNoProgressThreshold = config.watchdogNoProgressThreshold ?? 3
     this.watchdogRepeatedActionThreshold = config.watchdogRepeatedActionThreshold ?? 3
     this.maxAgentDepth = config.maxAgentDepth ?? 1
@@ -612,7 +615,7 @@ export class PulseRuntime {
         throw cause
       }
     }
-    if (this.maxRuntimeMs !== undefined && this.state.now >= this.maxRuntimeMs) for (const agent of this.state.agents.values()) if (agent.state === 'running') this.cancelAgent(agent.id, 'TIMEOUT')
+    if (this.maxRuntimeAt !== undefined && this.state.now >= this.maxRuntimeAt) for (const agent of this.state.agents.values()) if (agent.state === 'running') this.cancelAgent(agent.id, 'TIMEOUT')
     for (const timer of this.clock.timers.due(this.state.now)) timer.callback()
     let progressed = 0
     while (progressed < this.maxSteps) {

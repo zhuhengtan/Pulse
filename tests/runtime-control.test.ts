@@ -32,6 +32,21 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.now).toBeGreaterThan(0)
   })
 
+  it('treats maxRuntimeMs as a duration with a monotonic clock', () => {
+    const clock = new MonotonicClock()
+    const runtime = new PulseRuntime({ clock, maxRuntimeMs: 1_000, effectExecutor: async () => await new Promise(() => undefined) })
+    const program: LaneProgram = { id: 'monotonic-runtime-limit', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'pending', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('monotonic-runtime-limit', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('monotonic-runtime-limit', 'finish') } }
+    const { agentId } = runtime.createAgent('monotonic runtime limit', program)
+    runtime.tick()
+    expect(runtime.state.agents.get(agentId)?.state).toBe('running')
+
+    clock.advance(1_001)
+    runtime.tick()
+    expect(runtime.state.agents.get(agentId)?.state).not.toBe('running')
+  })
+
   it('fails a Lane after the configured consecutive control-error limit', () => {
     const runtime = new PulseRuntime({ maxConsecutiveControlErrors: 2 })
     const program: LaneProgram = { id: 'control-loop', version: '1', step: () => ({ actions: [], next: point('control-loop', '') }) }
