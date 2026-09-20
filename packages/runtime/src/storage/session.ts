@@ -14,6 +14,7 @@ export interface SessionSnapshot {
     toolCallCorrelations?: Array<[string, ToolCallCorrelation]>
     mergeProposals: Array<[string, MergeProposal]>
     events: RuntimeEvent[]
+    eventsCompactedThrough?: number
     nextIds: RuntimeState['nextIds']
     maxTotalLanes: number
     maxQueuedEffects: number
@@ -45,6 +46,7 @@ export function exportRuntimeState(state: RuntimeState): SessionSnapshot {
       toolCallCorrelations: [...state.toolCallCorrelations.entries()].map(([id, correlation]) => [id, structuredClone(correlation)]),
       mergeProposals: [...state.mergeProposals.entries()].map(([id, proposal]) => [id, structuredClone(proposal)]),
       events: state.events.map((event) => normalizeRuntimeEvent(event as unknown as RuntimeEventInput, event.seq, { sessionId: event.sessionId, timestamp: event.timestamp })),
+      ...(state.eventsCompactedThrough === undefined ? {} : { eventsCompactedThrough: state.eventsCompactedThrough }),
       nextIds: { ...state.nextIds },
       maxTotalLanes: state.maxTotalLanes,
       maxQueuedEffects: state.maxQueuedEffects,
@@ -76,5 +78,6 @@ export function importRuntimeState(snapshot: SessionSnapshot | JsonValue): Runti
   for (const [id, correlation] of value.state.toolCallCorrelations ?? []) state.toolCallCorrelations.set(id, structuredClone(correlation))
   for (const [id, proposal] of value.state.mergeProposals ?? []) state.mergeProposals.set(id, structuredClone(proposal))
   state.events = value.state.events.map((event) => normalizeRuntimeEvent(event as unknown as RuntimeEventInput, (event as RuntimeEvent).seq, { sessionId: (event as RuntimeEvent).sessionId, timestamp: (event as RuntimeEvent).timestamp }))
+  if (value.state.eventsCompactedThrough !== undefined) state.eventsCompactedThrough = value.state.eventsCompactedThrough
   return state
 }

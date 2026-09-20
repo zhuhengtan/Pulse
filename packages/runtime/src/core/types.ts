@@ -396,6 +396,7 @@ export interface RuntimeState {
   toolCallCorrelations: Map<string, ToolCallCorrelation>
   mergeProposals: Map<string, MergeProposal>
   events: RuntimeEvent[]
+  eventsCompactedThrough?: number
   nextIds: { agent: number; lane: number; effect: number; wait: number; result: number; proposal: number; event: number }
   maxTotalLanes: number
   maxQueuedEffects: number

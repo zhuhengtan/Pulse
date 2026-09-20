@@ -11,15 +11,17 @@ export class PulseSession {
     let cursor = fromSeq
     while (true) {
       const oldest = this.runtime.state.events[0]?.seq
-      if (oldest !== undefined && cursor + 1 < oldest) {
-        yield { type: 'gap', seq: oldest, fromSeq: cursor + 1, toSeq: oldest - 1 }
-        cursor = oldest - 1
+      const compactedThrough = this.runtime.state.eventsCompactedThrough ?? 0
+      const gapEnd = oldest === undefined ? compactedThrough : oldest - 1
+      if (cursor < gapEnd) {
+        yield { type: 'gap', seq: gapEnd, fromSeq: cursor + 1, toSeq: gapEnd }
+        cursor = gapEnd
       }
       const events = this.runtime.state.events.filter((event) => event.seq > cursor)
       for (const event of events) { cursor = event.seq; yield { type: 'fact', seq: event.seq, event } }
       for (const observation of this.runtime.observationInbox.drain(this.agentId)) yield { type: 'observation', seq: observation.seq, observation: observation as unknown as JsonValue }
       const root = [...this.runtime.state.lanes.values()].find((lane) => lane.agentId === this.agentId && lane.ownerLaneId === undefined)
-      if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status) && this.runtime.state.events.at(-1)?.seq === cursor) return
+      if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status) && (this.runtime.state.events.at(-1)?.seq ?? compactedThrough) === cursor) return
       await new Promise<void>((resolve) => setImmediate(resolve))
     }
   }

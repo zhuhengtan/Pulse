@@ -14,7 +14,7 @@ export interface RuntimePersistenceSnapshot {
   outbox: OutboxSnapshot
   quarantine?: QuarantineEntry[]
   storage?: StoragePolicySnapshot
-  checkpoint?: { schemaVersion: 1; logWatermark: number; state: SessionSnapshot }
+  checkpoint?: { schemaVersion: 1; logWatermark: number; eventWatermark?: number; state: SessionSnapshot }
 }
 
 export interface RuntimePersistenceBackend {
@@ -101,10 +101,16 @@ export function exportRuntimePersistence(state: RuntimeState, mutationLog: Mutat
   return { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: mutationLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }), ...(storagePolicy === undefined ? {} : { storage: storagePolicy.snapshot() }) }
 }
 
-export function exportRuntimeCheckpoint(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, quarantine?: QuarantineScope, storagePolicy?: SessionStoragePolicy): RuntimePersistenceSnapshot {
+export function exportRuntimeCheckpoint(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, quarantine?: QuarantineScope, storagePolicy?: SessionStoragePolicy, options: { compactEventsThrough?: number } = {}): RuntimePersistenceSnapshot {
   const watermark = mutationLog.lastSequence
   const checkpointLog = new MutationLog([], watermark)
-  return { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: checkpointLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }), ...(storagePolicy === undefined ? {} : { storage: storagePolicy.snapshot() }), checkpoint: { schemaVersion: 1, logWatermark: watermark, state: exportRuntimeState(state) } }
+  const checkpointState = exportRuntimeState(state)
+  const eventWatermark = options.compactEventsThrough
+  if (eventWatermark !== undefined) {
+    checkpointState.state.events = checkpointState.state.events.filter((event) => event.seq > eventWatermark)
+    checkpointState.state.eventsCompactedThrough = Math.max(checkpointState.state.eventsCompactedThrough ?? 0, eventWatermark)
+  }
+  return { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: checkpointLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }), ...(storagePolicy === undefined ? {} : { storage: storagePolicy.snapshot() }), checkpoint: { schemaVersion: 1, logWatermark: watermark, ...(eventWatermark === undefined ? {} : { eventWatermark }), state: checkpointState } }
 }
 
 export function serializeRuntimePersistence(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, storagePolicy?: SessionStoragePolicy): JsonValue {

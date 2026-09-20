@@ -261,14 +261,20 @@ export class PulseRuntime {
       this.schedulePersistence()
     }
   }
-  async checkpoint(backend: RuntimePersistenceBackend): Promise<RuntimePersistenceSnapshot> {
+  async checkpoint(backend: RuntimePersistenceBackend, options: { compactEventsThrough?: number } = {}): Promise<RuntimePersistenceSnapshot> {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
-    const snapshot = exportRuntimeCheckpoint(this.state, this.mutationLog, this.outbox, this.quarantine, persistedPolicy)
+    const eventWatermark = options.compactEventsThrough ?? this.state.events.at(-1)?.seq
+    const snapshot = exportRuntimeCheckpoint(this.state, this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark })
     await backend.save(snapshot)
     this.storagePolicy.markPersisted()
     const watermark = snapshot.checkpoint?.logWatermark ?? 0
     if (watermark > 0 && this.mutationLog.lastSequence >= watermark) this.mutationLog.truncateThrough(watermark)
+    if (eventWatermark !== undefined) {
+      this.state.events = this.state.events.filter((event) => event.seq > eventWatermark)
+      this.state.eventsCompactedThrough = Math.max(this.state.eventsCompactedThrough ?? 0, eventWatermark)
+    }
+    this.schedulePersistence()
     return snapshot
   }
   mergeProposals(agentId: string, proposalIds?: string[]): MergePlan {

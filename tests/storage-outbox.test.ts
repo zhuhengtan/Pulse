@@ -199,6 +199,31 @@ describe('effect outbox and runtime persistence envelope', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('compacts fact events at checkpoint and exposes a stream gap after restore', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-event-checkpoint-'))
+    try {
+      const backend = new FileRuntimePersistenceBackend(join(directory, 'runtime.json'))
+      const runtime = new PulseRuntime()
+      const program = { id: 'event-checkpoint', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'event-checkpoint', programVersion: '1', step: 'done', locals: {} } }) }
+      const { agentId } = runtime.createAgent('event checkpoint', program)
+      runtime.tick()
+      const eventWatermark = runtime.state.events.at(-1)?.seq
+      expect(eventWatermark).toBeGreaterThan(0)
+      const checkpoint = await runtime.checkpoint(backend)
+      expect(checkpoint.checkpoint?.eventWatermark).toBe(eventWatermark)
+      expect(checkpoint.checkpoint?.state.state.events).toEqual([])
+      expect(runtime.state.events).toEqual([])
+      expect(runtime.state.eventsCompactedThrough).toBe(eventWatermark)
+
+      const restored = await PulseRuntime.restore(backend)
+      restored.register(program)
+      const session = restored.start(agentId)
+      const first = await session.stream(0)[Symbol.asyncIterator]().next()
+      expect(first.value).toMatchObject({ type: 'gap', fromSeq: 1, toSeq: eventWatermark })
+      expect((await session.outcome()).status).toBe('succeeded')
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('round-trips Runtime Storage Policy with the persistence envelope', () => {
     const runtime = new PulseRuntime({ storagePolicy: { maxResultBytes: 1024 } })
     const program = { id: 'persist-storage', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'persist-storage', programVersion: '1', step: 'done', locals: {} } }) }
