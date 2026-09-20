@@ -15,6 +15,15 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.events.some((event) => event.type === 'lane.failed' && (event.data as any)?.code === 'CONTROL_ERROR_LOOP')).toBe(true)
   })
 
+  it('fails closed when an untyped async Step crosses the synchronous boundary', () => {
+    const runtime = new PulseRuntime()
+    const program: LaneProgram = { id: 'async-step', version: '1', step: (() => Promise.resolve({ actions: [], next: point('async-step', 'done') })) as unknown as LaneProgram['step'] }
+    const { laneId } = runtime.createAgent('async step', program)
+    expect(() => runtime.tick()).not.toThrow()
+    expect(runtime.state.lanes.get(laneId)?.status).toBe('failed')
+    expect(runtime.state.events.some((event) => event.type === 'lane.failed' && (event.data as any)?.code === 'ASYNC_STEP_FORBIDDEN')).toBe(true)
+  })
+
   it('turns a stuck attempt timeout into a terminal outcome without waiting forever', async () => {
     const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
     const program: LaneProgram = { id: 'attempt-timeout', version: '1', step: ({ lane }) => lane.resume.step === 'start'

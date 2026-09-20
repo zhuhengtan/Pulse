@@ -375,6 +375,10 @@ export class PulseRuntime {
         try { output = program.errorBoundary(failure, stepContext) }
         catch (boundaryCause) { this.failLane(lane, { code: 'ERROR_BOUNDARY_FAILED', message: boundaryCause instanceof Error ? boundaryCause.message : String(boundaryCause) }); continue }
       }
+      if (output && typeof output === 'object' && typeof (output as unknown as { then?: unknown }).then === 'function') {
+        this.failLane(lane, { code: 'ASYNC_STEP_FORBIDDEN', message: 'LaneProgram.step() must return synchronously; external work belongs in an Effect.' })
+        continue
+      }
       const preparedOutput = this.prepareStepOutput(output)
       const result = validateStep(this.state, lane.id, preparedOutput)
       if ('rejection' in result) {
