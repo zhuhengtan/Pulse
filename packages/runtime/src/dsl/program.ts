@@ -360,11 +360,13 @@ export class StepBuilder<TState = JsonValue> {
         const invalidTool = toolCalls.find((call) => { const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}; const toolName = typeof item.name === 'string' ? item.name : ''; return !toolName || (options.toolAllow !== undefined && !options.toolAllow.includes(toolName)) })
         if (invalidTool !== undefined) return fail({ code: 'ACTION_TOOL_NOT_ALLOWED', message: 'Model requested a tool outside the ReAct allow-list.', retryable: false })
         const sourceEffectId = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).find((dependency) => dependency.state === 'settled' && dependency.target.kind === 'effect')?.target.id : undefined
+        const sourcePrivacy = ref === undefined ? undefined : ctx.results.meta(ref)?.privacy
+        const toolDerivedFrom = ref === undefined ? [] : [ref]
         const effects = toolCalls.map((call, index) => {
           const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}
           const originalId = typeof item.toolCallId === 'string' ? item.toolCallId : `call-${index + 1}`
           const toolName = typeof item.name === 'string' ? item.name : ''
-          return { key: `${name}-tool-${turns}-${index + 1}`, toolCallId: `${name}:${turns}:${originalId}`, ...(sourceEffectId === undefined ? {} : { llmEffectId: sourceEffectId }), kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { toolCallId: `${name}:${turns}:${originalId}`, name: toolName, arguments: item.input ?? {} } }
+          return { key: `${name}-tool-${turns}-${index + 1}`, toolCallId: `${name}:${turns}:${originalId}`, ...(sourceEffectId === undefined ? {} : { llmEffectId: sourceEffectId }), ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }), ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}), kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { toolCallId: `${name}:${turns}:${originalId}`, name: toolName, arguments: item.input ?? {}, ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }), ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}) } }
         })
         return { actions: [{ type: 'submit_effects', effects, wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:tools` }
       }

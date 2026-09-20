@@ -66,16 +66,19 @@ describe('DSL Human/Timer host macros', () => {
       builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' }))
     })
     const calls: string[] = []
+    let toolInput: any
     const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
       calls.push(effect.key)
       if (effect.kind === 'llm' && effect.key === 'reason-turn-1') return { value: { text: '', finishReason: 'tool_calls', toolCalls: [{ toolCallId: 'provider-call-1', name: 'read', input: { path: 'a' } }] } }
       if (effect.kind === 'llm') return { value: { text: 'done', finishReason: 'stop', toolCalls: [] } }
+      toolInput = effect.input
       return { value: { content: 'file' } }
     } })
     const { agentId } = runtime.createAgent('react tools', program)
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
     expect(calls).toEqual(['reason-turn-1', 'reason-tool-1-1', 'reason-turn-2'])
     expect(runtime.state.toolCallCorrelations.get('reason:1:provider-call-1')).toMatchObject({ llmEffectId: 'effect-1', toolEffectId: 'effect-2', resultRef: expect.any(String) })
+    expect(toolInput).toMatchObject({ privacy: 'public', derivedFrom: ['result-1'] })
   })
 
   it('keeps the ReAct template result and applies program-level model context', async () => {
