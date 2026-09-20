@@ -7,8 +7,10 @@ export interface ProgramRef { programId: string; programVersion: string; step?: 
 
 export function defineReActLane(config: { id: string; version?: string; system?: string; toolSet?: string; instruction: string | ((view: InstructionView<JsonValue>) => string); toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; historyCompaction?: { summarizeTask: string; keepRecentRounds: number } }): LaneProgramDefinition {
   return defineLaneProgram({ id: config.id, version: config.version ?? '1', ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSet: config.toolSet }), ...(config.historyCompaction === undefined ? {} : { historyCompaction: config.historyCompaction }) }, (builder) => {
-    builder.addReActLoopStep('react', { instruction: config.instruction, ...(config.toolAllow === undefined ? {} : { toolAllow: config.toolAllow }), ...(config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns }), ...(config.outputSchema === undefined ? {} : { outputSchema: config.outputSchema }), onFinish: (resultRef, ctx) => { ctx.mutateLane((draft) => { if (draft && typeof draft === 'object' && !Array.isArray(draft)) (draft as Record<string, JsonValue>).resultRef = resultRef }); return 'finish' }, onMaxTurns: () => 'finish' })
-    builder.addStep('finish', (ctx) => ({ actions: [{ type: 'complete', result: ctx.laneState && typeof ctx.laneState === 'object' && !Array.isArray(ctx.laneState) ? { resultRef: (ctx.laneState as Record<string, JsonValue>).resultRef ?? null } : { resultRef: null } }], next: 'finish' }))
+    const onFinish = config.outputSchema === undefined
+      ? { text: (resultRef: string) => ({ complete: { value: { textRef: resultRef } } }) }
+      : { text: (resultRef: string) => ({ complete: { value: { textRef: resultRef } } }), structured: { schema: config.outputSchema, onParsed: (value: unknown) => ({ complete: { value: value as JsonValue } }) } }
+    builder.addReActLoopStep('react', { instruction: config.instruction, ...(config.toolAllow === undefined ? {} : { toolAllow: config.toolAllow }), ...(config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns }), ...(config.outputSchema === undefined ? {} : { outputSchema: config.outputSchema }), onFinish })
   })
 }
 

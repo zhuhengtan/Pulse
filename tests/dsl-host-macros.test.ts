@@ -75,9 +75,24 @@ describe('DSL Human/Timer host macros', () => {
     expect(request.contextSpec.toolSetId).toBe('readonly')
     expect(request.blocks.find((block: any) => block.kind === 'system')?.content).toBe('You are a verifier.')
     const lane = runtime.state.lanes.get(laneId)!
-    const result = lane.resultRef ? runtime.state.results.get(lane.resultRef)?.value : undefined
-    const resultRef = result && typeof result === 'object' && !Array.isArray(result) ? result.resultRef : undefined
-    expect(typeof resultRef).toBe('string')
-    expect(runtime.state.results.get(resultRef as string)?.value).toMatchObject({ answer: 'verified', finishReason: 'stop' })
+    expect(lane.resultRef).toBeDefined()
+    expect(runtime.state.results.get(lane.resultRef as string)?.value).toEqual({ answer: 'verified' })
+  })
+
+  it('returns a textRef for unstructured template output', async () => {
+    const program = defineReActLane({ id: 'react-text-template', instruction: 'answer plainly' })
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { text: 'plain answer', finishReason: 'stop', toolCalls: [] } }) })
+    const { agentId, laneId } = runtime.createAgent('text answer', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    const lane = runtime.state.lanes.get(laneId)!
+    expect(runtime.state.results.get(lane.resultRef as string)?.value).toEqual({ textRef: expect.any(String) })
+  })
+
+  it('does not silently succeed when a template reaches maxTurns', async () => {
+    const program = defineReActLane({ id: 'react-max-template', instruction: 'inspect', maxTurns: 1 })
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { text: '', finishReason: 'tool_calls', toolCalls: [{ name: 'inspect', input: {} }] } }) })
+    const { agentId, laneId } = runtime.createAgent('bounded template', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+    expect(runtime.state.lanes.get(laneId)?.failure).toMatchObject({ error: { code: 'MAX_TURNS_REACHED' } })
   })
 })
