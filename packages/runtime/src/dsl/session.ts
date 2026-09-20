@@ -7,6 +7,12 @@ export interface PulseSessionSnapshot { schemaVersion: 1; agentId: string; now: 
 export class PulseSession {
   private readonly execution: Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }>
   constructor(private readonly runtime: PulseRuntime, readonly agentId: string) { this.execution = runtime.runAgent(agentId) }
+  private ownsEvent(event: RuntimeEvent): boolean {
+    if (event.agentId === this.agentId) return true
+    if (event.laneId !== undefined) return this.runtime.state.lanes.get(event.laneId)?.agentId === this.agentId
+    if (event.effectId !== undefined) return this.runtime.state.effects.get(event.effectId)?.agentId === this.agentId
+    return false
+  }
   async *stream(fromSeq = 0): AsyncIterable<SessionEvent> {
     let cursor = fromSeq
     while (true) {
@@ -18,7 +24,7 @@ export class PulseSession {
         cursor = gapEnd
       }
       const events = this.runtime.state.events.filter((event) => event.seq > cursor)
-      for (const event of events) { cursor = event.seq; yield { type: 'fact', seq: event.seq, event } }
+      for (const event of events) { cursor = event.seq; if (this.ownsEvent(event)) yield { type: 'fact', seq: event.seq, event } }
       for (const observation of this.runtime.observationInbox.drain(this.agentId)) yield { type: 'observation', seq: observation.seq, observation: observation as unknown as JsonValue }
       const root = [...this.runtime.state.lanes.values()].find((lane) => lane.agentId === this.agentId && lane.ownerLaneId === undefined)
       if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status) && (this.runtime.state.events.at(-1)?.seq ?? compactedThrough) === cursor) return

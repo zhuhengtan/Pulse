@@ -61,6 +61,19 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     expect(runtime.state.lanes.get(runtime.state.agents.get(first.agentId)!.rootLaneId)?.status).toBe('failed')
   })
 
+  it('filters Session facts to the selected Agent while advancing the shared event cursor', async () => {
+    const runtime = new PulseRuntime()
+    const program = { id: 'session-filter', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'session-filter', programVersion: '1', step: 'done', locals: {} } }) }
+    const first = runtime.createAgent('first', program)
+    const second = runtime.createAgent('second', program)
+    const session = runtime.start(second.agentId)
+    const events: Array<{ laneId?: string }> = []
+    for await (const event of session.stream()) if (event.type === 'fact' && event.event) events.push(event.event)
+    expect(events.length).toBeGreaterThan(0)
+    expect(events.every((event) => event.laneId === undefined || runtime.state.lanes.get(event.laneId)?.agentId === second.agentId)).toBe(true)
+    expect(events.some((event) => event.laneId === runtime.state.agents.get(first.agentId)?.rootLaneId)).toBe(false)
+  })
+
   it('streams a read-only event mirror and exposes a final outcome', async () => {
     const runtime = new PulseRuntime()
     const program = { id: 'session-test', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'session-test', programVersion: '1', step: 'done', locals: {} } }) }
