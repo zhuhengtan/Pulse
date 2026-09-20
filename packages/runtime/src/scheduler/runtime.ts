@@ -132,6 +132,7 @@ export class PulseRuntime {
   private persistencePending: Promise<void> = Promise.resolve()
   private persistenceScheduled = false
   private persistenceDirty = false
+  private dispatchPersistencePending = false
   readonly mutationLog: MutationLog
   readonly outbox: EffectOutbox
   readonly clock: VirtualClock
@@ -1147,6 +1148,22 @@ export class PulseRuntime {
   }
 
   private dispatchQueuedEffects(): void {
+    if (this.persistenceBackend) {
+      this.schedulePersistence()
+      if (this.dispatchPersistencePending) return
+      this.dispatchPersistencePending = true
+      void this.flushPersistence().then(() => {
+        this.dispatchPersistencePending = false
+        this.dispatchQueuedEffectsNow()
+      }).catch(() => {
+        this.dispatchPersistencePending = false
+      })
+      return
+    }
+    this.dispatchQueuedEffectsNow()
+  }
+
+  private dispatchQueuedEffectsNow(): void {
     const queued = [...this.state.effects.values()].filter((effect) => effect.state === 'queued' && !this.executions.has(effect.id)).sort((a, b) => (Math.max(a.schedulePriority ?? 0, a.inheritedFloor ?? Number.NEGATIVE_INFINITY) - Math.max(b.schedulePriority ?? 0, b.inheritedFloor ?? Number.NEGATIVE_INFINITY)) || a.id.localeCompare(b.id))
     for (const effect of queued) {
       if (effect.state !== 'queued' || this.executions.has(effect.id)) continue

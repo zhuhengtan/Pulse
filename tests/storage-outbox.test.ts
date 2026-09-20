@@ -238,6 +238,35 @@ describe('effect outbox and runtime persistence envelope', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('durably records a pending outbox entry before dispatching an Effect', async () => {
+    let release!: () => void
+    let persistedPending: import('@pulse/runtime').RuntimePersistenceSnapshot | undefined
+    let started = false
+    const backend = {
+      load: async () => undefined,
+      save: async (snapshot: import('@pulse/runtime').RuntimePersistenceSnapshot) => {
+        if (snapshot.outbox.entries.length > 0 && persistedPending === undefined) {
+          persistedPending = snapshot
+          await new Promise<void>((resolve) => { release = resolve })
+        }
+      },
+    }
+    const runtime = new PulseRuntime({ persistenceBackend: backend, effectExecutor: async () => { started = true; return { value: { ok: true } } } })
+    await runtime.flushPersistence()
+    const program = { id: 'durable-dispatch-gate', version: '1', step: () => ({ actions: [{ type: 'submit_effects' as const, effects: [{ key: 'work', kind: 'tool' as const, concurrencyClass: 'tool' as const, input: {} }], wait: { onUnsatisfied: 'resume_with_error' as const } }], next: { programId: 'durable-dispatch-gate', programVersion: '1', step: 'done', locals: {} } }) }
+    runtime.createAgent('durable dispatch gate', program)
+    await runtime.flushPersistence()
+    runtime.tick()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(persistedPending?.outbox.entries).toHaveLength(1)
+    expect(persistedPending?.outbox.entries[0]?.state).toBe('pending')
+    expect(started).toBe(false)
+    release()
+    await runtime.flushPersistence()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(started).toBe(true)
+  })
+
   it('queues persistence when an async effect settles outside run()', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-async-auto-persist-'))
     try {
