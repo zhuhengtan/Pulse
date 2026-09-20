@@ -2,7 +2,7 @@ import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname } from 'node:path'
 import { parseContextSnapshotRef, provenanceRefId, provenanceRefKind } from '../core/types.js'
-import type { DataRef, JsonValue, ProvenanceRef, ResultRecord, RuntimeState } from '../core/types.js'
+import type { DataRef, JsonValue, ProvenanceRef, ResultRecord, RuntimeEvent, RuntimeState } from '../core/types.js'
 import { FactInbox, type FactInboxSnapshot } from '../core/inbox.js'
 import { exportRuntimeState, importRuntimeState, type SessionSnapshot } from './session.js'
 import { EffectOutbox, type OutboxSnapshot } from './outbox.js'
@@ -21,6 +21,7 @@ export interface RuntimePersistenceSnapshot {
   checkpoint?: { schemaVersion: 1; logWatermark: number; eventWatermark?: number; state: SessionSnapshot }
   resultBodies?: 'inline' | 'external'
   externalResultRefs?: string[]
+  eventArchive?: { through: number }
   integrity?: { algorithm: 'sha256'; digest: string }
 }
 
@@ -29,10 +30,16 @@ export interface RuntimeResultStore {
   load(ref: string): Promise<JsonValue | undefined>
 }
 
+export interface RuntimeEventArchive {
+  append(events: RuntimeEvent[]): Promise<void>
+  read(fromSeq: number, toSeq?: number): Promise<RuntimeEvent[]>
+}
+
 export interface RuntimePersistenceBackend {
   load(): Promise<RuntimePersistenceSnapshot | undefined>
   save(snapshot: RuntimePersistenceSnapshot, expectedDigest?: string): Promise<void>
   resultStore?: RuntimeResultStore
+  eventArchive?: RuntimeEventArchive
 }
 
 function hasTarget(state: SessionSnapshot['state'], target: { kind: string; id: string }): boolean {
@@ -48,6 +55,12 @@ function withoutIntegrity(snapshot: RuntimePersistenceSnapshot | JsonValue): Jso
 
 function integrityDigest(snapshot: RuntimePersistenceSnapshot | JsonValue): string {
   return createHash('sha256').update(JSON.stringify(withoutIntegrity(snapshot))).digest('hex')
+}
+
+export function withRuntimePersistenceIntegrity(snapshot: RuntimePersistenceSnapshot): RuntimePersistenceSnapshot {
+  const copy = structuredClone(snapshot)
+  delete copy.integrity
+  return { ...copy, integrity: { algorithm: 'sha256', digest: integrityDigest(copy) } }
 }
 
 function hasDerivedReference(ref: ProvenanceRef, ownerLaneId: string, agents: Map<string, any>, lanes: Map<string, any>, results: Map<string, any>, artifacts: Map<string, any>): boolean {
@@ -207,7 +220,7 @@ export async function externalizeRuntimeResultBodies(snapshot: RuntimePersistenc
   copy.resultBodies = 'external'
   copy.externalResultRefs = [...refs].sort()
   delete copy.integrity
-  return { ...copy, integrity: { algorithm: 'sha256', digest: integrityDigest(copy) } }
+  return withRuntimePersistenceIntegrity(copy)
 }
 
 export async function hydrateRuntimeResultBodies(snapshot: RuntimePersistenceSnapshot, store: RuntimeResultStore): Promise<RuntimePersistenceSnapshot> {
@@ -224,7 +237,7 @@ export async function hydrateRuntimeResultBodies(snapshot: RuntimePersistenceSna
     }
   }
   delete copy.integrity
-  return { ...copy, integrity: { algorithm: 'sha256', digest: integrityDigest(copy) } }
+  return withRuntimePersistenceIntegrity(copy)
 }
 
 export function serializeRuntimePersistence(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, storagePolicy?: SessionStoragePolicy): JsonValue {

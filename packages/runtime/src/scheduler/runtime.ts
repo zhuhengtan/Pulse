@@ -10,7 +10,7 @@ import { assertProgramPure } from '../dsl/program.js'
 import { FactInbox, ObservationInbox } from '../core/inbox.js'
 import { observeProgress, type ProgressObservation } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
-import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, hydrateRuntimeResultBodies, importRuntimePersistence, type RuntimePersistenceBackend, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
+import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, hydrateRuntimeResultBodies, importRuntimePersistence, withRuntimePersistenceIntegrity, type RuntimePersistenceBackend, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
 import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import { apply, type Mutation } from '../core/mutations.js'
@@ -317,8 +317,14 @@ export class PulseRuntime {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
     const eventWatermark = options.compactEventsThrough ?? this.state.events.at(-1)?.seq
+    if (backend.eventArchive !== undefined && eventWatermark !== undefined) {
+      const fromSeq = (this.state.eventsCompactedThrough ?? 0) + 1
+      const events = this.state.events.filter((event) => event.seq >= fromSeq && event.seq <= eventWatermark)
+      if (events.length) await backend.eventArchive.append(events)
+    }
     const exported = exportRuntimeCheckpoint(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark }, this.factInbox.snapshot())
-    const snapshot = backend.resultStore === undefined ? exported : await externalizeRuntimeResultBodies(exported, backend.resultStore)
+    const archived = backend.eventArchive === undefined || eventWatermark === undefined ? exported : withRuntimePersistenceIntegrity({ ...exported, eventArchive: { through: eventWatermark } })
+    const snapshot = backend.resultStore === undefined ? archived : await externalizeRuntimeResultBodies(archived, backend.resultStore)
     await backend.save(snapshot, backend === this.persistenceBackend ? this.persistenceDigest : undefined)
     if (backend === this.persistenceBackend) this.persistenceDigest = snapshot.integrity?.digest
     this.storagePolicy.markPersisted()

@@ -261,6 +261,28 @@ describe('effect outbox and runtime persistence envelope', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('archives fact events before checkpoint truncation and records the archive watermark', async () => {
+    let saved: any
+    const archived: any[] = []
+    const program = { id: 'event-archive', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'event-archive', programVersion: '1', step: 'done', locals: {} } }) }
+    const backend = {
+      load: async () => saved,
+      save: async (snapshot: any) => { saved = structuredClone(snapshot) },
+      eventArchive: {
+        append: async (events: any[]) => { archived.push(...structuredClone(events)) },
+        read: async (fromSeq: number, toSeq = Number.POSITIVE_INFINITY) => archived.filter((event) => event.seq >= fromSeq && event.seq <= toSeq).map((event) => structuredClone(event)),
+      },
+    }
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { ok: true } }) })
+    const { agentId } = runtime.createAgent('archive events', program)
+    await runtime.start(agentId).outcome()
+    const checkpoint = await runtime.checkpoint(backend)
+    expect(archived.length).toBeGreaterThan(0)
+    expect(checkpoint.eventArchive?.through).toBe(checkpoint.checkpoint?.eventWatermark)
+    expect((await backend.eventArchive.read(archived[0].seq, archived.at(-1).seq)).length).toBe(archived.length)
+    expect(runtime.state.events).toHaveLength(0)
+  })
+
   it('compacts fact events at checkpoint and exposes a stream gap after restore', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-event-checkpoint-'))
     try {

@@ -113,9 +113,10 @@
 | 恢复工具版本兼容 | Tool manifest 版本随 Effect 持久化；恢复活动 Tool Effect 时由宿主提供当前版本，缺失或不一致在 Tick 前 fail-closed | `tests/runtime-control.test.ts`、`tests/tool-host.test.ts` | 本轮工具版本提交 |
 | Result 外部索引与读穿 | Persistence backend 可把 Result 正文写入独立 ResultStore，快照只保留稳定 ResultRef 索引；恢复时读穿正文并重新校验快照完整性 | `tests/storage-outbox.test.ts` | 本轮 ResultStore 提交 |
 | 取消事务存储准入 | Agent/子 Agent/Lane/Effect 取消前预检全部取消事件，存储不足时不留下半取消状态 | `tests/runtime-control.test.ts` | 本轮取消准入提交 |
+| 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、248/248 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、249/249 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -477,6 +478,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - 本轮工具版本提交：Tool manifest 版本进入 Effect 持久化契约；恢复时若宿主未提供匹配版本，则在 Tick 前明确阻断恢复。
 - 本轮 ResultStore 提交：Persistence backend 可把 Result 正文独立存储，快照保留 ResultRef 索引，`PulseRuntime.restore()` 恢复时读穿并重新计算完整性。
 - 本轮取消准入提交：取消父/子 Agent 前统一预检 Lane、Effect、Agent 事件，存储准入失败时不修改任何取消状态。
+- 本轮事件归档提交：Checkpoint 截断前写入 EventArchive 并记录归档水位，归档失败时保留内存事实事件和旧持久化快照。
 - `2250df2`：Runtime Worker lease 暴露远程 claim/renew/complete/fail 协议；adapters 增加 HTTP Coordinator Server、Client、polling Worker 和 HTTP EffectExecutor，测试覆盖真实本机 HTTP 往返、heartbeat 与 Runtime Effect 闭环。
 - `685be10`：HTTP Worker Server/Client 增加 Bearer token 鉴权，未授权请求在任务访问前拒绝，并有回归测试。
 - `47791bd`：WorkerCoordinator 增加 schemaVersion=1 的 snapshot/restore；恢复时将 in-flight lease 重新入队，并让终态/幂等任务在重启后仍可返回结果。
@@ -488,7 +490,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `8bb07e5`：Global/Lane Context 增加不改变业务 JSON 形状的 privacy metadata sidecar；版本、持久化恢复、ContextBuilder、ContextMerger 和 warm start 均保留该元数据。
 - `fe9554a` / `596fecb`：Session outcome 和 fact stream 均按 Agent 隔离，Host snapshot 暴露 Global Context privacy metadata。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
-- 当前确定性门禁：`npm exec tsc -b --pretty false && npm test`，47 个测试文件、248 个测试通过；`npm run build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- 当前确定性门禁：`npm exec tsc -b --pretty false && npm test`，47 个测试文件、249 个测试通过；`npm run build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
@@ -503,7 +505,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | Host 调用与费用限制 | 确定性调用预算已实现 | `maxTotalAttempts`、`maxLLMAttempts`、`maxToolAttempts` 和按 currency 的 cost 累计已接入 Runtime；真实账单口径、跨 Runtime 聚合和宿主策略配置仍需生产接入 |
 | 动态工具检索 | 确定性目录检索和 Context ToolSet 编译已实现 | 已按查询生成稳定版本的工具集合并写入 LLM Context；仍需按宿主权限/隐私策略做生产级准入，验证真实远程模型看到的 schema 与 tool-call 往返 |
 | Host 工具权限 | 单进程 allow/deny 和 Zod 参数约束已实现 | deny 优先策略已经覆盖 Registry 目录、动态 ToolSet、执行和 admission；更细 workspace/网络权限、审计系统和生产策略配置仍需宿主接入 |
-| Checkpoint / 事实事件保留 | 单进程 checkpoint 截断与恢复 gap 已实现 | 事实状态、Mutation 水位、事件截断水位和 Session gap 已有测试；外部事实事件归档索引、跨进程故障注入和生产存储仍需验证 |
+| Checkpoint / 事实事件保留 | 单进程 checkpoint 截断、EventArchive 归档与恢复 gap 已实现 | 事实状态、Mutation 水位、事件截断水位、外部归档水位和 Session gap 已有测试；跨进程故障注入和生产存储仍需验证 |
 | Fork Affinity | DSL 在收到建议后可安全折叠同 Program 组；Runtime 提供可选自动 coalesce | 已验证组内依赖拓扑、成员结果注入、失败传播、原始 Join key 恢复，以及 `forkAffinity=coalesce` 的通用运行时路径；复杂跨组/外部依赖保持不折叠，生产负载校准仍需验证 |
 | Worker 执行与迁移 | 本地 HTTP/HTTPS lease transport、Bearer 鉴权、polling Worker、请求超时、远程未知对账、snapshot/restore、Runtime 适配、无重启 token 轮换和文件 lease CAS 已实现 | 已验证真实 HTTP/HTTPS claim/renew/complete/fail、未授权拒绝、短 lease heartbeat、token 重叠轮换、请求超时、写副作用响应丢失后的 `remote_unknown`/`executionRef`、in-flight lease 恢复、多 Worker 语义、陈旧 Coordinator 冲突和 Runtime Effect 闭环；跨主机故障注入、真正外部共享数据库和 Worker 迁移仍需验证 |
 | 运行观测 | Runtime 侧已有只读出口、JSONL/HTTP exporter、聚合和告警规则 | `inspect/explain`、`telemetry()`、JSONL/HTTP exporter 和有界聚合器已覆盖 route 排除原因、provider/model slot、Attempt usage/cost、峰值与阈值告警；外部生产指标系统接入仍需宿主配置 |
@@ -524,7 +526,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 本方案继承并落地《Pulse Runtime 架构设计》与《Pulse Application DSL 规范》：
 1. 以主架构第 26 节的 M0/M1 标注为唯一验收来源，不重复维护场景数量。
 2. M1 的真实 Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder、Session 和确定性端到端示例已贯通；其他 Provider 与真实网络任务属于独立集成验证。
-3. ResultRef 隔离、record/leaf Privacy、ContextDelta provenance、Watchdog、Fork Affinity（含 DSL series collapse 与 Runtime 可选自动 coalesce）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由及快照恢复、按 Agent 隔离的 Session、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、恢复程序/工具版本 fail-closed、ResultStore 外部正文读穿、取消事务存储准入、correlated telemetry、JSONL/HTTP exporter、聚合和告警规则、Bearer-authenticated HTTP lease-based Worker transport、Worker snapshot/restore、HTTP lease reaper、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、Snapshot 外部归档索引、生产级持久化事务边界、生产级 Worker TLS/密钥轮换与共享 durable lease store、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
+3. ResultRef 隔离、record/leaf Privacy、ContextDelta provenance、Watchdog、Fork Affinity（含 DSL series collapse 与 Runtime 可选自动 coalesce）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由及快照恢复、按 Agent 隔离的 Session、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、恢复程序/工具版本 fail-closed、ResultStore 外部正文读穿、事实 EventArchive 归档、取消事务存储准入、correlated telemetry、JSONL/HTTP exporter、聚合和告警规则、Bearer-authenticated HTTP lease-based Worker transport、Worker snapshot/restore、HTTP lease reaper、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、Snapshot 外部归档索引、生产级持久化事务边界、生产级 Worker TLS/密钥轮换与共享 durable lease store、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
 已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
