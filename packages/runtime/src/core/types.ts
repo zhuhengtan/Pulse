@@ -6,6 +6,9 @@ export type WaitId = string
 export type ResultRef = string
 export type ArtifactRef = string
 export type DataRef = { kind: 'result'; ref: ResultRef } | { kind: 'artifact'; ref: ArtifactRef }
+export type ProvenanceRef = string | DataRef
+export function provenanceRefId(ref: ProvenanceRef): string { return typeof ref === 'string' ? ref : ref.ref }
+export function provenanceRefKind(ref: ProvenanceRef): 'legacy' | DataRef['kind'] { return typeof ref === 'string' ? 'legacy' : ref.kind }
 export type ContextVersion = number
 export type PrivacyLabel = 'public' | 'cloud_allowed' | 'local_only'
 export type ForkAffinityMode = 'off' | 'advise' | 'coalesce'
@@ -105,8 +108,8 @@ export interface LaneRecord {
   enqueueSeq: number
   readySince: number
   ownedEffectIds: Set<EffectId>
-  closingResult?: { value: JsonValue; privacy: PrivacyLabel; privacyTaints?: PrivacyTaint[]; derivedFrom?: ResultRef[] }
-  failure?: { error: RuntimeError; privacy: PrivacyLabel; derivedFrom?: ResultRef[] }
+  closingResult?: { value: JsonValue; privacy: PrivacyLabel; privacyTaints?: PrivacyTaint[]; derivedFrom?: ProvenanceRef[] }
+  failure?: { error: RuntimeError; privacy: PrivacyLabel; derivedFrom?: ProvenanceRef[] }
   resultRef?: ResultRef
   consecutiveControlErrors?: number
   pendingOutcome?: Outcome
@@ -123,7 +126,7 @@ export interface EffectRecord {
   kind: 'llm' | 'tool' | 'human' | 'agent' | 'timer'
   concurrencyClass: ConcurrencyClass
   input: JsonValue
-  derivedFrom?: ResultRef[]
+  derivedFrom?: ProvenanceRef[]
   state: EffectState
   attemptId: string
   attemptNo: number
@@ -170,10 +173,10 @@ export interface ResultRecord {
   value?: JsonValue
   privacy: PrivacyLabel
   privacyTaints?: PrivacyTaint[]
-  derivedFrom: string[]
+  derivedFrom: ProvenanceRef[]
   summary?: JsonValue
   downgrade?: {
-    sourceRefs: ResultRef[]
+    sourceRefs: ProvenanceRef[]
     targetPrivacy: 'cloud_allowed'
     method: 'human_approval' | 'sanitizer'
     approvalRef?: string
@@ -190,7 +193,7 @@ export interface ArtifactRecord {
   contentBase64: string
   privacy: PrivacyLabel
   privacyTaints?: PrivacyTaint[]
-  derivedFrom?: string[]
+  derivedFrom?: ProvenanceRef[]
   storageState: 'memory' | 'persisted'
   pinCount: number
 }
@@ -245,7 +248,7 @@ export interface EffectSubmission {
   kind: EffectRecord['kind']
   concurrencyClass: ConcurrencyClass
   input: JsonValue
-  derivedFrom?: ResultRef[]
+  derivedFrom?: ProvenanceRef[]
   wait?: boolean
   privacy?: PrivacyLabel
   priority?: number
@@ -301,12 +304,12 @@ export interface ForkAction extends RuntimeActionBase {
 }
 export interface CancelLaneAction extends RuntimeActionBase { type: 'cancel_lane'; laneId: LaneId; reason: 'SUPERSEDED' | 'USER_REQUESTED' | 'POLICY' }
 export interface ProposeCancelAction extends RuntimeActionBase { type: 'propose_cancel'; laneId: LaneId; reason: 'SUPERSEDED' | 'POLICY' }
-export interface CompleteAction extends RuntimeActionBase { type: 'complete'; result: JsonValue; privacy?: PrivacyLabel; privacyTaints?: PrivacyTaint[]; derivedFrom?: ResultRef[]; children?: 'reject_if_active' | 'cancel' | 'await' }
-export interface FailAction extends RuntimeActionBase { type: 'fail'; error: RuntimeError; privacy?: PrivacyLabel; derivedFrom?: ResultRef[] }
+export interface CompleteAction extends RuntimeActionBase { type: 'complete'; result: JsonValue; privacy?: PrivacyLabel; privacyTaints?: PrivacyTaint[]; derivedFrom?: ProvenanceRef[]; children?: 'reject_if_active' | 'cancel' | 'await' }
+export interface FailAction extends RuntimeActionBase { type: 'fail'; error: RuntimeError; privacy?: PrivacyLabel; derivedFrom?: ProvenanceRef[] }
 export interface AdoptContextAction extends RuntimeActionBase { type: 'adopt_context'; version: ContextVersion | 'latest' }
 export interface DowngradePrivacyAction extends RuntimeActionBase {
   type: 'downgrade_privacy'
-  sourceRefs: ResultRef[]
+  sourceRefs: ProvenanceRef[]
   outputRef: ResultRef
   value: JsonValue
   targetPrivacy: 'cloud_allowed'
@@ -334,7 +337,7 @@ export interface ContextDelta {
   ops: ContextOp[]
   privacy?: PrivacyLabel
   privacyTaints?: PrivacyTaint[]
-  derivedFrom?: string[]
+  derivedFrom?: ProvenanceRef[]
   proposal?: boolean
 }
 
@@ -467,19 +470,21 @@ export function privacyForContextSnapshot(state: RuntimeState, lane: LaneRecord,
   return { privacy: lane.context.privacy ?? 'public', ...(lane.context.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(lane.context.privacyTaints) }) }
 }
 
-export function privacyMetadataForDerivedRef(state: RuntimeState, lane: LaneRecord, ref: string): PrivacyMetadata | undefined {
-  const result = state.results.get(ref)
+export function privacyMetadataForDerivedRef(state: RuntimeState, lane: LaneRecord, ref: ProvenanceRef): PrivacyMetadata | undefined {
+  const id = provenanceRefId(ref)
+  const kind = provenanceRefKind(ref)
+  const result = kind === 'artifact' ? undefined : state.results.get(id)
   if (result) return { privacy: result.privacy, ...(result.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(result.privacyTaints) }) }
-  const artifact = state.artifacts.get(ref)
+  const artifact = kind === 'result' ? undefined : state.artifacts.get(id)
   if (artifact && (artifact.agentId === undefined || artifact.agentId === lane.agentId)) return { privacy: artifact.privacy, ...(artifact.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(artifact.privacyTaints) }) }
-  return privacyForContextSnapshot(state, lane, ref)
+  return typeof ref === 'string' ? privacyForContextSnapshot(state, lane, ref) : undefined
 }
 
-export function privacyTaintsForDerivedRefs(state: RuntimeState, lane: LaneRecord, refs: readonly string[]): PrivacyTaint[] {
+export function privacyTaintsForDerivedRefs(state: RuntimeState, lane: LaneRecord, refs: readonly ProvenanceRef[]): PrivacyTaint[] {
   const output: PrivacyTaint[] = []
   const seen = new Set<string>()
   for (const ref of refs) for (const taint of privacyMetadataForDerivedRef(state, lane, ref)?.privacyTaints ?? []) {
-    const value = { path: [ref, ...taint.path], privacy: taint.privacy }
+    const value = { path: [provenanceRefId(ref), ...taint.path], privacy: taint.privacy }
     const key = JSON.stringify(value)
     if (!seen.has(key)) { seen.add(key); output.push(value) }
   }

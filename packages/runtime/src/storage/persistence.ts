@@ -1,7 +1,7 @@
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { parseContextSnapshotRef } from '../core/types.js'
-import type { JsonValue, RuntimeState } from '../core/types.js'
+import { parseContextSnapshotRef, provenanceRefId, provenanceRefKind } from '../core/types.js'
+import type { DataRef, JsonValue, ProvenanceRef, RuntimeState } from '../core/types.js'
 import { exportRuntimeState, importRuntimeState, type SessionSnapshot } from './session.js'
 import { EffectOutbox, type OutboxSnapshot } from './outbox.js'
 import { MutationLog, type MutationLogSnapshot } from './mutation-log.js'
@@ -27,14 +27,17 @@ function hasTarget(state: SessionSnapshot['state'], target: { kind: string; id: 
   return target.kind === 'lane' ? state.lanes.some(([id]) => id === target.id) : target.kind === 'effect' ? state.effects.some(([id]) => id === target.id) : false
 }
 
-function hasDerivedReference(ref: string, ownerLaneId: string, agents: Map<string, any>, lanes: Map<string, any>, results: Map<string, any>, artifacts: Map<string, any>): boolean {
-  if (results.has(ref)) return true
-  const artifact = artifacts.get(ref)
+function hasDerivedReference(ref: ProvenanceRef, ownerLaneId: string, agents: Map<string, any>, lanes: Map<string, any>, results: Map<string, any>, artifacts: Map<string, any>): boolean {
+  const id = provenanceRefId(ref)
+  const kind = provenanceRefKind(ref)
+  if (kind !== 'artifact' && results.has(id)) return true
+  const artifact = kind === 'result' ? undefined : artifacts.get(id)
   if (artifact) {
     const lane = lanes.get(ownerLaneId)
     return artifact.agentId === undefined || artifact.agentId === lane?.agentId
   }
-  const parsed = parseContextSnapshotRef(ref)
+  if (kind === 'result' || kind === 'artifact') return false
+  const parsed = parseContextSnapshotRef(id)
   if (!parsed) return false
   if (parsed.kind === 'global') {
     const lane = lanes.get(ownerLaneId)

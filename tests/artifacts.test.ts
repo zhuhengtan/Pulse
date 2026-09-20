@@ -32,4 +32,17 @@ describe('Artifact store', () => {
     apply(state, output.mutations)
     expect([...state.results.values()].at(-1)).toMatchObject({ privacy: 'local_only', derivedFrom: [artifact.ref] })
   })
+
+  it('accepts structured DataRef provenance for results and artifacts', () => {
+    const state = createRuntimeState()
+    const { root } = createAgent(state, 'structured refs', { programId: 'artifact', programVersion: '1', step: 'start', locals: {} })
+    state.results.set('source-result', { id: 'source-result', value: { ok: true }, privacy: 'public', derivedFrom: [] })
+    root.visibleResultRefs!.add('source-result')
+    const source = publishArtifact(state, { mediaType: 'text/plain', content: 'source', laneId: root.id, derivedFrom: [{ kind: 'result', ref: 'source-result' }] })
+    const output = validateStep(state, root.id, { actions: [{ type: 'complete', result: { artifact: source.ref }, derivedFrom: [{ kind: 'artifact', ref: source.ref }] }], next: { programId: 'artifact', programVersion: '1', step: 'done', locals: {} } })
+    expect('rejection' in output).toBe(false)
+    if ('rejection' in output) return
+    apply(state, output.mutations)
+    expect([...state.results.values()].at(-1)).toMatchObject({ derivedFrom: [{ kind: 'artifact', ref: source.ref }] })
+  })
 })

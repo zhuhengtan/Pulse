@@ -1,7 +1,7 @@
 import { z, type ZodTypeAny } from 'zod'
 import type { LaneProgram, LaneStepContext } from '../scheduler/runtime.js'
 import { globalContextRef, laneContextRef } from '../core/types.js'
-import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec } from '../core/types.js'
+import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, ProvenanceRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec } from '../core/types.js'
 import { createDraftProxy } from './context-proxy.js'
 
 export type NextStepTarget<TState = unknown> = string | { step: string }
@@ -9,7 +9,7 @@ export interface InstructionView<TState> { goal: string; state: TState }
 export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; artifacts?: string[]; events?: string[] }
 export interface HistoryCompactionOptions { summarizeTask: string; keepRecentRounds: number }
 export interface HistoryRecordMeta { seq: number; resultRefs: ResultRef[]; privacy: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[] }
-export interface ResultMeta { ref: ResultRef; privacy: PrivacyLabel; derivedFrom: string[]; summary?: JsonValue }
+export interface ResultMeta { ref: ResultRef; privacy: PrivacyLabel; derivedFrom: ProvenanceRef[]; summary?: JsonValue }
 export interface StepContext<TState = JsonValue> {
   lane: Readonly<LaneRecord>
   goal: string
@@ -160,7 +160,7 @@ function zodJsonSchema(schema: ZodTypeAny): JsonValue {
 function resultVisible(context: LaneStepContext, ref: ResultRef): boolean { return context.lane.visibleResultRefs === undefined || context.lane.visibleResultRefs.has(ref) }
 function findResult(context: LaneStepContext, ref: ResultRef): JsonValue | undefined { return resultVisible(context, ref) ? context.state.results.get(ref)?.value : undefined }
 
-function collectResumeResultRefs(input: ResumeInput | undefined, refs: Set<ResultRef>): void {
+function collectResumeResultRefs(input: ResumeInput | undefined, refs: Set<ProvenanceRef>): void {
   if (!input) return
   if (input.type === 'control_error') { collectResumeResultRefs(input.original, refs); return }
   if (input.type !== 'wait') return
@@ -171,7 +171,7 @@ function collectResumeResultRefs(input: ResumeInput | undefined, refs: Set<Resul
   }
 }
 
-function annotateAction(action: RuntimeAction, derivedFrom: ResultRef[]): RuntimeAction {
+function annotateAction(action: RuntimeAction, derivedFrom: ProvenanceRef[]): RuntimeAction {
   if (!derivedFrom.length) return action
   if (action.type === 'complete' || action.type === 'fail') return { ...action, derivedFrom: [...new Set([...derivedFrom, ...(action.derivedFrom ?? [])])] }
   if (action.type === 'submit_effects') return { ...action, effects: action.effects.map((effect) => ({ ...effect, derivedFrom: [...new Set([...derivedFrom, ...(effect.derivedFrom ?? [])])] })) }
@@ -192,12 +192,12 @@ function ordinaryLocals(locals: JsonValue): Record<string, JsonValue> {
   return locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}
 }
 
-function makeContext<TState>(context: LaneStepContext, initialState: TState): { ctx: StepContext<TState>; getDelta: () => ContextDelta | undefined; getActions: () => RuntimeAction[]; getDerivedRefs: () => ResultRef[]; getAdoptImmediately: () => boolean } {
+function makeContext<TState>(context: LaneStepContext, initialState: TState): { ctx: StepContext<TState>; getDelta: () => ContextDelta | undefined; getActions: () => RuntimeAction[]; getDerivedRefs: () => ProvenanceRef[]; getAdoptImmediately: () => boolean } {
   const draft = clone(initialState)
   const draftProxy = draft && typeof draft === 'object' && !Array.isArray(draft) ? createDraftProxy(draft as Record<string, unknown>) : undefined
   let delta: ContextDelta | undefined
   const actions: RuntimeAction[] = []
-  const derivedRefs = new Set<ResultRef>()
+  const derivedRefs = new Set<ProvenanceRef>()
   let adoptImmediately = false
   const agent = context.state.agents.get(context.lane.agentId)
   const globalVersion = context.lane.contextSnapshotVersion

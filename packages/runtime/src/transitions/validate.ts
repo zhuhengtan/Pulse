@@ -2,8 +2,8 @@ import { error } from '../core/errors.js'
 import { apply } from '../core/mutations.js'
 import { DependencyGraph } from '../dependencies/graph.js'
 import type { ValidationResult, Mutation } from '../core/mutations.js'
-import { effectivePrivacy, privacyMetadataForDerivedRef, privacyRank, privacyTaintPrivacy, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
-import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord, ForkLaneSpec, PrivacyMetadata, PrivacyTaint } from '../core/types.js'
+import { effectivePrivacy, privacyMetadataForDerivedRef, privacyRank, privacyTaintPrivacy, provenanceRefId, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
+import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord, ForkLaneSpec, PrivacyMetadata, PrivacyTaint, ProvenanceRef } from '../core/types.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import { ContextBuilder, estimateHistoryTokens, historyPressure } from '../context/builder.js'
 
@@ -246,25 +246,22 @@ function addWait(state: RuntimeState, lane: LaneRecord, spec: WaitSpec, targets:
 
 function resultVisible(lane: LaneRecord, ref: string): boolean { return lane.visibleResultRefs === undefined || lane.visibleResultRefs.has(ref) }
 
-function derivedPrivacy(state: RuntimeState, lane: LaneRecord, refs: string[]): { privacy?: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[]; error?: string } {
+function derivedPrivacy(state: RuntimeState, lane: LaneRecord, refs: ProvenanceRef[]): { privacy?: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[]; error?: string } {
   const labels: PrivacyLabel[] = []
   const privacyTaints: import('../core/types.js').PrivacyTaint[] = []
   const seenTaints = new Set<string>()
   for (const ref of refs) {
-    const result = state.results.get(ref)
+    const id = provenanceRefId(ref)
+    const result = typeof ref === 'string' || ref.kind === 'result' ? state.results.get(id) : undefined
     if (result) {
-      if (!resultVisible(lane, ref)) return { error: 'RESULT_NOT_VISIBLE' }
+      if (!resultVisible(lane, id)) return { error: 'RESULT_NOT_VISIBLE' }
     } else if (!privacyMetadataForDerivedRef(state, lane, ref)) return { error: 'UNKNOWN_RESULT_REF' }
     const metadata = privacyMetadataForDerivedRef(state, lane, ref)!
     labels.push(effectivePrivacy(metadata.privacy, metadata.privacyTaints))
     for (const taint of metadata.privacyTaints ?? []) {
-      const value = { path: [ref, ...taint.path], privacy: taint.privacy }
+      const value = { path: [id, ...taint.path], privacy: taint.privacy }
       const key = JSON.stringify(value)
       if (!seenTaints.has(key)) { seenTaints.add(key); privacyTaints.push(value) }
-    }
-    /* Keep the visibility check above separate from snapshot resolution. */
-    if (result) {
-      continue
     }
   }
   return { privacy: strictestPrivacy(labels), ...(privacyTaints.length ? { privacyTaints } : {}) }

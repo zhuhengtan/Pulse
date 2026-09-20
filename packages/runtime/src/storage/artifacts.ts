@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { ArtifactRecord, ArtifactRef, LaneId, PrivacyLabel, PrivacyTaint, RuntimeState } from '../core/types.js'
+import type { ArtifactRecord, ArtifactRef, LaneId, PrivacyLabel, PrivacyTaint, ProvenanceRef, RuntimeState } from '../core/types.js'
 import { effectivePrivacy, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, privacyRank, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 
 export interface ArtifactPublication {
@@ -9,7 +9,7 @@ export interface ArtifactPublication {
   ref?: ArtifactRef
   privacy?: PrivacyLabel
   privacyTaints?: PrivacyTaint[]
-  derivedFrom?: string[]
+  derivedFrom?: ProvenanceRef[]
 }
 
 function bytesOf(content: Uint8Array | string): Uint8Array { return typeof content === 'string' ? Buffer.from(content, 'utf8') : new Uint8Array(content) }

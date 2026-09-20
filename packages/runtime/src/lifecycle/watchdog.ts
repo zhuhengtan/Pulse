@@ -1,4 +1,5 @@
 import { contentHash } from '../context/builder.js'
+import { provenanceRefId } from '../core/types.js'
 import type { JsonValue, LaneRecord, LaneStepOutput, ProgressWatchdogState, RuntimeState } from '../core/types.js'
 
 export interface ProgressWatchdogOptions {
@@ -20,7 +21,7 @@ function withoutSdk(value: JsonValue): JsonValue {
 
 export function progressFingerprint(lane: LaneRecord, output: LaneStepOutput, state: RuntimeState): string {
   const resultRefs = output.actions.flatMap((action) => action.type === 'complete' && action.derivedFrom ? action.derivedFrom : [])
-  return contentHash({ goal: lane.goal, contextVersion: lane.context.version, context: lane.context.state, actions: output.actions, resultRefs, next: { ...output.next, locals: withoutSdk(output.next.locals) }, sourceResults: resultRefs.map((ref) => state.results.get(ref)?.id ?? ref) })
+  return contentHash({ goal: lane.goal, contextVersion: lane.context.version, context: lane.context.state, actions: output.actions, resultRefs, next: { ...output.next, locals: withoutSdk(output.next.locals) }, sourceResults: resultRefs.map((ref) => state.results.get(provenanceRefId(ref))?.id ?? provenanceRefId(ref)) })
 }
 
 export function observeProgress(lane: LaneRecord, output: LaneStepOutput, state: RuntimeState, previous?: ProgressWatchdogState, options: ProgressWatchdogOptions = {}): ProgressObservation {
