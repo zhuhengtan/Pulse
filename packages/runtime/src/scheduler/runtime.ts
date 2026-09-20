@@ -148,11 +148,16 @@ export class PulseRuntime {
       for (const lane of this.state.lanes.values()) if (lane.status === 'ready') this.ready.enqueue(readyItemFromLane(lane))
       for (const effect of this.state.effects.values()) {
         const outboxEntry = this.outbox.get(`${effect.id}:${effect.attemptId}`)
-        if (effect.state === 'running' && outboxEntry?.state === 'pending') {
+        if (effect.state === 'running' && (outboxEntry === undefined || outboxEntry.state === 'pending')) {
           if (effect.sideEffectPolicy === 'write') { effect.state = 'reconcile_required'; effect.executionState = 'remote_unknown'; effect.sideEffectState = 'unknown'; this.quarantine.add(effect.id, this.state.now, 'recovery_in_doubt') }
           else { effect.state = 'queued'; effect.executionState = 'local' }
         }
         if (effect.state === 'retry_wait' && effect.retryAt !== undefined) this.clock.timers.schedule(effect.retryAt, () => { if (!effect.outcome && effect.state === 'retry_wait') { effect.state = 'queued'; delete effect.retryAt; this.dispatchQueuedEffects() } })
+      }
+      for (const effect of [...this.state.effects.values()].sort((left, right) => left.id.localeCompare(right.id))) if (effect.state === 'reconcile_required' && effect.sideEffectState === 'unknown') {
+        const releases = [...(effect.locks ?? [])].sort((left, right) => left.resource.localeCompare(right.resource) || left.mode.localeCompare(right.mode)).map((lock, index) => this.resourceLocks.restoreHeld(lock.resource, lock.mode, `${effect.id}:${effect.attemptId}:recovery:${index}`))
+        if (releases.length) this.lockReleases.set(effect.id, releases)
+        if (!this.quarantine.has(effect.id)) this.quarantine.add(effect.id, this.state.now, 'recovery_in_doubt')
       }
       for (const wait of this.state.waits.values()) if (wait.state === 'pending') this.scheduleWaitDeadline(wait)
     }
@@ -611,7 +616,7 @@ export class PulseRuntime {
     effect.executionState = 'local_closed'
     effect.sideEffectState = 'unknown'
     effect.outcome = { status: 'failed', error: { code: 'RESOURCE_ABANDONED', message: 'Host abandoned reconciliation for an unknown side effect.' } }
-    if (effect.sideEffectState !== 'unknown') this.releaseEffectLocks(effectId)
+    this.releaseEffectLocks(effectId)
     const lane = this.state.lanes.get(effect.ownerLaneId)
     if (lane?.unresolvedEffectIds) lane.unresolvedEffectIds = lane.unresolvedEffectIds.filter((id) => id !== effectId)
     const abandonedEvent = this.emit({ type: 'resource.abandoned', effectId, data: { code: 'RESOURCE_ABANDONED' } })

@@ -27,6 +27,17 @@ export class ResourceLockManager {
     return () => this.release(resource, requestId)
   }
 
+  restoreHeld(resource: string, mode: LockMode, requestId: string): () => void {
+    if (!requestId || this.holders.get(resource)?.has(requestId)) throw new Error('INVALID_LOCK_RESTORE')
+    const holders = this.holders.get(resource) ?? new Map<string, LockMode>()
+    if (mode === 'exclusive' && holders.size > 0) throw new Error('RESOURCE_RESTORE_CONFLICT')
+    if (mode === 'shared' && [...holders.values()].some((heldMode) => heldMode === 'exclusive')) throw new Error('RESOURCE_RESTORE_CONFLICT')
+    if ((this.queues.get(resource)?.length ?? 0) > 0) throw new Error('RESOURCE_RESTORE_CONFLICT')
+    holders.set(requestId, mode)
+    this.holders.set(resource, holders)
+    return () => this.release(resource, requestId)
+  }
+
   private canGrant(resource: string, request: Request): boolean {
     const holders = this.holders.get(resource) ?? new Map()
     if (request.mode === 'shared' && [...holders.values()].some((mode) => mode === 'exclusive')) return false

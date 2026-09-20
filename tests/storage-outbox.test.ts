@@ -65,12 +65,15 @@ describe('effect outbox and runtime persistence envelope', () => {
     try {
       const backend = new FileRuntimePersistenceBackend(join(directory, 'runtime.json'))
       const source = new PulseRuntime()
-      source.state.effects.set('effect-1', { id: 'effect-1', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, state: 'running', attemptId: 'effect-1-attempt-1', attemptNo: 1, executionState: 'running', sideEffectState: 'applied', sideEffectPolicy: 'write' })
+      source.state.effects.set('effect-1', { id: 'effect-1', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, locks: [{ resource: 'workspace', mode: 'exclusive' }], state: 'running', attemptId: 'effect-1-attempt-1', attemptNo: 1, executionState: 'running', sideEffectState: 'applied', sideEffectPolicy: 'write' })
       source.outbox.enqueue({ id: 'effect-1', attemptId: 'effect-1-attempt-1' })
       await source.persist(backend)
       const restored = await PulseRuntime.restore(backend)
       expect(restored.state.effects.get('effect-1')?.state).toBe('reconcile_required')
       expect(restored.quarantine.unresolvedEffectIds).toEqual(['effect-1'])
+      expect(restored.resourceLocks.isHeld('workspace', 'exclusive')).toBe(true)
+      restored.abandonEffect('effect-1')
+      expect(restored.resourceLocks.isHeld('workspace')).toBe(false)
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
