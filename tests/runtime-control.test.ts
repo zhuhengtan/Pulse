@@ -59,6 +59,16 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.effects.get('effect-1')?.state).toBe('reconcile_required')
   })
 
+  it('rejects cancellation before mutating state when event storage admission fails', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 1 } })
+    const program: LaneProgram = { id: 'cancel-admission', version: '1', step: () => ({ actions: [], next: point('cancel-admission', 'done') }) }
+    const { agentId, laneId } = runtime.createAgent('cancel admission', program)
+    expect(() => runtime.cancelAgent(agentId)).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect(runtime.state.agents.get(agentId)?.state).toBe('running')
+    expect(runtime.state.lanes.get(laneId)?.status).toBe('ready')
+    expect(runtime.state.events).toHaveLength(0)
+  })
+
   it('supports explicit quarantine abandonment without claiming side-effect absence', async () => {
     const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
     const program: LaneProgram = { id: 'abandon-quarantine', version: '1', step: ({ lane }) => lane.resume.step === 'start'

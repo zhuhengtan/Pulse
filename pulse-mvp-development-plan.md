@@ -112,9 +112,10 @@
 | 恢复程序版本兼容 | Runtime 恢复时要求活动 Lane 的 `programId@version` 已注册；缺失版本在 Tick 前 fail-closed，不把兼容性错误伪装成业务失败 | `tests/runtime-control.test.ts` | 本轮恢复版本提交 |
 | 恢复工具版本兼容 | Tool manifest 版本随 Effect 持久化；恢复活动 Tool Effect 时由宿主提供当前版本，缺失或不一致在 Tick 前 fail-closed | `tests/runtime-control.test.ts`、`tests/tool-host.test.ts` | 本轮工具版本提交 |
 | Result 外部索引与读穿 | Persistence backend 可把 Result 正文写入独立 ResultStore，快照只保留稳定 ResultRef 索引；恢复时读穿正文并重新校验快照完整性 | `tests/storage-outbox.test.ts` | 本轮 ResultStore 提交 |
+| 取消事务存储准入 | Agent/子 Agent/Lane/Effect 取消前预检全部取消事件，存储不足时不留下半取消状态 | `tests/runtime-control.test.ts` | 本轮取消准入提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、247/247 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、248/248 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -475,6 +476,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - 本轮恢复版本提交：活动 Lane 缺少已注册的 `programId@version` 时在 Tick 前明确阻断恢复，要求宿主注册兼容版本或迁移。
 - 本轮工具版本提交：Tool manifest 版本进入 Effect 持久化契约；恢复时若宿主未提供匹配版本，则在 Tick 前明确阻断恢复。
 - 本轮 ResultStore 提交：Persistence backend 可把 Result 正文独立存储，快照保留 ResultRef 索引，`PulseRuntime.restore()` 恢复时读穿并重新计算完整性。
+- 本轮取消准入提交：取消父/子 Agent 前统一预检 Lane、Effect、Agent 事件，存储准入失败时不修改任何取消状态。
 - `2250df2`：Runtime Worker lease 暴露远程 claim/renew/complete/fail 协议；adapters 增加 HTTP Coordinator Server、Client、polling Worker 和 HTTP EffectExecutor，测试覆盖真实本机 HTTP 往返、heartbeat 与 Runtime Effect 闭环。
 - `685be10`：HTTP Worker Server/Client 增加 Bearer token 鉴权，未授权请求在任务访问前拒绝，并有回归测试。
 - `47791bd`：WorkerCoordinator 增加 schemaVersion=1 的 snapshot/restore；恢复时将 in-flight lease 重新入队，并让终态/幂等任务在重启后仍可返回结果。
@@ -486,7 +488,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `8bb07e5`：Global/Lane Context 增加不改变业务 JSON 形状的 privacy metadata sidecar；版本、持久化恢复、ContextBuilder、ContextMerger 和 warm start 均保留该元数据。
 - `fe9554a` / `596fecb`：Session outcome 和 fact stream 均按 Agent 隔离，Host snapshot 暴露 Global Context privacy metadata。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
-- 当前确定性门禁：`npm exec tsc -b --pretty false && npm test`，47 个测试文件、247 个测试通过；`npm run build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- 当前确定性门禁：`npm exec tsc -b --pretty false && npm test`，47 个测试文件、248 个测试通过；`npm run build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 

@@ -980,10 +980,40 @@ export class PulseRuntime {
   cancelAgent(agentId: string, reason: 'USER_REQUESTED' | 'SUPERSEDED' | 'POLICY' | 'TIMEOUT' = 'USER_REQUESTED'): void {
     const agent = this.state.agents.get(agentId)
     if (!agent || ['succeeded', 'failed', 'cancelled'].includes(agent.state ?? '')) return
-    agent.state = 'cancelling'
-    for (const lane of this.state.lanes.values()) if (lane.agentId === agentId && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'cancelled'; lane.version++; this.emit({ type: 'lane.cancelling', laneId: lane.id, data: reason }); for (const effectId of lane.ownedEffectIds) { const effect = this.state.effects.get(effectId); const childAgent = effect?.childAgentId === undefined ? undefined : this.state.agents.get(effect.childAgentId); if (childAgent?.detached === true) continue; if (effect?.childAgentId) this.cancelAgent(effect.childAgentId, reason); this.requestEffectCancellation(effectId, reason, effect?.cancelGraceMs ?? 0) } }
-    agent.state = 'cancelled'
-    this.emit({ type: 'agent.cancelled', data: reason })
+    const targetAgentIds: string[] = []
+    const collect = (currentAgentId: string): void => {
+      if (targetAgentIds.includes(currentAgentId)) return
+      const current = this.state.agents.get(currentAgentId)
+      if (!current || current.detached === true || ['succeeded', 'failed', 'cancelled'].includes(current.state ?? '')) return
+      targetAgentIds.push(currentAgentId)
+      for (const effect of this.state.effects.values()) if (effect.agentId === currentAgentId && effect.childAgentId !== undefined) collect(effect.childAgentId)
+    }
+    collect(agentId)
+    const targetAgentSet = new Set(targetAgentIds)
+    const targetLanes = [...this.state.lanes.values()].filter((lane) => targetAgentSet.has(lane.agentId) && !['succeeded', 'failed', 'cancelled'].includes(lane.status))
+    const targetEffects = [...this.state.effects.values()].filter((effect) => targetAgentSet.has(effect.agentId) && !effect.outcome)
+    const cancellationEvents: import('../core/types.js').RuntimeEventInput[] = [
+      ...targetLanes.map((lane) => ({ type: 'lane.cancelling', laneId: lane.id, data: reason })),
+      ...targetEffects.filter((effect) => effect.childAgentId === undefined || this.state.agents.get(effect.childAgentId)?.detached !== true).map((effect) => ({ type: 'effect.cancel_requested', effectId: effect.id, data: { reason } })),
+      ...targetAgentIds.map((targetId) => ({ type: 'agent.cancelled', agentId: targetId, data: reason })),
+    ]
+    this.assertStorageAdmission(cancellationEvents.map((event) => ({ op: 'appendEvent' as const, event })))
+    for (const targetId of targetAgentIds) this.state.agents.get(targetId)!.state = 'cancelling'
+    for (const lane of targetLanes) {
+      lane.status = 'cancelled'
+      lane.version++
+      this.emit({ type: 'lane.cancelling', laneId: lane.id, data: reason })
+    }
+    for (const effect of targetEffects) {
+      const childAgent = effect.childAgentId === undefined ? undefined : this.state.agents.get(effect.childAgentId)
+      if (childAgent?.detached === true) continue
+      this.requestEffectCancellation(effect.id, reason, effect.cancelGraceMs ?? 0)
+    }
+    for (const targetId of targetAgentIds) {
+      const target = this.state.agents.get(targetId)
+      if (target) target.state = 'cancelled'
+      this.emit({ type: 'agent.cancelled', agentId: targetId, data: reason })
+    }
     this.schedulePersistence()
   }
 
