@@ -36,4 +36,23 @@ describe('Result summary budget', () => {
     expect(runtime.state.artifacts.size).toBe(0)
     expect(runtime.state.events.some((event) => event.type === 'effect.settled')).toBe(true)
   })
+
+  it('fails a closing Lane instead of publishing an over-limit terminal Result', async () => {
+    const point = (step: string) => ({ programId: 'closing-result-limit', programVersion: '1', step, locals: {} })
+    const program: LaneProgram = {
+      id: 'closing-result-limit',
+      version: '1',
+      step: ({ lane }) => {
+        if (lane.goal === 'parent' && lane.resume.step === 'start') return { actions: [{ type: 'fork', lanes: [{ key: 'child', goal: 'child', program: point('child') }] }], next: point('close') }
+        if (lane.goal === 'parent' && lane.resume.step === 'close') return { actions: [{ type: 'complete', result: { payload: 'x'.repeat(500) }, children: 'await' }], next: point('close') }
+        if (lane.resume.step === 'child') return { actions: [{ type: 'submit_effects', effects: [{ key: 'child-work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('child-done') }
+        return { actions: [{ type: 'complete', result: { child: true } }], next: point('child-done') }
+      },
+    }
+    const runtime = new PulseRuntime({ storagePolicy: { maxResultBytes: 256 }, effectExecutor: async () => ({ value: { ok: true } }) })
+    const { agentId, laneId } = runtime.createAgent('parent', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+    expect(runtime.state.lanes.get(laneId)).toMatchObject({ status: 'failed', failure: { error: { code: 'SESSION_STORAGE_LIMIT_EXCEEDED' } } })
+    expect(runtime.state.lanes.get(laneId)?.resultRef).toBeUndefined()
+  })
 })

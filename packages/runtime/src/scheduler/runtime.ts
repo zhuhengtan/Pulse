@@ -1216,18 +1216,55 @@ export class PulseRuntime {
           changed = true
         } else if (modeSatisfied || (!pending && !unsatisfied && wait.spec.mode === 'all')) {
           this.cancelWaitDeadline(wait.id)
-          wait.state = 'satisfied'; wait.resolution = { waitId: wait.id, status: 'satisfied', dependencies: observations }
+          const resolution = { waitId: wait.id, status: 'satisfied' as const, dependencies: observations }
           const lane = this.state.lanes.get(wait.laneId)
           if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) {
-            delete lane.activeWaitId
             if (lane.closingResult) {
-              const resultId = `result-${this.state.nextIds.result++}`
-              this.state.results.set(resultId, { id: resultId, value: lane.closingResult.value, privacy: lane.closingResult.privacy, ...(lane.closingResult.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(lane.closingResult.privacyTaints) }), derivedFrom: [...(lane.closingResult.derivedFrom ?? [])] })
-              if (lane.visibleResultRefs) lane.visibleResultRefs.add(resultId)
-              else lane.visibleResultRefs = new Set([resultId])
-              lane.status = 'succeeded'; lane.resultRef = resultId; delete lane.closingResult
-              this.emit({ type: 'lane.succeeded', laneId: lane.id, data: resultId })
-            } else { lane.status = 'ready'; lane.pendingResumeInput = { type: 'wait', resolution: wait.resolution }; this.enqueueLane(lane.id) }
+              let resultSequence = this.state.nextIds.result
+              while (this.state.results.has(`result-${resultSequence}`)) resultSequence++
+              const resultId = `result-${resultSequence}`
+              const result = { id: resultId, value: lane.closingResult.value, privacy: lane.closingResult.privacy, ...(lane.closingResult.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(lane.closingResult.privacyTaints) }), derivedFrom: [...(lane.closingResult.derivedFrom ?? [])] }
+              const nextWait = structuredClone(wait)
+              nextWait.state = 'satisfied'
+              nextWait.resolution = resolution
+              const nextLane = structuredClone(lane)
+              delete nextLane.activeWaitId
+              nextLane.status = 'succeeded'
+              nextLane.resultRef = resultId
+              delete nextLane.closingResult
+              if (nextLane.visibleResultRefs) nextLane.visibleResultRefs.add(resultId)
+              else nextLane.visibleResultRefs = new Set([resultId])
+              const mutations: Mutation[] = [
+                { op: 'setWait', waitId: nextWait.id, record: nextWait },
+                { op: 'publishResult', record: result },
+                { op: 'setLane', laneId: nextLane.id, record: nextLane },
+                { op: 'appendEvent', event: { type: 'lane.succeeded', laneId: nextLane.id, data: resultId } },
+              ]
+              let closingCommitted = false
+              try {
+                this.assertStorageAdmission(mutations)
+                closingCommitted = true
+              } catch {
+                const storageError: RuntimeError = { code: 'SESSION_STORAGE_LIMIT_EXCEEDED', message: 'Session storage limit exceeded while committing a closing Lane result.' }
+                const failedWait = structuredClone(wait)
+                failedWait.state = 'unsatisfied'
+                failedWait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error: storageError }
+                const failedLane = structuredClone(lane)
+                delete failedLane.activeWaitId
+                failedLane.status = 'failed'
+                failedLane.failure = { error: storageError, privacy: 'public' }
+                failedLane.version++
+                this.state.waits.set(failedWait.id, failedWait)
+                this.state.lanes.set(failedLane.id, failedLane)
+              }
+              if (closingCommitted) commitMutationTransaction(this.state, this.mutationLog, `wait:${wait.id}:closing:${resultId}`, mutations, this.state.now, this.sessionId)
+            } else {
+              wait.state = 'satisfied'; wait.resolution = resolution
+              delete lane.activeWaitId
+              lane.status = 'ready'; lane.pendingResumeInput = { type: 'wait', resolution }; this.enqueueLane(lane.id)
+            }
+          } else {
+            wait.state = 'satisfied'; wait.resolution = resolution
           }
           changed = true
         }
