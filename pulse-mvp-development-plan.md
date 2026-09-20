@@ -83,8 +83,13 @@
 | 可复用 ReAct Lane 模板 | `defineReActLane` 保留最终 `resultRef`，支持模板级 `system/toolSet`、`outputSchema` 与 `historyCompaction`，模型请求继续走统一 ContextBuilder | `tests/dsl-host-macros.test.ts` | `6151318` |
 | 进程级恢复验收 | 子进程先持久化在途写 Effect 后被 `SIGKILL`，父进程通过真实文件后端恢复 `reconcile_required`、Quarantine 与资源锁隔离 | `tests/storage-outbox.test.ts`、`tests/process-recovery-child.ts` | `29a8e4c` |
 | RecoverableTool executionRef | `defineTool` 可声明执行引用，ToolRegistry/Executor 在成功或中断后持久化该引用；真实文件写入中断后可通过引用完成 reconcile | `tests/tool-host.test.ts` | `748c66f` |
+| LLM 结算结构化历史 | HistoryRecord 保存 effectId、ResultRef 选择规则/hash、结算结果和 Finding 引用；兼容旧快照字段 | `tests/history-llm-settlement.test.ts` | `8ab7642` |
+| Artifact 驻留策略 | Artifact 纳入 SessionStoragePolicy 的大小、pin、compact 和 persisted residency 管理 | `tests/artifacts.test.ts` | `bd64dbe` |
+| Effect 错误可重试性 | RuntimeError/ToolError 传播 retryable 与 details；明确不可重试错误阻止重复 Attempt，Provider/Worker 标记不再丢失 | `tests/tool-host.test.ts`、`tests/retry-policy.test.ts` | `3ea112d` |
+| Progress Admission | Watchdog 在 validate/commit 前计算规范化 Action 与 ResumePoint 指纹；重复外部 Action 注入 replan/fail，拒绝事务不派发 | `tests/watchdog.test.ts` | `d0266a1` |
+| 非 JSON Tool 输出 | 二进制或不可 JSON 化 Tool 输出转为 Artifact，Result 只保留 `{ artifactRef }` 并验证内容引用 | `tests/tool-host.test.ts` | `3edce15` |
 
-统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、211/211 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、215/215 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
