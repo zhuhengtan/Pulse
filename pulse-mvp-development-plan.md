@@ -130,6 +130,7 @@
 | Host Reply 类型边界 | Reply 只允许未结算的 HumanEffect；Tool/Timer/其他 Effect 仍由各自 Executor 结算 | `tests/effect-hosts.test.ts` | 本轮 Reply 类型提交 |
 | Host Fact 存储准入原子性 | 排队 Host Fact 先在候选 Inbox/StoragePolicy 上预检；快照 hard limit 失败时不进入真实队列、不消耗命令序号、不留下半个 pin 记录 | `tests/storage-policy.test.ts` | 本轮 Host Fact 准入提交 |
 | Host 命令 API | `requestCancel()`、`setLanePriority()`、`inspectLane()` 已接入 FactInbox；优先级修改与审计事件通过同一 MutationLog 事务提交，排队期间不重入当前 Step | `tests/host-commands.test.ts` | `5cf3af9` |
+| EffectHandle 取消边界 | EffectHandle 提供实时 `status()` 与排队式 `requestCancel()`；句柄携带 Agent 归属，取消经 FactInbox 校验后才调用 Effect 取消路径 | `tests/host-commands.test.ts`、`tests/effect-hosts.test.ts` | `a8bb883` |
 | Agent 创建事务 | Runtime 创建 Agent 时先生成候选 Agent/Root Lane，再将两条记录与 ID 游标作为一个 MutationLog 事务提交；Storage hard limit 失败不留下记录、不消耗 ID | `tests/agent-creation.test.ts`、`tests/artifacts.test.ts` | `94c4d69` |
 | Detached Agent 事件准入 | `detachAgent/attachAgent` 在改变 detached 状态前预检审计事件；事件硬上限失败时不留下半个后台 Scope 状态 | `tests/agent-effect.test.ts` | 本轮 Detached 准入提交 |
 | Fact Inbox 快照顺序校验 | 恢复时拒绝重复去重历史和乱序 `receivedSeq`，不把损坏快照静默归一化成另一条事实顺序 | `tests/fact-inbox.test.ts` | 本轮 Fact Inbox 校验提交 |
@@ -141,7 +142,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 49 个测试文件、274/274 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 49 个测试文件、275/275 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -541,8 +542,9 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
+- `a8bb883`：补齐架构定义的 `EffectHandle`，句柄状态可读，取消请求经 FactInbox 和 Agent 归属校验后执行。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
-- 当前确定性门禁：`npx tsc -b --pretty false && npm test`，49 个测试文件、274 个测试通过；`npm run build` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npx tsc -b --pretty false && npm test`，49 个测试文件、275 个测试通过；`npm run build` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
