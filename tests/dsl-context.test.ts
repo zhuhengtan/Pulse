@@ -10,9 +10,17 @@ describe('DSL StepContext', () => {
     delete draft.nested.enabled
     expect(changes().ops).toEqual([
       { op: 'set', path: ['nested', 'enabled'], value: true },
-      { op: 'set', path: ['items', '1'], value: 'b' },
-      { op: 'set', path: ['items', 'length'], value: 2 },
+      { op: 'append', path: ['items'], value: 'b' },
       { op: 'remove', path: ['nested', 'enabled'] },
+    ])
+    const array = createDraftProxy({ items: ['a', 'b', 'c'] })
+    array.draft.items[1] = 'B'
+    array.draft.items.splice(0, 1, 'A')
+    array.draft.items.sort()
+    expect(array.changes().ops).toEqual([
+      { op: 'set', path: ['items'], value: ['a', 'B', 'c'] },
+      { op: 'set', path: ['items'], value: ['A', 'B', 'c'] },
+      { op: 'set', path: ['items'], value: ['A', 'B', 'c'] },
     ])
   })
 
