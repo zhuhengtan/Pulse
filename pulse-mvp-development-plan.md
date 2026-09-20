@@ -48,6 +48,7 @@
 | warm start / DSL | facts/findings 筛选、ResultRef 授权、递归 Draft Proxy、ReAct 完成回调只传 ResultRef | `tests/warm-start.test.ts`、`tests/dsl-context.test.ts`、`tests/m4-dsl-e2e.test.ts` | `79a993f`、`324f1bc`、`e6c228b` |
 | Runtime Storage 编排 | Runtime 自动登记 Event/Result/Snapshot/LLM Request，活动 Lane/Wait/未结算 Request/可见 ResultRef 幂等 pin；Step 提交前 clone 预检 hard limit | `tests/storage-policy.test.ts` | `43a9847` |
 | SQLite 持久化事务 | 提供 Node `node:sqlite` RuntimePersistenceBackend；WAL/FULL synchronous、单行快照、`BEGIN IMMEDIATE` 和 digest CAS 支持原子保存/恢复 | `tests/sqlite-persistence.test.ts` | `0372a5a` |
+| SQLite 持久化一体化 | RuntimePersistenceBackend 自动挂载 SQLite ResultStore、SnapshotStore 与 EventArchive；checkpoint 外置正文、事实归档和 static restore 可直接闭环 | `tests/sqlite-persistence.test.ts` | `4ac21f3` |
 | SQLite Result/Snapshot/EventArchive | 提供带 namespace 的 SQLite Result/Snapshot body store 与幂等冲突检测，以及按事件序号原子追加、范围读取的 SQLite EventArchive | `tests/sqlite-content-store.test.ts` | `b832588` |
 | LLM Preparation | bounded preparing/prepared 窗口、generation、迟到准备丢弃、explain 展示 | `tests/provider-host.test.ts` | `944c3ad` |
 | Provider 请求与 usage | modelId、工具 schema、structured output schema、uncached token、latency/cost 归一化与 metadata | `tests/m3-context-adapters.test.ts`、`tests/provider-host.test.ts` | `fa723c7` |
@@ -592,7 +593,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，54 个测试文件、299 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，54 个测试文件、300 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
@@ -628,7 +629,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 本方案继承并落地《Pulse Runtime 架构设计》与《Pulse Application DSL 规范》：
 1. 以主架构第 26 节的 M0/M1 标注为唯一验收来源，不重复维护场景数量。
 2. M1 的真实 Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder、Session 和确定性端到端示例已贯通；其他 Provider 与真实网络任务属于独立集成验证。
-3. ResultRef 隔离、record/leaf Privacy、ContextDelta provenance、Watchdog、Fork Affinity（含 DSL series collapse 与 Runtime 可选自动 coalesce）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射与实时 Observation emitter、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由及快照恢复、按 Agent 隔离的 Session、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、恢复程序/工具版本 fail-closed、ResultStore 外部正文读穿、事实 EventArchive 归档、取消事务存储准入、correlated telemetry、JSONL/HTTP exporter、聚合和告警规则、Bearer-authenticated HTTP lease-based Worker transport、Worker snapshot/restore、HTTP lease reaper、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、Snapshot 外部归档索引、生产级持久化事务边界、生产级 Worker TLS/密钥轮换与共享 durable lease store、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
+3. ResultRef 隔离、record/leaf Privacy、ContextDelta provenance、Watchdog、Fork Affinity（含 DSL series collapse 与 Runtime 可选自动 coalesce）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射与实时 Observation emitter、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由及快照恢复、按 Agent 隔离的 Session、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、恢复程序/工具版本 fail-closed、ResultStore 外部正文读穿、SQLite Result/Snapshot/EventArchive 一体化、事实 EventArchive 归档、取消事务存储准入、correlated telemetry、JSONL/HTTP exporter、聚合和告警规则、Bearer-authenticated HTTP lease-based Worker transport、Worker snapshot/restore、HTTP lease reaper、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、Snapshot 外部归档索引、生产级持久化事务边界、生产级 Worker TLS/密钥轮换与共享 durable lease store、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
 已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
