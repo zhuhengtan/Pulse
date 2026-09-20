@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EffectOutbox, FileRuntimeContentStore, FileRuntimePersistenceBackend, PulseRuntime, createRuntimeState, exportRuntimePersistence, importRuntimePersistence, MutationLog, serializeRuntimePersistence } from '@pulse/runtime'
+import { EffectOutbox, FileRuntimeContentStore, FileRuntimeEventArchive, FileRuntimePersistenceBackend, PulseRuntime, createRuntimeState, exportRuntimePersistence, importRuntimePersistence, MutationLog, serializeRuntimePersistence } from '@pulse/runtime'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -98,6 +98,23 @@ describe('effect outbox and runtime persistence envelope', () => {
       await expect(store.save('result-1', { answer: 43 })).rejects.toThrow('RUNTIME_CONTENT_CONFLICT')
       expect(await store.load('missing')).toBeUndefined()
       await expect(store.save('', null)).rejects.toThrow('INVALID_RUNTIME_CONTENT_REF')
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('persists checkpoint facts through the file-backed EventArchive', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-event-archive-'))
+    try {
+      const archive = new FileRuntimeEventArchive(join(directory, 'archive'))
+      const backend = { load: async () => undefined, save: async () => undefined, eventArchive: archive }
+      const runtime = new PulseRuntime()
+      const program = { id: 'file-event-archive', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'file-event-archive', programVersion: '1', step: 'done', locals: {} } }) }
+      const { agentId } = runtime.createAgent('file archive', program)
+      await runtime.start(agentId).outcome()
+      const checkpoint = await runtime.checkpoint(backend)
+      const archived = await archive.read(1, checkpoint.eventArchive?.through)
+      expect(archived.length).toBeGreaterThan(0)
+      await archive.append(archived)
+      expect((await archive.read(archived[0]!.seq, archived.at(-1)!.seq)).length).toBe(archived.length)
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 

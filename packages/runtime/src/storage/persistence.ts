@@ -121,6 +121,89 @@ export class FileRuntimeContentStore implements RuntimeResultStore, RuntimeSnaps
   }
 }
 
+/** Atomic file-backed EventArchive with idempotent sequence append and range reads. */
+export class FileRuntimeEventArchive implements RuntimeEventArchive {
+  private readonly filePath: string
+
+  constructor(readonly directory: string) { this.filePath = join(directory, 'events.json') }
+
+  async append(events: RuntimeEvent[]): Promise<void> {
+    if (events.length === 0) return
+    const incoming = new Map<number, RuntimeEvent>()
+    for (const event of events) {
+      if (!Number.isInteger(event.seq) || event.seq < 1) throw new Error('INVALID_RUNTIME_EVENT_ARCHIVE')
+      const previous = incoming.get(event.seq)
+      if (previous && stableSerialize(previous) !== stableSerialize(event)) throw new Error('RUNTIME_EVENT_ARCHIVE_CONFLICT')
+      incoming.set(event.seq, structuredClone(event))
+    }
+    await mkdir(this.directory, { recursive: true })
+    await this.withLock(async () => {
+      const existing = await this.readEnvelope()
+      const bySeq = new Map(existing.map((event) => [event.seq, event]))
+      for (const [seq, event] of incoming) {
+        const previous = bySeq.get(seq)
+        if (previous && stableSerialize(previous) !== stableSerialize(event)) throw new Error('RUNTIME_EVENT_ARCHIVE_CONFLICT')
+        bySeq.set(seq, event)
+      }
+      await this.writeEnvelope([...bySeq.values()].sort((left, right) => left.seq - right.seq))
+    })
+  }
+
+  async read(fromSeq: number, toSeq = Number.POSITIVE_INFINITY): Promise<RuntimeEvent[]> {
+    if (!Number.isInteger(fromSeq) || fromSeq < 0 || Number.isNaN(toSeq)) throw new Error('INVALID_RUNTIME_EVENT_ARCHIVE_RANGE')
+    const events = await this.readEnvelope()
+    return events.filter((event) => event.seq >= fromSeq && event.seq <= toSeq).map((event) => structuredClone(event))
+  }
+
+  private async readEnvelope(): Promise<RuntimeEvent[]> {
+    try {
+      const parsed = JSON.parse(await readFile(this.filePath, 'utf8')) as { schemaVersion: 1; events: RuntimeEvent[] }
+      if (!parsed || parsed.schemaVersion !== 1 || !Array.isArray(parsed.events)) throw new Error('INVALID_RUNTIME_EVENT_ARCHIVE')
+      return parsed.events.map((event) => {
+        if (!event || !Number.isInteger(event.seq) || event.seq < 1) throw new Error('INVALID_RUNTIME_EVENT_ARCHIVE')
+        return structuredClone(event)
+      })
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return []
+      if (cause instanceof Error && cause.message === 'INVALID_RUNTIME_EVENT_ARCHIVE') throw cause
+      throw new Error('INVALID_RUNTIME_EVENT_ARCHIVE')
+    }
+  }
+
+  private async writeEnvelope(events: RuntimeEvent[]): Promise<void> {
+    const temporaryPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${process.hrtime.bigint().toString()}`
+    let handle: Awaited<ReturnType<typeof open>> | undefined
+    try {
+      handle = await open(temporaryPath, 'wx', 0o600)
+      await handle.writeFile(JSON.stringify({ schemaVersion: 1, events }), 'utf8')
+      await handle.sync()
+      await handle.close()
+      handle = undefined
+      await rename(temporaryPath, this.filePath)
+    } finally {
+      if (handle) await handle.close().catch(() => undefined)
+      await rm(temporaryPath, { force: true }).catch(() => undefined)
+    }
+  }
+
+  private async withLock<T>(work: () => Promise<T>): Promise<T> {
+    const lockPath = `${this.filePath}.lock`
+    const deadline = Date.now() + 30_000
+    let lock: Awaited<ReturnType<typeof open>> | undefined
+    while (lock === undefined) {
+      try { lock = await open(lockPath, 'wx', 0o600) }
+      catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause
+        const lockStat = await stat(lockPath).catch(() => undefined)
+        if (lockStat && Date.now() - lockStat.mtimeMs > 30_000) { await rm(lockPath, { force: true }); continue }
+        if (Date.now() >= deadline) throw new Error('RUNTIME_EVENT_ARCHIVE_LOCK_TIMEOUT')
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+    }
+    try { return await work() } finally { await lock.close().catch(() => undefined); await rm(lockPath, { force: true }).catch(() => undefined) }
+  }
+}
+
 export interface RuntimePersistenceBackend {
   load(): Promise<RuntimePersistenceSnapshot | undefined>
   save(snapshot: RuntimePersistenceSnapshot, expectedDigest?: string): Promise<void>
