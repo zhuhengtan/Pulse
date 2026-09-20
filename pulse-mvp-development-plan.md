@@ -57,7 +57,7 @@
 | 终态观测审计 | Effect 终态后的迟到 observation 不进入 ObservationInbox、不改变 Outcome，并记录 `attempt.late_emit` 事实 | `tests/late-attempt.test.ts` | `73c438b` |
 | RuntimeClock 注入 | Scheduler 接受宿主提供的 RuntimeClock；默认仍使用 VirtualClock，恢复、TimerWheel 与已有确定性调度保持兼容 | `tests/runtime-control.test.ts` | `488e3e7` |
 | MonotonicClock 与真实 Timer 等待 | 提供基于 `performance.now()` 的真实单调时钟；`run`/`runAgent` 在真实时钟下等待 Timer 或 Effect 完成，不再快进 deadline | `tests/runtime-control.test.ts` | `d4f5d8a` |
-| Runtime 绝对时限锚定 | `maxRuntimeMs` 按 Runtime 启动/恢复时钟作为相对时限计算；接入 epoch 单调时钟时不会首 Tick 误判超时 | `tests/runtime-control.test.ts` | `e91602f` |
+| Runtime 绝对时限锚定 | `maxRuntimeMs` 按 Runtime 启动/恢复时钟作为相对时限计算；接入 epoch 单调时钟时不会首 Tick 误判超时；恢复后 `waitUntil` 严格等待实际 Timer deadline | `tests/runtime-control.test.ts` | `e91602f`、`ce8da5a` |
 | 自适应模型路由 | `AdaptiveModelRouter` 基于质量、延迟、价格、缓存和探索项重排合规候选；Provider Executor 自动记录 Attempt 反馈，并支持经过校验的 snapshot/restore | `tests/adaptive-routing.test.ts`、`tests/provider-host.test.ts` | `0d17d7c`、`4c65d38` |
 | DSL Draft 数组语义与运行诊断 | `push→append`、数组索引/splice/sort→整数组 set；explain 补充队列、等待、watchdog、preparation、execution metadata | `tests/dsl-context.test.ts`、`tests/runtime-control.test.ts` | `d5c6ef2`、`f57ae27` |
 | Mutation 事务预检 | clone 预检失败不写日志、不改变运行时；提交时保留 Lane/Effect 对象身份；日志预备失败不消耗序号，状态 apply 与日志提交分层 | `tests/storage-mutation-log.test.ts` | `70c3534`、`6c89fe2` |
@@ -593,6 +593,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `488e3e7`：Runtime 接受宿主注入的 RuntimeClock，默认 VirtualClock 保持现有确定性调度和恢复语义。
 - `d4f5d8a`：补齐基于 `performance.now()` 的 MonotonicClock，真实时钟下 Timer 不再被虚拟快进，`run`/`runAgent` 会等待真实 deadline 或 Effect 结算。
 - `e91602f`：将 `maxRuntimeMs` 锚定到 Runtime 启动/恢复时刻；修复真实单调时钟使用 epoch 时间后首 Tick 立即超时的问题。
+- `ce8da5a`：补强 `MonotonicClock.waitUntil()` 的严格 deadline 循环，并覆盖恢复到新 Host 时钟后的 Runtime 时限回归。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
@@ -602,7 +603,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，54 个测试文件、305 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，54 个测试文件、306 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
