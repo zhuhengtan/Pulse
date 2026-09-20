@@ -12,10 +12,11 @@ import { EffectOutbox } from '../storage/outbox.js'
 import { exportRuntimeCheckpoint, exportRuntimePersistence, importRuntimePersistence, type RuntimePersistenceBackend, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
 import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
-import type { Mutation } from '../core/mutations.js'
+import { apply, type Mutation } from '../core/mutations.js'
 import { ContextMerger, type MergePlan } from '../context/merger.js'
 import { appendHistory, historyPressure } from '../context/builder.js'
 import { validateJsonSchema } from '../models/router.js'
+import { SessionStoragePolicy, type StoragePolicyConfig } from '../storage/policy.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number; observe?: (event: { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }) => void }
 export interface LaneProgram {
@@ -49,6 +50,7 @@ export interface RuntimeConfig {
   sessionId?: string
   maxAgentDepth?: number
   watchdogNoProgressThreshold?: number
+  storagePolicy?: StoragePolicyConfig
   persistence?: RuntimePersistenceSnapshot
   effectExecutor?: EffectExecutor
 }
@@ -88,6 +90,7 @@ export class PulseRuntime {
   readonly quarantine = new QuarantineScope()
   readonly priorityInheritance = new PriorityInheritance()
   readonly resourceLocks = new ResourceLockManager()
+  readonly storagePolicy: SessionStoragePolicy
   readonly factInbox = new FactInbox<HostCommand>()
   readonly observationInbox = new ObservationInbox()
   private readonly programs = new Map<string, LaneProgram>()
@@ -110,6 +113,7 @@ export class PulseRuntime {
     const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
     this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }), ...(config.forkAffinity === undefined ? {} : { forkAffinity: config.forkAffinity }), ...(config.historySoftTokens === undefined ? {} : { historySoftTokens: config.historySoftTokens }), ...(config.historyHardTokens === undefined ? {} : { historyHardTokens: config.historyHardTokens }) })
     this.sessionId = config.sessionId ?? 'session-local'
+    this.storagePolicy = new SessionStoragePolicy(config.storagePolicy)
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
     if (restored?.quarantine) this.quarantine.restore(restored.quarantine)
@@ -139,6 +143,7 @@ export class PulseRuntime {
     this.maxAgentDepth = config.maxAgentDepth ?? 1
     this.customExecutor = config.effectExecutor !== undefined
     this.executor = config.effectExecutor ?? (async () => ({ value: null }))
+    this.syncStoragePolicy()
   }
 
   register(program: LaneProgram): void { this.programs.set(`${program.id}@${program.version}`, program); if (program.seriesMemberProgram) this.register(program.seriesMemberProgram) }
@@ -173,6 +178,7 @@ export class PulseRuntime {
     root.enqueueSeq = this.enqueueSeq++
     agent.state = 'running'
     this.ready.enqueue(readyItemFromLane(root))
+    this.syncStoragePolicy()
     return { agentId: agent.id, laneId: root.id }
   }
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
@@ -290,6 +296,15 @@ export class PulseRuntime {
           }
         }
       } else {
+        try { this.assertStorageAdmission(result.mutations) }
+        catch (cause) {
+          const storageError: RuntimeError = { code: 'SESSION_STORAGE_LIMIT_EXCEEDED', message: cause instanceof Error ? cause.message : String(cause) }
+          lane.pendingResumeInput = { type: 'control_error', error: storageError, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
+          this.emit({ type: 'storage.limit_exceeded', laneId: lane.id, data: storageError as unknown as JsonValue })
+          this.enqueueLane(lane.id)
+          progressed++
+          continue
+        }
         commitMutationTransaction(this.state, this.mutationLog, `step:${lane.id}:${lane.version + 1}`, result.mutations, this.state.now, this.sessionId)
         for (const mutation of result.mutations) if (mutation.op === 'insertEffect') this.outbox.enqueue(mutation.record, this.state.now)
         const updated = this.state.lanes.get(lane.id)
@@ -305,11 +320,13 @@ export class PulseRuntime {
         this.enqueueNewReadyLanes()
         this.refreshWaits()
         this.propagateCancelledLanes()
+        this.syncStoragePolicy()
       }
       this.dispatchQueuedEffects()
       progressed++
     }
     this.completeFinishedChildAgents()
+    this.syncStoragePolicy()
     return progressed
   }
 
@@ -354,6 +371,55 @@ export class PulseRuntime {
   }
 
   inspect(): JsonValue { const explanation = this.explain() as Record<string, JsonValue>; return { ...explanation, quarantineEntries: this.quarantine.snapshot() as unknown as JsonValue, observationsPending: this.observationInbox.size } }
+
+  private assertStorageAdmission(mutations: Mutation[]): void {
+    const candidate = structuredClone(this.state)
+    apply(candidate, mutations, { sessionId: this.sessionId, timestamp: candidate.now })
+    const policy = this.storagePolicy.clone()
+    this.syncStoragePolicy(policy, candidate)
+  }
+
+  private syncStoragePolicy(policy = this.storagePolicy, state = this.state): void {
+    const pinKeys = new Set<string>()
+    for (const lane of state.lanes.values()) {
+      const active = !['succeeded', 'failed', 'cancelled'].includes(lane.status)
+      if (active) pinKeys.add(`snapshot:lane:${lane.id}:${lane.context.version}`)
+      if (active) for (const ref of lane.visibleResultRefs ?? []) pinKeys.add(`result:${ref}`)
+      for (const record of lane.context.history) for (const ref of record.resultRefs) pinKeys.add(`result:${ref}`)
+      if (lane.activeWaitId) pinKeys.add(`snapshot:wait:${lane.activeWaitId}`)
+      if (lane.pendingResumeInput) pinKeys.add(`snapshot:resume:${lane.id}:${lane.version}`)
+    }
+    for (const agent of state.agents.values()) for (const [version] of agent.globalVersions) if ([...state.lanes.values()].some((lane) => lane.agentId === agent.id && !['succeeded', 'failed', 'cancelled'].includes(lane.status) && lane.contextSnapshotVersion === version)) pinKeys.add(`snapshot:global:${agent.id}:${version}`)
+    for (const wait of state.waits.values()) if (wait.state === 'pending') pinKeys.add(`snapshot:wait:${wait.id}`)
+    for (const effect of state.effects.values()) {
+      if (!effect.outcome && effect.kind === 'llm') pinKeys.add(`snapshot:request:${effect.id}:${effect.attemptId}`)
+      if (!effect.outcome) for (const ref of effect.derivedFrom ?? []) pinKeys.add(`result:${ref}`)
+    }
+    policy.replacePinSource('runtime', pinKeys)
+    for (const lane of state.lanes.values()) {
+      const snapshotKey = `snapshot:lane:${lane.id}:${lane.context.version}`
+      policy.put('snapshot', snapshotKey, { laneId: lane.id, version: lane.context.version, context: lane.context, resume: lane.resume } as unknown as JsonValue)
+    }
+    for (const agent of state.agents.values()) {
+      for (const [version, value] of agent.globalVersions) {
+        const key = `snapshot:global:${agent.id}:${version}`
+        policy.put('snapshot', key, { agentId: agent.id, version, value } as unknown as JsonValue)
+      }
+    }
+    for (const wait of state.waits.values()) {
+      const key = `snapshot:wait:${wait.id}`
+      policy.put('snapshot', key, wait as unknown as JsonValue)
+    }
+    for (const effect of state.effects.values()) {
+      if (!effect.outcome && effect.kind === 'llm') {
+        const key = `snapshot:request:${effect.id}:${effect.attemptId}`
+        policy.put('snapshot', key, { effectId: effect.id, attemptId: effect.attemptId, input: effect.input } as unknown as JsonValue)
+      }
+    }
+    for (const result of state.results.values()) policy.put('result', `result:${result.id}`, result as unknown as JsonValue)
+    for (const event of state.events) policy.put('event', `event:${event.id}`, event as unknown as JsonValue)
+    for (const lane of state.lanes.values()) if (lane.pendingResumeInput) policy.put('snapshot', `snapshot:resume:${lane.id}:${lane.version}`, lane.pendingResumeInput as unknown as JsonValue)
+  }
 
   private hasPendingHostInteraction(): boolean { return [...this.state.effects.values()].some((effect) => effect.kind === 'human' && !effect.outcome) }
   private waitForFact(): Promise<void> { return new Promise((resolve) => this.factWaiters.push(resolve)) }

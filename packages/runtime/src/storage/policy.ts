@@ -23,6 +23,7 @@ export interface StoredRecord {
 
 export class SessionStoragePolicy {
   private readonly records = new Map<string, StoredRecord>()
+  private readonly pinSources = new Map<string, Set<string>>()
   private readonly limits: Required<StoragePolicyConfig>
 
   constructor(config: StoragePolicyConfig = {}) {
@@ -30,18 +31,19 @@ export class SessionStoragePolicy {
   }
 
   put(kind: StorageKind, key: string, value: JsonValue, pin = false): StoredRecord {
+    const before = this.snapshot()
     const bytes = Buffer.byteLength(stableSerialize(value))
     const previous = this.records.get(key)
     if (previous && previous.kind !== kind) throw new Error('STORAGE_KEY_KIND_CONFLICT')
-    const record: StoredRecord = { key, kind, storageState: 'memory', pinCount: (previous?.pinCount ?? 0) + (pin ? 1 : 0), bytes, hash: contentHash(value), value: structuredClone(value) }
+    const managedPin = previous === undefined && this.isManagedPinned(key) ? 1 : 0
+    const record: StoredRecord = { key, kind, storageState: 'memory', pinCount: (previous?.pinCount ?? 0) + (pin ? 1 : 0) + managedPin, bytes, hash: contentHash(value), value: structuredClone(value) }
     this.records.set(key, record)
     this.compactToFit(kind, key)
     if (this.memoryBytes(kind) > this.kindLimit(kind) || this.memoryBytes() > this.limits.maxTotalMemoryBytes) {
-      if (previous) this.records.set(key, previous)
-      else this.records.delete(key)
+      this.restore(before)
       throw new Error('SESSION_STORAGE_LIMIT_EXCEEDED')
     }
-    return this.clone(record)
+    return this.copyRecord(record)
   }
 
   get(key: string): JsonValue | undefined {
@@ -52,6 +54,23 @@ export class SessionStoragePolicy {
   pin(key: string): void { const record = this.require(key); record.pinCount++ }
   unpin(key: string): void { const record = this.require(key); record.pinCount = Math.max(0, record.pinCount - 1) }
 
+  /** Replace one logical owner’s pins without double-counting repeated reconciliation. */
+  replacePinSource(source: string, keys: Iterable<string>): void {
+    const next = new Set(keys)
+    const previous = this.pinSources.get(source) ?? new Set<string>()
+    for (const key of previous) if (!next.has(key) && this.records.has(key)) this.unpin(key)
+    for (const key of next) if (!previous.has(key) && this.records.has(key)) this.pin(key)
+    if (next.size) this.pinSources.set(source, next)
+    else this.pinSources.delete(source)
+  }
+
+  /** Make a private copy suitable for validate-stage storage admission. */
+  clone(): SessionStoragePolicy {
+    const copy = new SessionStoragePolicy(this.limits)
+    copy.restore(this.snapshot())
+    return copy
+  }
+
   compact(key: string): boolean {
     const record = this.require(key)
     if (record.kind === 'event') throw new Error('FACT_EVENT_REQUIRES_PERSISTENCE')
@@ -61,7 +80,7 @@ export class SessionStoragePolicy {
     return true
   }
 
-  inspect(): StoredRecord[] { return [...this.records.values()].map((record) => this.clone(record)) }
+  inspect(): StoredRecord[] { return [...this.records.values()].map((record) => this.copyRecord(record)) }
   get memoryBytesTotal(): number { return this.memoryBytes() }
 
   private compactToFit(kind: StorageKind, protectedKey: string): void {
@@ -74,5 +93,13 @@ export class SessionStoragePolicy {
   private memoryBytes(kind?: StorageKind): number { return [...this.records.values()].filter((record) => record.storageState === 'memory' && (kind === undefined || record.kind === kind)).reduce((total, record) => total + record.bytes, 0) }
   private kindLimit(kind: StorageKind): number { return kind === 'event' ? this.limits.maxEventLogBytes : kind === 'result' ? this.limits.maxResultBytes : this.limits.maxSnapshotBytes }
   private require(key: string): StoredRecord { const record = this.records.get(key); if (!record) throw new Error(`UNKNOWN_STORAGE_KEY:${key}`); return record }
-  private clone(record: StoredRecord): StoredRecord { return { ...record, ...(record.value === undefined ? {} : { value: structuredClone(record.value) }) } }
+  private copyRecord(record: StoredRecord): StoredRecord { return { ...record, ...(record.value === undefined ? {} : { value: structuredClone(record.value) }) } }
+  private isManagedPinned(key: string): boolean { return [...this.pinSources.values()].some((keys) => keys.has(key)) }
+  private snapshot(): { records: StoredRecord[]; pinSources: Array<[string, string[]]> } { return { records: [...this.records.values()].map((record) => this.copyRecord(record)), pinSources: [...this.pinSources.entries()].map(([source, keys]) => [source, [...keys]]) } }
+  private restore(snapshot: { records: StoredRecord[]; pinSources: Array<[string, string[]]> }): void {
+    this.records.clear()
+    for (const record of snapshot.records) this.records.set(record.key, this.copyRecord(record))
+    this.pinSources.clear()
+    for (const [source, keys] of snapshot.pinSources) this.pinSources.set(source, new Set(keys))
+  }
 }
