@@ -2,7 +2,7 @@ import { contentHash, stableSerialize } from '../context/builder.js'
 import type { JsonValue } from '../core/types.js'
 
 export type StorageKind = 'event' | 'result' | 'snapshot'
-export type StorageState = 'memory' | 'compacted'
+export type StorageState = 'memory' | 'persisted' | 'compacted'
 
 export interface StoragePolicyConfig {
   maxEventLogBytes?: number
@@ -95,6 +95,17 @@ export class SessionStoragePolicy {
     delete record.value
     record.storageState = 'compacted'
     return true
+  }
+
+  /** Mark records durable only after the persistence backend has acknowledged the snapshot. */
+  markPersisted(keys?: Iterable<string>): void {
+    const selected = keys === undefined ? [...this.records.keys()] : [...keys]
+    for (const key of selected) {
+      const record = this.require(key)
+      if (record.storageState === 'compacted') continue
+      delete record.value
+      record.storageState = 'persisted'
+    }
   }
 
   inspect(): StoredRecord[] { return [...this.records.values()].map((record) => this.copyRecord(record)) }

@@ -190,10 +190,14 @@ export class PulseRuntime {
   }
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
   exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine, this.storagePolicy) }
-  async persist(backend: RuntimePersistenceBackend): Promise<void> { await backend.save(this.exportPersistence()) }
+  async persist(backend: RuntimePersistenceBackend): Promise<void> {
+    await backend.save(this.exportPersistence())
+    this.storagePolicy.markPersisted()
+  }
   async checkpoint(backend: RuntimePersistenceBackend): Promise<RuntimePersistenceSnapshot> {
     const snapshot = exportRuntimeCheckpoint(this.state, this.mutationLog, this.outbox, this.quarantine, this.storagePolicy)
     await backend.save(snapshot)
+    this.storagePolicy.markPersisted()
     const watermark = snapshot.checkpoint?.logWatermark ?? 0
     if (watermark > 0 && this.mutationLog.lastSequence >= watermark) this.mutationLog.truncateThrough(watermark)
     return snapshot

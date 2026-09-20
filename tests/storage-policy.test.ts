@@ -62,4 +62,13 @@ describe('session storage policy', () => {
     expect(restored.get('result:r1')).toEqual({ answer: 1 })
     expect(restored.inspect().find((record) => record.key === 'result:r1')).toMatchObject({ pinCount: 1, storageState: 'memory' })
   })
+
+  it('marks records persisted only after the backend acknowledges the snapshot', () => {
+    const policy = new SessionStoragePolicy({ maxResultBytes: 100 })
+    policy.put('result', 'result:r1', { answer: 1 })
+    expect(policy.inspect()[0]?.storageState).toBe('memory')
+    policy.markPersisted()
+    expect(policy.inspect()[0]).toMatchObject({ storageState: 'persisted', bytes: expect.any(Number) })
+    expect(policy.get('result:r1')).toBeUndefined()
+  })
 })

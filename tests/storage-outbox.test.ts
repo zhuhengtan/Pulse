@@ -46,6 +46,18 @@ describe('effect outbox and runtime persistence envelope', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('marks the runtime storage records persisted only after a successful save', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-persisted-state-'))
+    try {
+      const backend = new FileRuntimePersistenceBackend(join(directory, 'runtime.json'))
+      const runtime = new PulseRuntime()
+      runtime.createAgent('persisted state', { id: 'persisted-state', version: '1', step: () => ({ actions: [], next: { programId: 'persisted-state', programVersion: '1', step: 'start', locals: {} } }) })
+      expect(runtime.storagePolicy.inspect().some((record) => record.storageState === 'memory')).toBe(true)
+      await runtime.persist(backend)
+      expect(runtime.storagePolicy.inspect().some((record) => record.storageState === 'persisted')).toBe(true)
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('serializes concurrent saves and leaves no temporary snapshot behind', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-persistence-queue-'))
     try {
