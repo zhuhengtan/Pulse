@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { decodeLLMActions, OutputValidationError } from '@pulse/runtime'
+import { apply, createAgent, createRuntimeState, decodeLLMActions, OutputValidationError, validateStep } from '@pulse/runtime'
 
 describe('LLM action decoder', () => {
   it('converts allowed tool calls into one Runtime submit action', () => {
@@ -11,5 +11,14 @@ describe('LLM action decoder', () => {
     expect(() => decodeLLMActions({ text: '', finishReason: 'tool_calls', toolCalls: [{ toolCallId: 'call-1', name: 'shell', input: {} }] }, { allowedTools: new Set(['read_file']) })).toThrow('ACTION_TOOL_NOT_ALLOWED')
     expect(() => decodeLLMActions({ text: '', finishReason: 'stop', toolCalls: [{ toolCallId: 'call-1', name: 'read_file', input: {} }] }, { allowedTools: new Set(['read_file']) })).toThrow(OutputValidationError)
     expect(() => decodeLLMActions({ text: '', finishReason: 'tool_calls', toolCalls: [{ toolCallId: 'call-1', name: 'read_file', input: { value: () => 1 } }] }, { allowedTools: new Set(['read_file']) })).toThrow('ACTION_INPUT_NOT_SERIALIZABLE')
+  })
+
+  it('rejects reusing a toolCallId for a second logical ToolEffect', () => {
+    const state = createRuntimeState()
+    const { root } = createAgent(state, 'tool correlation', { programId: 'tool', programVersion: '1', step: 'start', locals: {} })
+    const first = validateStep(state, root.id, { actions: [{ type: 'submit_effects', effects: [{ key: 'first', toolCallId: 'pulse-tool-1', kind: 'tool', concurrencyClass: 'tool', input: {} }] }], next: { programId: 'tool', programVersion: '1', step: 'next', locals: {} } })
+    expect('rejection' in first).toBe(false)
+    if (!('rejection' in first)) apply(state, first.mutations)
+    expect('rejection' in validateStep(state, root.id, { actions: [{ type: 'submit_effects', effects: [{ key: 'second', toolCallId: 'pulse-tool-1', kind: 'tool', concurrencyClass: 'tool', input: {} }] }], next: { programId: 'tool', programVersion: '1', step: 'next', locals: {} } })).toBe(true)
   })
 })

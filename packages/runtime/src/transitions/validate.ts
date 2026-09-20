@@ -193,6 +193,8 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   let resultCounter = state.nextIds.result + state.results.size
   let proposalCounter = state.nextIds.proposal + state.mergeProposals.size
   let queuedEffectCount = [...state.effects.values()].filter((effect) => effect.state === 'queued' && effect.concurrencyClass !== 'none').length
+  const existingToolCallIds = new Set([...state.effects.values()].filter((effect) => effect.agentId === lane.agentId && effect.toolCallId !== undefined).map((effect) => effect.toolCallId!))
+  const seenToolCallIds = new Set<string>()
 
   if (output.contextDelta) {
     if (output.contextDelta.target === 'global' && !output.contextDelta.proposal && lane.ownerLaneId !== undefined) return { rejection: error('GLOBAL_CONTEXT_WRITE_NOT_AUTHORIZED', 'Only the root Lane may commit Global Context directly.') }
@@ -225,7 +227,9 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       for (const submission of action.effects) {
         if (seenEffectKeys.has(submission.key)) return { rejection: error('DUPLICATE_EFFECT_KEY', submission.key) }
         if (submission.locks && new Set(submission.locks.map((lock) => lock.resource)).size !== submission.locks.length) return { rejection: error('DUPLICATE_EFFECT_LOCK', submission.key) }
+        if (submission.toolCallId !== undefined && (existingToolCallIds.has(submission.toolCallId) || seenToolCallIds.has(submission.toolCallId))) return { rejection: error('DUPLICATE_TOOL_CALL_ID', submission.toolCallId) }
         seenEffectKeys.add(submission.key)
+        if (submission.toolCallId !== undefined) seenToolCallIds.add(submission.toolCallId)
         const id = `effect-${effectCounter++}`
         const target = { kind: 'effect' as const, id }
         batchTargets.set(submission.key, target)

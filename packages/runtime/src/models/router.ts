@@ -10,12 +10,20 @@ export class InMemoryModelRegistry implements ModelRegistry {
   list(): ModelCandidate[] { return [...this.candidates] }
 }
 
+/** Conservative admission estimate used before a provider attempt is started. */
+export function estimateProjectionTokens(projection: LLMRequestProjection): number {
+  return Math.ceil(Buffer.byteLength(JSON.stringify(projection.blocks), 'utf8') / 4)
+}
+
 export class ModelRouter {
   constructor(private readonly registry: ModelRegistry) {}
   route(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] {
     return this.registry.list().filter((candidate) => candidate.tasks.includes(task) && (privacy !== 'local_only' || candidate.capabilities.local === true) && Object.entries(requirements).every(([key, value]) => candidate.capabilities[key as keyof ModelCapabilities] === value)).sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
   }
-  routeProjection(task: string, projection: LLMRequestProjection, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] { return this.route(task, projection.privacy, requirements) }
+  routeProjection(task: string, projection: LLMRequestProjection, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] {
+    const estimatedTokens = estimateProjectionTokens(projection)
+    return this.route(task, projection.privacy, requirements).filter((candidate) => candidate.capabilities.maxContextTokens >= estimatedTokens)
+  }
 }
 
 export interface LLMResult {
