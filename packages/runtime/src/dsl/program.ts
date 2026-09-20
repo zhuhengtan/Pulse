@@ -347,7 +347,8 @@ export class StepBuilder<TState = JsonValue> {
       }
       if (turns >= maxTurns) return maxTurnsReached()
       if (options.outputSchema) {
-        const parsed = options.outputSchema.safeParse(value)
+        const outputValue = record?.structured === undefined ? value : record.structured
+        const parsed = options.outputSchema.safeParse(outputValue)
         if (!parsed.success) return fail({ code: 'OUTPUT_SCHEMA_VIOLATION', message: 'ReAct result did not match outputSchema.', retryable: false, details: parsed.error.message })
       }
       if (!ref) return fail({ code: 'MISSING_RESULT_REF', message: 'ReAct result did not produce a ResultRef.', retryable: false })

@@ -36,4 +36,19 @@ describe('DSL ReAct contract', () => {
     expect((await runtime.start(agentId).outcome()).status).toBe('failed')
     expect(runtime.state.lanes.get(laneId)?.failure).toMatchObject({ error: { code: 'MAX_TURNS_REACHED' } })
   })
+
+  it('validates strict outputSchema against the structured payload', async () => {
+    const program = defineLaneProgram({ id: 'react-output-schema', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', {
+        instruction: 'verify',
+        outputSchema: z.object({ passed: z.literal(true) }),
+        onFinish: { text: () => ({ fail: { code: 'UNEXPECTED_TEXT', message: 'text finish is not allowed' } }), structured: { schema: z.object({ passed: z.literal(true) }), onParsed: (value) => ({ complete: { value } }) } },
+      })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { passed: true } }) })
+    const { agentId, laneId } = runtime.createAgent('strict react schema', program)
+
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(runtime.state.results.get(runtime.state.lanes.get(laneId)?.resultRef as string)?.value).toEqual({ passed: true })
+  })
 })
