@@ -26,6 +26,22 @@ describe('Tool SDK to Runtime Effect host', () => {
     expect(runtime.state.effects.get('effect-1')?.outcome).toMatchObject({ error: { code: 'PERMANENT_FAILURE', retryable: false, details: { source: 'tool' } } })
   })
 
+  it('publishes non-JSON Tool output as an ArtifactRef', async () => {
+    const registry = new ToolRegistry()
+    registry.register({ manifest: { name: 'binary', version: '1', description: 'returns binary output', inputSchema: { type: 'object' }, outputSchema: {}, concurrencyClass: 'tool', locks: [], supportsAbortSignal: true, sideEffectPolicy: 'none', retrySafety: 'read_only', defaultTimeoutMs: 1000 }, execute: () => new Uint8Array([0, 1, 2, 255]) })
+    const runtime = new PulseRuntime({ effectExecutor: createToolEffectExecutor(registry) })
+    const program: LaneProgram = { id: 'artifact-tool', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'binary', kind: 'tool', concurrencyClass: 'tool', input: { name: 'binary', arguments: {} } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('artifact-tool', 'finish') }
+      : { actions: [{ type: 'complete', result: { done: true } }], next: point('artifact-tool', 'finish') } }
+    const { agentId } = runtime.createAgent('binary output', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    const result = [...runtime.state.results.values()].find((item) => item.effectId === 'effect-1')
+    const artifactRef = result?.value && typeof result.value === 'object' && !Array.isArray(result.value) ? result.value.artifactRef : undefined
+    expect(typeof artifactRef).toBe('string')
+    expect(runtime.state.artifacts.get(artifactRef as string)).toMatchObject({ mediaType: 'application/octet-stream', sizeBytes: 4 })
+    expect([...runtime.readArtifact(artifactRef as string)]).toEqual([0, 1, 2, 255])
+  })
+
   it('executes a registered typed tool and preserves tool correlation', async () => {
     const registry = new ToolRegistry()
     registry.register(defineTool({ name: 'add', version: '2', description: 'adds', input: z.object({ a: z.number(), b: z.number() }), output: z.object({ sum: z.number() }), summarize: (output) => ({ sum: output.sum }), execute: ({ a, b }, context) => { context.emit({ type: 'progress', data: { phase: 'computed' } }); return { sum: a + b } } }))

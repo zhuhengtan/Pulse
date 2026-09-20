@@ -1,11 +1,30 @@
-import type { EffectExecutor, EffectExecution, EffectRecord, EffectSubmission, JsonValue } from '@pulse/runtime'
+import type { EffectArtifactOutput, EffectExecutor, EffectExecution, EffectRecord, EffectSubmission, JsonValue } from '@pulse/runtime'
 import { ToolRegistry, type ReconcileResult, type ToolDiscoveryQuery } from '@pulse/tool-sdk'
 
-function toJson(value: unknown): import('@pulse/runtime').JsonValue {
+function toJson(value: unknown, seen = new Set<object>()): import('@pulse/runtime').JsonValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') return value
-  if (Array.isArray(value)) return value.map(toJson)
-  if (typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, toJson(item)]))
+  if (Array.isArray(value)) {
+    if (seen.has(value)) throw new Error('TOOL_OUTPUT_NOT_SERIALIZABLE')
+    seen.add(value)
+    try { return value.map((item) => toJson(item, seen)) } finally { seen.delete(value) }
+  }
+  if (typeof value === 'object') {
+    if (value instanceof Uint8Array || value instanceof ArrayBuffer || value instanceof Date || Object.getPrototypeOf(value) !== Object.prototype) throw new Error('TOOL_OUTPUT_NOT_SERIALIZABLE')
+    if (seen.has(value)) throw new Error('TOOL_OUTPUT_NOT_SERIALIZABLE')
+    seen.add(value)
+    try { return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, toJson(item, seen)])) } finally { seen.delete(value) }
+  }
   throw new Error('TOOL_OUTPUT_NOT_SERIALIZABLE')
+}
+
+function artifactOutput(value: unknown): EffectArtifactOutput {
+  if (value instanceof Uint8Array) return { mediaType: 'application/octet-stream', content: new Uint8Array(value) }
+  if (value instanceof ArrayBuffer) return { mediaType: 'application/octet-stream', content: new Uint8Array(value) }
+  try {
+    const serialized = JSON.stringify(value)
+    if (serialized !== undefined) return { mediaType: 'application/json', content: serialized }
+  } catch { /* fall through to a bounded textual representation */ }
+  return { mediaType: 'text/plain', content: String(value) }
 }
 
 export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor {
@@ -47,7 +66,10 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
     }
     const summary = detailed.summary === undefined ? undefined : toJson(detailed.summary)
     if (summary !== undefined && JSON.stringify(summary).length > 4096) throw new Error('TOOL_SUMMARY_TOO_LARGE')
-    return { value: toJson(detailed.output), ...(summary === undefined ? {} : { summary }), sideEffectState: definition.manifest.sideEffectPolicy === 'write' ? 'applied' : 'none', executionState: 'succeeded', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length }, ...(observations.length ? { observations } : {}) }
+    let value: JsonValue
+    let artifact: EffectArtifactOutput | undefined
+    try { value = toJson(detailed.output) } catch { value = null; artifact = artifactOutput(detailed.output) }
+    return { value, ...(artifact === undefined ? {} : { artifact }), ...(summary === undefined ? {} : { summary }), sideEffectState: definition.manifest.sideEffectPolicy === 'write' ? 'applied' : 'none', executionState: 'succeeded', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length, ...(artifact === undefined ? {} : { artifactMediaType: artifact.mediaType }) }, ...(observations.length ? { observations } : {}) }
   }
 }
 
