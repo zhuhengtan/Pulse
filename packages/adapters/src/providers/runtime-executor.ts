@@ -28,7 +28,8 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
     const projection = request as unknown as LLMRequestProjection
     const observations: NonNullable<EffectExecution['observations']> = []
     const usage = new Map<string, NonNullable<LLMResult['usage']>>()
-    const candidates = config.router.routeProjection(task, projection, config.requirements)
+    const dynamicRequirements = input.requirements && typeof input.requirements === 'object' && !Array.isArray(input.requirements) ? input.requirements as Partial<ModelCandidate['capabilities']> : {}
+    const candidates = config.router.routeProjection(task, projection, { ...config.requirements, ...dynamicRequirements })
     const result = await fallback.execute(effect.id, candidates, async (attempt) => {
       const provider = config.providers.get(attempt.candidate.providerId)
       if (!provider) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause: new Error(`UNKNOWN_PROVIDER:${attempt.candidate.providerId}`) })
