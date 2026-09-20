@@ -14,7 +14,15 @@ export class TimerWheel {
   get size(): number { return [...this.entries.values()].filter((entry) => !entry.cancelled).length }
 }
 
-export class VirtualClock {
+export interface RuntimeClock {
+  readonly timers: TimerWheel
+  now(): number
+  set(now: number): void
+  advance(ms: number): void
+  schedule(delayMs: number, callback: () => void): string
+}
+
+export class VirtualClock implements RuntimeClock {
   readonly timers = new TimerWheel()
   private current = 0
   now(): number { return this.current }

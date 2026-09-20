@@ -1,7 +1,7 @@
 import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.js'
 import { buildAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
-import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
+import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock, type RuntimeClock } from './index.js'
 import type { ArtifactRecord, EffectRecord, EffectSubmission, EffectState, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, RuntimeEventInput, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata, ProvenanceRef } from '../core/types.js'
 import { createRuntimeState, effectivePrivacy, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, provenanceRefId, provenanceRefKind, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
@@ -66,6 +66,7 @@ export interface RuntimeConfig {
   watchdogRepeatedActionThreshold?: number
   maxPreparingLLMs?: number
   maxPreparedLLMs?: number
+  clock?: RuntimeClock
   trustedSanitizerIds?: string[]
   storagePolicy?: StoragePolicyConfig
   persistence?: RuntimePersistenceSnapshot
@@ -148,7 +149,7 @@ export class PulseRuntime {
   private dispatchPersistencePending = false
   readonly mutationLog: MutationLog
   readonly outbox: EffectOutbox
-  readonly clock: VirtualClock
+  readonly clock: RuntimeClock
   readonly ready: ReadyQueue
   readonly quarantine = new QuarantineScope()
   readonly priorityInheritance = new PriorityInheritance()
@@ -211,7 +212,7 @@ export class PulseRuntime {
       for (const id of recovery.requeued) this.emit({ type: 'outbox.requeued', data: id })
       for (const id of recovery.unknown) this.emit({ type: 'outbox.discarded', data: id })
     }
-    this.clock = new VirtualClock()
+    this.clock = config.clock ?? new VirtualClock()
     this.ready = new ReadyQueue(config.agingIntervalMs ?? 1000, config.agingCap ?? Number.POSITIVE_INFINITY)
     if (restored) {
       this.clock.set(this.state.now)

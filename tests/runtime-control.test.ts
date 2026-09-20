@@ -1,10 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime } from '@pulse/runtime'
+import { PulseRuntime, VirtualClock } from '@pulse/runtime'
 import type { EffectRecord, LaneProgram } from '@pulse/runtime'
 
 const point = (programId: string, step: string) => ({ programId, programVersion: '1', step, locals: {} })
 
 describe('runtime control boundaries', () => {
+  it('uses the host-provided RuntimeClock', () => {
+    const clock = new VirtualClock()
+    const runtime = new PulseRuntime({ clock })
+    expect(runtime.clock).toBe(clock)
+    expect(runtime.clock.now()).toBe(0)
+  })
+
   it('fails a Lane after the configured consecutive control-error limit', () => {
     const runtime = new PulseRuntime({ maxConsecutiveControlErrors: 2 })
     const program: LaneProgram = { id: 'control-loop', version: '1', step: () => ({ actions: [], next: point('control-loop', '') }) }
