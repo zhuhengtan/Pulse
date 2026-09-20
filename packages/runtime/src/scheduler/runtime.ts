@@ -46,6 +46,7 @@ export interface RuntimeConfig {
   forkAffinity?: ForkAffinityMode
   historySoftTokens?: number
   historyHardTokens?: number
+  maxResultSummaryBytes?: number
   maxConsecutiveControlErrors?: number
   maxRuntimeMs?: number
   sessionId?: string
@@ -158,7 +159,7 @@ export class PulseRuntime {
 
   constructor(config: RuntimeConfig = {}) {
     const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
-    this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }), ...(config.forkAffinity === undefined ? {} : { forkAffinity: config.forkAffinity }), ...(config.historySoftTokens === undefined ? {} : { historySoftTokens: config.historySoftTokens }), ...(config.historyHardTokens === undefined ? {} : { historyHardTokens: config.historyHardTokens }), ...(config.trustedSanitizerIds === undefined ? {} : { trustedSanitizerIds: config.trustedSanitizerIds }) })
+    this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }), ...(config.forkAffinity === undefined ? {} : { forkAffinity: config.forkAffinity }), ...(config.historySoftTokens === undefined ? {} : { historySoftTokens: config.historySoftTokens }), ...(config.historyHardTokens === undefined ? {} : { historyHardTokens: config.historyHardTokens }), ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }), ...(config.trustedSanitizerIds === undefined ? {} : { trustedSanitizerIds: config.trustedSanitizerIds }) })
     if (config.trustedSanitizerIds) for (const sanitizerId of config.trustedSanitizerIds) this.state.trustedSanitizerIds.add(sanitizerId)
     this.sessionId = config.sessionId ?? 'session-local'
     this.storagePolicy = restored?.storagePolicy ?? new SessionStoragePolicy(config.storagePolicy)
@@ -690,7 +691,9 @@ export class PulseRuntime {
     const sourceTaints = ownerLane ? privacyTaintsForDerivedRefs(this.state, ownerLane, effect.derivedFrom ?? []) : []
     const outputTaints = [...sourceTaints, ...(effectiveExecution.privacyTaints ?? [])]
     const rejectedTaints = [...sourceTaints, ...(effectiveExecution.rejectedOutput?.privacyTaints ?? [])]
-    const result = effectiveStatus === 'succeeded' && !taintError ? { id: resultId, effectId, value: effectiveExecution.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), outputTaints), ...(outputTaints.length ? { privacyTaints: outputTaints } : {}), derivedFrom: [...(effect.derivedFrom ?? [])], ...(effectiveExecution.summary === undefined ? {} : { summary: effectiveExecution.summary }) } : rejectedOutputId && effectiveExecution.rejectedOutput && !taintError ? { id: rejectedOutputId, effectId, kind: 'rejected_output' as const, value: effectiveExecution.rejectedOutput.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.rejectedOutput.privacy ?? effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), rejectedTaints), ...(rejectedTaints.length ? { privacyTaints: rejectedTaints } : {}), derivedFrom: [...(effectiveExecution.rejectedOutput.derivedFrom ?? effect.derivedFrom ?? [])] } : undefined
+    const summaryAllowed = effectiveExecution.summary === undefined || Buffer.byteLength(JSON.stringify(effectiveExecution.summary), 'utf8') <= this.state.maxResultSummaryBytes
+    if (effectiveExecution.summary !== undefined && !summaryAllowed) this.emit({ type: 'result.summary_rejected', effectId, data: { maxBytes: this.state.maxResultSummaryBytes, actualBytes: Buffer.byteLength(JSON.stringify(effectiveExecution.summary), 'utf8') } })
+    const result = effectiveStatus === 'succeeded' && !taintError ? { id: resultId, effectId, value: effectiveExecution.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), outputTaints), ...(outputTaints.length ? { privacyTaints: outputTaints } : {}), derivedFrom: [...(effect.derivedFrom ?? [])], ...(summaryAllowed && effectiveExecution.summary !== undefined ? { summary: effectiveExecution.summary } : {}) } : rejectedOutputId && effectiveExecution.rejectedOutput && !taintError ? { id: rejectedOutputId, effectId, kind: 'rejected_output' as const, value: effectiveExecution.rejectedOutput.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.rejectedOutput.privacy ?? effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), rejectedTaints), ...(rejectedTaints.length ? { privacyTaints: rejectedTaints } : {}), derivedFrom: [...(effectiveExecution.rejectedOutput.derivedFrom ?? effect.derivedFrom ?? [])] } : undefined
     if (result) this.state.results.set(resultId, result)
     let journalLane: LaneRecord | undefined
     if (ownerLane && result) {
