@@ -1,4 +1,4 @@
-import type { EffectExecutor, EffectExecution, EffectRecord, JsonValue } from '@pulse/runtime'
+import type { EffectExecutor, EffectExecution, EffectRecord, EffectSubmission, JsonValue } from '@pulse/runtime'
 import { ToolRegistry, type ReconcileResult } from '@pulse/tool-sdk'
 
 function toJson(value: unknown): import('@pulse/runtime').JsonValue {
@@ -46,4 +46,18 @@ export async function reconcileToolEffect(registry: ToolRegistry, effect: Readon
   if (typeof input.name !== 'string') throw new Error('INVALID_TOOL_EFFECT_INPUT')
   const result = await registry.reconcileDetailed(input.name, effect.executionRef, { toolCallId: effect.toolCallId ?? '', effectId: effect.id, attemptId: effect.attemptId, agentId: effect.agentId, laneId: effect.ownerLaneId, signal })
   return { status: result.status, ...(result.error === undefined ? {} : { error: result.error }), ...(result.output === undefined ? {} : { output: toJson(result.output) }) }
+}
+
+export function createToolEffectSubmissionPreparer(registry: ToolRegistry): (submission: EffectSubmission) => EffectSubmission {
+  return (submission) => {
+    if (submission.kind !== 'tool') return submission
+    const input = submission.input && typeof submission.input === 'object' && !Array.isArray(submission.input) ? submission.input as Record<string, JsonValue> : {}
+    if (typeof input.name !== 'string') return submission
+    try {
+      const admission = registry.admission(input.name, input.arguments ?? {})
+      return { ...submission, ...(submission.locks === undefined ? { locks: admission.locks } : {}), ...(submission.sideEffectPolicy === undefined ? { sideEffectPolicy: admission.sideEffectPolicy } : {}), ...(submission.attemptTimeoutMs === undefined ? { attemptTimeoutMs: admission.defaultTimeoutMs } : {}) }
+    } catch {
+      return submission
+    }
+  }
 }

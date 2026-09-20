@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createToolEffectExecutor, reconcileToolEffect } from '@pulse/adapters'
+import { createToolEffectExecutor, createToolEffectSubmissionPreparer, reconcileToolEffect } from '@pulse/adapters'
 import { defineTool, ToolRegistry } from '@pulse/tool-sdk'
 import { PulseRuntime } from '@pulse/runtime'
 import type { EffectRecord, LaneProgram } from '@pulse/runtime'
@@ -49,5 +49,13 @@ describe('Tool SDK to Runtime Effect host', () => {
     const pending = executor(effect, controller.signal)
     controller.abort()
     await expect(pending).resolves.toMatchObject({ executionState: 'remote_unknown', sideEffectState: 'unknown' })
+  })
+
+  it('injects trusted manifest locks, side-effect policy, and timeout before admission', () => {
+    const registry = new ToolRegistry()
+    registry.register(defineTool({ name: 'write-file', description: 'write', input: z.object({ path: z.string() }), output: z.object({ ok: z.boolean() }), sideEffectPolicy: 'write', defaultTimeoutMs: 2500, resolveResources: ({ path }) => [{ resource: `file:${path}`, mode: 'exclusive' }], execute: () => ({ ok: true }) }))
+    const prepare = createToolEffectSubmissionPreparer(registry)
+    const prepared = prepare({ key: 'write', kind: 'tool', concurrencyClass: 'tool', input: { name: 'write-file', arguments: { path: 'a.txt' } } })
+    expect(prepared).toMatchObject({ sideEffectPolicy: 'write', attemptTimeoutMs: 2500, locks: [{ resource: 'file:a.txt', mode: 'exclusive' }] })
   })
 })

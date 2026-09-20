@@ -2,7 +2,7 @@ import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.
 import { createAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
-import type { EffectRecord, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation } from '../core/types.js'
+import type { EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation } from '../core/types.js'
 import { createRuntimeState, strictestPrivacy } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
@@ -57,6 +57,7 @@ export interface RuntimeConfig {
   storagePolicy?: StoragePolicyConfig
   persistence?: RuntimePersistenceSnapshot
   effectExecutor?: EffectExecutor
+  effectSubmissionPreparer?: (submission: EffectSubmission) => EffectSubmission
 }
 
 export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' | 'final'; include?: 'facts' | 'facts_and_findings'; relevanceRefs?: string[] }
@@ -112,6 +113,7 @@ export class PulseRuntime {
   private readonly maxAgentDepth: number
   private readonly maxPreparingLLMs: number
   private readonly maxPreparedLLMs: number
+  private readonly effectSubmissionPreparer: ((submission: EffectSubmission) => EffectSubmission) | undefined
   private readonly preparingLLMs = new Set<string>()
   private readonly sessionId: string
   private hostCommandSeq = 1
@@ -158,6 +160,7 @@ export class PulseRuntime {
     this.maxAgentDepth = config.maxAgentDepth ?? 1
     this.maxPreparingLLMs = config.maxPreparingLLMs ?? 2
     this.maxPreparedLLMs = config.maxPreparedLLMs ?? 8
+    this.effectSubmissionPreparer = config.effectSubmissionPreparer
     this.customExecutor = config.effectExecutor !== undefined
     this.executor = config.effectExecutor ?? (async () => ({ value: null }))
     this.syncStoragePolicy()
@@ -224,6 +227,10 @@ export class PulseRuntime {
   }
 
   private emit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent { return appendRuntimeEvent(this.state, event, { sessionId: this.sessionId, timestamp: this.state.now }) }
+  private prepareStepOutput(output: LaneStepOutput): LaneStepOutput {
+    if (!this.effectSubmissionPreparer) return output
+    return { ...output, actions: output.actions.map((action) => action.type === 'submit_effects' ? { ...action, effects: action.effects.map((effect) => this.effectSubmissionPreparer!(effect)) } : action) }
+  }
   private journalEffect(effect: EffectRecord, transactionId: string, result?: import('../core/types.js').ResultRecord, events: import('../core/types.js').RuntimeEvent[] = [], lane?: LaneRecord, correlation?: ToolCallCorrelation): void {
     const mutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: structuredClone(effect) }]
     if (result) mutations.push({ op: 'publishResult', record: structuredClone(result) })
@@ -308,7 +315,8 @@ export class PulseRuntime {
         try { output = program.errorBoundary(failure, stepContext) }
         catch (boundaryCause) { this.failLane(lane, { code: 'ERROR_BOUNDARY_FAILED', message: boundaryCause instanceof Error ? boundaryCause.message : String(boundaryCause) }); continue }
       }
-      const result = validateStep(this.state, lane.id, output)
+      const preparedOutput = this.prepareStepOutput(output)
+      const result = validateStep(this.state, lane.id, preparedOutput)
       if ('rejection' in result) {
         const consecutive = (lane.consecutiveControlErrors ?? 0) + 1
         if (result.rejection.code === 'FORK_AFFINITY_COLLAPSIBLE') {
@@ -341,7 +349,7 @@ export class PulseRuntime {
         if (updated) delete updated.consecutiveControlErrors
         if (updated && updated.pendingResumeInput) delete updated.pendingResumeInput
         if (updated) {
-          const watchdog = observeProgress(lane, output, this.state, lane.progressWatchdog, { noProgressThreshold: this.watchdogNoProgressThreshold })
+          const watchdog = observeProgress(lane, preparedOutput, this.state, lane.progressWatchdog, { noProgressThreshold: this.watchdogNoProgressThreshold })
           updated.progressWatchdog = watchdog.state
           if (!watchdog.progressed) this.emit({ type: watchdog.state.interventionLevel >= 3 ? 'progress.no_progress_detected' : 'progress.intervention_applied', laneId: lane.id, data: { noProgressCount: watchdog.state.noProgressCount, interventionLevel: watchdog.state.interventionLevel } })
           if (watchdog.state.interventionLevel >= 3 && !['succeeded', 'failed', 'cancelled'].includes(updated.status)) this.failLane(updated, { code: 'NO_PROGRESS_DETECTED', message: 'Lane made no observable progress within the watchdog threshold.' })

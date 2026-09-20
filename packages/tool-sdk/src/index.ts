@@ -30,6 +30,7 @@ export interface ToolManifest {
   defaultTimeoutMs: number
   maxResultSummaryBytes?: number
 }
+export interface ToolAdmission { locks: ResourceClaim[]; sideEffectPolicy: ToolManifest['sideEffectPolicy']; defaultTimeoutMs: number; retrySafety: ToolManifest['retrySafety'] }
 export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   manifest: ToolManifest
   execute(input: TInput, context: ToolContext): Promise<TOutput> | TOutput
@@ -73,6 +74,7 @@ export class ToolRegistry {
     return definition.reconcile(executionRef, context)
   }
   resolveResources(name: string, input: unknown): ResourceClaim[] { const definition = this.definitions.get(name); if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`); return definition.resolveResources?.(input) ?? definition.manifest.resources ?? definition.manifest.locks }
+  admission(name: string, input: unknown): ToolAdmission { const definition = this.definitions.get(name); if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`); return { locks: structuredClone(this.resolveResources(name, input)), sideEffectPolicy: definition.manifest.sideEffectPolicy, defaultTimeoutMs: definition.manifest.defaultTimeoutMs, retrySafety: definition.manifest.retrySafety } }
 }
 
 function schemaToJsonSchema(schema: ZodTypeAny, seen = new Set<ZodTypeAny>()): Record<string, unknown> {
@@ -167,5 +169,5 @@ export function defineTool<TInput, TOutput>(config: {
   execute(input: TInput, context: ToolContext): Promise<TOutput> | TOutput
 }): ToolDefinition<TInput, TOutput> {
   const manifest: ToolManifest = { name: config.name, version: config.version ?? '1', description: config.description, inputSchema: zodToJsonSchema(config.input), outputSchema: zodToJsonSchema(config.output), concurrencyClass: config.concurrencyClass ?? 'tool', locks: config.locks ?? [], ...(config.resources === undefined ? {} : { resources: config.resources }), supportsAbortSignal: config.supportsAbortSignal ?? true, sideEffectPolicy: config.sideEffectPolicy ?? 'none', retrySafety: config.retrySafety ?? (config.sideEffectPolicy === 'write' ? 'unsafe' : 'read_only'), defaultTimeoutMs: config.defaultTimeoutMs ?? 30_000, ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }) }
-  return { manifest, execute: async (input, context) => config.output.parse(await config.execute(config.input.parse(input), context)), ...(config.resolveResources === undefined ? {} : { resolveResources: (input: TInput) => config.resolveResources!(input) }), ...(config.reconcile === undefined ? {} : { reconcile: async (executionRef: JsonValue, context: ReconcileContext) => { const result = await config.reconcile!(executionRef, context); return result.status === 'succeeded' && result.output !== undefined ? { ...result, output: config.output.parse(result.output) } : result } }), ...(config.normalize === undefined ? {} : { normalize: config.normalize }), ...(config.summarize === undefined ? {} : { summarize: (output: TOutput) => config.summarize!(output) }) }
+  return { manifest, execute: async (input, context) => config.output.parse(await config.execute(config.input.parse(input), context)), ...(config.resolveResources === undefined ? {} : { resolveResources: (input: TInput) => config.resolveResources!(config.input.parse(input)) }), ...(config.reconcile === undefined ? {} : { reconcile: async (executionRef: JsonValue, context: ReconcileContext) => { const result = await config.reconcile!(executionRef, context); return result.status === 'succeeded' && result.output !== undefined ? { ...result, output: config.output.parse(result.output) } : result } }), ...(config.normalize === undefined ? {} : { normalize: config.normalize }), ...(config.summarize === undefined ? {} : { summarize: (output: TOutput) => config.summarize!(output) }) }
 }
