@@ -11,6 +11,9 @@ describe('LLM action decoder', () => {
     expect(() => decodeLLMActions({ text: '', finishReason: 'tool_calls', toolCalls: [{ toolCallId: 'call-1', name: 'shell', input: {} }] }, { allowedTools: new Set(['read_file']) })).toThrow('ACTION_TOOL_NOT_ALLOWED')
     expect(() => decodeLLMActions({ text: '', finishReason: 'stop', toolCalls: [{ toolCallId: 'call-1', name: 'read_file', input: {} }] }, { allowedTools: new Set(['read_file']) })).toThrow(OutputValidationError)
     expect(() => decodeLLMActions({ text: '', finishReason: 'tool_calls', toolCalls: [{ toolCallId: 'call-1', name: 'read_file', input: { value: () => 1 } }] }, { allowedTools: new Set(['read_file']) })).toThrow('ACTION_INPUT_NOT_SERIALIZABLE')
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    expect(() => decodeLLMActions({ text: '', finishReason: 'tool_calls', toolCalls: [{ toolCallId: 'call-1', name: 'read_file', input: cyclic }] }, { allowedTools: new Set(['read_file']) })).toThrow('ACTION_INPUT_NOT_SERIALIZABLE')
   })
 
   it('rejects reusing a toolCallId for a second logical ToolEffect', () => {

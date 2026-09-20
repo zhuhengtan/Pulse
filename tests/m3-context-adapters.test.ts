@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { ContextBuilder, InMemoryModelRegistry, ModelFallbackController, ModelRouter, OutputValidationError, PulseRuntime, appendHistory, createAgent, createRuntimeState, modelFallbackError, stableSerialize, validateActionToolCalls, validateAdapterResult, validateStructuredOutput, MemoryStorage } from '@pulse/runtime'
-import { AnthropicAdapter, FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, OpenAICompatibleAdapter, runShell } from '@pulse/adapters'
+import { AnthropicAdapter, createModelEffectExecutor, FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, OpenAICompatibleAdapter, runShell } from '@pulse/adapters'
 import { defineTool } from '@pulse/tool-sdk'
 
 const resume = { programId: 'context', programVersion: '1', step: 'start', locals: {} }
@@ -48,6 +48,13 @@ describe('M1-3 context, models and adapters', () => {
     expect(normalizeOpenAIResponse({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 3 } } }).usage).toMatchObject({ inputTokens: 10, outputTokens: 2, cachedInputTokens: 3, uncachedInputTokens: 7 })
     expect(normalizeOpenAIResponse({ choices: [{ message: { content: null, refusal: 'not allowed' }, finish_reason: 'stop' }] })).toMatchObject({ finishReason: 'refusal', refusal: 'not allowed' })
     expect(normalizeAnthropicResponse({ content: [{ type: 'refusal', text: 'not allowed' }], stop_reason: 'refusal' })).toMatchObject({ finishReason: 'refusal', refusal: 'not allowed' })
+  })
+
+  it('fails closed on malformed provider JSON and malformed tool arguments', async () => {
+    expect(() => normalizeOpenAIResponse({ choices: [{ message: { content: '', tool_calls: [{ function: { name: 'read', arguments: '{bad' } }] }, finish_reason: 'tool_calls' }] })).toThrow('INVALID_TOOL_ARGUMENTS')
+    expect(() => normalizeAnthropicResponse({ content: [{ type: 'tool_use', name: 'read', input: '{bad' }] })).toThrow('INVALID_TOOL_ARGUMENTS')
+    const stream = new Response('data: {bad\n\n', { headers: { 'content-type': 'text/event-stream' } })
+    await expect(import('@pulse/adapters').then(({ consumeProviderSse }) => consumeProviderSse(stream))).rejects.toThrow('PROVIDER_STREAM_INVALID_JSON')
   })
 
   it('maps tool and structured-output contracts into real provider request bodies', async () => {
@@ -121,6 +128,18 @@ describe('M1-3 context, models and adapters', () => {
     expect(() => validateActionToolCalls(result, new Set(['write']))).toThrowError(OutputValidationError)
     expect(() => validateStructuredOutput({ ...result, structured: { ok: 'bad' } }, z.object({ ok: z.boolean() }))).toThrowError(/Structured output/)
     expect(() => validateAdapterResult({ ...result, finishReason: 'invalid' as never })).toThrowError(/normalized LLMResult/)
+  })
+
+  it('rejects cyclic and non-JSON provider output before publishing a value', async () => {
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'unsafe', providerId: 'unsafe-provider', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 1 })
+    const projection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'tools@1', instruction: 'reason', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'instruction' as const, content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'tools@1', privacy: 'public' as const, privacyRefs: [] } as import('@pulse/runtime').LLMRequestProjection
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    const providers = new Map<string, ProviderAdapter>([['unsafe-provider', { id: 'unsafe-provider', name: 'unsafe', executeAttempt: async () => ({ text: '', structured: cyclic, toolCalls: [], finishReason: 'stop' }) }]])
+    const executor = createModelEffectExecutor({ router: new ModelRouter(registry), providers })
+    const effect = { id: 'unsafe-effect', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request: projection }, attemptId: 'attempt-1', attemptNo: 0, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as EffectRecord
+    await expect(executor(effect, new AbortController().signal)).rejects.toThrow('LLM_OUTPUT_NOT_SERIALIZABLE')
   })
 
   it('falls back across candidates with one stable EffectId and blocks in-doubt replay', async () => {

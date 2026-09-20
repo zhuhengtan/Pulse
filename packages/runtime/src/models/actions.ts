@@ -2,10 +2,19 @@ import type { JsonValue, RuntimeAction } from '../core/types.js'
 import type { LLMResult } from './router.js'
 import { validateActionToolCalls, validateAdapterResult } from './router.js'
 
-function toJsonValue(value: unknown): JsonValue {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') return value
-  if (Array.isArray(value)) return value.map(toJsonValue)
-  if (typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, toJsonValue(item)]))
+function toJsonValue(value: unknown, seen = new Set<object>()): JsonValue {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
+  if (typeof value === 'number') { if (!Number.isFinite(value)) throw new Error('ACTION_INPUT_NOT_SERIALIZABLE'); return value }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) throw new Error('ACTION_INPUT_NOT_SERIALIZABLE')
+    seen.add(value)
+    try { return value.map((item) => toJsonValue(item, seen)) } finally { seen.delete(value) }
+  }
+  if (typeof value === 'object') {
+    if (value instanceof Uint8Array || value instanceof ArrayBuffer || value instanceof Date || Object.getPrototypeOf(value) !== Object.prototype || seen.has(value)) throw new Error('ACTION_INPUT_NOT_SERIALIZABLE')
+    seen.add(value)
+    try { return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, toJsonValue(item, seen)])) } finally { seen.delete(value) }
+  }
   throw new Error('ACTION_INPUT_NOT_SERIALIZABLE')
 }
 

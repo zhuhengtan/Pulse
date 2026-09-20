@@ -15,7 +15,7 @@ export async function consumeProviderSse(response: Response): Promise<ProviderSs
     if (dataLines.length === 0) { eventName = undefined; return }
     const raw = dataLines.join('\n')
     dataLines = []
-    const data = raw === '[DONE]' ? raw : (() => { try { return JSON.parse(raw) } catch { return { raw } } })()
+    const data = raw === '[DONE]' ? raw : (() => { try { return JSON.parse(raw) } catch { throw new Error('PROVIDER_STREAM_INVALID_JSON') } })()
     events.push({ ...(eventName === undefined ? {} : { event: eventName }), data })
     eventName = undefined
   }
@@ -57,7 +57,7 @@ export function normalizeOpenAIResponse(response: any): LLMResult {
 export function normalizeAnthropicResponse(response: any): LLMResult {
   const blocks = Array.isArray(response?.content) ? response.content : []
   const text = blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('')
-  const toolCalls = blocks.filter((block: any) => block.type === 'tool_use').map((block: any, index: number) => ({ toolCallId: `pulse-tool-${index + 1}`, name: String(block.name), input: block.input ?? {} }))
+  const toolCalls = blocks.filter((block: any) => block.type === 'tool_use').map((block: any, index: number) => ({ toolCallId: `pulse-tool-${index + 1}`, name: String(block.name), input: parseJson(block.input) }))
   const refusalBlock = blocks.find((block: any) => block.type === 'refusal' && typeof block.text === 'string')
   const refusal = refusalBlock?.text as string | undefined
   const inputTokens = response?.usage?.input_tokens
@@ -65,5 +65,8 @@ export function normalizeAnthropicResponse(response: any): LLMResult {
   const cost = response?.usage?.cost && typeof response.usage.cost === 'object' ? { amount: Number(response.usage.cost.amount), currency: String(response.usage.cost.currency ?? 'USD'), source: 'reported' as const } : undefined
   return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason: refusal !== undefined || response?.stop_reason === 'refusal' ? 'refusal' : toolCalls.length ? 'tool_calls' : 'stop', ...(response?.usage ? { usage: { ...(inputTokens === undefined ? {} : { inputTokens }), ...(response.usage.output_tokens === undefined ? {} : { outputTokens: response.usage.output_tokens }), ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }), ...(inputTokens !== undefined && cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens) } : {}), ...(cost === undefined ? {} : { cost }) } } : {}) }
 }
-function parseJson(value: unknown): unknown { if (typeof value !== 'string') return value ?? {}; try { return JSON.parse(value) } catch { return { raw: value } } }
+function parseJson(value: unknown): unknown {
+  if (typeof value !== 'string') return value ?? {}
+  try { return JSON.parse(value) } catch { throw new Error('INVALID_TOOL_ARGUMENTS') }
+}
 function parseStructured(value: string): unknown | undefined { if (!value.trim()) return undefined; try { const parsed = JSON.parse(value); return parsed !== null && typeof parsed === 'object' ? parsed : undefined } catch { return undefined } }

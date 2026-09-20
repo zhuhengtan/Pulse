@@ -36,7 +36,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const content = blocks.filter(Boolean).map((block) => {
       if (block.type === 'tool_use' && typeof block.inputJson === 'string') {
         try { return { ...block, input: JSON.parse(block.inputJson) as unknown } }
-        catch { return { ...block, input: { raw: block.inputJson } } }
+        catch { throw new Error('INVALID_TOOL_ARGUMENTS') }
       }
       return block
     })

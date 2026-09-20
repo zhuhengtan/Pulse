@@ -30,10 +30,19 @@ class SlotPool {
   get(key: string): AsyncSlot { let slot = this.slots.get(key); if (!slot) { slot = new AsyncSlot(this.limits[key] ?? Number.POSITIVE_INFINITY); this.slots.set(key, slot) }; return slot }
 }
 
-function toJson(value: unknown): JsonValue {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') return value
-  if (Array.isArray(value)) return value.map(toJson)
-  if (typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, toJson(item)]))
+function toJson(value: unknown, seen = new Set<object>()): JsonValue {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
+  if (typeof value === 'number') { if (!Number.isFinite(value)) throw new Error('LLM_OUTPUT_NOT_SERIALIZABLE'); return value }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) throw new Error('LLM_OUTPUT_NOT_SERIALIZABLE')
+    seen.add(value)
+    try { return value.map((item) => toJson(item, seen)) } finally { seen.delete(value) }
+  }
+  if (typeof value === 'object') {
+    if (value instanceof Uint8Array || value instanceof ArrayBuffer || value instanceof Date || Object.getPrototypeOf(value) !== Object.prototype || seen.has(value)) throw new Error('LLM_OUTPUT_NOT_SERIALIZABLE')
+    seen.add(value)
+    try { return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, toJson(item, seen)])) } finally { seen.delete(value) }
+  }
   throw new Error('LLM_OUTPUT_NOT_SERIALIZABLE')
 }
 
