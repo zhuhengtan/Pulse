@@ -281,6 +281,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       if (state.lanes.size + action.lanes.length > state.maxTotalLanes) return { rejection: error('LANE_LIMIT_EXCEEDED', 'runtime lane limit exceeded') }
       for (const child of action.lanes) {
         const target = siblingTargets.get(child.key)!
+        if (child.inputResultRefs?.some((ref) => !state.results.has(ref))) return { rejection: error('UNKNOWN_RESULT_REF', `fork input for ${child.key}`) }
         const contextVersion = child.contextVersion === 'latest' ? state.agents.get(lane.agentId)!.latestGlobalVersion : child.contextVersion === 'parent' || child.contextVersion === undefined ? lane.contextSnapshotVersion : child.contextVersion
         if (!state.agents.get(lane.agentId)!.globalVersions.has(contextVersion)) return { rejection: error('UNKNOWN_CONTEXT_VERSION', String(contextVersion)) }
         const dependencies = (child.dependsOn ?? []).map((dependency) => ({ ...dependency, target: resolveTarget(dependency.target, siblingTargets) ?? resolveTarget(dependency.target, localTargets) }))

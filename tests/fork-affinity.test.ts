@@ -34,4 +34,12 @@ describe('fork affinity admission', () => {
     expect('rejection' in result).toBe(false)
     if (!('rejection' in result)) expect(result.mutations.filter((mutation) => mutation.op === 'insertLane')).toHaveLength(2)
   })
+
+  it('rejects a fork that names an unknown input ResultRef before creating lanes', () => {
+    const state = createRuntimeState()
+    const { root } = createAgent(state, 'root', point('start'))
+    const result = validateStep(state, root.id, { actions: [{ type: 'fork', lanes: [{ key: 'worker', goal: 'worker', program: point('worker'), inputResultRefs: ['missing'] }] }], next: point('next') })
+    expect('rejection' in result && result.rejection.code).toBe('UNKNOWN_RESULT_REF')
+    expect(state.lanes.size).toBe(1)
+  })
 })
