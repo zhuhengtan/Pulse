@@ -61,7 +61,7 @@
 | Registered Model Adapter execution | Model Registry 候选可绑定标准 Adapter；未注入自定义 `effectExecutor` 时，Runtime 自动完成路由、隐私/能力/窗口准入、归一化、结构化能力与 schema contract 校验、候选 fallback 与 usage/route metadata | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts` | `47ec7a9` |
 | Model fallback EffectQueue re-entry | Runtime 内置 Executor 与标准 Provider Adapter 每个 Attempt 只执行一个候选；失败后按 `retryPolicy` 重新进入统一队列，保留同一 EffectId 并记录每个候选的 model/provider | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts`、`tests/retry-policy.test.ts` | `2028516`、`2ce6462` |
 | Logical ToolCall identity | Runtime 默认 Executor 与 Provider Adapter 将 Provider-native call id 重写为按逻辑 LLM Effect 命名空间化的 `EffectId:tool:n`，避免跨 Effect 冲突并支持 Action Decoder 关联 | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts` | `336de83` |
-| Action Decoder privacy/provenance | LLM 工具调用解码为 ToolEffect 时，同时把 `privacy` 与 `derivedFrom` 写入 Effect 和 ToolEffectInput，避免模型参数中的敏感来源绕过 Runtime 隐私传播 | `tests/action-decoder.test.ts` | `18fb787` |
+| Action Decoder privacy/provenance | LLM 工具调用解码为 ToolEffect 时，从调用方或 `LLMResult` 继承 `privacy` 与 `derivedFrom`，同时写入 Effect 和 ToolEffectInput，避免模型参数中的敏感来源绕过 Runtime 隐私传播 | `tests/action-decoder.test.ts` | `18fb787`、`711c0be` |
 | DSL ReAct tool provenance | 内置 ReAct 宏的平行工具解码路径同样从 LLM ResultRef 继承 `privacy` 与 `derivedFrom`，并写入 ToolEffect 与 ToolEffectInput | `tests/dsl-host-macros.test.ts` | `a524e72` |
 | Runtime Tool Registry | 对外提供 `runtime.tools.register()`、目录检索、稳定 ToolSet、allow/deny、schema admission、资源/副作用准入；标准 Tool Effect Adapter 可直接消费该目录 | `tests/runtime-tool-registry.test.ts`、`tests/tool-host.test.ts`、`tests/tool-discovery.test.ts` | `2c0da03` |
 | Agent create policy / limits | `createAgent` 支持优先级、策略/限制引用与 `maxActiveLanes`；Agent 超时按注入 RuntimeClock 触发 `TIMEOUT`，配置和引用随 Agent 记录持久化 | `tests/agent-create-contract.test.ts`、`tests/agent-creation.test.ts` | `b2de59b` |
@@ -648,6 +648,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `336de83`：Runtime 与 Provider Adapter 统一按逻辑 LLM Effect 生成命名空间化 ToolCall ID，避免 Provider-native ID 在不同 Effect 间冲突。
 - `18fb787`：Action Decoder 生成 ToolEffect 时保留 `privacy` 与 `derivedFrom`，并同步写入 ToolEffectInput，防止工具参数中的敏感来源丢失。
 - `a524e72`：DSL 内置 ReAct 工具解码路径同步继承 LLM ResultRef 的 `privacy` 与 `derivedFrom`。
+- `711c0be`：公共 Action Decoder 默认继承 `LLMResult` 自带的 `privacy/derivedFrom`，调用方无需重复传递来源元数据。
 - `a885019`：Progress Watchdog 只有在 Action 签名确实在窗口中重复时才升级；二级干预接受一次新策略并给 LLM 注入 `reasoning: high` floor，避免“换策略”被误判为重复而直接三级失败。
 - `b2de59b`：`createAgent` 补齐 priority/policy/limits 契约，Agent root Lane 使用声明优先级，`maxActiveLanes` 与 `timeoutMs` 真实生效并可恢复。
 - `0ce2a6e`：在开发模式为 Step/ErrorBoundary 增加运行时纯度守卫，阻断动态全局 IO/时间/随机源访问并保持生产模式兼容。
