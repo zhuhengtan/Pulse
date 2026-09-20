@@ -30,4 +30,15 @@ describe('Runtime tool registry', () => {
     const effect = { id: 'effect-tool-registry', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'echo', kind: 'tool', concurrencyClass: 'tool', input: { name: 'echo', arguments: { value: 'ok' } }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as EffectRecord
     await expect(executor(effect, new AbortController().signal)).resolves.toMatchObject({ value: { value: 'ok' }, executionState: 'succeeded' })
   })
+
+  it('automatically prepares tool admission and dynamic tool sets before commit', () => {
+    const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
+    runtime.tools.register(echo)
+    const program = { id: 'runtime-tool-preparation', version: '1', step: () => ({ actions: [{ type: 'submit_effects' as const, effects: [{ key: 'echo', kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { name: 'echo', arguments: { value: 'ok' } } }, { key: 'discover', kind: 'llm' as const, concurrencyClass: 'llm' as const, input: { toolDiscovery: { text: 'echo' } } }] }], next: { programId: 'runtime-tool-preparation', programVersion: '1', step: 'done', locals: {} } }) }
+    const { agentId } = runtime.createAgent('prepare tools', program)
+    runtime.tick()
+    expect(runtime.state.effects.get('effect-1')).toMatchObject({ toolVersion: '1', attemptTimeoutMs: 30000, locks: [] })
+    expect(runtime.state.effects.get('effect-2')?.input).toMatchObject({ toolSetId: expect.stringMatching(/^dynamic@/), tools: { tools: [{ name: 'echo' }] } })
+    expect(runtime.state.agents.get(agentId)?.state).toBe('running')
+  })
 })

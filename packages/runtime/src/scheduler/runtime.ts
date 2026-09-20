@@ -310,7 +310,7 @@ export class PulseRuntime {
     this.maxAgentDepth = config.maxAgentDepth ?? 1
     this.maxPreparingLLMs = config.maxPreparingLLMs ?? 2
     this.maxPreparedLLMs = config.maxPreparedLLMs ?? 8
-    this.effectSubmissionPreparer = config.effectSubmissionPreparer
+    this.effectSubmissionPreparer = config.effectSubmissionPreparer ?? ((submission) => this.prepareRegisteredToolSubmission(submission))
     this.telemetryExporter = config.telemetryExporter
     this.persistenceBackend = config.persistenceBackend
     this.budget = config.budget ?? {}
@@ -572,8 +572,27 @@ export class PulseRuntime {
     commitMutationTransaction(this.state, this.mutationLog, `host-command:${eventId}:rejected`, mutations, this.state.now, this.sessionId)
   }
   private prepareStepOutput(output: LaneStepOutput): LaneStepOutput {
-    if (!this.effectSubmissionPreparer) return output
     return { ...output, actions: output.actions.map((action) => action.type === 'submit_effects' ? { ...action, effects: action.effects.map((effect) => this.effectSubmissionPreparer!(effect)) } : action) }
+  }
+
+  private prepareRegisteredToolSubmission(submission: EffectSubmission): EffectSubmission {
+    if (submission.kind === 'llm') {
+      const input = submission.input && typeof submission.input === 'object' && !Array.isArray(submission.input) ? submission.input as Record<string, JsonValue> : {}
+      const rawQuery = input.toolDiscovery
+      if (rawQuery && typeof rawQuery === 'object' && !Array.isArray(rawQuery) && this.tools.list().length > 0) {
+        const requestedId = typeof input.toolSetId === 'string' ? input.toolSetId : 'dynamic'
+        const toolSet = this.tools.compileToolSet(requestedId, rawQuery as import('../tools/registry.js').RuntimeToolDiscoveryQuery)
+        const tools = toolSet.tools.map((manifest) => ({ name: manifest.name, description: manifest.description, inputSchema: manifest.inputSchema as JsonValue }))
+        return { ...submission, input: { ...input, toolSetId: `${toolSet.id}@${toolSet.version}`, tools: { tools } } }
+      }
+      return submission
+    }
+    if (submission.kind !== 'tool') return submission
+    const input = submission.input && typeof submission.input === 'object' && !Array.isArray(submission.input) ? submission.input as Record<string, JsonValue> : {}
+    if (typeof input.name !== 'string') return submission
+    if (this.tools.get(input.name) === undefined) return submission
+    const admission = this.tools.admission(input.name, input.arguments ?? {})
+    return { ...submission, ...(submission.locks === undefined ? { locks: admission.locks } : {}), ...(submission.sideEffectPolicy === undefined ? { sideEffectPolicy: admission.sideEffectPolicy } : {}), ...(submission.attemptTimeoutMs === undefined ? { attemptTimeoutMs: admission.defaultTimeoutMs } : {}), ...(submission.toolVersion === undefined ? { toolVersion: admission.version } : {}) }
   }
   private journalEffect(effect: EffectRecord, transactionId: string, result?: import('../core/types.js').ResultRecord, events: import('../core/types.js').RuntimeEvent[] = [], lane?: LaneRecord, correlation?: ToolCallCorrelation, artifact?: ArtifactRecord): void {
     const mutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: structuredClone(effect) }]
