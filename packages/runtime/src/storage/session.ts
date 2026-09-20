@@ -19,7 +19,7 @@ export interface SessionSnapshot {
     maxTotalLanes: number
     maxQueuedEffects: number
     maxRunning: Record<'llm' | 'tool' | 'agent' | 'none', number | 'Infinity'>
-    forkAffinity?: 'off' | 'advise'
+    forkAffinity?: 'off' | 'advise' | 'coalesce'
     historySoftTokens?: number
     historyHardTokens?: number
     trustedSanitizerIds?: string[]

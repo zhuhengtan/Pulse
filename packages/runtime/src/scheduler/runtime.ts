@@ -2,7 +2,7 @@ import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.
 import { createAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
-import type { EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec } from '../core/types.js'
+import type { EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode } from '../core/types.js'
 import { createRuntimeState, strictestPrivacy } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
@@ -43,7 +43,7 @@ export interface RuntimeConfig {
   maxTotalLanes?: number
   maxQueuedEffects?: number
   maxRunning?: Partial<Record<'llm' | 'tool' | 'agent' | 'none', number>>
-  forkAffinity?: 'off' | 'advise'
+  forkAffinity?: ForkAffinityMode
   historySoftTokens?: number
   historyHardTokens?: number
   maxConsecutiveControlErrors?: number
@@ -89,6 +89,25 @@ function outcomeForLane(lane: LaneRecord): Outcome | undefined {
   if (lane.status === 'failed') return { status: 'failed' }
   if (lane.status === 'cancelled') return { status: 'cancelled' }
   return undefined
+}
+
+function outcomeForSeriesMember(state: RuntimeState, lane: LaneRecord, key: string): Outcome | undefined {
+  const aggregate = outcomeForLane(lane)
+  if (!aggregate || lane.series === undefined || lane.resultRef === undefined) return aggregate
+  const value = state.results.get(lane.resultRef)?.value
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return aggregate
+  const results = value.results
+  if (!results || typeof results !== 'object' || Array.isArray(results)) return aggregate
+  const member = results[key]
+  if (!member || typeof member !== 'object' || Array.isArray(member)) return aggregate
+  const record = member as Record<string, JsonValue>
+  const status = record.status
+  if (status !== 'succeeded' && status !== 'failed' && status !== 'cancelled') return aggregate
+  return {
+    status,
+    ...(record.result === undefined ? {} : { result: record.result }),
+    ...(record.error && typeof record.error === 'object' && !Array.isArray(record.error) ? { error: record.error as unknown as RuntimeError } : {}),
+  }
 }
 
 export class PulseRuntime {
@@ -995,7 +1014,7 @@ export class PulseRuntime {
         let pendingCount = 0
         for (const dependency of wait.spec.dependencies) {
           const target = dependency.target as TargetRef
-          const outcome = target.kind === 'lane' ? outcomeForLane(this.state.lanes.get(target.id)!) : this.state.effects.get(target.id)?.outcome
+          const outcome = target.kind === 'lane' ? outcomeForSeriesMember(this.state, this.state.lanes.get(target.id)!, dependency.key) : this.state.effects.get(target.id)?.outcome
           if (!outcome) { observations[dependency.key] = { state: 'pending', target }; pending = true; pendingCount++; continue }
           if (outcome.status === 'cancelled' && wait.spec.onCancelled === 'ignore') { observations[dependency.key] = { state: 'ignored', target, outcome }; ignored++ }
           else if (dependency.condition === 'success' && outcome.status !== 'succeeded') { observations[dependency.key] = { state: 'settled', target, outcome }; unsatisfied = { code: 'DEPENDENCY_FAILED', message: `${dependency.key} did not succeed` } }
@@ -1058,7 +1077,7 @@ export class PulseRuntime {
     const observations: Record<string, import('../core/types.js').DependencyObservation> = {}
     for (const dependency of wait.spec.dependencies) {
       const target = dependency.target as TargetRef
-      const outcome = target.kind === 'lane' ? outcomeForLane(this.state.lanes.get(target.id)!) : this.state.effects.get(target.id)?.outcome
+      const outcome = target.kind === 'lane' ? outcomeForSeriesMember(this.state, this.state.lanes.get(target.id)!, dependency.key) : this.state.effects.get(target.id)?.outcome
       observations[dependency.key] = outcome === undefined ? { state: 'pending', target } : outcome.status === 'cancelled' && wait.spec.onCancelled === 'ignore' ? { state: 'ignored', target, outcome } : { state: 'settled', target, outcome }
     }
     const error: RuntimeError = { code: 'WAIT_DEADLINE_EXCEEDED', message: 'Wait deadline exceeded.', details: { deadlineAt: wait.spec.deadlineAt ?? this.state.now } }

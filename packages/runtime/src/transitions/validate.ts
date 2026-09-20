@@ -84,6 +84,73 @@ function affinityGroups(lanes: ForkLaneSpec[]): AffinityGroup[] {
   return groups.filter((group) => group.keys.size > 1).map((group) => ({ keys: [...group.keys].sort(), signals: [...group.signals].sort() })).sort((a, b) => a.keys[0]!.localeCompare(b.keys[0]!))
 }
 
+function sameForkProgram(left: ForkLaneSpec, right: ForkLaneSpec): boolean {
+  return left.program.programId === right.program.programId && left.program.programVersion === right.program.programVersion && left.program.step === right.program.step && JSON.stringify(left.program.locals ?? {}) === JSON.stringify(right.program.locals ?? {})
+}
+
+function seriesOrder(members: ForkLaneSpec[]): ForkLaneSpec[] | undefined {
+  const byKey = new Map(members.map((lane) => [lane.key, lane]))
+  const visiting = new Set<string>(); const visited = new Set<string>(); const ordered: ForkLaneSpec[] = []
+  const visit = (key: string): boolean => {
+    if (visited.has(key)) return true
+    if (visiting.has(key)) return false
+    const lane = byKey.get(key)
+    if (!lane) return false
+    visiting.add(key)
+    for (const dependency of lane.dependsOn ?? []) if ('local' in dependency.target && byKey.has(dependency.target.local) && !visit(dependency.target.local)) return false
+    visiting.delete(key); visited.add(key); ordered.push(lane)
+    return true
+  }
+  return members.every((lane) => visit(lane.key)) ? ordered : undefined
+}
+
+function coalesceForkAction(action: ForkAction): ForkAction {
+  const join = action.join
+  if (!join || (join.mode ?? 'all') !== 'all' || join.condition !== 'settled') return action
+  const byKey = new Map(action.lanes.map((lane) => [lane.key, lane]))
+  const collapsed = new Set<string>()
+  const replacements = new Map<string, string>()
+  const output: ForkLaneSpec[] = []
+  let groupIndex = 0
+  for (const group of affinityGroups(action.lanes)) {
+    const members = group.keys.map((key) => byKey.get(key)).filter((lane): lane is ForkLaneSpec => lane !== undefined)
+    if (members.length !== group.keys.length || members.some((lane) => lane.series !== undefined || !sameForkProgram(lane, members[0]!))) continue
+    if (members.some((lane) => (lane.dependsOn ?? []).some((dependency) => !('local' in dependency.target) || !group.keys.includes(dependency.target.local)))) continue
+    const contextVersions = new Set(members.map((lane) => JSON.stringify(lane.contextVersion ?? 'parent')))
+    if (contextVersions.size !== 1) continue
+    const ordered = seriesOrder(members)
+    if (!ordered) continue
+    let key = `__series_coalesce_${groupIndex++}`
+    while (byKey.has(key) || output.some((lane) => lane.key === key)) key = `${key}_x`
+    const member = ordered[0]!
+    const resources = new Map<string, 'shared' | 'exclusive'>()
+    for (const lane of ordered) for (const resource of lane.resources ?? []) resources.set(resource.resource, resources.get(resource.resource) === 'exclusive' || resource.mode === 'exclusive' ? 'exclusive' : 'shared')
+    const internalDependencies = Object.fromEntries(ordered.flatMap((lane) => {
+      const dependsOn = (lane.dependsOn ?? []).filter((dependency): dependency is typeof dependency & { target: { local: string } } => 'local' in dependency.target).map((dependency) => ({ key: dependency.target.local, condition: dependency.condition }))
+      return dependsOn.length ? [[lane.key, { dependsOn }]] : []
+    }))
+    const inputResultRefs = [...new Set(ordered.flatMap((lane) => lane.inputResultRefs ?? []))]
+    const toolSetIds = new Set(ordered.map((lane) => lane.toolSetId).filter((value): value is string => value !== undefined))
+    const workspacePaths = new Set(ordered.map((lane) => lane.workspacePath).filter((value): value is string => value !== undefined))
+    output.push({
+      key,
+      goal: ordered.map((lane) => `${lane.key}: ${lane.goal}`).join('\n'),
+      program: member.program,
+      ...(member.priority === undefined ? {} : { priority: Math.max(...ordered.map((lane) => lane.priority ?? member.priority!)) }),
+      ...(member.contextVersion === undefined ? {} : { contextVersion: member.contextVersion }),
+      ...(resources.size ? { resources: [...resources].map(([resource, mode]) => ({ resource, mode })) } : {}),
+      ...(inputResultRefs.length ? { inputResultRefs } : {}),
+      ...(toolSetIds.size === 1 ? { toolSetId: [...toolSetIds][0] } : {}),
+      ...(workspacePaths.size === 1 ? { workspacePath: [...workspacePaths][0] } : {}),
+      series: { member: member.program, keys: ordered.map((lane) => lane.key), goals: Object.fromEntries(ordered.map((lane) => [lane.key, lane.goal])), ...(Object.keys(internalDependencies).length ? { members: internalDependencies } : {}), onMemberFailure: 'continue' },
+    })
+    for (const lane of ordered) { collapsed.add(lane.key); replacements.set(lane.key, key) }
+  }
+  if (replacements.size === 0) return action
+  const aliases = Object.entries(action.joinAliases ?? Object.fromEntries(action.lanes.map((lane) => [lane.key, lane.key]))).map(([alias, laneKey]) => [alias, replacements.get(laneKey) ?? laneKey])
+  return { ...action, lanes: [...output, ...action.lanes.filter((lane) => !collapsed.has(lane.key))], joinAliases: Object.fromEntries(aliases), affinityAck: true }
+}
+
 function validateWait(state: RuntimeState, laneId: string, spec: WaitSpec, locals: Map<string, TargetRef>, newTargets: Map<string, TargetRef>): string | undefined {
   if (!['all', 'any', 'quorum'].includes(spec.mode) || (spec.dependencies.length === 0 && spec.mode !== 'all') || spec.dependencies.some((dependency) => !dependency.key || !resolveTarget(dependency.target, newTargets.size ? newTargets : locals))) return 'INVALID_WAIT_DEPENDENCY'
   if (spec.mode === 'quorum' && (!Number.isInteger(spec.quorum) || spec.quorum! < 1 || spec.quorum! > spec.dependencies.length)) return 'INVALID_WAIT_QUORUM'
@@ -275,21 +342,22 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         addWait(state, workingLane, spec, batchTargets, mutations, `wait-${waitCounter++}`)
       }
     } else if (action.type === 'fork') {
-      if (action.lanes.length === 0) return { rejection: error('EMPTY_FORK', 'fork requires at least one lane') }
-      if (state.forkAffinity === 'advise' && action.affinityAck !== true) {
-        const groups = affinityGroups(action.lanes)
+      const forkAction = state.forkAffinity === 'coalesce' ? coalesceForkAction(action) : action
+      if (forkAction.lanes.length === 0) return { rejection: error('EMPTY_FORK', 'fork requires at least one lane') }
+      if (state.forkAffinity === 'advise' && forkAction.affinityAck !== true) {
+        const groups = affinityGroups(forkAction.lanes)
         if (groups.length) return { rejection: error('FORK_AFFINITY_COLLAPSIBLE', 'Fork contains lanes that share a likely context affinity group.', { groups } as unknown as JsonValue) }
       }
       const siblingTargets = new Map<string, TargetRef>()
-      for (const child of action.lanes) {
+      for (const child of forkAction.lanes) {
         if (forkTargets.has(child.key)) return { rejection: error('DUPLICATE_FORK_KEY', child.key) }
         const childId = `lane-${laneCounter++}`
         const target = { kind: 'lane' as const, id: childId }
         forkTargets.set(child.key, target)
         siblingTargets.set(child.key, target)
       }
-      if (state.lanes.size + action.lanes.length > state.maxTotalLanes) return { rejection: error('LANE_LIMIT_EXCEEDED', 'runtime lane limit exceeded') }
-      for (const child of action.lanes) {
+      if (state.lanes.size + forkAction.lanes.length > state.maxTotalLanes) return { rejection: error('LANE_LIMIT_EXCEEDED', 'runtime lane limit exceeded') }
+      for (const child of forkAction.lanes) {
         const target = siblingTargets.get(child.key)!
         if (child.inputResultRefs?.some((ref) => !state.results.has(ref))) return { rejection: error('UNKNOWN_RESULT_REF', `fork input for ${child.key}`) }
         if (child.series && (!child.series.keys.length || new Set(child.series.keys).size !== child.series.keys.length || !validResume(child.series.member))) return { rejection: error('INVALID_SERIES_LANE', `series for ${child.key}`) }
@@ -307,17 +375,17 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
           addWait(state, record, waitSpec, resolved, mutations, `wait-${waitCounter++}`)
         }
       }
-      if (!action.join) {
-        const forkEdges = action.lanes.flatMap((child) => (child.dependsOn ?? []).map((dependency) => ({ from: siblingTargets.get(child.key)!, to: resolveTarget(dependency.target, siblingTargets) ?? resolveTarget(dependency.target, localTargets)! })))
+      if (!forkAction.join) {
+        const forkEdges = forkAction.lanes.flatMap((child) => (child.dependsOn ?? []).map((dependency) => ({ from: siblingTargets.get(child.key)!, to: resolveTarget(dependency.target, siblingTargets) ?? resolveTarget(dependency.target, localTargets)! })))
         if (forkEdges.some((edge) => !edge.to) || hasDependencyCycle(state, forkEdges)) return { rejection: error('DEPENDENCY_CYCLE', 'Fork dependencies would create a cycle') }
       }
-      if (action.join) {
-        const aliases = action.joinAliases === undefined ? action.lanes.map((child) => [child.key, child.key] as const) : Object.entries(action.joinAliases)
+      if (forkAction.join) {
+        const aliases = forkAction.joinAliases === undefined ? forkAction.lanes.map((child) => [child.key, child.key] as const) : Object.entries(forkAction.joinAliases)
         if (new Set(aliases.map(([key]) => key)).size !== aliases.length || aliases.some(([, laneKey]) => !siblingTargets.has(laneKey))) return { rejection: error('INVALID_JOIN_ALIASES', 'join aliases must point to unique original keys and existing fork lanes') }
-        const deps = aliases.map(([key, laneKey]) => ({ key, target: siblingTargets.get(laneKey)!, condition: action.join!.condition }))
-        const joinMode = action.join.mode ?? 'all'
-        const spec: WaitSpec = { dependencies: deps, mode: joinMode, ...(action.join.quorum === undefined ? {} : { quorum: action.join.quorum }), ...(action.join.deadlineAt === undefined ? {} : { deadlineAt: action.join.deadlineAt }), onUnsatisfied: action.join.onUnsatisfied, ...(action.join.onCancelled ? { onCancelled: action.join.onCancelled } : {}), reason: 'join' }
-        const forkEdges = action.lanes.flatMap((child) => (child.dependsOn ?? []).map((dependency) => ({ from: siblingTargets.get(child.key)!, to: resolveTarget(dependency.target, siblingTargets) ?? resolveTarget(dependency.target, localTargets)! })))
+        const deps = aliases.map(([key, laneKey]) => ({ key, target: siblingTargets.get(laneKey)!, condition: forkAction.join!.condition }))
+        const joinMode = forkAction.join.mode ?? 'all'
+        const spec: WaitSpec = { dependencies: deps, mode: joinMode, ...(forkAction.join.quorum === undefined ? {} : { quorum: forkAction.join.quorum }), ...(forkAction.join.deadlineAt === undefined ? {} : { deadlineAt: forkAction.join.deadlineAt }), onUnsatisfied: forkAction.join.onUnsatisfied, ...(forkAction.join.onCancelled ? { onCancelled: forkAction.join.onCancelled } : {}), reason: 'join' }
+        const forkEdges = forkAction.lanes.flatMap((child) => (child.dependsOn ?? []).map((dependency) => ({ from: siblingTargets.get(child.key)!, to: resolveTarget(dependency.target, siblingTargets) ?? resolveTarget(dependency.target, localTargets)! })))
         forkEdges.push(...deps.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: dependency.target as TargetRef })))
         if (forkEdges.some((edge) => !edge.to) || hasDependencyCycle(state, forkEdges)) return { rejection: error('DEPENDENCY_CYCLE', 'Fork dependencies would create a cycle') }
         const joinTargets = new Map(deps.map((dependency) => [dependency.key, dependency.target] as const))

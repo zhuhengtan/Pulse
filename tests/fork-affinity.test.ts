@@ -90,4 +90,27 @@ describe('fork affinity admission', () => {
     const result = root.resultRef ? runtime.state.results.get(root.resultRef)?.value : undefined
     expect(result).toMatchObject({ outcomes: { first: { status: 'succeeded' }, second: { status: 'succeeded', result: { dependency: { goal: 'first' } } } } })
   })
+
+  it('automatically coalesces compatible forks and restores member outcomes by key', async () => {
+    const worker = defineLaneProgram({ id: 'coalesce-worker', version: '1' }, (builder) => {
+      builder.addStep('start', (ctx) => ({ actions: [{ type: 'complete', result: { goal: ctx.goal } }], next: 'start' }))
+    })
+    const parent = defineLaneProgram({ id: 'coalesce-parent', version: '1' }, (builder) => {
+      builder.addStep('dispatch', () => ({ actions: [{ type: 'fork', lanes: [
+        { key: 'first', goal: 'first goal', program: { programId: worker.id, programVersion: worker.version, step: 'start', locals: {} }, resources: [{ resource: 'src/auth', mode: 'exclusive' }] },
+        { key: 'second', goal: 'second goal', program: { programId: worker.id, programVersion: worker.version, step: 'start', locals: {} }, resources: [{ resource: 'src/auth', mode: 'exclusive' }] },
+      ], join: { condition: 'settled', onUnsatisfied: 'resume_with_error' } }], next: 'finish' }))
+      builder.addStep('finish', (ctx) => ({ actions: [{ type: 'complete', result: Object.fromEntries(Object.entries(ctx.resumeInput?.type === 'wait' ? ctx.resumeInput.resolution.dependencies : {}).map(([key, dependency]) => [key, dependency.state === 'settled' ? dependency.outcome : dependency])) }], next: 'finish' }))
+    })
+    const runtime = new PulseRuntime({ forkAffinity: 'coalesce' })
+    runtime.register(worker)
+    const { agentId } = runtime.createAgent('coalesce parent', parent)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect([...runtime.state.lanes.values()]).toHaveLength(2)
+    const seriesLane = [...runtime.state.lanes.values()].find((lane) => lane.series !== undefined)!
+    expect(seriesLane.series?.keys).toEqual(['first', 'second'])
+    const root = [...runtime.state.lanes.values()].find((lane) => lane.ownerLaneId === undefined)!
+    const result = root.resultRef ? runtime.state.results.get(root.resultRef)?.value : undefined
+    expect(result).toMatchObject({ first: { status: 'succeeded', result: { goal: 'first goal' } }, second: { status: 'succeeded', result: { goal: 'second goal' } } })
+  })
 })
