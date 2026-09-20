@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { FileRuntimeTelemetryExporter, PulseRuntime, RuntimeTelemetryAggregator, defineLaneProgram } from '@pulse/runtime'
+import { FileRuntimeTelemetryExporter, HttpRuntimeTelemetryExporter, PulseRuntime, RuntimeTelemetryAggregator, defineLaneProgram } from '@pulse/runtime'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -53,5 +53,17 @@ describe('observation inbox and shutdown', () => {
     expect(aggregator.ingest({ schemaVersion: 1, timestamp: 50, snapshot: second })).toHaveLength(0)
     expect(aggregator.ingest({ schemaVersion: 1, timestamp: 100, snapshot: third })).toHaveLength(1)
     expect(aggregator.snapshot()).toMatchObject({ sampleCount: 3, peaks: { 'lanes.total': 4 }, alerts: [{ ruleId: 'lanes-high', value: 2 }, { ruleId: 'lanes-high', value: 4 }] })
+  })
+
+  it('publishes a complete envelope to an HTTP collector and fails closed on non-2xx', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    const exporter = new HttpRuntimeTelemetryExporter({ endpoint: 'https://collector.test/telemetry', headers: { authorization: 'Bearer test' }, fetch: async (url: any, init: any) => { calls.push({ url: String(url), init }); return new Response(null, { status: 202 }) } })
+    const envelope = { schemaVersion: 1 as const, timestamp: 42, snapshot: new PulseRuntime().telemetry() }
+    await exporter.publish(envelope)
+    expect(calls[0]?.url).toBe('https://collector.test/telemetry')
+    expect(calls[0]?.init).toMatchObject({ method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer test' } })
+    expect(JSON.parse(String(calls[0]?.init.body))).toMatchObject({ schemaVersion: 1, timestamp: 42 })
+    const rejected = new HttpRuntimeTelemetryExporter({ endpoint: 'https://collector.test/telemetry', fetch: async () => new Response(null, { status: 503 }) })
+    await expect(rejected.publish(envelope)).rejects.toThrow('TELEMETRY_HTTP_503')
   })
 })

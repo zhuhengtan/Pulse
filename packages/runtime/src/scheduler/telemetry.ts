@@ -128,6 +128,40 @@ export class FileRuntimeTelemetryExporter implements RuntimeTelemetryExporter {
   }
 }
 
+export interface HttpRuntimeTelemetryExporterOptions {
+  endpoint: string
+  headers?: Record<string, string>
+  timeoutMs?: number
+  fetch?: typeof globalThis.fetch
+}
+
+/** Sends complete envelopes to an external collector without changing Runtime state. */
+export class HttpRuntimeTelemetryExporter implements RuntimeTelemetryExporter {
+  private readonly endpoint: string
+  private readonly headers: Record<string, string>
+  private readonly timeoutMs: number
+  private readonly fetcher: typeof globalThis.fetch
+  constructor(options: HttpRuntimeTelemetryExporterOptions) {
+    if (!options.endpoint) throw new Error('TELEMETRY_ENDPOINT_REQUIRED')
+    this.endpoint = options.endpoint
+    this.headers = { 'content-type': 'application/json', ...(options.headers ?? {}) }
+    this.timeoutMs = options.timeoutMs ?? 10_000
+    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) throw new Error('INVALID_TELEMETRY_TIMEOUT')
+    this.fetcher = options.fetch ?? globalThis.fetch
+  }
+  async publish(envelope: RuntimeTelemetryEnvelope): Promise<void> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs)
+    try {
+      const response = await this.fetcher(this.endpoint, { method: 'POST', headers: this.headers, body: JSON.stringify(envelope), signal: controller.signal })
+      if (!response.ok) throw new Error(`TELEMETRY_HTTP_${response.status}`)
+    } catch (cause) {
+      if (controller.signal.aborted) throw new Error('TELEMETRY_HTTP_TIMEOUT')
+      throw cause
+    } finally { clearTimeout(timer) }
+  }
+}
+
 function count(target: Record<string, number>, key: string): void { target[key] = (target[key] ?? 0) + 1 }
 function numberField(value: unknown, key: string): number | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
