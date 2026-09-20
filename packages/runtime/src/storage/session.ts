@@ -1,4 +1,4 @@
-import type { AgentRecord, EffectRecord, JsonValue, LaneRecord, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord } from '../core/types.js'
+import type { AgentRecord, EffectRecord, JsonValue, LaneRecord, MergeProposal, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord } from '../core/types.js'
 import { createRuntimeState } from '../core/types.js'
 import { normalizeRuntimeEvent } from '../core/events.js'
 
@@ -11,6 +11,7 @@ export interface SessionSnapshot {
     effects: Array<[string, EffectRecord]>
     waits: Array<[string, WaitRecord]>
     results: Array<[string, ResultRecord]>
+    mergeProposals: Array<[string, MergeProposal]>
     events: RuntimeEvent[]
     nextIds: RuntimeState['nextIds']
     maxTotalLanes: number
@@ -36,6 +37,7 @@ export function exportRuntimeState(state: RuntimeState): SessionSnapshot {
       effects: [...state.effects.entries()].map(([id, effect]) => [id, structuredClone(effect)]),
       waits: [...state.waits.entries()].map(([id, wait]) => [id, structuredClone(wait)]),
       results: [...state.results.entries()].map(([id, result]) => [id, structuredClone(result)]),
+      mergeProposals: [...state.mergeProposals.entries()].map(([id, proposal]) => [id, structuredClone(proposal)]),
       events: state.events.map((event) => normalizeRuntimeEvent(event as unknown as RuntimeEventInput, event.seq, { sessionId: event.sessionId, timestamp: event.timestamp })),
       nextIds: { ...state.nextIds },
       maxTotalLanes: state.maxTotalLanes,
@@ -52,12 +54,13 @@ export function importRuntimeState(snapshot: SessionSnapshot | JsonValue): Runti
   if (!value || value.schemaVersion !== 1 || !value.state || !Array.isArray(value.state.agents) || !Array.isArray(value.state.lanes) || !Array.isArray(value.state.effects) || !Array.isArray(value.state.waits) || !Array.isArray(value.state.results) || !Array.isArray(value.state.events)) throw new Error('INVALID_SESSION_SNAPSHOT')
   const state = createRuntimeState(value.state.maxTotalLanes, { maxQueuedEffects: value.state.maxQueuedEffects, maxRunning: { llm: decodeNumber(value.state.maxRunning.llm), tool: decodeNumber(value.state.maxRunning.tool), agent: decodeNumber(value.state.maxRunning.agent), none: decodeNumber(value.state.maxRunning.none) } })
   state.now = value.state.now
-  state.nextIds = { ...value.state.nextIds }
+  state.nextIds = { ...value.state.nextIds, proposal: value.state.nextIds.proposal ?? 1 }
   for (const [id, agent] of value.state.agents) state.agents.set(id, { ...agent, globalVersions: new Map(agent.globalVersions.map(([version, context]) => [version, structuredClone(context)] as [number, JsonValue])) })
   for (const [id, lane] of value.state.lanes) state.lanes.set(id, { ...lane, children: new Set(lane.children), ownedEffectIds: new Set(lane.ownedEffectIds) })
   for (const [id, effect] of value.state.effects) state.effects.set(id, structuredClone(effect))
   for (const [id, wait] of value.state.waits) state.waits.set(id, structuredClone(wait))
   for (const [id, result] of value.state.results) state.results.set(id, structuredClone(result))
+  for (const [id, proposal] of value.state.mergeProposals ?? []) state.mergeProposals.set(id, structuredClone(proposal))
   state.events = value.state.events.map((event) => normalizeRuntimeEvent(event as unknown as RuntimeEventInput, (event as RuntimeEvent).seq, { sessionId: (event as RuntimeEvent).sessionId, timestamp: (event as RuntimeEvent).timestamp }))
   return state
 }

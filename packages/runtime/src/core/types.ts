@@ -248,10 +248,20 @@ export interface ContextOp {
 export interface ContextDelta {
   target: 'global' | 'lane'
   baseVersion: ContextVersion
+  sourceLaneId?: LaneId
   ops: ContextOp[]
   privacy?: PrivacyLabel
   derivedFrom?: string[]
   proposal?: boolean
+}
+
+export interface MergeProposal {
+  id: string
+  agentId: AgentId
+  sourceLaneId: LaneId
+  baseGlobalVersion: ContextVersion
+  delta: ContextDelta
+  createdAt: number
 }
 
 export interface LaneStepOutput {
@@ -325,15 +335,16 @@ export interface RuntimeState {
   effects: Map<EffectId, EffectRecord>
   waits: Map<WaitId, WaitRecord>
   results: Map<ResultRef, ResultRecord>
+  mergeProposals: Map<string, MergeProposal>
   events: RuntimeEvent[]
-  nextIds: { agent: number; lane: number; effect: number; wait: number; result: number; event: number }
+  nextIds: { agent: number; lane: number; effect: number; wait: number; result: number; proposal: number; event: number }
   maxTotalLanes: number
   maxQueuedEffects: number
   maxRunning: Record<ConcurrencyClass, number>
 }
 
 export function createRuntimeState(maxTotalLanes = 64, options: { maxQueuedEffects?: number; maxRunning?: Partial<Record<ConcurrencyClass, number>> } = {}): RuntimeState {
-  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, event: 1 }, maxTotalLanes, maxQueuedEffects: options.maxQueuedEffects ?? 256, maxRunning: { llm: 4, tool: 16, agent: 4, none: Number.POSITIVE_INFINITY, ...(options.maxRunning ?? {}) } }
+  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), mergeProposals: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, proposal: 1, event: 1 }, maxTotalLanes, maxQueuedEffects: options.maxQueuedEffects ?? 256, maxRunning: { llm: 4, tool: 16, agent: 4, none: Number.POSITIVE_INFINITY, ...(options.maxRunning ?? {}) } }
 }
 
 export function privacyRank(label: PrivacyLabel): number { return label === 'public' ? 0 : label === 'cloud_allowed' ? 1 : 2 }

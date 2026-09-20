@@ -57,7 +57,7 @@ function validateWait(state: RuntimeState, laneId: string, spec: WaitSpec, local
   return undefined
 }
 
-function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: ContextDelta, mutations: Mutation[]): { nextVersion: number; error?: string; history?: HistoryRecord[] } {
+function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: ContextDelta, mutations: Mutation[], proposalId?: string): { nextVersion: number; error?: string; history?: HistoryRecord[] } {
   const base = delta.target === 'global' ? state.agents.get(lane.agentId)!.latestGlobalVersion : lane.context.version
   if (delta.baseVersion !== base) return { nextVersion: base, error: 'CONTEXT_VERSION_CONFLICT' }
   const paths: string[][] = []
@@ -99,7 +99,8 @@ function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: Context
     }
   }
   const nextVersion = base + 1
-  if (delta.target === 'global') mutations.push({ op: 'setGlobal', agentId: lane.agentId, version: nextVersion, value: result })
+  if (delta.target === 'global' && delta.proposal) mutations.push({ op: 'insertMergeProposal', proposal: { id: proposalId ?? `proposal-${state.nextIds.proposal}`, agentId: lane.agentId, sourceLaneId: lane.id, baseGlobalVersion: base, delta: { ...clone(delta), sourceLaneId: lane.id }, createdAt: state.now } })
+  else if (delta.target === 'global') mutations.push({ op: 'setGlobal', agentId: lane.agentId, version: nextVersion, value: result })
   else mutations.push({ op: 'setLaneContext', laneId: lane.id, version: nextVersion, value: result, ...(history.length === lane.context.history.length && history.every((record, index) => record.seq === lane.context.history[index]?.seq) ? {} : { history }) })
   return { nextVersion, ...(delta.target === 'lane' ? { history } : {}) }
 }
@@ -142,10 +143,13 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   let laneCounter = state.nextIds.lane + state.lanes.size
   let waitCounter = state.nextIds.wait + state.waits.size
   let resultCounter = state.nextIds.result + state.results.size
+  let proposalCounter = state.nextIds.proposal + state.mergeProposals.size
   let queuedEffectCount = [...state.effects.values()].filter((effect) => effect.state === 'queued' && effect.concurrencyClass !== 'none').length
 
   if (output.contextDelta) {
-    const applied = applyContextDelta(state, workingLane, output.contextDelta, mutations)
+    if (output.contextDelta.target === 'global' && !output.contextDelta.proposal && lane.ownerLaneId !== undefined) return { rejection: error('GLOBAL_CONTEXT_WRITE_NOT_AUTHORIZED', 'Only the root Lane may commit Global Context directly.') }
+    if (output.contextDelta.target !== 'global' && output.contextDelta.proposal) return { rejection: error('INVALID_MERGE_PROPOSAL', 'Only Global Context deltas may be proposals.') }
+    const applied = applyContextDelta(state, workingLane, output.contextDelta, mutations, output.contextDelta.proposal ? `proposal-${proposalCounter++}` : undefined)
     if (applied.error) return { rejection: error(applied.error, 'ContextDelta rejected') }
     if (output.contextDelta.target === 'lane') {
       const nextValue = mutations[mutations.length - 1]
@@ -315,6 +319,7 @@ function requireMutations(): typeof import('../core/mutations.js') {
         case 'setGlobal': { const agent = state.agents.get(mutation.agentId)!; agent.globalVersions.set(mutation.version, mutation.value); agent.latestGlobalVersion = mutation.version; break }
         case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version, ...(mutation.history === undefined ? {} : { history: structuredClone(mutation.history) }) }; break }
         case 'appendEvent': appendRuntimeEvent(state, mutation.event); break
+        case 'insertMergeProposal': state.mergeProposals.set(mutation.proposal.id, mutation.proposal); break
         case 'setNow': state.now = mutation.now; break
       }
     }

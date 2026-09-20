@@ -1,6 +1,6 @@
 import { z, type ZodTypeAny } from 'zod'
 import type { LaneProgram, LaneStepContext } from '../scheduler/runtime.js'
-import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError } from '../core/types.js'
+import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal } from '../core/types.js'
 
 export type NextStepTarget<TState = unknown> = string | { step: string }
 export interface InstructionView<TState> { goal: string; state: TState }
@@ -20,6 +20,7 @@ export interface StepContext<TState = JsonValue> {
   resumeInput?: ResumeInput
   getResult(ref: ResultRef): JsonValue | undefined
   results: { meta(ref: ResultRef): ResultMeta | undefined; summary(ref: ResultRef): JsonValue | undefined }
+  mergeProposals: ReadonlyArray<MergeProposal>
   mutateLane(mutator: (draft: TState) => void): void
   proposeGlobal(delta: { ops: ContextOp[]; privacy?: PrivacyLabel }): void
   commitGlobal(delta: { ops: ContextOp[]; privacy?: PrivacyLabel; adoptImmediately?: boolean }): void
@@ -58,11 +59,12 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
   const global = clone(agent?.globalVersions.get(globalVersion) ?? {})
   const history = context.lane.context.history.map((record: HistoryRecord): HistoryRecordMeta => ({ seq: record.seq, resultRefs: [...record.resultRefs], privacy: record.privacy }))
   const resultMeta = (ref: ResultRef): ResultMeta | undefined => { const result = context.state.results.get(ref); return result ? { ref, privacy: result.privacy, derivedFrom: [...result.derivedFrom], ...(result.summary === undefined ? {} : { summary: clone(result.summary) }) } : undefined }
-  const globalDelta = (value: { ops: ContextOp[]; privacy?: PrivacyLabel; proposal: boolean }): void => { delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, ops: clone(value.ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal } }
+  const globalDelta = (value: { ops: ContextOp[]; privacy?: PrivacyLabel; proposal: boolean }): void => { delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, sourceLaneId: context.lane.id, ops: clone(value.ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal } }
   const ctx: StepContext<TState> = {
     lane: context.lane, state: context.state, goal: context.lane.goal, global, globalVersion, laneState: draft, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}),
     getResult: (ref) => findResult(context, ref),
     results: { meta: resultMeta, summary: (ref) => resultMeta(ref)?.summary },
+    mergeProposals: [...context.state.mergeProposals.values()].filter((proposal) => proposal.agentId === context.lane.agentId).map((proposal) => clone(proposal)),
     mutateLane: (mutator) => { mutator(draft); delta = { target: 'lane', baseVersion: context.lane.context.version, ops: Object.entries(draft as Record<string, unknown>).map(([key, value]) => ({ op: 'set' as const, path: [key], value: asJson(value) })) } },
     proposeGlobal: (value) => globalDelta({ ...value, proposal: true }),
     commitGlobal: (value) => { globalDelta({ ...value, proposal: false }); adoptImmediately = value.adoptImmediately ?? false },
@@ -124,7 +126,7 @@ export class StepBuilder<TState = JsonValue> {
   addMergeStep(name: string, options: { task: string; next: NextStepTarget; sources?: { proposals?: 'joined' | LaneId[]; outcomes?: 'joined' | LaneId[] }; instruction?: string | ((ctx: StepContext<TState>) => string); schema?: ZodTypeAny; onSynthesized?: (value: unknown, ctx: StepContext<TState>) => NextStepTarget }): this {
     this.handlers.set(name, (ctx) => {
       const joined = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef ? [dependency.outcome.resultRef] : []) : []
-      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: { task: options.task, merge: true, sources: joined, ...(options.instruction === undefined ? {} : { instruction: typeof options.instruction === 'string' ? options.instruction : options.instruction(ctx) }) } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:decode` }
+      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: asJson({ task: options.task, merge: true, sources: joined, proposals: ctx.mergeProposals.map((proposal) => ({ id: proposal.id, sourceLaneId: proposal.sourceLaneId, delta: proposal.delta })), ...(options.instruction === undefined ? {} : { instruction: typeof options.instruction === 'string' ? options.instruction : options.instruction(ctx) }) }) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:decode` }
     })
     this.handlers.set(`${name}:decode`, (ctx) => {
       const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined
