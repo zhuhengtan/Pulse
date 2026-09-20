@@ -3,7 +3,7 @@ import { createAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
 import type { EffectRecord, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord } from '../core/types.js'
-import { createRuntimeState } from '../core/types.js'
+import { createRuntimeState, strictestPrivacy } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
 import { FactInbox, ObservationInbox } from '../core/inbox.js'
@@ -365,7 +365,8 @@ export class PulseRuntime {
     effect.outcome = outcome
     this.releaseEffectLocks(effectId)
     this.outbox.ack(`${effect.id}:${effect.attemptId}`)
-    const result = effectiveStatus === 'succeeded' ? { id: resultId, effectId, value: execution.value, privacy: execution.privacy ?? 'public', derivedFrom: [], ...(execution.summary === undefined ? {} : { summary: execution.summary }) } : undefined
+    const sourcePrivacy = effect.derivedFrom?.map((ref) => this.state.results.get(ref)?.privacy).filter((privacy): privacy is NonNullable<typeof privacy> => privacy !== undefined) ?? []
+    const result = effectiveStatus === 'succeeded' ? { id: resultId, effectId, value: execution.value, privacy: strictestPrivacy([execution.privacy ?? 'public', ...sourcePrivacy]), derivedFrom: [...(effect.derivedFrom ?? [])], ...(execution.summary === undefined ? {} : { summary: execution.summary }) } : undefined
     if (result) this.state.results.set(resultId, result)
     const settledEvent = this.emit({ type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
     const metadataEvent = execution.metadata === undefined ? undefined : this.emit({ type: 'effect.execution_metadata', effectId, data: execution.metadata })

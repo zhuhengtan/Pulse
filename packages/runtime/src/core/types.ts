@@ -109,6 +109,7 @@ export interface EffectRecord {
   kind: 'llm' | 'tool' | 'human' | 'agent' | 'timer'
   concurrencyClass: ConcurrencyClass
   input: JsonValue
+  derivedFrom?: ResultRef[]
   state: EffectState
   attemptId: string
   attemptNo: number
@@ -209,6 +210,7 @@ export interface EffectSubmission {
   kind: EffectRecord['kind']
   concurrencyClass: ConcurrencyClass
   input: JsonValue
+  derivedFrom?: ResultRef[]
   wait?: boolean
   privacy?: PrivacyLabel
   priority?: number

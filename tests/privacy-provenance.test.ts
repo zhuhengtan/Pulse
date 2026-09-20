@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, createAgent, createRuntimeState, validateStep } from '@pulse/runtime'
+import { apply, createAgent, createRuntimeState, defineLaneProgram, PulseRuntime, validateStep } from '@pulse/runtime'
 
 describe('result privacy provenance', () => {
   it('recomputes the strictest source label and preserves derivedFrom', () => {
@@ -17,5 +17,26 @@ describe('result privacy provenance', () => {
     state.results.set('local-result', { id: 'local-result', value: {}, privacy: 'local_only', derivedFrom: [] })
     expect('rejection' in validateStep(state, root.id, { actions: [{ type: 'complete', result: {}, privacy: 'public', derivedFrom: ['local-result'] }], next: { programId: 'p', programVersion: '1', step: 'done', locals: {} } })).toBe(true)
     expect('rejection' in validateStep(state, root.id, { actions: [{ type: 'complete', result: {}, derivedFrom: ['missing'] }], next: { programId: 'p', programVersion: '1', step: 'done', locals: {} } })).toBe(true)
+  })
+
+  it('derives DSL terminal results and effect results from synchronous ResultRef reads', async () => {
+    const terminalProgram = defineLaneProgram({ id: 'dsl-provenance-terminal', version: '1' }, (builder) => {
+      builder.addStep('start', (ctx) => { ctx.getResult('source'); return { actions: [{ type: 'complete', result: { ok: true } }], next: 'start' } })
+    })
+    const terminalRuntime = new PulseRuntime()
+    const terminal = terminalRuntime.createAgent('terminal', terminalProgram)
+    terminalRuntime.state.results.set('source', { id: 'source', value: { secret: true }, privacy: 'local_only', derivedFrom: [] })
+    expect((await terminalRuntime.start(terminal.agentId).outcome()).status).toBe('succeeded')
+    expect([...terminalRuntime.state.results.values()].find((result) => result.id !== 'source')).toMatchObject({ privacy: 'local_only', derivedFrom: ['source'] })
+
+    const effectProgram = defineLaneProgram({ id: 'dsl-provenance-effect', version: '1' }, (builder) => {
+      builder.addStep('start', (ctx) => { ctx.getResult('source'); return { actions: [{ type: 'submit_effects', effects: [{ key: 'derived-work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'finish' } })
+      builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' }))
+    })
+    const effectRuntime = new PulseRuntime({ effectExecutor: async () => ({ value: { answer: 1 }, privacy: 'public' }) })
+    const effectAgent = effectRuntime.createAgent('effect', effectProgram)
+    effectRuntime.state.results.set('source', { id: 'source', value: { secret: true }, privacy: 'local_only', derivedFrom: [] })
+    expect((await effectRuntime.start(effectAgent.agentId).outcome()).status).toBe('succeeded')
+    expect([...effectRuntime.state.results.values()].find((result) => result.effectId === 'effect-1')).toMatchObject({ privacy: 'local_only', derivedFrom: ['source'] })
   })
 })

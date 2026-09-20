@@ -60,10 +60,11 @@ function ordinaryLocals(locals: JsonValue): Record<string, JsonValue> {
   return locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}
 }
 
-function makeContext<TState>(context: LaneStepContext, initialState: TState): { ctx: StepContext<TState>; getDelta: () => ContextDelta | undefined; getActions: () => RuntimeAction[]; getAdoptImmediately: () => boolean } {
+function makeContext<TState>(context: LaneStepContext, initialState: TState): { ctx: StepContext<TState>; getDelta: () => ContextDelta | undefined; getActions: () => RuntimeAction[]; getDerivedRefs: () => ResultRef[]; getAdoptImmediately: () => boolean } {
   const draft = clone(initialState)
   let delta: ContextDelta | undefined
   const actions: RuntimeAction[] = []
+  const derivedRefs = new Set<ResultRef>()
   let adoptImmediately = false
   const agent = context.state.agents.get(context.lane.agentId)
   const globalVersion = context.lane.contextSnapshotVersion
@@ -73,8 +74,8 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
   const globalDelta = (value: { ops: ContextOp[]; privacy?: PrivacyLabel; proposal: boolean }): void => { delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, sourceLaneId: context.lane.id, ops: clone(value.ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal } }
   const ctx: StepContext<TState> = {
     lane: context.lane, state: context.state, goal: context.lane.goal, global, globalVersion, laneState: draft, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}),
-    getResult: (ref) => findResult(context, ref),
-    results: { meta: resultMeta, summary: (ref) => resultMeta(ref)?.summary },
+    getResult: (ref) => { if (context.state.results.has(ref)) derivedRefs.add(ref); return findResult(context, ref) },
+    results: { meta: resultMeta, summary: (ref) => { if (context.state.results.has(ref)) derivedRefs.add(ref); return resultMeta(ref)?.summary } },
     mergeProposals: [...context.state.mergeProposals.values()].filter((proposal) => proposal.agentId === context.lane.agentId).map((proposal) => clone(proposal)),
     mutateLane: (mutator) => { mutator(draft); delta = { target: 'lane', baseVersion: context.lane.context.version, ops: Object.entries(draft as Record<string, unknown>).map(([key, value]) => ({ op: 'set' as const, path: [key], value: asJson(value) })) } },
     proposeGlobal: (value) => globalDelta({ ...value, proposal: true }),
@@ -84,7 +85,7 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
     proposeCancel: (laneId, reason) => actions.push({ type: 'propose_cancel', laneId, reason }),
     trace: (message) => { context.observe?.({ type: 'trace', data: typeof message === 'string' ? message : asJson(message) }) },
   }
-  return { ctx, getDelta: () => delta, getActions: () => actions, getAdoptImmediately: () => adoptImmediately }
+  return { ctx, getDelta: () => delta, getActions: () => actions, getDerivedRefs: () => [...derivedRefs], getAdoptImmediately: () => adoptImmediately }
 }
 
 export class StepBuilder<TState = JsonValue> {
@@ -106,7 +107,8 @@ export class StepBuilder<TState = JsonValue> {
     this.handlers.set(name, (ctx) => {
       const instruction = typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: ctx.laneState })
       const inputs = options.inputs?.(ctx) ?? {}
-      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: asJson({ task: options.task, instruction, inputs, schema: options.schema.description ?? 'structured' }) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
+      const inputResultRefs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? [])])]
+      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: asJson({ task: options.task, instruction, inputs, schema: options.schema.description ?? 'structured' }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
     })
     this.handlers.set(submit, (ctx) => ({ next: decode }))
     this.handlers.set(decode, (ctx) => {
@@ -227,10 +229,18 @@ export class StepBuilder<TState = JsonValue> {
         const requestedStep = shouldCompact ? compactSummarize : context.lane.resume.step
         const handler = this.handlers.get(requestedStep) ?? this.handlers.get(entry)!
         const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState
-        const { ctx, getDelta, getActions, getAdoptImmediately } = makeContext(context, state)
+        const { ctx, getDelta, getActions, getDerivedRefs, getAdoptImmediately } = makeContext(context, state)
         const result = handler(ctx)
+        const derivedFrom = getDerivedRefs()
+        const annotate = (action: RuntimeAction): RuntimeAction => {
+          if (!derivedFrom.length) return action
+          if (action.type === 'complete' || action.type === 'fail') return action.derivedFrom === undefined ? { ...action, derivedFrom } : action
+          if (action.type === 'submit_effects') return { ...action, effects: action.effects.map((effect) => effect.derivedFrom === undefined ? { ...effect, derivedFrom } : effect) }
+          return action
+        }
         const delta = result.contextDelta ?? getDelta()
-        return { actions: [...getActions(), ...(result.actions ?? [])], next: { programId: this.config.id, programVersion: this.config.version, step: target(result.next), locals: result.locals ?? ctx.lane.resume.locals }, ...(delta ? { contextDelta: delta } : {}), ...((result.adoptCommittedContext || getAdoptImmediately()) ? { adoptCommittedContext: true } : {}) }
+        const derivedDelta = delta && delta.derivedFrom === undefined && derivedFrom.length ? { ...delta, derivedFrom } : delta
+        return { actions: [...getActions(), ...(result.actions ?? [])].map(annotate), next: { programId: this.config.id, programVersion: this.config.version, step: target(result.next), locals: result.locals ?? ctx.lane.resume.locals }, ...(derivedDelta ? { contextDelta: derivedDelta } : {}), ...((result.adoptCommittedContext || getAdoptImmediately()) ? { adoptCommittedContext: true } : {}) }
       },
       ...(this.boundaryHandler === undefined ? {} : { errorBoundary: (error: RuntimeError, context: LaneStepContext): LaneStepOutput => { const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState; const { ctx, getDelta, getActions, getAdoptImmediately } = makeContext(context, state); const result = this.boundaryHandler!(error, ctx); const isFailure = typeof result === 'object' && result !== null && 'fail' in result; const delta = getDelta(); const next = isFailure ? context.lane.resume.step : target(result as NextStepTarget<TState>); return { actions: [...getActions(), ...(isFailure ? [{ type: 'fail' as const, error: (result as { fail: RuntimeError }).fail }] : [])], next: { programId: this.config.id, programVersion: this.config.version, step: next, locals: context.lane.resume.locals }, ...(delta ? { contextDelta: delta } : {}), ...(getAdoptImmediately() ? { adoptCommittedContext: true } : {}) } } })
     }
