@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname } from 'node:path'
 import type { EffectExecution } from './runtime.js'
@@ -20,7 +20,7 @@ export interface WorkerTaskRecord {
 
 export interface WorkerLease { task: WorkerTaskRecord; workerId: string; leaseId: string }
 export interface WorkerCoordinatorSnapshot { schemaVersion: 1; sequence: number; tasks: WorkerTaskRecord[]; idempotency: Record<string, string>; integrity?: { algorithm: 'sha256'; digest: string } }
-export interface WorkerPersistenceBackend { load(): Promise<WorkerCoordinatorSnapshot | undefined>; save(snapshot: WorkerCoordinatorSnapshot): Promise<void> }
+export interface WorkerPersistenceBackend { load(): Promise<WorkerCoordinatorSnapshot | undefined>; save(snapshot: WorkerCoordinatorSnapshot, expectedDigest?: string): Promise<void> }
 
 export class FileWorkerPersistenceBackend implements WorkerPersistenceBackend {
   private pending: Promise<void> = Promise.resolve()
@@ -29,26 +29,46 @@ export class FileWorkerPersistenceBackend implements WorkerPersistenceBackend {
     try { return JSON.parse(await readFile(this.filePath, 'utf8')) as WorkerCoordinatorSnapshot }
     catch (cause) { if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw cause }
   }
-  async save(snapshot: WorkerCoordinatorSnapshot): Promise<void> {
+  async save(snapshot: WorkerCoordinatorSnapshot, expectedDigest?: string): Promise<void> {
     const operation = this.pending.then(async () => {
       await mkdir(dirname(this.filePath), { recursive: true })
-      const temporaryPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${process.hrtime.bigint().toString()}`
-      let handle: Awaited<ReturnType<typeof open>> | undefined
+      const lockPath = `${this.filePath}.lock`
+      let lock: Awaited<ReturnType<typeof open>> | undefined
+      const lockDeadline = Date.now() + 30_000
+      while (lock === undefined) {
+        try { lock = await open(lockPath, 'wx', 0o600) }
+        catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause
+          const lockStat = await stat(lockPath).catch(() => undefined)
+          if (lockStat && Date.now() - lockStat.mtimeMs > 30_000) { await rm(lockPath, { force: true }); continue }
+          if (Date.now() >= lockDeadline) throw new Error('WORKER_PERSISTENCE_LOCK_TIMEOUT')
+          await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+      }
       try {
-        handle = await open(temporaryPath, 'wx', 0o600)
-        await handle.writeFile(JSON.stringify(snapshot), 'utf8')
-        await handle.sync()
-        await handle.close(); handle = undefined
-        await rename(temporaryPath, this.filePath)
+        const current = await this.load()
+        if (expectedDigest !== undefined && (current === undefined || current.integrity?.digest !== expectedDigest)) throw new Error('WORKER_PERSISTENCE_CONFLICT')
+        const temporaryPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${process.hrtime.bigint().toString()}`
+        let handle: Awaited<ReturnType<typeof open>> | undefined
         try {
-          const directory = await open(dirname(this.filePath), 'r')
-          try { await directory.sync() } finally { await directory.close() }
-        } catch {
-          // Some filesystems do not expose directory fsync; the rename remains atomic.
+          handle = await open(temporaryPath, 'wx', 0o600)
+          await handle.writeFile(JSON.stringify(snapshot), 'utf8')
+          await handle.sync()
+          await handle.close(); handle = undefined
+          await rename(temporaryPath, this.filePath)
+          try {
+            const directory = await open(dirname(this.filePath), 'r')
+            try { await directory.sync() } finally { await directory.close() }
+          } catch {
+            // Some filesystems do not expose directory fsync; the rename remains atomic.
+          }
+        } finally {
+          if (handle) await handle.close().catch(() => undefined)
+          await rm(temporaryPath, { force: true }).catch(() => undefined)
         }
       } finally {
-        if (handle) await handle.close().catch(() => undefined)
-        await rm(temporaryPath, { force: true }).catch(() => undefined)
+        await lock.close().catch(() => undefined)
+        await rm(lockPath, { force: true }).catch(() => undefined)
       }
     })
     this.pending = operation.catch(() => undefined)
@@ -88,6 +108,7 @@ export class WorkerCoordinator {
   private readonly remoteWorkers = new Set<string>()
   private readonly activeLeases = new Map<string, { leaseId: string; controller: AbortController }>()
   private readonly persistenceBackend: WorkerPersistenceBackend | undefined
+  private persistenceDigest: string | undefined
   private persistencePending: Promise<void> = Promise.resolve()
   private sequence = 1
 
@@ -96,6 +117,7 @@ export class WorkerCoordinator {
   static restore(snapshot: WorkerCoordinatorSnapshot, options: WorkerCoordinatorOptions = {}): WorkerCoordinator {
     if (snapshot.schemaVersion !== 1 || !Number.isInteger(snapshot.sequence) || snapshot.sequence < 1 || !Array.isArray(snapshot.tasks)) throw new Error('INVALID_WORKER_SNAPSHOT')
     const coordinator = new WorkerCoordinator(options)
+    coordinator.persistenceDigest = snapshot.integrity?.digest ?? workerSnapshotDigest(snapshot)
     coordinator.sequence = snapshot.sequence
     for (const input of snapshot.tasks) {
       if (!input || typeof input.id !== 'string' || typeof input.payload !== 'object' && input.payload !== null && typeof input.payload !== 'string' && typeof input.payload !== 'number' && typeof input.payload !== 'boolean' || !['queued', 'leased', 'succeeded', 'failed', 'cancelled'].includes(input.state)) throw new Error('INVALID_WORKER_SNAPSHOT')
@@ -240,8 +262,11 @@ export class WorkerCoordinator {
 
   private schedulePersistence(): void {
     if (!this.persistenceBackend) return
-    const snapshot = this.snapshot()
-    const operation = this.persistencePending.catch(() => undefined).then(() => this.persistenceBackend!.save(snapshot))
+    const operation = this.persistencePending.catch(() => undefined).then(async () => {
+      const snapshot = this.snapshot()
+      await this.persistenceBackend!.save(snapshot, this.persistenceDigest)
+      this.persistenceDigest = snapshot.integrity?.digest
+    })
     this.persistencePending = operation
   }
 

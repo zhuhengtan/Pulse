@@ -144,4 +144,23 @@ describe('lease-based WorkerCoordinator', () => {
     coordinator.registerRemote('durability-check')
     await expect(coordinator.flushPersistence()).rejects.toThrow('WORKER_PERSISTENCE_UNAVAILABLE')
   })
+
+  it('rejects a stale coordinator write instead of overwriting a shared lease store', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-worker-conflict-'))
+    try {
+      const backend = new FileWorkerPersistenceBackend(join(directory, 'worker.json'))
+      const first = await WorkerCoordinator.fromPersistence(backend)
+      first.registerRemote('first')
+      await first.flushPersistence()
+      const second = await WorkerCoordinator.fromPersistence(backend)
+      first.submit({ owner: 'first' }, { taskId: 'first-task' })
+      await first.flushPersistence()
+      second.registerRemote('second')
+      second.submit({ owner: 'second' }, { taskId: 'second-task' })
+      await expect(second.flushPersistence()).rejects.toThrow('WORKER_PERSISTENCE_CONFLICT')
+      const latest = await WorkerCoordinator.fromPersistence(backend)
+      expect(latest.get('first-task')).toBeDefined()
+      expect(latest.get('second-task')).toBeUndefined()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
 })
