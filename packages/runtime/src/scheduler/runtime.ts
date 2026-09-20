@@ -196,11 +196,15 @@ export class PulseRuntime {
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
   exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine, this.storagePolicy) }
   async persist(backend: RuntimePersistenceBackend): Promise<void> {
-    await backend.save(this.exportPersistence())
+    const persistedPolicy = this.storagePolicy.clone()
+    persistedPolicy.markPersisted()
+    await backend.save(exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine, persistedPolicy))
     this.storagePolicy.markPersisted()
   }
   async checkpoint(backend: RuntimePersistenceBackend): Promise<RuntimePersistenceSnapshot> {
-    const snapshot = exportRuntimeCheckpoint(this.state, this.mutationLog, this.outbox, this.quarantine, this.storagePolicy)
+    const persistedPolicy = this.storagePolicy.clone()
+    persistedPolicy.markPersisted()
+    const snapshot = exportRuntimeCheckpoint(this.state, this.mutationLog, this.outbox, this.quarantine, persistedPolicy)
     await backend.save(snapshot)
     this.storagePolicy.markPersisted()
     const watermark = snapshot.checkpoint?.logWatermark ?? 0

@@ -55,6 +55,8 @@ describe('effect outbox and runtime persistence envelope', () => {
       expect(runtime.storagePolicy.inspect().some((record) => record.storageState === 'memory')).toBe(true)
       await runtime.persist(backend)
       expect(runtime.storagePolicy.inspect().some((record) => record.storageState === 'persisted')).toBe(true)
+      const persisted = await backend.load()
+      expect(persisted?.storage?.records.some((record) => record.storageState === 'persisted')).toBe(true)
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
