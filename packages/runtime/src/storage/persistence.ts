@@ -1,5 +1,6 @@
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { parseContextSnapshotRef } from '../core/types.js'
 import type { JsonValue, RuntimeState } from '../core/types.js'
 import { exportRuntimeState, importRuntimeState, type SessionSnapshot } from './session.js'
 import { EffectOutbox, type OutboxSnapshot } from './outbox.js'
@@ -26,6 +27,19 @@ function hasTarget(state: SessionSnapshot['state'], target: { kind: string; id: 
   return target.kind === 'lane' ? state.lanes.some(([id]) => id === target.id) : target.kind === 'effect' ? state.effects.some(([id]) => id === target.id) : false
 }
 
+function hasDerivedReference(ref: string, ownerLaneId: string, agents: Map<string, any>, lanes: Map<string, any>, results: Map<string, any>): boolean {
+  if (results.has(ref)) return true
+  const parsed = parseContextSnapshotRef(ref)
+  if (!parsed) return false
+  if (parsed.kind === 'global') {
+    const lane = lanes.get(ownerLaneId)
+    const agent = lane ? agents.get(lane.agentId) : undefined
+    return Boolean(agent && (parsed.agentId === undefined || parsed.agentId === agent.id) && agent.globalVersions.some(([version]: [number, JsonValue]) => version === parsed.version))
+  }
+  const lane = lanes.get(ownerLaneId)
+  return Boolean(lane && parsed.laneId === lane.id && lane.context.version === parsed.version)
+}
+
 export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceSnapshot | JsonValue): void {
   const value = snapshot as RuntimePersistenceSnapshot
   if (value?.checkpoint?.eventWatermark !== undefined && (!Number.isInteger(value.checkpoint.eventWatermark) || value.checkpoint.eventWatermark < 0)) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
@@ -49,7 +63,7 @@ export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceS
   for (const [id, effect] of effects) {
     if (!lanes.has(effect.ownerLaneId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:effect.ownerLaneId:${id}`)
     if (effect.childAgentId !== undefined && !agents.has(effect.childAgentId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:effect.childAgentId:${id}`)
-    for (const resultRef of effect.derivedFrom ?? []) if (!results.has(resultRef)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:effect.derivedFrom:${id}`)
+    for (const resultRef of effect.derivedFrom ?? []) if (!hasDerivedReference(resultRef, effect.ownerLaneId, agents, lanes, results)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:effect.derivedFrom:${id}`)
   }
   for (const [id, wait] of waits) {
     if (!lanes.has(wait.laneId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:wait.laneId:${id}`)
@@ -58,7 +72,7 @@ export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceS
   }
   for (const [id, proposal] of new Map(state.mergeProposals)) {
     if (!agents.has(proposal.agentId) || !lanes.has(proposal.sourceLaneId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:mergeProposal:${id}`)
-    for (const ref of proposal.delta.derivedFrom ?? []) if (!results.has(ref)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:mergeProposal.derivedFrom:${id}`)
+    for (const ref of proposal.delta.derivedFrom ?? []) if (!hasDerivedReference(ref, proposal.sourceLaneId, agents, lanes, results)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:mergeProposal.derivedFrom:${id}`)
   }
   for (const entry of value.quarantine ?? []) if (!effects.has(entry.effectId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:quarantine:${entry.effectId}`)
 }

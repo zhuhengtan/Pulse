@@ -57,7 +57,9 @@ describe('result privacy provenance', () => {
     terminalRuntime.state.results.set('source', { id: 'source', value: { secret: true }, privacy: 'local_only', derivedFrom: [] })
     terminalRuntime.state.lanes.get(terminal.laneId)!.visibleResultRefs!.add('source')
     expect((await terminalRuntime.start(terminal.agentId).outcome()).status).toBe('succeeded')
-    expect([...terminalRuntime.state.results.values()].find((result) => result.id !== 'source')).toMatchObject({ privacy: 'local_only', derivedFrom: ['source'] })
+    const terminalResult = [...terminalRuntime.state.results.values()].find((result) => result.id !== 'source')
+    expect(terminalResult).toMatchObject({ privacy: 'local_only' })
+    expect(terminalResult?.derivedFrom).toContain('source')
 
     const effectProgram = defineLaneProgram({ id: 'dsl-provenance-effect', version: '1' }, (builder) => {
       builder.addStep('start', (ctx) => { ctx.results.meta('source'); return { actions: [{ type: 'submit_effects', effects: [{ key: 'derived-work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'finish' } })
@@ -68,7 +70,28 @@ describe('result privacy provenance', () => {
     effectRuntime.state.results.set('source', { id: 'source', value: { secret: true }, privacy: 'local_only', derivedFrom: [] })
     effectRuntime.state.lanes.get(effectAgent.laneId)!.visibleResultRefs!.add('source')
     expect((await effectRuntime.start(effectAgent.agentId).outcome()).status).toBe('succeeded')
-    expect([...effectRuntime.state.results.values()].find((result) => result.effectId === 'effect-1')).toMatchObject({ privacy: 'local_only', derivedFrom: ['source'] })
+    const effectResult = [...effectRuntime.state.results.values()].find((result) => result.effectId === 'effect-1')
+    expect(effectResult).toMatchObject({ privacy: 'local_only' })
+    expect(effectResult?.derivedFrom).toContain('source')
+  })
+
+  it('records Global/Lane snapshots and Join Outcome sources in DSL outputs', async () => {
+    const program = defineLaneProgram({ id: 'dsl-provenance-snapshots', version: '1' }, (builder) => {
+      builder.addStep('start', () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'finish' }))
+      builder.addStep('finish', (ctx) => ({ actions: [{ type: 'complete', result: { resumed: ctx.resumeInput?.type } }], next: 'finish' }))
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { ok: true }, privacy: 'public' }) })
+    const created = runtime.createAgent('snapshot provenance', program)
+    const agent = runtime.state.agents.get(created.agentId)!
+    const lane = runtime.state.lanes.get(created.laneId)!
+    agent.globalPrivacy!.set(0, { privacy: 'local_only' })
+    lane.context.privacy = 'local_only'
+    expect((await runtime.start(created.agentId).outcome()).status).toBe('succeeded')
+    const effectResult = [...runtime.state.results.values()].find((result) => result.effectId === 'effect-1')
+    expect(effectResult?.privacy).toBe('local_only')
+    expect(effectResult?.derivedFrom).toEqual(expect.arrayContaining([`global:${created.agentId}:0`, `lane:${created.laneId}:0`]))
+    const terminalResult = [...runtime.state.results.values()].find((result) => result.id !== effectResult?.id)
+    expect(terminalResult?.derivedFrom).toEqual(expect.arrayContaining([effectResult?.id]))
   })
 
   it('keeps provenance while a parent waits for children to finish', () => {

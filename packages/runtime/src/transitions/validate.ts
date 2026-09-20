@@ -2,7 +2,7 @@ import { error } from '../core/errors.js'
 import { apply } from '../core/mutations.js'
 import { DependencyGraph } from '../dependencies/graph.js'
 import type { ValidationResult, Mutation } from '../core/mutations.js'
-import { effectivePrivacy, privacyRank, privacyTaintPrivacy, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
+import { effectivePrivacy, privacyForContextSnapshot, privacyRank, privacyTaintPrivacy, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord, ForkLaneSpec, PrivacyMetadata } from '../core/types.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import { ContextBuilder, estimateHistoryTokens, historyPressure } from '../context/builder.js'
@@ -244,9 +244,14 @@ function derivedPrivacy(state: RuntimeState, lane: LaneRecord, refs: string[]): 
   const labels: PrivacyLabel[] = []
   for (const ref of refs) {
     const result = state.results.get(ref)
-    if (!result) return { error: 'UNKNOWN_RESULT_REF' }
-    if (!resultVisible(lane, ref)) return { error: 'RESULT_NOT_VISIBLE' }
-    labels.push(effectivePrivacy(result.privacy, result.privacyTaints))
+    if (result) {
+      if (!resultVisible(lane, ref)) return { error: 'RESULT_NOT_VISIBLE' }
+      labels.push(effectivePrivacy(result.privacy, result.privacyTaints))
+      continue
+    }
+    const snapshot = privacyForContextSnapshot(state, lane, ref)
+    if (!snapshot) return { error: 'UNKNOWN_RESULT_REF' }
+    labels.push(effectivePrivacy(snapshot.privacy, snapshot.privacyTaints))
   }
   return { privacy: strictestPrivacy(labels) }
 }
@@ -331,8 +336,8 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       for (const submission of action.effects) {
         if (seenEffectKeys.has(submission.key)) return { rejection: error('DUPLICATE_EFFECT_KEY', submission.key) }
         if (submission.locks && new Set(submission.locks.map((lock) => lock.resource)).size !== submission.locks.length) return { rejection: error('DUPLICATE_EFFECT_LOCK', submission.key) }
-        if (submission.derivedFrom?.some((ref) => !state.results.has(ref))) return { rejection: error('UNKNOWN_RESULT_REF', submission.key) }
-        if (submission.derivedFrom?.some((ref) => !resultVisible(lane, ref))) return { rejection: error('RESULT_NOT_VISIBLE', submission.key) }
+        const submissionDerived = derivedPrivacy(state, lane, submission.derivedFrom ?? [])
+        if (submissionDerived.error) return { rejection: error(submissionDerived.error, submission.key) }
         if (submission.toolCallId !== undefined && (existingToolCallIds.has(submission.toolCallId) || seenToolCallIds.has(submission.toolCallId))) return { rejection: error('DUPLICATE_TOOL_CALL_ID', submission.toolCallId) }
         const prepared = prepareLLMInput(state, lane, submission)
         if (prepared.error) return { rejection: error(prepared.error, submission.key) }

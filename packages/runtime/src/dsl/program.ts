@@ -1,5 +1,6 @@
 import { z, type ZodTypeAny } from 'zod'
 import type { LaneProgram, LaneStepContext } from '../scheduler/runtime.js'
+import { globalContextRef, laneContextRef } from '../core/types.js'
 import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec } from '../core/types.js'
 import { createDraftProxy } from './context-proxy.js'
 
@@ -7,7 +8,7 @@ export type NextStepTarget<TState = unknown> = string | { step: string }
 export interface InstructionView<TState> { goal: string; state: TState }
 export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; events?: string[] }
 export interface HistoryCompactionOptions { summarizeTask: string; keepRecentRounds: number }
-export interface HistoryRecordMeta { seq: number; resultRefs: ResultRef[]; privacy: PrivacyLabel }
+export interface HistoryRecordMeta { seq: number; resultRefs: ResultRef[]; privacy: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[] }
 export interface ResultMeta { ref: ResultRef; privacy: PrivacyLabel; derivedFrom: string[]; summary?: JsonValue }
 export interface StepContext<TState = JsonValue> {
   lane: Readonly<LaneRecord>
@@ -159,6 +160,24 @@ function zodJsonSchema(schema: ZodTypeAny): JsonValue {
 function resultVisible(context: LaneStepContext, ref: ResultRef): boolean { return context.lane.visibleResultRefs === undefined || context.lane.visibleResultRefs.has(ref) }
 function findResult(context: LaneStepContext, ref: ResultRef): JsonValue | undefined { return resultVisible(context, ref) ? context.state.results.get(ref)?.value : undefined }
 
+function collectResumeResultRefs(input: ResumeInput | undefined, refs: Set<ResultRef>): void {
+  if (!input) return
+  if (input.type === 'control_error') { collectResumeResultRefs(input.original, refs); return }
+  if (input.type !== 'wait') return
+  for (const dependency of Object.values(input.resolution.dependencies)) {
+    if (dependency.state !== 'settled' && dependency.state !== 'ignored') continue
+    if (dependency.outcome.resultRef) refs.add(dependency.outcome.resultRef)
+    for (const ref of dependency.outcome.rejectedOutputRefs ?? []) refs.add(ref)
+  }
+}
+
+function annotateAction(action: RuntimeAction, derivedFrom: ResultRef[]): RuntimeAction {
+  if (!derivedFrom.length) return action
+  if (action.type === 'complete' || action.type === 'fail') return { ...action, derivedFrom: [...new Set([...derivedFrom, ...(action.derivedFrom ?? [])])] }
+  if (action.type === 'submit_effects') return { ...action, effects: action.effects.map((effect) => ({ ...effect, derivedFrom: [...new Set([...derivedFrom, ...(effect.derivedFrom ?? [])])] })) }
+  return action
+}
+
 const RESULT_READER = Symbol('pulse.dsl.internal.result-reader')
 type InternalStepContext<TState> = StepContext<TState> & { [RESULT_READER]: (ref: ResultRef) => JsonValue | undefined }
 function readResult(ctx: StepContext, ref: ResultRef): JsonValue | undefined { return (ctx as InternalStepContext<JsonValue>)[RESULT_READER](ref) }
@@ -183,14 +202,18 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
   const agent = context.state.agents.get(context.lane.agentId)
   const globalVersion = context.lane.contextSnapshotVersion
   const global = clone(agent?.globalVersions.get(globalVersion) ?? {})
-  const history = context.lane.context.history.map((record: HistoryRecord): HistoryRecordMeta => ({ seq: record.seq, resultRefs: [...record.resultRefs], privacy: record.privacy }))
+  if (agent) derivedRefs.add(globalContextRef(agent.id, globalVersion))
+  derivedRefs.add(laneContextRef(context.lane.id, context.lane.context.version))
+  collectResumeResultRefs(context.resumeInput, derivedRefs)
+  for (const record of context.lane.context.history) for (const ref of record.resultRefs) derivedRefs.add(ref)
+  const history = context.lane.context.history.map((record: HistoryRecord): HistoryRecordMeta => ({ seq: record.seq, resultRefs: [...record.resultRefs], privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: clone(record.privacyTaints) }) }))
   const resultMeta = (ref: ResultRef): ResultMeta | undefined => { const result = resultVisible(context, ref) ? context.state.results.get(ref) : undefined; if (result) derivedRefs.add(ref); return result ? { ref, privacy: result.privacy, derivedFrom: [...result.derivedFrom], ...(result.summary === undefined ? {} : { summary: clone(result.summary) }) } : undefined }
   const globalDelta = (value: { ops: ContextOp[]; privacy?: PrivacyLabel; proposal: boolean }): void => { delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, sourceLaneId: context.lane.id, ops: clone(value.ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal } }
   const ctx: InternalStepContext<TState> = {
     lane: context.lane, goal: context.lane.goal, global, globalVersion, laneState: draft, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}),
     [RESULT_READER]: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return findResult(context, ref) },
     results: { meta: resultMeta, summary: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return resultMeta(ref)?.summary } },
-    mergeProposals: [...context.state.mergeProposals.values()].filter((proposal) => proposal.agentId === context.lane.agentId).map((proposal) => clone(proposal)),
+    mergeProposals: [...context.state.mergeProposals.values()].filter((proposal) => proposal.agentId === context.lane.agentId).map((proposal) => { for (const ref of proposal.delta.derivedFrom ?? []) derivedRefs.add(ref); return clone(proposal) }),
     mutateLane: (mutator) => { mutator((draftProxy?.draft ?? draft) as TState); const changes = draftProxy?.changes(); delta = { target: 'lane', baseVersion: context.lane.context.version, ops: changes?.ops.map((op) => op.op === 'set' ? { op: 'set' as const, path: op.path, value: asJson(op.value) } : op.op === 'append' ? { op: 'append' as const, path: op.path, value: asJson(op.value) } : { op: 'remove' as const, path: op.path }) ?? [] } },
     proposeGlobal: (value) => globalDelta({ ...value, proposal: true }),
     commitGlobal: (value) => { globalDelta({ ...value, proposal: false }); adoptImmediately = value.adoptImmediately ?? false },
@@ -393,17 +416,12 @@ export class StepBuilder<TState = JsonValue> {
         const { ctx, getDelta, getActions, getDerivedRefs, getAdoptImmediately } = makeContext(context, state)
         const result = handler(ctx)
         const derivedFrom = getDerivedRefs()
-        const annotate = (action: RuntimeAction): RuntimeAction => {
-          if (!derivedFrom.length) return action
-          if (action.type === 'complete' || action.type === 'fail') return action.derivedFrom === undefined ? { ...action, derivedFrom } : action
-          if (action.type === 'submit_effects') return { ...action, effects: action.effects.map((effect) => effect.derivedFrom === undefined ? { ...effect, derivedFrom } : effect) }
-          return action
-        }
         const delta = result.contextDelta ?? getDelta()
         const derivedDelta = delta && delta.derivedFrom === undefined && derivedFrom.length ? { ...delta, derivedFrom } : delta
-        return { actions: [...getActions(), ...(result.actions ?? [])].map(annotate), next: { programId: this.config.id, programVersion: this.config.version, step: target(result.next), locals: result.locals ?? ctx.lane.resume.locals }, ...(derivedDelta ? { contextDelta: derivedDelta } : {}), ...((result.adoptCommittedContext || getAdoptImmediately()) ? { adoptCommittedContext: true } : {}) }
+        const mergedDelta = derivedDelta && derivedFrom.length ? { ...derivedDelta, derivedFrom: [...new Set([...derivedFrom, ...(derivedDelta.derivedFrom ?? [])])] } : derivedDelta
+        return { actions: [...getActions(), ...(result.actions ?? [])].map((action) => annotateAction(action, derivedFrom)), next: { programId: this.config.id, programVersion: this.config.version, step: target(result.next), locals: result.locals ?? ctx.lane.resume.locals }, ...(mergedDelta ? { contextDelta: mergedDelta } : {}), ...((result.adoptCommittedContext || getAdoptImmediately()) ? { adoptCommittedContext: true } : {}) }
       },
-      ...(this.boundaryHandler === undefined ? {} : { errorBoundary: (error: RuntimeError, context: LaneStepContext): LaneStepOutput => { const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState; const { ctx, getDelta, getActions, getAdoptImmediately } = makeContext(context, state); const result = this.boundaryHandler!(error, ctx); const isFailure = typeof result === 'object' && result !== null && 'fail' in result; const delta = getDelta(); const next = isFailure ? context.lane.resume.step : target(result as NextStepTarget<TState>); return { actions: [...getActions(), ...(isFailure ? [{ type: 'fail' as const, error: (result as { fail: RuntimeError }).fail }] : [])], next: { programId: this.config.id, programVersion: this.config.version, step: next, locals: context.lane.resume.locals }, ...(delta ? { contextDelta: delta } : {}), ...(getAdoptImmediately() ? { adoptCommittedContext: true } : {}) } } })
+      ...(this.boundaryHandler === undefined ? {} : { errorBoundary: (error: RuntimeError, context: LaneStepContext): LaneStepOutput => { const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState; const { ctx, getDelta, getActions, getDerivedRefs, getAdoptImmediately } = makeContext(context, state); const result = this.boundaryHandler!(error, ctx); const derivedFrom = getDerivedRefs(); const isFailure = typeof result === 'object' && result !== null && 'fail' in result; const delta = getDelta(); const mergedDelta = delta && derivedFrom.length ? { ...delta, derivedFrom: [...new Set([...derivedFrom, ...(delta.derivedFrom ?? [])])] } : delta; const next = isFailure ? context.lane.resume.step : target(result as NextStepTarget<TState>); return { actions: [...getActions(), ...(isFailure ? [annotateAction({ type: 'fail' as const, error: (result as { fail: RuntimeError }).fail }, derivedFrom)] : [])], next: { programId: this.config.id, programVersion: this.config.version, step: next, locals: context.lane.resume.locals }, ...(mergedDelta ? { contextDelta: mergedDelta } : {}), ...(getAdoptImmediately() ? { adoptCommittedContext: true } : {}) } } })
     }
     return definition
   }

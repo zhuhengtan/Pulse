@@ -417,6 +417,36 @@ export interface RuntimeState {
   trustedSanitizerIds: Set<string>
 }
 
+export interface ContextSnapshotRef {
+  kind: 'global' | 'lane'
+  agentId?: AgentId
+  laneId?: LaneId
+  version: ContextVersion
+}
+
+export function globalContextRef(agentId: AgentId, version: ContextVersion): string { return `global:${agentId}:${version}` }
+export function laneContextRef(laneId: LaneId, version: ContextVersion): string { return `lane:${laneId}:${version}` }
+
+export function parseContextSnapshotRef(ref: string): ContextSnapshotRef | undefined {
+  const parts = ref.split(':')
+  if (parts[0] === 'global' && parts.length === 3 && parts[1] !== undefined && parts[2] !== undefined && /^\d+$/.test(parts[2])) return { kind: 'global', agentId: parts[1], version: Number(parts[2]) }
+  if (parts[0] === 'global' && parts.length === 2 && parts[1] !== undefined && /^\d+$/.test(parts[1])) return { kind: 'global', version: Number(parts[1]) }
+  if (parts[0] === 'lane' && parts.length === 3 && parts[1] !== undefined && parts[2] !== undefined && /^\d+$/.test(parts[2])) return { kind: 'lane', laneId: parts[1], version: Number(parts[2]) }
+  return undefined
+}
+
+export function privacyForContextSnapshot(state: RuntimeState, lane: LaneRecord, ref: string): PrivacyMetadata | undefined {
+  const parsed = parseContextSnapshotRef(ref)
+  if (!parsed) return undefined
+  if (parsed.kind === 'global') {
+    const agent = state.agents.get(lane.agentId)
+    if (!agent || (parsed.agentId !== undefined && parsed.agentId !== agent.id) || !agent.globalVersions.has(parsed.version)) return undefined
+    return structuredClone(agent.globalPrivacy?.get(parsed.version) ?? { privacy: 'public' })
+  }
+  if (parsed.laneId !== lane.id || parsed.version !== lane.context.version) return undefined
+  return { privacy: lane.context.privacy ?? 'public', ...(lane.context.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(lane.context.privacyTaints) }) }
+}
+
 export interface ToolCallCorrelation {
   toolCallId: string
   llmEffectId: EffectId
