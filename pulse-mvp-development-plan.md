@@ -71,7 +71,7 @@
 | DSL Fork 契约与依赖可见性 | `addParallelStep` 支持规范 `join` 与 `dependsOn.sibling`，`addDynamicForkStep` 支持 `proposal(ctx)`、动态 affinity 策略和完整 ProgramRef；Wait resolution 自动授予依赖结果可见性，保留旧 API | `tests/dsl-fork-contract.test.ts`、`tests/fork-affinity.test.ts`、`tests/m2-scheduler.test.ts` | `6393966` |
 | DSL Global Draft 写入 | `proposeGlobal/commitGlobal` 同时支持 `ContextOp[]` 与 Draft mutator，保持 privacy、proposal、adoptImmediately 和单 Step 事务语义 | `tests/dsl-context.test.ts`、`tests/merge-proposal.test.ts` | `251f077` |
 | DSL Merge 契约与 fail-closed | `addMergeStep` 默认 task 为 `reason`，支持仅由 `onSynthesized` 返回终态；instruction 受 2KB 限制，schema 失败转结构化 `OUTPUT_SCHEMA_VIOLATION`，不再静默跳转 | `tests/merge-proposal.test.ts` | `5e5bb53` |
-| DSL Human 回复边界 | Human Effect 的 schema 不匹配回复转 `HUMAN_RESPONSE_SCHEMA_VIOLATION`；仅 Wait unsatisfied/cancelled 进入 `onTimeout`，避免把非法回复伪装成超时 | `tests/dsl-human-contract.test.ts`、`tests/effect-hosts.test.ts` | `d341b29` |
+| DSL Human/Timer 失败边界 | Human Effect 的 schema 不匹配回复转 `HUMAN_RESPONSE_SCHEMA_VIOLATION`；只有 `ATTEMPT_TIMEOUT`/`TIMEOUT` 进入 `onTimeout`，其他 Effect 失败原样传播；Timer Effect 失败不执行 `onFire` | `tests/dsl-human-contract.test.ts`、`tests/dsl-host-macros.test.ts` | `031c4e6` |
 | ReAct Lane 预置模板 | `defineReActLane` 结构化输出直接 `complete.value`，无 schema 输出 `{textRef}`；`maxTurns` 超限转 `MAX_TURNS_REACHED`，不再静默完成 | `tests/dsl-host-macros.test.ts`、`tests/dsl-react-contract.test.ts` | `0be88d7` |
 | Scatter-gather 终态 reducer | `defineScatterGatherLane.reducer` 接受完整 `NextStepTarget`，可直接 `complete/fail`；保留字符串和 `{ step }` 兼容形式 | `tests/dsl-host-macros.test.ts` | `6d8e2b5` |
 | Series ProgramRef 恢复数据 | `defineSeriesLane` 保留成员 ProgramRef 的自定义 `step` 与 `locals`，Series runtime 首轮执行不再丢失入口恢复数据 | `tests/series-lane.test.ts`、`tests/fork-affinity.test.ts` | `9d6e47c` |
@@ -185,7 +185,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 61 个测试文件、333/333 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 61 个测试文件、335/335 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -627,7 +627,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `6393966`：Fork DSL 对齐规范 `join`、`dependsOn.sibling`、`proposal(ctx)` 和动态 affinity；Wait resolution 将兄弟 Lane 的结果加入可见引用，避免规范依赖链被错误拒绝；新增 Fork 契约回归。
 - `251f077`：`proposeGlobal/commitGlobal` 支持规范要求的 Draft mutator 写法，并保持 Global proposal/commit 与立即 adopt 的事务语义。
 - `5e5bb53`：Merge DSL 默认 `reason` task，支持 `onSynthesized` 独立返回终态；Merge instruction 受 2KB 限制，schema 不匹配转 `OUTPUT_SCHEMA_VIOLATION`，避免静默成功。
-- `d341b29`：Human Effect 回复 schema 校验失败转 `HUMAN_RESPONSE_SCHEMA_VIOLATION`，不再误走 `onTimeout`；真正的 Wait unsatisfied/cancelled 仍按 timeout 回调处理。
+- `d341b29`：Human Effect 回复 schema 校验失败转 `HUMAN_RESPONSE_SCHEMA_VIOLATION`，不再误走 `onTimeout`；后续 `031c4e6` 又把真实 `ATTEMPT_TIMEOUT`/`TIMEOUT` 与其他 Effect 失败分开。
 - `0be88d7`：`defineReActLane` 对齐规范完成值：structured 直接完成、文本返回 `textRef`，不再通过额外 finish Step 包装；模板 maxTurns 超限保持结构化失败。
 - `6d8e2b5`：`defineScatterGatherLane.reducer` 对齐 `NextStepTarget`，支持聚合后直接完成或失败，并新增终态 reducer 回归。
 - `9d6e47c`：Series Lane 保留 ProgramRef 的自定义入口和 locals，运行时首个成员按声明的 ResumePoint 启动，并新增恢复数据回归。
@@ -641,7 +641,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，61 个测试文件、333 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，61 个测试文件、335 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
