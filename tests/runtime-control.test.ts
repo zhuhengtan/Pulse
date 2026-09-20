@@ -64,6 +64,9 @@ describe('runtime control boundaries', () => {
     runtime.clock.advance(10)
     const outcome = await runtime.start(agentId).outcome()
     expect(outcome.status).toBe('cancelled')
+    expect(runtime.mutationLog.entries.some((entry) =>
+      entry.mutations.some((mutation) => mutation.op === 'setAgent' && mutation.agentId === agentId && mutation.record.state === 'cancelled')
+    )).toBe(true)
     expect(outcome.unresolvedEffectIds).toEqual(['effect-1'])
     expect(runtime.state.lanes.get(laneId)?.unresolvedEffectIds).toEqual(['effect-1'])
     expect(runtime.state.effects.get('effect-1')?.state).toBe('reconcile_required')

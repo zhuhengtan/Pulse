@@ -1065,7 +1065,7 @@ export class PulseRuntime {
       ...targetAgentIds.map((targetId) => ({ type: 'agent.cancelled', agentId: targetId, data: reason })),
     ]
     this.assertStorageAdmission(cancellationEvents.map((event) => ({ op: 'appendEvent' as const, event })))
-    for (const targetId of targetAgentIds) this.state.agents.get(targetId)!.state = 'cancelling'
+    for (const targetId of targetAgentIds) this.commitAgentState(targetId, 'cancelling', `agent:${targetId}:cancelling:${this.state.now}`)
     for (const lane of targetLanes) {
       lane.status = 'cancelled'
       lane.version++
@@ -1077,8 +1077,7 @@ export class PulseRuntime {
       this.requestEffectCancellation(effect.id, reason, effect.cancelGraceMs ?? 0)
     }
     for (const targetId of targetAgentIds) {
-      const target = this.state.agents.get(targetId)
-      if (target) target.state = 'cancelled'
+      this.commitAgentState(targetId, 'cancelled', `agent:${targetId}:cancelled:${this.state.now}`)
       this.emit({ type: 'agent.cancelled', agentId: targetId, data: reason })
     }
     this.schedulePersistence()
