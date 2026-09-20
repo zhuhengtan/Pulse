@@ -21,6 +21,20 @@ describe('result privacy provenance', () => {
     expect('rejection' in validateStep(state, root.id, { actions: [{ type: 'complete', result: {}, derivedFrom: ['missing'] }], next: { programId: 'p', programVersion: '1', step: 'done', locals: {} } })).toBe(true)
   })
 
+  it('validates and persists FailAction provenance atomically', () => {
+    const state = createRuntimeState()
+    const { root } = createAgent(state, 'failure privacy', { programId: 'p', programVersion: '1', step: 'start', locals: {} })
+    state.results.set('local-result', { id: 'local-result', value: {}, privacy: 'local_only', derivedFrom: [] })
+    root.visibleResultRefs!.add('local-result')
+    const downgrade = validateStep(state, root.id, { actions: [{ type: 'fail', error: { code: 'EXPECTED', message: 'expected' }, privacy: 'public', derivedFrom: ['local-result'] }], next: { programId: 'p', programVersion: '1', step: 'done', locals: {} } })
+    expect('rejection' in downgrade && downgrade.rejection.code).toBe('PRIVACY_DOWNGRADE_WITHOUT_PROOF')
+    const failed = validateStep(state, root.id, { actions: [{ type: 'fail', error: { code: 'EXPECTED', message: 'expected' }, derivedFrom: ['local-result'] }], next: { programId: 'p', programVersion: '1', step: 'done', locals: {} } })
+    expect('rejection' in failed).toBe(false)
+    if ('rejection' in failed) return
+    apply(state, failed.mutations)
+    expect(state.lanes.get(root.id)?.failure).toEqual({ error: { code: 'EXPECTED', message: 'expected' }, privacy: 'local_only', derivedFrom: ['local-result'] })
+  })
+
   it('applies provenance and taint validation to ContextDelta atomically', () => {
     const state = createRuntimeState()
     const { root } = createAgent(state, 'context privacy', { programId: 'p', programVersion: '1', step: 'start', locals: {} })

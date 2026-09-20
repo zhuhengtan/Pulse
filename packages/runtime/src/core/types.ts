@@ -104,6 +104,7 @@ export interface LaneRecord {
   readySince: number
   ownedEffectIds: Set<EffectId>
   closingResult?: { value: JsonValue; privacy: PrivacyLabel; privacyTaints?: PrivacyTaint[]; derivedFrom?: ResultRef[] }
+  failure?: { error: RuntimeError; privacy: PrivacyLabel; derivedFrom?: ResultRef[] }
   resultRef?: ResultRef
   consecutiveControlErrors?: number
   pendingOutcome?: Outcome

@@ -521,7 +521,12 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       mutations.push({ op: 'appendEvent', event: { type: 'lane.succeeded', laneId: lane.id, data: resultId } })
       return { mutations }
     } else if (action.type === 'fail') {
+      const derived = derivedPrivacy(state, lane, action.derivedFrom ?? [])
+      if (derived.error) return { rejection: error(derived.error, 'Failure provenance references an unknown or invisible result') }
+      if (action.privacy !== undefined && derived.privacy !== undefined && privacyRank(action.privacy) < privacyRank(derived.privacy)) return { rejection: error('PRIVACY_DOWNGRADE_WITHOUT_PROOF', 'Failure privacy cannot be broader than its sources') }
+      const privacy = strictestPrivacy([derived.privacy ?? 'public', action.privacy ?? 'public'])
       workingLane.status = 'failed'
+      workingLane.failure = { error: clone(action.error), privacy, ...(action.derivedFrom === undefined ? {} : { derivedFrom: [...action.derivedFrom] }) }
       mutations.push({ op: 'setLane', laneId: lane.id, record: { ...workingLane, version: lane.version + 1 } })
       mutations.push({ op: 'appendEvent', event: { type: 'lane.failed', laneId: lane.id, data: action.error as unknown as JsonValue } })
       return { mutations }
