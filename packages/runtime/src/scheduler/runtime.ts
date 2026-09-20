@@ -220,7 +220,11 @@ export class PulseRuntime {
     if (result) mutations.push({ op: 'publishResult', record: structuredClone(result) })
     if (lane) mutations.push({ op: 'setLane', laneId: lane.id, record: structuredClone(lane) })
     if (correlation) mutations.push({ op: 'setToolCallCorrelation', record: structuredClone(correlation) })
-    for (const event of events) { const { seq: _seq, ...input } = event; mutations.push({ op: 'appendEvent', event: input }) }
+    for (const event of events) {
+      if (event.txId === undefined) event.txId = transactionId
+      const { seq: _seq, ...input } = event
+      mutations.push({ op: 'appendEvent', event: input })
+    }
     this.mutationLog.append(transactionId, mutations, this.state.now)
   }
 

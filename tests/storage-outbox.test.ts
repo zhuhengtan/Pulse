@@ -72,6 +72,19 @@ describe('effect outbox and runtime persistence envelope', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('keeps online journal events and replayed events under the same transaction id', async () => {
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { ok: true } }) })
+    const program = { id: 'journal-tx', version: '1', step: ({ lane }: any) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects' as const, effects: [{ key: 'work', kind: 'tool' as const, concurrencyClass: 'tool' as const, input: {} }], wait: { onUnsatisfied: 'resume_with_error' as const } }], next: { programId: 'journal-tx', programVersion: '1', step: 'done', locals: {} } }
+      : { actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'journal-tx', programVersion: '1', step: 'done', locals: {} } } }
+    const { agentId } = runtime.createAgent('journal', program)
+    await runtime.start(agentId).outcome()
+    const online = runtime.state.events.find((event) => event.type === 'effect.settled')
+    const journal = runtime.mutationLog.entries.flatMap((entry) => entry.mutations).find((mutation) => mutation.op === 'appendEvent' && mutation.event.type === 'effect.settled')
+    expect(online?.txId).toBeDefined()
+    expect(journal && journal.op === 'appendEvent' ? journal.event.txId : undefined).toBe(online?.txId)
+  })
+
   it('serializes concurrent saves and leaves no temporary snapshot behind', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-persistence-queue-'))
     try {
