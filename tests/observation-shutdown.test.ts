@@ -15,6 +15,15 @@ describe('observation inbox and shutdown', () => {
     expect(inbox.snapshot()).toMatchObject([{ agentId: 'agent-b' }, { agentId: 'agent-a' }])
   })
 
+  it('bounds observations by bytes as well as entry count', () => {
+    const inbox = new ObservationInbox(10, 120)
+    inbox.enqueue({ agentId: 'agent-a', type: 'trace', data: { payload: 'first' }, timestamp: 1 })
+    inbox.enqueue({ agentId: 'agent-a', type: 'trace', data: { payload: 'second' }, timestamp: 2 })
+    expect(inbox.size).toBe(1)
+    expect(inbox.sizeBytes).toBeLessThanOrEqual(120)
+    expect(inbox.droppedThrough('agent-a')).toBe(1)
+  })
+
   it('surfaces an observation gap through Session.stream()', async () => {
     const runtime = new PulseRuntime()
     const program = defineLaneProgram({ id: 'observation-gap', version: '1' }, (builder) => {

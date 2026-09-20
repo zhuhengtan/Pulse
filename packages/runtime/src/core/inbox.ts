@@ -76,24 +76,36 @@ export interface ObservationEnvelope {
 export class ObservationInbox {
   private readonly queue: ObservationEnvelope[] = []
   private readonly droppedThroughByAgent = new Map<string, number>()
+  private bytes = 0
   private nextSeq = 1
-  constructor(readonly maxEntries = 4096) {}
+  constructor(readonly maxEntries = 4096, readonly maxBytes = 1_000_000) {}
   enqueue(input: Omit<ObservationEnvelope, 'seq'>): ObservationEnvelope {
-    const event = { ...input, seq: this.nextSeq++ }
-    this.queue.push(structuredClone(event))
-    while (this.queue.length > this.maxEntries) {
+    const event = structuredClone({ ...input, seq: this.nextSeq++ })
+    this.queue.push(event)
+    this.bytes += this.eventBytes(event)
+    while (this.queue.length > this.maxEntries || this.bytes > this.maxBytes) {
       const dropped = this.queue.shift()!
+      this.bytes -= this.eventBytes(dropped)
       this.droppedThroughByAgent.set(dropped.agentId, Math.max(this.droppedThroughByAgent.get(dropped.agentId) ?? 0, dropped.seq))
     }
     return structuredClone(event)
   }
   drain(agentId?: string): ObservationEnvelope[] {
-    if (agentId === undefined) return this.queue.splice(0).map((event) => structuredClone(event))
+    if (agentId === undefined) {
+      const selected = this.queue.splice(0)
+      this.bytes = 0
+      return selected.map((event) => structuredClone(event))
+    }
     const selected = this.queue.filter((event) => event.agentId === agentId)
-    if (selected.length) { const ids = new Set(selected.map((event) => event.seq)); for (let index = this.queue.length - 1; index >= 0; index--) if (ids.has(this.queue[index]!.seq)) this.queue.splice(index, 1) }
+    if (selected.length) {
+      const ids = new Set(selected.map((event) => event.seq))
+      for (let index = this.queue.length - 1; index >= 0; index--) if (ids.has(this.queue[index]!.seq)) { this.bytes -= this.eventBytes(this.queue[index]!); this.queue.splice(index, 1) }
+    }
     return selected.map((event) => structuredClone(event))
   }
   get size(): number { return this.queue.length }
+  get sizeBytes(): number { return this.bytes }
   droppedThrough(agentId: string): number { return this.droppedThroughByAgent.get(agentId) ?? 0 }
   snapshot(): ObservationEnvelope[] { return this.queue.map((event) => structuredClone(event)) }
+  private eventBytes(event: ObservationEnvelope): number { return Buffer.byteLength(JSON.stringify(event), 'utf8') }
 }
