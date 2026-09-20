@@ -446,6 +446,14 @@ export class PulseRuntime {
       return undefined
     }
   }
+  private rejectHostCommand(eventId: string, code: string): void {
+    const mutations: Mutation[] = [
+      { op: 'appendEvent', event: { type: 'command.rejected', data: { eventId, code } } },
+      { op: 'appendEvent', event: { type: 'command.applied', data: { eventId } } },
+    ]
+    this.assertStorageAdmission(mutations)
+    commitMutationTransaction(this.state, this.mutationLog, `host-command:${eventId}:rejected`, mutations, this.state.now, this.sessionId)
+  }
   private prepareStepOutput(output: LaneStepOutput): LaneStepOutput {
     if (!this.effectSubmissionPreparer) return output
     return { ...output, actions: output.actions.map((action) => action.type === 'submit_effects' ? { ...action, effects: action.effects.map((effect) => this.effectSubmissionPreparer!(effect)) } : action) }
@@ -540,17 +548,17 @@ export class PulseRuntime {
       if (envelope.fact.type === 'reply') {
         const effect = this.state.effects.get(envelope.fact.effectId)
         if (effect?.agentId === envelope.fact.agentId && effect.kind === 'human' && !effect.outcome) this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value })
-        else this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: effect?.agentId !== envelope.fact.agentId ? 'EFFECT_NOT_OWNED' : 'EFFECT_NOT_REPLYABLE' } })
+        else { this.rejectHostCommand(envelope.eventId, effect?.agentId !== envelope.fact.agentId ? 'EFFECT_NOT_OWNED' : 'EFFECT_NOT_REPLYABLE'); commandApplied = true }
       } else if (envelope.fact.type === 'cancel') this.cancelAgent(envelope.fact.agentId, envelope.fact.reason)
       else if (envelope.fact.type === 'cancel_effect') {
         const effect = this.state.effects.get(envelope.fact.effectId)
-        if (!effect || effect.agentId !== envelope.fact.agentId) this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: 'EFFECT_NOT_OWNED' } })
-        else if (effect.outcome) this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: 'EFFECT_ALREADY_SETTLED' } })
+        if (!effect || effect.agentId !== envelope.fact.agentId) { this.rejectHostCommand(envelope.eventId, 'EFFECT_NOT_OWNED'); commandApplied = true }
+        else if (effect.outcome) { this.rejectHostCommand(envelope.eventId, 'EFFECT_ALREADY_SETTLED'); commandApplied = true }
         else this.cancelEffect(envelope.fact.effectId, 0, envelope.fact.reason)
       } else {
         const lane = this.state.lanes.get(envelope.fact.laneId)
-        if (!lane) this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: 'LANE_NOT_FOUND' } })
-        else if (['succeeded', 'failed', 'cancelled'].includes(lane.status)) this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: 'LANE_TERMINAL' } })
+        if (!lane) { this.rejectHostCommand(envelope.eventId, 'LANE_NOT_FOUND'); commandApplied = true }
+        else if (['succeeded', 'failed', 'cancelled'].includes(lane.status)) { this.rejectHostCommand(envelope.eventId, 'LANE_TERMINAL'); commandApplied = true }
         else {
           const nextLane = structuredClone(lane)
           nextLane.priority = envelope.fact.priority
