@@ -62,7 +62,7 @@
 | 恢复定时器与 Wait deadline | 恢复后以持久化 `state.now` 立即 flush 过期 retry/wait timer；retry 入队和 Wait/Lane deadline 结算均经过 StoragePolicy 预检 | `tests/storage-outbox.test.ts`、`tests/runtime-control.test.ts` | 本轮恢复定时器提交 |
 | Wait 依赖结算事务 | Effect/Lane 终态触发 Wait resolution 时，Wait、Lane、closing Result 与恢复输入统一走 storage admission + MutationLog；准入失败不改变 pending Wait/Lane | `tests/runtime-control.test.ts`、`tests/result-summary-budget.test.ts` | 本轮 Wait 结算事务提交 |
 | Lane failure 事务 | 程序异常、异步 Step、控制错误和 Watchdog 失败统一先构造候选 Lane，再经 storage admission + MutationLog；事实事件超限时仍可无事件 fail-closed 进入失败终态 | `tests/runtime-control.test.ts` | 本轮 Lane failure 事务提交 |
-| Agent 状态事务 | Child Agent 的 succeeded/failed/cancelled 状态通过 `setAgent` Mutation 与 storage admission 提交，避免 Effect 结算后留下未持久化的直接 Agent 状态突变 | `tests/agent-effect.test.ts` | 本轮 Agent 状态事务提交 |
+| Agent 状态事务 | Child Agent 的 succeeded/failed/cancelled 状态与 parent Agent Effect settlement 作为同一笔 `setAgent + setEffect` Mutation 通过 storage admission 提交 | `tests/agent-effect.test.ts` | 本轮 Agent 状态事务提交 |
 | Agent 终态事务 | `run()` / `runAgent()` 的根 Lane 终态通过 `setAgent` Mutation 提交，运行入口不再直接改写 Agent 状态 | `tests/m0-acceptance.test.ts` | 本轮 Agent 终态事务提交 |
 | Agent 取消状态事务 | `cancelAgent()` 的 `cancelling/cancelled` 状态通过 `setAgent` Mutation 提交，并保留未决副作用的 Quarantine 语义 | `tests/runtime-control.test.ts` | 本轮 Agent 取消状态事务提交 |
 | Lane/Effect 取消事务 | Lane 取消、Effect cancel-requested 与 Quarantine 的状态和事件统一通过 MutationLog 提交，避免取消过程中直接改写 live record | `tests/runtime-control.test.ts` | 本轮 Lane/Effect 取消事务提交 |

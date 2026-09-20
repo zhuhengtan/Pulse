@@ -777,12 +777,13 @@ export class PulseRuntime {
       const root = child ? this.state.lanes.get(child.rootLaneId) : undefined
       if (!child || !root || !['succeeded', 'failed', 'cancelled'].includes(root.status)) continue
       const status = root.status === 'succeeded' ? 'succeeded' : root.status === 'cancelled' ? 'cancelled' : 'failed'
-      this.completeEffect(effect.id, { value: { agentId: child.id, status } }, status, status === 'failed' ? { code: 'CHILD_AGENT_FAILED', message: 'Child Agent failed.' } : undefined)
-      if (effect.outcome) this.commitAgentState(child.id, status, `agent:${child.id}:settled:${effect.id}`)
+      const nextChild = structuredClone(child)
+      nextChild.state = status
+      this.completeEffect(effect.id, { value: { agentId: child.id, status } }, status, status === 'failed' ? { code: 'CHILD_AGENT_FAILED', message: 'Child Agent failed.' } : undefined, [{ op: 'setAgent', agentId: child.id, record: nextChild }])
     }
   }
 
-  completeEffect(effectId: string, execution: EffectExecution, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded', error?: RuntimeError): void {
+  completeEffect(effectId: string, execution: EffectExecution, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded', error?: RuntimeError, additionalMutations: Mutation[] = []): void {
     const storedEffect = this.state.effects.get(effectId)
     if (!storedEffect) return
     if (storedEffect.outcome) { this.tryEmit({ type: 'attempt.late_emit', effectId, data: { status: storedEffect.outcome.status } }); return }
@@ -875,7 +876,7 @@ export class PulseRuntime {
         correlation = { ...existing, toolEffectId: effect.id, resultRef: result.id }
       }
     }
-    const publicationMutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: structuredClone(effect) }]
+    const publicationMutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: structuredClone(effect) }, ...additionalMutations.map((mutation) => structuredClone(mutation))]
     if (publishedArtifact) publicationMutations.push({ op: 'publishArtifact', record: structuredClone(publishedArtifact) })
     if (result) publicationMutations.push({ op: 'publishResult', record: structuredClone(result) })
     if (journalLane) publicationMutations.push({ op: 'setLane', laneId: journalLane.id, record: structuredClone(journalLane) })
