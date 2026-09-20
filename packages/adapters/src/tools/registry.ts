@@ -17,16 +17,22 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
     const definition = registry.get(name)
     if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`)
     const observations: NonNullable<EffectExecution['observations']> = []
-    const detailed = await registry.executeDetailed(name, input.arguments ?? {}, {
-      toolCallId: effect.toolCallId ?? '',
-      effectId: effect.id,
-      attemptId: effect.attemptId,
-      ...(effect.idempotencyKey === undefined ? {} : { idempotencyKey: effect.idempotencyKey }),
-      agentId: effect.agentId,
-      laneId: effect.ownerLaneId,
-      signal,
-      emit: (event) => { if (!signal.aborted) observations.push(event) },
-    })
+    let detailed: Awaited<ReturnType<ToolRegistry['executeDetailed']>>
+    try {
+      detailed = await registry.executeDetailed(name, input.arguments ?? {}, {
+        toolCallId: effect.toolCallId ?? '',
+        effectId: effect.id,
+        attemptId: effect.attemptId,
+        ...(effect.idempotencyKey === undefined ? {} : { idempotencyKey: effect.idempotencyKey }),
+        agentId: effect.agentId,
+        laneId: effect.ownerLaneId,
+        signal,
+        emit: (event) => { if (!signal.aborted) observations.push(event) },
+      })
+    } catch (error) {
+      if (signal.aborted && definition.manifest.sideEffectPolicy === 'write') return { value: null, executionState: 'remote_unknown', sideEffectState: 'unknown', metadata: { toolVersion: definition.manifest.version, reconcileRequired: true }, ...(error instanceof Error ? { error: { code: 'TOOL_CANCELLED_UNKNOWN', message: error.message } } : {}) }
+      throw error
+    }
     const summary = detailed.summary === undefined ? undefined : toJson(detailed.summary)
     if (summary !== undefined && JSON.stringify(summary).length > 4096) throw new Error('TOOL_SUMMARY_TOO_LARGE')
     return { value: toJson(detailed.output), ...(summary === undefined ? {} : { summary }), sideEffectState: definition.manifest.sideEffectPolicy === 'write' ? 'applied' : 'none', executionState: 'succeeded', metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length }, ...(observations.length ? { observations } : {}) }

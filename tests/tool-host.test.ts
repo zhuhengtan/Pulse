@@ -39,4 +39,15 @@ describe('Tool SDK to Runtime Effect host', () => {
     const effect = { id: 'effect-1', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'job', kind: 'tool', concurrencyClass: 'tool', input: { name: 'job', arguments: { id: 'job-1' } }, executionRef: 'job-1', attemptId: 'attempt-1', attemptNo: 0, state: 'reconcile_required', executionState: 'remote_unknown', sideEffectState: 'unknown' } as unknown as EffectRecord
     await expect(reconcileToolEffect(registry, effect, new AbortController().signal)).resolves.toEqual({ status: 'succeeded', output: { state: 'done' } })
   })
+
+  it('keeps a cancelled write Tool in remote-unknown state', async () => {
+    const registry = new ToolRegistry()
+    registry.register(defineTool({ name: 'write-job', description: 'remote write', input: z.object({}), output: z.object({ ok: z.boolean() }), sideEffectPolicy: 'write', execute: async (_input, context) => { await new Promise<void>((_resolve, reject) => { context.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }) }); return { ok: true } } }))
+    const controller = new AbortController()
+    const executor = createToolEffectExecutor(registry)
+    const effect = { id: 'effect-2', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'write-job', kind: 'tool', concurrencyClass: 'tool', input: { name: 'write-job', arguments: {} }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as import('@pulse/runtime').EffectRecord
+    const pending = executor(effect, controller.signal)
+    controller.abort()
+    await expect(pending).resolves.toMatchObject({ executionState: 'remote_unknown', sideEffectState: 'unknown' })
+  })
 })
