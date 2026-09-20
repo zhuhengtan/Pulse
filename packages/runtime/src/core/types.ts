@@ -22,6 +22,7 @@ export interface RuntimeError {
 export interface Outcome {
   status: OutcomeStatus
   resultRef?: ResultRef
+  rejectedOutputRefs?: ResultRef[]
   error?: RuntimeError
 }
 
@@ -149,6 +150,7 @@ export interface AttemptRecord {
 export interface ResultRecord {
   id: ResultRef
   effectId?: EffectId
+  kind?: 'result' | 'rejected_output'
   value?: JsonValue
   privacy: PrivacyLabel
   derivedFrom: string[]

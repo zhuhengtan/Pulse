@@ -48,6 +48,36 @@ function target(step: NextStepTarget): string { return typeof step === 'string' 
 function clone<T>(value: T): T { return structuredClone(value) }
 function asJson(value: unknown): JsonValue { return value as JsonValue }
 
+function zodJsonSchema(schema: ZodTypeAny): JsonValue {
+  const definition = schema?._def as { typeName?: string; shape?: (() => Record<string, ZodTypeAny>) | Record<string, ZodTypeAny>; type?: ZodTypeAny; innerType?: ZodTypeAny; values?: string[]; value?: JsonValue; options?: ZodTypeAny[]; description?: string } | undefined
+  if (!definition) return {}
+  const typeName = definition.typeName
+  let result: Record<string, JsonValue>
+  if (typeName === 'ZodObject') {
+    const shape = typeof definition.shape === 'function' ? definition.shape() : definition.shape ?? {}
+    const properties: Record<string, JsonValue> = {}
+    const required: string[] = []
+    for (const [key, child] of Object.entries(shape)) {
+      properties[key] = zodJsonSchema(child)
+      if (!child.isOptional()) required.push(key)
+    }
+    result = { type: 'object', properties, ...(required.length ? { required } : {}) }
+  } else if (typeName === 'ZodString') result = { type: 'string' }
+  else if (typeName === 'ZodNumber') result = { type: 'number' }
+  else if (typeName === 'ZodBoolean') result = { type: 'boolean' }
+  else if (typeName === 'ZodNull') result = { type: 'null' }
+  else if (typeName === 'ZodArray') result = { type: 'array', items: zodJsonSchema(definition.type!) }
+  else if (typeName === 'ZodOptional' || typeName === 'ZodDefault') return zodJsonSchema(definition.innerType ?? definition.type!)
+  else if (typeName === 'ZodNullable') result = { anyOf: [zodJsonSchema(definition.innerType!), { type: 'null' }] }
+  else if (typeName === 'ZodEnum') result = { enum: [...(definition.values ?? [])] }
+  else if (typeName === 'ZodLiteral') result = { const: definition.value ?? null }
+  else if (typeName === 'ZodUnion') result = { anyOf: (definition.options ?? []).map(zodJsonSchema) }
+  else if (typeName === 'ZodEffects') return zodJsonSchema((definition as { schema: ZodTypeAny }).schema)
+  else if (typeName === undefined) result = {}
+  else throw new Error(`UNSUPPORTED_OUTPUT_SCHEMA:${typeName}`)
+  return definition.description === undefined ? result : { ...result, description: definition.description }
+}
+
 function resultVisible(context: LaneStepContext, ref: ResultRef): boolean { return context.lane.visibleResultRefs === undefined || context.lane.visibleResultRefs.has(ref) }
 function findResult(context: LaneStepContext, ref: ResultRef): JsonValue | undefined { return resultVisible(context, ref) ? context.state.results.get(ref)?.value : undefined }
 
@@ -109,17 +139,21 @@ export class StepBuilder<TState = JsonValue> {
       const instruction = typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: ctx.laneState })
       const inputs = options.inputs?.(ctx) ?? {}
       const inputResultRefs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? [])])]
-      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: asJson({ task: options.task, instruction, inputs, schema: options.schema.description ?? 'structured', requirements: { structuredOutput: true } }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
+      const outputSchema = zodJsonSchema(options.schema)
+      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: asJson({ task: options.task, instruction, inputs, outputSchema, requirements: { structuredOutput: true } }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
     })
     this.handlers.set(submit, (ctx) => ({ next: decode }))
     this.handlers.set(decode, (ctx) => {
       const input = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).find((dependency) => dependency.state !== 'pending') : undefined
       const ref = input?.state === 'settled' ? input.outcome.resultRef : undefined
-      const value = ref ? ctx.getResult(ref) : undefined
+      const rejectedRef = input?.state === 'settled' ? input.outcome.rejectedOutputRefs?.[0] : undefined
+      const value = rejectedRef ? ctx.getResult(rejectedRef) : ref ? ctx.getResult(ref) : undefined
       const parsed = options.schema.safeParse(value)
       if (!parsed.success) {
         if (options.selfCorrect?.maxRounds === 0) return { next: options.onError ? options.onError(new Error('OUTPUT_SCHEMA_VIOLATION'), ctx) : decode }
-        return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-correct`, kind: 'llm', concurrencyClass: 'llm', input: { task: options.task, instruction: `${typeof options.instruction === 'string' ? options.instruction : 'structured'}\nValidation errors: ${parsed.error.message}`, rejectedOutput: value ?? null } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
+        const inputResultRefs = rejectedRef ? [rejectedRef] : []
+        const outputSchema = zodJsonSchema(options.schema)
+        return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-correct`, kind: 'llm', concurrencyClass: 'llm', input: { task: options.task, instruction: `${typeof options.instruction === 'string' ? options.instruction : 'structured'}\nValidation errors: ${parsed.error.message}`, inputs: { rejectedOutputRefs: inputResultRefs }, outputSchema, requirements: { structuredOutput: true } }, ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
       }
       const next = options.onSuccess(parsed.data, ctx)
       return { next }

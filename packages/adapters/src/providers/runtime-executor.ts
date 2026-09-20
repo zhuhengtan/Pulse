@@ -1,5 +1,5 @@
 import type { EffectExecutor, EffectExecution, JsonValue, LLMRequestProjection, LLMResult, ModelCandidate, ModelRouter } from '@pulse/runtime'
-import { ModelFallbackController, validateAdapterResult, modelFallbackError } from '@pulse/runtime'
+import { ModelFallbackController, OutputValidationError, validateAdapterResult, validateJsonSchema, modelFallbackError } from '@pulse/runtime'
 import type { ProviderAdapter } from './types.js'
 
 function toJson(value: unknown): JsonValue {
@@ -28,6 +28,8 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
     const projection = request as unknown as LLMRequestProjection
     const observations: NonNullable<EffectExecution['observations']> = []
     const usage = new Map<string, NonNullable<LLMResult['usage']>>()
+    let lastSchemaViolation: JsonValue | undefined
+    let failedForSchema = false
     const dynamicRequirements = input.requirements && typeof input.requirements === 'object' && !Array.isArray(input.requirements) ? input.requirements as Partial<ModelCandidate['capabilities']> : {}
     const candidates = config.router.routeProjection(task, projection, { ...config.requirements, ...dynamicRequirements })
     const result = await fallback.execute(effect.id, candidates, async (attempt) => {
@@ -36,12 +38,25 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
       try {
         const output = validateAdapterResult(await provider.executeAttempt({ request: projection, signal, onObservation: (chunk) => observations.push({ type: 'chunk', data: chunk }) }))
         if (output.usage) usage.set(attempt.attemptId, output.usage)
+        if (input.outputSchema !== undefined) {
+          const candidateValue = output.structured ?? output.text
+          if (!validateJsonSchema(candidateValue, input.outputSchema)) {
+            lastSchemaViolation = toJson(candidateValue)
+            failedForSchema = true
+            throw new OutputValidationError('structured', 'OUTPUT_SCHEMA_VIOLATION', 'Provider output did not match the declared schema')
+          }
+        }
+        failedForSchema = false
         return output
       } catch (cause) {
         throw modelFallbackError({ retryable: true, localClosed: true, sideEffectState: 'none', cause })
       }
+    }).catch((cause) => {
+      if (failedForSchema && lastSchemaViolation !== undefined) return { result: { text: '', toolCalls: [], finishReason: 'error' as const }, candidate: candidates.at(-1)!, attempts: [], schemaRejected: lastSchemaViolation }
+      throw cause
     })
-    const modelValue = typeof input.schema === 'string' ? (result.result.structured ?? result.result.text) : result.result
+    if ('schemaRejected' in result) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Provider output did not match the declared schema.' }, rejectedOutput: { value: result.schemaRejected, privacy: projection.privacy, derivedFrom: [...(effect.derivedFrom ?? [])] } }
+    const modelValue = input.outputSchema !== undefined || typeof input.schema === 'string' ? (result.result.structured ?? result.result.text) : result.result
     const value = toJson(modelValue)
     return { value, privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: candidateMetadata(result.candidate, result.attempts, usage), ...(observations.length ? { observations } : {}) }
   }

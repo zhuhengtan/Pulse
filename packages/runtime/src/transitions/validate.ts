@@ -182,7 +182,7 @@ function prepareLLMInput(state: RuntimeState, lane: LaneRecord, submission: Subm
   if (typeof input.task !== 'string') return { input: submission.input }
   const instruction = typeof input.instruction === 'string' ? input.instruction : input.task
   const rawInputs = input.inputs && typeof input.inputs === 'object' && !Array.isArray(input.inputs) ? input.inputs as Record<string, JsonValue> : {}
-  const resultRefs = [...new Set([...(Array.isArray(rawInputs.results) ? rawInputs.results.filter((ref): ref is string => typeof ref === 'string') : []), ...(Array.isArray(rawInputs.findings) ? rawInputs.findings.filter((ref): ref is string => typeof ref === 'string') : [])])]
+  const resultRefs = [...new Set([...(Array.isArray(rawInputs.results) ? rawInputs.results.filter((ref): ref is string => typeof ref === 'string') : []), ...(Array.isArray(rawInputs.findings) ? rawInputs.findings.filter((ref): ref is string => typeof ref === 'string') : []), ...(Array.isArray(rawInputs.rejectedOutputRefs) ? rawInputs.rejectedOutputRefs.filter((ref): ref is string => typeof ref === 'string') : [])])]
   try {
     const agent = state.agents.get(lane.agentId)
     if (!agent) return { error: 'UNKNOWN_AGENT' }

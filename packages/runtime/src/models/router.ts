@@ -36,6 +36,36 @@ export interface LLMResult {
   derivedFrom?: string[]
 }
 
+export function validateJsonSchema(value: unknown, schema: unknown): boolean {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return false
+  const document = schema as Record<string, unknown>
+  if (Array.isArray(document.anyOf)) return document.anyOf.some((candidate) => validateJsonSchema(value, candidate))
+  if (Array.isArray(document.oneOf)) return document.oneOf.filter((candidate) => validateJsonSchema(value, candidate)).length === 1
+  if (document.const !== undefined && JSON.stringify(value) !== JSON.stringify(document.const)) return false
+  if (Array.isArray(document.enum) && !document.enum.some((candidate) => JSON.stringify(value) === JSON.stringify(candidate))) return false
+  if (typeof document.type === 'string') {
+    const matches = document.type === 'null' ? value === null : document.type === 'boolean' ? typeof value === 'boolean' : document.type === 'number' ? typeof value === 'number' && Number.isFinite(value) : document.type === 'integer' ? typeof value === 'number' && Number.isInteger(value) : document.type === 'string' ? typeof value === 'string' : document.type === 'array' ? Array.isArray(value) : document.type === 'object' ? typeof value === 'object' && value !== null && !Array.isArray(value) : true
+    if (!matches) return false
+  }
+  if (typeof value === 'string') {
+    if (typeof document.minLength === 'number' && value.length < document.minLength) return false
+    if (typeof document.maxLength === 'number' && value.length > document.maxLength) return false
+  }
+  if (Array.isArray(value)) {
+    if (typeof document.minItems === 'number' && value.length < document.minItems) return false
+    if (typeof document.maxItems === 'number' && value.length > document.maxItems) return false
+    if (document.items !== undefined && value.some((item) => !validateJsonSchema(item, document.items))) return false
+  }
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const object = value as Record<string, unknown>
+    if (Array.isArray(document.required) && document.required.some((key) => typeof key !== 'string' || !(key in object))) return false
+    if (document.properties && typeof document.properties === 'object' && !Array.isArray(document.properties)) {
+      for (const [key, childSchema] of Object.entries(document.properties as Record<string, unknown>)) if (key in object && !validateJsonSchema(object[key], childSchema)) return false
+    }
+  }
+  return true
+}
+
 export function assertCloudAllowed(projection: LLMRequestProjection, candidate: ModelCandidate): void {
   if (projection.privacy === 'local_only' && candidate.capabilities.local !== true) throw new Error('PRIVACY_CLOUD_BLOCKED')
 }

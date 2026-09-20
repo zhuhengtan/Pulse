@@ -27,6 +27,10 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     const { agentId } = runtime.createAgent('correct', program)
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
     expect(calls).toBe(2)
+    const rejected = [...runtime.state.results.values()].find((result) => result.kind === 'rejected_output')
+    expect(rejected).toMatchObject({ kind: 'rejected_output', value: { invalid: true } })
+    expect(runtime.state.effects.get('effect-1')?.outcome).toMatchObject({ status: 'failed', rejectedOutputRefs: [rejected?.id] })
+    expect(runtime.state.lanes.get(runtime.state.agents.get(agentId)!.rootLaneId)?.context.history).toHaveLength(1)
   })
 
   it('keeps ReAct bookkeeping per Lane when one Program is reused by multiple Agents', async () => {

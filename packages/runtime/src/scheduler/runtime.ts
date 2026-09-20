@@ -15,6 +15,7 @@ import { appendRuntimeEvent } from '../core/events.js'
 import type { Mutation } from '../core/mutations.js'
 import { ContextMerger, type MergePlan } from '../context/merger.js'
 import { appendHistory, historyPressure } from '../context/builder.js'
+import { validateJsonSchema } from '../models/router.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number; observe?: (event: { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }) => void }
 export interface LaneProgram {
@@ -29,7 +30,7 @@ export interface LaneProgram {
   seriesOnMemberFailure?: 'continue' | 'abort'
 }
 export interface EffectObservation { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }
-export interface EffectExecution { value: JsonValue; summary?: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled'; metadata?: JsonValue; observations?: EffectObservation[] }
+export interface EffectExecution { value: JsonValue; summary?: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled'; error?: RuntimeError; rejectedOutput?: { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; derivedFrom?: string[] }; metadata?: JsonValue; observations?: EffectObservation[] }
 export type EffectExecutor = (effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<EffectExecution>
 type HostCommand = { type: 'reply'; effectId: string; value: JsonValue } | { type: 'cancel'; agentId: string; reason: string }
 
@@ -349,42 +350,51 @@ export class PulseRuntime {
     const running = this.executions.get(effectId)
     if (running) { running.controller.abort(); this.executions.delete(effectId) }
     if (execution.executionState === 'remote_unknown') { this.markRemoteUnknown(effectId, execution.sideEffectState ?? 'none'); return }
-    const effectiveStatus = effect.cancelRequested && (execution.status ?? status) === 'succeeded' ? 'cancelled' : (execution.status ?? status)
+    let effectiveExecution = execution
+    let outputError = error ?? execution.error
+    const rawInput = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+    const outputSchema = rawInput.outputSchema
+    if ((execution.status ?? status) === 'succeeded' && effect.kind === 'llm' && outputSchema !== undefined && !validateJsonSchema(execution.value, outputSchema)) {
+      effectiveExecution = { ...execution, status: 'failed', executionState: 'failed', rejectedOutput: { value: structuredClone(execution.value), ...(execution.privacy === undefined ? {} : { privacy: execution.privacy }), derivedFrom: [...(effect.derivedFrom ?? [])] } }
+      outputError = { code: 'OUTPUT_SCHEMA_VIOLATION', message: 'LLM output did not satisfy the declared output schema.' }
+    }
+    const effectiveStatus = effect.cancelRequested && (effectiveExecution.status ?? status) === 'succeeded' ? 'cancelled' : (effectiveExecution.status ?? status)
     effect.state = effectiveStatus
     effect.executionState = effectiveStatus === 'succeeded' ? 'succeeded' : effectiveStatus === 'cancelled' ? 'failed' : 'failed'
-    effect.sideEffectState = execution.sideEffectState ?? 'none'
+    effect.sideEffectState = effectiveExecution.sideEffectState ?? 'none'
     const attempt = effect.attempts?.at(-1)
-    if (attempt) { attempt.executionState = effect.executionState; attempt.sideEffectState = effect.sideEffectState; attempt.settledAt = this.state.now; if (error) attempt.error = error }
+    if (attempt) { attempt.executionState = effect.executionState; attempt.sideEffectState = effect.sideEffectState; attempt.settledAt = this.state.now; if (outputError) attempt.error = outputError }
     const settledAttemptId = effect.attemptId
-    if (effectiveStatus === 'failed' && this.scheduleRetry(effect, error)) {
+    if (effectiveStatus === 'failed' && this.scheduleRetry(effect, outputError)) {
       this.releaseEffectLocks(effectId)
       this.outbox.ack(`${effect.id}:${settledAttemptId}`)
       this.refreshWaits()
       return
     }
     const resultId = `result-${this.state.nextIds.result++}`
-    const outcome: Outcome = effectiveStatus === 'succeeded' ? { status: effectiveStatus, resultRef: resultId } : { status: effectiveStatus, ...(error ? { error } : {}) }
+    const rejectedOutputId = effectiveStatus !== 'succeeded' && effectiveExecution.rejectedOutput ? resultId : undefined
+    const outcome: Outcome = effectiveStatus === 'succeeded' ? { status: effectiveStatus, resultRef: resultId } : { status: effectiveStatus, ...(outputError ? { error: outputError } : {}), ...(rejectedOutputId ? { rejectedOutputRefs: [rejectedOutputId] } : {}) }
     effect.outcome = outcome
     this.releaseEffectLocks(effectId)
     this.outbox.ack(`${effect.id}:${effect.attemptId}`)
-    for (const observation of execution.observations ?? []) this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now })
+    for (const observation of effectiveExecution.observations ?? []) this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now })
     const ownerLane = this.state.lanes.get(effect.ownerLaneId)
     const sourcePrivacy = effect.derivedFrom?.map((ref) => this.state.results.get(ref)?.privacy).filter((privacy): privacy is NonNullable<typeof privacy> => privacy !== undefined) ?? []
-    const result = effectiveStatus === 'succeeded' ? { id: resultId, effectId, value: execution.value, privacy: strictestPrivacy([execution.privacy ?? 'public', ...sourcePrivacy]), derivedFrom: [...(effect.derivedFrom ?? [])], ...(execution.summary === undefined ? {} : { summary: execution.summary }) } : undefined
+    const result = effectiveStatus === 'succeeded' ? { id: resultId, effectId, value: effectiveExecution.value, privacy: strictestPrivacy([effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), derivedFrom: [...(effect.derivedFrom ?? [])], ...(effectiveExecution.summary === undefined ? {} : { summary: effectiveExecution.summary }) } : rejectedOutputId && effectiveExecution.rejectedOutput ? { id: rejectedOutputId, effectId, kind: 'rejected_output' as const, value: effectiveExecution.rejectedOutput.value, privacy: strictestPrivacy([effectiveExecution.rejectedOutput.privacy ?? effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), derivedFrom: [...(effectiveExecution.rejectedOutput.derivedFrom ?? effect.derivedFrom ?? [])] } : undefined
     if (result) this.state.results.set(resultId, result)
     let journalLane: LaneRecord | undefined
-    if (ownerLane && effectiveStatus === 'succeeded') {
+    if (ownerLane && result) {
       journalLane = structuredClone(ownerLane)
-      if (journalLane.visibleResultRefs) journalLane.visibleResultRefs.add(resultId)
-      else journalLane.visibleResultRefs = new Set([resultId])
-      if (effect.kind === 'llm' && result) {
+      if (journalLane.visibleResultRefs) journalLane.visibleResultRefs.add(result.id)
+      else journalLane.visibleResultRefs = new Set([result.id])
+      if (effect.kind === 'llm' && effectiveStatus === 'succeeded') {
         const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
         const request = input.request && typeof input.request === 'object' && !Array.isArray(input.request) ? input.request as Record<string, JsonValue> : undefined
         const contextSpec = request?.contextSpec && typeof request.contextSpec === 'object' && !Array.isArray(request.contextSpec) ? request.contextSpec as Record<string, JsonValue> : undefined
         const refs = Array.isArray(contextSpec?.resultRefs) ? contextSpec.resultRefs.filter((ref): ref is string => typeof ref === 'string') : effect.derivedFrom ?? []
         const instruction = typeof contextSpec?.instruction === 'string' ? contextSpec.instruction : typeof input.instruction === 'string' ? input.instruction : typeof input.task === 'string' ? input.task : effect.key
-        journalLane = appendHistory(journalLane, { instruction, resultRefs: [...new Set(refs)], output: structuredClone(execution.value), privacy: result.privacy })
-        journalLane.visibleResultRefs!.add(resultId)
+        journalLane = appendHistory(journalLane, { instruction, resultRefs: [...new Set(refs)], output: structuredClone(effectiveExecution.value), privacy: result.privacy })
+        journalLane.visibleResultRefs!.add(result.id)
       }
       this.state.lanes.set(journalLane.id, journalLane)
     }
