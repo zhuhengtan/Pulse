@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { JsonValue, RuntimeState } from '../core/types.js'
 import { exportRuntimeState, importRuntimeState, type SessionSnapshot } from './session.js'
@@ -21,16 +21,37 @@ export interface RuntimePersistenceBackend {
 }
 
 export class FileRuntimePersistenceBackend implements RuntimePersistenceBackend {
+  private pending: Promise<void> = Promise.resolve()
   constructor(readonly filePath: string) {}
   async load(): Promise<RuntimePersistenceSnapshot | undefined> {
     try { return JSON.parse(await readFile(this.filePath, 'utf8')) as RuntimePersistenceSnapshot }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
   }
   async save(snapshot: RuntimePersistenceSnapshot): Promise<void> {
-    await mkdir(dirname(this.filePath), { recursive: true })
-    const temporaryPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}`
-    await writeFile(temporaryPath, JSON.stringify(snapshot), 'utf8')
-    await rename(temporaryPath, this.filePath)
+    const operation = this.pending.then(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true })
+      const temporaryPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${process.hrtime.bigint().toString()}`
+      let handle: Awaited<ReturnType<typeof open>> | undefined
+      try {
+        handle = await open(temporaryPath, 'wx', 0o600)
+        await handle.writeFile(JSON.stringify(snapshot), 'utf8')
+        await handle.sync()
+        await handle.close()
+        handle = undefined
+        await rename(temporaryPath, this.filePath)
+        try {
+          const directory = await open(dirname(this.filePath), 'r')
+          try { await directory.sync() } finally { await directory.close() }
+        } catch {
+          // Directory fsync is not available on every supported filesystem; the rename remains atomic.
+        }
+      } finally {
+        if (handle) await handle.close().catch(() => undefined)
+        await rm(temporaryPath, { force: true }).catch(() => undefined)
+      }
+    })
+    this.pending = operation.catch(() => undefined)
+    await operation
   }
 }
 

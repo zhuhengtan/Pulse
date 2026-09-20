@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { EffectOutbox, FileRuntimePersistenceBackend, PulseRuntime, createRuntimeState, exportRuntimePersistence, importRuntimePersistence, MutationLog, serializeRuntimePersistence } from '@pulse/runtime'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -43,6 +43,19 @@ describe('effect outbox and runtime persistence envelope', () => {
       const restored = await backend.load()
       expect(restored?.schemaVersion).toBe(1)
       expect(restored?.state.schemaVersion).toBe(1)
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('serializes concurrent saves and leaves no temporary snapshot behind', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-persistence-queue-'))
+    try {
+      const backend = new FileRuntimePersistenceBackend(join(directory, 'runtime.json'))
+      const first = new PulseRuntime(); first.state.now = 1
+      const second = new PulseRuntime(); second.state.now = 2
+      await Promise.all([backend.save(first.exportPersistence()), backend.save(second.exportPersistence())])
+      const loaded = await backend.load()
+      expect(loaded?.state.state.now).toBe(2)
+      expect((await readdir(directory)).filter((name) => name.includes('.tmp-'))).toEqual([])
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
