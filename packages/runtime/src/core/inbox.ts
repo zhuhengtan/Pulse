@@ -34,6 +34,13 @@ export class FactInbox<T extends JsonValue = JsonValue> {
   get size(): number { return this.queue.length }
   has(eventId: string): boolean { return this.seen.has(eventId) }
   snapshot(): FactInboxSnapshot<T> { return { schemaVersion: 1, nextSeq: this.nextSeq, seen: [...this.seen], queue: this.queue.map((envelope) => structuredClone(envelope)) } }
+  restore(snapshot: FactInboxSnapshot<T> | JsonValue): void {
+    const restored = FactInbox.fromSnapshot<T>(snapshot)
+    this.queue.splice(0, this.queue.length, ...restored.queue.map((envelope) => structuredClone(envelope)))
+    this.seen.clear()
+    for (const eventId of restored.seen) this.seen.add(eventId)
+    this.nextSeq = restored.nextSeq
+  }
   static fromSnapshot<T extends JsonValue = JsonValue>(snapshot: FactInboxSnapshot<T> | JsonValue): FactInbox<T> {
     const value = snapshot as FactInboxSnapshot<T>
     if (!value || value.schemaVersion !== 1 || !Number.isInteger(value.nextSeq) || value.nextSeq < 1 || !Array.isArray(value.seen) || value.seen.some((eventId) => typeof eventId !== 'string' || eventId.length === 0) || !Array.isArray(value.queue)) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')

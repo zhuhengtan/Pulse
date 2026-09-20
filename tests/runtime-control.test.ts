@@ -283,6 +283,16 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.agents.get(agentId)?.state).toBe('running')
   })
 
+  it('retains a Host Fact when its transaction is rejected by storage admission', () => {
+    const runtime = new PulseRuntime()
+    const program: LaneProgram = { id: 'fact-retry', version: '1', step: () => ({ actions: [], next: point('fact-retry', 'start') }) }
+    const { laneId } = runtime.createAgent('fact retry', program)
+    runtime.setLanePriority(laneId, 7)
+    ;(runtime.storagePolicy as any).limits.maxEventLogBytes = runtime.storagePolicy.inspect().filter((record) => record.kind === 'event').reduce((total, record) => total + record.bytes, 0)
+    expect(() => runtime.tick()).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect(runtime.factInbox.snapshot().queue).toMatchObject([{ fact: { type: 'set_lane_priority', laneId, priority: 7 } }])
+  })
+
   it('rebuilds ready work after persistence recovery', async () => {
     const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { ok: true } }) })
     const program: LaneProgram = { id: 'recover-ready', version: '1', step: ({ lane }) => lane.resume.step === 'start'

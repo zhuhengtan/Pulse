@@ -522,8 +522,12 @@ export class PulseRuntime {
   tick(): number {
     this.assertRecoveryPrograms()
     this.state.now = this.clock.now()
-    for (const envelope of this.factInbox.drain()) {
-      this.emit({ id: envelope.eventId, type: 'command.enqueued', data: envelope.fact as unknown as JsonValue })
+    while (this.factInbox.size > 0) {
+      const before = this.factInbox.snapshot()
+      const envelope = this.factInbox.drain(1)[0]
+      if (!envelope) break
+      try {
+        if (!this.state.events.some((event) => event.id === envelope.eventId && event.type === 'command.enqueued')) this.emit({ id: envelope.eventId, type: 'command.enqueued', data: envelope.fact as unknown as JsonValue })
       if (envelope.fact.type === 'reply') {
         const effect = this.state.effects.get(envelope.fact.effectId)
         if (effect?.agentId === envelope.fact.agentId && effect.kind === 'human' && !effect.outcome) this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value })
@@ -552,6 +556,10 @@ export class PulseRuntime {
         }
       }
       this.emit({ type: 'command.applied', data: { eventId: envelope.eventId } })
+      } catch (cause) {
+        this.factInbox.restore(before)
+        throw cause
+      }
     }
     if (this.maxRuntimeMs !== undefined && this.state.now >= this.maxRuntimeMs) for (const agent of this.state.agents.values()) if (agent.state === 'running') this.cancelAgent(agent.id, 'TIMEOUT')
     for (const timer of this.clock.timers.due(this.state.now)) timer.callback()
