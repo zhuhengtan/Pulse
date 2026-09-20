@@ -620,9 +620,12 @@ export class PulseRuntime {
     if (typeof task !== 'string' || !request || typeof request !== 'object' || Array.isArray(request)) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'INVALID_LLM_EFFECT_INPUT', message: 'LLM effect requires task and request.' } }
     const projection = request as unknown as import('../core/types.js').LLMRequestProjection
     const dynamicRequirements = input.requirements && typeof input.requirements === 'object' && !Array.isArray(input.requirements) ? input.requirements as Record<string, JsonValue> : {}
+    const structuredRequirement = dynamicRequirements.structuredOutput
+    const structuredSchema = structuredRequirement && typeof structuredRequirement === 'object' && !Array.isArray(structuredRequirement) ? (structuredRequirement as Record<string, JsonValue>).schema : undefined
+    if (structuredSchema !== undefined && (input.outputSchema === undefined || stableSerialize(structuredSchema) !== stableSerialize(input.outputSchema))) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'STRUCTURED_OUTPUT_CONTRACT_MISMATCH', message: 'requirements.structuredOutput.schema must equal outputSchema.' } }
     const requirements: Partial<ModelCapabilities> = {
       ...(typeof dynamicRequirements.toolCalling === 'boolean' ? { toolCalling: dynamicRequirements.toolCalling } : {}),
-      ...(typeof dynamicRequirements.structuredOutput === 'boolean' ? { structuredOutput: dynamicRequirements.structuredOutput } : {}),
+      ...(typeof dynamicRequirements.structuredOutput === 'boolean' ? { structuredOutput: dynamicRequirements.structuredOutput } : structuredSchema === undefined ? {} : { structuredOutput: true }),
       ...(typeof dynamicRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: dynamicRequirements.maxOutputTokens } : {}),
     }
     const candidates = this.modelRouter.routeProjection(task, projection, requirements)

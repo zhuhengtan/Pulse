@@ -61,4 +61,17 @@ describe('Runtime model registry and task routes', () => {
     const effect = { id: 'effect-error', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request: projection }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as any
     await expect((runtime as any).executor(effect, new AbortController().signal)).resolves.toMatchObject({ status: 'failed', error: { code: 'MODEL_ERROR' } })
   })
+
+  it('enforces structured output capability and schema contract in the built-in executor', async () => {
+    const projection: LLMRequestProjection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'default', instruction: 'reason', privacy: 'public', privacyRefs: [] }, blocks: [{ kind: 'instruction', content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'default', privacy: 'public', privacyRefs: [] }
+    const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] }
+    const calls: string[] = []
+    const runtime = new PulseRuntime()
+    runtime.models.register({ id: 'plain', providerId: 'p1', tasks: ['reason'], capabilities: { maxContextTokens: 4096, structuredOutput: false }, priority: 100, adapter: { executeAttempt: async () => { calls.push('plain'); return { text: '{"ok":true}', structured: { ok: true }, toolCalls: [], finishReason: 'stop' } } } })
+    runtime.models.register({ id: 'structured', providerId: 'p2', tasks: ['reason'], capabilities: { maxContextTokens: 4096, structuredOutput: true }, priority: 1, adapter: { executeAttempt: async () => { calls.push('structured'); return { text: '{"ok":true}', structured: { ok: true }, toolCalls: [], finishReason: 'stop' } } } })
+    runtime.modelRouter.register({ task: 'reason', candidates: ['plain', 'structured'] })
+    const effect = { id: 'effect-structured', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request: projection, outputSchema: schema, requirements: { structuredOutput: { schema } } }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as any
+    await expect((runtime as any).executor(effect, new AbortController().signal)).resolves.toMatchObject({ value: { ok: true } })
+    expect(calls).toEqual(['structured'])
+  })
 })
