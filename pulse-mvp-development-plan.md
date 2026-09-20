@@ -90,6 +90,7 @@
 | Progress Admission | Watchdog 在 validate/commit 前计算规范化 Action 与 ResumePoint 指纹；重复外部 Action 注入 replan/fail，拒绝事务不派发 | `tests/watchdog.test.ts` | `d0266a1` |
 | 非 JSON Tool 输出 | 二进制或不可 JSON 化 Tool 输出转为 Artifact，Result 只保留 `{ artifactRef }` 并验证内容引用 | `tests/tool-host.test.ts` | `3edce15` |
 | Finding 事务与可见性 | Finding 发布先预检，再通过 MutationLog 原子提交；重放恢复结果、共享 Result 序号和 owner Lane 可见性 | `tests/findings.test.ts`、`tests/storage-mutation-log.test.ts` | `cfc81d0`、`2394813` |
+| 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
 统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、220/220 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
