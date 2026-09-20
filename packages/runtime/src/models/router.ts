@@ -12,6 +12,35 @@ export interface ModelUsage {
 export interface ModelCandidate { id: string; providerId: string; tasks: string[]; capabilities: ModelCapabilities; priority: number }
 export interface ModelRouteDiagnostic { id: string; providerId: string; accepted: boolean; reasons: string[] }
 export interface ModelRegistry { register(candidate: ModelCandidate): void; list(): ModelCandidate[] }
+export interface ModelRouteFeedback {
+  modelId: string
+  providerId?: string
+  outcome: 'succeeded' | 'failed' | 'refused' | 'schema_rejected'
+  quality?: number
+  usage?: ModelUsage
+}
+export interface AdaptiveRoutePolicy {
+  priorityWeight?: number
+  qualityWeight?: number
+  latencyWeight?: number
+  costWeight?: number
+  cacheWeight?: number
+  explorationWeight?: number
+  targetLatencyMs?: number
+  targetCost?: number
+}
+export interface ModelRouteMetrics {
+  attempts: number
+  successes: number
+  failures: number
+  qualityTotal: number
+  latencyTotalMs: number
+  latencySamples: number
+  costTotal: number
+  costSamples: number
+  cachedInputTokens: number
+  inputTokens: number
+}
 
 export class InMemoryModelRegistry implements ModelRegistry {
   private readonly candidates: ModelCandidate[] = []
@@ -25,12 +54,14 @@ export function estimateProjectionTokens(projection: LLMRequestProjection): numb
 }
 
 export class ModelRouter {
-  constructor(private readonly registry: ModelRegistry) {}
-  route(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] { return this.diagnostics(task, privacy, requirements).filter((item) => item.accepted).map((item) => this.registry.list().find((candidate) => candidate.id === item.id)!).sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id)) }
+  constructor(protected readonly registry: ModelRegistry) {}
+  route(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] { return this.rankCandidates(this.diagnostics(task, privacy, requirements).filter((item) => item.accepted).map((item) => this.registry.list().find((candidate) => candidate.id === item.id)!)) }
   routeProjection(task: string, projection: LLMRequestProjection, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] {
     const estimatedTokens = estimateProjectionTokens(projection) + (typeof requirements.maxOutputTokens === 'number' ? requirements.maxOutputTokens : 0)
-    return this.diagnostics(task, projection.privacy, requirements, estimatedTokens).filter((item) => item.accepted).map((item) => this.registry.list().find((candidate) => candidate.id === item.id)!).sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
+    return this.rankCandidates(this.diagnostics(task, projection.privacy, requirements, estimatedTokens).filter((item) => item.accepted).map((item) => this.registry.list().find((candidate) => candidate.id === item.id)!))
   }
+  recordFeedback(_feedback: ModelRouteFeedback): void {}
+  protected rankCandidates(candidates: ModelCandidate[]): ModelCandidate[] { return candidates.sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id)) }
   diagnostics(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}, estimatedTokens?: number): ModelRouteDiagnostic[] {
     return this.registry.list().map((candidate) => {
       const reasons: string[] = []
@@ -41,6 +72,63 @@ export class ModelRouter {
       if (estimatedTokens !== undefined && candidate.capabilities.maxContextTokens < estimatedTokens) reasons.push('CONTEXT_WINDOW_TOO_SMALL')
       return { id: candidate.id, providerId: candidate.providerId, accepted: reasons.length === 0, reasons }
     })
+  }
+}
+
+/** Deterministic feedback-driven routing. It only affects future candidate ordering. */
+export class AdaptiveModelRouter extends ModelRouter {
+  private readonly feedback = new Map<string, ModelRouteMetrics>()
+  private readonly policy: Required<AdaptiveRoutePolicy>
+
+  constructor(registry: ModelRegistry, policy: AdaptiveRoutePolicy = {}) {
+    super(registry)
+    this.policy = {
+      priorityWeight: policy.priorityWeight ?? 1,
+      qualityWeight: policy.qualityWeight ?? 4,
+      latencyWeight: policy.latencyWeight ?? 1,
+      costWeight: policy.costWeight ?? 1,
+      cacheWeight: policy.cacheWeight ?? 0.5,
+      explorationWeight: policy.explorationWeight ?? 0.25,
+      targetLatencyMs: policy.targetLatencyMs ?? 1_000,
+      targetCost: policy.targetCost ?? 1,
+    }
+  }
+
+  recordFeedback(feedback: ModelRouteFeedback): void {
+    if (!this.registry.list().some((candidate) => candidate.id === feedback.modelId)) return
+    const metrics = this.feedback.get(feedback.modelId) ?? { attempts: 0, successes: 0, failures: 0, qualityTotal: 0, latencyTotalMs: 0, latencySamples: 0, costTotal: 0, costSamples: 0, cachedInputTokens: 0, inputTokens: 0 }
+    metrics.attempts++
+    if (feedback.outcome === 'succeeded') metrics.successes++
+    else metrics.failures++
+    const quality = feedback.quality ?? (feedback.outcome === 'succeeded' ? 1 : 0)
+    if (Number.isFinite(quality)) metrics.qualityTotal += Math.max(0, Math.min(1, quality))
+    const latency = feedback.usage?.latencyMs
+    if (latency !== undefined && Number.isFinite(latency) && latency >= 0) { metrics.latencyTotalMs += latency; metrics.latencySamples++ }
+    const cost = feedback.usage?.cost?.amount
+    if (cost !== undefined && Number.isFinite(cost) && cost >= 0) { metrics.costTotal += cost; metrics.costSamples++ }
+    const inputTokens = feedback.usage?.inputTokens
+    const cachedInputTokens = feedback.usage?.cachedInputTokens
+    if (inputTokens !== undefined && cachedInputTokens !== undefined && Number.isFinite(inputTokens) && Number.isFinite(cachedInputTokens) && inputTokens > 0 && cachedInputTokens >= 0) {
+      metrics.inputTokens += inputTokens
+      metrics.cachedInputTokens += Math.min(inputTokens, cachedInputTokens)
+    }
+    this.feedback.set(feedback.modelId, metrics)
+  }
+
+  metrics(): ReadonlyMap<string, ModelRouteMetrics> { return new Map([...this.feedback.entries()].map(([id, metrics]) => [id, { ...metrics }])) }
+
+  protected rankCandidates(candidates: ModelCandidate[]): ModelCandidate[] {
+    const score = (candidate: ModelCandidate): number => {
+      const metrics = this.feedback.get(candidate.id)
+      const attempts = metrics?.attempts ?? 0
+      const quality = attempts ? (metrics?.qualityTotal ?? 0) / attempts : 0.5
+      const latency = metrics?.latencySamples ? 1 / (1 + (metrics.latencyTotalMs / metrics.latencySamples) / Math.max(1, this.policy.targetLatencyMs)) : 0.5
+      const cost = metrics?.costSamples ? 1 / (1 + (metrics.costTotal / metrics.costSamples) / Math.max(Number.MIN_VALUE, this.policy.targetCost)) : 0.5
+      const cache = metrics?.inputTokens ? Math.max(0, Math.min(1, (metrics.cachedInputTokens / metrics.inputTokens))) : 0
+      const exploration = 1 / Math.sqrt(attempts + 1)
+      return this.policy.priorityWeight * candidate.priority + this.policy.qualityWeight * quality + this.policy.latencyWeight * latency + this.policy.costWeight * cost + this.policy.cacheWeight * cache + this.policy.explorationWeight * exploration
+    }
+    return candidates.sort((a, b) => score(b) - score(a) || b.priority - a.priority || a.id.localeCompare(b.id))
   }
 }
 

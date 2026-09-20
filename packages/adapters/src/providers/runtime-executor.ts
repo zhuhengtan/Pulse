@@ -83,23 +83,32 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
       try { modelRelease = await modelSlots.get(attempt.candidate.id).acquire(signal) } catch (cause) { providerRelease(); if (signal.aborted) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause }); throw cause }
       slotWaitMs.set(attempt.attemptId, Math.max(0, Date.now() - slotStartedAt))
       const releases = [providerRelease, modelRelease]
+      let feedbackRecorded = false
+      const recordFeedback = (outcome: 'succeeded' | 'failed' | 'refused' | 'schema_rejected', quality: number): void => {
+        if (feedbackRecorded) return
+        feedbackRecorded = true
+        config.router.recordFeedback({ modelId: attempt.candidate.id, providerId: attempt.candidate.providerId, outcome, quality, ...(usage.get(attempt.attemptId) === undefined ? {} : { usage: usage.get(attempt.attemptId)! }) })
+      }
       try {
         const startedAt = Date.now()
         const output = validateAdapterResult(await provider.executeAttempt({ request: projection, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation: (chunk) => { observations.push({ type: 'chunk', data: chunk }) } }))
         const measuredUsage = output.usage === undefined ? { latencyMs: Math.max(0, Date.now() - startedAt) } : { ...output.usage, latencyMs: output.usage.latencyMs ?? Math.max(0, Date.now() - startedAt), ...(output.usage.uncachedInputTokens === undefined && output.usage.inputTokens !== undefined && output.usage.cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, output.usage.inputTokens - output.usage.cachedInputTokens) } : {}) }
         usage.set(attempt.attemptId, measuredUsage)
-        if (output.finishReason === 'refusal') throw new OutputValidationError('adapter', 'MODEL_REFUSAL', output.refusal ?? 'Provider refused the request.')
+        if (output.finishReason === 'refusal') { recordFeedback('refused', 0); throw new OutputValidationError('adapter', 'MODEL_REFUSAL', output.refusal ?? 'Provider refused the request.') }
         if (input.outputSchema !== undefined) {
           const candidateValue = output.structured ?? output.text
           if (!validateJsonSchema(candidateValue, input.outputSchema)) {
             lastSchemaViolation = toJson(candidateValue)
             failedForSchema = true
+            recordFeedback('schema_rejected', 0)
             throw new OutputValidationError('structured', 'OUTPUT_SCHEMA_VIOLATION', 'Provider output did not match the declared schema')
           }
         }
         failedForSchema = false
+        recordFeedback('succeeded', 1)
         return output
       } catch (cause) {
+        recordFeedback('failed', 0)
         if (signal.aborted) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause })
         throw modelFallbackError({ retryable: true, localClosed: true, sideEffectState: 'none', cause })
       } finally { for (const release of releases.reverse()) release() }
