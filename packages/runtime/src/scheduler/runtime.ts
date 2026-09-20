@@ -626,9 +626,14 @@ export class PulseRuntime {
         const result = validateAdapterResult(await candidate.adapter.executeAttempt({ request: projection, signal, model: candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof requirements.maxOutputTokens === 'number' ? { maxOutputTokens: requirements.maxOutputTokens } : {}), ...(emitObservation === undefined ? {} : { onObservation: (chunk: string) => emitObservation({ type: 'chunk', data: chunk }) }) }))
         const usage = result.usage === undefined ? { latencyMs: Math.max(0, Date.now() - startedAt) } : { ...result.usage, latencyMs: result.usage.latencyMs ?? Math.max(0, Date.now() - startedAt) }
         attempts.push({ attemptId, attemptNo: attempts.length + 1, modelId: candidate.id, providerId: candidate.providerId, usage })
+        if (result.finishReason === 'refusal') {
+          lastError = Object.assign(new Error(result.refusal ?? 'Model refused the request.'), { code: 'MODEL_REFUSAL' })
+          this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'refused', ...(result.usage === undefined ? {} : { usage: result.usage }) })
+          continue
+        }
         const output = input.outputSchema === undefined ? result : result.structured ?? result.text
         if (input.outputSchema !== undefined && !validateJsonSchema(output, input.outputSchema)) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Provider output did not match the declared schema.' }, metadata: { selected: { id: candidate.id, providerId: candidate.providerId }, routes: asJsonValue(routes), attempts } }
-        this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: result.finishReason === 'refusal' ? 'refused' : 'succeeded', ...(result.usage === undefined ? {} : { usage: result.usage }) })
+        this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'succeeded', ...(result.usage === undefined ? {} : { usage: result.usage }) })
         return { value: asJsonValue(output), privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: { selected: { id: candidate.id, providerId: candidate.providerId }, routes: asJsonValue(routes), attempts } }
       } catch (cause) {
         lastError = cause

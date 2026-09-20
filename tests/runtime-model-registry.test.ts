@@ -40,4 +40,16 @@ describe('Runtime model registry and task routes', () => {
     await expect(runtime.start(agentId).outcome()).resolves.toMatchObject({ status: 'succeeded' })
     expect([...runtime.state.results.values()].some((result) => result.value && typeof result.value === 'object' && !Array.isArray(result.value) && result.value.text === 'registered result')).toBe(true)
   })
+
+  it('fails a refusal and falls back to the next registered model', async () => {
+    const projection: LLMRequestProjection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'default', instruction: 'reason', privacy: 'public', privacyRefs: [] }, blocks: [{ kind: 'instruction', content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'default', privacy: 'public', privacyRefs: [] }
+    const runtime = new PulseRuntime()
+    const calls: string[] = []
+    runtime.models.register({ id: 'refusing', providerId: 'p1', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 2, adapter: { executeAttempt: async () => { calls.push('refusing'); return { text: '', refusal: 'no', toolCalls: [], finishReason: 'refusal' } } } })
+    runtime.models.register({ id: 'fallback', providerId: 'p2', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 1, adapter: { executeAttempt: async () => { calls.push('fallback'); return { text: 'ok', toolCalls: [], finishReason: 'stop' } } } })
+    runtime.modelRouter.register({ task: 'reason', candidates: ['refusing', 'fallback'] })
+    const effect = { id: 'effect-refusal', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request: projection }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as any
+    await expect((runtime as any).executor(effect, new AbortController().signal)).resolves.toMatchObject({ value: { text: 'ok' } })
+    expect(calls).toEqual(['refusing', 'fallback'])
+  })
 })
