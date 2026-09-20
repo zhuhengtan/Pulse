@@ -129,6 +129,7 @@
 | Finding 事务与可见性 | Finding 发布先预检，再通过 MutationLog 原子提交；重放恢复结果、共享 Result 序号和 owner Lane 可见性 | `tests/findings.test.ts`、`tests/storage-mutation-log.test.ts` | `cfc81d0`、`2394813` |
 | Effect 结算存储准入 | Artifact、Result、Lane、Correlation、closing Lane 终态与 Effect 结算先统一执行 storage admission；超限时整笔 Effect/Lane 失败，不产生半个 Artifact/Result，重试仍保持真实 Effect 身份 | `tests/result-summary-budget.test.ts`、`tests/retry-policy.test.ts`、`tests/m2-scheduler.test.ts` | `d267bb6`、本轮终态提交 |
 | 事实事件硬上限 fail-closed | Step/结算遇到无法容纳事实事件的 storage limit 时进入结构化失败终态；拒绝事件仅在可安全写入时追加，不抛异常、不重复排队 | `tests/result-summary-budget.test.ts` | 本轮事件压力提交 |
+| 统一事件入口准入 | Runtime 直接事件入口先在候选状态上执行 StoragePolicy hard-limit 预检，再追加真实事件；Host Fact 超限时保持队列并允许重试 | `tests/runtime-control.test.ts`、`tests/storage-policy.test.ts` | `b554078` |
 | 结算后存储策略同步 | 直接 `completeEffect()` 结算后立即重建 Runtime StoragePolicy，后续准入不读取过期的驻内存占用 | `tests/storage-policy.test.ts` | 本轮存储同步提交 |
 | 存储策略重建事务性 | Runtime 重建 live StoragePolicy 时先在候选副本上完成全部写入；任一 hard limit 失败则 live records、pin sources 与 Result residency 保持不变 | `tests/storage-policy.test.ts` | 本轮存储策略事务提交 |
 | Storage residency 稳定性 | 同一内容重复进入 StoragePolicy 时保留已确认的 `persisted`/`compacted` 状态，避免同步过程重新物化驻内存正文 | `tests/storage-policy.test.ts` | 本轮 residency 提交 |
@@ -556,6 +557,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `e29d501`：FactInbox 改为逐条处理，命令事务失败时恢复当前 Fact；重复重试不会再次写入同一 `command.enqueued` 镜像事件。
 - `6e1d295`：补充 Host Fact 存储拒绝后的恢复重试回归，验证命令最终应用且 `command.enqueued` 镜像保持幂等。
 - `6c89fe2`：MutationLog 增加 prepare/commit 分层；不可克隆 Mutation 的失败不会消耗日志序号，Runtime 状态 apply 使用独立副本，避免状态记录与日志共享可变引用。
+- `b554078`：Runtime 统一 `emit()` 入口先执行候选状态 StoragePolicy 预检，直接事实事件不再绕过 hard limit；Host Fact 超限时不会提前消费或写入事件。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
