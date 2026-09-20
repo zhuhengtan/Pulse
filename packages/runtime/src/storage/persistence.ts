@@ -1,3 +1,5 @@
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import type { JsonValue, RuntimeState } from '../core/types.js'
 import { exportRuntimeState, importRuntimeState, type SessionSnapshot } from './session.js'
 import { EffectOutbox, type OutboxSnapshot } from './outbox.js'
@@ -8,6 +10,25 @@ export interface RuntimePersistenceSnapshot {
   state: SessionSnapshot
   mutationLog: MutationLogSnapshot
   outbox: OutboxSnapshot
+}
+
+export interface RuntimePersistenceBackend {
+  load(): Promise<RuntimePersistenceSnapshot | undefined>
+  save(snapshot: RuntimePersistenceSnapshot): Promise<void>
+}
+
+export class FileRuntimePersistenceBackend implements RuntimePersistenceBackend {
+  constructor(readonly filePath: string) {}
+  async load(): Promise<RuntimePersistenceSnapshot | undefined> {
+    try { return JSON.parse(await readFile(this.filePath, 'utf8')) as RuntimePersistenceSnapshot }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
+  }
+  async save(snapshot: RuntimePersistenceSnapshot): Promise<void> {
+    await mkdir(dirname(this.filePath), { recursive: true })
+    const temporaryPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}`
+    await writeFile(temporaryPath, JSON.stringify(snapshot), 'utf8')
+    await rename(temporaryPath, this.filePath)
+  }
 }
 
 export function exportRuntimePersistence(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox): RuntimePersistenceSnapshot {

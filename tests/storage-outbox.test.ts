@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { EffectOutbox, createRuntimeState, exportRuntimePersistence, importRuntimePersistence, MutationLog, serializeRuntimePersistence } from '@pulse/runtime'
+import { EffectOutbox, FileRuntimePersistenceBackend, PulseRuntime, createRuntimeState, exportRuntimePersistence, importRuntimePersistence, MutationLog, serializeRuntimePersistence } from '@pulse/runtime'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 describe('effect outbox and runtime persistence envelope', () => {
   it('deduplicates logical attempts and recovers claimed work for redispatch', () => {
@@ -30,5 +33,16 @@ describe('effect outbox and runtime persistence envelope', () => {
 
   it('rejects malformed persistence envelopes before recovery', () => {
     expect(() => importRuntimePersistence({ schemaVersion: 1 } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
+  })
+
+  it('writes a complete snapshot through an atomic temporary file', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-persistence-'))
+    try {
+      const backend = new FileRuntimePersistenceBackend(join(directory, 'runtime.json'))
+      await new PulseRuntime().persist(backend)
+      const restored = await backend.load()
+      expect(restored?.schemaVersion).toBe(1)
+      expect(restored?.state.schemaVersion).toBe(1)
+    } finally { await rm(directory, { recursive: true, force: true }) }
   })
 })

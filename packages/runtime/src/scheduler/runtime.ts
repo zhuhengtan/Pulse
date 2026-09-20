@@ -9,7 +9,7 @@ import { PulseSession } from '../dsl/session.js'
 import { FactInbox } from '../core/inbox.js'
 import { observeProgress } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
-import { exportRuntimePersistence, importRuntimePersistence, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
+import { exportRuntimePersistence, importRuntimePersistence, type RuntimePersistenceBackend, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
 import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
 
@@ -120,6 +120,7 @@ export class PulseRuntime {
   }
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
   exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox) }
+  async persist(backend: RuntimePersistenceBackend): Promise<void> { await backend.save(this.exportPersistence()) }
 
   private emit(event: import('../core/types.js').RuntimeEventInput): void { appendRuntimeEvent(this.state, event, { sessionId: this.sessionId, timestamp: this.state.now }) }
 
