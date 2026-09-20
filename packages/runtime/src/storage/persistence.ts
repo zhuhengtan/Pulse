@@ -122,6 +122,149 @@ export class FileRuntimeContentStore implements RuntimeResultStore, RuntimeSnaps
   }
 }
 
+interface RuntimeSqliteStatement {
+  get(...params: unknown[]): Record<string, unknown> | undefined
+  all(...params: unknown[]): Record<string, unknown>[]
+  run(...params: unknown[]): unknown
+}
+
+interface RuntimeSqliteDatabase {
+  exec(sql: string): void
+  prepare(sql: string): RuntimeSqliteStatement
+  close(): void
+}
+
+type RuntimeSqliteDatabaseConstructor = new (path: string) => RuntimeSqliteDatabase
+
+/** SQLite-backed result/snapshot body store with idempotent writes and conflict detection. */
+export class SqliteRuntimeContentStore implements RuntimeResultStore, RuntimeSnapshotStore {
+  private database: RuntimeSqliteDatabase | undefined
+  private tail: Promise<void> = Promise.resolve()
+
+  constructor(readonly filePath: string, readonly namespace: 'result' | 'snapshot') {}
+
+  async save(ref: string, value: JsonValue): Promise<void> {
+    if (!ref) throw new Error('INVALID_RUNTIME_CONTENT_REF')
+    await this.enqueue(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true })
+      const database = this.open()
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        const current = database.prepare('SELECT payload FROM runtime_content WHERE namespace = ? AND ref = ?').get(this.namespace, ref)
+        if (current && typeof current.payload === 'string') {
+          if (stableSerialize(JSON.parse(current.payload) as JsonValue) !== stableSerialize(value)) throw new Error('RUNTIME_CONTENT_CONFLICT')
+        } else database.prepare('INSERT INTO runtime_content (namespace, ref, payload) VALUES (?, ?, ?)').run(this.namespace, ref, JSON.stringify(value))
+        database.exec('COMMIT')
+      } catch (cause) {
+        try { database.exec('ROLLBACK') } catch { /* transaction already closed */ }
+        throw cause
+      }
+    })
+  }
+
+  async load(ref: string): Promise<JsonValue | undefined> {
+    if (!ref) throw new Error('INVALID_RUNTIME_CONTENT_REF')
+    return await this.enqueue(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true })
+      const row = this.open().prepare('SELECT payload FROM runtime_content WHERE namespace = ? AND ref = ?').get(this.namespace, ref)
+      if (!row || typeof row.payload !== 'string') return undefined
+      return structuredClone(JSON.parse(row.payload) as JsonValue)
+    })
+  }
+
+  async close(): Promise<void> {
+    await this.enqueue(async () => {
+      this.database?.close()
+      this.database = undefined
+    })
+  }
+
+  private open(): RuntimeSqliteDatabase {
+    if (this.database) return this.database
+    const require = createRequire(import.meta.url)
+    const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: RuntimeSqliteDatabaseConstructor }
+    this.database = new DatabaseSync(this.filePath)
+    this.database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 30000; CREATE TABLE IF NOT EXISTS runtime_content (namespace TEXT NOT NULL, ref TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (namespace, ref))')
+    return this.database
+  }
+
+  private enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const operation = this.tail.then(work, work)
+    this.tail = operation.then(() => undefined, () => undefined)
+    return operation
+  }
+}
+
+/** SQLite-backed fact event archive with idempotent sequence append and range reads. */
+export class SqliteRuntimeEventArchive implements RuntimeEventArchive {
+  private database: RuntimeSqliteDatabase | undefined
+  private tail: Promise<void> = Promise.resolve()
+
+  constructor(readonly filePath: string) {}
+
+  async append(events: RuntimeEvent[]): Promise<void> {
+    if (events.length === 0) return
+    const incoming = new Map<number, RuntimeEvent>()
+    for (const event of events) {
+      if (!Number.isInteger(event.seq) || event.seq < 1) throw new Error('INVALID_RUNTIME_EVENT_ARCHIVE')
+      const previous = incoming.get(event.seq)
+      if (previous && stableSerialize(previous) !== stableSerialize(event)) throw new Error('RUNTIME_EVENT_ARCHIVE_CONFLICT')
+      incoming.set(event.seq, structuredClone(event))
+    }
+    await this.enqueue(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true })
+      const database = this.open()
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        for (const [seq, event] of incoming) {
+          const current = database.prepare('SELECT payload FROM runtime_event_archive WHERE seq = ?').get(seq)
+          if (current && typeof current.payload === 'string') {
+            if (stableSerialize(JSON.parse(current.payload) as RuntimeEvent) !== stableSerialize(event)) throw new Error('RUNTIME_EVENT_ARCHIVE_CONFLICT')
+          } else database.prepare('INSERT INTO runtime_event_archive (seq, payload) VALUES (?, ?)').run(seq, JSON.stringify(event))
+        }
+        database.exec('COMMIT')
+      } catch (cause) {
+        try { database.exec('ROLLBACK') } catch { /* transaction already closed */ }
+        throw cause
+      }
+    })
+  }
+
+  async read(fromSeq: number, toSeq = Number.POSITIVE_INFINITY): Promise<RuntimeEvent[]> {
+    if (!Number.isInteger(fromSeq) || fromSeq < 0 || Number.isNaN(toSeq)) throw new Error('INVALID_RUNTIME_EVENT_ARCHIVE_RANGE')
+    return await this.enqueue(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true })
+      const statement = toSeq === Number.POSITIVE_INFINITY
+        ? this.open().prepare('SELECT payload FROM runtime_event_archive WHERE seq >= ? ORDER BY seq')
+        : this.open().prepare('SELECT payload FROM runtime_event_archive WHERE seq >= ? AND seq <= ? ORDER BY seq')
+      const rows = toSeq === Number.POSITIVE_INFINITY ? statement.all(fromSeq) : statement.all(fromSeq, toSeq)
+      return rows.filter((row) => typeof row.payload === 'string').map((row) => structuredClone(JSON.parse(row.payload as string) as RuntimeEvent))
+    })
+  }
+
+  async close(): Promise<void> {
+    await this.enqueue(async () => {
+      this.database?.close()
+      this.database = undefined
+    })
+  }
+
+  private open(): RuntimeSqliteDatabase {
+    if (this.database) return this.database
+    const require = createRequire(import.meta.url)
+    const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: RuntimeSqliteDatabaseConstructor }
+    this.database = new DatabaseSync(this.filePath)
+    this.database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 30000; CREATE TABLE IF NOT EXISTS runtime_event_archive (seq INTEGER PRIMARY KEY, payload TEXT NOT NULL)')
+    return this.database
+  }
+
+  private enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const operation = this.tail.then(work, work)
+    this.tail = operation.then(() => undefined, () => undefined)
+    return operation
+  }
+}
+
 /** Atomic file-backed EventArchive with idempotent sequence append and range reads. */
 export class FileRuntimeEventArchive implements RuntimeEventArchive {
   private readonly filePath: string
