@@ -254,9 +254,25 @@ function hasDerivedReference(ref: ProvenanceRef, ownerLaneId: string, agents: Ma
   return Boolean(lane && parsed.laneId === lane.id && lane.context.version === parsed.version)
 }
 
+function validateExternalBodyReferences(snapshot: RuntimePersistenceSnapshot): void {
+  const sessions = [snapshot.state, ...(snapshot.checkpoint === undefined ? [] : [snapshot.checkpoint.state])]
+  if (snapshot.snapshotBodies === 'external') {
+    const refs = snapshot.externalSnapshotRefs
+    if (!Array.isArray(refs) || refs.length !== new Set(refs).size || refs.some((ref) => typeof ref !== 'string' || ref.length === 0)) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
+    for (const session of sessions) {
+      for (const [agentId, agent] of session.state.agents) for (const entry of agent.globalVersions) if (entry[1] === null && !refs.includes(`global:${agentId}:${entry[0]}`)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:global:${agentId}:${entry[0]}`)
+      for (const [laneId, lane] of session.state.lanes) if (lane.context.state === null && !refs.includes(`lane:${laneId}:${lane.context.version}`)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:lane:${laneId}:${lane.context.version}`)
+    }
+  }
+  if (snapshot.resultBodies === 'external') {
+    const refs = snapshot.externalResultRefs
+    if (!Array.isArray(refs) || refs.length !== new Set(refs).size || refs.some((ref) => typeof ref !== 'string' || ref.length === 0)) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
+    for (const session of sessions) for (const [ref, result] of session.state.results) if (result.value === undefined && !refs.includes(ref)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:result:${ref}`)
+  }
+}
+
 export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceSnapshot | JsonValue): void {
   const value = snapshot as RuntimePersistenceSnapshot
-  if (value?.snapshotBodies === 'external' && (!Array.isArray(value.externalSnapshotRefs) || value.externalSnapshotRefs.some((ref) => typeof ref !== 'string' || ref.length === 0))) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
   if (value?.checkpoint?.eventWatermark !== undefined && (!Number.isInteger(value.checkpoint.eventWatermark) || value.checkpoint.eventWatermark < 0)) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
   if (value?.factInbox !== undefined) try { FactInbox.fromSnapshot(value.factInbox) } catch { throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT') }
   const state = value?.checkpoint?.state?.state ?? value?.state?.state
@@ -267,6 +283,7 @@ export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceS
   const waits = new Map(state.waits)
   const results = new Map(state.results)
   const artifacts = new Map(state.artifacts ?? [])
+  validateExternalBodyReferences(value)
   for (const [id, agent] of agents) if (!lanes.has(agent.rootLaneId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:agent.rootLaneId:${id}`)
   for (const [ref, artifact] of artifacts) {
     if (artifact.ref !== ref || !artifact.mediaType || !Number.isInteger(artifact.sizeBytes) || artifact.sizeBytes < 0 || typeof artifact.contentBase64 !== 'string' || typeof artifact.contentHash !== 'string' || artifact.pinCount < 0) throw new Error(`INVALID_RUNTIME_PERSISTENCE_ARTIFACT:${ref}`)
@@ -390,8 +407,6 @@ export async function externalizeRuntimeResultBodies(snapshot: RuntimePersistenc
   }
   copy.resultBodies = 'external'
   copy.externalResultRefs = [...refs].sort()
-  copy.snapshotBodies = 'inline'
-  delete copy.externalSnapshotRefs
   delete copy.integrity
   return withRuntimePersistenceIntegrity(copy)
 }
@@ -427,12 +442,13 @@ export async function externalizeRuntimeSnapshotBodies(snapshot: RuntimePersiste
 export async function hydrateRuntimeSnapshotBodies(snapshot: RuntimePersistenceSnapshot, store: RuntimeSnapshotStore): Promise<RuntimePersistenceSnapshot> {
   if (snapshot.snapshotBodies !== 'external') return snapshot
   const copy = structuredClone(snapshot)
+  validateExternalBodyReferences(copy)
   const refs = new Set(copy.externalSnapshotRefs ?? [])
   for (const session of snapshotSessions(copy)) {
     for (const [agentId, agent] of session.state.agents) {
       for (const entry of agent.globalVersions) {
         const ref = `global:${agentId}:${entry[0]}`
-        if (!refs.has(ref)) continue
+        if (!refs.has(ref)) throw new Error(`RUNTIME_SNAPSHOT_REFERENCE_MISSING:${ref}`)
         const value = await store.load(ref)
         if (value === undefined) throw new Error(`RUNTIME_SNAPSHOT_NOT_FOUND:${ref}`)
         entry[1] = value
@@ -440,7 +456,7 @@ export async function hydrateRuntimeSnapshotBodies(snapshot: RuntimePersistenceS
     }
     for (const [laneId, lane] of session.state.lanes) {
       const ref = `lane:${laneId}:${lane.context.version}`
-      if (!refs.has(ref)) continue
+      if (!refs.has(ref)) throw new Error(`RUNTIME_SNAPSHOT_REFERENCE_MISSING:${ref}`)
       const value = await store.load(ref)
       if (value === undefined) throw new Error(`RUNTIME_SNAPSHOT_NOT_FOUND:${ref}`)
       lane.context.state = value
@@ -455,11 +471,13 @@ export async function hydrateRuntimeSnapshotBodies(snapshot: RuntimePersistenceS
 export async function hydrateRuntimeResultBodies(snapshot: RuntimePersistenceSnapshot, store: RuntimeResultStore): Promise<RuntimePersistenceSnapshot> {
   if (snapshot.resultBodies !== 'external') return snapshot
   const copy = structuredClone(snapshot)
+  validateExternalBodyReferences(copy)
   const refs = copy.externalResultRefs ?? []
-  const sessions = [copy.checkpoint?.state ?? copy.state]
+  const sessions = snapshotSessions(copy)
   for (const session of sessions) {
     for (const [ref, result] of session.state.results) {
-      if (!refs.includes(ref) || result.value !== undefined) continue
+      if (result.value !== undefined) continue
+      if (!refs.includes(ref)) throw new Error(`RUNTIME_RESULT_REFERENCE_MISSING:${ref}`)
       const value = await store.load(ref)
       if (value === undefined) throw new Error(`RUNTIME_RESULT_NOT_FOUND:${ref}`)
       result.value = value

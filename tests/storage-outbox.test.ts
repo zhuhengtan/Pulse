@@ -86,6 +86,9 @@ describe('effect outbox and runtime persistence envelope', () => {
     expect(values.get(resultRef as string)).toEqual({ answer: 42 })
     const restored = await PulseRuntime.restore(backend, { programs: [program] })
     expect(restored.state.results.get(resultRef as string)?.value).toEqual({ answer: 42 })
+    const missingResultIndex = structuredClone(saved)
+    missingResultIndex.externalResultRefs = []
+    await expect(PulseRuntime.restore({ load: async () => missingResultIndex, save: async () => undefined, resultStore: backend.resultStore })).rejects.toThrow('INVALID_RUNTIME_PERSISTENCE_REFERENCE:result:')
   })
 
   it('provides an idempotent atomic file body store for Result and Snapshot contents', async () => {
@@ -139,7 +142,34 @@ describe('effect outbox and runtime persistence envelope', () => {
     const restored = await PulseRuntime.restore(backend)
     expect(restored.state.agents.get(agentId)?.globalVersions.get(0)).toEqual({})
     expect(restored.state.lanes.get(laneId)?.context.state).toEqual({})
+    const missingSnapshotIndex = structuredClone(saved)
+    missingSnapshotIndex.externalSnapshotRefs = missingSnapshotIndex.externalSnapshotRefs.filter((ref: string) => ref !== `lane:${laneId}:0`)
+    await expect(PulseRuntime.restore({ load: async () => missingSnapshotIndex, save: async () => undefined, snapshotStore: backend.snapshotStore })).rejects.toThrow('INVALID_RUNTIME_PERSISTENCE_REFERENCE:lane:')
     await expect(PulseRuntime.restore({ load: async () => saved, save: async () => undefined })).rejects.toThrow('RUNTIME_SNAPSHOT_STORE_REQUIRED')
+  })
+
+  it('composes external Result and Snapshot bodies through checkpoint persistence', async () => {
+    let saved: any
+    const values = new Map<string, any>()
+    const backend = {
+      load: async () => saved,
+      save: async (snapshot: any) => { saved = structuredClone(snapshot) },
+      resultStore: { save: async (ref: string, value: any) => { values.set(`result:${ref}`, structuredClone(value)) }, load: async (ref: string) => values.get(`result:${ref}`) },
+      snapshotStore: { save: async (ref: string, value: any) => { values.set(`snapshot:${ref}`, structuredClone(value)) }, load: async (ref: string) => values.get(`snapshot:${ref}`) },
+    }
+    const program = { id: 'external-checkpoint', version: '1', step: ({ lane }: any) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects' as const, effects: [{ key: 'work', kind: 'tool' as const, concurrencyClass: 'tool' as const, input: {} }], wait: { onUnsatisfied: 'resume_with_error' as const } }], next: { programId: 'external-checkpoint', programVersion: '1', step: 'finish', locals: {} } }
+      : { actions: [{ type: 'complete' as const, result: { done: true } }], next: { programId: 'external-checkpoint', programVersion: '1', step: 'finish', locals: {} } } }
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { answer: 7 } }) })
+    const { agentId } = runtime.createAgent('external checkpoint', program)
+    await runtime.start(agentId).outcome()
+    await runtime.checkpoint(backend)
+    expect(saved.resultBodies).toBe('external')
+    expect(saved.snapshotBodies).toBe('external')
+    expect(saved.externalSnapshotRefs).toEqual(expect.arrayContaining([expect.stringMatching(/^global:/), expect.stringMatching(/^lane:/)]))
+    const restored = await PulseRuntime.restore(backend, { programs: [program] })
+    expect([...restored.state.results.values()].some((result) => result.value && (result.value as any).answer === 7)).toBe(true)
+    expect(restored.state.agents.get(agentId)?.globalVersions.get(0)).toEqual({})
   })
 
   it('flushes overdue retry timers after restoring the persisted virtual time', async () => {
