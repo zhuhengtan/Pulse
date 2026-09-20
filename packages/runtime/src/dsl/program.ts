@@ -1,7 +1,7 @@
 import { z, type ZodTypeAny } from 'zod'
 import type { LaneProgram, LaneStepContext } from '../scheduler/runtime.js'
 import { globalContextRef, laneContextRef } from '../core/types.js'
-import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, ProvenanceRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec } from '../core/types.js'
+import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, ProvenanceRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec, WaitResolution } from '../core/types.js'
 import { createDraftProxy } from './context-proxy.js'
 
 export type NextStepTarget<TState = unknown> = string | { step: string } | { complete: { value?: JsonValue; privacy?: PrivacyLabel; children?: 'reject_if_active' | 'cancel' | 'await' } } | { fail: { code: string; message: string; retryable?: boolean; details?: JsonValue; privacy?: PrivacyLabel; derivedFrom?: ProvenanceRef[] } }
@@ -367,7 +367,22 @@ export class StepBuilder<TState = JsonValue> {
     })
     return this
   }
-  addWaitStep(name: string, spec: { dependencies: Array<{ key: string; target: { kind: 'lane' | 'effect'; id: string }; condition: 'success' | 'settled' }>; mode?: 'all' | 'any' | 'quorum'; quorum?: number; deadlineAt?: number; next: NextStepTarget }): this { this.handlers.set(name, () => ({ actions: [{ type: 'wait', spec: { ...spec, mode: spec.mode ?? 'all', ...(spec.quorum === undefined ? {} : { quorum: spec.quorum }), ...(spec.deadlineAt === undefined ? {} : { deadlineAt: spec.deadlineAt }), onUnsatisfied: 'resume_with_error', reason: 'dependency' } }], next: spec.next })); return this }
+  addWaitStep(name: string, spec: { dependencies: Array<{ key: string; target: { kind: 'lane' | 'effect'; id: string }; condition: 'success' | 'settled' }>; mode?: 'all' | 'any' | 'quorum'; quorum?: number; deadlineAt?: number; next: NextStepTarget } | { targets: (ctx: StepContext<TState>) => Array<{ key: string; target: { kind: 'lane' | 'effect'; id: string }; condition: 'success' | 'settled' }>; mode?: 'all' | 'any' | 'quorum'; quorum?: number; timeoutMs?: number; onResolved: (resolution: WaitResolution, ctx: StepContext<TState>) => NextStepTarget<TState>; onUnsatisfied?: (resolution: WaitResolution, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
+    if ('dependencies' in spec) {
+      this.handlers.set(name, () => ({ actions: [{ type: 'wait', spec: { ...spec, mode: spec.mode ?? 'all', ...(spec.quorum === undefined ? {} : { quorum: spec.quorum }), ...(spec.deadlineAt === undefined ? {} : { deadlineAt: spec.deadlineAt }), onUnsatisfied: 'resume_with_error', reason: 'dependency' } }], next: spec.next }))
+      return this
+    }
+    const resume = `${name}:resume`
+    this.handlers.set(name, (ctx) => ({ actions: [{ type: 'wait', spec: { dependencies: spec.targets(ctx), mode: spec.mode ?? 'all', ...(spec.quorum === undefined ? {} : { quorum: spec.quorum }), ...(spec.timeoutMs === undefined ? {} : { deadlineAt: ctx.now + Math.max(0, spec.timeoutMs) }), onUnsatisfied: 'resume_with_error', reason: 'dependency' } }], next: resume }))
+    this.handlers.set(resume, (ctx) => {
+      const resolution = ctx.resumeInput?.type === 'wait' ? ctx.resumeInput.resolution : undefined
+      if (!resolution) throw Object.assign(new Error('WAIT_RESOLUTION_MISSING'), { code: 'WAIT_RESOLUTION_MISSING', retryable: false })
+      if (resolution.status === 'satisfied') return { next: spec.onResolved(resolution, ctx) }
+      if (spec.onUnsatisfied) return { next: spec.onUnsatisfied(resolution, ctx) }
+      throw Object.assign(new Error(resolution.error?.message ?? 'WAIT_UNSATISFIED'), resolution.error ?? { code: 'WAIT_UNSATISFIED', retryable: false })
+    })
+    return this
+  }
   addHumanStep<TOutput extends ZodTypeAny>(name: string, options: { prompt: string | ((view: InstructionView<TState>) => string); schema: TOutput; onReply: (reply: z.infer<TOutput>, ctx: StepContext<TState>) => NextStepTarget; onTimeout?: (ctx: StepContext<TState>) => NextStepTarget; timeoutMs?: number }): this {
     const decode = `${name}:decode`
     this.handlers.set(name, (ctx) => ({ actions: [{ type: 'submit_effects', effects: [{ key: `${name}-human`, kind: 'human', concurrencyClass: 'none', input: asJson({ prompt: typeof options.prompt === 'string' ? options.prompt : options.prompt({ goal: ctx.goal, state: ctx.laneState }) }), ...(options.timeoutMs === undefined ? {} : { attemptTimeoutMs: options.timeoutMs }) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }))
