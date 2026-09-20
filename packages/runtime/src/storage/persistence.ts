@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname } from 'node:path'
 import { parseContextSnapshotRef, provenanceRefId, provenanceRefKind } from '../core/types.js'
@@ -24,7 +24,7 @@ export interface RuntimePersistenceSnapshot {
 
 export interface RuntimePersistenceBackend {
   load(): Promise<RuntimePersistenceSnapshot | undefined>
-  save(snapshot: RuntimePersistenceSnapshot): Promise<void>
+  save(snapshot: RuntimePersistenceSnapshot, expectedDigest?: string): Promise<void>
 }
 
 function hasTarget(state: SessionSnapshot['state'], target: { kind: string; id: string }): boolean {
@@ -118,27 +118,47 @@ export class FileRuntimePersistenceBackend implements RuntimePersistenceBackend 
     try { return JSON.parse(await readFile(this.filePath, 'utf8')) as RuntimePersistenceSnapshot }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
   }
-  async save(snapshot: RuntimePersistenceSnapshot): Promise<void> {
+  async save(snapshot: RuntimePersistenceSnapshot, expectedDigest?: string): Promise<void> {
     const operation = this.pending.then(async () => {
       await mkdir(dirname(this.filePath), { recursive: true })
-      const temporaryPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${process.hrtime.bigint().toString()}`
-      let handle: Awaited<ReturnType<typeof open>> | undefined
+      const lockPath = `${this.filePath}.lock`
+      let lock: Awaited<ReturnType<typeof open>> | undefined
+      const lockDeadline = Date.now() + 30_000
+      while (lock === undefined) {
+        try { lock = await open(lockPath, 'wx', 0o600) }
+        catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause
+          const lockStat = await stat(lockPath).catch(() => undefined)
+          if (lockStat && Date.now() - lockStat.mtimeMs > 30_000) { await rm(lockPath, { force: true }); continue }
+          if (Date.now() >= lockDeadline) throw new Error('RUNTIME_PERSISTENCE_LOCK_TIMEOUT')
+          await new Promise((resolve) => setTimeout(resolve, 5))
+        }
+      }
       try {
-        handle = await open(temporaryPath, 'wx', 0o600)
-        await handle.writeFile(JSON.stringify(snapshot), 'utf8')
-        await handle.sync()
-        await handle.close()
-        handle = undefined
-        await rename(temporaryPath, this.filePath)
+        const current = await this.load()
+        if (expectedDigest !== undefined && (current === undefined || current.integrity?.digest !== expectedDigest)) throw new Error('RUNTIME_PERSISTENCE_CONFLICT')
+        const temporaryPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${process.hrtime.bigint().toString()}`
+        let handle: Awaited<ReturnType<typeof open>> | undefined
         try {
-          const directory = await open(dirname(this.filePath), 'r')
-          try { await directory.sync() } finally { await directory.close() }
-        } catch {
-          // Directory fsync is not available on every supported filesystem; the rename remains atomic.
+          handle = await open(temporaryPath, 'wx', 0o600)
+          await handle.writeFile(JSON.stringify(snapshot), 'utf8')
+          await handle.sync()
+          await handle.close()
+          handle = undefined
+          await rename(temporaryPath, this.filePath)
+          try {
+            const directory = await open(dirname(this.filePath), 'r')
+            try { await directory.sync() } finally { await directory.close() }
+          } catch {
+            // Directory fsync is not available on every supported filesystem; the rename remains atomic.
+          }
+        } finally {
+          if (handle) await handle.close().catch(() => undefined)
+          await rm(temporaryPath, { force: true }).catch(() => undefined)
         }
       } finally {
-        if (handle) await handle.close().catch(() => undefined)
-        await rm(temporaryPath, { force: true }).catch(() => undefined)
+        await lock.close().catch(() => undefined)
+        await rm(lockPath, { force: true }).catch(() => undefined)
       }
     })
     this.pending = operation.catch(() => undefined)

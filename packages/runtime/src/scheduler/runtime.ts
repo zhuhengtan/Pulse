@@ -123,6 +123,7 @@ export class PulseRuntime {
   private readonly telemetryExporter: RuntimeTelemetryExporter | undefined
   private readonly persistenceBackend: RuntimePersistenceBackend | undefined
   private readonly budget: RuntimeBudgetConfig
+  private persistenceDigest: string | undefined
   private readonly budgetCost = new Map<string, number>()
   private persistencePending: Promise<void> = Promise.resolve()
   private persistenceScheduled = false
@@ -170,6 +171,7 @@ export class PulseRuntime {
     if (config.trustedSanitizerIds) for (const sanitizerId of config.trustedSanitizerIds) this.state.trustedSanitizerIds.add(sanitizerId)
     this.sessionId = config.sessionId ?? 'session-local'
     this.storagePolicy = restored?.storagePolicy ?? new SessionStoragePolicy(config.storagePolicy)
+    this.persistenceDigest = config.persistence?.integrity?.digest
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
     this.factInbox = restored?.factInbox === undefined ? new FactInbox<HostCommand>() : FactInbox.fromSnapshot<HostCommand>(restored.factInbox as unknown as import('../core/inbox.js').FactInboxSnapshot<HostCommand>)
@@ -286,7 +288,9 @@ export class PulseRuntime {
   async persist(backend: RuntimePersistenceBackend): Promise<void> {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
-    await backend.save(exportRuntimePersistence(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, this.factInbox.snapshot()))
+    const snapshot = exportRuntimePersistence(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, this.factInbox.snapshot())
+    await backend.save(snapshot, backend === this.persistenceBackend ? this.persistenceDigest : undefined)
+    if (backend === this.persistenceBackend) this.persistenceDigest = snapshot.integrity?.digest
     this.storagePolicy.markPersisted()
     this.markArtifactsPersisted()
   }
@@ -304,7 +308,8 @@ export class PulseRuntime {
     persistedPolicy.markPersisted()
     const eventWatermark = options.compactEventsThrough ?? this.state.events.at(-1)?.seq
     const snapshot = exportRuntimeCheckpoint(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark }, this.factInbox.snapshot())
-    await backend.save(snapshot)
+    await backend.save(snapshot, backend === this.persistenceBackend ? this.persistenceDigest : undefined)
+    if (backend === this.persistenceBackend) this.persistenceDigest = snapshot.integrity?.digest
     this.storagePolicy.markPersisted()
     this.markArtifactsPersisted()
     const watermark = snapshot.checkpoint?.logWatermark ?? 0

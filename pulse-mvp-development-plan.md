@@ -108,9 +108,10 @@
 | Host Fact 存储准入原子性 | 排队 Host Fact 先在候选 Inbox/StoragePolicy 上预检；快照 hard limit 失败时不进入真实队列、不消耗命令序号、不留下半个 pin 记录 | `tests/storage-policy.test.ts` | 本轮 Host Fact 准入提交 |
 | Detached Agent 事件准入 | `detachAgent/attachAgent` 在改变 detached 状态前预检审计事件；事件硬上限失败时不留下半个后台 Scope 状态 | `tests/agent-effect.test.ts` | 本轮 Detached 准入提交 |
 | Fact Inbox 快照顺序校验 | 恢复时拒绝重复去重历史和乱序 `receivedSeq`，不把损坏快照静默归一化成另一条事实顺序 | `tests/fact-inbox.test.ts` | 本轮 Fact Inbox 校验提交 |
+| Runtime 共享快照 CAS | File Runtime persistence 使用跨进程 lock + integrity digest compare-and-swap；陈旧 Runtime 不得覆盖最新状态、Mutation log 或 outbox | `tests/storage-outbox.test.ts` | 本轮 Runtime Persistence CAS 提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、243/243 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、244/244 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -467,6 +468,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - 本轮 Worker Snapshot 校验提交：Worker lease snapshot 加入 SHA-256 envelope，恢复前拒绝被篡改的任务状态、序号或幂等索引。
 - 本轮 Worker 持久化错误提交：自动保存失败通过 `flushPersistence()` 暴露，不再静默视为成功。
 - 本轮 Worker Lease CAS 提交：共享文件 lease store 增加跨进程锁与 digest CAS，拒绝陈旧 Coordinator 覆盖最新状态。
+- 本轮 Runtime Persistence CAS 提交：共享 Runtime 快照增加跨进程锁与 digest CAS，拒绝陈旧 Runtime 覆盖最新状态、日志和 outbox。
 - `2250df2`：Runtime Worker lease 暴露远程 claim/renew/complete/fail 协议；adapters 增加 HTTP Coordinator Server、Client、polling Worker 和 HTTP EffectExecutor，测试覆盖真实本机 HTTP 往返、heartbeat 与 Runtime Effect 闭环。
 - `685be10`：HTTP Worker Server/Client 增加 Bearer token 鉴权，未授权请求在任务访问前拒绝，并有回归测试。
 - `47791bd`：WorkerCoordinator 增加 schemaVersion=1 的 snapshot/restore；恢复时将 in-flight lease 重新入队，并让终态/幂等任务在重启后仍可返回结果。
@@ -478,14 +480,14 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `8bb07e5`：Global/Lane Context 增加不改变业务 JSON 形状的 privacy metadata sidecar；版本、持久化恢复、ContextBuilder、ContextMerger 和 warm start 均保留该元数据。
 - `fe9554a` / `596fecb`：Session outcome 和 fact stream 均按 Agent 隔离，Host snapshot 暴露 Global Context privacy metadata。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
-- 当前确定性门禁：`npm exec tsc -b --pretty false && npm test`，47 个测试文件、243 个测试通过；`npm run build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- 当前确定性门禁：`npm exec tsc -b --pretty false && npm test`，47 个测试文件、244 个测试通过；`npm run build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
 | 验收项 | 当前状态 | 缺口 |
 | --- | --- | --- |
 | 真实 Provider Live Smoke | 已执行但被鉴权阻塞 | 请求已到真实 HTTP endpoint，当前返回 `PROVIDER_HTTP_401`；需要有效凭证验证 token、取消、structured output 和 tool-call 往返 |
-| Runtime Storage pin/retention | 确定性代码与后端快照已覆盖，生命周期自动落盘已接入 | 自动 pin、hard-limit 预检、compact、backend 确认后的 `persisted` 标记、restore，以及 Runtime `run()`/`shutdown()`/异步 Effect 结算自动持久化已有测试；旧 Snapshot/Result 外部索引与生产级写事务仍需实现 |
+| Runtime Storage pin/retention | 确定性代码与后端快照已覆盖，生命周期自动落盘、完整性和共享快照 CAS 已接入 | 自动 pin、hard-limit 预检、compact、backend 确认后的 `persisted` 标记、restore、完整性校验、共享文件快照 CAS，以及 Runtime `run()`/`shutdown()`/异步 Effect 结算自动持久化已有测试；旧 Snapshot/Result 外部索引和真正数据库事务仍需实现 |
 | 崩溃恢复与副作用对账 | 进程级重启和本地真实写入对账已验证，远程副作用仍待验证 | 已补子进程 `SIGKILL` 后恢复、启动 quarantine、资源锁隔离，以及 `executionRef` 从 Tool 到 Runtime 的持久化链；仍缺真实远程写系统 reconcile 和生产环境的持久化事务边界证明 |
 | Provider 请求完整能力 | 确定性映射已覆盖，真实厂商仍待验证 | OpenAI-compatible/Anthropic 请求带 model、tool schema、structured schema，usage 已归一化；真实 endpoint 的字段兼容、计费口径、取消和 tool-call 往返仍需有效凭证 |
 | 动态模型路由 | 确定性反馈路由与 snapshot/restore 已实现 | `AdaptiveModelRouter` 已按质量、延迟、费用、缓存和探索项调整未来候选顺序，Executor 已自动采集反馈；仍需真实生产样本校准权重和跨进程快照宿主接入 |

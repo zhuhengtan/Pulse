@@ -274,4 +274,23 @@ describe('effect outbox and runtime persistence envelope', () => {
     tampered.state.state.now = 99
     expect(() => importRuntimePersistence(tampered)).toThrow('INVALID_RUNTIME_PERSISTENCE_INTEGRITY')
   })
+
+  it('rejects a stale Runtime persistence writer instead of overwriting a shared snapshot', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-runtime-conflict-'))
+    try {
+      const backend = new FileRuntimePersistenceBackend(join(directory, 'runtime.json'))
+      const program = { id: 'runtime-conflict', version: '1', step: () => ({ actions: [], next: { programId: 'runtime-conflict', programVersion: '1', step: 'start', locals: {} } }) }
+      const first = new PulseRuntime({ persistenceBackend: backend })
+      first.createAgent('baseline', program)
+      await first.flushPersistence()
+      const second = await PulseRuntime.restore(backend, { persistenceBackend: backend })
+      first.createAgent('first-writer', program)
+      await first.flushPersistence()
+      second.createAgent('stale-writer', program)
+      await expect(second.flushPersistence()).rejects.toThrow('RUNTIME_PERSISTENCE_CONFLICT')
+      const latest = await PulseRuntime.restore(backend)
+      expect([...latest.state.agents.values()].some((agent) => agent.goal === 'first-writer')).toBe(true)
+      expect([...latest.state.agents.values()].some((agent) => agent.goal === 'stale-writer')).toBe(false)
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
 })
