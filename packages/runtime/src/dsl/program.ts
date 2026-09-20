@@ -28,7 +28,7 @@ export interface StepContext<TState = JsonValue> {
   adoptContext(version: number | 'latest'): void
   cancelLane(target: LaneId, reason: 'SUPERSEDED' | 'USER_REQUESTED' | 'POLICY'): void
   proposeCancel(target: LaneId, reason: 'SUPERSEDED' | 'POLICY'): void
-  trace(message: string): void
+  trace(message: string | { kind: string; data?: JsonValue }): void
 }
 
 type Handler = (ctx: StepContext<any>) => { actions?: RuntimeAction[]; next: NextStepTarget; contextDelta?: ContextDelta | undefined; adoptCommittedContext?: boolean; locals?: JsonValue }
@@ -82,7 +82,7 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
     adoptContext: (version) => actions.push({ type: 'adopt_context', version }),
     cancelLane: (laneId, reason) => actions.push({ type: 'cancel_lane', laneId, reason }),
     proposeCancel: (laneId, reason) => actions.push({ type: 'propose_cancel', laneId, reason }),
-    trace: (_message) => { /* ObservationInbox wiring is host-owned; no Runtime state mutation occurs inside Step. */ },
+    trace: (message) => { context.observe?.({ type: 'trace', data: typeof message === 'string' ? message : asJson(message) }) },
   }
   return { ctx, getDelta: () => delta, getActions: () => actions, getAdoptImmediately: () => adoptImmediately }
 }

@@ -1,7 +1,7 @@
 import type { PulseRuntime } from '../scheduler/runtime.js'
 import type { JsonValue, RuntimeEvent } from '../core/types.js'
 
-export interface SessionEvent { type: 'fact' | 'gap' | 'snapshot'; seq: number; event?: RuntimeEvent; fromSeq?: number; toSeq?: number; snapshot?: JsonValue }
+export interface SessionEvent { type: 'fact' | 'observation' | 'gap' | 'snapshot'; seq: number; event?: RuntimeEvent; observation?: JsonValue; fromSeq?: number; toSeq?: number; snapshot?: JsonValue }
 export interface PulseSessionSnapshot { schemaVersion: 1; agentId: string; now: number; eventSeq: number; agent: JsonValue; lanes: unknown[]; effects: unknown[]; waits: unknown[]; results: unknown[] }
 
 export class PulseSession {
@@ -17,6 +17,7 @@ export class PulseSession {
       }
       const events = this.runtime.state.events.filter((event) => event.seq > cursor)
       for (const event of events) { cursor = event.seq; yield { type: 'fact', seq: event.seq, event } }
+      for (const observation of this.runtime.observationInbox.drain(this.agentId)) yield { type: 'observation', seq: observation.seq, observation: observation as unknown as JsonValue }
       const root = [...this.runtime.state.lanes.values()].find((lane) => lane.agentId === this.agentId && lane.ownerLaneId === undefined)
       if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status) && this.runtime.state.events.at(-1)?.seq === cursor) return
       await new Promise<void>((resolve) => setImmediate(resolve))
