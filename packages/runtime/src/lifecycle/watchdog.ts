@@ -70,7 +70,7 @@ export function observeProgress(lane: LaneRecord, output: LaneStepOutput, state:
   const reached = qualifies && noProgressCount >= threshold
   if (reached && options.admission) {
     const interventionLevel = Math.min(3, prior.interventionLevel + 1) as 0 | 1 | 2 | 3
-    const rejection: RuntimeError = { code: interventionLevel >= 3 ? 'NO_PROGRESS_DETECTED' : 'WATCHDOG_REPLAN_REQUIRED', message: interventionLevel >= 3 ? 'Lane made no observable progress within the watchdog threshold.' : 'Lane repeated an action without material progress; change strategy before retrying.', details: { repeatedActionCount, noProgressCount, interventionLevel } }
+    const rejection: RuntimeError = { code: 'NO_PROGRESS_DETECTED', message: interventionLevel >= 3 ? 'Lane made no observable progress within the watchdog threshold.' : 'Lane repeated an action without material progress; change strategy before retrying.', details: { repeatedActionCount, noProgressCount, interventionLevel } }
     return { fingerprint, progressed: false, repeatedActionCount, rejected: rejection, state: { ...prior, noProgressCount: 0, interventionLevel, lastReason: rejection.code } }
   }
   const interventionLevel = progressed ? 0 : Math.max(prior.interventionLevel, Math.min(3, Math.floor(noProgressCount / threshold))) as 0 | 1 | 2 | 3

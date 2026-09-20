@@ -443,7 +443,7 @@ export class PulseRuntime {
           const observation = observeProgress(lane, preparedOutput, this.state, lane.progressWatchdog, { noProgressThreshold: this.watchdogNoProgressThreshold, repeatedActionThreshold: this.watchdogRepeatedActionThreshold, admission: true })
           if (observation.rejected) {
             lane.progressWatchdog = observation.state
-            if (observation.rejected.code === 'NO_PROGRESS_DETECTED') this.failLane(lane, observation.rejected)
+            if (observation.state.interventionLevel >= 3) this.failLane(lane, observation.rejected)
             else {
               lane.pendingResumeInput = { type: 'control_error', error: observation.rejected, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
               this.emit({ type: 'progress.intervention_applied', laneId: lane.id, data: observation.rejected as unknown as JsonValue })

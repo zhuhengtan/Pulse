@@ -46,6 +46,6 @@ describe('progress watchdog', () => {
     expect(calls).toBe(1)
     expect([...runtime.state.lanes.values()].find((lane) => lane.status === 'failed')?.failure).toMatchObject({ error: { code: 'NO_PROGRESS_DETECTED' }, privacy: 'public' })
     expect(runtime.state.events.some((event) => event.type === 'lane.failed' && JSON.stringify(event.data).includes('NO_PROGRESS_DETECTED'))).toBe(true)
-    expect(runtime.state.events.some((event) => event.type === 'progress.intervention_applied')).toBe(true)
+    expect(runtime.state.events.some((event) => event.type === 'progress.intervention_applied' && JSON.stringify(event.data).includes('NO_PROGRESS_DETECTED'))).toBe(true)
   })
 })
