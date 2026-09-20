@@ -596,7 +596,7 @@ export class PulseRuntime {
     const status = root?.status === 'succeeded' ? 'succeeded' : root?.status === 'cancelled' ? 'cancelled' : 'failed'
     if (root && !['succeeded', 'failed', 'cancelled'].includes(root.status)) this.emit({ type: 'runtime.idle_blocked', laneId: root.id, data: { status: root.status } })
     const agent = root ? this.state.agents.get(root.agentId) : undefined
-    if (agent && ['succeeded', 'failed', 'cancelled'].includes(root?.status ?? 'failed')) agent.state = status
+    if (agent && ['succeeded', 'failed', 'cancelled'].includes(root?.status ?? 'failed')) this.commitAgentState(agent.id, status, `agent:${agent.id}:run-settled:${root?.version ?? this.state.now}`)
     await this.flushPersistence()
     return { status, unresolvedEffectIds: this.quarantine.unresolvedEffectIds }
   }
@@ -611,8 +611,7 @@ export class PulseRuntime {
       const root = this.state.lanes.get(agent.rootLaneId)
       if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status)) {
         const status: 'succeeded' | 'failed' | 'cancelled' = root.status === 'succeeded' ? 'succeeded' : root.status === 'cancelled' ? 'cancelled' : 'failed'
-        agent.state = status
-        this.schedulePersistence()
+        this.commitAgentState(agent.id, status, `agent:${agent.id}:run-agent-settled:${root.version}`)
         const effectIds = new Set([...this.state.effects.values()].filter((effect) => effect.agentId === agentId).map((effect) => effect.id))
         await this.flushPersistence()
         return { status, unresolvedEffectIds: this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)) }

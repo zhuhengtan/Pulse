@@ -12,6 +12,9 @@ describe('M0 acceptance matrix', () => {
     const { agentId } = runtime.createAgent('failure', program)
     const outcome = await runtime.start(agentId).outcome()
     expect(outcome.status).toBe('succeeded')
+    expect(runtime.mutationLog.entries.some((entry) =>
+      entry.mutations.some((mutation) => mutation.op === 'setAgent' && mutation.agentId === agentId && mutation.record.state === 'succeeded')
+    )).toBe(true)
     expect([...runtime.state.results.values()].some((result) => (result.value as any).handled === true)).toBe(true)
   })
 

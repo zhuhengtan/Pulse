@@ -63,6 +63,7 @@
 | Wait 依赖结算事务 | Effect/Lane 终态触发 Wait resolution 时，Wait、Lane、closing Result 与恢复输入统一走 storage admission + MutationLog；准入失败不改变 pending Wait/Lane | `tests/runtime-control.test.ts`、`tests/result-summary-budget.test.ts` | 本轮 Wait 结算事务提交 |
 | Lane failure 事务 | 程序异常、异步 Step、控制错误和 Watchdog 失败统一先构造候选 Lane，再经 storage admission + MutationLog；事实事件超限时仍可无事件 fail-closed 进入失败终态 | `tests/runtime-control.test.ts` | 本轮 Lane failure 事务提交 |
 | Agent 状态事务 | Child Agent 的 succeeded/failed/cancelled 状态通过 `setAgent` Mutation 与 storage admission 提交，避免 Effect 结算后留下未持久化的直接 Agent 状态突变 | `tests/agent-effect.test.ts` | 本轮 Agent 状态事务提交 |
+| Agent 终态事务 | `run()` / `runAgent()` 的根 Lane 终态通过 `setAgent` Mutation 提交，运行入口不再直接改写 Agent 状态 | `tests/m0-acceptance.test.ts` | 本轮 Agent 终态事务提交 |
 | Effect 控制路径准入 | 取消、超时、立即隔离、Remote Unknown、对账放弃、重试的控制事件与 Effect/Lane 状态变更先做统一 StoragePolicy 预检，失败时不留下半完成状态 | `tests/runtime-control.test.ts`、`tests/retry-policy.test.ts` | 本轮 Effect 控制准入提交、本轮 Remote Unknown 准入提交、本轮对账放弃准入提交、本轮重试准入提交 |
 | Runtime 生命周期自动持久化 | 配置 `persistenceBackend` 后，Tick/异步 Effect 结算、取消与对账自动排队保存；`run()`、`shutdown()` 等待 durable save；显式 `flushPersistence()` 支持宿主主动冲刷 | `tests/storage-outbox.test.ts` | `7a2ed52`、`3bb7ac0` |
 | 运行观测 | 只读 telemetry 聚合 agent/lane/effect/attempt、route 排除、provider/model、slot wait、usage/cost | `tests/provider-host.test.ts` | `e68cae0` |
@@ -502,6 +503,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - 本轮 Wait 结算事务提交：依赖满足/失败与 closing Lane 结果统一经 storage admission 和 MutationLog，失败时不再直接修改 Wait/Lane 内存状态。
 - 本轮 Lane failure 事务提交：程序异常、异步 Step、控制错误和 Watchdog 失败不再直接改写 Lane；事实事件无法容纳时保留失败状态并省略不可写审计事件。
 - 本轮 Agent 状态事务提交：Child Agent 的结束状态通过 `setAgent` Mutation + storage admission 落盘，避免 Effect 结算后的直接内存突变。
+- 本轮 Agent 终态事务提交：`run()` / `runAgent()` 不再直接改写根 Agent 状态，终态统一经过 `setAgent` Mutation + storage admission。
 - 本轮取消准入提交：取消父/子 Agent 前统一预检 Lane、Effect、Agent 事件，存储准入失败时不修改任何取消状态。
 - 本轮事件归档提交：Checkpoint 截断前写入 EventArchive 并记录归档水位，归档失败时保留内存事实事件和旧持久化快照。
 - `2250df2`：Runtime Worker lease 暴露远程 claim/renew/complete/fail 协议；adapters 增加 HTTP Coordinator Server、Client、polling Worker 和 HTTP EffectExecutor，测试覆盖真实本机 HTTP 往返、heartbeat 与 Runtime Effect 闭环。
