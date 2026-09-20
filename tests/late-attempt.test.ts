@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { PulseRuntime } from '@pulse/runtime'
-import type { LaneProgram } from '@pulse/runtime'
+import type { EffectObservationEmitter, LaneProgram } from '@pulse/runtime'
 
 const point = (id: string, step: string) => ({ programId: id, programVersion: '1', step, locals: {} })
 
@@ -17,6 +17,23 @@ describe('late Attempt and remote-unknown boundaries', () => {
     expect(runtime.state.effects.get('effect-1')?.outcome).toEqual(before)
     expect(runtime.state.events.some((event) => event.type === 'attempt.late_emit')).toBe(true)
     expect(runtime.mutationLog.entries.some((entry) => entry.transactionId === 'effect:effect-1:effect-1-attempt-1:settled')).toBe(true)
+  })
+
+  it('audits a late observation without re-entering the ObservationInbox', async () => {
+    let emitLate: EffectObservationEmitter | undefined
+    const runtime = new PulseRuntime({ effectExecutor: async (_effect, _signal, emitObservation) => {
+      emitLate = emitObservation
+      return { value: { ok: true } }
+    } })
+    const program: LaneProgram = { id: 'late-observation', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('late-observation', 'done') }
+      : { actions: [{ type: 'complete', result: { done: true } }], next: point('late-observation', 'done') } }
+    const { agentId } = runtime.createAgent('late observation', program)
+    await expect(runtime.start(agentId).outcome()).resolves.toMatchObject({ status: 'succeeded' })
+    expect(emitLate).toBeDefined()
+    emitLate!({ type: 'progress', data: { phase: 'after-settlement' } })
+    expect(runtime.observationInbox.snapshot()).toHaveLength(0)
+    expect(runtime.state.events.some((event) => event.type === 'attempt.late_emit' && event.data && typeof event.data === 'object' && !Array.isArray(event.data) && event.data.kind === 'observation')).toBe(true)
   })
 
   it('bounds remote-unknown retries for pure computation', () => {

@@ -1413,7 +1413,11 @@ export class PulseRuntime {
       }
       const emitObservation: EffectObservationEmitter = (observation) => {
         const liveEffect = this.state.effects.get(effect.id)
-        if (!liveEffect || liveEffect.outcome || liveEffect.state !== 'running') return
+        if (!liveEffect) return
+        if (liveEffect.outcome || liveEffect.state !== 'running') {
+          this.tryEmit({ type: 'attempt.late_emit', effectId: effect.id, attemptId: effect.attemptId, data: { kind: 'observation', status: liveEffect.outcome?.status ?? liveEffect.state } })
+          return
+        }
         this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now })
       }
       const promise = this.executor(effect, controller.signal, emitObservation).then((execution) => { this.completeEffect(effect.id, execution) }).catch((cause) => { const runtimeError = runtimeErrorFromCause(cause); this.tryEmit({ type: 'effect.dispatch_failed', effectId: effect.id, data: runtimeError as unknown as JsonValue }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', runtimeError) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
