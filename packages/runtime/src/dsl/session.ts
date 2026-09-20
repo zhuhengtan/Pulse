@@ -1,7 +1,12 @@
 import type { PulseRuntime } from '../scheduler/runtime.js'
 import type { JsonValue, RuntimeEvent } from '../core/types.js'
 
-export interface SessionEvent { type: 'fact' | 'observation' | 'gap' | 'snapshot'; seq: number; event?: RuntimeEvent; observation?: JsonValue; fromSeq?: number; toSeq?: number; snapshot?: JsonValue }
+export type SessionEventKind = 'fact' | 'observation' | 'gap' | 'snapshot'
+/**
+ * Session events use the DSL's `kind` field. `type` remains as a compatibility
+ * alias for the initial runtime API and is emitted with the same value.
+ */
+export interface SessionEvent { kind: SessionEventKind; type: SessionEventKind; seq: number; event?: RuntimeEvent; observation?: JsonValue; fromSeq?: number; toSeq?: number; snapshot?: JsonValue }
 export interface PulseSessionSnapshot { schemaVersion: 1; agentId: string; now: number; eventSeq: number; agent: JsonValue; lanes: unknown[]; effects: unknown[]; waits: unknown[]; results: unknown[]; mergeProposals: unknown[]; quarantine: unknown[]; observationsPending: number }
 
 export class PulseSession {
@@ -20,18 +25,18 @@ export class PulseSession {
       const compactedThrough = this.runtime.state.eventsCompactedThrough ?? 0
       const gapEnd = oldest === undefined ? compactedThrough : oldest - 1
       if (cursor < gapEnd) {
-        yield { type: 'gap', seq: gapEnd, fromSeq: cursor + 1, toSeq: gapEnd }
+        yield { kind: 'gap', type: 'gap', seq: gapEnd, fromSeq: cursor + 1, toSeq: gapEnd }
         cursor = gapEnd
       }
       const events = this.runtime.state.events.filter((event) => event.seq > cursor)
-      for (const event of events) { cursor = event.seq; if (this.ownsEvent(event)) yield { type: 'fact', seq: event.seq, event } }
-      for (const observation of this.runtime.observationInbox.drain(this.agentId)) yield { type: 'observation', seq: observation.seq, observation: observation as unknown as JsonValue }
+      for (const event of events) { cursor = event.seq; if (this.ownsEvent(event)) yield { kind: 'fact', type: 'fact', seq: event.seq, event } }
+      for (const observation of this.runtime.observationInbox.drain(this.agentId)) yield { kind: 'observation', type: 'observation', seq: observation.seq, observation: observation as unknown as JsonValue }
       const root = [...this.runtime.state.lanes.values()].find((lane) => lane.agentId === this.agentId && lane.ownerLaneId === undefined)
       if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status) && (this.runtime.state.events.at(-1)?.seq ?? compactedThrough) === cursor) return
       await new Promise<void>((resolve) => setImmediate(resolve))
     }
   }
-  snapshot(): PulseSessionSnapshot {
+  async snapshot(): Promise<PulseSessionSnapshot> {
     const agent = this.runtime.state.agents.get(this.agentId)
     const laneIds = new Set([...this.runtime.state.lanes.values()].filter((lane) => lane.agentId === this.agentId).map((lane) => lane.id))
     const effects = [...this.runtime.state.effects.values()].filter((effect) => effect.agentId === this.agentId)

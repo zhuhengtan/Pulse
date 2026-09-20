@@ -79,12 +79,15 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     const program = { id: 'session-test', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'session-test', programVersion: '1', step: 'done', locals: {} } }) }
     const { agentId } = runtime.createAgent('session', program)
     const session = runtime.start(agentId)
-    expect(session.snapshot()).toMatchObject({ schemaVersion: 1, agentId, eventSeq: expect.any(Number), lanes: expect.any(Array), effects: expect.any(Array), waits: expect.any(Array), results: expect.any(Array), mergeProposals: expect.any(Array), quarantine: expect.any(Array), observationsPending: expect.any(Number) })
+    await expect(session.snapshot()).resolves.toMatchObject({ schemaVersion: 1, agentId, eventSeq: expect.any(Number), lanes: expect.any(Array), effects: expect.any(Array), waits: expect.any(Array), results: expect.any(Array), mergeProposals: expect.any(Array), quarantine: expect.any(Array), observationsPending: expect.any(Number) })
     const events: string[] = []
-    for await (const event of session.stream()) events.push(event.type)
+    for await (const event of session.stream()) {
+      expect(event.kind).toBe(event.type)
+      events.push(event.kind)
+    }
     expect(events).toContain('fact')
     expect((await session.outcome()).status).toBe('succeeded')
-    expect(session.snapshot()).toMatchObject({ agentId })
+    await expect(session.snapshot()).resolves.toMatchObject({ agentId })
   })
 
   it('keeps runtime progress independent from a slow stream consumer', async () => {
@@ -113,6 +116,7 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     runtime.state.events.push({ seq: 2, type: 'synthetic-2' }, { seq: 3, type: 'synthetic-3' })
     runtime.state.events.splice(0, runtime.state.events.length - 1)
     const first = await session.stream()[Symbol.asyncIterator]().next()
+    expect(first.value?.kind).toBe('gap')
     expect(first.value?.type).toBe('gap')
     await session.cancel('test')
     expect(runtime.factInbox.size).toBe(1)
