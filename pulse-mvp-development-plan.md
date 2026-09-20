@@ -172,7 +172,7 @@
 | Artifact 驻留策略 | Artifact 纳入 SessionStoragePolicy 的大小、pin、compact 和 persisted residency 管理 | `tests/artifacts.test.ts` | `bd64dbe` |
 | Artifact 持久化状态一致性 | backend 成功保存后才把 Runtime 与恢复快照中的 Artifact 标记为 `persisted`；保存失败保持 `memory` | `tests/storage-outbox.test.ts` | `4a854e9` |
 | Effect 错误可重试性 | RuntimeError/ToolError 传播 retryable 与 details；明确不可重试错误阻止重复 Attempt，Provider/Worker 标记不再丢失 | `tests/tool-host.test.ts`、`tests/retry-policy.test.ts` | `3ea112d` |
-| Progress Admission | Watchdog 在 validate/commit 前计算规范化 Action 与 ResumePoint 指纹；重复外部 Action 注入 replan/fail，拒绝事务不派发 | `tests/watchdog.test.ts` | `d0266a1` |
+| Progress Admission | Watchdog 在 validate/commit 前计算规范化 Action 与 ResumePoint 指纹；真正重复的外部 Action 才升级干预，二级干预为 LLM 注入 `reasoning: high` 最低能力，新策略可先提交，三级才 fail；拒绝事务不派发 | `tests/watchdog.test.ts` | `a885019` |
 | 非 JSON Tool 输出 | 二进制或不可 JSON 化 Tool 输出转为 Artifact，Result 只保留 `{ artifactRef }` 并验证内容引用 | `tests/tool-host.test.ts` | `3edce15` |
 | Finding 事务与可见性 | Finding 发布先预检，再通过 MutationLog 原子提交；重放恢复结果、共享 Result 序号和 owner Lane 可见性 | `tests/findings.test.ts`、`tests/storage-mutation-log.test.ts` | `cfc81d0`、`2394813` |
 | Effect 结算存储准入 | Artifact、Result、Lane、Correlation、closing Lane 终态与 Effect 结算先统一执行 storage admission；超限时整笔 Effect/Lane 失败，不产生半个 Artifact/Result，重试仍保持真实 Effect 身份 | `tests/result-summary-budget.test.ts`、`tests/retry-policy.test.ts`、`tests/m2-scheduler.test.ts` | `d267bb6`、本轮终态提交 |
@@ -204,7 +204,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、373/373 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、374/374 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Watchdog 二级策略变更与推理能力提升、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -636,6 +636,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `47ec7a9`：Runtime 内置注册模型执行器与 Adapter 执行器对齐，结构化输出 schema 同时成为模型能力准入条件，并拒绝 `requirements.structuredOutput.schema` 与 `outputSchema` 不一致的 Effect。
 - `7d698c2`：ModelRouter 与两条模型执行路径支持 `reasoning` 最低能力过滤；低于 `medium/high` 的候选不会被结构化 DSL 或 Runtime 控制要求绕过。
 - `37d75cb`：ModelRouter 与两条模型执行路径支持 `LLMRequirements.contextSize` 最低容量准入，并与实际投影估算取最大值，避免小窗口模型接收声明上限更高的请求。
+- `a885019`：Progress Watchdog 只有在 Action 签名确实在窗口中重复时才升级；二级干预接受一次新策略并给 LLM 注入 `reasoning: high` floor，避免“换策略”被误判为重复而直接三级失败。
 - `b2de59b`：`createAgent` 补齐 priority/policy/limits 契约，Agent root Lane 使用声明优先级，`maxActiveLanes` 与 `timeoutMs` 真实生效并可恢复。
 - `0ce2a6e`：在开发模式为 Step/ErrorBoundary 增加运行时纯度守卫，阻断动态全局 IO/时间/随机源访问并保持生产模式兼容。
 - `01b72c2`：`runtime.run()` / `runAgent()` 返回完整 Agent Outcome，包含根 Lane 结果引用、错误/取消信息和 quarantine 未决 Effect。
@@ -684,7 +685,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，68 个测试文件、373 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，68 个测试文件、374 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
