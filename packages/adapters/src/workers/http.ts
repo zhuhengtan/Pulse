@@ -36,12 +36,16 @@ export interface WorkerHttpServer {
   close(): Promise<void>
 }
 
-export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinator, options: { host?: string; port?: number } = {}): Promise<WorkerHttpServer> {
+export interface WorkerHttpServerOptions { host?: string; port?: number; authToken?: string }
+
+export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinator, options: WorkerHttpServerOptions = {}): Promise<WorkerHttpServer> {
   const registrations = new Map<string, () => void>()
   const server: Server = createServer(async (request, response) => {
     try {
       const method = request.method ?? 'GET'
       const path = request.url?.split('?')[0] ?? '/'
+      const configuredToken = options.authToken
+      if (configuredToken !== undefined && request.headers.authorization !== `Bearer ${configuredToken}`) { send(response, 401, { error: 'WORKER_HTTP_UNAUTHORIZED' }); return }
       if (method === 'GET' && path === '/health') { send(response, 200, { ok: true }); return }
       if (method !== 'POST') { send(response, 405, { error: 'WORKER_HTTP_METHOD_NOT_ALLOWED' }); return }
       const body = object(await readBody(request))
@@ -117,12 +121,13 @@ export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinato
   return { url, close: async () => await new Promise<void>((resolve, reject) => { server.close((cause) => cause ? reject(cause) : resolve()) }) }
 }
 
-export interface HttpWorkerClientOptions { baseUrl: string; workerId: string; pollMs?: number; fetch?: typeof globalThis.fetch }
+export interface HttpWorkerClientOptions { baseUrl: string; workerId: string; pollMs?: number; authToken?: string; fetch?: typeof globalThis.fetch }
 
 export class HttpWorkerClient {
   private readonly baseUrl: string
   private readonly workerId: string
   private readonly pollMs: number
+  private readonly authToken: string | undefined
   private readonly fetcher: typeof globalThis.fetch
   private sequence = 1
 
@@ -131,11 +136,12 @@ export class HttpWorkerClient {
     this.baseUrl = options.baseUrl.replace(/\/$/, '')
     this.workerId = options.workerId
     this.pollMs = options.pollMs ?? 10
+    this.authToken = options.authToken
     this.fetcher = options.fetch ?? globalThis.fetch
   }
 
   private async request(path: string, body: JsonObject): Promise<JsonValue> {
-    const response = await this.fetcher(`${this.baseUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const response = await this.fetcher(`${this.baseUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(this.authToken === undefined ? {} : { authorization: `Bearer ${this.authToken}` }) }, body: JSON.stringify(body) })
     const text = await response.text()
     let value: JsonValue = null
     try { value = text.length === 0 ? null : JSON.parse(text) as JsonValue } catch { throw new Error('WORKER_HTTP_INVALID_RESPONSE') }

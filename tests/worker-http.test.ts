@@ -27,6 +27,18 @@ describe('HTTP Worker transport', () => {
     }
   })
 
+  it('rejects unauthenticated Worker transport requests before task access', async () => {
+    const coordinator = new Coordinator()
+    const server = await startWorkerCoordinatorServer(coordinator, { authToken: 'test-worker-token' })
+    const unauthenticated = new HttpWorkerClient({ baseUrl: server.url, workerId: 'unauthenticated', pollMs: 1 })
+    const authenticated = new HttpWorkerClient({ baseUrl: server.url, workerId: 'authenticated', pollMs: 1, authToken: 'test-worker-token' })
+    try {
+      await expect(unauthenticated.register()).rejects.toThrow('WORKER_HTTP_UNAUTHORIZED')
+      await expect(authenticated.register()).resolves.toBeUndefined()
+      await expect(authenticated.unregister()).resolves.toBeUndefined()
+    } finally { await server.close() }
+  })
+
   it('executes a Runtime Effect through an HTTP polling Worker with heartbeat renewal', async () => {
     const coordinator = new Coordinator()
     const server = await startWorkerCoordinatorServer(coordinator)
