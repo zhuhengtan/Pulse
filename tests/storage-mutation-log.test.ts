@@ -100,4 +100,22 @@ describe('mutation log and replay', () => {
     expect(state).toEqual(before)
     expect(log.size).toBe(0)
   })
+
+  it('does not consume a log sequence when mutation cloning fails', () => {
+    const log = new MutationLog()
+    const invalid = { op: 'setNow', now: (() => 1) } as never
+    expect(() => log.append('invalid', [invalid])).toThrow()
+    expect(log.size).toBe(0)
+    expect(log.append('valid', [{ op: 'setNow', now: 1 }]).seq).toBe(1)
+  })
+
+  it('does not change state or log when transaction preparation fails after state preflight', () => {
+    const state = createRuntimeState()
+    const log = new MutationLog()
+    const before = structuredClone(state)
+    const invalid = { op: 'setNow', now: (() => 1) } as never
+    expect(() => commitMutationTransaction(state, log, 'invalid', [invalid])).toThrow()
+    expect(state).toEqual(before)
+    expect(log.size).toBe(0)
+  })
 })

@@ -73,13 +73,26 @@ export class MutationLog {
     return entry === undefined ? undefined : { ...entry, mutations: cloneMutations(entry.mutations) }
   }
 
-  append(transactionId: string, mutations: Mutation[], committedAt = 0): MutationLogEntry {
+  prepareAppend(transactionId: string, mutations: Mutation[], committedAt = 0): MutationLogEntry {
     if (!transactionId) throw new Error('INVALID_TRANSACTION_ID')
     const existing = this.findTransaction(transactionId)
     if (existing) return existing
-    const entry: MutationLogEntry = { seq: this.nextSequence++, transactionId, committedAt, mutations: cloneMutations(mutations), checksum: checksum(this.nextSequence - 1, transactionId, mutations) }
-    this.log.push(entry)
+    const seq = this.nextSequence
+    const clonedMutations = cloneMutations(mutations)
+    return { seq, transactionId, committedAt, mutations: clonedMutations, checksum: checksum(seq, transactionId, clonedMutations) }
+  }
+
+  commitPrepared(entry: MutationLogEntry): MutationLogEntry {
+    const existing = this.findTransaction(entry.transactionId)
+    if (existing) return existing
+    if (entry.seq !== this.nextSequence || checksum(entry.seq, entry.transactionId, entry.mutations) !== entry.checksum) throw new Error('INVALID_MUTATION_LOG')
+    this.log.push({ ...entry, mutations: cloneMutations(entry.mutations) })
+    this.nextSequence = entry.seq + 1
     return { ...entry, mutations: cloneMutations(entry.mutations) }
+  }
+
+  append(transactionId: string, mutations: Mutation[], committedAt = 0): MutationLogEntry {
+    return this.commitPrepared(this.prepareAppend(transactionId, mutations, committedAt))
   }
 
   snapshot(): MutationLogSnapshot {
@@ -132,7 +145,7 @@ export function commitMutationTransaction(state: RuntimeState, log: MutationLog,
   const transactionalMutations = mutations.map((mutation) => mutation.op === 'appendEvent' && mutation.event.txId === undefined ? { ...mutation, event: { ...mutation.event, txId: transactionId } } : mutation)
   const candidate = structuredClone(state)
   apply(candidate, transactionalMutations, { sessionId, timestamp: committedAt })
-  const entry = log.append(transactionId, transactionalMutations, committedAt)
-  apply(state, entry.mutations, { sessionId, timestamp: committedAt })
-  return entry
+  const entry = log.prepareAppend(transactionId, transactionalMutations, committedAt)
+  apply(state, cloneMutations(entry.mutations), { sessionId, timestamp: committedAt })
+  return log.commitPrepared(entry)
 }
