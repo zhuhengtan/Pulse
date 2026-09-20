@@ -32,6 +32,7 @@ export class ContextBuilder {
     const results = resultRefs.map((ref) => {
       const result = this.state.results.get(ref)
       if (!result) throw new Error(`UNKNOWN_RESULT_REF:${ref}`)
+      if (input.lane.visibleResultRefs !== undefined && !input.lane.visibleResultRefs.has(ref)) throw new Error(`RESULT_NOT_VISIBLE:${ref}`)
       return result
     })
     const privacy = strictestPrivacy(results.map((result) => result.privacy))

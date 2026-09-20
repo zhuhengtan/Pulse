@@ -9,7 +9,7 @@ import { ContextBuilder, estimateHistoryTokens, historyPressure } from '../conte
 
 const isLocal = (value: TargetRef | LocalRef): value is LocalRef => 'local' in value
 const clone = <T>(value: T): T => structuredClone(value)
-const laneCopy = (lane: LaneRecord): LaneRecord => ({ ...lane, resume: clone(lane.resume), context: clone(lane.context), children: new Set(lane.children), ownedEffectIds: new Set(lane.ownedEffectIds), ...(lane.pendingResumeInput === undefined ? {} : { pendingResumeInput: clone(lane.pendingResumeInput) }) })
+const laneCopy = (lane: LaneRecord): LaneRecord => ({ ...lane, resume: clone(lane.resume), context: clone(lane.context), ...(lane.visibleResultRefs === undefined ? {} : { visibleResultRefs: new Set(lane.visibleResultRefs) }), children: new Set(lane.children), ownedEffectIds: new Set(lane.ownedEffectIds), ...(lane.pendingResumeInput === undefined ? {} : { pendingResumeInput: clone(lane.pendingResumeInput) }) })
 
 function validResume(resume: ResumePoint): boolean {
   return Boolean(resume.programId && resume.programVersion && resume.step) && resume.locals !== undefined
@@ -112,6 +112,7 @@ function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: Context
       const upToSeq = op.upToSeq
       const summaryResult = op.summaryRef === undefined ? undefined : state.results.get(op.summaryRef)
       if (op.summaryRef !== undefined && !summaryResult) return { nextVersion: base, error: 'UNKNOWN_SUMMARY_REF' }
+      if (op.summaryRef !== undefined && !resultVisible(lane, op.summaryRef)) return { nextVersion: base, error: 'RESULT_NOT_VISIBLE' }
       const summary = op.summary ?? summaryResult?.summary ?? summaryResult?.value
       if (delta.target !== 'lane' || upToSeq === undefined || summary === undefined || (op.summary === undefined && op.summaryRef === undefined) || !Number.isInteger(upToSeq) || upToSeq < 1) return { nextVersion: base, error: 'INVALID_HISTORY_COMPACTION' }
       if (!history.some((record) => record.seq <= upToSeq)) return { nextVersion: base, error: 'INVALID_HISTORY_COMPACTION' }
@@ -161,11 +162,14 @@ function addWait(state: RuntimeState, lane: LaneRecord, spec: WaitSpec, targets:
   lane.status = 'waiting'
 }
 
-function derivedPrivacy(state: RuntimeState, refs: string[]): { privacy?: PrivacyLabel; error?: string } {
+function resultVisible(lane: LaneRecord, ref: string): boolean { return lane.visibleResultRefs === undefined || lane.visibleResultRefs.has(ref) }
+
+function derivedPrivacy(state: RuntimeState, lane: LaneRecord, refs: string[]): { privacy?: PrivacyLabel; error?: string } {
   const labels: PrivacyLabel[] = []
   for (const ref of refs) {
     const result = state.results.get(ref)
     if (!result) return { error: 'UNKNOWN_RESULT_REF' }
+    if (!resultVisible(lane, ref)) return { error: 'RESULT_NOT_VISIBLE' }
     labels.push(result.privacy)
   }
   return { privacy: strictestPrivacy(labels) }
@@ -247,6 +251,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         if (seenEffectKeys.has(submission.key)) return { rejection: error('DUPLICATE_EFFECT_KEY', submission.key) }
         if (submission.locks && new Set(submission.locks.map((lock) => lock.resource)).size !== submission.locks.length) return { rejection: error('DUPLICATE_EFFECT_LOCK', submission.key) }
         if (submission.derivedFrom?.some((ref) => !state.results.has(ref))) return { rejection: error('UNKNOWN_RESULT_REF', submission.key) }
+        if (submission.derivedFrom?.some((ref) => !resultVisible(lane, ref))) return { rejection: error('RESULT_NOT_VISIBLE', submission.key) }
         if (submission.toolCallId !== undefined && (existingToolCallIds.has(submission.toolCallId) || seenToolCallIds.has(submission.toolCallId))) return { rejection: error('DUPLICATE_TOOL_CALL_ID', submission.toolCallId) }
         const prepared = prepareLLMInput(state, lane, submission)
         if (prepared.error) return { rejection: error(prepared.error, submission.key) }
@@ -287,7 +292,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         if (!state.agents.get(lane.agentId)!.globalVersions.has(contextVersion)) return { rejection: error('UNKNOWN_CONTEXT_VERSION', String(contextVersion)) }
         const dependencies = (child.dependsOn ?? []).map((dependency) => ({ ...dependency, target: resolveTarget(dependency.target, siblingTargets) ?? resolveTarget(dependency.target, localTargets) }))
         if (dependencies.some((dependency) => !dependency.target)) return { rejection: error('UNKNOWN_TARGET', `fork dependency for ${child.key}`) }
-        const record: LaneRecord = { id: target.id, agentId: lane.agentId, ownerLaneId: lane.id, status: dependencies.length ? 'waiting' : 'ready', version: 0, goal: child.goal, resume: clone(child.program), contextSnapshotVersion: contextVersion, context: { version: 0, history: [], state: {} }, children: new Set(), priority: child.priority ?? lane.priority, enqueueSeq: state.nextIds.event + laneCounter, readySince: state.now, ownedEffectIds: new Set() }
+        const record: LaneRecord = { id: target.id, agentId: lane.agentId, ownerLaneId: lane.id, status: dependencies.length ? 'waiting' : 'ready', version: 0, goal: child.goal, resume: clone(child.program), contextSnapshotVersion: contextVersion, context: { version: 0, history: [], state: {} }, visibleResultRefs: new Set(child.inputResultRefs ?? []), children: new Set(), priority: child.priority ?? lane.priority, enqueueSeq: state.nextIds.event + laneCounter, readySince: state.now, ownedEffectIds: new Set() }
         mutations.push({ op: 'insertLane', record })
         workingLane.children.add(record.id)
         if (!dependencies.length) mutations.push({ op: 'appendEvent', event: { type: 'lane.ready', laneId: record.id } })
@@ -348,7 +353,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       if (action.sourceRefs.length === 0) return { rejection: error('EMPTY_PRIVACY_SOURCES', 'downgrade_privacy requires at least one source reference.') }
       if (action.method === 'human_approval' && !action.approvalRef) return { rejection: error('MISSING_PRIVACY_APPROVAL', 'human_approval requires approvalRef.') }
       if (action.method === 'sanitizer' && !action.sanitizerId) return { rejection: error('MISSING_PRIVACY_SANITIZER', 'sanitizer requires sanitizerId.') }
-      const sourcePrivacy = derivedPrivacy(state, action.sourceRefs)
+      const sourcePrivacy = derivedPrivacy(state, lane, action.sourceRefs)
       if (sourcePrivacy.error) return { rejection: error(sourcePrivacy.error, 'Privacy downgrade references an unknown result.') }
       const result: import('../core/types.js').ResultRecord = {
         id: action.outputRef,
@@ -365,11 +370,13 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         },
       }
       mutations.push({ op: 'publishResult', record: result })
+      if (workingLane.visibleResultRefs) workingLane.visibleResultRefs.add(action.outputRef)
+      else workingLane.visibleResultRefs = new Set([action.outputRef])
       mutations.push({ op: 'appendEvent', event: { type: 'privacy.downgraded', laneId: lane.id, data: { outputRef: action.outputRef, sourceRefs: action.sourceRefs, method: action.method } as unknown as JsonValue } })
     } else if (action.type === 'complete') {
       const activeChildren = [...lane.children].some((childId) => !['succeeded', 'failed', 'cancelled'].includes(state.lanes.get(childId)?.status ?? 'cancelled'))
       if (activeChildren && (action.children ?? 'reject_if_active') === 'reject_if_active') return { rejection: error('CHILDREN_STILL_ACTIVE', 'complete requires an explicit child join or cancellation') }
-      const derived = derivedPrivacy(state, action.derivedFrom ?? [])
+      const derived = derivedPrivacy(state, lane, action.derivedFrom ?? [])
       if (derived.error) return { rejection: error(derived.error, 'Result provenance references an unknown result') }
       if (action.privacy !== undefined && derived.privacy !== undefined && privacyRank(action.privacy) < privacyRank(derived.privacy)) return { rejection: error('PRIVACY_DOWNGRADE_WITHOUT_PROOF', 'Result privacy cannot be broader than its sources') }
       const privacy = strictestPrivacy([derived.privacy ?? 'public', action.privacy ?? 'public'])
@@ -391,6 +398,17 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       }
       const resultId = `result-${resultCounter++}`
       mutations.push({ op: 'publishResult', record: { id: resultId, value: clone(action.result), privacy, derivedFrom: [...(action.derivedFrom ?? [])] } })
+      if (workingLane.visibleResultRefs) workingLane.visibleResultRefs.add(resultId)
+      else workingLane.visibleResultRefs = new Set([resultId])
+      if (lane.ownerLaneId !== undefined) {
+        const owner = state.lanes.get(lane.ownerLaneId)
+        if (owner) {
+          const ownerCopy = laneCopy(owner)
+          if (ownerCopy.visibleResultRefs) ownerCopy.visibleResultRefs.add(resultId)
+          else ownerCopy.visibleResultRefs = new Set([resultId])
+          mutations.push({ op: 'setLane', laneId: owner.id, record: ownerCopy })
+        }
+      }
       workingLane.status = 'succeeded'
       workingLane.resultRef = resultId
       mutations.push({ op: 'setLane', laneId: lane.id, record: { ...workingLane, version: lane.version + 1 } })

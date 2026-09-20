@@ -367,6 +367,11 @@ export class PulseRuntime {
     this.releaseEffectLocks(effectId)
     this.outbox.ack(`${effect.id}:${effect.attemptId}`)
     for (const observation of execution.observations ?? []) this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now })
+    const ownerLane = this.state.lanes.get(effect.ownerLaneId)
+    if (ownerLane && effectiveStatus === 'succeeded') {
+      if (ownerLane.visibleResultRefs) ownerLane.visibleResultRefs.add(resultId)
+      else ownerLane.visibleResultRefs = new Set([resultId])
+    }
     const sourcePrivacy = effect.derivedFrom?.map((ref) => this.state.results.get(ref)?.privacy).filter((privacy): privacy is NonNullable<typeof privacy> => privacy !== undefined) ?? []
     const result = effectiveStatus === 'succeeded' ? { id: resultId, effectId, value: execution.value, privacy: strictestPrivacy([execution.privacy ?? 'public', ...sourcePrivacy]), derivedFrom: [...(effect.derivedFrom ?? [])], ...(execution.summary === undefined ? {} : { summary: execution.summary }) } : undefined
     if (result) this.state.results.set(resultId, result)
@@ -654,6 +659,8 @@ export class PulseRuntime {
             if (lane.closingResult) {
               const resultId = `result-${this.state.nextIds.result++}`
               this.state.results.set(resultId, { id: resultId, value: lane.closingResult.value, privacy: lane.closingResult.privacy, derivedFrom: [...(lane.closingResult.derivedFrom ?? [])] })
+              if (lane.visibleResultRefs) lane.visibleResultRefs.add(resultId)
+              else lane.visibleResultRefs = new Set([resultId])
               lane.status = 'succeeded'; lane.resultRef = resultId; delete lane.closingResult
               this.emit({ type: 'lane.succeeded', laneId: lane.id, data: resultId })
             } else { lane.status = 'ready'; lane.pendingResumeInput = { type: 'wait', resolution: wait.resolution }; this.enqueueLane(lane.id) }

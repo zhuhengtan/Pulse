@@ -85,6 +85,7 @@ export interface LaneRecord {
   pendingResumeInput?: ResumeInput
   contextSnapshotVersion: ContextVersion
   context: LaneContext
+  visibleResultRefs?: Set<ResultRef>
   activeWaitId?: WaitId
   children: Set<LaneId>
   priority: number

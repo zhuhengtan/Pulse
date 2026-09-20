@@ -11,6 +11,7 @@ describe('history pressure and compaction', () => {
     const rejected = validateStep(state, root.id, { actions: [], next: point('next') })
     expect('rejection' in rejected && rejected.rejection.code).toBe('CONTEXT_TOO_LARGE')
     state.results.set('summary', { id: 'summary', value: { compacted: true }, summary: { compacted: true }, privacy: 'public', derivedFrom: [] })
+    root.visibleResultRefs!.add('summary')
     const accepted = validateStep(state, root.id, { contextDelta: { target: 'lane', baseVersion: 0, ops: [{ op: 'compact_history', upToSeq: 7, summaryRef: 'summary' }] }, actions: [], next: point('next') })
     expect('rejection' in accepted).toBe(false)
     if (!('rejection' in accepted)) {

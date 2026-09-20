@@ -48,7 +48,8 @@ function target(step: NextStepTarget): string { return typeof step === 'string' 
 function clone<T>(value: T): T { return structuredClone(value) }
 function asJson(value: unknown): JsonValue { return value as JsonValue }
 
-function findResult(context: LaneStepContext, ref: ResultRef): JsonValue | undefined { return context.state.results.get(ref)?.value }
+function resultVisible(context: LaneStepContext, ref: ResultRef): boolean { return context.lane.visibleResultRefs === undefined || context.lane.visibleResultRefs.has(ref) }
+function findResult(context: LaneStepContext, ref: ResultRef): JsonValue | undefined { return resultVisible(context, ref) ? context.state.results.get(ref)?.value : undefined }
 
 function sdkLocals(locals: JsonValue): Record<string, JsonValue> {
   if (!locals || typeof locals !== 'object' || Array.isArray(locals)) return {}
@@ -70,12 +71,12 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
   const globalVersion = context.lane.contextSnapshotVersion
   const global = clone(agent?.globalVersions.get(globalVersion) ?? {})
   const history = context.lane.context.history.map((record: HistoryRecord): HistoryRecordMeta => ({ seq: record.seq, resultRefs: [...record.resultRefs], privacy: record.privacy }))
-  const resultMeta = (ref: ResultRef): ResultMeta | undefined => { const result = context.state.results.get(ref); return result ? { ref, privacy: result.privacy, derivedFrom: [...result.derivedFrom], ...(result.summary === undefined ? {} : { summary: clone(result.summary) }) } : undefined }
+  const resultMeta = (ref: ResultRef): ResultMeta | undefined => { const result = resultVisible(context, ref) ? context.state.results.get(ref) : undefined; return result ? { ref, privacy: result.privacy, derivedFrom: [...result.derivedFrom], ...(result.summary === undefined ? {} : { summary: clone(result.summary) }) } : undefined }
   const globalDelta = (value: { ops: ContextOp[]; privacy?: PrivacyLabel; proposal: boolean }): void => { delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, sourceLaneId: context.lane.id, ops: clone(value.ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal } }
   const ctx: StepContext<TState> = {
     lane: context.lane, state: context.state, goal: context.lane.goal, global, globalVersion, laneState: draft, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}),
-    getResult: (ref) => { if (context.state.results.has(ref)) derivedRefs.add(ref); return findResult(context, ref) },
-    results: { meta: resultMeta, summary: (ref) => { if (context.state.results.has(ref)) derivedRefs.add(ref); return resultMeta(ref)?.summary } },
+    getResult: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return findResult(context, ref) },
+    results: { meta: resultMeta, summary: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return resultMeta(ref)?.summary } },
     mergeProposals: [...context.state.mergeProposals.values()].filter((proposal) => proposal.agentId === context.lane.agentId).map((proposal) => clone(proposal)),
     mutateLane: (mutator) => { mutator(draft); delta = { target: 'lane', baseVersion: context.lane.context.version, ops: Object.entries(draft as Record<string, unknown>).map(([key, value]) => ({ op: 'set' as const, path: [key], value: asJson(value) })) } },
     proposeGlobal: (value) => globalDelta({ ...value, proposal: true }),

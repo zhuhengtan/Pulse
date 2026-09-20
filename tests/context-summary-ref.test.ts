@@ -9,6 +9,7 @@ describe('history compaction summaryRef', () => {
     const { root } = createAgent(state, 'summary', next)
     root.context.history = [{ seq: 1, instruction: 'old', resultRefs: [], output: { old: true }, privacy: 'local_only' }]
     state.results.set('result-summary', { id: 'result-summary', value: { text: 'summary' }, summary: { text: 'summary' }, privacy: 'local_only', derivedFrom: [] })
+    root.visibleResultRefs!.add('result-summary')
     const result = validateStep(state, root.id, { contextDelta: { target: 'lane', baseVersion: 0, ops: [{ op: 'compact_history', upToSeq: 1, summaryRef: 'result-summary' }] }, actions: [], next })
     expect('rejection' in result).toBe(false)
     if (!('rejection' in result)) expect(result.mutations.find((mutation) => mutation.op === 'setLaneContext')?.history?.[0]).toMatchObject({ resultRefs: ['result-summary'], privacy: 'local_only' })
