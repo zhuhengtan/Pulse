@@ -62,6 +62,7 @@
 | Model fallback EffectQueue re-entry | Runtime 内置 Executor 与标准 Provider Adapter 每个 Attempt 只执行一个候选；失败后按 `retryPolicy` 重新进入统一队列，保留同一 EffectId 并记录每个候选的 model/provider | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts`、`tests/retry-policy.test.ts` | `2028516`、`2ce6462` |
 | Logical ToolCall identity | Runtime 默认 Executor 与 Provider Adapter 将 Provider-native call id 重写为按逻辑 LLM Effect 命名空间化的 `EffectId:tool:n`，避免跨 Effect 冲突并支持 Action Decoder 关联 | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts` | `336de83` |
 | Action Decoder privacy/provenance | LLM 工具调用解码为 ToolEffect 时，同时把 `privacy` 与 `derivedFrom` 写入 Effect 和 ToolEffectInput，避免模型参数中的敏感来源绕过 Runtime 隐私传播 | `tests/action-decoder.test.ts` | `18fb787` |
+| DSL ReAct tool provenance | 内置 ReAct 宏的平行工具解码路径同样从 LLM ResultRef 继承 `privacy` 与 `derivedFrom`，并写入 ToolEffect 与 ToolEffectInput | `tests/dsl-host-macros.test.ts` | `a524e72` |
 | Runtime Tool Registry | 对外提供 `runtime.tools.register()`、目录检索、稳定 ToolSet、allow/deny、schema admission、资源/副作用准入；标准 Tool Effect Adapter 可直接消费该目录 | `tests/runtime-tool-registry.test.ts`、`tests/tool-host.test.ts`、`tests/tool-discovery.test.ts` | `2c0da03` |
 | Agent create policy / limits | `createAgent` 支持优先级、策略/限制引用与 `maxActiveLanes`；Agent 超时按注入 RuntimeClock 触发 `TIMEOUT`，配置和引用随 Agent 记录持久化 | `tests/agent-create-contract.test.ts`、`tests/agent-creation.test.ts` | `b2de59b` |
 | 开发模式纯 Step 守卫 | Runtime 调用 Step 与 ErrorBoundary 时，在非 production 环境阻断动态 `console.*`、`Date.now`、`Math.random`、`fetch`、`process` 访问，统一报告 `PURE_STEP_VIOLATION`；生产环境不注入守卫 | `tests/pure-step-guard.test.ts` | `0ce2a6e` |
@@ -646,6 +647,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `2ce6462`：标准 Provider Model Effect Executor 同样改为单候选 Attempt；保留 usage、slot wait、route rejection metadata，并将 Provider fallback 交回 Runtime 队列。
 - `336de83`：Runtime 与 Provider Adapter 统一按逻辑 LLM Effect 生成命名空间化 ToolCall ID，避免 Provider-native ID 在不同 Effect 间冲突。
 - `18fb787`：Action Decoder 生成 ToolEffect 时保留 `privacy` 与 `derivedFrom`，并同步写入 ToolEffectInput，防止工具参数中的敏感来源丢失。
+- `a524e72`：DSL 内置 ReAct 工具解码路径同步继承 LLM ResultRef 的 `privacy` 与 `derivedFrom`。
 - `a885019`：Progress Watchdog 只有在 Action 签名确实在窗口中重复时才升级；二级干预接受一次新策略并给 LLM 注入 `reasoning: high` floor，避免“换策略”被误判为重复而直接三级失败。
 - `b2de59b`：`createAgent` 补齐 priority/policy/limits 契约，Agent root Lane 使用声明优先级，`maxActiveLanes` 与 `timeoutMs` 真实生效并可恢复。
 - `0ce2a6e`：在开发模式为 Step/ErrorBoundary 增加运行时纯度守卫，阻断动态全局 IO/时间/随机源访问并保持生产模式兼容。
@@ -732,7 +734,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 本方案继承并落地《Pulse Runtime 架构设计》与《Pulse Application DSL 规范》：
 1. 以主架构第 26 节的 M0/M1 标注为唯一验收来源，不重复维护场景数量。
 2. M1 的真实 Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder、Session 和确定性端到端示例已贯通；其他 Provider 与真实网络任务属于独立集成验证。
-3. ResultRef 隔离、record/leaf Privacy、ContextDelta provenance、Action Decoder 的 ToolEffect privacy/derivedFrom 传播、Watchdog、Fork Affinity（含 DSL series collapse 与 Runtime 可选自动 coalesce）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射与实时 Observation emitter、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由及快照恢复、按 Agent 隔离的 Session、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、恢复程序/工具版本 fail-closed、ResultStore 外部正文读穿、File/SQLite Snapshot 外置索引与 EventArchive 一体化、取消事务存储准入、correlated telemetry、JSONL/HTTP exporter、聚合和告警规则、Bearer-authenticated HTTP lease-based Worker transport、Worker snapshot/restore、HTTP lease reaper、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、生产级持久化事务边界、生产级 Worker TLS/密钥轮换与共享 durable lease store、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
+3. ResultRef 隔离、record/leaf Privacy、ContextDelta provenance、Action Decoder 与 DSL ReAct 的 ToolEffect privacy/derivedFrom 传播、Watchdog、Fork Affinity（含 DSL series collapse 与 Runtime 可选自动 coalesce）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射与实时 Observation emitter、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由及快照恢复、按 Agent 隔离的 Session、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、恢复程序/工具版本 fail-closed、ResultStore 外部正文读穿、File/SQLite Snapshot 外置索引与 EventArchive 一体化、取消事务存储准入、correlated telemetry、JSONL/HTTP exporter、聚合和告警规则、Bearer-authenticated HTTP lease-based Worker transport、Worker snapshot/restore、HTTP lease reaper、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、生产级持久化事务边界、生产级 Worker TLS/密钥轮换与共享 durable lease store、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
 已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
