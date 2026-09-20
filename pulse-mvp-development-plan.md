@@ -471,7 +471,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - [x] DSL 编译不变量：宏步展开、JSON ResumePoint、`Date`/随机数/外部 I/O 源码违规扫描，以及 Step 对 Runtime 状态的隔离测试通过。
 - [x] 结构化自愈验证：非规范输出触发一次带错误信息的新 LLM Effect 并成功解析。
 - [x] 慢消费者背压保护：在 `session.stream()` 人为阻塞消费的情况下，Runtime 内部调度 Tick 耗时不受任何影响。
-- [x] 端到端实战全绿：Mock 环境成功执行登录排障 Main/Fork/Join/Synthesize 流程并汇总证据。
+- [x] 端到端实战全绿：Mock 环境成功执行登录排障 Planner/Fork(analyze, tests, fix)/Join/Verify DSL 流程并汇总结构化证据。
 - [ ] Live Smoke：历史尝试曾到达真实 Provider 鉴权层并返回 `PROVIDER_HTTP_401`；本轮当前环境在 DNS 阶段返回 `ENOTFOUND api.openai.com`。需要可联网且具备有效凭证的 Host 后重新验证请求投影、`LLMResult` 归一化、工具调用关联和取消收尾。该失败只记录 Provider 集成阻塞，不否定确定性 Gate。
 
 ---
@@ -628,6 +628,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `251f077`：`proposeGlobal/commitGlobal` 支持规范要求的 Draft mutator 写法，并保持 Global proposal/commit 与立即 adopt 的事务语义。
 - `5e5bb53`：Merge DSL 默认 `reason` task，支持 `onSynthesized` 独立返回终态；Merge instruction 受 2KB 限制，schema 不匹配转 `OUTPUT_SCHEMA_VIOLATION`，避免静默成功。
 - `d341b29`：Human Effect 回复 schema 校验失败转 `HUMAN_RESPONSE_SCHEMA_VIOLATION`，不再误走 `onTimeout`；后续 `031c4e6` 又把真实 `ATTEMPT_TIMEOUT`/`TIMEOUT` 与其他 Effect 失败分开。
+- `7f8e4a0`：登录排障示例改为真实 DSL 链路：Planner 结构化输出、Analyze/Tests/Fix 静态 DAG、Join 后 ReAct Verify；Mock executor 与 E2E 断言覆盖三条子 Lane 和最终结构化验证结果。
 - `0be88d7`：`defineReActLane` 对齐规范完成值：structured 直接完成、文本返回 `textRef`，不再通过额外 finish Step 包装；模板 maxTurns 超限保持结构化失败。
 - `6d8e2b5`：`defineScatterGatherLane.reducer` 对齐 `NextStepTarget`，支持聚合后直接完成或失败，并新增终态 reducer 回归。
 - `9d6e47c`：Series Lane 保留 ProgramRef 的自定义入口和 locals，运行时首个成员按声明的 ResumePoint 启动，并新增恢复数据回归。
