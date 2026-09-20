@@ -31,4 +31,24 @@ describe('built-in Timer and Human Effect hosts', () => {
     expect(outcome.status).toBe('succeeded')
     expect(runtime.state.events.some((event) => event.type === 'human.requested')).toBe(true)
   })
+
+  it('rejects a Human reply submitted by a different Agent Session', async () => {
+    const program: LaneProgram = { id: 'human-ownership', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'approval', kind: 'human', concurrencyClass: 'none', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('human-ownership', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('human-ownership', 'finish') } }
+    const runtime = new PulseRuntime()
+    const first = runtime.createAgent('first', program)
+    const second = runtime.createAgent('second', program)
+    runtime.tick()
+    runtime.enqueueHostCommand({ type: 'reply', agentId: second.agentId, effectId: 'effect-1', value: { approved: true } })
+    runtime.tick()
+    const firstSession = runtime.start(first.agentId)
+    const secondSession = runtime.start(second.agentId)
+    await expect(secondSession.reply('effect-1', { approved: true })).rejects.toThrow('EFFECT_NOT_OWNED')
+    await firstSession.reply('effect-1', { approved: true })
+    await secondSession.reply('effect-2', { approved: true })
+    await expect(firstSession.outcome()).resolves.toMatchObject({ status: 'succeeded' })
+    await expect(secondSession.outcome()).resolves.toMatchObject({ status: 'succeeded' })
+    expect(runtime.state.events.some((event) => event.type === 'command.rejected')).toBe(true)
+  })
 })

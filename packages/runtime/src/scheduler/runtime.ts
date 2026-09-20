@@ -39,7 +39,7 @@ export interface EffectObservation { type: 'progress' | 'chunk' | 'trace' | 'war
 export interface EffectArtifactOutput { mediaType: string; content: Uint8Array | string; privacy?: 'public' | 'cloud_allowed' | 'local_only'; privacyTaints?: PrivacyTaint[]; derivedFrom?: ProvenanceRef[] }
 export interface EffectExecution { value: JsonValue; normalized?: JsonValue; artifact?: EffectArtifactOutput; summary?: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; privacyTaints?: PrivacyTaint[]; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionRef?: JsonValue; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled'; error?: RuntimeError; rejectedOutput?: { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; privacyTaints?: PrivacyTaint[]; derivedFrom?: ProvenanceRef[] }; metadata?: JsonValue; observations?: EffectObservation[] }
 export type EffectExecutor = (effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<EffectExecution>
-type HostCommand = { type: 'reply'; effectId: string; value: JsonValue } | { type: 'cancel'; agentId: string; reason: string }
+type HostCommand = { type: 'reply'; agentId: string; effectId: string; value: JsonValue } | { type: 'cancel'; agentId: string; reason: string }
 
 export interface RuntimeConfig {
   maxLaneStepsPerTick?: number
@@ -408,8 +408,11 @@ export class PulseRuntime {
     this.state.now = this.clock.now()
     for (const envelope of this.factInbox.drain()) {
       this.emit({ id: envelope.eventId, type: 'command.enqueued', data: envelope.fact as unknown as JsonValue })
-      if (envelope.fact.type === 'reply') this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value })
-      else this.cancelAgent(envelope.fact.agentId, 'USER_REQUESTED')
+      if (envelope.fact.type === 'reply') {
+        const effect = this.state.effects.get(envelope.fact.effectId)
+        if (effect?.agentId === envelope.fact.agentId) this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value })
+        else this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: 'EFFECT_NOT_OWNED' } })
+      } else this.cancelAgent(envelope.fact.agentId, 'USER_REQUESTED')
       this.emit({ type: 'command.applied', data: { eventId: envelope.eventId } })
     }
     if (this.maxRuntimeMs !== undefined && this.state.now >= this.maxRuntimeMs) for (const agent of this.state.agents.values()) if (agent.state === 'running') this.cancelAgent(agent.id, 'TIMEOUT')
