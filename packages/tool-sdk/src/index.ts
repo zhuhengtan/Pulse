@@ -36,7 +36,7 @@ export interface ToolDiscoveryQuery { text?: string; tags?: string[]; sideEffect
 export interface ToolDiscoveryResult { manifest: ToolManifest; score: number }
 export interface ToolSetSnapshot { id: string; version: string; tools: ToolManifest[] }
 export interface ToolRegistryPolicy { allow?: string[]; deny?: string[] }
-export interface ToolAdmission { locks: ResourceClaim[]; sideEffectPolicy: ToolManifest['sideEffectPolicy']; defaultTimeoutMs: number; retrySafety: ToolManifest['retrySafety'] }
+export interface ToolAdmission { locks: ResourceClaim[]; sideEffectPolicy: ToolManifest['sideEffectPolicy']; defaultTimeoutMs: number; retrySafety: ToolManifest['retrySafety']; version: string }
 export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   manifest: ToolManifest
   resourceAdmissionMode?: 'explicit' | 'default'
@@ -133,7 +133,7 @@ export class ToolRegistry {
     if (definition.manifest.sideEffectPolicy === 'read') return [{ resource: 'workspace', mode: 'shared' }]
     return []
   }
-  admission(name: string, input: unknown): ToolAdmission { const definition = this.require(name); return { locks: structuredClone(this.resolveResources(name, input)), sideEffectPolicy: definition.manifest.sideEffectPolicy, defaultTimeoutMs: definition.manifest.defaultTimeoutMs, retrySafety: definition.manifest.retrySafety } }
+  admission(name: string, input: unknown): ToolAdmission { const definition = this.require(name); return { locks: structuredClone(this.resolveResources(name, input)), sideEffectPolicy: definition.manifest.sideEffectPolicy, defaultTimeoutMs: definition.manifest.defaultTimeoutMs, retrySafety: definition.manifest.retrySafety, version: definition.manifest.version } }
   private require(name: string): ToolDefinition<any, any> {
     if (!this.isAllowed(name)) throw new Error(`TOOL_NOT_ALLOWED:${name}`)
     const definition = this.definitions.get(name)

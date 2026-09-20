@@ -64,6 +64,7 @@ export interface RuntimeConfig {
   storagePolicy?: StoragePolicyConfig
   persistence?: RuntimePersistenceSnapshot
   programs?: LaneProgram[]
+  toolVersions?: Record<string, string>
   effectExecutor?: EffectExecutor
   effectSubmissionPreparer?: (submission: EffectSubmission) => EffectSubmission
   telemetryExporter?: RuntimeTelemetryExporter
@@ -124,6 +125,7 @@ export class PulseRuntime {
   private readonly telemetryExporter: RuntimeTelemetryExporter | undefined
   private readonly persistenceBackend: RuntimePersistenceBackend | undefined
   private readonly enforcingRecoveryPrograms: boolean
+  private readonly toolVersions: Readonly<Record<string, string>>
   private readonly budget: RuntimeBudgetConfig
   private persistenceDigest: string | undefined
   private readonly budgetCost = new Map<string, number>()
@@ -170,6 +172,7 @@ export class PulseRuntime {
   constructor(config: RuntimeConfig = {}) {
     const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
     this.enforcingRecoveryPrograms = restored !== undefined
+    this.toolVersions = { ...(config.toolVersions ?? {}) }
     this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }), ...(config.forkAffinity === undefined ? {} : { forkAffinity: config.forkAffinity }), ...(config.historySoftTokens === undefined ? {} : { historySoftTokens: config.historySoftTokens }), ...(config.historyHardTokens === undefined ? {} : { historyHardTokens: config.historyHardTokens }), ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }), ...(config.trustedSanitizerIds === undefined ? {} : { trustedSanitizerIds: config.trustedSanitizerIds }) })
     if (config.trustedSanitizerIds) for (const sanitizerId of config.trustedSanitizerIds) this.state.trustedSanitizerIds.add(sanitizerId)
     this.sessionId = config.sessionId ?? 'session-local'
@@ -340,6 +343,13 @@ export class PulseRuntime {
       if (['succeeded', 'failed', 'cancelled'].includes(lane.status)) continue
       const key = `${lane.resume.programId}@${lane.resume.programVersion}`
       if (!this.programs.has(key)) throw new Error(`PROGRAM_VERSION_UNAVAILABLE:${key}`)
+    }
+    for (const effect of this.state.effects.values()) {
+      if (effect.outcome || ['succeeded', 'failed', 'cancelled'].includes(effect.state)) continue
+      if (effect.kind !== 'tool' || effect.toolVersion === undefined) continue
+      const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+      const name = input.name
+      if (typeof name !== 'string' || this.toolVersions[name] !== effect.toolVersion) throw new Error(`TOOL_VERSION_UNAVAILABLE:${typeof name === 'string' ? `${name}@${effect.toolVersion}` : effect.toolVersion}`)
     }
   }
   private tryEmit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent | undefined {

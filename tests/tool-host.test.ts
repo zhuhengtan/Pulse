@@ -123,7 +123,7 @@ describe('Tool SDK to Runtime Effect host', () => {
     registry.register(defineTool({ name: 'write-file', description: 'write', input: z.object({ path: z.string() }), output: z.object({ ok: z.boolean() }), sideEffectPolicy: 'write', defaultTimeoutMs: 2500, resolveResources: ({ path }) => [{ resource: `file:${path}`, mode: 'exclusive' }], execute: () => ({ ok: true }) }))
     const prepare = createToolEffectSubmissionPreparer(registry)
     const prepared = prepare({ key: 'write', kind: 'tool', concurrencyClass: 'tool', input: { name: 'write-file', arguments: { path: 'a.txt' } } })
-    expect(prepared).toMatchObject({ sideEffectPolicy: 'write', attemptTimeoutMs: 2500, locks: [{ resource: 'file:a.txt', mode: 'exclusive' }] })
+    expect(prepared).toMatchObject({ sideEffectPolicy: 'write', toolVersion: '1', attemptTimeoutMs: 2500, locks: [{ resource: 'file:a.txt', mode: 'exclusive' }] })
   })
 
   it('compiles dynamic tool discovery into a versioned Context ToolSet', async () => {

@@ -151,6 +151,7 @@ export interface EffectRecord {
   attemptTimeoutMs?: number
   idempotencyKey?: string
   sideEffectPolicy?: 'none' | 'read' | 'write'
+  toolVersion?: string
   retryPolicy?: { maxAttempts: number; initialBackoffMs: number; maxBackoffMs: number; jitter: boolean }
   duplicateExecutionPolicy?: 'allow' | 'forbid'
   maxUnknownAttempts?: number
@@ -277,6 +278,7 @@ export interface EffectSubmission {
   attemptTimeoutMs?: number
   idempotencyKey?: string
   sideEffectPolicy?: 'none' | 'read' | 'write'
+  toolVersion?: string
   retryPolicy?: { maxAttempts: number; initialBackoffMs: number; maxBackoffMs: number; jitter: boolean }
   duplicateExecutionPolicy?: 'allow' | 'forbid'
   maxUnknownAttempts?: number

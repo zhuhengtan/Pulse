@@ -140,6 +140,18 @@ describe('runtime control boundaries', () => {
     expect(() => restored.tick()).not.toThrow()
   })
 
+  it('stops recovery when an active Tool version is unavailable', () => {
+    const runtime = new PulseRuntime()
+    const program: LaneProgram = { id: 'tool-version-recovery', version: '1', step: () => ({ actions: [], next: point('tool-version-recovery', 'done') }) }
+    const { laneId } = runtime.createAgent('tool version', program)
+    runtime.state.effects.set('effect-1', { id: 'effect-1', agentId: 'agent-1', ownerLaneId: laneId, key: 'write-file', kind: 'tool', concurrencyClass: 'tool', input: { name: 'write-file', arguments: {} }, toolVersion: '1', state: 'running', attemptId: 'effect-1-attempt-1', attemptNo: 1, executionState: 'running', sideEffectState: 'none' })
+    const snapshot = runtime.exportPersistence()
+    const incompatible = new PulseRuntime({ persistence: snapshot, programs: [program], toolVersions: { 'write-file': '2' } })
+    expect(() => incompatible.tick()).toThrow('TOOL_VERSION_UNAVAILABLE:write-file@1')
+    const compatible = new PulseRuntime({ persistence: snapshot, programs: [program], toolVersions: { 'write-file': '1' } })
+    expect(() => compatible.tick()).not.toThrow()
+  })
+
   it('fails queued Effects closed when the Runtime attempt budget is exhausted', async () => {
     const runtime = new PulseRuntime({ budget: { maxTotalAttempts: 1 }, effectExecutor: async () => ({ value: { ok: true } }) })
     const program: LaneProgram = { id: 'attempt-budget', version: '1', step: ({ lane }) => lane.resume.step === 'start'
