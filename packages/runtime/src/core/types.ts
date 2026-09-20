@@ -88,6 +88,7 @@ export interface LaneRecord {
   activeWaitId?: WaitId
   children: Set<LaneId>
   priority: number
+  inheritedFloor?: number
   enqueueSeq: number
   readySince: number
   ownedEffectIds: Set<EffectId>

@@ -51,8 +51,8 @@ export interface RuntimeConfig {
   effectExecutor?: EffectExecutor
 }
 
-export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' }
-export interface AgentCreateRequest { goal: string; program: LaneProgram; agentId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string }
+export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' | 'final'; include?: 'facts' | 'facts_and_findings'; relevanceRefs?: string[] }
+export interface AgentCreateRequest { goal: string; program: LaneProgram; agentId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string; inheritedFloor?: number }
 
 function outcomeForLane(lane: LaneRecord): Outcome | undefined {
   if (lane.status === 'succeeded') return { status: 'succeeded', ...(lane.resultRef === undefined ? {} : { resultRef: lane.resultRef }) }
@@ -133,7 +133,7 @@ export class PulseRuntime {
     if (warmStart) {
       const source = this.state.agents.get(warmStart.agentId)
       if (!source) throw new Error(`WARM_START_SOURCE_NOT_FOUND:${warmStart.agentId}`)
-      const version = warmStart.globalVersion === 'latest' || warmStart.globalVersion === undefined ? source.latestGlobalVersion : warmStart.globalVersion
+      const version = warmStart.globalVersion === 'latest' || warmStart.globalVersion === 'final' || warmStart.globalVersion === undefined ? source.latestGlobalVersion : warmStart.globalVersion
       const value = source.globalVersions.get(version)
       if (value === undefined) throw new Error(`WARM_START_VERSION_NOT_FOUND:${version}`)
       initialGlobal = structuredClone(value)
@@ -142,7 +142,7 @@ export class PulseRuntime {
     if (this.state.lanes.size >= this.state.maxTotalLanes) throw new Error('MAX_TOTAL_LANES')
     const parent = request.parentAgentId === undefined ? undefined : this.state.agents.get(request.parentAgentId)
     if (request.parentAgentId !== undefined && !parent) throw new Error(`PARENT_AGENT_NOT_FOUND:${request.parentAgentId}`)
-    const { agent, root } = createAgent(this.state, request.goal, { programId: request.program.id, programVersion: request.program.version, step: (request.program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(initialGlobal === undefined ? {} : { initialGlobal }), ...(request.parentAgentId === undefined ? {} : { parentAgentId: request.parentAgentId, depth: (parent?.depth ?? 0) + 1 }) })
+    const { agent, root } = createAgent(this.state, request.goal, { programId: request.program.id, programVersion: request.program.version, step: (request.program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(initialGlobal === undefined ? {} : { initialGlobal }), ...(request.parentAgentId === undefined ? {} : { parentAgentId: request.parentAgentId, depth: (parent?.depth ?? 0) + 1 }), ...(request.inheritedFloor === undefined ? {} : { inheritedFloor: request.inheritedFloor }) })
     if (request.program.seriesKeys?.length) root.resume.locals = { $sdk: { series: { keys: [...request.program.seriesKeys], index: 0 } } }
     root.enqueueSeq = this.enqueueSeq++
     agent.state = 'running'
@@ -523,7 +523,9 @@ export class PulseRuntime {
         if (!childProgram || typeof goal !== 'string') { this.completeEffect(effect.id, { value: null }, 'failed', { code: 'INVALID_AGENT_EFFECT_INPUT', message: 'Agent Effect requires a registered program and goal.' }); continue }
         const parent = this.state.agents.get(effect.agentId)
         if ((parent?.depth ?? 0) >= this.maxAgentDepth) { this.completeEffect(effect.id, { value: null }, 'failed', { code: 'MAX_AGENT_DEPTH', message: 'Child Agent depth limit exceeded.' }); continue }
-        const child = this.createAgent({ goal, program: childProgram, parentAgentId: effect.agentId })
+        const parentLane = this.state.lanes.get(effect.ownerLaneId)
+        const parentScore = parentLane === undefined ? 0 : this.ready.snapshot(this.state.now).find((item) => item.laneId === parentLane.id)?.effectivePriority ?? parentLane.priority
+        const child = this.createAgent({ goal, program: childProgram, parentAgentId: effect.agentId, inheritedFloor: parentScore })
         effect.childAgentId = child.agentId
         this.emit({ type: 'agent.effect_started', effectId: effect.id, data: child.agentId })
         continue
@@ -663,6 +665,16 @@ export class PulseRuntime {
   private recomputePriorityInheritance(): void {
     this.priorityInheritance.clear()
     for (const effect of this.state.effects.values()) delete effect.inheritedFloor
+    const childEffectsWithPendingWait = new Set<string>()
+    for (const wait of this.state.waits.values()) if (wait.state === 'pending') for (const dependency of wait.spec.dependencies) if ((dependency.target as TargetRef).kind === 'effect') {
+      const effect = this.state.effects.get((dependency.target as TargetRef).id)
+      if (effect?.childAgentId) childEffectsWithPendingWait.add(effect.id)
+    }
+    for (const agent of this.state.agents.values()) {
+      const root = this.state.lanes.get(agent.rootLaneId)
+      const ownedAgentEffect = [...this.state.effects.values()].find((effect) => effect.childAgentId === agent.id)
+      if (root && (!ownedAgentEffect || !childEffectsWithPendingWait.has(ownedAgentEffect.id))) delete root.inheritedFloor
+    }
     for (const wait of this.state.waits.values()) {
       if (wait.state !== 'pending') continue
       const consumer = this.state.lanes.get(wait.laneId)
@@ -679,6 +691,11 @@ export class PulseRuntime {
             const inheritedFloor = this.priorityInheritance.floor(effect.id)
             if (inheritedFloor === undefined) delete effect.inheritedFloor
             else effect.inheritedFloor = inheritedFloor
+            if (effect.childAgentId) {
+              const childRoot = this.state.agents.get(effect.childAgentId)?.rootLaneId
+              const childLane = childRoot === undefined ? undefined : this.state.lanes.get(childRoot)
+              if (childLane && childLane.status === 'ready') { if (inheritedFloor === undefined) delete childLane.inheritedFloor; else childLane.inheritedFloor = inheritedFloor; this.ready.enqueue(readyItemFromLane(childLane)) }
+            }
           }
         }
       }

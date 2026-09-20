@@ -40,4 +40,20 @@ describe('built-in Child Agent Effect host', () => {
     expect(child?.depth).toBe(1)
     expect([...runtime.state.effects.values()].some((effect) => effect.outcome?.error?.code === 'MAX_AGENT_DEPTH')).toBe(true)
   })
+
+  it('propagates the waiting parent score to the child root', async () => {
+    const runtime = new PulseRuntime()
+    let observedFloor: number | undefined
+    const child: LaneProgram = { id: 'priority-child', version: '1', step: ({ lane }) => { observedFloor = lane.inheritedFloor; return { actions: [{ type: 'complete', result: { ok: true } }], next: point('priority-child', 'done') } } }
+    const parent: LaneProgram = { id: 'priority-parent', version: '1', step: ({ lane }) => lane.resume.step === 'start' ? ({ actions: [{ type: 'submit_effects', effects: [{ key: 'child', kind: 'agent', concurrencyClass: 'agent', input: { goal: 'child', programId: child.id, programVersion: child.version } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('priority-parent', 'done') }) : ({ actions: [{ type: 'complete', result: { ok: true } }], next: point('priority-parent', 'done') }) }
+    runtime.register(child)
+    const { agentId, laneId } = runtime.createAgent('parent', parent)
+    runtime.state.lanes.get(laneId)!.priority = 9
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    const childAgent = [...runtime.state.agents.values()].find((agent) => agent.parentAgentId === agentId)
+    const childRoot = childAgent ? runtime.state.lanes.get(childAgent.rootLaneId) : undefined
+    expect(observedFloor).toBe(9)
+    expect(childRoot?.inheritedFloor).toBeUndefined()
+    expect(runtime.state.events.some((event) => event.type === 'agent.effect_started')).toBe(true)
+  })
 })

@@ -30,4 +30,4 @@ export class PriorityInheritance {
   floor(targetLaneId: string): number | undefined { const values = [...(this.floors.get(targetLaneId)?.values() ?? [])]; return values.length ? Math.max(...values) : undefined }
 }
 
-export function readyItemFromLane(lane: LaneRecord, inheritedFloor?: number): ReadyItem { return { laneId: lane.id, basePriority: lane.priority, readySince: lane.readySince, enqueueSeq: lane.enqueueSeq, ...(inheritedFloor === undefined ? {} : { inheritedFloor }) } }
+export function readyItemFromLane(lane: LaneRecord, inheritedFloor = lane.inheritedFloor): ReadyItem { return { laneId: lane.id, basePriority: lane.priority, readySince: lane.readySince, enqueueSeq: lane.enqueueSeq, ...(inheritedFloor === undefined ? {} : { inheritedFloor }) } }
