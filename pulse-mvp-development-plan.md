@@ -129,7 +129,7 @@
 | Host Fact Agent 隔离 | Reply Fact 携带 Agent 身份；Session API 与 Runtime apply 双重校验，跨 Agent Human Effect 响应被拒绝并记录 `command.rejected` | `tests/effect-hosts.test.ts` | 本轮 Host 隔离提交 |
 | Host Reply 类型边界 | Reply 只允许未结算的 HumanEffect；Tool/Timer/其他 Effect 仍由各自 Executor 结算 | `tests/effect-hosts.test.ts` | 本轮 Reply 类型提交 |
 | Host Fact 存储准入原子性 | 排队 Host Fact 先在候选 Inbox/StoragePolicy 上预检；快照 hard limit 失败时不进入真实队列、不消耗命令序号、不留下半个 pin 记录 | `tests/storage-policy.test.ts` | 本轮 Host Fact 准入提交 |
-| Host 命令 API | `requestCancel()`、`setLanePriority()`、`inspectLane()` 已接入 FactInbox；优先级修改与审计事件通过同一 MutationLog 事务提交，排队期间不重入当前 Step | `tests/host-commands.test.ts` | `5cf3af9` |
+| Host 命令 API | `requestCancel()`、`setLanePriority()`、`inspectLane()` 已接入 FactInbox；优先级修改与审计事件通过同一 MutationLog 事务提交，递增 Lane version，排队期间不重入当前 Step | `tests/host-commands.test.ts` | `5cf3af9`、`d96dd00` |
 | EffectHandle 取消边界 | EffectHandle 提供实时 `status()` 与排队式 `requestCancel()`；句柄携带 Agent 归属，取消经 FactInbox 校验后才调用 Effect 取消路径 | `tests/host-commands.test.ts`、`tests/effect-hosts.test.ts` | `a8bb883` |
 | Agent 创建事务 | Runtime 创建 Agent 时先生成候选 Agent/Root Lane，再将两条记录与 ID 游标作为一个 MutationLog 事务提交；Storage hard limit 失败不留下记录、不消耗 ID | `tests/agent-creation.test.ts`、`tests/artifacts.test.ts` | `94c4d69` |
 | Detached Agent 事件准入 | `detachAgent/attachAgent` 在改变 detached 状态前预检审计事件；事件硬上限失败时不留下半个后台 Scope 状态 | `tests/agent-effect.test.ts` | 本轮 Detached 准入提交 |
@@ -543,6 +543,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
 - `a8bb883`：补齐架构定义的 `EffectHandle`，句柄状态可读，取消请求经 FactInbox 和 Agent 归属校验后执行。
+- `d96dd00`：Host 优先级变更递增 Lane version，保持 OCC 与恢复点语义一致。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - 当前确定性门禁：`npx tsc -b --pretty false && npm test`，49 个测试文件、275 个测试通过；`npm run build` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
