@@ -624,6 +624,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `889db76`：PulseRuntime 对外暴露 Model Registry 与 ModelRouter；支持显式 task route 注册，按注册顺序和隐私/能力/窗口约束筛选模型候选。
 - `2c0da03`：PulseRuntime 对外暴露 Tool Registry；支持 Tool SDK 定义注册、目录/ToolSet、allow/deny、schema admission，并验证标准 Tool Effect Adapter 可直接消费。
 - `8b59574`：Runtime Persistence compatibility 自动合并已注册 Tool manifest 版本；恢复活动 Tool Effect 时按实际 Registry 版本校验，不再只依赖手工 `toolVersions`。
+- `b674a0e`：ModelRouter 对显式 task route 未入选的模型返回 `TASK_ROUTE_EXCLUDED` 诊断，保证路由结果、拒绝原因和 telemetry 一致。
 - `b2de59b`：`createAgent` 补齐 priority/policy/limits 契约，Agent root Lane 使用声明优先级，`maxActiveLanes` 与 `timeoutMs` 真实生效并可恢复。
 - `0ce2a6e`：在开发模式为 Step/ErrorBoundary 增加运行时纯度守卫，阻断动态全局 IO/时间/随机源访问并保持生产模式兼容。
 - `01b72c2`：`runtime.run()` / `runAgent()` 返回完整 Agent Outcome，包含根 Lane 结果引用、错误/取消信息和 quarantine 未决 Effect。
