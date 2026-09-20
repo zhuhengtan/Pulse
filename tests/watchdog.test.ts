@@ -44,6 +44,7 @@ describe('progress watchdog', () => {
     const { agentId } = runtime.createAgent('repeat same action', program)
     expect((await runtime.start(agentId).outcome()).status).toBe('failed')
     expect(calls).toBe(1)
+    expect([...runtime.state.lanes.values()].find((lane) => lane.status === 'failed')?.failure).toMatchObject({ error: { code: 'NO_PROGRESS_DETECTED' }, privacy: 'public' })
     expect(runtime.state.events.some((event) => event.type === 'lane.failed' && JSON.stringify(event.data).includes('NO_PROGRESS_DETECTED'))).toBe(true)
     expect(runtime.state.events.some((event) => event.type === 'progress.intervention_applied')).toBe(true)
   })

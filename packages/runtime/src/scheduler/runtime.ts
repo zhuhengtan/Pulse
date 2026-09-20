@@ -1109,7 +1109,13 @@ export class PulseRuntime {
     for (const lane of this.state.lanes.values()) if (lane.status === 'ready' && !this.ready.has(lane.id)) this.enqueueLane(lane.id)
   }
 
-  private failLane(lane: LaneRecord, failure: RuntimeError): void { lane.status = 'failed'; lane.version++; this.emit({ type: 'lane.failed', laneId: lane.id, data: failure as unknown as JsonValue }); this.refreshWaits() }
+  private failLane(lane: LaneRecord, failure: RuntimeError): void {
+    lane.status = 'failed'
+    lane.failure = { error: structuredClone(failure), privacy: 'public' }
+    lane.version++
+    this.emit({ type: 'lane.failed', laneId: lane.id, data: failure as unknown as JsonValue })
+    this.refreshWaits()
+  }
 
   private refreshWaits(): void {
     let changed = true
