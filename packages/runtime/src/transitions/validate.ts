@@ -5,6 +5,7 @@ import type { ValidationResult, Mutation } from '../core/mutations.js'
 import { privacyRank, strictestPrivacy } from '../core/types.js'
 import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord, ForkLaneSpec } from '../core/types.js'
 import { appendRuntimeEvent } from '../core/events.js'
+import { estimateHistoryTokens, historyPressure } from '../context/builder.js'
 
 const isLocal = (value: TargetRef | LocalRef): value is LocalRef => 'local' in value
 const clone = <T>(value: T): T => structuredClone(value)
@@ -114,6 +115,7 @@ function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: Context
       const summary = op.summary ?? summaryResult?.summary ?? summaryResult?.value
       if (delta.target !== 'lane' || upToSeq === undefined || summary === undefined || (op.summary === undefined && op.summaryRef === undefined) || !Number.isInteger(upToSeq) || upToSeq < 1) return { nextVersion: base, error: 'INVALID_HISTORY_COMPACTION' }
       if (!history.some((record) => record.seq <= upToSeq)) return { nextVersion: base, error: 'INVALID_HISTORY_COMPACTION' }
+      if (history.length > 0 && upToSeq > Math.max(...history.map((record) => record.seq))) return { nextVersion: base, error: 'INVALID_HISTORY_COMPACTION' }
       history = [{ seq: upToSeq, instruction: '[history compacted]', resultRefs: op.summaryRef === undefined ? [] : [op.summaryRef], output: clone(summary), privacy: delta.privacy ?? summaryResult?.privacy ?? 'public' }, ...history.filter((record) => record.seq > upToSeq)]
       continue
     }
@@ -205,6 +207,13 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
     if (output.contextDelta.proposal && output.adoptCommittedContext) return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'proposals cannot be adopted in the same transaction') }
     if (output.contextDelta.target === 'global' && output.adoptCommittedContext) workingLane.contextSnapshotVersion = applied.nextVersion
   } else if (output.adoptCommittedContext) return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'adoptCommittedContext requires a ContextDelta') }
+
+  const compactRequested = output.contextDelta?.target === 'lane' && output.contextDelta.ops.some((op) => op.op === 'compact_history')
+  const nextHistoryTokens = estimateHistoryTokens(workingLane.context.history)
+  if (nextHistoryTokens > state.historyHardTokens && !compactRequested) return { rejection: error('CONTEXT_TOO_LARGE', 'Lane history exceeded hardTokens and must be compacted before another Step can commit.', { historyTokens: nextHistoryTokens, softTokens: state.historySoftTokens, hardTokens: state.historyHardTokens }) }
+  const pressure = historyPressure(workingLane.context.history, state.historySoftTokens, state.historyHardTokens)
+  if (pressure) workingLane.historyPressure = pressure
+  else delete workingLane.historyPressure
 
   for (const action of actions) {
     if (action.type === 'submit_effects') {

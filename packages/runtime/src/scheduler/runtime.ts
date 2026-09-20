@@ -14,6 +14,7 @@ import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import type { Mutation } from '../core/mutations.js'
 import { ContextMerger, type MergePlan } from '../context/merger.js'
+import { historyPressure } from '../context/builder.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number }
 export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput; errorBoundary?: (error: RuntimeError, context: LaneStepContext) => LaneStepOutput }
@@ -29,6 +30,8 @@ export interface RuntimeConfig {
   maxQueuedEffects?: number
   maxRunning?: Partial<Record<'llm' | 'tool' | 'agent' | 'none', number>>
   forkAffinity?: 'off' | 'advise'
+  historySoftTokens?: number
+  historyHardTokens?: number
   maxConsecutiveControlErrors?: number
   maxRuntimeMs?: number
   sessionId?: string
@@ -76,7 +79,7 @@ export class PulseRuntime {
 
   constructor(config: RuntimeConfig = {}) {
     const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
-    this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }), ...(config.forkAffinity === undefined ? {} : { forkAffinity: config.forkAffinity }) })
+    this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }), ...(config.forkAffinity === undefined ? {} : { forkAffinity: config.forkAffinity }), ...(config.historySoftTokens === undefined ? {} : { historySoftTokens: config.historySoftTokens }), ...(config.historyHardTokens === undefined ? {} : { historyHardTokens: config.historyHardTokens }) })
     this.sessionId = config.sessionId ?? 'session-local'
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
@@ -174,6 +177,9 @@ export class PulseRuntime {
       if (!laneId) break
       const lane = this.state.lanes.get(laneId)
       if (!lane || lane.status !== 'ready') continue
+      const currentPressure = historyPressure(lane.context.history, this.state.historySoftTokens, this.state.historyHardTokens)
+      if (currentPressure) lane.historyPressure = currentPressure
+      else delete lane.historyPressure
       const program = this.programs.get(`${lane.resume.programId}@${lane.resume.programVersion}`)
       if (!program) { this.failLane(lane, { code: 'PROGRAM_NOT_REGISTERED', message: `${lane.resume.programId}@${lane.resume.programVersion}` }); continue }
       let output: LaneStepOutput

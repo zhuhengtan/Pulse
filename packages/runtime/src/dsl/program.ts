@@ -5,6 +5,7 @@ import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, Ru
 export type NextStepTarget<TState = unknown> = string | { step: string }
 export interface InstructionView<TState> { goal: string; state: TState }
 export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; events?: string[] }
+export interface HistoryCompactionOptions { summarizeTask: string; keepRecentRounds: number }
 export interface HistoryRecordMeta { seq: number; resultRefs: ResultRef[]; privacy: PrivacyLabel }
 export interface ResultMeta { ref: ResultRef; privacy: PrivacyLabel; derivedFrom: string[]; summary?: JsonValue }
 export interface StepContext<TState = JsonValue> {
@@ -49,6 +50,16 @@ function asJson(value: unknown): JsonValue { return value as JsonValue }
 
 function findResult(context: LaneStepContext, ref: ResultRef): JsonValue | undefined { return context.state.results.get(ref)?.value }
 
+function sdkLocals(locals: JsonValue): Record<string, JsonValue> {
+  if (!locals || typeof locals !== 'object' || Array.isArray(locals)) return {}
+  const value = (locals as Record<string, JsonValue>).$sdk
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, JsonValue> : {}
+}
+
+function ordinaryLocals(locals: JsonValue): Record<string, JsonValue> {
+  return locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}
+}
+
 function makeContext<TState>(context: LaneStepContext, initialState: TState): { ctx: StepContext<TState>; getDelta: () => ContextDelta | undefined; getActions: () => RuntimeAction[]; getAdoptImmediately: () => boolean } {
   const draft = clone(initialState)
   let delta: ContextDelta | undefined
@@ -79,7 +90,7 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
 export class StepBuilder<TState = JsonValue> {
   readonly handlers = new Map<string, Handler>()
   private boundaryHandler?: ErrorBoundaryHandler<TState>
-  constructor(readonly config: { id: string; version: string; system?: string; toolSet?: string; state?: z.ZodType<TState> }) {}
+  constructor(readonly config: { id: string; version: string; system?: string; toolSet?: string; state?: z.ZodType<TState>; historyCompaction?: HistoryCompactionOptions }) {}
   addStep(name: string, handler: Handler): this { this.handlers.set(name, handler); return this }
   onErrorBoundary(handler: ErrorBoundaryHandler<TState>): this { this.boundaryHandler = handler; return this }
   addStructuredLLMStep<TOutput extends ZodTypeAny>(name: string, options: {
@@ -156,12 +167,65 @@ export class StepBuilder<TState = JsonValue> {
   }
   build(entry = this.handlers.has('start') ? 'start' : [...this.handlers.keys()][0] ?? 'start'): LaneProgramDefinition {
     if (!this.handlers.has(entry)) this.handlers.set(entry, () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: entry }))
-    const definition: LaneProgramDefinition = { id: this.config.id, version: this.config.version, entry, steps: [...this.handlers.keys()], debugSources: [...this.handlers.values()].map((handler) => handler.toString()), ...(this.config.system === undefined ? {} : { system: this.config.system }), ...(this.config.toolSet === undefined ? {} : { toolSet: this.config.toolSet }), step: (context) => { const handler = this.handlers.get(context.lane.resume.step) ?? this.handlers.get(entry)!; const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState; const { ctx, getDelta, getActions, getAdoptImmediately } = makeContext(context, state); const result = handler(ctx); const delta = result.contextDelta ?? getDelta(); return { actions: [...getActions(), ...(result.actions ?? [])], next: { programId: this.config.id, programVersion: this.config.version, step: target(result.next), locals: result.locals ?? ctx.lane.resume.locals }, ...(delta ? { contextDelta: delta } : {}), ...((result.adoptCommittedContext || getAdoptImmediately()) ? { adoptCommittedContext: true } : {}) } }, ...(this.boundaryHandler === undefined ? {} : { errorBoundary: (error: RuntimeError, context: LaneStepContext): LaneStepOutput => { const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState; const { ctx, getDelta, getActions, getAdoptImmediately } = makeContext(context, state); const result = this.boundaryHandler!(error, ctx); const isFailure = typeof result === 'object' && result !== null && 'fail' in result; const delta = getDelta(); const next = isFailure ? context.lane.resume.step : target(result as NextStepTarget<TState>); return { actions: [...getActions(), ...(isFailure ? [{ type: 'fail' as const, error: (result as { fail: RuntimeError }).fail }] : [])], next: { programId: this.config.id, programVersion: this.config.version, step: next, locals: context.lane.resume.locals }, ...(delta ? { contextDelta: delta } : {}), ...(getAdoptImmediately() ? { adoptCommittedContext: true } : {}) } } }) }
+    const compaction = this.config.historyCompaction
+    const compactSummarize = '$compact:summarize'
+    const compactApply = '$compact:apply'
+    if (compaction) {
+      const keepRecentRounds = Math.max(0, Math.floor(compaction.keepRecentRounds))
+      this.handlers.set(compactSummarize, (ctx) => {
+        const candidates = ctx.history.slice(0, Math.max(0, ctx.history.length - keepRecentRounds))
+        const upToSeq = candidates.at(-1)?.seq
+        const locals = ordinaryLocals(ctx.lane.resume.locals)
+        const sdk = sdkLocals(ctx.lane.resume.locals)
+        const returnStep = typeof sdk.compactReturnStep === 'string' ? sdk.compactReturnStep : ctx.lane.resume.step
+        if (upToSeq === undefined) return { next: returnStep === compactSummarize ? entry : returnStep, locals: { ...locals, $sdk: sdk } }
+        return {
+          actions: [{ type: 'submit_effects', effects: [{ key: '$compact-summary', kind: 'llm', concurrencyClass: 'llm', input: { task: compaction.summarizeTask, historySeqs: candidates.map((record) => record.seq), upToSeq } }], wait: { onUnsatisfied: 'resume_with_error' } }],
+          next: compactApply,
+          locals: { ...locals, $sdk: { ...sdk, compactPending: true, compactReturnStep: returnStep, compactUpToSeq: upToSeq } },
+        }
+      })
+      this.handlers.set(compactApply, (ctx) => {
+        const sdk = sdkLocals(ctx.lane.resume.locals)
+        const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).find((item) => item.state === 'settled') : undefined
+        const summaryRef = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined
+        const returnStep = typeof sdk.compactReturnStep === 'string' ? sdk.compactReturnStep : entry
+        const upToSeq = typeof sdk.compactUpToSeq === 'number' ? sdk.compactUpToSeq : undefined
+        const base = ordinaryLocals(ctx.lane.resume.locals)
+        const nextSdk = { ...sdk }
+        delete nextSdk.compactPending; delete nextSdk.compactReturnStep; delete nextSdk.compactUpToSeq
+        if (!summaryRef || upToSeq === undefined) return { next: returnStep, locals: { ...base, $sdk: nextSdk } }
+        return { contextDelta: { target: 'lane', baseVersion: ctx.lane.context.version, ops: [{ op: 'compact_history', upToSeq, summaryRef }] }, next: returnStep, locals: { ...base, $sdk: nextSdk } }
+      })
+    }
+    const definition: LaneProgramDefinition = {
+      id: this.config.id,
+      version: this.config.version,
+      entry,
+      steps: [...this.handlers.keys()],
+      debugSources: [...this.handlers.values()].map((handler) => handler.toString()),
+      ...(this.config.system === undefined ? {} : { system: this.config.system }),
+      ...(this.config.toolSet === undefined ? {} : { toolSet: this.config.toolSet }),
+      step: (context) => {
+        const sdk = sdkLocals(context.lane.resume.locals)
+        const pressure = context.lane.historyPressure
+        const shouldCompact = compaction !== undefined && !context.lane.resume.step.startsWith('$compact:') && context.lane.activeWaitId === undefined && sdk.compactPending !== true && pressure !== undefined && pressure.historyTokens > pressure.softTokens && context.lane.context.history.length > Math.max(0, Math.floor(compaction.keepRecentRounds))
+        if (shouldCompact) return { actions: [], next: { programId: this.config.id, programVersion: this.config.version, step: compactSummarize, locals: { ...ordinaryLocals(context.lane.resume.locals), $sdk: { ...sdk, compactPending: true, compactReturnStep: context.lane.resume.step } } } }
+        const requestedStep = shouldCompact ? compactSummarize : context.lane.resume.step
+        const handler = this.handlers.get(requestedStep) ?? this.handlers.get(entry)!
+        const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState
+        const { ctx, getDelta, getActions, getAdoptImmediately } = makeContext(context, state)
+        const result = handler(ctx)
+        const delta = result.contextDelta ?? getDelta()
+        return { actions: [...getActions(), ...(result.actions ?? [])], next: { programId: this.config.id, programVersion: this.config.version, step: target(result.next), locals: result.locals ?? ctx.lane.resume.locals }, ...(delta ? { contextDelta: delta } : {}), ...((result.adoptCommittedContext || getAdoptImmediately()) ? { adoptCommittedContext: true } : {}) }
+      },
+      ...(this.boundaryHandler === undefined ? {} : { errorBoundary: (error: RuntimeError, context: LaneStepContext): LaneStepOutput => { const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState; const { ctx, getDelta, getActions, getAdoptImmediately } = makeContext(context, state); const result = this.boundaryHandler!(error, ctx); const isFailure = typeof result === 'object' && result !== null && 'fail' in result; const delta = getDelta(); const next = isFailure ? context.lane.resume.step : target(result as NextStepTarget<TState>); return { actions: [...getActions(), ...(isFailure ? [{ type: 'fail' as const, error: (result as { fail: RuntimeError }).fail }] : [])], next: { programId: this.config.id, programVersion: this.config.version, step: next, locals: context.lane.resume.locals }, ...(delta ? { contextDelta: delta } : {}), ...(getAdoptImmediately() ? { adoptCommittedContext: true } : {}) } } })
+    }
     return definition
   }
 }
 
-export function defineLaneProgram<TState = JsonValue>(config: { id: string; version: string; system?: string; toolSet?: string; state?: z.ZodType<TState> }, define: (builder: StepBuilder<TState>) => void): LaneProgramDefinition { const builder = new StepBuilder(config); define(builder); return builder.build() }
+export function defineLaneProgram<TState = JsonValue>(config: { id: string; version: string; system?: string; toolSet?: string; state?: z.ZodType<TState>; historyCompaction?: HistoryCompactionOptions }, define: (builder: StepBuilder<TState>) => void): LaneProgramDefinition { const builder = new StepBuilder(config); define(builder); return builder.build() }
 
 export function assertProgramPure(program: LaneProgramDefinition): void {
   const source = [program.step.toString(), ...(program.debugSources ?? [])].join('\n')

@@ -54,6 +54,12 @@ export interface ProgressWatchdogState {
   lastReason?: string
 }
 
+export interface HistoryPressure {
+  historyTokens: number
+  softTokens: number
+  hardTokens: number
+}
+
 export interface AgentRecord {
   id: AgentId
   rootLaneId: LaneId
@@ -91,6 +97,7 @@ export interface LaneRecord {
   pendingOutcome?: Outcome
   unresolvedEffectIds?: EffectId[]
   progressWatchdog?: ProgressWatchdogState
+  historyPressure?: HistoryPressure
 }
 
 export interface EffectRecord {
@@ -368,10 +375,12 @@ export interface RuntimeState {
   maxQueuedEffects: number
   maxRunning: Record<ConcurrencyClass, number>
   forkAffinity: ForkAffinityMode
+  historySoftTokens: number
+  historyHardTokens: number
 }
 
-export function createRuntimeState(maxTotalLanes = 64, options: { maxQueuedEffects?: number; maxRunning?: Partial<Record<ConcurrencyClass, number>>; forkAffinity?: ForkAffinityMode } = {}): RuntimeState {
-  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), mergeProposals: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, proposal: 1, event: 1 }, maxTotalLanes, maxQueuedEffects: options.maxQueuedEffects ?? 256, maxRunning: { llm: 4, tool: 16, agent: 4, none: Number.POSITIVE_INFINITY, ...(options.maxRunning ?? {}) }, forkAffinity: options.forkAffinity ?? 'off' }
+export function createRuntimeState(maxTotalLanes = 64, options: { maxQueuedEffects?: number; maxRunning?: Partial<Record<ConcurrencyClass, number>>; forkAffinity?: ForkAffinityMode; historySoftTokens?: number; historyHardTokens?: number } = {}): RuntimeState {
+  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), mergeProposals: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, proposal: 1, event: 1 }, maxTotalLanes, maxQueuedEffects: options.maxQueuedEffects ?? 256, maxRunning: { llm: 4, tool: 16, agent: 4, none: Number.POSITIVE_INFINITY, ...(options.maxRunning ?? {}) }, forkAffinity: options.forkAffinity ?? 'off', historySoftTokens: options.historySoftTokens ?? 8_000, historyHardTokens: options.historyHardTokens ?? 16_000 }
 }
 
 export function privacyRank(label: PrivacyLabel): number { return label === 'public' ? 0 : label === 'cloud_allowed' ? 1 : 2 }

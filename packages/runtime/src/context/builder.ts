@@ -57,6 +57,16 @@ export function appendHistory(lane: LaneRecord, record: { instruction: string; r
   return next
 }
 
+/** A deterministic, conservative estimate used for admission rather than billing. */
+export function estimateHistoryTokens(history: ReadonlyArray<{ seq: number; instruction: string; resultRefs: string[]; output: JsonValue; privacy: PrivacyLabel }>): number {
+  return Math.ceil(Buffer.byteLength(stableSerialize(history), 'utf8') / 4)
+}
+
+export function historyPressure(history: ReadonlyArray<{ seq: number; instruction: string; resultRefs: string[]; output: JsonValue; privacy: PrivacyLabel }>, softTokens: number, hardTokens: number): { historyTokens: number; softTokens: number; hardTokens: number } | undefined {
+  const historyTokens = estimateHistoryTokens(history)
+  return historyTokens > softTokens ? { historyTokens, softTokens, hardTokens } : undefined
+}
+
 export function stableSerialize(value: unknown): string { return stable(value) }
 export function contentHash(value: unknown): string { return hash(value) }
 
