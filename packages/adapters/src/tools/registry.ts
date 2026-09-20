@@ -28,7 +28,7 @@ function artifactOutput(value: unknown): EffectArtifactOutput {
 }
 
 export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor {
-  return async (effect, signal): Promise<EffectExecution> => {
+  return async (effect, signal, emitObservation): Promise<EffectExecution> => {
     if (effect.kind !== 'tool') throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`)
     const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, import('@pulse/runtime').JsonValue> : {}
     const name = input.name
@@ -36,6 +36,12 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
     if (!registry.isAllowed(name)) throw new Error(`TOOL_NOT_ALLOWED:${name}`)
     const definition = registry.get(name)
     if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`)
+    const observations: NonNullable<EffectExecution['observations']> = []
+    const emit = (event: { type: 'progress' | 'warning' | 'diagnostic'; data: JsonValue }): void => {
+      if (signal.aborted) return
+      if (emitObservation) emitObservation(event)
+      else observations.push(event)
+    }
     const toolContext = {
       toolCallId: effect.toolCallId ?? '',
       effectId: effect.id,
@@ -44,10 +50,9 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
       agentId: effect.agentId,
       laneId: effect.ownerLaneId,
       signal,
-      emit: (_event: { type: 'progress' | 'warning' | 'diagnostic'; data: JsonValue }) => undefined,
+      emit,
     }
     const executionRef = registry.executionRef(name, input.arguments ?? {}, toolContext)
-    const observations: NonNullable<EffectExecution['observations']> = []
     let detailed: Awaited<ReturnType<ToolRegistry['executeDetailed']>>
     try {
       detailed = await registry.executeDetailed(name, input.arguments ?? {}, {
@@ -58,7 +63,7 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
         agentId: effect.agentId,
         laneId: effect.ownerLaneId,
         signal,
-        emit: (event) => { if (!signal.aborted) observations.push(event) },
+        emit,
       })
     } catch (error) {
       if (signal.aborted && definition.manifest.sideEffectPolicy === 'write') return { value: null, executionState: 'remote_unknown', sideEffectState: 'unknown', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: definition.manifest.version, reconcileRequired: true }, ...(error instanceof Error ? { error: { code: 'TOOL_CANCELLED_UNKNOWN', message: error.message } } : {}) }

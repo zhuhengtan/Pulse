@@ -50,7 +50,7 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
   const fallback = new ModelFallbackController()
   const providerSlots = new SlotPool(config.maxConcurrentByProvider)
   const modelSlots = new SlotPool(config.maxConcurrentByModel)
-  return async (effect, signal): Promise<EffectExecution> => {
+  return async (effect, signal, emitObservation): Promise<EffectExecution> => {
     if (effect.kind !== 'llm') throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`)
     const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
     const task = input.task
@@ -91,7 +91,12 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
       }
       try {
         const startedAt = Date.now()
-        const output = validateAdapterResult(await provider.executeAttempt({ request: projection, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation: (chunk) => { observations.push({ type: 'chunk', data: chunk }) } }))
+        const onObservation = (chunk: string): void => {
+          const observation = { type: 'chunk' as const, data: chunk }
+          if (emitObservation) emitObservation(observation)
+          else observations.push(observation)
+        }
+        const output = validateAdapterResult(await provider.executeAttempt({ request: projection, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation }))
         const measuredUsage = output.usage === undefined ? { latencyMs: Math.max(0, Date.now() - startedAt) } : { ...output.usage, latencyMs: output.usage.latencyMs ?? Math.max(0, Date.now() - startedAt), ...(output.usage.uncachedInputTokens === undefined && output.usage.inputTokens !== undefined && output.usage.cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, output.usage.inputTokens - output.usage.cachedInputTokens) } : {}) }
         usage.set(attempt.attemptId, measuredUsage)
         if (output.finishReason === 'refusal') { recordFeedback('refused', 0); throw new OutputValidationError('adapter', 'MODEL_REFUSAL', output.refusal ?? 'Provider refused the request.') }

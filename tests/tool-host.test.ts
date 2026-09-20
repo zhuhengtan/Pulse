@@ -68,6 +68,31 @@ describe('Tool SDK to Runtime Effect host', () => {
     expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.payload).includes('"toolVersion":"2"'))).toBe(true)
   })
 
+  it('streams Tool observations before the Effect settles', async () => {
+    const registry = new ToolRegistry()
+    registry.register(defineTool({ name: 'progressive', description: 'emits progress while running', input: z.object({}), output: z.object({ ok: z.boolean() }), execute: async (_input, context) => {
+      context.emit({ type: 'progress', data: { phase: 'started' } })
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      return { ok: true }
+    } }))
+    const runtime = new PulseRuntime({ effectExecutor: createToolEffectExecutor(registry) })
+    const program: LaneProgram = { id: 'live-observation', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'progressive', kind: 'tool', concurrencyClass: 'tool', input: { name: 'progressive', arguments: {} } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('live-observation', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('live-observation', 'finish') } }
+    const { agentId } = runtime.createAgent('live observation', program)
+    const session = runtime.start(agentId)
+    let liveObservation: import('@pulse/runtime').SessionEvent | undefined
+    for await (const event of session.stream()) {
+      if (event.kind === 'observation') {
+        liveObservation = event
+        break
+      }
+    }
+    expect(liveObservation?.observation).toMatchObject({ type: 'progress', data: { phase: 'started' } })
+    expect(runtime.state.effects.get('effect-1')?.outcome).toBeUndefined()
+    await expect(session.outcome()).resolves.toMatchObject({ status: 'succeeded' })
+  })
+
   it('rejects unknown tools through the normal dispatch failure path', async () => {
     const runtime = new PulseRuntime({ effectExecutor: createToolEffectExecutor(new ToolRegistry()) })
     const program: LaneProgram = { id: 'unknown-tool', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'missing', kind: 'tool', concurrencyClass: 'tool', input: { name: 'missing', arguments: {} } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('unknown-tool', 'done') }) }
