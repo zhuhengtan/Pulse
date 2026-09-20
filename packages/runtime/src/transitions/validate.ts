@@ -213,6 +213,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   let queuedEffectCount = [...state.effects.values()].filter((effect) => effect.state === 'queued' && effect.concurrencyClass !== 'none').length
   const existingToolCallIds = new Set([...state.effects.values()].filter((effect) => effect.agentId === lane.agentId && effect.toolCallId !== undefined).map((effect) => effect.toolCallId!))
   const seenToolCallIds = new Set<string>()
+  const seenCancelTargets = new Set<string>()
 
   if (output.contextDelta) {
     if (output.contextDelta.target === 'global' && !output.contextDelta.proposal && lane.ownerLaneId !== undefined) return { rejection: error('GLOBAL_CONTEXT_WRITE_NOT_AUTHORIZED', 'Only the root Lane may commit Global Context directly.') }
@@ -319,10 +320,14 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       if (hasDependencyCycle(state, action.spec.dependencies.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: resolveTarget(dependency.target, localTargets)! })))) return { rejection: error('DEPENDENCY_CYCLE', 'Wait would create a dependency cycle') }
       addWait(state, workingLane, action.spec, targets, mutations, `wait-${waitCounter++}`)
     } else if (action.type === 'cancel_lane') {
+      if (seenCancelTargets.has(action.laneId)) return { rejection: error('DUPLICATE_CANCEL_TARGET', action.laneId) }
+      seenCancelTargets.add(action.laneId)
       if (action.laneId === lane.id || !descendants(state, lane.id, action.laneId)) return { rejection: error('CANCEL_NOT_OWNER', 'a Lane can only cancel its own descendants') }
       const target = state.lanes.get(action.laneId)!
       mutations.push({ op: 'setLane', laneId: target.id, record: { ...laneCopy(target), status: 'cancelled', version: target.version + 1 } })
     } else if (action.type === 'propose_cancel') {
+      if (seenCancelTargets.has(action.laneId)) return { rejection: error('DUPLICATE_CANCEL_TARGET', action.laneId) }
+      seenCancelTargets.add(action.laneId)
       const target = state.lanes.get(action.laneId)
       if (!target) return { rejection: error('UNKNOWN_LANE', action.laneId) }
       if (target.ownerLaneId && target.ownerLaneId !== lane.id) {

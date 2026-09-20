@@ -64,6 +64,17 @@ describe('M1-1 deterministic transaction boundary', () => {
     expect(state.lanes.get(root.id)?.status).toBe('succeeded')
     expect(state.results.size).toBe(1)
   })
+
+  it('rejects duplicate cancellation targets atomically', () => {
+    const { state, root } = setup()
+    const fork = validateStep(state, root.id, { actions: [{ type: 'fork', lanes: [{ key: 'child', goal: 'child', program: resume() }] }], next: resume() })
+    expect('rejection' in fork).toBe(false)
+    if (!('rejection' in fork)) apply(state, fork.mutations)
+    const childId = [...state.lanes.values()].find((lane) => lane.ownerLaneId === root.id)!.id
+    const result = validateStep(state, root.id, { actions: [{ type: 'cancel_lane', laneId: childId, reason: 'SUPERSEDED' }, { type: 'cancel_lane', laneId: childId, reason: 'SUPERSEDED' }], next: resume() })
+    expect('rejection' in result && result.rejection.code).toBe('DUPLICATE_CANCEL_TARGET')
+    expect(state.lanes.get(childId)?.status).toBe('ready')
+  })
 })
 
 describe('dependency graph and deadlock edge semantics', () => {
