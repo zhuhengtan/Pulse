@@ -36,7 +36,7 @@ export interface WorkerHttpServer {
   close(): Promise<void>
 }
 
-export interface WorkerHttpServerOptions { host?: string; port?: number; authToken?: string }
+export interface WorkerHttpServerOptions { host?: string; port?: number; authToken?: string; recoveryIntervalMs?: number }
 
 export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinator, options: WorkerHttpServerOptions = {}): Promise<WorkerHttpServer> {
   const registrations = new Map<string, () => void>()
@@ -118,7 +118,10 @@ export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinato
   if (address === null || typeof address === 'string') throw new Error('WORKER_HTTP_ADDRESS_UNAVAILABLE')
   const host = options.host === '0.0.0.0' || options.host === '::' || options.host === undefined ? '127.0.0.1' : options.host
   const url = `http://${host}:${(address as AddressInfo).port}`
-  return { url, close: async () => await new Promise<void>((resolve, reject) => { server.close((cause) => cause ? reject(cause) : resolve()) }) }
+  const recoveryIntervalMs = options.recoveryIntervalMs ?? 1_000
+  const recoveryTimer = recoveryIntervalMs > 0 ? setInterval(() => { coordinator.recoverExpired(Date.now()) }, recoveryIntervalMs) : undefined
+  recoveryTimer?.unref()
+  return { url, close: async () => { if (recoveryTimer) clearInterval(recoveryTimer); await new Promise<void>((resolve, reject) => { server.close((cause) => cause ? reject(cause) : resolve()) }) } }
 }
 
 export interface HttpWorkerClientOptions { baseUrl: string; workerId: string; pollMs?: number; authToken?: string; fetch?: typeof globalThis.fetch }

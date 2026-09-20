@@ -65,4 +65,27 @@ describe('HTTP Worker transport', () => {
       await server.close()
     }
   })
+
+  it('reclaims an expired remote lease without an explicit host-side recovery call', async () => {
+    const coordinator = new Coordinator()
+    const server = await startWorkerCoordinatorServer(coordinator, { recoveryIntervalMs: 2 })
+    const stale = new HttpWorkerClient({ baseUrl: server.url, workerId: 'stale', pollMs: 1 })
+    const fresh = new HttpWorkerClient({ baseUrl: server.url, workerId: 'fresh', pollMs: 1 })
+    try {
+      await stale.register()
+      await fresh.register()
+      const result = coordinator.submit({ job: 'reclaim' }, { taskId: 'reclaim-task', leaseMs: 5 })
+      const lease = await stale.claim()
+      expect(lease?.task.id).toBe('reclaim-task')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      const recovered = await fresh.claim()
+      expect(recovered).toMatchObject({ task: { id: 'reclaim-task', attempt: 2 }, workerId: 'fresh' })
+      await fresh.complete(recovered!.leaseId, { reclaimed: true })
+      await expect(result).resolves.toEqual({ reclaimed: true })
+    } finally {
+      await stale.unregister().catch(() => undefined)
+      await fresh.unregister().catch(() => undefined)
+      await server.close()
+    }
+  })
 })

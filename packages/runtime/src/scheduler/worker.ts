@@ -1,3 +1,5 @@
+import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import type { EffectExecution } from './runtime.js'
 import type { EffectRecord, JsonValue, RuntimeError } from '../core/types.js'
 
@@ -17,9 +19,45 @@ export interface WorkerTaskRecord {
 
 export interface WorkerLease { task: WorkerTaskRecord; workerId: string; leaseId: string }
 export interface WorkerCoordinatorSnapshot { schemaVersion: 1; sequence: number; tasks: WorkerTaskRecord[]; idempotency: Record<string, string> }
+export interface WorkerPersistenceBackend { load(): Promise<WorkerCoordinatorSnapshot | undefined>; save(snapshot: WorkerCoordinatorSnapshot): Promise<void> }
+
+export class FileWorkerPersistenceBackend implements WorkerPersistenceBackend {
+  private pending: Promise<void> = Promise.resolve()
+  constructor(readonly filePath: string) {}
+  async load(): Promise<WorkerCoordinatorSnapshot | undefined> {
+    try { return JSON.parse(await readFile(this.filePath, 'utf8')) as WorkerCoordinatorSnapshot }
+    catch (cause) { if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw cause }
+  }
+  async save(snapshot: WorkerCoordinatorSnapshot): Promise<void> {
+    const operation = this.pending.then(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true })
+      const temporaryPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${process.hrtime.bigint().toString()}`
+      let handle: Awaited<ReturnType<typeof open>> | undefined
+      try {
+        handle = await open(temporaryPath, 'wx', 0o600)
+        await handle.writeFile(JSON.stringify(snapshot), 'utf8')
+        await handle.sync()
+        await handle.close(); handle = undefined
+        await rename(temporaryPath, this.filePath)
+        try {
+          const directory = await open(dirname(this.filePath), 'r')
+          try { await directory.sync() } finally { await directory.close() }
+        } catch {
+          // Some filesystems do not expose directory fsync; the rename remains atomic.
+        }
+      } finally {
+        if (handle) await handle.close().catch(() => undefined)
+        await rm(temporaryPath, { force: true }).catch(() => undefined)
+      }
+    })
+    this.pending = operation.catch(() => undefined)
+    await operation
+  }
+}
 
 export type WorkerHandler = (payload: JsonValue, signal: AbortSignal) => Promise<JsonValue>
 export interface WorkerSubmitOptions { taskId?: string; idempotencyKey?: string; leaseMs?: number; signal?: AbortSignal }
+export interface WorkerCoordinatorOptions { persistenceBackend?: WorkerPersistenceBackend }
 type Deferred = { promise: Promise<JsonValue>; resolve: (value: JsonValue) => void; reject: (error: unknown) => void }
 
 function deferred(): Deferred {
@@ -39,11 +77,15 @@ export class WorkerCoordinator {
   private readonly handlers = new Map<string, WorkerHandler>()
   private readonly remoteWorkers = new Set<string>()
   private readonly activeLeases = new Map<string, { leaseId: string; controller: AbortController }>()
+  private readonly persistenceBackend: WorkerPersistenceBackend | undefined
+  private persistencePending: Promise<void> = Promise.resolve()
   private sequence = 1
 
-  static restore(snapshot: WorkerCoordinatorSnapshot): WorkerCoordinator {
+  constructor(options: WorkerCoordinatorOptions = {}) { this.persistenceBackend = options.persistenceBackend }
+
+  static restore(snapshot: WorkerCoordinatorSnapshot, options: WorkerCoordinatorOptions = {}): WorkerCoordinator {
     if (snapshot.schemaVersion !== 1 || !Number.isInteger(snapshot.sequence) || snapshot.sequence < 1 || !Array.isArray(snapshot.tasks)) throw new Error('INVALID_WORKER_SNAPSHOT')
-    const coordinator = new WorkerCoordinator()
+    const coordinator = new WorkerCoordinator(options)
     coordinator.sequence = snapshot.sequence
     for (const input of snapshot.tasks) {
       if (!input || typeof input.id !== 'string' || typeof input.payload !== 'object' && input.payload !== null && typeof input.payload !== 'string' && typeof input.payload !== 'number' && typeof input.payload !== 'boolean' || !['queued', 'leased', 'succeeded', 'failed', 'cancelled'].includes(input.state)) throw new Error('INVALID_WORKER_SNAPSHOT')
@@ -56,10 +98,18 @@ export class WorkerCoordinator {
     return coordinator
   }
 
+  static async fromPersistence(backend: WorkerPersistenceBackend): Promise<WorkerCoordinator> {
+    const snapshot = await backend.load()
+    return snapshot === undefined ? new WorkerCoordinator({ persistenceBackend: backend }) : WorkerCoordinator.restore(snapshot, { persistenceBackend: backend })
+  }
+
+  async flushPersistence(): Promise<void> { await this.persistencePending }
+
   register(workerId: string, handler: WorkerHandler): () => void {
     if (!workerId || this.handlers.has(workerId) || this.remoteWorkers.has(workerId)) throw new Error(`WORKER_ALREADY_REGISTERED:${workerId}`)
     this.handlers.set(workerId, handler)
     this.pump()
+    this.schedulePersistence()
     return () => this.unregister(workerId)
   }
 
@@ -67,6 +117,7 @@ export class WorkerCoordinator {
     if (!workerId || this.handlers.has(workerId) || this.remoteWorkers.has(workerId)) throw new Error(`WORKER_ALREADY_REGISTERED:${workerId}`)
     this.remoteWorkers.add(workerId)
     this.pump()
+    this.schedulePersistence()
     return () => this.unregister(workerId)
   }
 
@@ -77,6 +128,7 @@ export class WorkerCoordinator {
     if (active) { active.controller.abort(); this.activeLeases.delete(workerId) }
     for (const task of this.tasks.values()) if (task.state === 'leased' && task.workerId === workerId) this.requeue(task)
     this.pump()
+    this.schedulePersistence()
   }
 
   submit(payload: JsonValue, options: WorkerSubmitOptions = {}): Promise<JsonValue> {
@@ -97,6 +149,7 @@ export class WorkerCoordinator {
     }
     task.leaseMs = leaseMs
     this.pump()
+    this.schedulePersistence()
     return result.promise
   }
 
@@ -109,6 +162,7 @@ export class WorkerCoordinator {
       recovered.push(task.id)
     }
     this.pump()
+    this.schedulePersistence()
     return recovered
   }
 
@@ -126,6 +180,7 @@ export class WorkerCoordinator {
     const task = [...this.tasks.values()].find((candidate) => candidate.state === 'queued')
     if (!task) return undefined
     const lease = this.assign(workerId, task, now)
+    this.schedulePersistence()
     return { workerId, leaseId: lease.leaseId, task: structuredClone(task) }
   }
 
@@ -136,6 +191,7 @@ export class WorkerCoordinator {
     const duration = leaseMs ?? task.leaseMs ?? 30_000
     if (!Number.isFinite(duration) || duration <= 0) throw new Error('INVALID_WORKER_LEASE')
     task.leaseExpiresAt = now + duration
+    this.schedulePersistence()
     return task.leaseExpiresAt
   }
 
@@ -164,10 +220,18 @@ export class WorkerCoordinator {
     task.state = 'cancelled'; delete task.leaseId; delete task.workerId; delete task.leaseExpiresAt
     this.ensureDeferred(task.id).reject(new Error(reason))
     this.pump()
+    this.schedulePersistence()
     return true
   }
 
   inspect(): WorkerTaskRecord[] { return [...this.tasks.values()].map((task) => structuredClone(task)) }
+
+  private schedulePersistence(): void {
+    if (!this.persistenceBackend) return
+    const snapshot = this.snapshot()
+    const operation = this.persistencePending.then(() => this.persistenceBackend!.save(snapshot))
+    this.persistencePending = operation.catch(() => undefined)
+  }
 
   private requeue(task: WorkerTaskRecord): void {
     task.state = 'queued'; delete task.leaseId; delete task.workerId; delete task.leaseExpiresAt
@@ -231,6 +295,7 @@ export class WorkerCoordinator {
     if (!task || task.state !== 'leased' || task.leaseId !== leaseId) return false
     task.state = 'succeeded'; task.result = structuredClone(value); delete task.leaseId; delete task.workerId; delete task.leaseExpiresAt
     this.ensureDeferred(taskId).resolve(value)
+    this.schedulePersistence()
     return true
   }
 
@@ -239,6 +304,7 @@ export class WorkerCoordinator {
     if (!task || task.state !== 'leased' || task.leaseId !== leaseId) return false
     task.state = 'failed'; task.error = error; delete task.leaseId; delete task.workerId; delete task.leaseExpiresAt
     this.ensureDeferred(taskId).reject(new Error(error.message))
+    this.schedulePersistence()
     return true
   }
 }

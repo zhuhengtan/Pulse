@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { createWorkerEffectExecutor, PulseRuntime, WorkerCoordinator } from '@pulse/runtime'
+import { createWorkerEffectExecutor, FileWorkerPersistenceBackend, PulseRuntime, WorkerCoordinator } from '@pulse/runtime'
 import type { JsonValue, LaneProgram } from '@pulse/runtime'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const point = (programId: string, step: string) => ({ programId, programVersion: '1', step, locals: {} })
 
@@ -102,5 +105,28 @@ describe('lease-based WorkerCoordinator', () => {
     await expect(restored.submit({ job: 'duplicate-payload' }, { taskId: 'ignored', idempotencyKey: 'durable-key' })).resolves.toEqual({ recovered: true })
     expect(restored.get('task-durable')).toMatchObject({ state: 'succeeded', attempt: 2 })
     expect(original).toBeInstanceOf(Promise)
+  })
+
+  it('persists and restores coordinator state through an atomic file backend', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-worker-persistence-'))
+    try {
+      const backend = new FileWorkerPersistenceBackend(join(directory, 'worker.json'))
+      const coordinator = await WorkerCoordinator.fromPersistence(backend)
+      coordinator.registerRemote('before-restart')
+      coordinator.submit({ job: 'durable-file' }, { taskId: 'durable-file-task', idempotencyKey: 'durable-file-key', leaseMs: 50 })
+      const firstLease = coordinator.claim('before-restart')
+      expect(firstLease?.task.state).toBe('leased')
+      await coordinator.flushPersistence()
+
+      const restored = await WorkerCoordinator.fromPersistence(backend)
+      restored.registerRemote('after-restart')
+      const recovered = restored.claim('after-restart')
+      expect(recovered).toMatchObject({ task: { id: 'durable-file-task', state: 'leased', attempt: 2 } })
+      expect(restored.completeRemote('after-restart', recovered!.leaseId, { recovered: 'file' })).toBe(true)
+      await restored.flushPersistence()
+      await expect(restored.submit({ job: 'duplicate-after-restart' }, { taskId: 'ignored-after-restart', idempotencyKey: 'durable-file-key' })).resolves.toEqual({ recovered: 'file' })
+      const final = await WorkerCoordinator.fromPersistence(backend)
+      expect(final.get('durable-file-task')).toMatchObject({ state: 'succeeded', result: { recovered: 'file' } })
+    } finally { await rm(directory, { recursive: true, force: true }) }
   })
 })
