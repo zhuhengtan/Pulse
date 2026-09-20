@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { PulseRuntime, defineLaneProgram } from '@pulse/runtime'
+import { PulseRuntime, defineLaneProgram, definePlanAndExecuteLane } from '@pulse/runtime'
 
 describe('DSL Human/Timer host macros', () => {
   it('compiles addTimerStep into a timer wait and resumes on fire', async () => {
@@ -25,5 +25,25 @@ describe('DSL Human/Timer host macros', () => {
     const session = runtime.start(agentId)
     await session.reply('effect-1', { approved: true })
     expect((await session.outcome()).status).toBe('succeeded')
+  })
+
+  it('runs the plan, fork/join, synthesis, and global commit template', async () => {
+    const worker = defineLaneProgram({ id: 'plan-worker', version: '1' }, (builder) => {
+      builder.addStep('start', () => ({ actions: [{ type: 'complete', result: { worker: true } }], next: 'start' }))
+    })
+    const program = definePlanAndExecuteLane({
+      id: 'plan-template',
+      version: '1',
+      planner: { instruction: 'make a plan' },
+      workers: { first: { goal: 'first', programId: worker.id, programVersion: worker.version } },
+      synthesizer: { instruction: 'synthesize' },
+    })
+    const calls: string[] = []
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => { calls.push(effect.key); return { value: effect.key === 'synthesize-llm' ? { report: 'done' } : { plan: ['first'] } } } })
+    runtime.register(worker)
+    const { agentId } = runtime.createAgent('template', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(calls).toEqual(['plan-llm', 'synthesize-llm'])
+    expect(runtime.state.agents.get(agentId)?.globalVersions.get(1)).toEqual({ synthesis: { report: 'done' } })
   })
 })

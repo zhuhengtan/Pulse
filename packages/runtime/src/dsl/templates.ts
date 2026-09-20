@@ -1,6 +1,7 @@
 import { defineLaneProgram, type LaneProgramDefinition, type StepContext } from './program.js'
 import type { LaneProgram } from '../scheduler/runtime.js'
 import type { Outcome, JsonValue } from '../core/types.js'
+import type { ZodTypeAny } from 'zod'
 
 export interface ProgramRef { programId: string; programVersion: string; step?: string; locals?: JsonValue }
 
@@ -21,8 +22,57 @@ export function defineSeriesLane(config: { id: string; version?: string; steps: 
   return wrapper
 }
 
-export function definePlanAndExecuteLane(config: { id: string; version?: string; planInstruction: string; workers: Record<string, { goal: string; programId: string; programVersion?: string }> }): LaneProgramDefinition {
-  return defineLaneProgram({ id: config.id, version: config.version ?? '1' }, (builder) => { builder.addStructuredLLMStep('plan', { task: 'plan', instruction: config.planInstruction, schema: { safeParse: (value: unknown) => ({ success: true, data: value }) } as never, onSuccess: () => 'dispatch' }); builder.addParallelStep('dispatch', { lanes: Object.fromEntries(Object.entries(config.workers).map(([key, value]) => [key, { goal: value.goal, program: { programId: value.programId, programVersion: value.programVersion ?? '1' } }])), next: 'finish' }); builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' })) })
+export interface PlanWorker extends ProgramRef { goal?: string }
+export interface PlanAndExecuteConfig {
+  id: string
+  version?: string
+  system?: string
+  toolSet?: string
+  planInstruction?: string
+  planner?: { task?: string; instruction: string; schema?: ZodTypeAny }
+  workers: Record<string, PlanWorker | { goal: string; programId: string; programVersion?: string }>
+  affinity?: 'collapse' | 'ack'
+  synthesizer?: { task?: string; instruction: string | ((ctx: StepContext) => string); schema?: ZodTypeAny }
+}
+
+const permissiveSchema = { safeParse: (value: unknown) => ({ success: true as const, data: value }) } as never
+
+export function definePlanAndExecuteLane(config: PlanAndExecuteConfig): LaneProgramDefinition {
+  const planner = config.planner ?? { task: 'plan', instruction: config.planInstruction ?? 'Create an executable plan for the goal.' }
+  const synthesizer = config.synthesizer ?? { task: 'merge', instruction: 'Synthesize the joined worker outcomes into a concise final report.' }
+  return defineLaneProgram({ id: config.id, version: config.version ?? '1', ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSet: config.toolSet }) }, (builder) => {
+    builder.addStructuredLLMStep('plan', {
+      task: planner.task ?? 'plan',
+      instruction: planner.instruction,
+      schema: planner.schema ?? permissiveSchema,
+      onSuccess: (plan, ctx) => {
+        ctx.mutateLane((draft) => {
+          if (draft && typeof draft === 'object' && !Array.isArray(draft)) (draft as Record<string, JsonValue>).plan = plan as JsonValue
+        })
+        return 'dispatch'
+      },
+    })
+    builder.addDynamicForkStep('dispatch', {
+      lanes: () => Object.fromEntries(Object.entries(config.workers).map(([key, worker]) => {
+        const program = { programId: worker.programId, programVersion: worker.programVersion ?? '1', ...(!('step' in worker) || worker.step === undefined ? {} : { step: worker.step }), ...(!('locals' in worker) || worker.locals === undefined ? {} : { locals: worker.locals }) }
+        return [key, { goal: 'goal' in worker && worker.goal !== undefined ? worker.goal : key, program }]
+      })),
+      affinity: config.affinity === 'ack' ? 'ack' : 'collapse',
+      next: 'synthesize',
+    })
+    builder.addMergeStep('synthesize', {
+      task: synthesizer.task ?? 'merge',
+      instruction: synthesizer.instruction,
+      ...(synthesizer.schema === undefined ? {} : { schema: synthesizer.schema }),
+      sources: { proposals: 'joined', outcomes: 'joined' },
+      onSynthesized: (report, ctx) => {
+        ctx.commitGlobal({ ops: [{ op: 'set', path: ['synthesis'], value: report as JsonValue }], adoptImmediately: true })
+        return 'finish'
+      },
+      next: 'finish',
+    })
+    builder.addStep('finish', (ctx) => ({ actions: [{ type: 'complete', result: { ok: true, globalVersion: ctx.globalVersion } }], next: 'finish' }))
+  })
 }
 
 export function defineScatterGatherLane<TItem>(config: { id: string; version?: string; items: (ctx: StepContext) => TItem[]; worker: ProgramRef; batch?: number; reducer: (outcomes: Outcome[], ctx: StepContext) => string | { step: string } }): LaneProgramDefinition {
