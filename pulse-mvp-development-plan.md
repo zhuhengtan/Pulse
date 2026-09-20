@@ -59,7 +59,7 @@
 | Program Registry / ProgramRef | 对外提供 `runtime.programs.register()`、ProgramRef 解析与版本校验；`createAgent` 支持已注册引用并拒绝未注册引用，同时保留直接传 LaneProgram 的兼容入口 | `tests/dsl-program-registry.test.ts` | `b879c5a` |
 | Runtime Model Registry / task route | 对外提供 `runtime.models.register()` 与 `runtime.modelRouter.register()`；按显式候选顺序结合任务、隐私、推理能力、结构化/工具能力、声明的最低上下文容量和实际投影窗口过滤，保留 Adapter 注入边界 | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts` | `37d75cb` |
 | Registered Model Adapter execution | Model Registry 候选可绑定标准 Adapter；未注入自定义 `effectExecutor` 时，Runtime 自动完成路由、隐私/能力/窗口准入、归一化、结构化能力与 schema contract 校验、候选 fallback 与 usage/route metadata | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts` | `47ec7a9` |
-| Model fallback attempt bound | Runtime 内置 Executor 与 Provider Adapter fallback 都遵守 Effect 的 `retryPolicy.maxAttempts`；达到上限后不再偷偷派发后继候选 | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts` | `7274889` |
+| Model fallback EffectQueue re-entry | Runtime 内置 Executor 每个 Attempt 只执行一个候选；失败后按 `retryPolicy` 重新进入统一队列，保留同一 EffectId 并记录每个候选的 model/provider | `tests/runtime-model-registry.test.ts`、`tests/retry-policy.test.ts` | `2028516` |
 | Runtime Tool Registry | 对外提供 `runtime.tools.register()`、目录检索、稳定 ToolSet、allow/deny、schema admission、资源/副作用准入；标准 Tool Effect Adapter 可直接消费该目录 | `tests/runtime-tool-registry.test.ts`、`tests/tool-host.test.ts`、`tests/tool-discovery.test.ts` | `2c0da03` |
 | Agent create policy / limits | `createAgent` 支持优先级、策略/限制引用与 `maxActiveLanes`；Agent 超时按注入 RuntimeClock 触发 `TIMEOUT`，配置和引用随 Agent 记录持久化 | `tests/agent-create-contract.test.ts`、`tests/agent-creation.test.ts` | `b2de59b` |
 | 开发模式纯 Step 守卫 | Runtime 调用 Step 与 ErrorBoundary 时，在非 production 环境阻断动态 `console.*`、`Date.now`、`Math.random`、`fetch`、`process` 访问，统一报告 `PURE_STEP_VIOLATION`；生产环境不注入守卫 | `tests/pure-step-guard.test.ts` | `0ce2a6e` |
@@ -640,6 +640,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `37d75cb`：ModelRouter 与两条模型执行路径支持 `LLMRequirements.contextSize` 最低容量准入，并与实际投影估算取最大值，避免小窗口模型接收声明上限更高的请求。
 - `7274889`：Runtime 内置 Executor 与 Provider Adapter fallback 统一尊重 Effect 的 `retryPolicy.maxAttempts`，显式上限不再被内部候选切换绕过。
 - `7658937`：`PulseSession` 暴露稳定 `sessionId`，`createAgent({ warmStart: { sessionId } })` 与架构/DSL 契约对齐，并保留旧 `agentId` source alias。
+- `2028516`：Runtime 默认模型执行器改为单候选 Attempt；候选拒绝或失败后通过 `retry_wait` 重新进入统一 EffectQueue，显式/默认 `maxAttempts` 都按候选上限生效，并记录 model/provider Attempt 归属。
 - `a885019`：Progress Watchdog 只有在 Action 签名确实在窗口中重复时才升级；二级干预接受一次新策略并给 LLM 注入 `reasoning: high` floor，避免“换策略”被误判为重复而直接三级失败。
 - `b2de59b`：`createAgent` 补齐 priority/policy/limits 契约，Agent root Lane 使用声明优先级，`maxActiveLanes` 与 `timeoutMs` 真实生效并可恢复。
 - `0ce2a6e`：在开发模式为 Step/ErrorBoundary 增加运行时纯度守卫，阻断动态全局 IO/时间/随机源访问并保持生产模式兼容。
