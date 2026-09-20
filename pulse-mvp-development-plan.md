@@ -56,6 +56,7 @@
 | Provider loopback HTTP 集成 | 通过真实本机 HTTP 栈验证 OpenAI-compatible JSON 请求、Bearer 认证、model/request body 映射，以及 SSE chunk 观测与完整 tool 参数收尾 | `tests/provider-http-integration.test.ts` | `b832af3` |
 | Program Registry / ProgramRef | 对外提供 `runtime.programs.register()`、ProgramRef 解析与版本校验；`createAgent` 支持已注册引用并拒绝未注册引用，同时保留直接传 LaneProgram 的兼容入口 | `tests/dsl-program-registry.test.ts` | `b879c5a` |
 | 开发模式纯 Step 守卫 | Runtime 调用 Step 与 ErrorBoundary 时，在非 production 环境阻断动态 `console.*`、`Date.now`、`Math.random`、`fetch`、`process` 访问，统一报告 `PURE_STEP_VIOLATION`；生产环境不注入守卫 | `tests/pure-step-guard.test.ts` | `0ce2a6e` |
+| 完整 Agent Outcome Host API | `runtime.run()` / `runAgent()` 直接返回根 Lane 的 `resultRef`、失败/取消信息与按 Agent 过滤的 `unresolvedEffectIds`，空转未终态也返回结构化 `RUNTIME_IDLE_BLOCKED` | `tests/agent-creation.test.ts`、`tests/dsl-program-registry.test.ts` | `01b72c2` |
 | Provider 输出 fail-closed | 畸形 SSE/工具参数直接拒绝；LLM structured/tool 输出遇到循环对象、`Date`、二进制或非有限数字时不发布伪造 JSON；Action Decoder 同步拒绝不可序列化参数 | `tests/m3-context-adapters.test.ts`、`tests/action-decoder.test.ts` | `28e4722` |
 | Effect 实时观测桥接 | EffectExecutor 提供实时 observation emitter；Tool progress 与 Provider chunk 在 Effect 尚未结算时进入 ObservationInbox，Session stream 可即时读到；直接调用 EffectExecutor 时仍保留结算 observations 兼容行为 | `tests/tool-host.test.ts` | `8e14534` |
 | 终态观测审计 | Effect 终态后的迟到 observation 不进入 ObservationInbox、不改变 Outcome，并记录 `attempt.late_emit` 事实 | `tests/late-attempt.test.ts` | `73c438b` |
@@ -616,6 +617,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `b832af3`：通过真实 loopback HTTP 栈验证 OpenAI-compatible JSON/SSE 请求、Bearer 认证、model/request body 映射、chunk 观测和完整 tool 参数收尾。
 - `b879c5a`：对外提供 Program Registry 与 ProgramRef 入口，已注册版本可创建 Agent，未注册引用 fail-closed，并保留直接传 LaneProgram 的兼容入口。
 - `0ce2a6e`：在开发模式为 Step/ErrorBoundary 增加运行时纯度守卫，阻断动态全局 IO/时间/随机源访问并保持生产模式兼容。
+- `01b72c2`：`runtime.run()` / `runAgent()` 返回完整 Agent Outcome，包含根 Lane 结果引用、错误/取消信息和 quarantine 未决 Effect。
 - `b832588`：增加 SQLite Result/Snapshot body store 与 EventArchive，支持跨实例幂等写、冲突拒绝和事件范围恢复读取。
 - `8fa5f47`：持久化 envelope 增加 program/tool/policy/router compatibility，恢复执行前拒绝版本不匹配或缺失的宿主能力。
 - `3627c75`：恢复外置 Result/Snapshot 正文后保留后端原始 digest 作为下一次自动持久化的 CAS 基线，避免读穿后的重算 digest 误报共享快照冲突；仅显式配置 `persistenceBackend` 时续写恢复状态。
