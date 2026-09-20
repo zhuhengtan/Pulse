@@ -1,6 +1,6 @@
 import { z, type ZodTypeAny } from 'zod'
 import type { LaneProgram, LaneStepContext } from '../scheduler/runtime.js'
-import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel } from '../core/types.js'
+import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError } from '../core/types.js'
 
 export type NextStepTarget<TState = unknown> = string | { step: string }
 export interface InstructionView<TState> { goal: string; state: TState }
@@ -40,6 +40,7 @@ export interface LaneProgramDefinition extends LaneProgram {
   steps: string[]
   debugSources?: string[]
 }
+type ErrorBoundaryHandler<TState> = (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState> | { fail: RuntimeError }
 
 function target(step: NextStepTarget): string { return typeof step === 'string' ? step : step.step }
 function clone<T>(value: T): T { return structuredClone(value) }
@@ -75,8 +76,10 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
 
 export class StepBuilder<TState = JsonValue> {
   readonly handlers = new Map<string, Handler>()
+  private boundaryHandler?: ErrorBoundaryHandler<TState>
   constructor(readonly config: { id: string; version: string; system?: string; toolSet?: string; state?: z.ZodType<TState> }) {}
   addStep(name: string, handler: Handler): this { this.handlers.set(name, handler); return this }
+  onErrorBoundary(handler: ErrorBoundaryHandler<TState>): this { this.boundaryHandler = handler; return this }
   addStructuredLLMStep<TOutput extends ZodTypeAny>(name: string, options: {
     task: string
     instruction: string | ((view: InstructionView<TState>) => string)
@@ -151,7 +154,7 @@ export class StepBuilder<TState = JsonValue> {
   }
   build(entry = this.handlers.has('start') ? 'start' : [...this.handlers.keys()][0] ?? 'start'): LaneProgramDefinition {
     if (!this.handlers.has(entry)) this.handlers.set(entry, () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: entry }))
-    const definition: LaneProgramDefinition = { id: this.config.id, version: this.config.version, entry, steps: [...this.handlers.keys()], debugSources: [...this.handlers.values()].map((handler) => handler.toString()), ...(this.config.system === undefined ? {} : { system: this.config.system }), ...(this.config.toolSet === undefined ? {} : { toolSet: this.config.toolSet }), step: (context) => { const handler = this.handlers.get(context.lane.resume.step) ?? this.handlers.get(entry)!; const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState; const { ctx, getDelta, getActions, getAdoptImmediately } = makeContext(context, state); const result = handler(ctx); const delta = result.contextDelta ?? getDelta(); return { actions: [...getActions(), ...(result.actions ?? [])], next: { programId: this.config.id, programVersion: this.config.version, step: target(result.next), locals: result.locals ?? ctx.lane.resume.locals }, ...(delta ? { contextDelta: delta } : {}), ...((result.adoptCommittedContext || getAdoptImmediately()) ? { adoptCommittedContext: true } : {}) } } }
+    const definition: LaneProgramDefinition = { id: this.config.id, version: this.config.version, entry, steps: [...this.handlers.keys()], debugSources: [...this.handlers.values()].map((handler) => handler.toString()), ...(this.config.system === undefined ? {} : { system: this.config.system }), ...(this.config.toolSet === undefined ? {} : { toolSet: this.config.toolSet }), step: (context) => { const handler = this.handlers.get(context.lane.resume.step) ?? this.handlers.get(entry)!; const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState; const { ctx, getDelta, getActions, getAdoptImmediately } = makeContext(context, state); const result = handler(ctx); const delta = result.contextDelta ?? getDelta(); return { actions: [...getActions(), ...(result.actions ?? [])], next: { programId: this.config.id, programVersion: this.config.version, step: target(result.next), locals: result.locals ?? ctx.lane.resume.locals }, ...(delta ? { contextDelta: delta } : {}), ...((result.adoptCommittedContext || getAdoptImmediately()) ? { adoptCommittedContext: true } : {}) } }, ...(this.boundaryHandler === undefined ? {} : { errorBoundary: (error: RuntimeError, context: LaneStepContext): LaneStepOutput => { const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState; const { ctx, getDelta, getActions, getAdoptImmediately } = makeContext(context, state); const result = this.boundaryHandler!(error, ctx); const isFailure = typeof result === 'object' && result !== null && 'fail' in result; const delta = getDelta(); const next = isFailure ? context.lane.resume.step : target(result as NextStepTarget<TState>); return { actions: [...getActions(), ...(isFailure ? [{ type: 'fail' as const, error: (result as { fail: RuntimeError }).fail }] : [])], next: { programId: this.config.id, programVersion: this.config.version, step: next, locals: context.lane.resume.locals }, ...(delta ? { contextDelta: delta } : {}), ...(getAdoptImmediately() ? { adoptCommittedContext: true } : {}) } } }) }
     return definition
   }
 }

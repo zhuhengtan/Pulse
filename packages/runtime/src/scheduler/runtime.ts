@@ -15,7 +15,7 @@ import { appendRuntimeEvent } from '../core/events.js'
 import type { Mutation } from '../core/mutations.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number }
-export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput }
+export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput; errorBoundary?: (error: RuntimeError, context: LaneStepContext) => LaneStepOutput }
 export interface EffectExecution { value: JsonValue; summary?: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled'; metadata?: JsonValue }
 export type EffectExecutor = (effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<EffectExecution>
 type HostCommand = { type: 'reply'; effectId: string; value: JsonValue } | { type: 'cancel'; agentId: string; reason: string }
@@ -157,8 +157,14 @@ export class PulseRuntime {
       const program = this.programs.get(`${lane.resume.programId}@${lane.resume.programVersion}`)
       if (!program) { this.failLane(lane, { code: 'PROGRAM_NOT_REGISTERED', message: `${lane.resume.programId}@${lane.resume.programVersion}` }); continue }
       let output: LaneStepOutput
-      try { output = program.step({ lane: structuredClone(lane), state: structuredClone(this.state), ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), now: this.state.now }) }
-      catch (cause) { this.failLane(lane, { code: 'STEP_FAILED', message: cause instanceof Error ? cause.message : String(cause) }); continue }
+      const stepContext: LaneStepContext = { lane: structuredClone(lane), state: structuredClone(this.state), ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), now: this.state.now }
+      try { output = program.step(stepContext) }
+      catch (cause) {
+        const failure: RuntimeError = { code: 'STEP_FAILED', message: cause instanceof Error ? cause.message : String(cause) }
+        if (!program.errorBoundary) { this.failLane(lane, failure); continue }
+        try { output = program.errorBoundary(failure, stepContext) }
+        catch (boundaryCause) { this.failLane(lane, { code: 'ERROR_BOUNDARY_FAILED', message: boundaryCause instanceof Error ? boundaryCause.message : String(boundaryCause) }); continue }
+      }
       const result = validateStep(this.state, lane.id, output)
       if ('rejection' in result) {
         const consecutive = (lane.consecutiveControlErrors ?? 0) + 1
