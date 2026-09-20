@@ -94,6 +94,21 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.events).toHaveLength(0)
   })
 
+  it('rejects reconciliation abandonment before removing the quarantine entry', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 100_000 } })
+    const { agentId, laneId } = runtime.createAgent('abandon admission', { id: 'abandon-admission', version: '1', step: () => ({ actions: [], next: point('abandon-admission', 'done') }) })
+    const effect: EffectRecord = { id: 'effect-1', agentId, ownerLaneId: laneId, key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, state: 'reconcile_required', attemptId: 'effect-1-attempt-1', attemptNo: 1, executionState: 'remote_unknown', sideEffectState: 'unknown' }
+    runtime.state.effects.set(effect.id, effect)
+    runtime.state.lanes.get(laneId)!.ownedEffectIds.add(effect.id)
+    runtime.state.lanes.get(laneId)!.unresolvedEffectIds = [effect.id]
+    runtime.quarantine.add(effect.id, 0, 'in_doubt')
+    ;(runtime.storagePolicy as any).limits.maxEventLogBytes = 1
+    expect(() => runtime.abandonEffect(effect.id)).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect(runtime.quarantine.unresolvedEffectIds).toEqual([effect.id])
+    expect(runtime.state.effects.get(effect.id)).toMatchObject({ state: 'reconcile_required', executionState: 'remote_unknown' })
+    expect(runtime.state.events).toHaveLength(0)
+  })
+
   it('supports explicit quarantine abandonment without claiming side-effect absence', async () => {
     const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
     const program: LaneProgram = { id: 'abandon-quarantine', version: '1', step: ({ lane }) => lane.resume.step === 'start'

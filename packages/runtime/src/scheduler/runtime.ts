@@ -971,16 +971,26 @@ export class PulseRuntime {
   abandonEffect(effectId: string): void {
     const effect = this.state.effects.get(effectId)
     if (!effect || effect.state !== 'reconcile_required') return
-    if (!this.quarantine.abandon(effectId)) return
-    effect.state = 'failed'
-    effect.executionState = 'local_closed'
-    effect.sideEffectState = 'unknown'
-    effect.outcome = { status: 'failed', error: { code: 'RESOURCE_ABANDONED', message: 'Host abandoned reconciliation for an unknown side effect.' } }
-    this.releaseEffectLocks(effectId)
+    if (!this.quarantine.has(effectId)) return
+    const candidate = structuredClone(effect)
+    candidate.state = 'failed'
+    candidate.executionState = 'local_closed'
+    candidate.sideEffectState = 'unknown'
+    candidate.outcome = { status: 'failed', error: { code: 'RESOURCE_ABANDONED', message: 'Host abandoned reconciliation for an unknown side effect.' } }
     const lane = this.state.lanes.get(effect.ownerLaneId)
-    if (lane?.unresolvedEffectIds) lane.unresolvedEffectIds = lane.unresolvedEffectIds.filter((id) => id !== effectId)
-    const abandonedEvent = this.emit({ type: 'resource.abandoned', effectId, data: { code: 'RESOURCE_ABANDONED' } })
-    this.journalEffect(effect, `effect:${effect.id}:${effect.attemptId}:abandoned`, undefined, [abandonedEvent])
+    const candidateLane = lane === undefined ? undefined : structuredClone(lane)
+    if (candidateLane?.unresolvedEffectIds) candidateLane.unresolvedEffectIds = candidateLane.unresolvedEffectIds.filter((id) => id !== effectId)
+    const abandonedEvent: import('../core/types.js').RuntimeEventInput = { type: 'resource.abandoned', effectId, data: { code: 'RESOURCE_ABANDONED' } }
+    const admission: Mutation[] = [{ op: 'setEffect', effectId, record: candidate }]
+    if (candidateLane) admission.push({ op: 'setLane', laneId: candidateLane.id, record: candidateLane })
+    admission.push({ op: 'appendEvent', event: abandonedEvent })
+    this.assertStorageAdmission(admission)
+    if (!this.quarantine.abandon(effectId)) return
+    Object.assign(effect, candidate)
+    if (candidateLane) this.state.lanes.set(candidateLane.id, candidateLane)
+    this.releaseEffectLocks(effectId)
+    const committedAbandonedEvent = this.emit(abandonedEvent)
+    this.journalEffect(effect, `effect:${effect.id}:${effect.attemptId}:abandoned`, undefined, [committedAbandonedEvent])
     this.refreshWaits()
     this.schedulePersistence()
   }
