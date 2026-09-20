@@ -30,4 +30,21 @@ describe('DSL Human and instruction contracts', () => {
     expect(runtime.state.lanes.get(laneId)?.status).toBe('failed')
     expect(runtime.state.lanes.get(laneId)?.failure?.error.code).toBe('INSTRUCTION_TOO_LARGE')
   })
+
+  it('does not treat a malformed human reply as a timeout', async () => {
+    let timedOut = false
+    const program = defineLaneProgram({ id: 'human-reply-schema', version: '1' }, (builder) => {
+      builder.addHumanStep('approve', { prompt: 'approve', schema: z.object({ approved: z.boolean() }), onReply: () => 'done', onTimeout: () => { timedOut = true; return 'done' } })
+      builder.addStep('done', () => ({ actions: [{ type: 'complete', result: { done: true } }], next: 'done' }))
+    })
+    const runtime = new PulseRuntime()
+    const { agentId } = runtime.createAgent('human schema', program)
+    runtime.tick()
+    const effect = runtime.state.effects.get('effect-1')!
+    const session = runtime.start(agentId)
+    await session.reply(effect.id, { approved: 'yes' })
+    expect((await session.outcome()).status).toBe('failed')
+    expect(timedOut).toBe(false)
+    expect([...runtime.state.lanes.values()].find((lane) => lane.status === 'failed')?.failure).toMatchObject({ error: { code: 'HUMAN_RESPONSE_SCHEMA_VIOLATION' } })
+  })
 })
