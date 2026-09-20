@@ -230,7 +230,8 @@ export class PulseRuntime {
 
   completeEffect(effectId: string, execution: EffectExecution, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded', error?: RuntimeError): void {
     const effect = this.state.effects.get(effectId)
-    if (!effect || effect.outcome) return
+    if (!effect) return
+    if (effect.outcome) { this.emit({ type: 'attempt.late_emit', effectId, data: { status: effect.outcome.status } }); return }
     const running = this.executions.get(effectId)
     if (running) { running.controller.abort(); this.executions.delete(effectId) }
     if (execution.executionState === 'remote_unknown') { this.markRemoteUnknown(effectId, execution.sideEffectState ?? 'none'); return }
@@ -270,11 +271,20 @@ export class PulseRuntime {
     if (attempt) { attempt.executionState = 'remote_unknown'; attempt.sideEffectState = sideEffectState; attempt.settledAt = this.state.now }
     if (sideEffectState === 'unknown') { effect.state = 'reconcile_required'; this.quarantine.add(effect.id, this.state.now, 'in_doubt') }
     else {
+      const unknownAttempts = effect.attempts?.filter((attempt) => attempt.executionState === 'remote_unknown').length ?? 0
+      const settledAttemptId = effect.attemptId
+      if (effect.duplicateExecutionPolicy === 'allow' && effect.maxUnknownAttempts !== undefined && unknownAttempts <= effect.maxUnknownAttempts && this.scheduleRetry(effect, { code: 'REMOTE_EXECUTION_UNKNOWN', message: 'Remote execution outcome is unknown.', details: { unknownAttempts } })) {
+        this.releaseEffectLocks(effectId)
+        this.outbox.ack(`${effect.id}:${settledAttemptId}`)
+        this.refreshWaits()
+        return
+      }
       effect.state = 'failed'
       effect.outcome = { status: 'failed', error: { code: 'REMOTE_UNKNOWN', message: 'Remote execution outcome is unknown but no side effect was recorded.' } }
       this.emit({ type: 'effect.remote_unknown', effectId, data: { executionState: 'remote_unknown', sideEffectState } })
+      this.releaseEffectLocks(effectId)
     }
-    this.releaseEffectLocks(effectId)
+    if (sideEffectState !== 'unknown') this.releaseEffectLocks(effectId)
     this.refreshWaits()
   }
 
@@ -293,7 +303,7 @@ export class PulseRuntime {
     effect.executionState = 'local_closed'
     effect.sideEffectState = 'unknown'
     effect.outcome = { status: 'failed', error: { code: 'RESOURCE_ABANDONED', message: 'Host abandoned reconciliation for an unknown side effect.' } }
-    this.releaseEffectLocks(effectId)
+    if (effect.sideEffectState !== 'unknown') this.releaseEffectLocks(effectId)
     const lane = this.state.lanes.get(effect.ownerLaneId)
     if (lane?.unresolvedEffectIds) lane.unresolvedEffectIds = lane.unresolvedEffectIds.filter((id) => id !== effectId)
     this.emit({ type: 'resource.abandoned', effectId, data: { code: 'RESOURCE_ABANDONED' } })
