@@ -59,6 +59,7 @@ export interface RuntimeConfig {
   effectExecutor?: EffectExecutor
   effectSubmissionPreparer?: (submission: EffectSubmission) => EffectSubmission
   telemetryExporter?: RuntimeTelemetryExporter
+  persistenceBackend?: RuntimePersistenceBackend
 }
 
 export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' | 'final'; include?: 'facts' | 'facts_and_findings'; relevanceRefs?: string[] }
@@ -91,6 +92,10 @@ export class PulseRuntime {
   readonly state: RuntimeState
   private shuttingDown = false
   private readonly telemetryExporter: RuntimeTelemetryExporter | undefined
+  private readonly persistenceBackend: RuntimePersistenceBackend | undefined
+  private persistencePending: Promise<void> = Promise.resolve()
+  private persistenceScheduled = false
+  private persistenceDirty = false
   readonly mutationLog: MutationLog
   readonly outbox: EffectOutbox
   readonly clock: VirtualClock
@@ -170,6 +175,7 @@ export class PulseRuntime {
     this.maxPreparedLLMs = config.maxPreparedLLMs ?? 8
     this.effectSubmissionPreparer = config.effectSubmissionPreparer
     this.telemetryExporter = config.telemetryExporter
+    this.persistenceBackend = config.persistenceBackend
     this.customExecutor = config.effectExecutor !== undefined
     this.executor = config.effectExecutor ?? (async () => ({ value: null }))
     this.syncStoragePolicy()
@@ -218,6 +224,15 @@ export class PulseRuntime {
     persistedPolicy.markPersisted()
     await backend.save(exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine, persistedPolicy))
     this.storagePolicy.markPersisted()
+  }
+  async flushPersistence(): Promise<void> {
+    if (!this.persistenceBackend) return
+    this.schedulePersistence()
+    while (true) {
+      await this.persistencePending
+      if (!this.persistenceDirty) return
+      this.schedulePersistence()
+    }
   }
   async checkpoint(backend: RuntimePersistenceBackend): Promise<RuntimePersistenceSnapshot> {
     const persistedPolicy = this.storagePolicy.clone()
@@ -388,12 +403,14 @@ export class PulseRuntime {
     }
     this.completeFinishedChildAgents()
     this.syncStoragePolicy()
+    this.schedulePersistence()
     return progressed
   }
 
   async run(maxTicks = 10_000): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }> {
     for (let tick = 0; tick < maxTicks; tick++) {
       const work = this.tick()
+      await this.flushPersistence()
       this.refreshWaits()
       if (this.ready.size === 0 && this.executions.size === 0) {
         if (this.preparingLLMs.size) { await Promise.resolve(); continue }
@@ -416,6 +433,7 @@ export class PulseRuntime {
     if (root && !['succeeded', 'failed', 'cancelled'].includes(root.status)) this.emit({ type: 'runtime.idle_blocked', laneId: root.id, data: { status: root.status } })
     const agent = root ? this.state.agents.get(root.agentId) : undefined
     if (agent && ['succeeded', 'failed', 'cancelled'].includes(root?.status ?? 'failed')) agent.state = status
+    await this.flushPersistence()
     return { status, unresolvedEffectIds: this.quarantine.unresolvedEffectIds }
   }
 
@@ -429,6 +447,7 @@ export class PulseRuntime {
       this.tick()
       if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise).concat([new Promise<void>((resolve) => setTimeout(resolve, Math.min(10, Math.max(0, deadline - Date.now()))))]))
     }
+    await this.flushPersistence()
     const unresolved = [...this.state.effects.values()].filter((effect) => !effect.outcome && effect.state !== 'cancelled').map((effect) => effect.id)
     return { status: unresolved.length || this.executions.size ? 'timed_out' : 'stopped', unresolvedEffectIds: [...new Set([...unresolved, ...this.quarantine.unresolvedEffectIds])], quarantine: this.quarantine.unresolvedEffectIds }
   }
@@ -447,6 +466,22 @@ export class PulseRuntime {
     apply(candidate, mutations, { sessionId: this.sessionId, timestamp: candidate.now })
     const policy = this.storagePolicy.clone()
     this.syncStoragePolicy(policy, candidate)
+  }
+
+  private schedulePersistence(): void {
+    if (!this.persistenceBackend) return
+    this.persistenceDirty = true
+    if (this.persistenceScheduled) return
+    this.persistenceScheduled = true
+    this.persistencePending = this.persistencePending.catch(() => undefined).then(async () => {
+      while (this.persistenceDirty) {
+        this.persistenceDirty = false
+        await this.persist(this.persistenceBackend!)
+      }
+    }).finally(() => {
+      this.persistenceScheduled = false
+      if (this.persistenceDirty) this.schedulePersistence()
+    })
   }
 
   private syncStoragePolicy(policy = this.storagePolicy, state = this.state): void {

@@ -68,6 +68,27 @@ describe('effect outbox and runtime persistence envelope', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('automatically persists the runtime lifecycle and supports explicit flush', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-auto-persist-'))
+    try {
+      const backend = new FileRuntimePersistenceBackend(join(directory, 'runtime.json'))
+      const program = { id: 'auto-persist', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'auto-persist', programVersion: '1', step: 'done', locals: {} } }) }
+      const runtime = new PulseRuntime({ persistenceBackend: backend })
+      const { agentId } = runtime.createAgent('auto persistence', program)
+
+      await runtime.flushPersistence()
+      const pendingSnapshot = await backend.load()
+      expect(pendingSnapshot?.state.state.agents.find(([id]) => id === agentId)?.[1].state).toBe('running')
+
+      expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+      const completedSnapshot = await backend.load()
+      expect(completedSnapshot?.state.state.agents.find(([id]) => id === agentId)?.[1].state).toBe('succeeded')
+
+      const restored = await PulseRuntime.restore(backend, { persistenceBackend: backend })
+      expect(restored.state.agents.get(agentId)?.state).toBe('succeeded')
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('restores through the backend and quarantines an in-flight write effect', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-restore-'))
     try {
