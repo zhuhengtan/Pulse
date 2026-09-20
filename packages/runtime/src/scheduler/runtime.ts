@@ -1067,9 +1067,13 @@ export class PulseRuntime {
     this.assertStorageAdmission(cancellationEvents.map((event) => ({ op: 'appendEvent' as const, event })))
     for (const targetId of targetAgentIds) this.commitAgentState(targetId, 'cancelling', `agent:${targetId}:cancelling:${this.state.now}`)
     for (const lane of targetLanes) {
-      lane.status = 'cancelled'
-      lane.version++
-      this.emit({ type: 'lane.cancelling', laneId: lane.id, data: reason })
+      const nextLane = structuredClone(lane)
+      nextLane.status = 'cancelled'
+      nextLane.version++
+      const event = { type: 'lane.cancelling' as const, laneId: lane.id, data: reason }
+      const mutations: Mutation[] = [{ op: 'setLane', laneId: lane.id, record: nextLane }, { op: 'appendEvent', event }]
+      this.assertStorageAdmission(mutations)
+      commitMutationTransaction(this.state, this.mutationLog, `lane:${lane.id}:cancelling:${nextLane.version}`, mutations, this.state.now, this.sessionId)
     }
     for (const effect of targetEffects) {
       const childAgent = effect.childAgentId === undefined ? undefined : this.state.agents.get(effect.childAgentId)
@@ -1268,8 +1272,7 @@ export class PulseRuntime {
     const admitted = structuredClone(effect)
     admitted.cancelRequested = { reason, at: this.state.now }
     this.assertStorageAdmission([{ op: 'setEffect', effectId, record: admitted }, { op: 'appendEvent', event: cancelEvent }])
-    Object.assign(effect, admitted)
-    this.emit(cancelEvent)
+    commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${effect.attemptId}:cancel-requested`, [{ op: 'setEffect', effectId, record: admitted }, { op: 'appendEvent', event: cancelEvent }], this.state.now, this.sessionId)
     if (!this.executions.has(effectId)) { this.completeEffect(effectId, { value: null }, 'cancelled', { code: 'CANCELLED', message: reason }); return }
     this.executions.get(effectId)!.controller.abort()
     if (graceMs === 0) this.quarantineEffect(effectId, reason, 0)
@@ -1297,12 +1300,8 @@ export class PulseRuntime {
     this.assertStorageAdmission(admission)
     if (execution) { execution.controller.abort(); this.executions.delete(effectId) }
     this.releaseEffectLocks(effectId)
-    Object.assign(effect, candidate)
-    if (candidateLane) this.state.lanes.set(candidateLane.id, candidateLane)
+    commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${effect.attemptId}:quarantined`, admission, this.state.now, this.sessionId)
     this.quarantine.add(effectId, this.state.now, reason)
-    if (precedingEvent) this.emit(precedingEvent)
-    const committedQuarantineEvent = this.emit(quarantineEvent)
-    this.journalEffect(effect, `effect:${effect.id}:${effect.attemptId}:quarantined`, undefined, [committedQuarantineEvent])
     this.refreshWaits()
     this.schedulePersistence()
   }
