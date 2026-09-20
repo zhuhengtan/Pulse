@@ -67,7 +67,10 @@ function deferred(): Deferred {
   return { promise, resolve, reject }
 }
 
-function runtimeError(cause: unknown): RuntimeError { return { code: 'WORKER_FAILED', message: cause instanceof Error ? cause.message : String(cause) } }
+function runtimeError(cause: unknown): RuntimeError {
+  if (typeof cause === 'object' && cause !== null && typeof (cause as { retryable?: unknown }).retryable === 'boolean') return { code: 'WORKER_FAILED', message: cause instanceof Error ? cause.message : String(cause), retryable: (cause as { retryable: boolean }).retryable }
+  return { code: 'WORKER_FAILED', message: cause instanceof Error ? cause.message : String(cause) }
+}
 
 /** A lease-based worker coordinator. A network transport can implement the same claim/complete contract. */
 export class WorkerCoordinator {

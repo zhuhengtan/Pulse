@@ -20,6 +20,7 @@ import { validateJsonSchema } from '../models/router.js'
 import { SessionStoragePolicy, type StoragePolicyConfig } from '../storage/policy.js'
 import { collectRuntimeTelemetry, type RuntimeTelemetryExporter, type RuntimeTelemetrySnapshot } from './telemetry.js'
 import { markArtifactPersisted, pinArtifact, publishArtifact, readArtifact, unpinArtifact, type ArtifactPublication } from '../storage/artifacts.js'
+import { runtimeErrorFromCause } from '../core/errors.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number; observe?: (event: { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }) => void }
 export interface LaneProgram {
@@ -849,6 +850,7 @@ export class PulseRuntime {
 
   private scheduleRetry(effect: EffectRecord, error?: RuntimeError, forcedDelayMs?: number): boolean {
     if (effect.cancelRequested || (!forcedDelayMs && !effect.retryPolicy)) return false
+    if (forcedDelayMs === undefined && error?.retryable === false) return false
     if (forcedDelayMs === undefined && effect.retryPolicy) {
       if (effect.attemptNo >= effect.retryPolicy.maxAttempts) return false
       if (effect.sideEffectState === 'unknown') return false
@@ -929,7 +931,7 @@ export class PulseRuntime {
         this.emit({ type: 'agent.effect_started', effectId: effect.id, data: child.agentId })
         continue
       }
-      const promise = this.executor(effect, controller.signal).then((execution) => this.completeEffect(effect.id, execution)).catch((cause) => { this.emit({ type: 'effect.dispatch_failed', effectId: effect.id, data: { message: cause instanceof Error ? cause.message : String(cause) } }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', { code: 'EFFECT_FAILED', message: cause instanceof Error ? cause.message : String(cause) }) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
+      const promise = this.executor(effect, controller.signal).then((execution) => this.completeEffect(effect.id, execution)).catch((cause) => { const runtimeError = runtimeErrorFromCause(cause); this.emit({ type: 'effect.dispatch_failed', effectId: effect.id, data: runtimeError as unknown as JsonValue }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', runtimeError) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
       executionRecord.promise = promise
       if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.clock.schedule(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
       if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.clock.timers.schedule(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))

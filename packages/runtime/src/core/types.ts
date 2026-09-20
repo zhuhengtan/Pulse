@@ -24,6 +24,8 @@ export interface PrivacyMetadata { privacy: PrivacyLabel; privacyTaints?: Privac
 export interface RuntimeError {
   code: string
   message: string
+  /** Explicitly prevents or permits automatic retry when the failure is settled by an Effect host. */
+  retryable?: boolean
   details?: JsonValue
 }
 

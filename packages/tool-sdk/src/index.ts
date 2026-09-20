@@ -48,7 +48,21 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   summarize?(output: TOutput): JsonValue
 }
 
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+
+export class ToolError extends Error {
+  readonly code: string
+  readonly retryable: boolean
+  readonly details: JsonValue | undefined
+
+  constructor(code: string, message: string, options: { retryable?: boolean; details?: JsonValue } = {}) {
+    super(message)
+    this.name = 'ToolError'
+    this.code = code
+    this.retryable = options.retryable ?? true
+    this.details = options.details
+  }
+}
 
 export class ToolRegistry {
   private readonly definitions = new Map<string, ToolDefinition<any, any>>()

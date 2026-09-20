@@ -99,7 +99,7 @@ export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinato
         const workerId = body.workerId; const leaseId = body.leaseId
         if (typeof workerId !== 'string' || typeof leaseId !== 'string') throw new Error('INVALID_WORKER_COMPLETION')
         const rawError = object(body.error)
-        const error: RuntimeError = { code: typeof rawError.code === 'string' ? rawError.code : 'WORKER_FAILED', message: typeof rawError.message === 'string' ? rawError.message : 'Worker failed.', ...(rawError.details === undefined ? {} : { details: rawError.details }) }
+        const error: RuntimeError = { code: typeof rawError.code === 'string' ? rawError.code : 'WORKER_FAILED', message: typeof rawError.message === 'string' ? rawError.message : 'Worker failed.', ...(typeof rawError.retryable === 'boolean' ? { retryable: rawError.retryable } : {}), ...(rawError.details === undefined ? {} : { details: rawError.details }) }
         if (!coordinator.failRemote(workerId, leaseId, error)) { send(response, 409, { error: 'WORKER_LEASE_NOT_FOUND' }); return }
         send(response, 200, { failed: true }); return
       }

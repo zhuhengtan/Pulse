@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createToolEffectExecutor, createToolEffectSubmissionPreparer, reconcileToolEffect } from '@pulse/adapters'
-import { defineTool, ToolRegistry } from '@pulse/tool-sdk'
+import { defineTool, ToolError, ToolRegistry } from '@pulse/tool-sdk'
 import { PulseRuntime } from '@pulse/runtime'
 import type { EffectRecord, LaneProgram } from '@pulse/runtime'
 import { z } from 'zod'
@@ -11,6 +11,21 @@ import { tmpdir } from 'node:os'
 const point = (id: string, step: string) => ({ programId: id, programVersion: '1', step, locals: {} })
 
 describe('Tool SDK to Runtime Effect host', () => {
+  it('preserves a non-retryable ToolError and prevents duplicate attempts', async () => {
+    let calls = 0
+    const registry = new ToolRegistry()
+    registry.register(defineTool({ name: 'permanent-failure', description: 'fails permanently', input: z.object({}), output: z.object({ ok: z.boolean() }), execute: () => { calls += 1; throw new ToolError('PERMANENT_FAILURE', 'do not retry', { retryable: false, details: { source: 'tool' } }) } }))
+    const runtime = new PulseRuntime({ effectExecutor: createToolEffectExecutor(registry) })
+    const program: LaneProgram = { id: 'non-retryable-tool', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'permanent', kind: 'tool', concurrencyClass: 'tool', input: { name: 'permanent-failure', arguments: {} }, retryPolicy: { maxAttempts: 3, initialBackoffMs: 1, maxBackoffMs: 1, jitter: false } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('non-retryable-tool', 'done') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('non-retryable-tool', 'done') } }
+    const { agentId } = runtime.createAgent('permanent tool failure', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(calls).toBe(1)
+    expect(runtime.state.effects.get('effect-1')?.attempts).toHaveLength(1)
+    expect(runtime.state.effects.get('effect-1')?.outcome).toMatchObject({ error: { code: 'PERMANENT_FAILURE', retryable: false, details: { source: 'tool' } } })
+  })
+
   it('executes a registered typed tool and preserves tool correlation', async () => {
     const registry = new ToolRegistry()
     registry.register(defineTool({ name: 'add', version: '2', description: 'adds', input: z.object({ a: z.number(), b: z.number() }), output: z.object({ sum: z.number() }), summarize: (output) => ({ sum: output.sum }), execute: ({ a, b }, context) => { context.emit({ type: 'progress', data: { phase: 'computed' } }); return { sum: a + b } } }))
