@@ -15,7 +15,7 @@ export interface ToolContext {
   emit(event: { type: 'progress' | 'warning' | 'diagnostic'; data: JsonValue }): void
 }
 export interface ReconcileContext { toolCallId: string; effectId: string; attemptId: string; agentId: string; laneId: string; signal: AbortSignal }
-export interface ReconcileResult<TOutput> { status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; output?: TOutput; error?: { code: string; message: string; details?: JsonValue } }
+export interface ReconcileResult<TOutput> { status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; output?: TOutput; error?: { code: string; message: string; retryable?: boolean; details?: JsonValue } }
 export interface ToolManifest {
   name: string
   version: string
@@ -110,7 +110,7 @@ export class ToolRegistry {
     const toolContext: ToolContext = 'aborted' in context ? { toolCallId: '', effectId: '', attemptId: '', agentId: '', laneId: '', signal: context, emit: () => {} } : context
     const output = await definition.execute(input, toolContext)
     const summary = definition.summarize?.(output)
-    if (summary !== undefined && JSON.stringify(summary).length > (definition.manifest.maxResultSummaryBytes ?? 4096)) throw new Error('TOOL_SUMMARY_TOO_LARGE')
+    if (summary !== undefined && Buffer.byteLength(JSON.stringify(summary), 'utf8') > (definition.manifest.maxResultSummaryBytes ?? 4096)) throw new Error('TOOL_SUMMARY_TOO_LARGE')
     return { output, ...(summary === undefined ? {} : { summary }), manifest: structuredClone(definition.manifest) }
   }
   async reconcileDetailed(name: string, executionRef: JsonValue, context: ReconcileContext): Promise<ReconcileResult<unknown>> {

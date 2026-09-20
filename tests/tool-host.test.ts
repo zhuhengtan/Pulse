@@ -42,6 +42,14 @@ describe('Tool SDK to Runtime Effect host', () => {
     expect([...runtime.readArtifact(artifactRef as string)]).toEqual([0, 1, 2, 255])
   })
 
+  it('enforces the Tool manifest summary byte budget', async () => {
+    const registry = new ToolRegistry()
+    registry.register(defineTool({ name: 'bounded-summary', description: 'bounded summary', input: z.object({}), output: z.object({ ok: z.boolean() }), maxResultSummaryBytes: 8, summarize: () => ({ text: '你好你好' }), execute: () => ({ ok: true }) }))
+    const executor = createToolEffectExecutor(registry)
+    const effect = { id: 'effect-summary', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'bounded-summary', kind: 'tool', concurrencyClass: 'tool', input: { name: 'bounded-summary', arguments: {} }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as EffectRecord
+    await expect(executor(effect, new AbortController().signal)).rejects.toThrow('TOOL_SUMMARY_TOO_LARGE')
+  })
+
   it('executes a registered typed tool and preserves tool correlation', async () => {
     const registry = new ToolRegistry()
     registry.register(defineTool({ name: 'add', version: '2', description: 'adds', input: z.object({ a: z.number(), b: z.number() }), output: z.object({ sum: z.number() }), summarize: (output) => ({ sum: output.sum }), execute: ({ a, b }, context) => { context.emit({ type: 'progress', data: { phase: 'computed' } }); return { sum: a + b } } }))
