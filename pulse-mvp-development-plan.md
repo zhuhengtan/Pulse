@@ -386,7 +386,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `639c6cb`：RuntimeTelemetryExporter、原子追加的 JSONL 文件 exporter 和显式 `runtime.exportTelemetry()` 宿主出口。
 - `ad09a2f`：有界 `RuntimeTelemetryAggregator`、峰值统计、阈值告警和冷却窗口。
 - `290c559` / `b8f6aec` / `417ecb1`：恢复时重建 quarantine 资源锁、放弃后释放隔离锁、校验快照引用并对 malformed snapshot fail closed。
-- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，40 个测试文件、166 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，40 个测试文件、168 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
