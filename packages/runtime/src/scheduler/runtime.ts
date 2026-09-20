@@ -1,5 +1,5 @@
 import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.js'
-import { createAgent } from '../core/factory.js'
+import { buildAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
 import type { ArtifactRecord, EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata, ProvenanceRef } from '../core/types.js'
@@ -273,12 +273,20 @@ export class PulseRuntime {
     if (this.state.lanes.size >= this.state.maxTotalLanes) throw new Error('MAX_TOTAL_LANES')
     const parent = request.parentAgentId === undefined ? undefined : this.state.agents.get(request.parentAgentId)
     if (request.parentAgentId !== undefined && !parent) throw new Error(`PARENT_AGENT_NOT_FOUND:${request.parentAgentId}`)
-    const { agent, root } = createAgent(this.state, request.goal, { programId: request.program.id, programVersion: request.program.version, step: (request.program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(initialGlobal === undefined ? {} : { initialGlobal }), ...(initialGlobalPrivacy === undefined ? {} : { initialGlobalPrivacy }), ...(request.parentAgentId === undefined ? {} : { parentAgentId: request.parentAgentId, depth: (parent?.depth ?? 0) + 1 }), ...(request.inheritedFloor === undefined ? {} : { inheritedFloor: request.inheritedFloor }) })
+    const { agent, root, nextIds } = buildAgent(this.state, request.goal, { programId: request.program.id, programVersion: request.program.version, step: (request.program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(request.maxActiveLanes === undefined ? {} : { maxActiveLanes: request.maxActiveLanes }), ...(initialGlobal === undefined ? {} : { initialGlobal }), ...(initialGlobalPrivacy === undefined ? {} : { initialGlobalPrivacy }), ...(request.parentAgentId === undefined ? {} : { parentAgentId: request.parentAgentId, depth: (parent?.depth ?? 0) + 1 }), ...(request.inheritedFloor === undefined ? {} : { inheritedFloor: request.inheritedFloor }) })
     if (warmStartResultRefs.length) root.visibleResultRefs = new Set(warmStartResultRefs)
     if (request.program.seriesKeys?.length) root.resume.locals = { $sdk: { series: { keys: [...request.program.seriesKeys], index: 0 } } }
     root.enqueueSeq = this.enqueueSeq++
     agent.state = 'running'
-    this.ready.enqueue(readyItemFromLane(root))
+    const mutations: Mutation[] = [
+      { op: 'setAgent', agentId: agent.id, record: agent },
+      { op: 'setLane', laneId: root.id, record: root },
+      { op: 'setNextIds', nextIds },
+    ]
+    this.assertStorageAdmission(mutations)
+    commitMutationTransaction(this.state, this.mutationLog, `agent:${agent.id}:created`, mutations, this.state.now, this.sessionId)
+    const committedRoot = this.state.lanes.get(root.id)!
+    this.ready.enqueue(readyItemFromLane(committedRoot))
     this.syncStoragePolicy()
     this.schedulePersistence()
     return { agentId: agent.id, laneId: root.id }

@@ -63,6 +63,6 @@ describe('Artifact store', () => {
     const { laneId } = runtime.createAgent('artifact limit', program)
     expect(() => runtime.publishArtifact({ mediaType: 'text/plain', content: 'too large', laneId })).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
     expect(runtime.state.artifacts.size).toBe(0)
-    expect(runtime.mutationLog.size).toBe(0)
+    expect(runtime.mutationLog.entries.some((entry) => entry.mutations.some((mutation) => mutation.op === 'publishArtifact'))).toBe(false)
   })
 })

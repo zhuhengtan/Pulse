@@ -591,6 +591,7 @@ function requireMutations(): typeof import('../core/mutations.js') {
         }
         case 'setGlobal': { const agent = state.agents.get(mutation.agentId)!; agent.globalVersions.set(mutation.version, mutation.value); if (mutation.metadata) { if (!agent.globalPrivacy) agent.globalPrivacy = new Map(); agent.globalPrivacy.set(mutation.version, structuredClone(mutation.metadata)) } agent.latestGlobalVersion = mutation.version; break }
         case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version, ...(mutation.history === undefined ? {} : { history: structuredClone(mutation.history) }), ...(mutation.metadata === undefined ? {} : structuredClone(mutation.metadata)) }; break }
+        case 'setNextIds': state.nextIds = { ...mutation.nextIds }; break
         case 'appendEvent': appendRuntimeEvent(state, mutation.event); break
         case 'insertMergeProposal': state.mergeProposals.set(mutation.proposal.id, mutation.proposal); break
         case 'removeMergeProposal': state.mergeProposals.delete(mutation.proposalId); break

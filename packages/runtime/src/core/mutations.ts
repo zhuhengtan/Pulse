@@ -17,6 +17,7 @@ export type Mutation =
   | { op: 'removeMergeProposal'; proposalId: string }
   | { op: 'setGlobal'; agentId: string; version: ContextVersion; value: JsonValue; metadata?: PrivacyMetadata }
   | { op: 'setLaneContext'; laneId: LaneId; value: JsonValue; version: ContextVersion; history?: HistoryRecord[]; metadata?: PrivacyMetadata }
+  | { op: 'setNextIds'; nextIds: RuntimeState['nextIds'] }
   | { op: 'appendEvent'; event: RuntimeEventInput }
   | { op: 'setNow'; now: number }
 
@@ -60,6 +61,7 @@ export function apply(state: RuntimeState, mutations: Mutation[], defaults: { se
       case 'removeMergeProposal': state.mergeProposals.delete(mutation.proposalId); break
       case 'setGlobal': { const agent = state.agents.get(mutation.agentId)!; agent.globalVersions.set(mutation.version, mutation.value); if (mutation.metadata) { if (!agent.globalPrivacy) agent.globalPrivacy = new Map(); agent.globalPrivacy.set(mutation.version, structuredClone(mutation.metadata)) } agent.latestGlobalVersion = mutation.version; break }
       case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version, ...(mutation.history === undefined ? {} : { history: structuredClone(mutation.history) }), ...(mutation.metadata === undefined ? {} : structuredClone(mutation.metadata)) }; break }
+      case 'setNextIds': state.nextIds = { ...mutation.nextIds }; break
       case 'appendEvent': appendRuntimeEvent(state, mutation.event, defaults); break
       case 'setNow': state.now = mutation.now; break
     }
