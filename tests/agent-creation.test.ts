@@ -26,4 +26,11 @@ describe('Agent creation transaction', () => {
     expect(runtime.state.nextIds).toEqual(expect.objectContaining({ agent: 1, lane: 1 }))
     expect(runtime.mutationLog.findTransaction('agent:agent-1:created')).toBeUndefined()
   })
+
+  it('supports the architecture-level run(agentId) Host API', async () => {
+    const runtime = new PulseRuntime()
+    const program: LaneProgram = { id: 'run-agent', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: point('run-agent') }) }
+    const { agentId } = runtime.createAgent('run one agent', program)
+    await expect(runtime.run(agentId)).resolves.toMatchObject({ status: 'succeeded', unresolvedEffectIds: [] })
+  })
 })

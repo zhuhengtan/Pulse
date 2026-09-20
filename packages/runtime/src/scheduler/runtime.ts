@@ -622,8 +622,12 @@ export class PulseRuntime {
     return progressed
   }
 
-  async run(maxTicks = 10_000): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }> {
-    for (let tick = 0; tick < maxTicks; tick++) {
+  async run(): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }>
+  async run(maxTicks: number): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }>
+  async run(agentId: string, maxTicks?: number): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }>
+  async run(agentOrMaxTicks: string | number = 10_000, requestedMaxTicks = 10_000): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }> {
+    if (typeof agentOrMaxTicks === 'string') return this.runAgent(agentOrMaxTicks, requestedMaxTicks)
+    for (let tick = 0; tick < agentOrMaxTicks; tick++) {
       const work = this.tick()
       await this.flushPersistence()
       this.refreshWaits()
