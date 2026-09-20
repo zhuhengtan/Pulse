@@ -71,6 +71,7 @@
 | 派生 taint 传播 | Result/Global/Lane 来源的叶子 taint 以带来源路径继续传播到 Effect Result、Complete Result 与 Context metadata | `tests/privacy-provenance.test.ts` | `85be1e9` |
 | Result summary 大小门禁 | 按 Runtime 配置限制结构化摘要字节数；超限摘要不进入 ResultStore，并追加 `result.summary_rejected` 审计事件；限制随 Session 恢复 | `tests/result-summary-budget.test.ts`、`tests/storage-session.test.ts` | `4cec053` |
 | Artifact 引用与存储 | Runtime 提供带 SHA-256、media type、大小、隐私来源、pin/residency 的 ArtifactRecord；支持内容读取、Session 恢复及 Artifact-derived provenance | `tests/artifacts.test.ts`、`tests/storage-session.test.ts` | `da66f82` |
+| Artifact Context 接入 | LLM Context 显式接收 `artifactRefs`，投影记录 Artifact 元数据、隐私与来源；DSL `inputs.artifacts` 自动合并到 Effect provenance | `tests/artifacts.test.ts`、`tests/m3-context-adapters.test.ts`、`tests/dsl-host-macros.test.ts` | `e60f13f` |
 | Fork Affinity 组内依赖 | 相同 Program 的亲和折叠支持组内 `dependsOn` 拓扑排序、成功/已结算条件、成员结果注入与失败传播；运行时 `forkAffinity=coalesce` 自动合并可安全折叠的 Fork，并按原始成员 key 恢复 Join Outcome；组外依赖仍保持 fail-closed | `tests/fork-affinity.test.ts` | `c0bb520`、`2ec9f05` |
 | Session Agent 隔离 | `runtime.start(agentId)` 只等待指定 Agent；同一 Runtime 中其他 Agent/Detached scope 不会污染该 Session 的 outcome；计时器推进和终态持久化保持一致 | `tests/m4-dsl-e2e.test.ts`、`tests/dsl-host-macros.test.ts`、`tests/storage-outbox.test.ts` | `4c9668c` |
 | Session 事实流隔离 | Session stream 只发出目标 Agent 的事实事件，但游标跨过共享 Runtime 的其他 Agent 事件；Host snapshot 同时暴露 Global Context privacy metadata | `tests/m4-dsl-e2e.test.ts`、`tests/warm-start.test.ts` | `fe9554a`、`596fecb` |
