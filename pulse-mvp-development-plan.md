@@ -71,6 +71,7 @@
 | 恢复 Effect 状态事务 | 恢复时 running Effect 的 requeue/reconcile_required 修正通过 `setEffect` MutationLog 记录，避免恢复阶段直接改写 live record | `tests/storage-outbox.test.ts` | 本轮恢复 Effect 事务提交 |
 | Effect dispatch 状态事务 | Effect 取得 outbox/锁后，`running` 状态与 Attempt 记录先经 storage admission + `setEffect` MutationLog，再启动 Executor | `tests/runtime-control.test.ts` | 本轮 Effect dispatch 事务提交 |
 | Remote Unknown 重试准入 | Remote Unknown 的可重试分支先在候选 Effect 上计算 retry，准入失败不修改 running Effect | `tests/runtime-control.test.ts` | 本轮 Remote Unknown 重试准入提交 |
+| Effect 正常结算事务 | Effect settled、Result/Artifact、Lane history、Tool correlation 与 metadata 事件统一由一个 MutationLog 事务提交，并保持旧 record 引用兼容 | `tests/late-attempt.test.ts`、`tests/storage-outbox.test.ts` | 本轮 Effect 正常结算事务提交 |
 | Effect 控制路径准入 | 取消、超时、立即隔离、Remote Unknown、对账放弃、重试的控制事件与 Effect/Lane 状态变更先做统一 StoragePolicy 预检，失败时不留下半完成状态 | `tests/runtime-control.test.ts`、`tests/retry-policy.test.ts` | 本轮 Effect 控制准入提交、本轮 Remote Unknown 准入提交、本轮对账放弃准入提交、本轮重试准入提交 |
 | Runtime 生命周期自动持久化 | 配置 `persistenceBackend` 后，Tick/异步 Effect 结算、取消与对账自动排队保存；`run()`、`shutdown()` 等待 durable save；显式 `flushPersistence()` 支持宿主主动冲刷 | `tests/storage-outbox.test.ts` | `7a2ed52`、`3bb7ac0` |
 | 运行观测 | 只读 telemetry 聚合 agent/lane/effect/attempt、route 排除、provider/model、slot wait、usage/cost | `tests/provider-host.test.ts` | `e68cae0` |
@@ -518,6 +519,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - 本轮恢复 Effect 事务提交：恢复阶段对 running Effect 的 requeue/reconcile_required 修正写入 MutationLog，并继续恢复 Quarantine。
 - 本轮 Effect dispatch 事务提交：Effect 只有在 `running + Attempt` 通过 storage admission 并写入 MutationLog 后才进入 Executor。
 - 本轮 Remote Unknown 重试准入提交：可重试 Remote Unknown 不再先改 live Effect，retry admission 失败时保留原 Attempt 状态。
+- 本轮 Effect 正常结算事务提交：正常结算不再分散写入 Effect/Result/Artifact/Lane/Event，统一由 settlement MutationLog 事务提交。
 - 本轮取消准入提交：取消父/子 Agent 前统一预检 Lane、Effect、Agent 事件，存储准入失败时不修改任何取消状态。
 - 本轮事件归档提交：Checkpoint 截断前写入 EventArchive 并记录归档水位，归档失败时保留内存事实事件和旧持久化快照。
 - `2250df2`：Runtime Worker lease 暴露远程 claim/renew/complete/fail 协议；adapters 增加 HTTP Coordinator Server、Client、polling Worker 和 HTTP EffectExecutor，测试覆盖真实本机 HTTP 往返、heartbeat 与 Runtime Effect 闭环。

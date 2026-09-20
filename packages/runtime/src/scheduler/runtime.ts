@@ -902,22 +902,16 @@ export class PulseRuntime {
       this.schedulePersistence()
       return
     }
-    Object.assign(storedEffect, effect)
-    if (publishedArtifact) { this.state.artifacts.set(publishedArtifact.ref, publishedArtifact); advanceArtifactId(this.state, publishedArtifact.ref) }
-    if (result) {
-      this.state.results.set(result.id, result)
-      this.state.nextIds.result = Math.max(this.state.nextIds.result, resultSequence + 1)
-    }
-    if (journalLane) this.state.lanes.set(journalLane.id, journalLane)
-    if (correlation) this.state.toolCallCorrelations.set(effect.toolCallId!, correlation)
     this.releaseEffectLocks(effectId)
     this.outbox.ack(`${effect.id}:${effect.attemptId}`)
     for (const observation of effectiveExecution.observations ?? []) this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now })
-    if (effectiveExecution.summary !== undefined && !summaryAllowed) this.emit({ type: 'result.summary_rejected', effectId, data: { maxBytes: this.state.maxResultSummaryBytes, actualBytes: Buffer.byteLength(JSON.stringify(effectiveExecution.summary), 'utf8') } })
-    const settledEvent = this.emit({ type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
-    const metadataEvent = execution.metadata === undefined ? undefined : this.emit({ type: 'effect.execution_metadata', effectId, data: execution.metadata })
+    const settlementTransactionId = `effect:${effect.id}:${settledAttemptId}:settled`
+    const settlementMutations = [...publicationMutations]
+    commitMutationTransaction(this.state, this.mutationLog, settlementTransactionId, settlementMutations, this.state.now, this.sessionId)
+    Object.assign(storedEffect, effect)
+    this.state.effects.set(effectId, storedEffect)
+    if (journalLane) { const liveLane = this.state.lanes.get(journalLane.id); if (liveLane) { Object.assign(liveLane, journalLane); this.state.lanes.set(journalLane.id, liveLane) } }
     this.recordBudgetMetadata(execution.metadata)
-    this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:settled`, result, [settledEvent, ...(metadataEvent ? [metadataEvent] : [])], journalLane, correlation, publishedArtifact)
     this.syncStoragePolicy()
     this.refreshWaits()
     this.dispatchQueuedEffects()
