@@ -7,6 +7,25 @@ describe('LLM action decoder', () => {
     expect(actions).toEqual([{ type: 'submit_effects', effects: [{ key: 'tool:pulse-tool-1', toolCallId: 'pulse-tool-1', kind: 'tool', concurrencyClass: 'tool', input: { toolCallId: 'pulse-tool-1', name: 'read_file', arguments: { path: 'a.txt' } } }], wait: { onUnsatisfied: 'resume_with_error', reason: 'effect' } }])
   })
 
+  it('propagates tool-call privacy and provenance to the effect and input', () => {
+    const actions = decodeLLMActions({ text: '', finishReason: 'tool_calls', toolCalls: [{ toolCallId: 'pulse-tool-2', name: 'read_file', input: { path: 'secret.txt' } }] }, {
+      allowedTools: new Set(['read_file']),
+      privacy: 'local_only',
+      derivedFrom: [{ kind: 'result', ref: 'result:secret' }],
+    })
+    expect(actions[0]).toMatchObject({
+      type: 'submit_effects',
+      effects: [{
+        privacy: 'local_only',
+        derivedFrom: [{ kind: 'result', ref: 'result:secret' }],
+        input: {
+          privacy: 'local_only',
+          derivedFrom: [{ kind: 'result', ref: 'result:secret' }],
+        },
+      }],
+    })
+  })
+
   it('rejects disallowed, malformed, and non-serializable actions', () => {
     expect(() => decodeLLMActions({ text: '', finishReason: 'tool_calls', toolCalls: [{ toolCallId: 'call-1', name: 'shell', input: {} }] }, { allowedTools: new Set(['read_file']) })).toThrow('ACTION_TOOL_NOT_ALLOWED')
     expect(() => decodeLLMActions({ text: '', finishReason: 'stop', toolCalls: [{ toolCallId: 'call-1', name: 'read_file', input: {} }] }, { allowedTools: new Set(['read_file']) })).toThrow(OutputValidationError)

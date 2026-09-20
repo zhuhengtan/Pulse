@@ -1,4 +1,4 @@
-import type { JsonValue, RuntimeAction } from '../core/types.js'
+import type { JsonValue, PrivacyLabel, ProvenanceRef, RuntimeAction } from '../core/types.js'
 import type { LLMResult } from './router.js'
 import { validateActionToolCalls, validateAdapterResult } from './router.js'
 
@@ -22,6 +22,12 @@ export interface ActionDecoderOptions {
   allowedTools: ReadonlySet<string>
   wait?: boolean
   llmEffectId?: string
+  privacy?: PrivacyLabel
+  derivedFrom?: ProvenanceRef[]
+}
+
+function cloneProvenanceRefs(refs: readonly ProvenanceRef[] | undefined): ProvenanceRef[] | undefined {
+  return refs === undefined ? undefined : refs.map((ref) => typeof ref === 'string' ? ref : { ...ref })
 }
 
 export function decodeLLMActions(result: LLMResult, options: ActionDecoderOptions): RuntimeAction[] {
@@ -31,7 +37,22 @@ export function decodeLLMActions(result: LLMResult, options: ActionDecoderOption
   if (result.toolCalls.length === 0) throw new Error('INVALID_TOOL_CALL_FINISH_REASON')
   return [{
     type: 'submit_effects',
-    effects: result.toolCalls.map((call) => ({ key: `tool:${call.toolCallId}`, toolCallId: call.toolCallId, ...(options.llmEffectId === undefined ? {} : { llmEffectId: options.llmEffectId }), kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { toolCallId: call.toolCallId, name: call.name, arguments: toJsonValue(call.input) } })),
+    effects: result.toolCalls.map((call) => {
+      const derivedFrom = cloneProvenanceRefs(options.derivedFrom)
+      const input: Record<string, JsonValue> = { toolCallId: call.toolCallId, name: call.name, arguments: toJsonValue(call.input) }
+      if (options.privacy !== undefined) input.privacy = options.privacy
+      if (derivedFrom !== undefined) input.derivedFrom = derivedFrom as unknown as JsonValue
+      return {
+        key: `tool:${call.toolCallId}`,
+        toolCallId: call.toolCallId,
+        ...(options.llmEffectId === undefined ? {} : { llmEffectId: options.llmEffectId }),
+        ...(options.privacy === undefined ? {} : { privacy: options.privacy }),
+        ...(derivedFrom === undefined ? {} : { derivedFrom }),
+        kind: 'tool' as const,
+        concurrencyClass: 'tool' as const,
+        input,
+      }
+    }),
     ...(options.wait === false ? {} : { wait: { onUnsatisfied: 'resume_with_error' as const, reason: 'effect' as const } }),
   }]
 }
