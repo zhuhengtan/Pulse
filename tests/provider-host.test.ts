@@ -51,7 +51,7 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     expect(called).toBe(false)
   })
 
-  it('routes local_only requests, falls back within one Effect, and records attempt metadata', async () => {
+  it('routes local_only requests, re-enters the queue for fallback, and records attempt metadata', async () => {
     const registry = new InMemoryModelRegistry()
     registry.register({ id: 'local-first', providerId: 'p1', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 2 })
     registry.register({ id: 'local-second', providerId: 'p2', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 1 })
