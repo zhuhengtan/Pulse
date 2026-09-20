@@ -9,6 +9,7 @@ describe('Finding evidence records', () => {
     const finding = publishFinding(state, { laneId: root.id, statement: 'The artifact is local-only.', evidenceRefs: [{ kind: 'artifact', ref: artifact.ref }] })
     expect(finding).toMatchObject({ kind: 'finding', privacy: 'local_only', statement: 'The artifact is local-only.', evidenceRefs: [{ kind: 'artifact', ref: artifact.ref }] })
     expect(state.results.get(finding.id)?.derivedFrom).toEqual([{ kind: 'artifact', ref: artifact.ref }])
+    expect(state.lanes.get(root.id)?.visibleResultRefs?.has(finding.id)).toBe(true)
   })
 
   it('rejects invisible evidence and invalid persistence references', () => {

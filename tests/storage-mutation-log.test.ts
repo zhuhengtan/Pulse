@@ -65,6 +65,7 @@ describe('mutation log and replay', () => {
     restored.artifacts.set(artifact.ref, artifact)
     log.replay(restored)
     expect(restored.results.get(record.id)).toMatchObject({ kind: 'finding', statement: record.statement, evidenceRefs: record.evidenceRefs })
+    expect(restored.lanes.get(root.id)?.visibleResultRefs?.has(record.id)).toBe(true)
     expect(restored.nextIds.result).toBe(2)
   })
 

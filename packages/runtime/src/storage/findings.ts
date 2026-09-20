@@ -53,6 +53,9 @@ export function prepareFindingPublication(state: RuntimeState, publication: Find
 export function publishFinding(state: RuntimeState, publication: FindingPublication): FindingRecord {
   const record = prepareFindingPublication(state, publication)
   state.results.set(record.id, record)
+  const lane = state.lanes.get(record.laneId)
+  if (lane?.visibleResultRefs) lane.visibleResultRefs.add(record.id)
+  else if (lane) lane.visibleResultRefs = new Set([record.id])
   advanceFindingId(state, record.id)
   return structuredClone(record)
 }
