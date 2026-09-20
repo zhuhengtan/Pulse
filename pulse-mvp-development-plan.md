@@ -52,6 +52,7 @@
 | LLM Preparation | bounded preparing/prepared 窗口、generation、迟到准备丢弃、explain 展示 | `tests/provider-host.test.ts` | `944c3ad` |
 | Provider 请求与 usage | modelId、工具 schema、structured output schema、uncached token、latency/cost 归一化与 metadata | `tests/m3-context-adapters.test.ts`、`tests/provider-host.test.ts` | `fa723c7` |
 | Provider SSE 观测流 | OpenAI-compatible 与 Anthropic SSE 读取 `llm:chunk` 文本观测；工具参数只在完整流结束后归一化，不执行未闭合参数；非 SSE 响应安全回退 JSON | `tests/m3-context-adapters.test.ts` | `44c8608` |
+| Effect 实时观测桥接 | EffectExecutor 提供实时 observation emitter；Tool progress 与 Provider chunk 在 Effect 尚未结算时进入 ObservationInbox，Session stream 可即时读到；直接调用 EffectExecutor 时仍保留结算 observations 兼容行为 | `tests/tool-host.test.ts` | `8e14534` |
 | 自适应模型路由 | `AdaptiveModelRouter` 基于质量、延迟、价格、缓存和探索项重排合规候选；Provider Executor 自动记录 Attempt 反馈，并支持经过校验的 snapshot/restore | `tests/adaptive-routing.test.ts`、`tests/provider-host.test.ts` | `0d17d7c`、`4c65d38` |
 | DSL Draft 数组语义与运行诊断 | `push→append`、数组索引/splice/sort→整数组 set；explain 补充队列、等待、watchdog、preparation、execution metadata | `tests/dsl-context.test.ts`、`tests/runtime-control.test.ts` | `d5c6ef2`、`f57ae27` |
 | Mutation 事务预检 | clone 预检失败不写日志、不改变运行时；提交时保留 Lane/Effect 对象身份；日志预备失败不消耗序号，状态 apply 与日志提交分层 | `tests/storage-mutation-log.test.ts` | `70c3534`、`6c89fe2` |
@@ -83,7 +84,7 @@
 | Effect 结算拒绝事务 | Result/Artifact 超限时以失败 Effect + 可容纳的 settled 事件作为兜底事务，不留下半个 Artifact/Result | `tests/result-summary-budget.test.ts` | 本轮 Effect 结算拒绝事务提交 |
 | Effect 控制路径准入 | 取消、超时、立即隔离、Remote Unknown、对账放弃、重试的控制事件与 Effect/Lane 状态变更先做统一 StoragePolicy 预检，失败时不留下半完成状态 | `tests/runtime-control.test.ts`、`tests/retry-policy.test.ts` | 本轮 Effect 控制准入提交、本轮 Remote Unknown 准入提交、本轮对账放弃准入提交、本轮重试准入提交 |
 | Runtime 生命周期自动持久化 | 配置 `persistenceBackend` 后，Tick/异步 Effect 结算、取消与对账自动排队保存；`run()`、`shutdown()` 等待 durable save；显式 `flushPersistence()` 支持宿主主动冲刷 | `tests/storage-outbox.test.ts` | `7a2ed52`、`3bb7ac0` |
-| 运行观测 | 只读 telemetry 聚合 agent/lane/effect/attempt、route 排除、provider/model、slot wait、usage/cost | `tests/provider-host.test.ts` | `e68cae0` |
+| 运行观测 | 只读 telemetry 聚合与实时 ObservationInbox 镜像 | `tests/provider-host.test.ts`、`tests/tool-host.test.ts` | `e68cae0`、`8e14534` |
 | 输出预算与可恢复 Tool | `maxOutputTokens` 参与窗口预留、候选准入和 Provider 请求；structured schema 与最终 `outputSchema` 契约校验；保存 executionRef 并提供 RecoverableTool 对账入口 | `tests/provider-host.test.ts`、`tests/tool-host.test.ts`、`tests/m3-context-adapters.test.ts` | `d451014`、`b4461a8`、`83ebe38` |
 | 高级 Wait 与 Tool 准入 | Wait 支持 `any/quorum`、独立 deadline 和恢复重建；Tool Manifest 可在提交前注入可信锁、副作用策略与默认超时 | `tests/advanced-join.test.ts`、`tests/tool-host.test.ts` | `af1ff6f`、`f523c71`、`a95d4f5` |
 | Detached/background scope | Child Agent 可显式转入后台 scope；父取消不传播到 detached child，仍受 Runtime shutdown 约束，并支持查询与 attach | `tests/agent-effect.test.ts` | `e3ef1ce` |
@@ -591,7 +592,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，54 个测试文件、298 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，54 个测试文件、299 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
@@ -609,7 +610,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | Checkpoint / 事实事件保留 | 单进程 checkpoint 截断、EventArchive 归档与恢复 gap 已实现 | 事实状态、Mutation 水位、事件截断水位、外部归档水位和 Session gap 已有测试；跨进程故障注入和生产存储仍需验证 |
 | Fork Affinity | DSL 在收到建议后可安全折叠同 Program 组；Runtime 提供可选自动 coalesce | 已验证组内依赖拓扑、成员结果注入、失败传播、原始 Join key 恢复，以及 `forkAffinity=coalesce` 的通用运行时路径；复杂跨组/外部依赖保持不折叠，生产负载校准仍需验证 |
 | Worker 执行与迁移 | 本地 HTTP/HTTPS lease transport、Bearer 鉴权、polling Worker、请求超时、远程未知对账、snapshot/restore、Runtime 适配、无重启 token 轮换、文件和 SQLite lease CAS、SQLite 分布式条件事务已实现 | 已验证真实 HTTP/HTTPS claim/renew/complete/fail、未授权拒绝、短 lease heartbeat、token 重叠轮换、请求超时、写副作用响应丢失后的 `remote_unknown`/`executionRef`、in-flight lease 恢复、多 Worker 语义、独立 SQLite Coordinator 单任务认领、陈旧 Coordinator 冲突和 Runtime Effect 闭环；真实多主机故障注入、生产 SQLite 运维、Worker 迁移和跨进程 Agent scope 仍需验证 |
-| 运行观测 | Runtime 侧已有只读出口、JSONL/HTTP exporter、聚合和告警规则 | `inspect/explain`、`telemetry()`、JSONL/HTTP exporter 和有界聚合器已覆盖 route 排除原因、provider/model slot、Attempt usage/cost、峰值与阈值告警；外部生产指标系统接入仍需宿主配置 |
+| 运行观测 | Runtime 侧已有只读出口、实时 ObservationInbox 镜像、JSONL/HTTP exporter、聚合和告警规则 | `inspect/explain`、`telemetry()`、`session.stream()`、JSONL/HTTP exporter 和有界聚合器已覆盖 Tool progress、Provider chunk、route 排除原因、provider/model slot、Attempt usage/cost、峰值与阈值告警；外部生产指标系统接入仍需宿主配置 |
 
 ## 6. 实施时间线与任务清单（Checklist）
 
@@ -627,7 +628,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 本方案继承并落地《Pulse Runtime 架构设计》与《Pulse Application DSL 规范》：
 1. 以主架构第 26 节的 M0/M1 标注为唯一验收来源，不重复维护场景数量。
 2. M1 的真实 Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder、Session 和确定性端到端示例已贯通；其他 Provider 与真实网络任务属于独立集成验证。
-3. ResultRef 隔离、record/leaf Privacy、ContextDelta provenance、Watchdog、Fork Affinity（含 DSL series collapse 与 Runtime 可选自动 coalesce）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由及快照恢复、按 Agent 隔离的 Session、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、恢复程序/工具版本 fail-closed、ResultStore 外部正文读穿、事实 EventArchive 归档、取消事务存储准入、correlated telemetry、JSONL/HTTP exporter、聚合和告警规则、Bearer-authenticated HTTP lease-based Worker transport、Worker snapshot/restore、HTTP lease reaper、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、Snapshot 外部归档索引、生产级持久化事务边界、生产级 Worker TLS/密钥轮换与共享 durable lease store、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
+3. ResultRef 隔离、record/leaf Privacy、ContextDelta provenance、Watchdog、Fork Affinity（含 DSL series collapse 与 Runtime 可选自动 coalesce）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射与实时 Observation emitter、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由及快照恢复、按 Agent 隔离的 Session、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、恢复程序/工具版本 fail-closed、ResultStore 外部正文读穿、事实 EventArchive 归档、取消事务存储准入、correlated telemetry、JSONL/HTTP exporter、聚合和告警规则、Bearer-authenticated HTTP lease-based Worker transport、Worker snapshot/restore、HTTP lease reaper、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、Snapshot 外部归档索引、生产级持久化事务边界、生产级 Worker TLS/密钥轮换与共享 durable lease store、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
 已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
