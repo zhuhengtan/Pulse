@@ -5,10 +5,11 @@ import type { ValidationResult, Mutation } from '../core/mutations.js'
 import { effectivePrivacy, privacyMetadataForDerivedRef, privacyRank, privacyTaintPrivacy, provenanceRefId, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord, ForkLaneSpec, PrivacyMetadata, PrivacyTaint, ProvenanceRef } from '../core/types.js'
 import { appendRuntimeEvent } from '../core/events.js'
-import { ContextBuilder, estimateHistoryTokens, historyPressure } from '../context/builder.js'
+import { ContextBuilder, contentHash, estimateHistoryTokens, historyPressure, stableSerialize } from '../context/builder.js'
 
 const isLocal = (value: TargetRef | LocalRef): value is LocalRef => 'local' in value
 const clone = <T>(value: T): T => structuredClone(value)
+const resultMetadata = (value: JsonValue): { sizeBytes: number; contentHash: string } => ({ sizeBytes: Buffer.byteLength(stableSerialize(value), 'utf8'), contentHash: contentHash(value) })
 const laneCopy = (lane: LaneRecord): LaneRecord => ({ ...lane, resume: clone(lane.resume), context: clone(lane.context), ...(lane.visibleResultRefs === undefined ? {} : { visibleResultRefs: new Set(lane.visibleResultRefs) }), children: new Set(lane.children), ownedEffectIds: new Set(lane.ownedEffectIds), ...(lane.pendingResumeInput === undefined ? {} : { pendingResumeInput: clone(lane.pendingResumeInput) }), ...(lane.pendingOutcome === undefined ? {} : { pendingOutcome: clone(lane.pendingOutcome) }) })
 function mergePrivacyTaints(...groups: Array<readonly PrivacyTaint[] | undefined>): PrivacyTaint[] {
   const output: PrivacyTaint[] = []; const seen = new Set<string>()
@@ -480,7 +481,9 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       if (sourcePrivacy.error) return { rejection: error(sourcePrivacy.error, 'Privacy downgrade references an unknown result.') }
       const result: import('../core/types.js').ResultRecord = {
         id: action.outputRef,
+        producer: { kind: 'lane', id: lane.id },
         value: clone(action.value ?? null),
+        ...resultMetadata(action.value ?? null),
         storageState: 'memory',
         pinCount: 0,
         privacy: action.targetPrivacy,
@@ -534,7 +537,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         }
       }
       const resultId = `result-${resultCounter++}`
-      mutations.push({ op: 'publishResult', record: { id: resultId, value: clone(action.result), storageState: 'memory', pinCount: 0, privacy, ...(propagatedTaints.length ? { privacyTaints: propagatedTaints } : {}), derivedFrom: [...(action.derivedFrom ?? [])] } })
+      mutations.push({ op: 'publishResult', record: { id: resultId, producer: { kind: 'lane', id: lane.id }, value: clone(action.result), ...resultMetadata(action.result), storageState: 'memory', pinCount: 0, privacy, ...(propagatedTaints.length ? { privacyTaints: propagatedTaints } : {}), derivedFrom: [...(action.derivedFrom ?? [])] } })
       if (workingLane.visibleResultRefs) workingLane.visibleResultRefs.add(resultId)
       else workingLane.visibleResultRefs = new Set([resultId])
       if (lane.ownerLaneId !== undefined) {

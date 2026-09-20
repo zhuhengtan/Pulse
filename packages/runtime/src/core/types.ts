@@ -182,6 +182,8 @@ export interface AttemptRecord {
 export interface ResultRecord {
   id: ResultRef
   effectId?: EffectId
+  /** Stable producer identity used by DSL metadata and audit tooling. */
+  producer?: TargetRef
   kind?: 'result' | 'finding' | 'rejected_output'
   statement?: string
   evidenceRefs?: DataRef[]
@@ -192,6 +194,8 @@ export interface ResultRecord {
   privacyTaints?: PrivacyTaint[]
   derivedFrom: ProvenanceRef[]
   summary?: JsonValue
+  sizeBytes?: number
+  contentHash?: string
   normalized?: JsonValue
   downgrade?: {
     sourceRefs: ProvenanceRef[]

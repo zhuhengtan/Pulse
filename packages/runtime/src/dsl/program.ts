@@ -4,6 +4,7 @@ import { globalContextRef, laneContextRef } from '../core/types.js'
 import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, ProvenanceRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec, WaitResolution } from '../core/types.js'
 import { createDraftProxy } from './context-proxy.js'
 import type { ProgramRef } from './templates.js'
+import { contentHash, stableSerialize } from '../context/builder.js'
 
 export type NextStepTarget<TState = unknown> = string | { step: string } | { complete: { value?: JsonValue; privacy?: PrivacyLabel; children?: 'reject_if_active' | 'cancel' | 'await' } } | { fail: { code: string; message: string; retryable?: boolean; details?: JsonValue; privacy?: PrivacyLabel; derivedFrom?: ProvenanceRef[] } }
 export type ScalarProjection<T> = T extends string | number | boolean | null ? T : T extends readonly unknown[] ? never : T extends object ? { [K in keyof T]: T[K] extends string | number | boolean | null ? T[K] : never } : never
@@ -11,7 +12,7 @@ export interface InstructionView<TState> { goal: string; state: ScalarProjection
 export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; artifacts?: string[]; events?: string[] }
 export interface HistoryCompactionOptions { summarizeTask: string; keepRecentRounds: number }
 export interface HistoryRecordMeta { seq: number; effectId?: string; resultRefs: ResultRef[]; resultSelection?: Array<{ ref: ResultRef; rule: string; hash: string }>; result?: ResultRef; findings?: ResultRef[]; privacy: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[] }
-export interface ResultMeta { ref: ResultRef; privacy: PrivacyLabel; derivedFrom: ProvenanceRef[]; summary?: JsonValue }
+export interface ResultMeta { ref: ResultRef; privacy: PrivacyLabel; derivedFrom: ProvenanceRef[]; sizeBytes: number; hash: string; producer: { kind: 'lane' | 'effect'; id: string }; summary?: JsonValue }
 export interface StepContext<TState = JsonValue> {
   lane: Readonly<LaneRecord>
   goal: string
@@ -244,7 +245,21 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
   collectResumeResultRefs(context.resumeInput, derivedRefs)
   for (const record of context.lane.context.history) for (const ref of record.resultRefs) derivedRefs.add(ref)
   const history = context.lane.context.history.map((record: HistoryRecord): HistoryRecordMeta => ({ seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), resultRefs: [...record.resultRefs], ...(record.resultSelection === undefined ? {} : { resultSelection: clone(record.resultSelection) }), ...(record.result === undefined ? {} : { result: record.result }), ...(record.findings === undefined ? {} : { findings: [...record.findings] }), privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: clone(record.privacyTaints) }) }))
-  const resultMeta = (ref: ResultRef): ResultMeta | undefined => { const result = resultVisible(context, ref) ? context.state.results.get(ref) : undefined; if (result) derivedRefs.add(ref); return result ? { ref, privacy: result.privacy, derivedFrom: [...result.derivedFrom], ...(result.summary === undefined ? {} : { summary: clone(result.summary) }) } : undefined }
+  const resultMeta = (ref: ResultRef): ResultMeta | undefined => {
+    const result = resultVisible(context, ref) ? context.state.results.get(ref) : undefined
+    if (result) derivedRefs.add(ref)
+    if (!result) return undefined
+    const value = result.value ?? null
+    return {
+      ref,
+      privacy: result.privacy,
+      derivedFrom: [...result.derivedFrom],
+      sizeBytes: result.sizeBytes ?? Buffer.byteLength(stableSerialize(value), 'utf8'),
+      hash: result.contentHash ?? contentHash(value),
+      producer: result.producer ?? (result.effectId === undefined ? { kind: 'lane', id: context.lane.id } : { kind: 'effect', id: result.effectId }),
+      ...(result.summary === undefined ? {} : { summary: clone(result.summary) }),
+    }
+  }
   const globalDelta = (value: { ops: ContextOp[] | ((draft: Record<string, JsonValue>) => void); privacy?: PrivacyLabel; proposal: boolean }): void => {
     const ops = typeof value.ops === 'function' ? (() => { if (!globalDraftProxy) throw Object.assign(new Error('GLOBAL_DRAFT_REQUIRES_OBJECT'), { code: 'GLOBAL_DRAFT_REQUIRES_OBJECT', retryable: false }); value.ops(globalDraftProxy.draft as Record<string, JsonValue>); return globalDraftProxy.changes().ops as ContextOp[] })() : value.ops
     delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, sourceLaneId: context.lane.id, ops: clone(ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal }

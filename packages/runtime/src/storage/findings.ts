@@ -1,5 +1,6 @@
 import type { DataRef, FindingRecord, LaneId, PrivacyLabel, PrivacyTaint, RuntimeState } from '../core/types.js'
 import { effectivePrivacy, privacyMetadataForDerivedRef, privacyRank, privacyTaintsForDerivedRefs, provenanceRefId, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
+import { contentHash, stableSerialize } from '../context/builder.js'
 
 export interface FindingPublication {
   statement: string
@@ -37,12 +38,15 @@ export function prepareFindingPublication(state: RuntimeState, publication: Find
   if (state.results.has(ref)) throw new Error('FINDING_REF_ALREADY_EXISTS')
   const record: FindingRecord = {
     id: ref,
+    producer: { kind: 'lane', id: lane.id },
     kind: 'finding',
     agentId: lane.agentId,
     laneId: lane.id,
     statement: publication.statement,
     evidenceRefs: structuredClone(publication.evidenceRefs),
     value: { statement: publication.statement, evidenceRefs: structuredClone(publication.evidenceRefs) },
+    sizeBytes: Buffer.byteLength(stableSerialize({ statement: publication.statement, evidenceRefs: publication.evidenceRefs }), 'utf8'),
+    contentHash: contentHash({ statement: publication.statement, evidenceRefs: publication.evidenceRefs }),
     storageState: 'memory',
     pinCount: 0,
     privacy,

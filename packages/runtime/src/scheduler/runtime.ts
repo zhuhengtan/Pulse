@@ -16,7 +16,7 @@ import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import { apply, type Mutation } from '../core/mutations.js'
 import { ContextMerger, type MergePlan } from '../context/merger.js'
-import { appendHistory, contentHash, historyPressure } from '../context/builder.js'
+import { appendHistory, contentHash, historyPressure, stableSerialize } from '../context/builder.js'
 import { validateJsonSchema } from '../models/router.js'
 import { SessionStoragePolicy, type StoragePolicyConfig } from '../storage/policy.js'
 import { collectRuntimeTelemetry, type RuntimeTelemetryExporter, type RuntimeTelemetrySnapshot } from './telemetry.js'
@@ -90,6 +90,8 @@ export interface RuntimeBudgetConfig { maxTotalAttempts?: number; maxLLMAttempts
 export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' | 'final'; include?: 'facts' | 'facts_and_findings'; relevanceRefs?: string[] }
 export interface AgentCreateRequest { goal: string; program: LaneProgram | ProgramRef; agentId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string; inheritedFloor?: number }
 export interface BackgroundAgentInfo { agentId: string; rootLaneId: string; state: NonNullable<import('../core/types.js').AgentRecord['state']>; detached: true }
+
+function resultMetadata(value: JsonValue): { sizeBytes: number; contentHash: string } { return { sizeBytes: Buffer.byteLength(stableSerialize(value), 'utf8'), contentHash: contentHash(value) } }
 
 export class ProgramRegistry {
   private readonly records = new Map<string, LaneProgram>()
@@ -1052,7 +1054,7 @@ export class PulseRuntime {
     const outputTaints = [...sourceTaints, ...(effectiveExecution.privacyTaints ?? [])]
     const rejectedTaints = [...sourceTaints, ...(effectiveExecution.rejectedOutput?.privacyTaints ?? [])]
     const summaryAllowed = effectiveExecution.summary === undefined || Buffer.byteLength(JSON.stringify(effectiveExecution.summary), 'utf8') <= this.state.maxResultSummaryBytes
-    const result = effectiveStatus === 'succeeded' && !taintError ? { id: resultId, effectId, value: effectiveExecution.value, storageState: 'memory' as const, pinCount: 0, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), outputTaints), ...(outputTaints.length ? { privacyTaints: outputTaints } : {}), derivedFrom: resultDerivedFrom, ...(effectiveExecution.normalized === undefined ? {} : { normalized: effectiveExecution.normalized }), ...(summaryAllowed && effectiveExecution.summary !== undefined ? { summary: effectiveExecution.summary } : {}) } : rejectedOutputId && effectiveExecution.rejectedOutput && !taintError ? { id: rejectedOutputId, effectId, kind: 'rejected_output' as const, value: effectiveExecution.rejectedOutput.value, storageState: 'memory' as const, pinCount: 0, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.rejectedOutput.privacy ?? effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), rejectedTaints), ...(rejectedTaints.length ? { privacyTaints: rejectedTaints } : {}), derivedFrom: [...(effectiveExecution.rejectedOutput.derivedFrom ?? effect.derivedFrom ?? [])] } : undefined
+    const result = effectiveStatus === 'succeeded' && !taintError ? { id: resultId, effectId, producer: { kind: 'effect' as const, id: effect.id }, value: effectiveExecution.value, ...resultMetadata(effectiveExecution.value), storageState: 'memory' as const, pinCount: 0, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), outputTaints), ...(outputTaints.length ? { privacyTaints: outputTaints } : {}), derivedFrom: resultDerivedFrom, ...(effectiveExecution.normalized === undefined ? {} : { normalized: effectiveExecution.normalized }), ...(summaryAllowed && effectiveExecution.summary !== undefined ? { summary: effectiveExecution.summary } : {}) } : rejectedOutputId && effectiveExecution.rejectedOutput && !taintError ? { id: rejectedOutputId, effectId, producer: { kind: 'effect' as const, id: effect.id }, kind: 'rejected_output' as const, value: effectiveExecution.rejectedOutput.value, ...resultMetadata(effectiveExecution.rejectedOutput.value), storageState: 'memory' as const, pinCount: 0, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.rejectedOutput.privacy ?? effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), rejectedTaints), ...(rejectedTaints.length ? { privacyTaints: rejectedTaints } : {}), derivedFrom: [...(effectiveExecution.rejectedOutput.derivedFrom ?? effect.derivedFrom ?? [])] } : undefined
     let journalLane: LaneRecord | undefined
     if (ownerLane && result) {
       journalLane = structuredClone(ownerLane)
@@ -1861,7 +1863,7 @@ export class PulseRuntime {
               let resultSequence = this.state.nextIds.result
               while (this.state.results.has(`result-${resultSequence}`)) resultSequence++
               const resultId = `result-${resultSequence}`
-              const result = { id: resultId, value: nextLane.closingResult.value, storageState: 'memory' as const, pinCount: 0, privacy: nextLane.closingResult.privacy, ...(nextLane.closingResult.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(nextLane.closingResult.privacyTaints) }), derivedFrom: [...(nextLane.closingResult.derivedFrom ?? [])] }
+              const result = { id: resultId, producer: { kind: 'lane' as const, id: nextLane.id }, value: nextLane.closingResult.value, ...resultMetadata(nextLane.closingResult.value), storageState: 'memory' as const, pinCount: 0, privacy: nextLane.closingResult.privacy, ...(nextLane.closingResult.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(nextLane.closingResult.privacyTaints) }), derivedFrom: [...(nextLane.closingResult.derivedFrom ?? [])] }
               delete nextLane.activeWaitId
               nextLane.status = 'succeeded'
               delete nextLane.pendingOutcome

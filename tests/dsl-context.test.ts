@@ -49,4 +49,23 @@ describe('DSL StepContext', () => {
     const result = [...runtime.state.results.values()].at(-1)?.value
     expect(result).toEqual({ touched: true, globalReady: true })
   })
+
+  it('exposes bounded result metadata without exposing the result body through meta()', async () => {
+    const program = defineLaneProgram({ id: 'dsl-result-meta', version: '1' }, (builder) => {
+      builder.addStep('start', () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'read', kind: 'tool', concurrencyClass: 'tool', input: { name: 'read' } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'done' }))
+      builder.addStep('done', (ctx) => {
+        const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined
+        const ref = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined
+        const meta = ref === undefined ? undefined : ctx.results.meta(ref)
+        return { actions: [{ type: 'complete', result: meta as never }], next: 'done' }
+      })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { secret: 'body' } }) })
+    const { agentId, laneId } = runtime.createAgent('result metadata', program)
+
+    expect((await runtime.run(agentId)).status).toBe('succeeded')
+    const value = runtime.state.results.get(runtime.state.lanes.get(laneId)!.resultRef!)?.value as Record<string, unknown>
+    expect(value).toMatchObject({ privacy: 'public', producer: { kind: 'effect' }, sizeBytes: expect.any(Number), hash: expect.stringMatching(/^[a-f0-9]{64}$/) })
+    expect(value).not.toHaveProperty('secret')
+  })
 })
