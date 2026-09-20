@@ -23,6 +23,15 @@ describe('Runtime model registry and task routes', () => {
     expect(runtime.modelRouter.diagnostics('reason', 'cloud_allowed')).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'not-selected', accepted: false, reasons: ['TASK_ROUTE_EXCLUDED'] })]))
   })
 
+  it('treats reasoning as a minimum capability instead of an exact label', () => {
+    const runtime = new PulseRuntime()
+    runtime.models.register({ id: 'low', providerId: 'local', tasks: ['reason'], capabilities: { local: true, reasoning: 'low', maxContextTokens: 4096 }, priority: 3 })
+    runtime.models.register({ id: 'high', providerId: 'local', tasks: ['reason'], capabilities: { local: true, reasoning: 'high', maxContextTokens: 4096 }, priority: 1 })
+    runtime.modelRouter.register({ task: 'reason', candidates: ['low', 'high'] })
+    expect(runtime.modelRouter.route('reason', 'local_only', { reasoning: 'medium' }).map((candidate) => candidate.id)).toEqual(['high'])
+    expect(runtime.modelRouter.diagnostics('reason', 'local_only', { reasoning: 'medium' })).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'low', accepted: false, reasons: ['CAPABILITY_MISSING:reasoning'] })]))
+  })
+
   it('reuses a supplied router registry when only a router is configured', () => {
     const router = new ModelRouter({ register: () => {}, list: () => [{ id: 'local:only', providerId: 'local', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 1 }] })
     const runtime = new PulseRuntime({ modelRouter: router, programs: [program] })

@@ -1,6 +1,7 @@
 import type { JsonValue, LLMRequestProjection, PrivacyLabel } from '../core/types.js'
 
-export interface ModelCapabilities { toolCalling?: boolean; structuredOutput?: boolean; maxContextTokens: number; maxOutputTokens?: number; local?: boolean }
+export type ReasoningLevel = 'low' | 'medium' | 'high'
+export interface ModelCapabilities { toolCalling?: boolean; structuredOutput?: boolean; reasoning?: ReasoningLevel; maxContextTokens: number; maxOutputTokens?: number; local?: boolean }
 export interface ModelUsage {
   inputTokens?: number
   outputTokens?: number
@@ -94,7 +95,16 @@ export class ModelRouter {
       if (preferred !== undefined && !preferred.includes(candidate.id)) reasons.push('TASK_ROUTE_EXCLUDED')
       if (!candidate.tasks.includes(task)) reasons.push('TASK_NOT_SUPPORTED')
       if (privacy === 'local_only' && candidate.capabilities.local !== true) reasons.push('PRIVACY_CLOUD_BLOCKED')
-      for (const [key, value] of Object.entries(requirements)) if (key !== 'maxOutputTokens' && candidate.capabilities[key as keyof ModelCapabilities] !== value) reasons.push(`CAPABILITY_MISSING:${key}`)
+      for (const [key, value] of Object.entries(requirements)) {
+        if (key === 'maxOutputTokens') continue
+        if (key === 'reasoning') {
+          const levels: Record<ReasoningLevel, number> = { low: 1, medium: 2, high: 3 }
+          const required = value as ReasoningLevel
+          if (candidate.capabilities.reasoning === undefined || levels[candidate.capabilities.reasoning] < levels[required]) reasons.push('CAPABILITY_MISSING:reasoning')
+          continue
+        }
+        if (candidate.capabilities[key as keyof ModelCapabilities] !== value) reasons.push(`CAPABILITY_MISSING:${key}`)
+      }
       if (typeof requirements.maxOutputTokens === 'number' && (candidate.capabilities.maxOutputTokens === undefined || candidate.capabilities.maxOutputTokens < requirements.maxOutputTokens)) reasons.push('OUTPUT_BUDGET_TOO_SMALL')
       if (estimatedTokens !== undefined && candidate.capabilities.maxContextTokens < estimatedTokens) reasons.push('CONTEXT_WINDOW_TOO_SMALL')
       return { id: candidate.id, providerId: candidate.providerId, accepted: reasons.length === 0, reasons }

@@ -626,6 +626,7 @@ export class PulseRuntime {
     const requirements: Partial<ModelCapabilities> = {
       ...(typeof dynamicRequirements.toolCalling === 'boolean' ? { toolCalling: dynamicRequirements.toolCalling } : {}),
       ...(typeof dynamicRequirements.structuredOutput === 'boolean' ? { structuredOutput: dynamicRequirements.structuredOutput } : structuredSchema === undefined ? {} : { structuredOutput: true }),
+      ...(dynamicRequirements.reasoning === 'low' || dynamicRequirements.reasoning === 'medium' || dynamicRequirements.reasoning === 'high' ? { reasoning: dynamicRequirements.reasoning } : {}),
       ...(typeof dynamicRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: dynamicRequirements.maxOutputTokens } : {}),
     }
     const candidates = this.modelRouter.routeProjection(task, projection, requirements)
