@@ -291,6 +291,10 @@ describe('runtime control boundaries', () => {
     ;(runtime.storagePolicy as any).limits.maxEventLogBytes = runtime.storagePolicy.inspect().filter((record) => record.kind === 'event').reduce((total, record) => total + record.bytes, 0)
     expect(() => runtime.tick()).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
     expect(runtime.factInbox.snapshot().queue).toMatchObject([{ fact: { type: 'set_lane_priority', laneId, priority: 7 } }])
+    ;(runtime.storagePolicy as any).limits.maxEventLogBytes = 1_000_000
+    runtime.tick()
+    expect(runtime.state.lanes.get(laneId)?.priority).toBe(7)
+    expect(runtime.state.events.filter((event) => event.id === 'host-command-1' && event.type === 'command.enqueued')).toHaveLength(1)
   })
 
   it('rebuilds ready work after persistence recovery', async () => {
