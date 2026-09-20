@@ -156,6 +156,19 @@ describe('M1-3 context, models and adapters', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('applies filesystem writes only when the baseline hash still matches', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulse-filesystem-baseline-'))
+    try {
+      const filesystem = new FilesystemTool(root)
+      await filesystem.write('file.txt', 'before')
+      const baseline = await filesystem.hash('file.txt')
+      await expect(filesystem.writeIfUnchanged('file.txt', 'after', baseline)).resolves.toMatchObject({ hash: expect.stringMatching(/^[a-f0-9]{64}$/), bytes: 5 })
+      await expect(filesystem.read('file.txt')).resolves.toBe('after')
+      await expect(filesystem.writeIfUnchanged('file.txt', 'stale', baseline)).rejects.toThrow('FILE_BASELINE_CONFLICT')
+      await expect(filesystem.writeIfUnchanged('../outside.txt', 'bad', baseline)).rejects.toThrow('PATH_OUTSIDE_SANDBOX')
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('cancels a shell process group instead of leaving a spawned child running', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-shell-'))
     const marker = join(root, 'leaked.txt')
