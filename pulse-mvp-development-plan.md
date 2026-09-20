@@ -56,7 +56,7 @@
 | Provider 输出 fail-closed | 畸形 SSE/工具参数直接拒绝；LLM structured/tool 输出遇到循环对象、`Date`、二进制或非有限数字时不发布伪造 JSON；Action Decoder 同步拒绝不可序列化参数 | `tests/m3-context-adapters.test.ts`、`tests/action-decoder.test.ts` | `28e4722` |
 | Effect 实时观测桥接 | EffectExecutor 提供实时 observation emitter；Tool progress 与 Provider chunk 在 Effect 尚未结算时进入 ObservationInbox，Session stream 可即时读到；直接调用 EffectExecutor 时仍保留结算 observations 兼容行为 | `tests/tool-host.test.ts` | `8e14534` |
 | 终态观测审计 | Effect 终态后的迟到 observation 不进入 ObservationInbox、不改变 Outcome，并记录 `attempt.late_emit` 事实 | `tests/late-attempt.test.ts` | `73c438b` |
-| Observation gap 重同步 | ObservationInbox 按条数与字节双重有界，并按 Agent 记录 ring 丢弃的最高序号；`Session.stream()` 在观测缺口前发出 `{ kind: 'gap', fromSeq, toSeq }`，宿主可调用 `session.snapshot()` 重同步，事实流仍保持独立 | `tests/observation-shutdown.test.ts` | `6d8388e`、`e92e9ff` |
+| Observation gap 重同步 | ObservationInbox 按条数与字节双重有界，并按 Agent 记录 ring 丢弃的最高序号；Runtime Host 可配置两项上限；`Session.stream()` 在观测缺口前发出 `{ kind: 'gap', fromSeq, toSeq }`，宿主可调用 `session.snapshot()` 重同步，事实流仍保持独立 | `tests/observation-shutdown.test.ts` | `6d8388e`、`e92e9ff`、`67b1c64` |
 | RuntimeClock 注入 | Scheduler 接受宿主提供的 RuntimeClock；默认仍使用 VirtualClock，恢复、TimerWheel 与已有确定性调度保持兼容 | `tests/runtime-control.test.ts` | `488e3e7` |
 | MonotonicClock 与真实 Timer 等待 | 提供基于 `performance.now()` 的真实单调时钟；`run`/`runAgent` 在真实时钟下等待 Timer 或 Effect 完成，不再快进 deadline | `tests/runtime-control.test.ts` | `d4f5d8a` |
 | Runtime 绝对时限锚定 | `maxRuntimeMs` 按 Runtime 启动/恢复时钟作为相对时限计算；接入 epoch 单调时钟时不会首 Tick 误判超时；恢复后 `waitUntil` 严格等待实际 Timer deadline | `tests/runtime-control.test.ts` | `e91602f`、`ce8da5a` |
@@ -193,7 +193,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 61 个测试文件、341/341 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步和 observation 字节上限回归。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 61 个测试文件、342/342 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限和 Runtime 配置回归。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -616,6 +616,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `73c438b`：Effect 终态后的迟到 observation 以 `attempt.late_emit` 记录，不重新进入 ObservationInbox，也不改变已发布 Outcome。
 - `6d8388e`：ObservationInbox 按 Agent 记录 ring 丢弃水位，`Session.stream()` 对观测缺口发出 `gap`，宿主可用 `session.snapshot()` 完成重同步；新增慢消费者回归。
 - `e92e9ff`：ObservationInbox 增加字节上限，与条数上限共同限制观测流驻内存占用；drain 同步维护字节水位，超限仍按 Agent 暴露 gap。
+- `67b1c64`：RuntimeConfig 暴露 `maxObservationEntries` / `maxObservationBytes`，宿主可以按会话容量配置 observation ring 上限。
 - `488e3e7`：Runtime 接受宿主注入的 RuntimeClock，默认 VirtualClock 保持现有确定性调度和恢复语义。
 - `d4f5d8a`：补齐基于 `performance.now()` 的 MonotonicClock，真实时钟下 Timer 不再被虚拟快进，`run`/`runAgent` 会等待真实 deadline 或 Effect 结算。
 - `e91602f`：将 `maxRuntimeMs` 锚定到 Runtime 启动/恢复时刻；修复真实单调时钟使用 epoch 时间后首 Tick 立即超时的问题。
