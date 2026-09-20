@@ -99,6 +99,7 @@
 | Worker 网络超时 | HTTP Worker Client 为每个请求设置有界超时；Coordinator/网络分区不会让 register、claim 或 polling 永久悬挂 | `tests/worker-http.test.ts` | 本轮 Worker 网络超时提交 |
 | Worker 远程未知对账 | HTTP Worker Effect Executor 在提交/轮询响应丢失时查询任务状态；写副作用查不到确定状态则返回 `remote_unknown + executionRef`，交给 Runtime Quarantine | `tests/worker-http.test.ts`、`tests/storage-outbox.test.ts` | 本轮 Worker 对账提交 |
 | 持久化快照完整性 | Runtime Persistence/Checkpoint envelope 带 SHA-256 digest；恢复前校验篡改或损坏，失败时不进入状态恢复 | `tests/storage-outbox.test.ts` | 本轮持久化完整性提交 |
+| 恢复兼容性版本 | Persistence envelope 保存 program/tool/policy/router 版本；恢复 tick 前校验，不兼容时 fail-closed，不让新宿主默默解释旧 ResumePoint | `tests/persistence-compatibility.test.ts` | `8fa5f47` |
 | Worker Snapshot 完整性 | Worker Coordinator snapshot 带 SHA-256 digest；lease 恢复前拒绝被篡改的任务、序号或幂等索引 | `tests/worker-coordinator.test.ts` | 本轮 Worker Snapshot 校验提交 |
 | Worker 持久化失败可观测 | Worker Coordinator 自动保存失败不再静默吞掉；`flushPersistence()` 返回明确错误，同时后续保存仍可继续排队 | `tests/worker-coordinator.test.ts` | 本轮 Worker 持久化错误提交 |
 | Worker 共享 Lease Store CAS | File Worker persistence 使用跨进程 lock + integrity digest compare-and-swap；陈旧 Coordinator 不得覆盖新 lease 状态 | `tests/worker-coordinator.test.ts` | 本轮 Worker Lease CAS 提交 |
@@ -580,6 +581,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `7bfd5d8`：Agent 取消级联预审全部目标状态与事实事件，并将 `agent.cancelled` 事件并入 Agent 终态事务，拒绝后续存储失败造成半取消状态。
 - `44c8608`：Provider Adapter 支持 OpenAI-compatible/Anthropic SSE 文本观测，完整响应后再归一化 tool call，避免流式中间参数进入 Runtime。
 - `b832588`：增加 SQLite Result/Snapshot body store 与 EventArchive，支持跨实例幂等写、冲突拒绝和事件范围恢复读取。
+- `8fa5f47`：持久化 envelope 增加 program/tool/policy/router compatibility，恢复执行前拒绝版本不匹配或缺失的宿主能力。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
@@ -589,7 +591,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，53 个测试文件、296 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，54 个测试文件、298 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
