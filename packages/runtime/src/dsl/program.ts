@@ -251,17 +251,28 @@ export class StepBuilder<TState = JsonValue> {
     instruction: string | ((view: InstructionView<TState>) => string)
     schema: TOutput
     inputs?: (ctx: StepContext<TState>) => StepInputs
+    requirements?: Record<string, JsonValue>
+    executionPolicy?: { duplicateExecutionPolicy: 'allow' | 'forbid'; maxUnknownAttempts: number }
+    retryPolicy?: { maxAttempts: number; initialBackoffMs: number; maxBackoffMs: number; jitter: boolean }
     selfCorrect?: { maxRounds: 0 | 1 }
     onSuccess: (data: z.infer<TOutput>, ctx: StepContext<TState>) => NextStepTarget<TState>
-    onError?: (error: Error, ctx: StepContext<TState>) => NextStepTarget<TState>
+    onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState>
   }): this {
     const submit = `${name}:submit`; const decode = `${name}:decode`
+    const maxCorrectionRounds = options.selfCorrect?.maxRounds ?? 1
+    const correctionRoundKey = `${name}CorrectRound`
+    const inputKey = `${name}Inputs`
+    const readSdk = (ctx: StepContext<TState>): Record<string, JsonValue> => sdkLocals(ctx.lane.resume.locals)
+    const writeSdk = (ctx: StepContext<TState>, patch: Record<string, JsonValue>): JsonValue => { const locals = ctx.lane.resume.locals; const base = locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}; return { ...base, $sdk: { ...readSdk(ctx), ...patch } } }
+    const fail = (runtimeError: RuntimeError, ctx: StepContext<TState>): { next: NextStepTarget<TState> } => options.onError ? { next: options.onError(runtimeError, ctx) } : (() => { throw Object.assign(new Error(runtimeError.message), runtimeError) })()
+    const retryPolicy = options.retryPolicy ?? { maxAttempts: 1, initialBackoffMs: 0, maxBackoffMs: 0, jitter: false }
+    const requirements = { ...(options.requirements ?? {}) }
     this.handlers.set(name, (ctx) => {
       const instruction = boundedInstruction(typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: scalarProjection(ctx.laneState) as ScalarProjection<TState> }))
       const inputs = options.inputs?.(ctx) ?? {}
       const inputResultRefs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? []), ...(inputs.artifacts ?? [])])]
       const outputSchema = zodJsonSchema(options.schema)
-      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction, inputs: asJson(inputs), outputSchema, requirements: { structuredOutput: true } }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
+      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction, inputs: asJson(inputs), outputSchema, requirements: { ...requirements, structuredOutput: { schema: outputSchema } }, ...(options.executionPolicy === undefined ? {} : { executionPolicy: options.executionPolicy }) }), retryPolicy, ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode, locals: writeSdk(ctx, { [correctionRoundKey]: 0, [inputKey]: asJson(inputs) }) }
     })
     this.handlers.set(submit, (ctx) => ({ next: decode }))
     this.handlers.set(decode, (ctx) => {
@@ -271,11 +282,14 @@ export class StepBuilder<TState = JsonValue> {
       const value = rejectedRef ? readResult(ctx, rejectedRef) : ref ? readResult(ctx, ref) : undefined
       const parsed = options.schema.safeParse(value)
       if (!parsed.success) {
-        if (options.selfCorrect?.maxRounds === 0) return { next: options.onError ? options.onError(new Error('OUTPUT_SCHEMA_VIOLATION'), ctx) : decode }
-        const inputResultRefs = rejectedRef ? [rejectedRef] : []
+        const sdk = readSdk(ctx)
+        const currentRound = typeof sdk[correctionRoundKey] === 'number' && Number.isInteger(sdk[correctionRoundKey]) ? sdk[correctionRoundKey] as number : 0
+        if (currentRound >= maxCorrectionRounds) return fail({ code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Structured LLM output did not match the declared schema.', retryable: false, details: parsed.error.message }, ctx)
+        const originalInputs = sdk[inputKey] && typeof sdk[inputKey] === 'object' && !Array.isArray(sdk[inputKey]) ? sdk[inputKey] as Record<string, JsonValue> : {}
+        const inputResultRefs = [...new Set([...(Array.isArray(originalInputs.results) ? originalInputs.results.filter((item): item is string => typeof item === 'string') : []), ...(Array.isArray(originalInputs.findings) ? originalInputs.findings.filter((item): item is string => typeof item === 'string') : []), ...(Array.isArray(originalInputs.artifacts) ? originalInputs.artifacts.filter((item): item is string => typeof item === 'string') : []), ...(rejectedRef ? [rejectedRef] : [])])]
         const outputSchema = zodJsonSchema(options.schema)
         const correctionInstruction = boundedInstruction(`${typeof options.instruction === 'string' ? options.instruction : 'structured'}\nValidation errors: ${parsed.error.message}`)
-        return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-correct`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction: correctionInstruction, inputs: { rejectedOutputRefs: inputResultRefs }, outputSchema, requirements: { structuredOutput: true } }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }
+        return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-correct-${currentRound + 1}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction: correctionInstruction, inputs: { ...originalInputs, rejectedOutputRefs: inputResultRefs }, outputSchema, requirements: { ...requirements, structuredOutput: { schema: outputSchema } }, ...(options.executionPolicy === undefined ? {} : { executionPolicy: options.executionPolicy }) }), retryPolicy, ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode, locals: writeSdk(ctx, { [correctionRoundKey]: currentRound + 1, [inputKey]: { ...originalInputs, rejectedOutputRefs: inputResultRefs } }) }
       }
       const next = options.onSuccess(parsed.data, ctx)
       return { next }
