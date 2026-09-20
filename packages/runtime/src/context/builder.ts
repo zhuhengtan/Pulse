@@ -51,8 +51,8 @@ export class ContextBuilder {
     const privacyRefs = [
       ...(privacyRank(globalMetadata.privacy) > 0 ? [`global:${input.lane.contextSnapshotVersion}`] : []),
       ...(privacyRank(laneMetadata.privacy) > 0 ? [`lane:${input.lane.context.version}`] : []),
-      ...effectiveResults.filter((item) => privacyRank(item.privacy) > 0).map((item) => item.result.id),
-      ...effectiveArtifacts.filter((item) => privacyRank(item.privacy) > 0).map((item) => item.artifact.ref),
+      ...effectiveResults.filter((item) => privacyRank(item.privacy) > 0).map((item) => ({ kind: 'result' as const, ref: item.result.id })),
+      ...effectiveArtifacts.filter((item) => privacyRank(item.privacy) > 0).map((item) => ({ kind: 'artifact' as const, ref: item.artifact.ref })),
     ]
     const privacyTaints = [
       ...(globalMetadata.privacyTaints ?? []).map((taint) => ({ path: ['global', ...taint.path], privacy: taint.privacy })),

@@ -378,7 +378,7 @@ export interface LLMContextSpec {
   toolSetId: string
   instruction: string
   privacy: PrivacyLabel
-  privacyRefs: string[]
+  privacyRefs: ProvenanceRef[]
   privacyTaints?: PrivacyTaint[]
 }
 
@@ -391,7 +391,7 @@ export interface LLMRequestProjection {
   policyVersion: string
   toolSetVersion: string
   privacy: PrivacyLabel
-  privacyRefs: string[]
+  privacyRefs: ProvenanceRef[]
   privacyTaints?: PrivacyTaint[]
 }
 

@@ -26,6 +26,7 @@ describe('Artifact store', () => {
     expect(projection.contextSpec.artifactRefs).toEqual([artifact.ref])
     expect(projection.blocks.find((block) => block.kind === 'artifacts')?.content).toMatchObject([{ ref: artifact.ref, mediaType: 'application/json' }])
     expect(projection.privacy).toBe('local_only')
+    expect(projection.privacyRefs).toContainEqual({ kind: 'artifact', ref: artifact.ref })
     const output = validateStep(state, root.id, { actions: [{ type: 'complete', result: { artifact: artifact.ref }, derivedFrom: [artifact.ref] }], next: { programId: 'artifact', programVersion: '1', step: 'done', locals: {} } })
     expect('rejection' in output).toBe(false)
     if ('rejection' in output) return

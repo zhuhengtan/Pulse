@@ -56,9 +56,10 @@ describe('result privacy provenance', () => {
     expect('rejection' in committed).toBe(false)
     if ('rejection' in committed) return
     apply(state, committed.mutations)
-    const projection = new ContextBuilder(state).build({ agent, lane: state.lanes.get(root.id)!, instruction: 'inspect', toolSetId: 'default' })
+    const projection = new ContextBuilder(state).build({ agent, lane: state.lanes.get(root.id)!, resultRefs: ['local-result'], instruction: 'inspect', toolSetId: 'default' })
     expect(projection.privacy).toBe('local_only')
     expect(projection.privacyRefs).toContain('global:1')
+    expect(projection.privacyRefs).toContainEqual({ kind: 'result', ref: 'local-result' })
     expect(importRuntimeState(exportRuntimeState(state)).agents.get(agent.id)?.globalPrivacy?.get(1)).toMatchObject({ privacy: 'local_only' })
   })
 
