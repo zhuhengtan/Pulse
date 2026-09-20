@@ -58,6 +58,20 @@ describe('effect outbox and runtime persistence envelope', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('restores through the backend and quarantines an in-flight write effect', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-restore-'))
+    try {
+      const backend = new FileRuntimePersistenceBackend(join(directory, 'runtime.json'))
+      const source = new PulseRuntime()
+      source.state.effects.set('effect-1', { id: 'effect-1', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, state: 'running', attemptId: 'effect-1-attempt-1', attemptNo: 1, executionState: 'running', sideEffectState: 'applied', sideEffectPolicy: 'write' })
+      source.outbox.enqueue({ id: 'effect-1', attemptId: 'effect-1-attempt-1' })
+      await source.persist(backend)
+      const restored = await PulseRuntime.restore(backend)
+      expect(restored.state.effects.get('effect-1')?.state).toBe('reconcile_required')
+      expect(restored.quarantine.unresolvedEffectIds).toEqual(['effect-1'])
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('serializes concurrent saves and leaves no temporary snapshot behind', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-persistence-queue-'))
     try {
