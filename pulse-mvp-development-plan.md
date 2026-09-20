@@ -55,8 +55,9 @@
 | 持久化恢复边界 | `persisted` 驻留状态、backend restore、在途写副作用 quarantine、journal event `txId` 一致 | `tests/storage-policy.test.ts`、`tests/storage-outbox.test.ts` | `00d49f6`、`f7ba385`、`9b22fd3`、`c0e87f6` |
 | 运行观测 | 只读 telemetry 聚合 agent/lane/effect/attempt、route 排除、provider/model、slot wait、usage/cost | `tests/provider-host.test.ts` | `e68cae0` |
 | 输出预算与可恢复 Tool | `maxOutputTokens` 参与窗口预留、候选准入和 Provider 请求；structured schema 与最终 `outputSchema` 契约校验；保存 executionRef 并提供 RecoverableTool 对账入口 | `tests/provider-host.test.ts`、`tests/tool-host.test.ts`、`tests/m3-context-adapters.test.ts` | `d451014`、`b4461a8`、`83ebe38` |
+| 高级 Wait 与 Tool 准入 | Wait 支持 `any/quorum`、独立 deadline 和恢复重建；Tool Manifest 可在提交前注入可信锁、副作用策略与默认超时 | `tests/advanced-join.test.ts`、`tests/tool-host.test.ts` | `af1ff6f`、`f523c71`、`a95d4f5` |
 
-统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 39 个测试文件、156/156 通过，`pnpm build` 也已通过。
+统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 40 个测试文件、160/160 通过，`pnpm build` 也已通过。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、进程级故障注入后的完整崩溃恢复/副作用对账，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、恢复、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实进程/网络证据。
 
@@ -376,7 +377,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `9199fbd`：成功 LLMEffect history 归档；`9eda5b1` / `2009eaa`：JSON Schema、`rejected_output` 与 DSL 自愈链路。
 - `0d0ea33`：ToolCallCorrelation 持久化；`015c959`：Provider/Model 可取消并发槽。
 - `79a993f` / `324f1bc` / `e6c228b`：warm start 筛选、递归 Draft Proxy、ReAct 完成回调 ResultRef 契约。
-- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，39 个测试文件、156 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，40 个测试文件、160 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
