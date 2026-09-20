@@ -21,6 +21,18 @@ describe('result privacy provenance', () => {
     expect('rejection' in validateStep(state, root.id, { actions: [{ type: 'complete', result: {}, derivedFrom: ['missing'] }], next: { programId: 'p', programVersion: '1', step: 'done', locals: {} } })).toBe(true)
   })
 
+  it('applies provenance and taint validation to ContextDelta atomically', () => {
+    const state = createRuntimeState()
+    const { root } = createAgent(state, 'context privacy', { programId: 'p', programVersion: '1', step: 'start', locals: {} })
+    state.results.set('local-result', { id: 'local-result', value: { secret: true }, privacy: 'local_only', derivedFrom: [] })
+    root.visibleResultRefs!.add('local-result')
+    const downgrade = validateStep(state, root.id, { contextDelta: { target: 'global', baseVersion: 0, ops: [{ op: 'set', path: ['summary'], value: 'unsafe' }], privacy: 'public', derivedFrom: ['local-result'] }, actions: [], next: { programId: 'p', programVersion: '1', step: 'done', locals: {} } })
+    expect('rejection' in downgrade && downgrade.rejection.code).toBe('PRIVACY_DOWNGRADE_WITHOUT_PROOF')
+    const malformed = validateStep(state, root.id, { contextDelta: { target: 'global', baseVersion: 0, ops: [{ op: 'set', path: ['summary'], value: 'unsafe' }], privacyTaints: [{ path: [], privacy: 'local_only' }] }, actions: [], next: { programId: 'p', programVersion: '1', step: 'done', locals: {} } })
+    expect('rejection' in malformed && malformed.rejection.code).toBe('INVALID_PRIVACY_TAINT')
+    expect(state.agents.get(root.agentId)?.latestGlobalVersion).toBe(0)
+  })
+
   it('derives DSL terminal results and effect results from synchronous ResultRef reads', async () => {
     const terminalProgram = defineLaneProgram({ id: 'dsl-provenance-terminal', version: '1' }, (builder) => {
       builder.addStep('start', (ctx) => { ctx.results.meta('source'); return { actions: [{ type: 'complete', result: { ok: true } }], next: 'start' } })

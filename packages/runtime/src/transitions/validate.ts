@@ -290,6 +290,11 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   const seenCancelTargets = new Set<string>()
 
   if (output.contextDelta) {
+    const deltaPrivacyTaintError = validatePrivacyTaints(output.contextDelta.privacyTaints)
+    if (deltaPrivacyTaintError) return { rejection: error(deltaPrivacyTaintError, 'ContextDelta privacy taints are invalid') }
+    const deltaDerived = derivedPrivacy(state, lane, output.contextDelta.derivedFrom ?? [])
+    if (deltaDerived.error) return { rejection: error(deltaDerived.error, 'ContextDelta provenance references an unknown or invisible result') }
+    if (output.contextDelta.privacy !== undefined && deltaDerived.privacy !== undefined && privacyRank(output.contextDelta.privacy) < privacyRank(deltaDerived.privacy)) return { rejection: error('PRIVACY_DOWNGRADE_WITHOUT_PROOF', 'ContextDelta privacy cannot be broader than its sources') }
     if (output.contextDelta.target === 'global' && !output.contextDelta.proposal && lane.ownerLaneId !== undefined) return { rejection: error('GLOBAL_CONTEXT_WRITE_NOT_AUTHORIZED', 'Only the root Lane may commit Global Context directly.') }
     if (output.contextDelta.target !== 'global' && output.contextDelta.proposal) return { rejection: error('INVALID_MERGE_PROPOSAL', 'Only Global Context deltas may be proposals.') }
     const applied = applyContextDelta(state, workingLane, output.contextDelta, mutations, output.contextDelta.proposal ? `proposal-${proposalCounter++}` : undefined)
