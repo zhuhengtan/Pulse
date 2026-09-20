@@ -1,10 +1,38 @@
 import { describe, expect, it } from 'vitest'
-import { FileRuntimeTelemetryExporter, HttpRuntimeTelemetryExporter, PulseRuntime, RuntimeTelemetryAggregator, defineLaneProgram } from '@pulse/runtime'
+import { FileRuntimeTelemetryExporter, HttpRuntimeTelemetryExporter, ObservationInbox, PulseRuntime, RuntimeTelemetryAggregator, defineLaneProgram } from '@pulse/runtime'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 describe('observation inbox and shutdown', () => {
+  it('reports dropped observation sequence ranges for slow session consumers', () => {
+    const inbox = new ObservationInbox(2)
+    inbox.enqueue({ agentId: 'agent-a', type: 'trace', data: { n: 1 }, timestamp: 1 })
+    inbox.enqueue({ agentId: 'agent-b', type: 'trace', data: { n: 2 }, timestamp: 2 })
+    inbox.enqueue({ agentId: 'agent-a', type: 'trace', data: { n: 3 }, timestamp: 3 })
+    expect(inbox.droppedThrough('agent-a')).toBe(1)
+    expect(inbox.droppedThrough('agent-b')).toBe(0)
+    expect(inbox.snapshot()).toMatchObject([{ agentId: 'agent-b' }, { agentId: 'agent-a' }])
+  })
+
+  it('surfaces an observation gap through Session.stream()', async () => {
+    const runtime = new PulseRuntime()
+    const program = defineLaneProgram({ id: 'observation-gap', version: '1' }, (builder) => {
+      builder.addStep('start', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'start' }))
+    })
+    const { agentId } = runtime.createAgent('observation gap', program)
+    const session = runtime.start(agentId)
+    for (let index = 0; index <= 4096; index++) runtime.observationInbox.enqueue({ agentId, type: 'trace', data: { index }, timestamp: index })
+    const stream = session.stream()[Symbol.asyncIterator]()
+    let gap: Awaited<ReturnType<typeof stream.next>>['value']
+    for (let index = 0; index < 100 && gap === undefined; index++) {
+      const event = (await stream.next()).value
+      if (event?.kind === 'gap') gap = event
+    }
+    expect(gap).toMatchObject({ kind: 'gap', fromSeq: 1, toSeq: 1 })
+    await stream.return?.()
+  })
+
   it('keeps trace outside the fact log and exposes it to inspection', async () => {
     const program = defineLaneProgram({ id: 'observe', version: '1' }, (builder) => {
       builder.addStep('start', (ctx) => { ctx.trace({ kind: 'diagnostic', data: { phase: 'start' } }); return { actions: [{ type: 'complete', result: { ok: true } }], next: 'start' } })

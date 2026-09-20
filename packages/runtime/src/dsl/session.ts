@@ -31,6 +31,7 @@ export class PulseSession {
   }
   async *stream(fromSeq = 0): AsyncIterable<SessionEvent> {
     let cursor = fromSeq
+    let observationCursor = 0
     while (true) {
       const oldest = this.runtime.state.events[0]?.seq
       const compactedThrough = this.runtime.state.eventsCompactedThrough ?? 0
@@ -41,7 +42,15 @@ export class PulseSession {
       }
       const events = this.runtime.state.events.filter((event) => event.seq > cursor)
       for (const event of events) { cursor = event.seq; if (this.ownsEvent(event)) yield { kind: 'fact', type: 'fact', seq: event.seq, event } }
-      for (const observation of this.runtime.observationInbox.drain(this.agentId)) yield { kind: 'observation', type: 'observation', seq: observation.seq, observation: observation as unknown as JsonValue }
+      const observationGapEnd = this.runtime.observationInbox.droppedThrough(this.agentId)
+      if (observationCursor < observationGapEnd) {
+        yield { kind: 'gap', type: 'gap', seq: observationGapEnd, fromSeq: observationCursor + 1, toSeq: observationGapEnd }
+        observationCursor = observationGapEnd
+      }
+      for (const observation of this.runtime.observationInbox.drain(this.agentId)) {
+        observationCursor = Math.max(observationCursor, observation.seq)
+        yield { kind: 'observation', type: 'observation', seq: observation.seq, observation: observation as unknown as JsonValue }
+      }
       const root = [...this.runtime.state.lanes.values()].find((lane) => lane.agentId === this.agentId && lane.ownerLaneId === undefined)
       if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status) && (this.runtime.state.events.at(-1)?.seq ?? compactedThrough) === cursor) return
       await new Promise<void>((resolve) => setImmediate(resolve))

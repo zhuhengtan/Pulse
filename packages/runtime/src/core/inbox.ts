@@ -75,12 +75,16 @@ export interface ObservationEnvelope {
 
 export class ObservationInbox {
   private readonly queue: ObservationEnvelope[] = []
+  private readonly droppedThroughByAgent = new Map<string, number>()
   private nextSeq = 1
   constructor(readonly maxEntries = 4096) {}
   enqueue(input: Omit<ObservationEnvelope, 'seq'>): ObservationEnvelope {
     const event = { ...input, seq: this.nextSeq++ }
     this.queue.push(structuredClone(event))
-    while (this.queue.length > this.maxEntries) this.queue.shift()
+    while (this.queue.length > this.maxEntries) {
+      const dropped = this.queue.shift()!
+      this.droppedThroughByAgent.set(dropped.agentId, Math.max(this.droppedThroughByAgent.get(dropped.agentId) ?? 0, dropped.seq))
+    }
     return structuredClone(event)
   }
   drain(agentId?: string): ObservationEnvelope[] {
@@ -90,5 +94,6 @@ export class ObservationInbox {
     return selected.map((event) => structuredClone(event))
   }
   get size(): number { return this.queue.length }
+  droppedThrough(agentId: string): number { return this.droppedThroughByAgent.get(agentId) ?? 0 }
   snapshot(): ObservationEnvelope[] { return this.queue.map((event) => structuredClone(event)) }
 }
