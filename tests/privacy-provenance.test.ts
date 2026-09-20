@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, ContextBuilder, createAgent, createRuntimeState, defineLaneProgram, InMemoryModelRegistry, ModelRouter, PulseRuntime, validateStep } from '@pulse/runtime'
+import { apply, ContextBuilder, createAgent, createRuntimeState, defineLaneProgram, exportRuntimeState, importRuntimeState, InMemoryModelRegistry, ModelRouter, PulseRuntime, validateStep } from '@pulse/runtime'
 
 describe('result privacy provenance', () => {
   it('recomputes the strictest source label and preserves derivedFrom', () => {
@@ -31,6 +31,21 @@ describe('result privacy provenance', () => {
     const malformed = validateStep(state, root.id, { contextDelta: { target: 'global', baseVersion: 0, ops: [{ op: 'set', path: ['summary'], value: 'unsafe' }], privacyTaints: [{ path: [], privacy: 'local_only' }] }, actions: [], next: { programId: 'p', programVersion: '1', step: 'done', locals: {} } })
     expect('rejection' in malformed && malformed.rejection.code).toBe('INVALID_PRIVACY_TAINT')
     expect(state.agents.get(root.agentId)?.latestGlobalVersion).toBe(0)
+  })
+
+  it('carries Context privacy metadata through versions, projections, and persistence', () => {
+    const state = createRuntimeState()
+    const { agent, root } = createAgent(state, 'context metadata', { programId: 'p', programVersion: '1', step: 'start', locals: {} })
+    state.results.set('local-result', { id: 'local-result', value: { secret: true }, privacy: 'local_only', derivedFrom: [] })
+    root.visibleResultRefs!.add('local-result')
+    const committed = validateStep(state, root.id, { contextDelta: { target: 'global', baseVersion: 0, ops: [{ op: 'set', path: ['finding'], value: { secret: true } }], derivedFrom: ['local-result'] }, adoptCommittedContext: true, actions: [], next: { programId: 'p', programVersion: '1', step: 'done', locals: {} } })
+    expect('rejection' in committed).toBe(false)
+    if ('rejection' in committed) return
+    apply(state, committed.mutations)
+    const projection = new ContextBuilder(state).build({ agent, lane: state.lanes.get(root.id)!, instruction: 'inspect', toolSetId: 'default' })
+    expect(projection.privacy).toBe('local_only')
+    expect(projection.privacyRefs).toContain('global:1')
+    expect(importRuntimeState(exportRuntimeState(state)).agents.get(agent.id)?.globalPrivacy?.get(1)).toMatchObject({ privacy: 'local_only' })
   })
 
   it('derives DSL terminal results and effect results from synchronous ResultRef reads', async () => {

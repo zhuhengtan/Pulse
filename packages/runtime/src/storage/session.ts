@@ -1,4 +1,4 @@
-import type { AgentRecord, EffectRecord, JsonValue, LaneRecord, MergeProposal, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord, ToolCallCorrelation } from '../core/types.js'
+import type { AgentRecord, EffectRecord, JsonValue, LaneRecord, MergeProposal, PrivacyMetadata, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord, ToolCallCorrelation } from '../core/types.js'
 import { createRuntimeState } from '../core/types.js'
 import { normalizeRuntimeEvent } from '../core/events.js'
 
@@ -6,7 +6,7 @@ export interface SessionSnapshot {
   schemaVersion: 1
   state: {
     now: number
-    agents: Array<[string, Omit<AgentRecord, 'globalVersions'> & { globalVersions: Array<[number, JsonValue]> }]>
+    agents: Array<[string, Omit<AgentRecord, 'globalVersions' | 'globalPrivacy'> & { globalVersions: Array<[number, JsonValue]>; globalPrivacy?: Array<[number, PrivacyMetadata]> }]>
     lanes: Array<[string, Omit<LaneRecord, 'children' | 'ownedEffectIds' | 'visibleResultRefs'> & { children: string[]; ownedEffectIds: string[]; visibleResultRefs?: string[] }]>
     effects: Array<[string, EffectRecord]>
     waits: Array<[string, WaitRecord]>
@@ -38,7 +38,7 @@ export function exportRuntimeState(state: RuntimeState): SessionSnapshot {
     schemaVersion: 1,
     state: {
       now: state.now,
-      agents: [...state.agents.entries()].map(([id, agent]) => [id, { ...agent, globalVersions: [...agent.globalVersions.entries()].map(([version, value]) => [version, structuredClone(value)] as [number, JsonValue]) }] as [string, Omit<AgentRecord, 'globalVersions'> & { globalVersions: Array<[number, JsonValue]> }]),
+      agents: [...state.agents.entries()].map(([id, agent]) => [id, { ...agent, globalVersions: [...agent.globalVersions.entries()].map(([version, value]) => [version, structuredClone(value)] as [number, JsonValue]), ...(agent.globalPrivacy === undefined ? {} : { globalPrivacy: [...agent.globalPrivacy.entries()].map(([version, metadata]) => [version, structuredClone(metadata)] as [number, PrivacyMetadata]) }) }] as [string, Omit<AgentRecord, 'globalVersions' | 'globalPrivacy'> & { globalVersions: Array<[number, JsonValue]>; globalPrivacy?: Array<[number, PrivacyMetadata]> }]),
       lanes: [...state.lanes.entries()].map(([id, lane]) => [id, { ...lane, children: [...lane.children], ownedEffectIds: [...lane.ownedEffectIds], ...(lane.visibleResultRefs === undefined ? {} : { visibleResultRefs: [...lane.visibleResultRefs] }) }] as [string, Omit<LaneRecord, 'children' | 'ownedEffectIds' | 'visibleResultRefs'> & { children: string[]; ownedEffectIds: string[]; visibleResultRefs?: string[] }]),
       effects: [...state.effects.entries()].map(([id, effect]) => [id, structuredClone(effect)]),
       waits: [...state.waits.entries()].map(([id, wait]) => [id, structuredClone(wait)]),
@@ -67,7 +67,10 @@ export function importRuntimeState(snapshot: SessionSnapshot | JsonValue): Runti
   const state = createRuntimeState(value.state.maxTotalLanes, { maxQueuedEffects: value.state.maxQueuedEffects, maxRunning: { llm: decodeNumber(value.state.maxRunning.llm), tool: decodeNumber(value.state.maxRunning.tool), agent: decodeNumber(value.state.maxRunning.agent), none: decodeNumber(value.state.maxRunning.none) }, forkAffinity: value.state.forkAffinity ?? 'off', ...(value.state.historySoftTokens === undefined ? {} : { historySoftTokens: value.state.historySoftTokens }), ...(value.state.historyHardTokens === undefined ? {} : { historyHardTokens: value.state.historyHardTokens }), ...(value.state.trustedSanitizerIds === undefined ? {} : { trustedSanitizerIds: value.state.trustedSanitizerIds }) })
   state.now = value.state.now
   state.nextIds = { ...value.state.nextIds, proposal: value.state.nextIds.proposal ?? 1 }
-  for (const [id, agent] of value.state.agents) state.agents.set(id, { ...agent, globalVersions: new Map(agent.globalVersions.map(([version, context]) => [version, structuredClone(context)] as [number, JsonValue])) })
+  for (const [id, agent] of value.state.agents) {
+    const { globalVersions, globalPrivacy, ...agentValue } = agent
+    state.agents.set(id, { ...agentValue, globalVersions: new Map(globalVersions.map(([version, context]) => [version, structuredClone(context)] as [number, JsonValue])), ...(globalPrivacy === undefined ? {} : { globalPrivacy: new Map(globalPrivacy.map(([version, metadata]) => [version, structuredClone(metadata)] as [number, PrivacyMetadata])) }) })
+  }
   for (const [id, lane] of value.state.lanes) {
     const { visibleResultRefs, ...laneValue } = lane
     state.lanes.set(id, { ...laneValue, children: new Set(lane.children), ownedEffectIds: new Set(lane.ownedEffectIds), ...(visibleResultRefs === undefined ? {} : { visibleResultRefs: new Set(visibleResultRefs) }) })

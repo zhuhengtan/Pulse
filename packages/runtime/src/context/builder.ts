@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { AgentRecord, LaneRecord, LLMContextSpec, LLMRequestProjection, PrivacyLabel, ResultRef, RuntimeState, JsonValue, ContextDelta, ContextOp } from '../core/types.js'
+import type { AgentRecord, LaneRecord, LLMContextSpec, LLMRequestProjection, PrivacyLabel, PrivacyTaint, ResultRef, RuntimeState, JsonValue, ContextDelta, ContextOp } from '../core/types.js'
 import { effectivePrivacy, privacyRank, strictestPrivacy } from '../core/types.js'
 
 function stable(value: unknown): string {
@@ -35,24 +35,34 @@ export class ContextBuilder {
       if (input.lane.visibleResultRefs !== undefined && !input.lane.visibleResultRefs.has(ref)) throw new Error(`RESULT_NOT_VISIBLE:${ref}`)
       return result
     })
+    const globalMetadata = input.agent.globalPrivacy?.get(input.lane.contextSnapshotVersion) ?? { privacy: 'public' as const }
+    const laneMetadata = { privacy: input.lane.context.privacy ?? 'public', privacyTaints: input.lane.context.privacyTaints }
     const effectiveResults = results.map((result) => ({ result, privacy: effectivePrivacy(result.privacy, result.privacyTaints) }))
-    const privacy = strictestPrivacy(effectiveResults.map((item) => item.privacy))
-    const privacyRefs = effectiveResults.filter((item) => privacyRank(item.privacy) > 0).map((item) => item.result.id)
-    const privacyTaints = effectiveResults.flatMap((item) => (item.result.privacyTaints ?? []).map((taint) => ({ path: [item.result.id, ...taint.path], privacy: taint.privacy })))
+    const privacy = strictestPrivacy([globalMetadata.privacy, laneMetadata.privacy, ...effectiveResults.map((item) => item.privacy)])
+    const privacyRefs = [
+      ...(privacyRank(globalMetadata.privacy) > 0 ? [`global:${input.lane.contextSnapshotVersion}`] : []),
+      ...(privacyRank(laneMetadata.privacy) > 0 ? [`lane:${input.lane.context.version}`] : []),
+      ...effectiveResults.filter((item) => privacyRank(item.privacy) > 0).map((item) => item.result.id),
+    ]
+    const privacyTaints = [
+      ...(globalMetadata.privacyTaints ?? []).map((taint) => ({ path: ['global', ...taint.path], privacy: taint.privacy })),
+      ...(laneMetadata.privacyTaints ?? []).map((taint) => ({ path: ['lane', ...taint.path], privacy: taint.privacy })),
+      ...effectiveResults.flatMap((item) => (item.result.privacyTaints ?? []).map((taint) => ({ path: [item.result.id, ...taint.path], privacy: taint.privacy }))),
+    ]
     const contextSpec: LLMContextSpec = { globalSnapshotVersion: input.lane.contextSnapshotVersion, laneSnapshotVersion: input.lane.context.version, resultRefs, eventIds: input.eventIds ?? [], toolSetId: input.toolSetId, instruction: input.instruction, privacy, privacyRefs, ...(privacyTaints.length ? { privacyTaints } : {}) }
     const prefixBlocks = [
       { kind: 'system' as const, content: input.system ?? '' },
       { kind: 'policy' as const, content: input.policy ?? {} },
       { kind: 'tools' as const, content: input.tools ?? {} },
       { kind: 'global' as const, content: global },
-      { kind: 'history' as const, content: input.lane.context.history.map((record) => ({ seq: record.seq, instruction: record.instruction, resultRefs: record.resultRefs, output: record.output, privacy: record.privacy })) },
+      { kind: 'history' as const, content: input.lane.context.history.map((record) => ({ seq: record.seq, instruction: record.instruction, resultRefs: record.resultRefs, output: record.output, privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: record.privacyTaints as unknown as JsonValue }) })) },
     ]
     const blocks = [...prefixBlocks, { kind: 'lane' as const, content: input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: results.map((result) => ({ id: result.id, value: result.value ?? null, ...(result.privacyTaints === undefined ? {} : { privacyTaints: result.privacyTaints.map((taint) => ({ path: [...taint.path], privacy: taint.privacy }) as unknown as JsonValue) }) })) }, { kind: 'instruction' as const, content: input.instruction }]
     return { contextSpec, blocks, prefixHash: hash(prefixBlocks), projectionHash: hash(blocks), builderVersion: this.version, policyVersion: '1', toolSetVersion: input.toolSetId, privacy, privacyRefs, ...(privacyTaints.length ? { privacyTaints } : {}) }
   }
 }
 
-export function appendHistory(lane: LaneRecord, record: { instruction: string; resultRefs: string[]; output: JsonValue; privacy: PrivacyLabel }): LaneRecord {
+export function appendHistory(lane: LaneRecord, record: { instruction: string; resultRefs: string[]; output: JsonValue; privacy: PrivacyLabel; privacyTaints?: PrivacyTaint[] }): LaneRecord {
   const next = structuredClone(lane)
   const seq = next.context.history.length ? next.context.history[next.context.history.length - 1]!.seq + 1 : 1
   next.context.history.push({ seq, ...record })

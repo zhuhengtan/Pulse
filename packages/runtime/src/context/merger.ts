@@ -1,7 +1,8 @@
 import { rebaseContextDelta, stableSerialize, type RebaseConflict } from './builder.js'
 import { apply } from '../core/mutations.js'
 import type { Mutation } from '../core/mutations.js'
-import type { AgentRecord, ContextDelta, JsonValue, MergeProposal, RuntimeState } from '../core/types.js'
+import { privacyTaintPrivacy, strictestPrivacy } from '../core/types.js'
+import type { AgentRecord, ContextDelta, JsonValue, MergeProposal, PrivacyMetadata, RuntimeState } from '../core/types.js'
 
 export interface MergeConflict {
   proposalId: string
@@ -79,6 +80,7 @@ export class ContextMerger {
     const proposals = proposalOrder([...this.state.mergeProposals.values()].filter((proposal) => proposal.agentId === agentId && (wanted === undefined || wanted.has(proposal.id))))
     let version = agent.latestGlobalVersion
     let value: JsonValue = clone(agent.globalVersions.get(version) ?? {})
+    let metadata: PrivacyMetadata = clone(agent.globalPrivacy?.get(version) ?? { privacy: 'public' })
     const appliedProposalIds: string[] = []
     const conflicts: MergeConflict[] = []
     const mutations: Mutation[] = []
@@ -95,10 +97,15 @@ export class ContextMerger {
       }
       try {
         const next = applyDelta(value, rebased.delta)
-        if (stableSerialize(next) !== stableSerialize(value)) {
+        const nextMetadata: PrivacyMetadata = {
+          privacy: strictestPrivacy([metadata.privacy, proposal.delta.privacy ?? 'public', privacyTaintPrivacy(proposal.delta.privacyTaints)]),
+          ...(metadata.privacyTaints?.length || proposal.delta.privacyTaints?.length ? { privacyTaints: [...(metadata.privacyTaints ?? []), ...(proposal.delta.privacyTaints ?? [])] } : {}),
+        }
+        if (stableSerialize(next) !== stableSerialize(value) || stableSerialize(nextMetadata) !== stableSerialize(metadata)) {
           value = next
           version++
         }
+        metadata = nextMetadata
         appliedProposalIds.push(proposal.id)
         mutations.push({ op: 'removeMergeProposal', proposalId: proposal.id })
       } catch (cause) {
@@ -106,7 +113,7 @@ export class ContextMerger {
       }
     }
     if (appliedProposalIds.length) {
-      mutations.unshift({ op: 'setGlobal', agentId, version, value: clone(value) })
+      mutations.unshift({ op: 'setGlobal', agentId, version, value: clone(value), metadata: clone(metadata) })
       mutations.push({ op: 'appendEvent', event: { type: 'context.merge_committed', agentId, data: { version, proposalIds: appliedProposalIds } as unknown as JsonValue } })
     }
     return { agentId, ...(appliedProposalIds.length ? { version, value: clone(value) } : {}), appliedProposalIds, conflicts, mutations }

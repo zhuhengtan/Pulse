@@ -13,6 +13,7 @@ export type ConcurrencyClass = 'llm' | 'tool' | 'agent' | 'none'
 export type OutcomeStatus = 'succeeded' | 'failed' | 'cancelled'
 export interface ResourceLockSpec { resource: string; mode: 'shared' | 'exclusive' }
 export interface PrivacyTaint { path: string[]; privacy: PrivacyLabel }
+export interface PrivacyMetadata { privacy: PrivacyLabel; privacyTaints?: PrivacyTaint[] }
 
 export interface RuntimeError {
   code: string
@@ -48,6 +49,8 @@ export interface LaneContext {
   version: ContextVersion
   history: HistoryRecord[]
   state: JsonValue
+  privacy?: PrivacyLabel
+  privacyTaints?: PrivacyTaint[]
 }
 
 export interface ProgressWatchdogState {
@@ -72,6 +75,7 @@ export interface AgentRecord {
   policyId?: string
   limitsId?: string
   globalVersions: Map<ContextVersion, JsonValue>
+  globalPrivacy?: Map<ContextVersion, PrivacyMetadata>
   latestGlobalVersion: ContextVersion
   maxActiveLanes: number
   parentAgentId?: AgentId

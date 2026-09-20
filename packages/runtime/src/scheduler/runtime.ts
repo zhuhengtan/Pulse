@@ -2,7 +2,7 @@ import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.
 import { createAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
-import type { EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint } from '../core/types.js'
+import type { EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata } from '../core/types.js'
 import { createRuntimeState, effectivePrivacy, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
@@ -215,6 +215,7 @@ export class PulseRuntime {
     const request: AgentCreateRequest = typeof goalOrRequest === 'string' ? { goal: goalOrRequest, program: program!, ...(agentId === undefined ? {} : { agentId }) } : goalOrRequest
     const warmStart = request.warmStart
     let initialGlobal: JsonValue | undefined
+    let initialGlobalPrivacy: PrivacyMetadata | undefined
     let warmStartResultRefs: string[] = []
     if (warmStart) {
       const source = this.state.agents.get(warmStart.agentId)
@@ -223,6 +224,7 @@ export class PulseRuntime {
       const value = source.globalVersions.get(version)
       if (value === undefined) throw new Error(`WARM_START_VERSION_NOT_FOUND:${version}`)
       initialGlobal = warmStartGlobal(value, warmStart.include ?? 'facts', warmStart.relevanceRefs)
+      initialGlobalPrivacy = source.globalPrivacy?.get(version) === undefined ? undefined : structuredClone(source.globalPrivacy.get(version))
       warmStartResultRefs = [...new Set(warmStart.relevanceRefs ?? [])]
       const sourceRoot = this.state.lanes.get(source.rootLaneId)
       for (const ref of warmStartResultRefs) {
@@ -234,7 +236,7 @@ export class PulseRuntime {
     if (this.state.lanes.size >= this.state.maxTotalLanes) throw new Error('MAX_TOTAL_LANES')
     const parent = request.parentAgentId === undefined ? undefined : this.state.agents.get(request.parentAgentId)
     if (request.parentAgentId !== undefined && !parent) throw new Error(`PARENT_AGENT_NOT_FOUND:${request.parentAgentId}`)
-    const { agent, root } = createAgent(this.state, request.goal, { programId: request.program.id, programVersion: request.program.version, step: (request.program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(initialGlobal === undefined ? {} : { initialGlobal }), ...(request.parentAgentId === undefined ? {} : { parentAgentId: request.parentAgentId, depth: (parent?.depth ?? 0) + 1 }), ...(request.inheritedFloor === undefined ? {} : { inheritedFloor: request.inheritedFloor }) })
+    const { agent, root } = createAgent(this.state, request.goal, { programId: request.program.id, programVersion: request.program.version, step: (request.program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(initialGlobal === undefined ? {} : { initialGlobal }), ...(initialGlobalPrivacy === undefined ? {} : { initialGlobalPrivacy }), ...(request.parentAgentId === undefined ? {} : { parentAgentId: request.parentAgentId, depth: (parent?.depth ?? 0) + 1 }), ...(request.inheritedFloor === undefined ? {} : { inheritedFloor: request.inheritedFloor }) })
     if (warmStartResultRefs.length) root.visibleResultRefs = new Set(warmStartResultRefs)
     if (request.program.seriesKeys?.length) root.resume.locals = { $sdk: { series: { keys: [...request.program.seriesKeys], index: 0 } } }
     root.enqueueSeq = this.enqueueSeq++

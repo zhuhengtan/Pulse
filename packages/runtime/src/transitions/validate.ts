@@ -2,8 +2,8 @@ import { error } from '../core/errors.js'
 import { apply } from '../core/mutations.js'
 import { DependencyGraph } from '../dependencies/graph.js'
 import type { ValidationResult, Mutation } from '../core/mutations.js'
-import { effectivePrivacy, privacyRank, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
-import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord, ForkLaneSpec } from '../core/types.js'
+import { effectivePrivacy, privacyRank, privacyTaintPrivacy, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
+import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord, ForkLaneSpec, PrivacyMetadata } from '../core/types.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import { ContextBuilder, estimateHistoryTokens, historyPressure } from '../context/builder.js'
 
@@ -172,7 +172,7 @@ function validateWait(state: RuntimeState, laneId: string, spec: WaitSpec, local
   return undefined
 }
 
-function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: ContextDelta, mutations: Mutation[], proposalId?: string): { nextVersion: number; error?: string; history?: HistoryRecord[] } {
+function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: ContextDelta, mutations: Mutation[], proposalId?: string): { nextVersion: number; error?: string; history?: HistoryRecord[]; metadata?: PrivacyMetadata } {
   const base = delta.target === 'global' ? state.agents.get(lane.agentId)!.latestGlobalVersion : lane.context.version
   if (delta.baseVersion !== base) return { nextVersion: base, error: 'CONTEXT_VERSION_CONFLICT' }
   const paths: string[][] = []
@@ -218,10 +218,16 @@ function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: Context
     }
   }
   const nextVersion = base + 1
+  const baseMetadata = delta.target === 'global' ? state.agents.get(lane.agentId)!.globalPrivacy?.get(base) ?? { privacy: 'public' as const } : { privacy: lane.context.privacy ?? 'public', privacyTaints: lane.context.privacyTaints }
+  const derived = derivedPrivacy(state, lane, delta.derivedFrom ?? [])
+  const metadata: PrivacyMetadata = {
+    privacy: strictestPrivacy([baseMetadata.privacy, delta.privacy ?? 'public', privacyTaintPrivacy(delta.privacyTaints), derived.privacy ?? 'public']),
+    ...(baseMetadata.privacyTaints?.length || delta.privacyTaints?.length ? { privacyTaints: [...(baseMetadata.privacyTaints ?? []), ...(delta.privacyTaints ?? [])] } : {}),
+  }
   if (delta.target === 'global' && delta.proposal) mutations.push({ op: 'insertMergeProposal', proposal: { id: proposalId ?? `proposal-${state.nextIds.proposal}`, agentId: lane.agentId, sourceLaneId: lane.id, baseGlobalVersion: base, delta: { ...clone(delta), sourceLaneId: lane.id }, createdAt: state.now } })
-  else if (delta.target === 'global') mutations.push({ op: 'setGlobal', agentId: lane.agentId, version: nextVersion, value: result })
-  else mutations.push({ op: 'setLaneContext', laneId: lane.id, version: nextVersion, value: result, ...(history.length === lane.context.history.length && history.every((record, index) => JSON.stringify(record) === JSON.stringify(lane.context.history[index])) ? {} : { history }) })
-  return { nextVersion, ...(delta.target === 'lane' ? { history } : {}) }
+  else if (delta.target === 'global') mutations.push({ op: 'setGlobal', agentId: lane.agentId, version: nextVersion, value: result, metadata })
+  else mutations.push({ op: 'setLaneContext', laneId: lane.id, version: nextVersion, value: result, metadata, ...(history.length === lane.context.history.length && history.every((record, index) => JSON.stringify(record) === JSON.stringify(lane.context.history[index])) ? {} : { history }) })
+  return { nextVersion, metadata, ...(delta.target === 'lane' ? { history } : {}) }
 }
 
 function addWait(state: RuntimeState, lane: LaneRecord, spec: WaitSpec, targets: Map<string, TargetRef>, mutations: Mutation[], nextId: string): void {
@@ -301,7 +307,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
     if (applied.error) return { rejection: error(applied.error, 'ContextDelta rejected') }
     if (output.contextDelta.target === 'lane') {
       const nextValue = mutations[mutations.length - 1]
-      if (nextValue?.op === 'setLaneContext') workingLane.context = { ...workingLane.context, state: nextValue.value, version: applied.nextVersion, ...(nextValue.history === undefined ? {} : { history: structuredClone(nextValue.history) }) }
+      if (nextValue?.op === 'setLaneContext') workingLane.context = { ...workingLane.context, state: nextValue.value, version: applied.nextVersion, ...(nextValue.history === undefined ? {} : { history: structuredClone(nextValue.history) }), ...(nextValue.metadata === undefined ? {} : structuredClone(nextValue.metadata)) }
     }
     if (output.adoptCommittedContext && output.contextDelta.target !== 'global') return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'adoptCommittedContext requires a global ContextDelta') }
     if (output.contextDelta.proposal && output.adoptCommittedContext) return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'proposals cannot be adopted in the same transaction') }
@@ -543,8 +549,8 @@ function requireMutations(): typeof import('../core/mutations.js') {
         case 'insertEffect': state.effects.set(mutation.record.id, mutation.record); break
         case 'insertWait': state.waits.set(mutation.record.id, mutation.record); break
         case 'publishResult': state.results.set(mutation.record.id, mutation.record); break
-        case 'setGlobal': { const agent = state.agents.get(mutation.agentId)!; agent.globalVersions.set(mutation.version, mutation.value); agent.latestGlobalVersion = mutation.version; break }
-        case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version, ...(mutation.history === undefined ? {} : { history: structuredClone(mutation.history) }) }; break }
+        case 'setGlobal': { const agent = state.agents.get(mutation.agentId)!; agent.globalVersions.set(mutation.version, mutation.value); if (mutation.metadata) { if (!agent.globalPrivacy) agent.globalPrivacy = new Map(); agent.globalPrivacy.set(mutation.version, structuredClone(mutation.metadata)) } agent.latestGlobalVersion = mutation.version; break }
+        case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version, ...(mutation.history === undefined ? {} : { history: structuredClone(mutation.history) }), ...(mutation.metadata === undefined ? {} : structuredClone(mutation.metadata)) }; break }
         case 'appendEvent': appendRuntimeEvent(state, mutation.event); break
         case 'insertMergeProposal': state.mergeProposals.set(mutation.proposal.id, mutation.proposal); break
         case 'removeMergeProposal': state.mergeProposals.delete(mutation.proposalId); break
