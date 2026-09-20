@@ -60,8 +60,10 @@ export interface RuntimeConfig {
   effectSubmissionPreparer?: (submission: EffectSubmission) => EffectSubmission
   telemetryExporter?: RuntimeTelemetryExporter
   persistenceBackend?: RuntimePersistenceBackend
+  budget?: RuntimeBudgetConfig
 }
 
+export interface RuntimeBudgetConfig { maxTotalAttempts?: number; maxLLMAttempts?: number; maxToolAttempts?: number; maxCostByCurrency?: Record<string, number> }
 export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' | 'final'; include?: 'facts' | 'facts_and_findings'; relevanceRefs?: string[] }
 export interface AgentCreateRequest { goal: string; program: LaneProgram; agentId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string; inheritedFloor?: number }
 export interface BackgroundAgentInfo { agentId: string; rootLaneId: string; state: NonNullable<import('../core/types.js').AgentRecord['state']>; detached: true }
@@ -94,6 +96,8 @@ export class PulseRuntime {
   private shuttingDown = false
   private readonly telemetryExporter: RuntimeTelemetryExporter | undefined
   private readonly persistenceBackend: RuntimePersistenceBackend | undefined
+  private readonly budget: RuntimeBudgetConfig
+  private readonly budgetCost = new Map<string, number>()
   private persistencePending: Promise<void> = Promise.resolve()
   private persistenceScheduled = false
   private persistenceDirty = false
@@ -177,6 +181,8 @@ export class PulseRuntime {
     this.effectSubmissionPreparer = config.effectSubmissionPreparer
     this.telemetryExporter = config.telemetryExporter
     this.persistenceBackend = config.persistenceBackend
+    this.budget = config.budget ?? {}
+    if (restored) for (const event of this.state.events) if (event.type === 'effect.execution_metadata') this.recordBudgetMetadata(event.data ?? event.payload)
     this.customExecutor = config.effectExecutor !== undefined
     this.executor = config.effectExecutor ?? (async () => ({ value: null }))
     this.syncStoragePolicy()
@@ -633,6 +639,7 @@ export class PulseRuntime {
     }
     const settledEvent = this.emit({ type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
     const metadataEvent = execution.metadata === undefined ? undefined : this.emit({ type: 'effect.execution_metadata', effectId, data: execution.metadata })
+    this.recordBudgetMetadata(execution.metadata)
     this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:settled`, result, [settledEvent, ...(metadataEvent ? [metadataEvent] : [])], journalLane, correlation)
     this.refreshWaits()
     this.dispatchQueuedEffects()
@@ -773,6 +780,8 @@ export class PulseRuntime {
       if (effect.state !== 'queued' || this.executions.has(effect.id)) continue
       if (effect.kind === 'llm' && !this.prepareLLMEffect(effect)) continue
       if (effect.concurrencyClass !== 'none' && this.runningCount(effect.concurrencyClass) >= this.state.maxRunning[effect.concurrencyClass]) continue
+      const budgetError = this.budgetRejection(effect)
+      if (budgetError) { this.completeEffect(effect.id, { value: null, executionState: 'failed', sideEffectState: 'none' }, 'failed', budgetError); continue }
       const outboxEntry = this.outbox.enqueue(effect, this.state.now)
       if (outboxEntry.state === 'claimed') continue
       if (!this.acquireEffectLocks(effect)) continue
@@ -902,6 +911,36 @@ export class PulseRuntime {
   }
 
   private runningCount(concurrencyClass: import('../core/types.js').ConcurrencyClass): number { return [...this.state.effects.values()].filter((effect) => effect.concurrencyClass === concurrencyClass && effect.state === 'running').length }
+
+  budgetUsage(): { attempts: number; costByCurrency: Record<string, number> } {
+    return { attempts: [...this.state.effects.values()].reduce((total, effect) => total + (effect.attempts?.length ?? 0), 0), costByCurrency: Object.fromEntries(this.budgetCost.entries()) }
+  }
+
+  private budgetRejection(effect: EffectRecord): RuntimeError | undefined {
+    const attempts = [...this.state.effects.values()].reduce((total, candidate) => total + (candidate.attempts?.length ?? 0), 0)
+    if (this.budget.maxTotalAttempts !== undefined && attempts >= this.budget.maxTotalAttempts) return { code: 'BUDGET_EXCEEDED', message: 'Runtime attempt budget exceeded.', details: { budget: 'maxTotalAttempts', limit: this.budget.maxTotalAttempts } }
+    const kindLimit = effect.kind === 'llm' ? this.budget.maxLLMAttempts : effect.kind === 'tool' ? this.budget.maxToolAttempts : undefined
+    const kindAttempts = [...this.state.effects.values()].filter((candidate) => candidate.kind === effect.kind).reduce((total, candidate) => total + (candidate.attempts?.length ?? 0), 0)
+    if (kindLimit !== undefined && kindAttempts >= kindLimit) return { code: 'BUDGET_EXCEEDED', message: `${effect.kind} attempt budget exceeded.`, details: { budget: effect.kind === 'llm' ? 'maxLLMAttempts' : 'maxToolAttempts', limit: kindLimit } }
+    for (const [currency, limit] of Object.entries(this.budget.maxCostByCurrency ?? {})) if ((this.budgetCost.get(currency) ?? 0) >= limit) return { code: 'BUDGET_EXCEEDED', message: `Runtime cost budget exceeded for ${currency}.`, details: { budget: 'maxCostByCurrency', currency, limit } }
+    return undefined
+  }
+
+  private recordBudgetMetadata(metadata: JsonValue | undefined): void {
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return
+    const attempts = (metadata as Record<string, JsonValue>).attempts
+    if (!Array.isArray(attempts)) return
+    for (const attempt of attempts) {
+      if (!attempt || typeof attempt !== 'object' || Array.isArray(attempt)) continue
+      const usage = (attempt as Record<string, JsonValue>).usage
+      if (!usage || typeof usage !== 'object' || Array.isArray(usage)) continue
+      const cost = (usage as Record<string, JsonValue>).cost
+      if (!cost || typeof cost !== 'object' || Array.isArray(cost)) continue
+      const currency = (cost as Record<string, JsonValue>).currency
+      const amount = (cost as Record<string, JsonValue>).amount
+      if (typeof currency === 'string' && typeof amount === 'number' && Number.isFinite(amount) && amount >= 0) this.budgetCost.set(currency, (this.budgetCost.get(currency) ?? 0) + amount)
+    }
+  }
 
   private acquireEffectLocks(effect: EffectRecord): boolean {
     const specs = [...(effect.locks ?? [])].sort((a, b) => a.resource.localeCompare(b.resource) || a.mode.localeCompare(b.mode))

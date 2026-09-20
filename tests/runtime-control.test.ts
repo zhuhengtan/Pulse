@@ -123,4 +123,16 @@ describe('runtime control boundaries', () => {
     expect(restored.ready.has(created.laneId)).toBe(true)
     expect((await restored.start(created.agentId).outcome()).status).toBe('succeeded')
   })
+
+  it('fails queued Effects closed when the Runtime attempt budget is exhausted', async () => {
+    const runtime = new PulseRuntime({ budget: { maxTotalAttempts: 1 }, effectExecutor: async () => ({ value: { ok: true } }) })
+    const program: LaneProgram = { id: 'attempt-budget', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'first', kind: 'tool', concurrencyClass: 'tool', input: {} }, { key: 'second', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('attempt-budget', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('attempt-budget', 'finish') } }
+    const { agentId } = runtime.createAgent('budget', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(runtime.state.effects.get('effect-1')?.outcome?.status).toBe('succeeded')
+    expect(runtime.state.effects.get('effect-2')?.outcome?.error?.code).toBe('BUDGET_EXCEEDED')
+    expect(runtime.budgetUsage().attempts).toBe(1)
+  })
 })
