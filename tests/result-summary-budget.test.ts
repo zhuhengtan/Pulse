@@ -19,4 +19,21 @@ describe('Result summary budget', () => {
     expect(result?.summary).toBeUndefined()
     expect(runtime.state.events.some((event) => event.type === 'result.summary_rejected')).toBe(true)
   })
+
+  it('fails an effect cleanly when its Artifact cannot pass storage admission', async () => {
+    const program: LaneProgram = {
+      id: 'artifact-storage-limit',
+      version: '1',
+      step: ({ lane, resumeInput }) => lane.resume.step === 'start'
+        ? { actions: [{ type: 'submit_effects', effects: [{ key: 'artifact', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: 'artifact-storage-limit', programVersion: '1', step: 'finish', locals: {} } }
+        : { actions: [{ type: 'complete', result: { status: resumeInput?.type === 'wait' ? resumeInput.resolution.status : 'missing' } }], next: { programId: 'artifact-storage-limit', programVersion: '1', step: 'finish', locals: {} } },
+    }
+    const runtime = new PulseRuntime({ storagePolicy: { maxArtifactBytes: 1 }, effectExecutor: async () => ({ value: null, artifact: { mediaType: 'text/plain', content: 'too large' } }) })
+    const { agentId } = runtime.createAgent('artifact storage limit', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    const effect = runtime.state.effects.get('effect-1')
+    expect(effect).toMatchObject({ state: 'failed', outcome: { status: 'failed', error: { code: 'SESSION_STORAGE_LIMIT_EXCEEDED' } } })
+    expect(runtime.state.artifacts.size).toBe(0)
+    expect(runtime.state.events.some((event) => event.type === 'effect.settled')).toBe(true)
+  })
 })

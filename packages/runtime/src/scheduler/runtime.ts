@@ -681,9 +681,10 @@ export class PulseRuntime {
   }
 
   completeEffect(effectId: string, execution: EffectExecution, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded', error?: RuntimeError): void {
-    const effect = this.state.effects.get(effectId)
-    if (!effect) return
-    if (effect.outcome) { this.emit({ type: 'attempt.late_emit', effectId, data: { status: effect.outcome.status } }); return }
+    const storedEffect = this.state.effects.get(effectId)
+    if (!storedEffect) return
+    if (storedEffect.outcome) { this.emit({ type: 'attempt.late_emit', effectId, data: { status: storedEffect.outcome.status } }); return }
+    const effect = structuredClone(storedEffect)
     const running = this.executions.get(effectId)
     if (running) { running.controller.abort(); this.executions.delete(effectId) }
     if (execution.executionState === 'remote_unknown') { this.markRemoteUnknown(effectId, execution.sideEffectState ?? 'none'); return }
@@ -695,8 +696,6 @@ export class PulseRuntime {
     if (execution.artifact !== undefined) {
       try {
         const artifact = prepareArtifactPublication(this.state, { ...execution.artifact, laneId: effect.ownerLaneId, derivedFrom: [...(effect.derivedFrom ?? []), ...(execution.artifact.derivedFrom ?? [])] })
-        this.state.artifacts.set(artifact.ref, artifact)
-        advanceArtifactId(this.state, artifact.ref)
         publishedArtifact = artifact
         resultDerivedFrom = [...resultDerivedFrom, { kind: 'artifact', ref: artifact.ref }]
         effectiveExecution = { ...effectiveExecution, value: { artifactRef: artifact.ref }, privacy: artifact.privacy, ...(artifact.privacyTaints === undefined ? {} : { privacyTaints: artifact.privacyTaints }) }
@@ -724,19 +723,19 @@ export class PulseRuntime {
     if (attempt) { attempt.executionState = effect.executionState; attempt.sideEffectState = effect.sideEffectState; if (effectiveExecution.executionRef !== undefined) attempt.sideEffectRef = structuredClone(effectiveExecution.executionRef); attempt.settledAt = this.state.now; if (outputError) attempt.error = outputError }
     const settledAttemptId = effect.attemptId
     if (effectiveStatus === 'failed' && this.scheduleRetry(effect, outputError)) {
+      Object.assign(storedEffect, effect)
       this.releaseEffectLocks(effectId)
       this.outbox.ack(`${effect.id}:${settledAttemptId}`)
       this.refreshWaits()
       this.schedulePersistence()
       return
     }
-    const resultId = `result-${this.state.nextIds.result++}`
+    let resultSequence = this.state.nextIds.result
+    while (this.state.results.has(`result-${resultSequence}`)) resultSequence++
+    const resultId = `result-${resultSequence}`
     const rejectedOutputId = effectiveStatus !== 'succeeded' && effectiveExecution.rejectedOutput ? resultId : undefined
     const outcome: Outcome = effectiveStatus === 'succeeded' ? { status: effectiveStatus, resultRef: resultId } : { status: effectiveStatus, ...(outputError ? { error: outputError } : {}), ...(rejectedOutputId ? { rejectedOutputRefs: [rejectedOutputId] } : {}) }
     effect.outcome = outcome
-    this.releaseEffectLocks(effectId)
-    this.outbox.ack(`${effect.id}:${effect.attemptId}`)
-    for (const observation of effectiveExecution.observations ?? []) this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now })
     const ownerLane = this.state.lanes.get(effect.ownerLaneId)
     const sourcePrivacy = effect.derivedFrom?.flatMap((ref) => {
       const result = provenanceRefKind(ref) === 'artifact' ? undefined : this.state.results.get(provenanceRefId(ref))
@@ -748,9 +747,7 @@ export class PulseRuntime {
     const outputTaints = [...sourceTaints, ...(effectiveExecution.privacyTaints ?? [])]
     const rejectedTaints = [...sourceTaints, ...(effectiveExecution.rejectedOutput?.privacyTaints ?? [])]
     const summaryAllowed = effectiveExecution.summary === undefined || Buffer.byteLength(JSON.stringify(effectiveExecution.summary), 'utf8') <= this.state.maxResultSummaryBytes
-    if (effectiveExecution.summary !== undefined && !summaryAllowed) this.emit({ type: 'result.summary_rejected', effectId, data: { maxBytes: this.state.maxResultSummaryBytes, actualBytes: Buffer.byteLength(JSON.stringify(effectiveExecution.summary), 'utf8') } })
     const result = effectiveStatus === 'succeeded' && !taintError ? { id: resultId, effectId, value: effectiveExecution.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), outputTaints), ...(outputTaints.length ? { privacyTaints: outputTaints } : {}), derivedFrom: resultDerivedFrom, ...(effectiveExecution.normalized === undefined ? {} : { normalized: effectiveExecution.normalized }), ...(summaryAllowed && effectiveExecution.summary !== undefined ? { summary: effectiveExecution.summary } : {}) } : rejectedOutputId && effectiveExecution.rejectedOutput && !taintError ? { id: rejectedOutputId, effectId, kind: 'rejected_output' as const, value: effectiveExecution.rejectedOutput.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.rejectedOutput.privacy ?? effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), rejectedTaints), ...(rejectedTaints.length ? { privacyTaints: rejectedTaints } : {}), derivedFrom: [...(effectiveExecution.rejectedOutput.derivedFrom ?? effect.derivedFrom ?? [])] } : undefined
-    if (result) this.state.results.set(resultId, result)
     let journalLane: LaneRecord | undefined
     if (ownerLane && result) {
       journalLane = structuredClone(ownerLane)
@@ -768,16 +765,49 @@ export class PulseRuntime {
         journalLane = appendHistory(journalLane, { effectId: effect.id, instruction, resultRefs: selectedRefs, resultSelection, result: result.id, ...(findings.length ? { findings } : {}), output: structuredClone(effectiveExecution.value), privacy: result.privacy, ...(result.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(result.privacyTaints) }) })
         journalLane.visibleResultRefs!.add(result.id)
       }
-      this.state.lanes.set(journalLane.id, journalLane)
     }
     let correlation: ToolCallCorrelation | undefined
     if (effect.kind === 'tool' && effect.toolCallId && result) {
       const existing = this.state.toolCallCorrelations.get(effect.toolCallId)
       if (existing) {
         correlation = { ...existing, toolEffectId: effect.id, resultRef: result.id }
-        this.state.toolCallCorrelations.set(effect.toolCallId, correlation)
       }
     }
+    const publicationMutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: structuredClone(effect) }]
+    if (publishedArtifact) publicationMutations.push({ op: 'publishArtifact', record: structuredClone(publishedArtifact) })
+    if (result) publicationMutations.push({ op: 'publishResult', record: structuredClone(result) })
+    if (journalLane) publicationMutations.push({ op: 'setLane', laneId: journalLane.id, record: structuredClone(journalLane) })
+    if (correlation) publicationMutations.push({ op: 'setToolCallCorrelation', record: structuredClone(correlation) })
+    try {
+      this.assertStorageAdmission(publicationMutations)
+    } catch (cause) {
+      const storageError: RuntimeError = { code: 'SESSION_STORAGE_LIMIT_EXCEEDED', message: cause instanceof Error ? cause.message : String(cause) }
+      effect.state = 'failed'
+      effect.executionState = 'failed'
+      effect.outcome = { status: 'failed', error: storageError }
+      const failedAttempt = effect.attempts?.at(-1)
+      if (failedAttempt) failedAttempt.error = storageError
+      Object.assign(storedEffect, effect)
+      this.releaseEffectLocks(effectId)
+      this.outbox.ack(`${effect.id}:${effect.attemptId}`)
+      const storageEvent = this.emit({ type: 'effect.settled', effectId, data: effect.outcome as unknown as JsonValue })
+      this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:storage-rejected`, undefined, [storageEvent])
+      this.refreshWaits()
+      this.schedulePersistence()
+      return
+    }
+    Object.assign(storedEffect, effect)
+    if (publishedArtifact) { this.state.artifacts.set(publishedArtifact.ref, publishedArtifact); advanceArtifactId(this.state, publishedArtifact.ref) }
+    if (result) {
+      this.state.results.set(result.id, result)
+      this.state.nextIds.result = Math.max(this.state.nextIds.result, resultSequence + 1)
+    }
+    if (journalLane) this.state.lanes.set(journalLane.id, journalLane)
+    if (correlation) this.state.toolCallCorrelations.set(effect.toolCallId!, correlation)
+    this.releaseEffectLocks(effectId)
+    this.outbox.ack(`${effect.id}:${effect.attemptId}`)
+    for (const observation of effectiveExecution.observations ?? []) this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now })
+    if (effectiveExecution.summary !== undefined && !summaryAllowed) this.emit({ type: 'result.summary_rejected', effectId, data: { maxBytes: this.state.maxResultSummaryBytes, actualBytes: Buffer.byteLength(JSON.stringify(effectiveExecution.summary), 'utf8') } })
     const settledEvent = this.emit({ type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
     const metadataEvent = execution.metadata === undefined ? undefined : this.emit({ type: 'effect.execution_metadata', effectId, data: execution.metadata })
     this.recordBudgetMetadata(execution.metadata)
@@ -929,10 +959,11 @@ export class PulseRuntime {
     if (effect.kind === 'llm') { effect.preparation = { state: 'stale', generation: (effect.preparation?.generation ?? 0) + 1 } }
     this.emit({ type: 'effect.retry_scheduled', effectId: effect.id, data: { previousAttemptId, nextAttemptId: effect.attemptId, delayMs, ...(error ? { error } : {}) } as unknown as JsonValue })
     this.clock.timers.schedule(effect.retryAt, () => {
-      if (!effect.outcome && effect.state === 'retry_wait') {
-        effect.state = 'queued'
-        delete effect.retryAt
-        this.emit({ type: 'effect.retry_ready', effectId: effect.id, data: effect.attemptId })
+      const current = this.state.effects.get(effect.id)
+      if (current && !current.outcome && current.state === 'retry_wait' && current.attemptId === effect.attemptId) {
+        current.state = 'queued'
+        delete current.retryAt
+        this.emit({ type: 'effect.retry_ready', effectId: current.id, data: current.attemptId })
         this.dispatchQueuedEffects()
       }
     })

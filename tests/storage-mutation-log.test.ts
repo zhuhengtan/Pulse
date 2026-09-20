@@ -24,6 +24,17 @@ describe('mutation log and replay', () => {
     expect(restored.events[0]?.id).toBe('event-1')
   })
 
+  it('advances the shared result sequence when replaying a published Result', () => {
+    const state = createRuntimeState()
+    const log = new MutationLog()
+    commitMutationTransaction(state, log, 'result-transaction', [{ op: 'publishResult', record: { id: 'result-7', value: { ok: true }, privacy: 'public', derivedFrom: [] } }])
+    expect(state.nextIds.result).toBe(8)
+    const restored = createRuntimeState()
+    log.replay(restored)
+    expect(restored.results.get('result-7')?.value).toEqual({ ok: true })
+    expect(restored.nextIds.result).toBe(8)
+  })
+
   it('serializes, validates checksums, and rejects tampered or non-contiguous logs', () => {
     const log = new MutationLog()
     log.append('tx-1', [{ op: 'setNow', now: 7 }], 7)

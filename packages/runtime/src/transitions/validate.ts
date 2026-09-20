@@ -571,7 +571,12 @@ function requireMutations(): typeof import('../core/mutations.js') {
         case 'insertLane': state.lanes.set(mutation.record.id, mutation.record); break
         case 'insertEffect': state.effects.set(mutation.record.id, mutation.record); break
         case 'insertWait': state.waits.set(mutation.record.id, mutation.record); break
-        case 'publishResult': state.results.set(mutation.record.id, mutation.record); break
+        case 'publishResult': {
+          state.results.set(mutation.record.id, mutation.record)
+          const match = /^result-(\d+)$/.exec(mutation.record.id)
+          if (match) state.nextIds.result = Math.max(state.nextIds.result, Number(match[1]) + 1)
+          break
+        }
         case 'publishFinding': {
           state.results.set(mutation.record.id, mutation.record)
           const lane = state.lanes.get(mutation.record.laneId)
