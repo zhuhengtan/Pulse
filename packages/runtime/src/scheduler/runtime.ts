@@ -2,7 +2,7 @@ import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.
 import { createAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
-import type { EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation } from '../core/types.js'
+import type { EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec } from '../core/types.js'
 import { createRuntimeState, strictestPrivacy } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
@@ -251,19 +251,20 @@ export class PulseRuntime {
 
   enqueueLane(laneId: string): void { const lane = this.state.lanes.get(laneId); if (lane && lane.status === 'ready') { lane.enqueueSeq = this.enqueueSeq++; lane.readySince = this.state.now; this.ready.enqueue(readyItemFromLane(lane)) } }
 
-  private seriesStep(program: LaneProgram, context: LaneStepContext): LaneStepOutput {
+  private seriesStep(program: LaneProgram, context: LaneStepContext, series?: SeriesLaneSpec): LaneStepOutput {
     const locals = context.lane.resume.locals && typeof context.lane.resume.locals === 'object' && !Array.isArray(context.lane.resume.locals) ? context.lane.resume.locals as Record<string, JsonValue> : {}
     const sdkValue = locals.$sdk && typeof locals.$sdk === 'object' && !Array.isArray(locals.$sdk) ? locals.$sdk as Record<string, JsonValue> : {}
     const seriesValue = sdkValue.series && typeof sdkValue.series === 'object' && !Array.isArray(sdkValue.series) ? sdkValue.series as Record<string, JsonValue> : {}
-    const keys = Array.isArray(seriesValue.keys) ? seriesValue.keys.filter((key): key is string => typeof key === 'string') : (program.seriesKeys ?? ['member'])
+    const keys = Array.isArray(seriesValue.keys) ? seriesValue.keys.filter((key): key is string => typeof key === 'string') : (series?.keys ?? program.seriesKeys ?? ['member'])
     const index = typeof seriesValue.index === 'number' && Number.isInteger(seriesValue.index) && seriesValue.index >= 0 ? seriesValue.index : 0
-    const member = this.programs.get(`${program.seriesMember!.programId}@${program.seriesMember!.programVersion}`)
-    if (!member) return { actions: [{ type: 'fail', error: { code: 'PROGRAM_NOT_REGISTERED', message: `${program.seriesMember!.programId}@${program.seriesMember!.programVersion}` } }], next: { programId: program.id, programVersion: program.version, step: 'start', locals } }
+    const memberRef = series?.member ?? (program.seriesMember ? { programId: program.seriesMember.programId, programVersion: program.seriesMember.programVersion, step: 'start', locals: {} } : undefined)
+    const member = memberRef === undefined ? undefined : this.programs.get(`${memberRef.programId}@${memberRef.programVersion}`)
+    if (!member || memberRef === undefined) return { actions: [{ type: 'fail', error: { code: 'PROGRAM_NOT_REGISTERED', message: memberRef ? `${memberRef.programId}@${memberRef.programVersion}` : 'series member' } }], next: { programId: program.id, programVersion: program.version, step: 'start', locals } }
     if (index >= keys.length) return { actions: [{ type: 'complete', result: sdkValue.seriesResults ?? { results: {} } }], next: { programId: program.id, programVersion: program.version, step: 'start', locals } }
     const memberLocals = sdkValue.memberLocals ?? {}
     const memberLane = structuredClone(context.lane) as LaneRecord
-    memberLane.resume = { programId: member.id, programVersion: member.version, step: typeof sdkValue.memberStep === 'string' ? sdkValue.memberStep : (member as LaneProgram & { entry?: string }).entry ?? 'start', locals: structuredClone(memberLocals) }
-    memberLane.goal = `${context.lane.goal} [series:${keys[index]}]`
+    memberLane.resume = { programId: member.id, programVersion: member.version, step: typeof sdkValue.memberStep === 'string' ? sdkValue.memberStep : memberRef.step ?? (member as LaneProgram & { entry?: string }).entry ?? 'start', locals: structuredClone(memberLocals) }
+    memberLane.goal = series?.goals?.[keys[index]!] ?? `${context.lane.goal} [series:${keys[index]}]`
     const output = member.step({ ...context, lane: memberLane })
     const terminal = output.actions.find((action) => action.type === 'complete' || action.type === 'fail')
     const seriesResults = sdkValue.seriesResults && typeof sdkValue.seriesResults === 'object' && !Array.isArray(sdkValue.seriesResults) ? sdkValue.seriesResults as Record<string, JsonValue> : {}
@@ -308,7 +309,7 @@ export class PulseRuntime {
       if (!program) { this.failLane(lane, { code: 'PROGRAM_NOT_REGISTERED', message: `${lane.resume.programId}@${lane.resume.programVersion}` }); continue }
       let output: LaneStepOutput
       const stepContext: LaneStepContext = { lane: structuredClone(lane), state: structuredClone(this.state), ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), now: this.state.now, observe: (event) => { this.observationInbox.enqueue({ ...event, agentId: lane.agentId, laneId: lane.id, timestamp: this.state.now }) } }
-      try { output = program.seriesMember ? this.seriesStep(program, stepContext) : program.step(stepContext) }
+      try { output = lane.series || program.seriesMember ? this.seriesStep(program, stepContext, lane.series) : program.step(stepContext) }
       catch (cause) {
         const failure: RuntimeError = { code: 'STEP_FAILED', message: cause instanceof Error ? cause.message : String(cause) }
         if (!program.errorBoundary) { this.failLane(lane, failure); continue }

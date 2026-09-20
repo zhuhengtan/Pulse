@@ -1,1 +1,1 @@
-export type { RuntimeAction, SubmitEffectsAction, WaitAction, ForkAction, CancelLaneAction, ProposeCancelAction, CompleteAction, FailAction, AdoptContextAction, EffectSubmission, ForkLaneSpec } from './types.js'
+export type { RuntimeAction, SubmitEffectsAction, WaitAction, ForkAction, CancelLaneAction, ProposeCancelAction, CompleteAction, FailAction, AdoptContextAction, EffectSubmission, ForkLaneSpec, SeriesLaneSpec } from './types.js'

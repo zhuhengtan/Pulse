@@ -22,6 +22,7 @@ export interface RuntimeError {
 export interface Outcome {
   status: OutcomeStatus
   resultRef?: ResultRef
+  result?: JsonValue
   rejectedOutputRefs?: ResultRef[]
   error?: RuntimeError
 }
@@ -83,6 +84,7 @@ export interface LaneRecord {
   version: number
   goal: string
   resume: ResumePoint
+  series?: SeriesLaneSpec
   pendingResumeInput?: ResumeInput
   contextSnapshotVersion: ContextVersion
   context: LaneContext
@@ -247,6 +249,14 @@ export interface ForkLaneSpec {
   toolSetId?: string
   workspacePath?: string
   dependsOn?: Array<{ key: string; target: TargetRef | LocalRef; condition: 'success' | 'settled' }>
+  series?: SeriesLaneSpec
+}
+
+export interface SeriesLaneSpec {
+  member: ResumePoint
+  keys: string[]
+  goals?: Record<string, string>
+  onMemberFailure?: 'continue' | 'abort'
 }
 
 export interface RuntimeActionBase { type: string }
@@ -260,6 +270,7 @@ export interface ForkAction extends RuntimeActionBase {
   type: 'fork'
   lanes: ForkLaneSpec[]
   affinityAck?: boolean
+  joinAliases?: Record<string, string>
   join?: { condition: 'success' | 'settled'; mode?: WaitSpec['mode']; quorum?: number; deadlineAt?: number; onUnsatisfied: 'fail_lane' | 'resume_with_error'; onCancelled?: 'unsatisfied' | 'ignore' }
 }
 export interface CancelLaneAction extends RuntimeActionBase { type: 'cancel_lane'; laneId: LaneId; reason: 'SUPERSEDED' | 'USER_REQUESTED' | 'POLICY' }

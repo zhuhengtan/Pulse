@@ -1,6 +1,6 @@
 import { z, type ZodTypeAny } from 'zod'
 import type { LaneProgram, LaneStepContext } from '../scheduler/runtime.js'
-import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome } from '../core/types.js'
+import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec } from '../core/types.js'
 import { createDraftProxy } from './context-proxy.js'
 
 export type NextStepTarget<TState = unknown> = string | { step: string }
@@ -46,6 +46,61 @@ type ErrorBoundaryHandler<TState> = (error: RuntimeError, ctx: StepContext<TStat
 function target(step: NextStepTarget): string { return typeof step === 'string' ? step : step.step }
 function clone<T>(value: T): T { return structuredClone(value) }
 function asJson(value: unknown): JsonValue { return value as JsonValue }
+
+interface AffinityAdviceGroup { keys: string[]; signals: string[] }
+
+function affinityAdvice(ctx: StepContext): AffinityAdviceGroup[] | undefined {
+  const input = ctx.resumeInput
+  if (!input || input.type !== 'control_error' || input.error.code !== 'FORK_AFFINITY_COLLAPSIBLE') return undefined
+  const details = input.error.details
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return undefined
+  const groups = (details as Record<string, JsonValue>).groups
+  if (!Array.isArray(groups)) return undefined
+  return groups.flatMap((group) => {
+    if (!group || typeof group !== 'object' || Array.isArray(group)) return []
+    const value = group as Record<string, JsonValue>
+    const keys = Array.isArray(value.keys) ? value.keys.filter((key): key is string => typeof key === 'string') : []
+    const signals = Array.isArray(value.signals) ? value.signals.filter((signal): signal is string => typeof signal === 'string') : []
+    return keys.length > 1 ? [{ keys, signals }] : []
+  })
+}
+
+function sameProgram(left: ForkLaneSpec, right: ForkLaneSpec): boolean {
+  return left.program.programId === right.program.programId && left.program.programVersion === right.program.programVersion && left.program.step === right.program.step && JSON.stringify(left.program.locals ?? {}) === JSON.stringify(right.program.locals ?? {})
+}
+
+function collapseAffinityLanes(name: string, lanes: ForkLaneSpec[], groups: AffinityAdviceGroup[], enabled: boolean, joinMode: 'all' | 'any' | 'quorum', condition: 'success' | 'settled'): { lanes: ForkLaneSpec[]; aliases?: Record<string, string> } {
+  if (!enabled || joinMode !== 'all' || condition !== 'settled') return { lanes }
+  const byKey = new Map(lanes.map((lane) => [lane.key, lane]))
+  const collapsed = new Set<string>()
+  const aliases: Record<string, string> = {}
+  const output: ForkLaneSpec[] = []
+  let groupIndex = 0
+  for (const group of groups) {
+    const members = group.keys.map((key) => byKey.get(key)).filter((lane): lane is ForkLaneSpec => lane !== undefined)
+    if (members.length !== group.keys.length || members.some((lane) => lane.dependsOn?.length) || members.some((lane) => !sameProgram(lane, members[0]!))) continue
+    const key = `__series_${name}_${groupIndex++}`
+    const member = members[0]!
+    output.push({ key, goal: members.map((lane) => `${lane.key}: ${lane.goal}`).join('\n'), program: member.program, ...(member.priority === undefined ? {} : { priority: member.priority }), ...(member.contextVersion === undefined ? {} : { contextVersion: member.contextVersion }), ...(member.resources === undefined ? {} : { resources: member.resources }), series: { member: member.program, keys: members.map((lane) => lane.key), goals: Object.fromEntries(members.map((lane) => [lane.key, lane.goal])), onMemberFailure: 'continue' } })
+    for (const lane of members) { collapsed.add(lane.key); aliases[lane.key] = key }
+  }
+  output.push(...lanes.filter((lane) => !collapsed.has(lane.key)))
+  return Object.keys(aliases).length ? { lanes: output, aliases } : { lanes }
+}
+
+function joinedOutcome(ctx: StepContext, dependency: { state: string; outcome: Outcome }, key: string): Outcome {
+  if (dependency.outcome.resultRef === undefined) return dependency.outcome
+  const value = readResult(ctx, dependency.outcome.resultRef)
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return dependency.outcome
+  const member = (value as Record<string, JsonValue>).results
+  if (!member || typeof member !== 'object' || Array.isArray(member)) return dependency.outcome
+  const result = (member as Record<string, JsonValue>)[key]
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return dependency.outcome
+  const record = result as Record<string, JsonValue>
+  const status = record.status
+  if (status !== 'succeeded' && status !== 'failed' && status !== 'cancelled') return dependency.outcome
+  return { status, resultRef: dependency.outcome.resultRef, ...(record.result === undefined ? {} : { result: record.result } as { result: JsonValue }), ...(record.error && typeof record.error === 'object' && !Array.isArray(record.error) ? { error: record.error as unknown as RuntimeError } : {}) }
+}
 
 function zodJsonSchema(schema: ZodTypeAny): JsonValue {
   const definition = schema?._def as { typeName?: string; shape?: (() => Record<string, ZodTypeAny>) | Record<string, ZodTypeAny>; type?: ZodTypeAny; innerType?: ZodTypeAny; values?: string[]; value?: JsonValue; options?: ZodTypeAny[]; description?: string } | undefined
@@ -200,14 +255,26 @@ export class StepBuilder<TState = JsonValue> {
   }
   addParallelStep(name: string, options: { lanes: Record<string, { goal: string; program: { programId: string; programVersion: string; step?: string; locals?: JsonValue }; priority?: number; contextVersion?: 'parent' | 'latest' | number; affinityKey?: string; resources?: ResourceLockSpec[]; dependsOn?: Array<{ key: string; target: { local: string } | { kind: 'lane' | 'effect'; id: string }; condition: 'success' | 'settled' }> }>; condition?: 'success' | 'settled'; mode?: 'all' | 'any' | 'quorum'; quorum?: number; deadlineAt?: number; affinity?: 'collapse' | 'ack'; next?: NextStepTarget; onJoin?: (outcomes: Record<string, Outcome>, ctx: StepContext<TState>) => NextStepTarget }): this {
     const joinStep = `${name}:join`
-    this.handlers.set(name, () => ({ actions: [{ type: 'fork', affinityAck: options.affinity === 'ack', lanes: Object.entries(options.lanes).map(([key, lane]) => ({ key, goal: lane.goal, program: { programId: lane.program.programId, programVersion: lane.program.programVersion, step: lane.program.step ?? 'start', locals: lane.program.locals ?? {} }, ...(lane.priority === undefined ? {} : { priority: lane.priority }), ...(lane.contextVersion === undefined ? {} : { contextVersion: lane.contextVersion }), ...(lane.affinityKey === undefined ? {} : { affinityKey: lane.affinityKey }), ...(lane.resources === undefined ? {} : { resources: lane.resources }), ...(lane.dependsOn ? { dependsOn: lane.dependsOn } : {}) })), join: { condition: options.condition ?? 'settled', mode: options.mode ?? 'all', ...(options.quorum === undefined ? {} : { quorum: options.quorum }), ...(options.deadlineAt === undefined ? {} : { deadlineAt: options.deadlineAt }), onUnsatisfied: 'resume_with_error' } }], next: options.onJoin ? joinStep : options.next ?? joinStep }));
-    if (options.onJoin) this.handlers.set(joinStep, (ctx) => { const outcomes: Record<string, Outcome> = {}; if (ctx.resumeInput?.type === 'wait') for (const [key, dependency] of Object.entries(ctx.resumeInput.resolution.dependencies)) if (dependency.state !== 'pending') outcomes[key] = dependency.outcome; return { next: options.onJoin!(outcomes, ctx) } })
+    this.handlers.set(name, (ctx) => {
+      const condition = options.condition ?? 'settled'; const mode = options.mode ?? 'all'
+      const rawLanes: ForkLaneSpec[] = Object.entries(options.lanes).map(([key, lane]) => ({ key, goal: lane.goal, program: { programId: lane.program.programId, programVersion: lane.program.programVersion, step: lane.program.step ?? 'start', locals: lane.program.locals ?? {} }, ...(lane.priority === undefined ? {} : { priority: lane.priority }), ...(lane.contextVersion === undefined ? {} : { contextVersion: lane.contextVersion }), ...(lane.affinityKey === undefined ? {} : { affinityKey: lane.affinityKey }), ...(lane.resources === undefined ? {} : { resources: lane.resources }), ...(lane.dependsOn ? { dependsOn: lane.dependsOn } : {}) }))
+      const collapsed = collapseAffinityLanes(name, rawLanes, affinityAdvice(ctx) ?? [], options.affinity !== 'ack', mode, condition)
+      const action: ForkAction = { type: 'fork', affinityAck: options.affinity === 'ack' || affinityAdvice(ctx) !== undefined, lanes: collapsed.lanes, ...(collapsed.aliases === undefined ? {} : { joinAliases: collapsed.aliases }), join: { condition, mode, ...(options.quorum === undefined ? {} : { quorum: options.quorum }), ...(options.deadlineAt === undefined ? {} : { deadlineAt: options.deadlineAt }), onUnsatisfied: 'resume_with_error' } }
+      return { actions: [action], next: options.onJoin ? joinStep : options.next ?? joinStep }
+    })
+    if (options.onJoin) this.handlers.set(joinStep, (ctx) => { const outcomes: Record<string, Outcome> = {}; if (ctx.resumeInput?.type === 'wait') for (const [key, dependency] of Object.entries(ctx.resumeInput.resolution.dependencies)) if (dependency.state !== 'pending') outcomes[key] = joinedOutcome(ctx, dependency, key); return { next: options.onJoin!(outcomes, ctx) } })
     return this
   }
   addDynamicForkStep(name: string, options: { lanes: (ctx: StepContext<TState>) => Record<string, { goal: string; program: { programId: string; programVersion: string }; affinityKey?: string; resources?: ResourceLockSpec[]; inputResultRefs?: ResultRef[] }>; condition?: 'success' | 'settled'; mode?: 'all' | 'any' | 'quorum'; quorum?: number; deadlineAt?: number; affinity?: 'collapse' | 'ack'; next?: NextStepTarget; onJoin?: (outcomes: Map<string, Outcome>, ctx: StepContext<TState>) => NextStepTarget }): this {
     const joinStep = `${name}:join`
-    this.handlers.set(name, (ctx) => ({ actions: [{ type: 'fork', affinityAck: options.affinity === 'ack', lanes: Object.entries(options.lanes(ctx)).map(([key, lane]) => ({ key, goal: lane.goal, program: { ...lane.program, step: 'start', locals: {} }, ...(lane.affinityKey === undefined ? {} : { affinityKey: lane.affinityKey }), ...(lane.resources === undefined ? {} : { resources: lane.resources }), ...(lane.inputResultRefs === undefined ? {} : { inputResultRefs: lane.inputResultRefs }) })), join: { condition: options.condition ?? 'settled', mode: options.mode ?? 'all', ...(options.quorum === undefined ? {} : { quorum: options.quorum }), ...(options.deadlineAt === undefined ? {} : { deadlineAt: options.deadlineAt }), onUnsatisfied: 'resume_with_error' } }], next: options.onJoin ? joinStep : options.next ?? joinStep }));
-    if (options.onJoin) this.handlers.set(joinStep, (ctx) => { const outcomes = new Map<string, Outcome>(); if (ctx.resumeInput?.type === 'wait') for (const [key, dependency] of Object.entries(ctx.resumeInput.resolution.dependencies)) if (dependency.state !== 'pending') outcomes.set(key, dependency.outcome); return { next: options.onJoin!(outcomes, ctx) } })
+    this.handlers.set(name, (ctx) => {
+      const condition = options.condition ?? 'settled'; const mode = options.mode ?? 'all'
+      const rawLanes: ForkLaneSpec[] = Object.entries(options.lanes(ctx)).map(([key, lane]) => ({ key, goal: lane.goal, program: { ...lane.program, step: 'start', locals: {} }, ...(lane.affinityKey === undefined ? {} : { affinityKey: lane.affinityKey }), ...(lane.resources === undefined ? {} : { resources: lane.resources }), ...(lane.inputResultRefs === undefined ? {} : { inputResultRefs: lane.inputResultRefs }) }))
+      const collapsed = collapseAffinityLanes(name, rawLanes, affinityAdvice(ctx) ?? [], options.affinity !== 'ack', mode, condition)
+      const action: ForkAction = { type: 'fork', affinityAck: options.affinity === 'ack' || affinityAdvice(ctx) !== undefined, lanes: collapsed.lanes, ...(collapsed.aliases === undefined ? {} : { joinAliases: collapsed.aliases }), join: { condition, mode, ...(options.quorum === undefined ? {} : { quorum: options.quorum }), ...(options.deadlineAt === undefined ? {} : { deadlineAt: options.deadlineAt }), onUnsatisfied: 'resume_with_error' } }
+      return { actions: [action], next: options.onJoin ? joinStep : options.next ?? joinStep }
+    })
+    if (options.onJoin) this.handlers.set(joinStep, (ctx) => { const outcomes = new Map<string, Outcome>(); if (ctx.resumeInput?.type === 'wait') for (const [key, dependency] of Object.entries(ctx.resumeInput.resolution.dependencies)) if (dependency.state !== 'pending') outcomes.set(key, joinedOutcome(ctx, dependency, key)); return { next: options.onJoin!(outcomes, ctx) } })
     return this
   }
   addMergeStep(name: string, options: { task: string; next: NextStepTarget; sources?: { proposals?: 'joined' | LaneId[]; outcomes?: 'joined' | LaneId[] }; instruction?: string | ((ctx: StepContext<TState>) => string); schema?: ZodTypeAny; onSynthesized?: (value: unknown, ctx: StepContext<TState>) => NextStepTarget }): this {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createAgent, createRuntimeState, validateStep } from '@pulse/runtime'
+import { createAgent, createRuntimeState, defineLaneProgram, validateStep, PulseRuntime } from '@pulse/runtime'
 
 const point = (step: string) => ({ programId: 'affinity', programVersion: '1', step, locals: {} })
 
@@ -41,5 +41,30 @@ describe('fork affinity admission', () => {
     const result = validateStep(state, root.id, { actions: [{ type: 'fork', lanes: [{ key: 'worker', goal: 'worker', program: point('worker'), inputResultRefs: ['missing'] }] }], next: point('next') })
     expect('rejection' in result && result.rejection.code).toBe('UNKNOWN_RESULT_REF')
     expect(state.lanes.size).toBe(1)
+  })
+
+  it('retries the DSL proposal as one series lane and restores original join keys', async () => {
+    const worker = defineLaneProgram({ id: 'affinity-worker', version: '1' }, (builder) => {
+      builder.addStep('start', (ctx) => ({ actions: [{ type: 'complete', result: { goal: ctx.goal } }], next: 'start' }))
+    })
+    const parent = defineLaneProgram({ id: 'affinity-parent', version: '1' }, (builder) => {
+      builder.addParallelStep('dispatch', {
+        lanes: {
+          first: { goal: 'first goal', program: { programId: worker.id, programVersion: worker.version }, resources: [{ resource: 'src/auth', mode: 'exclusive' }] },
+          second: { goal: 'second goal', program: { programId: worker.id, programVersion: worker.version }, resources: [{ resource: 'src/auth', mode: 'exclusive' }] },
+        },
+        onJoin: (outcomes, ctx) => { ctx.mutateLane((state) => { (state as Record<string, unknown>).outcomes = outcomes as unknown as Record<string, unknown> }); return 'finish' },
+      })
+      builder.addStep('finish', (ctx) => ({ actions: [{ type: 'complete', result: ctx.lane.context.state }], next: 'finish' }))
+    })
+    const runtime = new PulseRuntime({ forkAffinity: 'advise' })
+    runtime.register(worker)
+    const { agentId } = runtime.createAgent('affinity parent', parent)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect([...runtime.state.lanes.values()]).toHaveLength(2)
+    const root = [...runtime.state.lanes.values()].find((lane) => lane.ownerLaneId === undefined)!
+    const result = root.resultRef ? runtime.state.results.get(root.resultRef)?.value : undefined
+    expect(result).toMatchObject({ outcomes: { first: { status: 'succeeded', result: { goal: 'first goal' } }, second: { status: 'succeeded', result: { goal: 'second goal' } } } })
+    expect(runtime.state.events.some((event) => event.type === 'fork.affinity_advice')).toBe(true)
   })
 })

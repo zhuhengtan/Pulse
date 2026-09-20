@@ -292,11 +292,12 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       for (const child of action.lanes) {
         const target = siblingTargets.get(child.key)!
         if (child.inputResultRefs?.some((ref) => !state.results.has(ref))) return { rejection: error('UNKNOWN_RESULT_REF', `fork input for ${child.key}`) }
+        if (child.series && (!child.series.keys.length || new Set(child.series.keys).size !== child.series.keys.length || !validResume(child.series.member))) return { rejection: error('INVALID_SERIES_LANE', `series for ${child.key}`) }
         const contextVersion = child.contextVersion === 'latest' ? state.agents.get(lane.agentId)!.latestGlobalVersion : child.contextVersion === 'parent' || child.contextVersion === undefined ? lane.contextSnapshotVersion : child.contextVersion
         if (!state.agents.get(lane.agentId)!.globalVersions.has(contextVersion)) return { rejection: error('UNKNOWN_CONTEXT_VERSION', String(contextVersion)) }
         const dependencies = (child.dependsOn ?? []).map((dependency) => ({ ...dependency, target: resolveTarget(dependency.target, siblingTargets) ?? resolveTarget(dependency.target, localTargets) }))
         if (dependencies.some((dependency) => !dependency.target)) return { rejection: error('UNKNOWN_TARGET', `fork dependency for ${child.key}`) }
-        const record: LaneRecord = { id: target.id, agentId: lane.agentId, ownerLaneId: lane.id, status: dependencies.length ? 'waiting' : 'ready', version: 0, goal: child.goal, resume: clone(child.program), contextSnapshotVersion: contextVersion, context: { version: 0, history: [], state: {} }, visibleResultRefs: new Set(child.inputResultRefs ?? []), children: new Set(), priority: child.priority ?? lane.priority, enqueueSeq: state.nextIds.event + laneCounter, readySince: state.now, ownedEffectIds: new Set() }
+        const record: LaneRecord = { id: target.id, agentId: lane.agentId, ownerLaneId: lane.id, status: dependencies.length ? 'waiting' : 'ready', version: 0, goal: child.goal, resume: clone(child.program), ...(child.series === undefined ? {} : { series: clone(child.series) }), contextSnapshotVersion: contextVersion, context: { version: 0, history: [], state: {} }, visibleResultRefs: new Set(child.inputResultRefs ?? []), children: new Set(), priority: child.priority ?? lane.priority, enqueueSeq: state.nextIds.event + laneCounter, readySince: state.now, ownedEffectIds: new Set() }
         mutations.push({ op: 'insertLane', record })
         workingLane.children.add(record.id)
         if (!dependencies.length) mutations.push({ op: 'appendEvent', event: { type: 'lane.ready', laneId: record.id } })
@@ -311,13 +312,16 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         if (forkEdges.some((edge) => !edge.to) || hasDependencyCycle(state, forkEdges)) return { rejection: error('DEPENDENCY_CYCLE', 'Fork dependencies would create a cycle') }
       }
       if (action.join) {
-        const deps = action.lanes.map((child) => ({ key: child.key, target: siblingTargets.get(child.key)!, condition: action.join!.condition }))
+        const aliases = action.joinAliases === undefined ? action.lanes.map((child) => [child.key, child.key] as const) : Object.entries(action.joinAliases)
+        if (new Set(aliases.map(([key]) => key)).size !== aliases.length || aliases.some(([, laneKey]) => !siblingTargets.has(laneKey))) return { rejection: error('INVALID_JOIN_ALIASES', 'join aliases must point to unique original keys and existing fork lanes') }
+        const deps = aliases.map(([key, laneKey]) => ({ key, target: siblingTargets.get(laneKey)!, condition: action.join!.condition }))
         const joinMode = action.join.mode ?? 'all'
         const spec: WaitSpec = { dependencies: deps, mode: joinMode, ...(action.join.quorum === undefined ? {} : { quorum: action.join.quorum }), ...(action.join.deadlineAt === undefined ? {} : { deadlineAt: action.join.deadlineAt }), onUnsatisfied: action.join.onUnsatisfied, ...(action.join.onCancelled ? { onCancelled: action.join.onCancelled } : {}), reason: 'join' }
         const forkEdges = action.lanes.flatMap((child) => (child.dependsOn ?? []).map((dependency) => ({ from: siblingTargets.get(child.key)!, to: resolveTarget(dependency.target, siblingTargets) ?? resolveTarget(dependency.target, localTargets)! })))
         forkEdges.push(...deps.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: dependency.target as TargetRef })))
         if (forkEdges.some((edge) => !edge.to) || hasDependencyCycle(state, forkEdges)) return { rejection: error('DEPENDENCY_CYCLE', 'Fork dependencies would create a cycle') }
-        addWait(state, workingLane, spec, siblingTargets, mutations, `wait-${waitCounter++}`)
+        const joinTargets = new Map(deps.map((dependency) => [dependency.key, dependency.target] as const))
+        addWait(state, workingLane, spec, joinTargets, mutations, `wait-${waitCounter++}`)
       }
     } else if (action.type === 'wait') {
       const targets = new Map<string, TargetRef>()
