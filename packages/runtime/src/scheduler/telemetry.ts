@@ -1,4 +1,6 @@
 import type { JsonValue, RuntimeState } from '../core/types.js'
+import { mkdir, open } from 'node:fs/promises'
+import { dirname } from 'node:path'
 
 export interface RuntimeTelemetryAttempt {
   effectId: string
@@ -23,6 +25,34 @@ export interface RuntimeTelemetrySnapshot {
     attempts: RuntimeTelemetryAttempt[]
     routeRejections: Record<string, number>
     usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number; uncachedInputTokens: number; latencyMs: number; costByCurrency: Record<string, number> }
+  }
+}
+
+export interface RuntimeTelemetryEnvelope {
+  schemaVersion: 1
+  timestamp: number
+  snapshot: RuntimeTelemetrySnapshot
+}
+
+export interface RuntimeTelemetryExporter {
+  publish(envelope: RuntimeTelemetryEnvelope): Promise<void> | void
+}
+
+/** A durable, append-only exporter suitable for a local host or sidecar collector. */
+export class FileRuntimeTelemetryExporter implements RuntimeTelemetryExporter {
+  private pending: Promise<void> = Promise.resolve()
+  constructor(readonly filePath: string) {}
+  async publish(envelope: RuntimeTelemetryEnvelope): Promise<void> {
+    const operation = this.pending.then(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true })
+      const handle = await open(this.filePath, 'a', 0o600)
+      try {
+        await handle.writeFile(`${JSON.stringify(envelope)}\n`, 'utf8')
+        await handle.sync()
+      } finally { await handle.close() }
+    })
+    this.pending = operation.catch(() => undefined)
+    await operation
   }
 }
 

@@ -17,7 +17,7 @@ import { ContextMerger, type MergePlan } from '../context/merger.js'
 import { appendHistory, historyPressure } from '../context/builder.js'
 import { validateJsonSchema } from '../models/router.js'
 import { SessionStoragePolicy, type StoragePolicyConfig } from '../storage/policy.js'
-import { collectRuntimeTelemetry, type RuntimeTelemetrySnapshot } from './telemetry.js'
+import { collectRuntimeTelemetry, type RuntimeTelemetryExporter, type RuntimeTelemetrySnapshot } from './telemetry.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number; observe?: (event: { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }) => void }
 export interface LaneProgram {
@@ -58,6 +58,7 @@ export interface RuntimeConfig {
   persistence?: RuntimePersistenceSnapshot
   effectExecutor?: EffectExecutor
   effectSubmissionPreparer?: (submission: EffectSubmission) => EffectSubmission
+  telemetryExporter?: RuntimeTelemetryExporter
 }
 
 export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' | 'final'; include?: 'facts' | 'facts_and_findings'; relevanceRefs?: string[] }
@@ -89,6 +90,7 @@ function outcomeForLane(lane: LaneRecord): Outcome | undefined {
 export class PulseRuntime {
   readonly state: RuntimeState
   private shuttingDown = false
+  private readonly telemetryExporter: RuntimeTelemetryExporter | undefined
   readonly mutationLog: MutationLog
   readonly outbox: EffectOutbox
   readonly clock: VirtualClock
@@ -162,6 +164,7 @@ export class PulseRuntime {
     this.maxPreparingLLMs = config.maxPreparingLLMs ?? 2
     this.maxPreparedLLMs = config.maxPreparedLLMs ?? 8
     this.effectSubmissionPreparer = config.effectSubmissionPreparer
+    this.telemetryExporter = config.telemetryExporter
     this.customExecutor = config.effectExecutor !== undefined
     this.executor = config.effectExecutor ?? (async () => ({ value: null }))
     this.syncStoragePolicy()
@@ -416,6 +419,11 @@ export class PulseRuntime {
   inspect(): JsonValue { const explanation = this.explain() as Record<string, JsonValue>; return { ...explanation, quarantineEntries: this.quarantine.snapshot() as unknown as JsonValue, observationsPending: this.observationInbox.size } }
 
   telemetry(): RuntimeTelemetrySnapshot { return collectRuntimeTelemetry(this.state) }
+  async exportTelemetry(timestamp = Date.now()): Promise<RuntimeTelemetrySnapshot> {
+    const snapshot = this.telemetry()
+    if (this.telemetryExporter) await this.telemetryExporter.publish({ schemaVersion: 1, timestamp, snapshot })
+    return snapshot
+  }
 
   private assertStorageAdmission(mutations: Mutation[]): void {
     const candidate = structuredClone(this.state)
