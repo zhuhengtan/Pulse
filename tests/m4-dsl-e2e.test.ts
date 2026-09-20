@@ -58,6 +58,7 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     const second = runtime.createAgent('second', succeeding)
 
     await expect(runtime.start(second.agentId).outcome()).resolves.toMatchObject({ status: 'succeeded' })
+    await expect(runtime.start(first.agentId).outcome()).resolves.toMatchObject({ status: 'failed', error: { code: 'EXPECTED' } })
     expect(runtime.state.lanes.get(runtime.state.agents.get(first.agentId)!.rootLaneId)?.status).toBe('failed')
   })
 

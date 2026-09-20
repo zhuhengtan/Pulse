@@ -1,5 +1,5 @@
 import type { PulseRuntime } from '../scheduler/runtime.js'
-import type { JsonValue, RuntimeEvent } from '../core/types.js'
+import type { JsonValue, Outcome, RuntimeEvent } from '../core/types.js'
 
 export type SessionEventKind = 'fact' | 'observation' | 'gap' | 'snapshot'
 /**
@@ -10,8 +10,19 @@ export interface SessionEvent { kind: SessionEventKind; type: SessionEventKind; 
 export interface PulseSessionSnapshot { schemaVersion: 1; agentId: string; now: number; eventSeq: number; agent: JsonValue; lanes: unknown[]; effects: unknown[]; waits: unknown[]; results: unknown[]; mergeProposals: unknown[]; quarantine: unknown[]; observationsPending: number }
 
 export class PulseSession {
-  private readonly execution: Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }>
-  constructor(private readonly runtime: PulseRuntime, readonly agentId: string) { this.execution = runtime.runAgent(agentId) }
+  private readonly execution: Promise<Outcome>
+  constructor(private readonly runtime: PulseRuntime, readonly agentId: string) {
+    this.execution = runtime.runAgent(agentId).then((result) => {
+      const root = runtime.state.lanes.get(runtime.state.agents.get(agentId)?.rootLaneId ?? '')
+      return {
+        status: result.status,
+        ...(root?.resultRef === undefined ? {} : { resultRef: root.resultRef }),
+        ...(root?.failure === undefined ? {} : { error: root.failure.error }),
+        ...(result.status === 'cancelled' && root?.cancelReason !== undefined ? { reason: root.cancelReason } : {}),
+        ...(result.unresolvedEffectIds.length ? { unresolvedEffectIds: [...result.unresolvedEffectIds] } : {}),
+      }
+    })
+  }
   private ownsEvent(event: RuntimeEvent): boolean {
     if (event.agentId === this.agentId) return true
     if (event.laneId !== undefined) return this.runtime.state.lanes.get(event.laneId)?.agentId === this.agentId
@@ -56,7 +67,7 @@ export class PulseSession {
       observationsPending: this.runtime.observationInbox.snapshot().filter((observation) => observation.agentId === this.agentId).length,
     }
   }
-  async outcome(): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }> { return this.execution }
+  async outcome(): Promise<Outcome> { return this.execution }
   async reply(effectId: string, value: JsonValue): Promise<void> {
     const effect = this.runtime.state.effects.get(effectId)
     if (!effect || effect.agentId !== this.agentId) throw new Error('EFFECT_NOT_OWNED')
