@@ -44,8 +44,12 @@ export interface ResumePoint {
 
 export interface HistoryRecord {
   seq: number
+  effectId?: EffectId
   instruction: string
   resultRefs: ResultRef[]
+  resultSelection?: Array<{ ref: ResultRef; rule: string; hash: string }>
+  result?: ResultRef
+  findings?: FindingRef[]
   output: JsonValue
   privacy: PrivacyLabel
   privacyTaints?: PrivacyTaint[]

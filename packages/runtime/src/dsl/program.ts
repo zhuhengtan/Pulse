@@ -8,7 +8,7 @@ export type NextStepTarget<TState = unknown> = string | { step: string }
 export interface InstructionView<TState> { goal: string; state: TState }
 export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; artifacts?: string[]; events?: string[] }
 export interface HistoryCompactionOptions { summarizeTask: string; keepRecentRounds: number }
-export interface HistoryRecordMeta { seq: number; resultRefs: ResultRef[]; privacy: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[] }
+export interface HistoryRecordMeta { seq: number; effectId?: string; resultRefs: ResultRef[]; resultSelection?: Array<{ ref: ResultRef; rule: string; hash: string }>; result?: ResultRef; findings?: ResultRef[]; privacy: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[] }
 export interface ResultMeta { ref: ResultRef; privacy: PrivacyLabel; derivedFrom: ProvenanceRef[]; summary?: JsonValue }
 export interface StepContext<TState = JsonValue> {
   lane: Readonly<LaneRecord>
@@ -206,7 +206,7 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
   derivedRefs.add(laneContextRef(context.lane.id, context.lane.context.version))
   collectResumeResultRefs(context.resumeInput, derivedRefs)
   for (const record of context.lane.context.history) for (const ref of record.resultRefs) derivedRefs.add(ref)
-  const history = context.lane.context.history.map((record: HistoryRecord): HistoryRecordMeta => ({ seq: record.seq, resultRefs: [...record.resultRefs], privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: clone(record.privacyTaints) }) }))
+  const history = context.lane.context.history.map((record: HistoryRecord): HistoryRecordMeta => ({ seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), resultRefs: [...record.resultRefs], ...(record.resultSelection === undefined ? {} : { resultSelection: clone(record.resultSelection) }), ...(record.result === undefined ? {} : { result: record.result }), ...(record.findings === undefined ? {} : { findings: [...record.findings] }), privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: clone(record.privacyTaints) }) }))
   const resultMeta = (ref: ResultRef): ResultMeta | undefined => { const result = resultVisible(context, ref) ? context.state.results.get(ref) : undefined; if (result) derivedRefs.add(ref); return result ? { ref, privacy: result.privacy, derivedFrom: [...result.derivedFrom], ...(result.summary === undefined ? {} : { summary: clone(result.summary) }) } : undefined }
   const globalDelta = (value: { ops: ContextOp[]; privacy?: PrivacyLabel; proposal: boolean }): void => { delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, sourceLaneId: context.lane.id, ops: clone(value.ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal } }
   const ctx: InternalStepContext<TState> = {

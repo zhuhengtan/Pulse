@@ -15,7 +15,7 @@ import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import { apply, type Mutation } from '../core/mutations.js'
 import { ContextMerger, type MergePlan } from '../context/merger.js'
-import { appendHistory, historyPressure } from '../context/builder.js'
+import { appendHistory, contentHash, historyPressure } from '../context/builder.js'
 import { validateJsonSchema } from '../models/router.js'
 import { SessionStoragePolicy, type StoragePolicyConfig } from '../storage/policy.js'
 import { collectRuntimeTelemetry, type RuntimeTelemetryExporter, type RuntimeTelemetrySnapshot } from './telemetry.js'
@@ -708,7 +708,10 @@ export class PulseRuntime {
         const contextSpec = request?.contextSpec && typeof request.contextSpec === 'object' && !Array.isArray(request.contextSpec) ? request.contextSpec as Record<string, JsonValue> : undefined
         const refs = Array.isArray(contextSpec?.resultRefs) ? contextSpec.resultRefs.filter((ref): ref is string => typeof ref === 'string') : (effect.derivedFrom ?? []).filter((ref): ref is string => typeof ref === 'string')
         const instruction = typeof contextSpec?.instruction === 'string' ? contextSpec.instruction : typeof input.instruction === 'string' ? input.instruction : typeof input.task === 'string' ? input.task : effect.key
-        journalLane = appendHistory(journalLane, { instruction, resultRefs: [...new Set(refs)], output: structuredClone(effectiveExecution.value), privacy: result.privacy, ...(result.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(result.privacyTaints) }) })
+        const selectedRefs = [...new Set(refs)]
+        const resultSelection = selectedRefs.map((ref) => ({ ref, rule: 'explicit-context-result', hash: contentHash(this.state.results.get(ref)?.value ?? null) }))
+        const findings = selectedRefs.filter((ref) => this.state.results.get(ref)?.kind === 'finding')
+        journalLane = appendHistory(journalLane, { effectId: effect.id, instruction, resultRefs: selectedRefs, resultSelection, result: result.id, ...(findings.length ? { findings } : {}), output: structuredClone(effectiveExecution.value), privacy: result.privacy, ...(result.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(result.privacyTaints) }) })
         journalLane.visibleResultRefs!.add(result.id)
       }
       this.state.lanes.set(journalLane.id, journalLane)

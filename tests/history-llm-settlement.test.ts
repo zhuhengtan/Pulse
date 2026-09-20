@@ -15,6 +15,6 @@ describe('LLM Effect history settlement', () => {
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
     const history = runtime.state.lanes.get(laneId)!.context.history
     expect(history).toHaveLength(1)
-    expect(history[0]).toMatchObject({ instruction: 'answer the question', resultRefs: [], output: { text: 'answer', finishReason: 'stop' }, privacy: 'public' })
+    expect(history[0]).toMatchObject({ effectId: 'effect-1', instruction: 'answer the question', resultRefs: [], result: 'result-1', resultSelection: [], output: { text: 'answer', finishReason: 'stop' }, privacy: 'public' })
   })
 })
