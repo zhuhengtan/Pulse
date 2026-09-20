@@ -136,6 +136,7 @@
 | Fact Inbox 持久化与 pin | 未消费 Host Fact 随 Runtime persistence 快照恢复，去重历史与 `host-command-N` 序号保持连续；队列期间 pin，消费后清理索引 | `tests/fact-inbox.test.ts`、`tests/storage-outbox.test.ts`、`tests/storage-policy.test.ts` | 本轮 Fact Inbox 提交 |
 | Host Fact Agent 隔离 | Reply Fact 携带 Agent 身份；Session API 与 Runtime apply 双重校验，跨 Agent Human Effect 响应被拒绝并记录 `command.rejected` | `tests/effect-hosts.test.ts` | 本轮 Host 隔离提交 |
 | Host Fact 失败保留 | Runtime 逐条消费 Fact；命令事务发生 storage admission 异常时恢复当前 Fact，避免 drain 后丢失事实并允许重试 | `tests/runtime-control.test.ts`、`tests/fact-inbox.test.ts`、`tests/storage-outbox.test.ts` | `e29d501` |
+| Host 优先级确认事务 | Lane priority 变更与 `command.applied` 确认事件使用同一 MutationLog 事务，并以 Fact `eventId` 作为幂等身份 | `tests/host-commands.test.ts` | `54502fc` |
 | Host Reply 类型边界 | Reply 只允许未结算的 HumanEffect；Tool/Timer/其他 Effect 仍由各自 Executor 结算 | `tests/effect-hosts.test.ts` | 本轮 Reply 类型提交 |
 | Host Fact 存储准入原子性 | 排队 Host Fact 先在候选 Inbox/StoragePolicy 上预检；快照 hard limit 失败时不进入真实队列、不消耗命令序号、不留下半个 pin 记录 | `tests/storage-policy.test.ts` | 本轮 Host Fact 准入提交 |
 | Host 命令 API | `requestCancel()`、`setLanePriority()`、`inspectLane()` 已接入 FactInbox；优先级修改与审计事件通过同一 MutationLog 事务提交，递增 Lane version，排队期间不重入当前 Step | `tests/host-commands.test.ts` | `5cf3af9`、`d96dd00` |
@@ -558,6 +559,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `6e1d295`：补充 Host Fact 存储拒绝后的恢复重试回归，验证命令最终应用且 `command.enqueued` 镜像保持幂等。
 - `6c89fe2`：MutationLog 增加 prepare/commit 分层；不可克隆 Mutation 的失败不会消耗日志序号，Runtime 状态 apply 使用独立副本，避免状态记录与日志共享可变引用。
 - `b554078`：Runtime 统一 `emit()` 入口先执行候选状态 StoragePolicy 预检，直接事实事件不再绕过 hard limit；Host Fact 超限时不会提前消费或写入事件。
+- `54502fc`：Host 优先级命令把 Lane 变更与 `command.applied` 放入同一 MutationLog 事务，并以 Fact `eventId` 固定事务身份，避免状态已改但确认未落盘。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
