@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
@@ -173,6 +173,27 @@ describe('M1-3 context, models and adapters', () => {
       expect(result.truncated).toBe(true)
       expect(await readFile(join(root, 'nested/file.txt'), 'utf8')).toBe('ok')
     } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('rejects sandbox symlink escapes for reads, listings, hashes, and writes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulse-symlink-root-'))
+    const outside = await mkdtemp(join(tmpdir(), 'pulse-symlink-outside-'))
+    try {
+      const outsideFile = join(outside, 'secret.txt')
+      await writeFile(outsideFile, 'secret', 'utf8')
+      await symlink(outsideFile, join(root, 'escape.txt'))
+      await symlink(outside, join(root, 'escape-dir'))
+      const filesystem = new FilesystemTool(root)
+      await expect(filesystem.read('escape.txt')).rejects.toThrow('PATH_OUTSIDE_SANDBOX')
+      await expect(filesystem.hash('escape.txt')).rejects.toThrow('PATH_OUTSIDE_SANDBOX')
+      await expect(filesystem.list('escape-dir')).rejects.toThrow('PATH_OUTSIDE_SANDBOX')
+      await expect(filesystem.write('escape.txt', 'overwrite')).rejects.toThrow('PATH_OUTSIDE_SANDBOX')
+      await expect(filesystem.writeIfUnchanged('escape.txt', 'overwrite', await filesystem.hash('escape.txt').catch(() => '0'.repeat(64)))).rejects.toThrow('PATH_OUTSIDE_SANDBOX')
+      expect(await readFile(outsideFile, 'utf8')).toBe('secret')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+      await rm(outside, { recursive: true, force: true })
+    }
   })
 
   it('applies filesystem writes only when the baseline hash still matches', async () => {

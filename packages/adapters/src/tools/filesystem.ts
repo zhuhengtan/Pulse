@@ -1,24 +1,40 @@
 import { createHash } from 'node:crypto'
-import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 
 export interface FilesystemWriteResult { hash: string; bytes: number }
 
 export class FilesystemTool {
   constructor(readonly root: string) {}
-  private safe(path: string): string { const target = resolve(this.root, path); if (isAbsolute(path) || relative(this.root, target).startsWith('..')) throw new Error('PATH_OUTSIDE_SANDBOX'); return target }
-  async read(path: string, signal?: AbortSignal): Promise<string> { if (signal?.aborted) throw new Error('ABORTED'); return readFile(this.safe(path), 'utf8') }
-  async list(path = '.', signal?: AbortSignal): Promise<string[]> { if (signal?.aborted) throw new Error('ABORTED'); return readdir(this.safe(path)) }
-  async write(path: string, content: string, signal?: AbortSignal): Promise<void> { if (signal?.aborted) throw new Error('ABORTED'); const target = this.safe(path); await mkdir(dirname(target), { recursive: true }); await writeFile(target, content, 'utf8') }
+  private safe(path: string): string { const target = resolve(this.root, path); if (isAbsolute(path) || relative(resolve(this.root), target).startsWith('..')) throw new Error('PATH_OUTSIDE_SANDBOX'); return target }
+  private async existing(path: string): Promise<string> {
+    const target = this.safe(path)
+    const [root, resolved] = await Promise.all([realpath(this.root), realpath(target)])
+    const within = relative(root, resolved)
+    if (within.startsWith('..') || isAbsolute(within)) throw new Error('PATH_OUTSIDE_SANDBOX')
+    return resolved
+  }
+  private async writable(path: string): Promise<string> {
+    const target = this.safe(path)
+    await mkdir(dirname(target), { recursive: true })
+    const [root, parent] = await Promise.all([realpath(this.root), realpath(dirname(target))])
+    const within = relative(root, parent)
+    if (within.startsWith('..') || isAbsolute(within)) throw new Error('PATH_OUTSIDE_SANDBOX')
+    const existing = await lstat(target).catch((cause) => (cause as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : Promise.reject(cause))
+    if (existing?.isSymbolicLink()) throw new Error('PATH_OUTSIDE_SANDBOX')
+    return target
+  }
+  async read(path: string, signal?: AbortSignal): Promise<string> { if (signal?.aborted) throw new Error('ABORTED'); return readFile(await this.existing(path), 'utf8') }
+  async list(path = '.', signal?: AbortSignal): Promise<string[]> { if (signal?.aborted) throw new Error('ABORTED'); return readdir(await this.existing(path)) }
+  async write(path: string, content: string, signal?: AbortSignal): Promise<void> { if (signal?.aborted) throw new Error('ABORTED'); await writeFile(await this.writable(path), content, 'utf8') }
   async hash(path: string, signal?: AbortSignal): Promise<string> {
     if (signal?.aborted) throw new Error('ABORTED')
-    return createHash('sha256').update(await readFile(this.safe(path))).digest('hex')
+    return createHash('sha256').update(await readFile(await this.existing(path))).digest('hex')
   }
   async writeIfUnchanged(path: string, content: string, expectedHash: string, signal?: AbortSignal): Promise<FilesystemWriteResult> {
     if (signal?.aborted) throw new Error('ABORTED')
     if (!/^[a-f0-9]{64}$/.test(expectedHash)) throw new Error('INVALID_FILE_BASELINE_HASH')
-    const target = this.safe(path)
-    await mkdir(dirname(target), { recursive: true })
+    const target = await this.writable(path)
     return this.withLock(target, async () => {
       if (signal?.aborted) throw new Error('ABORTED')
       let current: Buffer
