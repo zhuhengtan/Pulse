@@ -50,12 +50,16 @@
 | LLM Preparation | bounded preparing/prepared 窗口、generation、迟到准备丢弃、explain 展示 | `tests/provider-host.test.ts` | `944c3ad` |
 | Provider 请求与 usage | modelId、工具 schema、structured output schema、uncached token、latency/cost 归一化与 metadata | `tests/m3-context-adapters.test.ts`、`tests/provider-host.test.ts` | `fa723c7` |
 | DSL Draft 数组语义与运行诊断 | `push→append`、数组索引/splice/sort→整数组 set；explain 补充队列、等待、watchdog、preparation、execution metadata | `tests/dsl-context.test.ts`、`tests/runtime-control.test.ts` | `d5c6ef2`、`f57ae27` |
+| Mutation 事务预检 | clone 预检失败不写日志、不改变运行时；提交时保留 Lane/Effect 对象身份 | `tests/storage-mutation-log.test.ts` | `70c3534` |
+| Tool Schema 与 Provider 上限 | 不支持的 Zod 类型构建时 fail-closed；Anthropic `maxOutputTokens` 不再写死 | `tests/m3-context-adapters.test.ts` | `e21907a` |
+| 持久化恢复边界 | `persisted` 驻留状态、backend restore、在途写副作用 quarantine、journal event `txId` 一致 | `tests/storage-policy.test.ts`、`tests/storage-outbox.test.ts` | `00d49f6`、`f7ba385`、`9b22fd3`、`c0e87f6` |
+| 运行观测 | 只读 telemetry 聚合 agent/lane/effect/attempt、route 排除、provider/model、slot wait、usage/cost | `tests/provider-host.test.ts` | `e68cae0` |
 
-统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 39 个测试文件、139/139 通过，`pnpm build` 也已通过。
+统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 39 个测试文件、148/148 通过，`pnpm build` 也已通过。
 
-以下内容没有被无凭证确定性测试伪装成“已完成”：真实 Provider Live Smoke、生产级 Storage pin/retention 与持久化后端对接、故障注入后的完整崩溃恢复/副作用对账，以及真实网络下的 Provider 工具 schema/取消验证。未勾选的 Gate 条目继续表示这些证据缺口。
+以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、进程级故障注入后的完整崩溃恢复/副作用对账，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、恢复、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实进程/网络证据。
 
-> **里程碑边界**：M1 的 Context/模型/DSL 主链已经实现；record 级 Privacy、Progress Watchdog、Fork Affinity、warm start、ResultRef 隔离和结构化拒绝输出已补入当前代码。精细 Storage pin/retention、真实崩溃故障注入和生产级 Provider 验证仍保持独立 Gate，不用本地单测冒充完成。
+> **里程碑边界**：M1 的 Context/模型/DSL 主链已经实现；record 级 Privacy、Progress Watchdog、Fork Affinity、warm start、ResultRef 隔离、结构化拒绝输出、持久化恢复入口和 correlated telemetry 已补入当前代码。真实崩溃故障注入、外部副作用对账和真实 Provider 验证仍保持独立 Gate，不用本地单测冒充完成。
 
 ---
 
@@ -297,7 +301,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
    - 实现 `FilesystemTool`：安全路径沙箱校验、读写与列表
    - 实现 `ShellTool`：子进程组管理、POSIX 信号优雅终止、`cancelGraceMs` 超时升级与输出缓冲截断
 5. **M1 存储边界 (`packages/runtime/src/storage/`)**
-   - 已实现独立的驻内存 hard cap、大小预估、显式 pin/compact 和 `SESSION_STORAGE_LIMIT_EXCEEDED`；Runtime 全自动 pin/retention 编排仍是未完成 Gate
+   - 已实现独立的驻内存 hard cap、大小预估、自动 pin/retention、显式 compact、backend 确认后的 `persisted` 驻留状态、`SESSION_STORAGE_LIMIT_EXCEEDED` 和统一恢复入口；进程级故障注入与外部副作用对账仍属于独立恢复 Gate
 
 #### 验收门禁 Gate 3
 - [x] 稳定前缀测试：固定块顺序、Global/Lane 版本、History 追加行为和前缀稳定序列化通过测试。
@@ -338,7 +342,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - [x] 结构化自愈验证：非规范输出触发一次带错误信息的新 LLM Effect 并成功解析。
 - [x] 慢消费者背压保护：在 `session.stream()` 人为阻塞消费的情况下，Runtime 内部调度 Tick 耗时不受任何影响。
 - [x] 端到端实战全绿：Mock 环境成功执行登录排障 Main/Fork/Join/Synthesize 流程并汇总证据。
-- [ ] Live Smoke（可选）：在真实 Provider 环境下验证请求投影、`LLMResult` 归一化、工具调用关联、隐私阻断和取消收尾；失败只记录 Provider 集成问题，不否定确定性 Gate。
+- [ ] Live Smoke：已尝试真实 Provider 请求，但当前环境返回 `PROVIDER_HTTP_401`；需要有效凭证后重新验证请求投影、`LLMResult` 归一化、工具调用关联和取消收尾。该失败只记录 Provider 集成阻塞，不否定确定性 Gate。
 
 ---
 
@@ -371,17 +375,17 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `9199fbd`：成功 LLMEffect history 归档；`9eda5b1` / `2009eaa`：JSON Schema、`rejected_output` 与 DSL 自愈链路。
 - `0d0ea33`：ToolCallCorrelation 持久化；`015c959`：Provider/Model 可取消并发槽。
 - `79a993f` / `324f1bc` / `e6c228b`：warm start 筛选、递归 Draft Proxy、ReAct 完成回调 ResultRef 契约。
-- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，39 个测试文件、139 个测试通过；`pnpm build` 通过。Live Smoke 仍为真实 Provider 集成验证，未将其冒烟结果冒充内核证明。
+- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，39 个测试文件、148 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
 | 验收项 | 当前状态 | 缺口 |
 | --- | --- | --- |
-| 真实 Provider Live Smoke | 未执行 | 需要有效凭证、真实网络、真实 token/取消/工具调用证据；当前只有 Fixture 和可运行 HTTP Adapter |
-| Runtime Storage pin/retention | 代码侧已接通，生产侧仍有边界 | Runtime 已自动建立幂等 pin 并在 Step commit 前做 hard-limit 预检；仍缺真实持久化后端确认写入后的 `persisted` 状态、旧 Snapshot/Result 的可恢复索引和所有外部入口统一事务化 |
-| 崩溃恢复与副作用对账 | 部分完成 | 有快照、Mutation Log、Outbox 和恢复路径，但仍缺进程级故障注入、持久化事务边界和真实写副作用 reconcile 证明 |
-| Provider 请求完整能力 | 代码侧已补齐映射，仍需真实厂商验证 | OpenAI-compatible/Anthropic 请求已带 model、tool schema、structured schema，并归一化 usage；真实 endpoint 的字段兼容、计费口径、取消和 tool-call 往返仍需 live smoke |
-| 生产运行观测 | 基础诊断已完成，生产指标仍缺 | `inspect/explain` 已展示队列等待、Wait/锁阻塞、watchdog、preparation、执行 metadata；完整 route 排除原因、provider/model slot 等待和持久化 telemetry 仍需补齐 |
+| 真实 Provider Live Smoke | 已执行但被鉴权阻塞 | 请求已到真实 HTTP endpoint，当前返回 `PROVIDER_HTTP_401`；需要有效凭证验证 token、取消、structured output 和 tool-call 往返 |
+| Runtime Storage pin/retention | 确定性代码与后端快照已覆盖 | 自动 pin、hard-limit 预检、compact、backend 确认后的 `persisted` 标记和 restore 已有测试；旧 Snapshot/Result 外部索引与所有进程入口的统一写事务仍需生产实现 |
+| 崩溃恢复与副作用对账 | 部分完成 | 有快照、Mutation Log、Outbox、backend restore 和启动 quarantine；仍缺进程级故障注入、真正的持久化事务边界和真实写副作用 reconcile 证明 |
+| Provider 请求完整能力 | 确定性映射已覆盖，真实厂商仍待验证 | OpenAI-compatible/Anthropic 请求带 model、tool schema、structured schema，usage 已归一化；真实 endpoint 的字段兼容、计费口径、取消和 tool-call 往返仍需有效凭证 |
+| 运行观测 | Runtime 侧已补齐只读出口 | `inspect/explain` 加上 telemetry，覆盖 route 排除原因、provider/model slot、Attempt usage/cost；生产 exporter、长期聚合和告警仍未实现 |
 
 ## 6. 实施时间线与任务清单（Checklist）
 
@@ -399,7 +403,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 本方案继承并落地《Pulse Runtime 架构设计》与《Pulse Application DSL 规范》：
 1. 以主架构第 26 节的 M0/M1 标注为唯一验收来源，不重复维护场景数量。
 2. M1 的真实 Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder、Session 和确定性端到端示例已贯通；其他 Provider 与真实网络任务属于独立集成验证。
-3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation 和 Provider 请求映射已实现并有确定性测试；真实 Provider smoke、可靠持久化恢复和生产级 telemetry 仍未勾选。
+3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore 和 correlated telemetry 已实现并有确定性测试；真实 Provider smoke、进程级故障恢复与生产 exporter 仍未勾选。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
 已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
