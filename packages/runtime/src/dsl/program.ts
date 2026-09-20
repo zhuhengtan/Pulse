@@ -4,7 +4,7 @@ import { globalContextRef, laneContextRef } from '../core/types.js'
 import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, ProvenanceRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec } from '../core/types.js'
 import { createDraftProxy } from './context-proxy.js'
 
-export type NextStepTarget<TState = unknown> = string | { step: string }
+export type NextStepTarget<TState = unknown> = string | { step: string } | { complete: { value?: JsonValue; privacy?: PrivacyLabel; children?: 'reject_if_active' | 'cancel' | 'await' } } | { fail: { code: string; message: string; retryable?: boolean; details?: JsonValue; privacy?: PrivacyLabel; derivedFrom?: ProvenanceRef[] } }
 export interface InstructionView<TState> { goal: string; state: TState }
 export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; artifacts?: string[]; events?: string[] }
 export interface HistoryCompactionOptions { summarizeTask: string; keepRecentRounds: number }
@@ -44,7 +44,12 @@ export interface LaneProgramDefinition extends LaneProgram {
 }
 type ErrorBoundaryHandler<TState> = (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState> | { fail: RuntimeError }
 
-function target(step: NextStepTarget): string { return typeof step === 'string' ? step : step.step }
+function target(step: NextStepTarget, fallback: string): { step: string; action?: RuntimeAction } {
+  if (typeof step === 'string') return { step }
+  if ('step' in step) return { step: step.step }
+  if ('complete' in step) return { step: fallback, action: { type: 'complete', result: step.complete.value ?? null, ...(step.complete.privacy === undefined ? {} : { privacy: step.complete.privacy }), ...(step.complete.children === undefined ? {} : { children: step.complete.children }) } }
+  return { step: fallback, action: { type: 'fail', error: { code: step.fail.code, message: step.fail.message, ...(step.fail.retryable === undefined ? {} : { retryable: step.fail.retryable }), ...(step.fail.details === undefined ? {} : { details: step.fail.details }) }, ...(step.fail.privacy === undefined ? {} : { privacy: step.fail.privacy }), ...(step.fail.derivedFrom === undefined ? {} : { derivedFrom: step.fail.derivedFrom }) } }
+}
 function clone<T>(value: T): T { return structuredClone(value) }
 function asJson(value: unknown): JsonValue { return value as JsonValue }
 function programLLMInput(config: { system?: string; toolSet?: string }, input: Record<string, JsonValue>): Record<string, JsonValue> {
@@ -419,9 +424,11 @@ export class StepBuilder<TState = JsonValue> {
         const delta = result.contextDelta ?? getDelta()
         const derivedDelta = delta && delta.derivedFrom === undefined && derivedFrom.length ? { ...delta, derivedFrom } : delta
         const mergedDelta = derivedDelta && derivedFrom.length ? { ...derivedDelta, derivedFrom: [...new Set([...derivedFrom, ...(derivedDelta.derivedFrom ?? [])])] } : derivedDelta
-        return { actions: [...getActions(), ...(result.actions ?? [])].map((action) => annotateAction(action, derivedFrom)), next: { programId: this.config.id, programVersion: this.config.version, step: target(result.next), locals: result.locals ?? ctx.lane.resume.locals }, ...(mergedDelta ? { contextDelta: mergedDelta } : {}), ...((result.adoptCommittedContext || getAdoptImmediately()) ? { adoptCommittedContext: true } : {}) }
+        const destination = target(result.next, context.lane.resume.step)
+        const actions = [...getActions(), ...(result.actions ?? []), ...(destination.action === undefined ? [] : [destination.action])].map((action) => annotateAction(action, derivedFrom))
+        return { actions, next: { programId: this.config.id, programVersion: this.config.version, step: destination.step, locals: result.locals ?? ctx.lane.resume.locals }, ...(mergedDelta ? { contextDelta: mergedDelta } : {}), ...((result.adoptCommittedContext || getAdoptImmediately()) ? { adoptCommittedContext: true } : {}) }
       },
-      ...(this.boundaryHandler === undefined ? {} : { errorBoundary: (error: RuntimeError, context: LaneStepContext): LaneStepOutput => { const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState; const { ctx, getDelta, getActions, getDerivedRefs, getAdoptImmediately } = makeContext(context, state); const result = this.boundaryHandler!(error, ctx); const derivedFrom = getDerivedRefs(); const isFailure = typeof result === 'object' && result !== null && 'fail' in result; const delta = getDelta(); const mergedDelta = delta && derivedFrom.length ? { ...delta, derivedFrom: [...new Set([...derivedFrom, ...(delta.derivedFrom ?? [])])] } : delta; const next = isFailure ? context.lane.resume.step : target(result as NextStepTarget<TState>); return { actions: [...getActions(), ...(isFailure ? [annotateAction({ type: 'fail' as const, error: (result as { fail: RuntimeError }).fail }, derivedFrom)] : [])], next: { programId: this.config.id, programVersion: this.config.version, step: next, locals: context.lane.resume.locals }, ...(mergedDelta ? { contextDelta: mergedDelta } : {}), ...(getAdoptImmediately() ? { adoptCommittedContext: true } : {}) } } })
+      ...(this.boundaryHandler === undefined ? {} : { errorBoundary: (error: RuntimeError, context: LaneStepContext): LaneStepOutput => { const state = this.config.state ? this.config.state.parse(context.lane.context.state) : context.lane.context.state as TState; const { ctx, getDelta, getActions, getDerivedRefs, getAdoptImmediately } = makeContext(context, state); const result = this.boundaryHandler!(error, ctx); const derivedFrom = getDerivedRefs(); const delta = getDelta(); const mergedDelta = delta && derivedFrom.length ? { ...delta, derivedFrom: [...new Set([...derivedFrom, ...(delta.derivedFrom ?? [])])] } : delta; const destination = target(result, context.lane.resume.step); const actions = [...getActions(), ...(destination.action === undefined ? [] : [destination.action])].map((action) => annotateAction(action, derivedFrom)); return { actions, next: { programId: this.config.id, programVersion: this.config.version, step: destination.step, locals: context.lane.resume.locals }, ...(mergedDelta ? { contextDelta: mergedDelta } : {}), ...(getAdoptImmediately() ? { adoptCommittedContext: true } : {}) } } })
     }
     return definition
   }
