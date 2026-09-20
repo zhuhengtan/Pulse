@@ -96,6 +96,7 @@
 | 取消原因与终态 Outcome | Lane、Effect、Series member 和 Wait 可观察的取消 Outcome 保留 `USER_REQUESTED` / `SUPERSEDED` / `POLICY` 等原因；失败 Lane 暴露结构化错误，Quarantine 未决 Effect 继续随 Outcome 传递 | `tests/m0-acceptance.test.ts`、`tests/runtime-control.test.ts` | `25c6c65` |
 | 终态可观察性 | `inspectLane()`、Session snapshot 与 DSL Join 成员 Outcome 同步暴露取消原因、Lane 失败错误和未决 Effect，避免终态信息只存在内部记录 | `tests/runtime-control.test.ts`、`tests/m4-dsl-e2e.test.ts` | `b982cf0` |
 | cancelling / pendingOutcome 状态机 | Lane 支持 `cancelling`；取消期间不重新执行业务 Step，普通 Wait 直接取消收尾；`children: 'await'` 的 closing Lane 保留并最终提交原成功 Outcome，Agent 状态与 Lane 终态一致 | `tests/runtime-control.test.ts`、`tests/host-commands.test.ts`、`tests/agent-effect.test.ts` | `1d399ef` |
+| DSL 取消入口与 pendingOutcome | `cancel_lane` 和 `children: 'cancel'` 对 closing Lane 使用 `cancelling + pendingOutcome`，普通子 Lane 保持立即取消；加入纯 Transition 回归验证 | `tests/m0-acceptance.test.ts`、`tests/m1-core.test.ts` | `9e77036` |
 | Agent 终态准入失败 | Agent 终态 `setAgent` 的 storage admission 失败不再静默返回，`run()`/`runAgent()` fail-closed 暴露 `SESSION_STORAGE_LIMIT_EXCEEDED` | `tests/runtime-control.test.ts` | `11aa4d4` |
 | Lane/Effect 取消事务 | Lane 取消、Effect cancel-requested 与 Quarantine 的状态和事件统一通过 MutationLog 提交，避免取消过程中直接改写 live record | `tests/runtime-control.test.ts` | 本轮 Lane/Effect 取消事务提交 |
 | 重试/Remote Unknown 事务 | retry scheduled/ready、Remote Unknown 和 reconciliation abandon 的 Effect/Lane 状态与事件统一通过 MutationLog 提交 | `tests/retry-policy.test.ts`、`tests/runtime-control.test.ts` | 本轮重试与 Remote Unknown 事务提交 |
