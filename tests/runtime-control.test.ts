@@ -151,6 +151,16 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.lanes.get('lane-1')?.status).toBe('waiting')
   })
 
+  it('commits a Lane failure through MutationLog when Step storage admission fails', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxResultBytes: 100_000 } })
+    const program: LaneProgram = { id: 'step-storage-limit', version: '1', step: () => ({ actions: [{ type: 'complete', result: { too: 'large' } }], next: point('step-storage-limit', 'done') }) }
+    const { laneId } = runtime.createAgent('step storage limit', program)
+    ;(runtime.storagePolicy as any).limits.maxResultBytes = 1
+    runtime.tick()
+    expect(runtime.state.lanes.get(laneId)?.status).toBe('failed')
+    expect(runtime.mutationLog.entries.some((entry) => entry.mutations.some((mutation) => mutation.op === 'setLane' && mutation.laneId === laneId && mutation.record.status === 'failed'))).toBe(true)
+  })
+
   it('contains Executor failures when dispatch audit events cannot fit the event budget', async () => {
     const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 100_000 }, effectExecutor: async () => { throw new Error('executor failed') } })
     const program: LaneProgram = { id: 'dispatch-failure-admission', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('dispatch-failure-admission', 'done') }) }

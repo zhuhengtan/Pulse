@@ -537,10 +537,7 @@ export class PulseRuntime {
         try { this.assertStorageAdmission(result.mutations) }
         catch (cause) {
           const storageError: RuntimeError = { code: 'SESSION_STORAGE_LIMIT_EXCEEDED', message: cause instanceof Error ? cause.message : String(cause) }
-          lane.status = 'failed'
-          lane.failure = { error: storageError, privacy: 'public' }
-          lane.version++
-          this.tryEmit({ type: 'storage.limit_exceeded', laneId: lane.id, data: storageError as unknown as JsonValue })
+          this.failLane(lane, storageError)
           progressed++
           continue
         }
