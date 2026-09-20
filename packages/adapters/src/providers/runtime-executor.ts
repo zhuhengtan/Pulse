@@ -1,5 +1,5 @@
 import type { EffectExecutor, EffectExecution, JsonValue, LLMRequestProjection, LLMResult, ModelCandidate, ModelRouter } from '@pulse/runtime'
-import { ModelFallbackController, OutputValidationError, estimateProjectionTokens, validateAdapterResult, validateJsonSchema, modelFallbackError } from '@pulse/runtime'
+import { ModelFallbackController, OutputValidationError, estimateProjectionTokens, stableSerialize, validateAdapterResult, validateJsonSchema, modelFallbackError } from '@pulse/runtime'
 import type { ProviderAdapter } from './types.js'
 
 class AsyncSlot {
@@ -62,9 +62,12 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
     const slotWaitMs = new Map<string, number>()
     let lastSchemaViolation: JsonValue | undefined
     let failedForSchema = false
-    const dynamicRequirements = input.requirements && typeof input.requirements === 'object' && !Array.isArray(input.requirements) ? input.requirements as Partial<ModelCandidate['capabilities']> : {}
-    const routeRequirements = { ...config.requirements, ...dynamicRequirements }
-    const routeDiagnostics = config.router.diagnostics(task, projection.privacy, routeRequirements, estimateProjectionTokens(projection))
+    const dynamicRequirements = input.requirements && typeof input.requirements === 'object' && !Array.isArray(input.requirements) ? input.requirements as Record<string, JsonValue> : {}
+    const structuredRequirement = dynamicRequirements.structuredOutput
+    const structuredSchema = structuredRequirement && typeof structuredRequirement === 'object' && !Array.isArray(structuredRequirement) ? (structuredRequirement as Record<string, JsonValue>).schema : undefined
+    if (structuredSchema !== undefined && (input.outputSchema === undefined || stableSerialize(structuredSchema) !== stableSerialize(input.outputSchema))) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'STRUCTURED_OUTPUT_CONTRACT_MISMATCH', message: 'requirements.structuredOutput.schema must equal outputSchema.' } }
+    const routeRequirements: Partial<ModelCandidate['capabilities']> = { ...config.requirements, ...(typeof dynamicRequirements.toolCalling === 'boolean' ? { toolCalling: dynamicRequirements.toolCalling } : {}), ...(typeof dynamicRequirements.structuredOutput === 'boolean' ? { structuredOutput: dynamicRequirements.structuredOutput } : structuredSchema === undefined ? {} : { structuredOutput: true }), ...(typeof dynamicRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: dynamicRequirements.maxOutputTokens } : {}) }
+    const routeDiagnostics = config.router.diagnostics(task, projection.privacy, routeRequirements, estimateProjectionTokens(projection) + (typeof routeRequirements.maxOutputTokens === 'number' ? routeRequirements.maxOutputTokens : 0))
     const candidates = config.router.routeProjection(task, projection, routeRequirements)
     const result = await fallback.execute(effect.id, candidates, async (attempt) => {
       failedForSchema = false
@@ -82,7 +85,7 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
       const releases = [providerRelease, modelRelease]
       try {
         const startedAt = Date.now()
-        const output = validateAdapterResult(await provider.executeAttempt({ request: projection, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), onObservation: (chunk) => { observations.push({ type: 'chunk', data: chunk }) } }))
+        const output = validateAdapterResult(await provider.executeAttempt({ request: projection, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation: (chunk) => { observations.push({ type: 'chunk', data: chunk }) } }))
         const measuredUsage = output.usage === undefined ? { latencyMs: Math.max(0, Date.now() - startedAt) } : { ...output.usage, latencyMs: output.usage.latencyMs ?? Math.max(0, Date.now() - startedAt), ...(output.usage.uncachedInputTokens === undefined && output.usage.inputTokens !== undefined && output.usage.cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, output.usage.inputTokens - output.usage.cachedInputTokens) } : {}) }
         usage.set(attempt.attemptId, measuredUsage)
         if (output.finishReason === 'refusal') throw new OutputValidationError('adapter', 'MODEL_REFUSAL', output.refusal ?? 'Provider refused the request.')

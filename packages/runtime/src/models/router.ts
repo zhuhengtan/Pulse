@@ -1,6 +1,6 @@
 import type { LLMRequestProjection, PrivacyLabel } from '../core/types.js'
 
-export interface ModelCapabilities { toolCalling?: boolean; structuredOutput?: boolean; maxContextTokens: number; local?: boolean }
+export interface ModelCapabilities { toolCalling?: boolean; structuredOutput?: boolean; maxContextTokens: number; maxOutputTokens?: number; local?: boolean }
 export interface ModelUsage {
   inputTokens?: number
   outputTokens?: number
@@ -28,7 +28,7 @@ export class ModelRouter {
   constructor(private readonly registry: ModelRegistry) {}
   route(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] { return this.diagnostics(task, privacy, requirements).filter((item) => item.accepted).map((item) => this.registry.list().find((candidate) => candidate.id === item.id)!).sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id)) }
   routeProjection(task: string, projection: LLMRequestProjection, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] {
-    const estimatedTokens = estimateProjectionTokens(projection)
+    const estimatedTokens = estimateProjectionTokens(projection) + (typeof requirements.maxOutputTokens === 'number' ? requirements.maxOutputTokens : 0)
     return this.diagnostics(task, projection.privacy, requirements, estimatedTokens).filter((item) => item.accepted).map((item) => this.registry.list().find((candidate) => candidate.id === item.id)!).sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
   }
   diagnostics(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}, estimatedTokens?: number): ModelRouteDiagnostic[] {
@@ -36,7 +36,8 @@ export class ModelRouter {
       const reasons: string[] = []
       if (!candidate.tasks.includes(task)) reasons.push('TASK_NOT_SUPPORTED')
       if (privacy === 'local_only' && candidate.capabilities.local !== true) reasons.push('PRIVACY_CLOUD_BLOCKED')
-      for (const [key, value] of Object.entries(requirements)) if (candidate.capabilities[key as keyof ModelCapabilities] !== value) reasons.push(`CAPABILITY_MISSING:${key}`)
+      for (const [key, value] of Object.entries(requirements)) if (key !== 'maxOutputTokens' && candidate.capabilities[key as keyof ModelCapabilities] !== value) reasons.push(`CAPABILITY_MISSING:${key}`)
+      if (typeof requirements.maxOutputTokens === 'number' && (candidate.capabilities.maxOutputTokens === undefined || candidate.capabilities.maxOutputTokens < requirements.maxOutputTokens)) reasons.push('OUTPUT_BUDGET_TOO_SMALL')
       if (estimatedTokens !== undefined && candidate.capabilities.maxContextTokens < estimatedTokens) reasons.push('CONTEXT_WINDOW_TOO_SMALL')
       return { id: candidate.id, providerId: candidate.providerId, accepted: reasons.length === 0, reasons }
     })

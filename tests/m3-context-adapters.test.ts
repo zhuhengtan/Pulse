@@ -55,9 +55,10 @@ describe('M1-3 context, models and adapters', () => {
     vi.stubGlobal('fetch', fetchMock)
     const request = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'tools@1', instruction: 'inspect', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'system' as const, content: 'system' }, { kind: 'tools' as const, content: [{ name: 'read', description: 'Read a file', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } }] }, { kind: 'instruction' as const, content: 'inspect' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'tools@1', privacy: 'public' as const, privacyRefs: [] }
     const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] }
-    await new OpenAICompatibleAdapter('openai', { provider: 'openai', defaultModel: 'fallback' }).executeAttempt({ request, signal: new AbortController().signal, model: 'candidate', outputSchema: schema })
+    await new OpenAICompatibleAdapter('openai', { provider: 'openai', defaultModel: 'fallback' }).executeAttempt({ request, signal: new AbortController().signal, model: 'candidate', outputSchema: schema, maxOutputTokens: 77 })
     const openaiBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
     expect(openaiBody.model).toBe('candidate')
+    expect(openaiBody.max_tokens).toBe(77)
     expect(openaiBody.tools[0].function.parameters).toEqual(request.blocks[1].content[0].inputSchema)
     expect(openaiBody.response_format.json_schema.schema).toEqual(schema)
     fetchMock.mockClear()

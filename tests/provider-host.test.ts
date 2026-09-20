@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createModelEffectExecutor, type ProviderAdapter } from '@pulse/adapters'
 import { ModelRouter, InMemoryModelRegistry, modelFallbackError, estimateProjectionTokens, type LLMRequestProjection, validateAdapterResult, validateJsonSchema } from '@pulse/runtime'
 import { PulseRuntime } from '@pulse/runtime'
-import type { LaneProgram } from '@pulse/runtime'
+import type { EffectRecord, LaneProgram } from '@pulse/runtime'
 import { defineLaneProgram } from '@pulse/runtime'
 import { z } from 'zod'
 
@@ -28,6 +28,27 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     registry.register({ id: 'too-small', providerId: 'p1', tasks: ['reason'], capabilities: { local: true, maxContextTokens: estimateProjectionTokens(projection) - 1 }, priority: 10 })
     registry.register({ id: 'fits', providerId: 'p2', tasks: ['reason'], capabilities: { local: true, maxContextTokens: estimateProjectionTokens(projection) }, priority: 1 })
     expect(new ModelRouter(registry).routeProjection('reason', projection).map((candidate) => candidate.id)).toEqual(['fits'])
+  })
+
+  it('reserves the requested output budget during model admission', () => {
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'small-output', providerId: 'p1', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096, maxOutputTokens: 7 }, priority: 10 })
+    registry.register({ id: 'fits-output', providerId: 'p2', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096, maxOutputTokens: 8 }, priority: 1 })
+    const router = new ModelRouter(registry)
+    expect(router.routeProjection('reason', projection, { maxOutputTokens: 8 }).map((candidate) => candidate.id)).toEqual(['fits-output'])
+    expect(router.diagnostics('reason', projection.privacy, { maxOutputTokens: 8 })).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'small-output', accepted: false, reasons: ['OUTPUT_BUDGET_TOO_SMALL'] })]))
+  })
+
+  it('rejects a structured-output schema that diverges from the final output schema', async () => {
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'structured', providerId: 'structured-provider', tasks: ['plan'], capabilities: { local: true, structuredOutput: true, maxContextTokens: 4096, maxOutputTokens: 128 }, priority: 1 })
+    let called = false
+    const providers = new Map<string, ProviderAdapter>([['structured-provider', { id: 'structured-provider', name: 'structured', executeAttempt: async () => { called = true; return { text: '', structured: { ok: true }, toolCalls: [], finishReason: 'stop' } } }]])
+    const executor = createModelEffectExecutor({ router: new ModelRouter(registry), providers })
+    const effect = { id: 'effect-1', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'plan', kind: 'llm', concurrencyClass: 'llm', input: { task: 'plan', request: projection, requirements: { structuredOutput: { schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] } } }, outputSchema: { type: 'object', properties: { done: { type: 'boolean' } }, required: ['done'] } }, attemptId: 'attempt-1', attemptNo: 0, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as EffectRecord
+    const execution = await executor(effect, new AbortController().signal)
+    expect(execution).toMatchObject({ status: 'failed', error: { code: 'STRUCTURED_OUTPUT_CONTRACT_MISMATCH' } })
+    expect(called).toBe(false)
   })
 
   it('routes local_only requests, falls back within one Effect, and records attempt metadata', async () => {
