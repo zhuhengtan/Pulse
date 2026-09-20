@@ -40,7 +40,8 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
         throw modelFallbackError({ retryable: true, localClosed: true, sideEffectState: 'none', cause })
       }
     })
-    const value = toJson(result.result)
+    const modelValue = typeof input.schema === 'string' ? (result.result.structured ?? result.result.text) : result.result
+    const value = toJson(modelValue)
     return { value, privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: candidateMetadata(result.candidate, result.attempts, usage), ...(observations.length ? { observations } : {}) }
   }
 }

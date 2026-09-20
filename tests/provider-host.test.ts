@@ -3,6 +3,8 @@ import { createModelEffectExecutor, type ProviderAdapter } from '@pulse/adapters
 import { ModelRouter, InMemoryModelRegistry, modelFallbackError, estimateProjectionTokens, type LLMRequestProjection } from '@pulse/runtime'
 import { PulseRuntime } from '@pulse/runtime'
 import type { LaneProgram } from '@pulse/runtime'
+import { defineLaneProgram } from '@pulse/runtime'
+import { z } from 'zod'
 
 const point = (id: string, step: string) => ({ programId: id, programVersion: '1', step, locals: {} })
 const projection: LLMRequestProjection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'default', instruction: 'reason', privacy: 'local_only', privacyRefs: [] }, blocks: [{ kind: 'instruction', content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'default', privacy: 'local_only', privacyRefs: [] }
@@ -35,5 +37,18 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     expect(calls).toEqual(['p1', 'p2'])
     expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.data).includes('local-second'))).toBe(true)
     expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.data).includes('cachedInputTokens'))).toBe(true)
+  })
+
+  it('passes a Provider structured payload to the DSL schema decoder', async () => {
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'structured', providerId: 'structured-provider', tasks: ['plan'], capabilities: { local: true, structuredOutput: true, maxContextTokens: 4096 }, priority: 1 })
+    const providers = new Map<string, ProviderAdapter>([['structured-provider', { id: 'structured-provider', name: 'structured', executeAttempt: async () => ({ text: '', structured: { ok: true }, toolCalls: [], finishReason: 'stop' }) }]])
+    const program = defineLaneProgram({ id: 'provider-structured', version: '1' }, (builder) => {
+      builder.addStructuredLLMStep('plan', { task: 'plan', instruction: 'return structured', schema: z.object({ ok: z.boolean() }), onSuccess: (value) => value.ok ? 'finish' : 'finish' })
+      builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' }))
+    })
+    const runtime = new PulseRuntime({ effectExecutor: createModelEffectExecutor({ router: new ModelRouter(registry), providers }) })
+    const { agentId } = runtime.createAgent('structured', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
   })
 })

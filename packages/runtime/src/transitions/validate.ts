@@ -5,7 +5,7 @@ import type { ValidationResult, Mutation } from '../core/mutations.js'
 import { privacyRank, strictestPrivacy } from '../core/types.js'
 import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord, ForkLaneSpec } from '../core/types.js'
 import { appendRuntimeEvent } from '../core/events.js'
-import { estimateHistoryTokens, historyPressure } from '../context/builder.js'
+import { ContextBuilder, estimateHistoryTokens, historyPressure } from '../context/builder.js'
 
 const isLocal = (value: TargetRef | LocalRef): value is LocalRef => 'local' in value
 const clone = <T>(value: T): T => structuredClone(value)
@@ -171,6 +171,24 @@ function derivedPrivacy(state: RuntimeState, refs: string[]): { privacy?: Privac
   return { privacy: strictestPrivacy(labels) }
 }
 
+function prepareLLMInput(state: RuntimeState, lane: LaneRecord, submission: SubmitEffectsAction['effects'][number]): { input?: JsonValue; error?: string } {
+  if (submission.kind !== 'llm' || !submission.input || typeof submission.input !== 'object' || Array.isArray(submission.input)) return { input: submission.input }
+  const input = submission.input as Record<string, JsonValue>
+  if (input.request !== undefined) return { input: submission.input }
+  if (typeof input.task !== 'string') return { input: submission.input }
+  const instruction = typeof input.instruction === 'string' ? input.instruction : input.task
+  const rawInputs = input.inputs && typeof input.inputs === 'object' && !Array.isArray(input.inputs) ? input.inputs as Record<string, JsonValue> : {}
+  const resultRefs = [...new Set([...(Array.isArray(rawInputs.results) ? rawInputs.results.filter((ref): ref is string => typeof ref === 'string') : []), ...(Array.isArray(rawInputs.findings) ? rawInputs.findings.filter((ref): ref is string => typeof ref === 'string') : [])])]
+  try {
+    const agent = state.agents.get(lane.agentId)
+    if (!agent) return { error: 'UNKNOWN_AGENT' }
+    const projection = new ContextBuilder(state).build({ agent, lane, resultRefs, instruction, ...(typeof input.system === 'string' ? { system: input.system } : {}), ...(input.policy === undefined ? {} : { policy: input.policy }), ...(input.tools === undefined ? {} : { tools: input.tools }), toolSetId: typeof input.toolSetId === 'string' ? input.toolSetId : 'default' })
+    return { input: { ...input, request: projection as unknown as JsonValue } }
+  } catch (cause) {
+    return { error: cause instanceof Error ? cause.message : 'INVALID_LLM_CONTEXT' }
+  }
+}
+
 export function validateStep(state: RuntimeState, laneId: string, output: LaneStepOutput): ValidationResult {
   const lane = state.lanes.get(laneId)
   if (!lane) return { rejection: error('UNKNOWN_LANE', `Lane ${laneId} does not exist`) }
@@ -229,13 +247,15 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         if (submission.locks && new Set(submission.locks.map((lock) => lock.resource)).size !== submission.locks.length) return { rejection: error('DUPLICATE_EFFECT_LOCK', submission.key) }
         if (submission.derivedFrom?.some((ref) => !state.results.has(ref))) return { rejection: error('UNKNOWN_RESULT_REF', submission.key) }
         if (submission.toolCallId !== undefined && (existingToolCallIds.has(submission.toolCallId) || seenToolCallIds.has(submission.toolCallId))) return { rejection: error('DUPLICATE_TOOL_CALL_ID', submission.toolCallId) }
+        const prepared = prepareLLMInput(state, lane, submission)
+        if (prepared.error) return { rejection: error(prepared.error, submission.key) }
         seenEffectKeys.add(submission.key)
         if (submission.toolCallId !== undefined) seenToolCallIds.add(submission.toolCallId)
         const id = `effect-${effectCounter++}`
         const target = { kind: 'effect' as const, id }
         batchTargets.set(submission.key, target)
         localTargets.set(submission.key, target)
-        const effect: EffectRecord = { id, agentId: lane.agentId, ownerLaneId: lane.id, key: submission.key, kind: submission.kind, concurrencyClass: submission.concurrencyClass, input: clone(submission.input), ...(submission.derivedFrom === undefined ? {} : { derivedFrom: [...submission.derivedFrom] }), state: 'queued', attemptId: `${id}-attempt-1`, attemptNo: 1, executionState: 'local', sideEffectState: 'none', ...(submission.priority === undefined ? {} : { schedulePriority: submission.priority }), ...(submission.deadlineAt === undefined ? {} : { deadlineAt: submission.deadlineAt }), ...(submission.cancelGraceMs === undefined ? {} : { cancelGraceMs: submission.cancelGraceMs }), ...(submission.attemptTimeoutMs === undefined ? {} : { attemptTimeoutMs: submission.attemptTimeoutMs }), ...(submission.idempotencyKey === undefined ? {} : { idempotencyKey: submission.idempotencyKey }), ...(submission.sideEffectPolicy === undefined ? {} : { sideEffectPolicy: submission.sideEffectPolicy }), ...(submission.retryPolicy === undefined ? {} : { retryPolicy: clone(submission.retryPolicy) }), ...(submission.duplicateExecutionPolicy === undefined ? {} : { duplicateExecutionPolicy: submission.duplicateExecutionPolicy }), ...(submission.maxUnknownAttempts === undefined ? {} : { maxUnknownAttempts: submission.maxUnknownAttempts }), ...(submission.toolCallId === undefined ? {} : { toolCallId: submission.toolCallId }), ...(submission.locks === undefined ? {} : { locks: clone(submission.locks) }) }
+        const effect: EffectRecord = { id, agentId: lane.agentId, ownerLaneId: lane.id, key: submission.key, kind: submission.kind, concurrencyClass: submission.concurrencyClass, input: clone(prepared.input ?? submission.input), ...(submission.derivedFrom === undefined ? {} : { derivedFrom: [...submission.derivedFrom] }), state: 'queued', attemptId: `${id}-attempt-1`, attemptNo: 1, executionState: 'local', sideEffectState: 'none', ...(submission.priority === undefined ? {} : { schedulePriority: submission.priority }), ...(submission.deadlineAt === undefined ? {} : { deadlineAt: submission.deadlineAt }), ...(submission.cancelGraceMs === undefined ? {} : { cancelGraceMs: submission.cancelGraceMs }), ...(submission.attemptTimeoutMs === undefined ? {} : { attemptTimeoutMs: submission.attemptTimeoutMs }), ...(submission.idempotencyKey === undefined ? {} : { idempotencyKey: submission.idempotencyKey }), ...(submission.sideEffectPolicy === undefined ? {} : { sideEffectPolicy: submission.sideEffectPolicy }), ...(submission.retryPolicy === undefined ? {} : { retryPolicy: clone(submission.retryPolicy) }), ...(submission.duplicateExecutionPolicy === undefined ? {} : { duplicateExecutionPolicy: submission.duplicateExecutionPolicy }), ...(submission.maxUnknownAttempts === undefined ? {} : { maxUnknownAttempts: submission.maxUnknownAttempts }), ...(submission.toolCallId === undefined ? {} : { toolCallId: submission.toolCallId }), ...(submission.locks === undefined ? {} : { locks: clone(submission.locks) }) }
         mutations.push({ op: 'insertEffect', record: effect })
         workingLane.ownedEffectIds.add(id)
       }
