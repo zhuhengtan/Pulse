@@ -48,7 +48,7 @@
 | warm start / DSL | facts/findings 筛选、ResultRef 授权、递归 Draft Proxy、ReAct 完成回调只传 ResultRef | `tests/warm-start.test.ts`、`tests/dsl-context.test.ts`、`tests/m4-dsl-e2e.test.ts` | `79a993f`、`324f1bc`、`e6c228b` |
 | Runtime Storage 编排 | Runtime 自动登记 Event/Result/Snapshot/LLM Request，活动 Lane/Wait/未结算 Request/可见 ResultRef 幂等 pin；Step 提交前 clone 预检 hard limit | `tests/storage-policy.test.ts` | `43a9847` |
 | SQLite 持久化事务 | 提供 Node `node:sqlite` RuntimePersistenceBackend；WAL/FULL synchronous、单行快照、`BEGIN IMMEDIATE` 和 digest CAS 支持原子保存/恢复 | `tests/sqlite-persistence.test.ts` | `0372a5a` |
-| SQLite 持久化一体化 | RuntimePersistenceBackend 自动挂载 SQLite ResultStore、SnapshotStore 与 EventArchive；checkpoint 外置正文、事实归档和 static restore 可直接闭环 | `tests/sqlite-persistence.test.ts` | `4ac21f3` |
+| SQLite 持久化一体化 | RuntimePersistenceBackend 自动挂载 SQLite ResultStore、SnapshotStore 与 EventArchive；checkpoint 外置正文、事实归档和 static restore 可直接闭环；读穿外置正文后保留原始 digest 作为恢复续写 CAS 基线 | `tests/sqlite-persistence.test.ts` | `4ac21f3`、`3627c75` |
 | SQLite Result/Snapshot/EventArchive | 提供带 namespace 的 SQLite Result/Snapshot body store 与幂等冲突检测，以及按事件序号原子追加、范围读取的 SQLite EventArchive | `tests/sqlite-content-store.test.ts` | `b832588` |
 | LLM Preparation | bounded preparing/prepared 窗口、generation、迟到准备丢弃、explain 展示 | `tests/provider-host.test.ts` | `944c3ad` |
 | Provider 请求与 usage | modelId、工具 schema、structured output schema、uncached token、latency/cost 归一化与 metadata | `tests/m3-context-adapters.test.ts`、`tests/provider-host.test.ts` | `fa723c7` |
@@ -584,6 +584,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `44c8608`：Provider Adapter 支持 OpenAI-compatible/Anthropic SSE 文本观测，完整响应后再归一化 tool call，避免流式中间参数进入 Runtime。
 - `b832588`：增加 SQLite Result/Snapshot body store 与 EventArchive，支持跨实例幂等写、冲突拒绝和事件范围恢复读取。
 - `8fa5f47`：持久化 envelope 增加 program/tool/policy/router compatibility，恢复执行前拒绝版本不匹配或缺失的宿主能力。
+- `3627c75`：恢复外置 Result/Snapshot 正文后保留后端原始 digest 作为下一次自动持久化的 CAS 基线，避免读穿后的重算 digest 误报共享快照冲突；仅显式配置 `persistenceBackend` 时续写恢复状态。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
