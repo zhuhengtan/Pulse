@@ -1,6 +1,7 @@
 import { z, type ZodTypeAny } from 'zod'
 import type { LaneProgram, LaneStepContext } from '../scheduler/runtime.js'
 import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome } from '../core/types.js'
+import { createDraftProxy } from './context-proxy.js'
 
 export type NextStepTarget<TState = unknown> = string | { step: string }
 export interface InstructionView<TState> { goal: string; state: TState }
@@ -93,6 +94,7 @@ function ordinaryLocals(locals: JsonValue): Record<string, JsonValue> {
 
 function makeContext<TState>(context: LaneStepContext, initialState: TState): { ctx: StepContext<TState>; getDelta: () => ContextDelta | undefined; getActions: () => RuntimeAction[]; getDerivedRefs: () => ResultRef[]; getAdoptImmediately: () => boolean } {
   const draft = clone(initialState)
+  const draftProxy = draft && typeof draft === 'object' && !Array.isArray(draft) ? createDraftProxy(draft as Record<string, unknown>) : undefined
   let delta: ContextDelta | undefined
   const actions: RuntimeAction[] = []
   const derivedRefs = new Set<ResultRef>()
@@ -108,7 +110,7 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
     getResult: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return findResult(context, ref) },
     results: { meta: resultMeta, summary: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return resultMeta(ref)?.summary } },
     mergeProposals: [...context.state.mergeProposals.values()].filter((proposal) => proposal.agentId === context.lane.agentId).map((proposal) => clone(proposal)),
-    mutateLane: (mutator) => { mutator(draft); delta = { target: 'lane', baseVersion: context.lane.context.version, ops: Object.entries(draft as Record<string, unknown>).map(([key, value]) => ({ op: 'set' as const, path: [key], value: asJson(value) })) } },
+    mutateLane: (mutator) => { mutator((draftProxy?.draft ?? draft) as TState); const changes = draftProxy?.changes(); delta = { target: 'lane', baseVersion: context.lane.context.version, ops: changes?.ops.map((op) => op.op === 'set' ? { op: 'set' as const, path: op.path, value: asJson(op.value) } : { op: 'remove' as const, path: op.path }) ?? [] } },
     proposeGlobal: (value) => globalDelta({ ...value, proposal: true }),
     commitGlobal: (value) => { globalDelta({ ...value, proposal: false }); adoptImmediately = value.adoptImmediately ?? false },
     adoptContext: (version) => actions.push({ type: 'adopt_context', version }),

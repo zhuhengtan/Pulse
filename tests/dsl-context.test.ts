@@ -1,8 +1,21 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, defineLaneProgram } from '@pulse/runtime'
+import { PulseRuntime, createDraftProxy, defineLaneProgram } from '@pulse/runtime'
 import { z } from 'zod'
 
 describe('DSL StepContext', () => {
+  it('captures nested object and array mutations as path operations', () => {
+    const { draft, changes } = createDraftProxy({ nested: { enabled: false }, items: ['a'] })
+    draft.nested.enabled = true
+    draft.items.push('b')
+    delete draft.nested.enabled
+    expect(changes().ops).toEqual([
+      { op: 'set', path: ['nested', 'enabled'], value: true },
+      { op: 'set', path: ['items', '1'], value: 'b' },
+      { op: 'set', path: ['items', 'length'], value: 2 },
+      { op: 'remove', path: ['nested', 'enabled'] },
+    ])
+  })
+
   it('exposes fixed global/history metadata and compiles lane/global writes atomically', async () => {
     const program = defineLaneProgram({ id: 'dsl-context', version: '1', state: z.object({ touched: z.boolean().optional() }) }, (builder) => {
       builder.addStep('start', (ctx) => {
