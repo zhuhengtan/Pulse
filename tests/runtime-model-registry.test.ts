@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ModelRouter, PulseRuntime, type LaneProgram } from '@pulse/runtime'
+import { ModelRouter, PulseRuntime, type LaneProgram, type LLMRequestProjection } from '@pulse/runtime'
 
 const program: LaneProgram = { id: 'runtime-model-registry', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'runtime-model-registry', programVersion: '1', step: 'start', locals: {} } }) }
 
@@ -28,5 +28,16 @@ describe('Runtime model registry and task routes', () => {
     const runtime = new PulseRuntime({ modelRouter: router, programs: [program] })
     expect(runtime.models).toBe(router.registry)
     expect(runtime.modelRouter).toBe(router)
+  })
+
+  it('executes an LLM Effect through the Adapter bound to a registered model', async () => {
+    const projection: LLMRequestProjection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'default', instruction: 'reason', privacy: 'public', privacyRefs: [] }, blocks: [{ kind: 'instruction', content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'default', privacy: 'public', privacyRefs: [] }
+    const runtime = new PulseRuntime()
+    runtime.models.register({ id: 'local:primary', providerId: 'local', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 1, adapter: { executeAttempt: async () => ({ text: 'registered result', toolCalls: [], finishReason: 'stop' }) } })
+    runtime.modelRouter.register({ task: 'reason', candidates: ['local:primary'] })
+    const program: LaneProgram = { id: 'registered-model-execution', version: '1', step: ({ lane }) => lane.resume.step === 'start' ? { actions: [{ type: 'submit_effects', effects: [{ key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request: projection } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: 'registered-model-execution', programVersion: '1', step: 'finish', locals: {} } } : { actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'registered-model-execution', programVersion: '1', step: 'finish', locals: {} } } }
+    const { agentId } = runtime.createAgent('registered model', program)
+    await expect(runtime.start(agentId).outcome()).resolves.toMatchObject({ status: 'succeeded' })
+    expect([...runtime.state.results.values()].some((result) => result.value && typeof result.value === 'object' && !Array.isArray(result.value) && result.value.text === 'registered result')).toBe(true)
   })
 })

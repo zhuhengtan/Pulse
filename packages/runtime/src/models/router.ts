@@ -1,4 +1,4 @@
-import type { LLMRequestProjection, PrivacyLabel } from '../core/types.js'
+import type { JsonValue, LLMRequestProjection, PrivacyLabel } from '../core/types.js'
 
 export interface ModelCapabilities { toolCalling?: boolean; structuredOutput?: boolean; maxContextTokens: number; maxOutputTokens?: number; local?: boolean }
 export interface ModelUsage {
@@ -9,7 +9,10 @@ export interface ModelUsage {
   latencyMs?: number
   cost?: { amount: number; currency: string; source: 'reported' | 'estimated'; pricingVersion?: string }
 }
-export interface ModelCandidate { id: string; providerId: string; tasks: string[]; capabilities: ModelCapabilities; priority: number }
+export interface ModelAdapter {
+  executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number }): Promise<LLMResult>
+}
+export interface ModelCandidate { id: string; providerId: string; tasks: string[]; capabilities: ModelCapabilities; priority: number; adapter?: ModelAdapter }
 export interface ModelRouteDiagnostic { id: string; providerId: string; accepted: boolean; reasons: string[] }
 export interface ModelRegistry { register(candidate: ModelCandidate): void; list(): ModelCandidate[] }
 export interface ModelRoute { task: string; candidates: string[] }

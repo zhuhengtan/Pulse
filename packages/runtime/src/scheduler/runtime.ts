@@ -17,7 +17,7 @@ import { appendRuntimeEvent } from '../core/events.js'
 import { apply, type Mutation } from '../core/mutations.js'
 import { ContextMerger, type MergePlan } from '../context/merger.js'
 import { appendHistory, contentHash, historyPressure, stableSerialize } from '../context/builder.js'
-import { InMemoryModelRegistry, ModelRouter, validateJsonSchema, type ModelRegistry } from '../models/router.js'
+import { InMemoryModelRegistry, ModelRouter, validateAdapterResult, validateJsonSchema, type ModelCapabilities, type ModelRegistry } from '../models/router.js'
 import { SessionStoragePolicy, type StoragePolicyConfig } from '../storage/policy.js'
 import { collectRuntimeTelemetry, type RuntimeTelemetryExporter, type RuntimeTelemetrySnapshot } from './telemetry.js'
 import { advanceArtifactId, markArtifactPersisted, pinArtifact, prepareArtifactPublication, readArtifact, unpinArtifact, type ArtifactPublication } from '../storage/artifacts.js'
@@ -99,6 +99,12 @@ export interface AgentCreateRequest { goal: string; program: LaneProgram | Progr
 export interface BackgroundAgentInfo { agentId: string; rootLaneId: string; state: NonNullable<import('../core/types.js').AgentRecord['state']>; detached: true }
 
 function resultMetadata(value: JsonValue): { sizeBytes: number; contentHash: string } { return { sizeBytes: Buffer.byteLength(stableSerialize(value), 'utf8'), contentHash: contentHash(value) } }
+
+function asJsonValue(value: unknown): JsonValue {
+  const serialized = JSON.stringify(value)
+  if (serialized === undefined) throw new Error('MODEL_OUTPUT_NOT_SERIALIZABLE')
+  try { return JSON.parse(serialized) as JsonValue } catch { throw new Error('MODEL_OUTPUT_NOT_SERIALIZABLE') }
+}
 
 function priorityScore(priority: AgentCreateRequest['priority']): number | undefined {
   if (priority === undefined) return undefined
@@ -316,7 +322,7 @@ export class PulseRuntime {
     this.budget = config.budget ?? {}
     if (restored) for (const event of this.state.events) if (event.type === 'effect.execution_metadata') this.recordBudgetMetadata(event.data ?? event.payload)
     this.customExecutor = config.effectExecutor !== undefined
-    this.executor = config.effectExecutor ?? (async () => ({ value: null }))
+    this.executor = config.effectExecutor ?? this.executeRegisteredEffect.bind(this)
     if (restored) this.clock.set(this.state.now)
     if (config.maxRuntimeMs !== undefined) {
       if (!Number.isFinite(config.maxRuntimeMs) || config.maxRuntimeMs < 0) throw new Error('INVALID_MAX_RUNTIME')
@@ -593,6 +599,45 @@ export class PulseRuntime {
     if (this.tools.get(input.name) === undefined) return submission
     const admission = this.tools.admission(input.name, input.arguments ?? {})
     return { ...submission, ...(submission.locks === undefined ? { locks: admission.locks } : {}), ...(submission.sideEffectPolicy === undefined ? { sideEffectPolicy: admission.sideEffectPolicy } : {}), ...(submission.attemptTimeoutMs === undefined ? { attemptTimeoutMs: admission.defaultTimeoutMs } : {}), ...(submission.toolVersion === undefined ? { toolVersion: admission.version } : {}) }
+  }
+
+  private async executeRegisteredEffect(effect: Readonly<EffectRecord>, signal: AbortSignal, emitObservation?: EffectObservationEmitter): Promise<EffectExecution> {
+    if (effect.kind !== 'llm') return { value: null }
+    const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+    const task = input.task
+    const request = input.request
+    if (typeof task !== 'string' || !request || typeof request !== 'object' || Array.isArray(request)) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'INVALID_LLM_EFFECT_INPUT', message: 'LLM effect requires task and request.' } }
+    const projection = request as unknown as import('../core/types.js').LLMRequestProjection
+    const dynamicRequirements = input.requirements && typeof input.requirements === 'object' && !Array.isArray(input.requirements) ? input.requirements as Record<string, JsonValue> : {}
+    const requirements: Partial<ModelCapabilities> = {
+      ...(typeof dynamicRequirements.toolCalling === 'boolean' ? { toolCalling: dynamicRequirements.toolCalling } : {}),
+      ...(typeof dynamicRequirements.structuredOutput === 'boolean' ? { structuredOutput: dynamicRequirements.structuredOutput } : {}),
+      ...(typeof dynamicRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: dynamicRequirements.maxOutputTokens } : {}),
+    }
+    const candidates = this.modelRouter.routeProjection(task, projection, requirements)
+    const routes = this.modelRouter.diagnostics(task, projection.privacy, requirements)
+    const attempts: JsonValue[] = []
+    let lastError: unknown
+    for (const candidate of candidates) {
+      if (candidate.adapter === undefined) continue
+      const attemptId = `${effect.id}-attempt-${attempts.length + 1}`
+      const startedAt = Date.now()
+      try {
+        const result = validateAdapterResult(await candidate.adapter.executeAttempt({ request: projection, signal, model: candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof requirements.maxOutputTokens === 'number' ? { maxOutputTokens: requirements.maxOutputTokens } : {}), ...(emitObservation === undefined ? {} : { onObservation: (chunk: string) => emitObservation({ type: 'chunk', data: chunk }) }) }))
+        const usage = result.usage === undefined ? { latencyMs: Math.max(0, Date.now() - startedAt) } : { ...result.usage, latencyMs: result.usage.latencyMs ?? Math.max(0, Date.now() - startedAt) }
+        attempts.push({ attemptId, attemptNo: attempts.length + 1, modelId: candidate.id, providerId: candidate.providerId, usage })
+        const output = input.outputSchema === undefined ? result : result.structured ?? result.text
+        if (input.outputSchema !== undefined && !validateJsonSchema(output, input.outputSchema)) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Provider output did not match the declared schema.' }, metadata: { selected: { id: candidate.id, providerId: candidate.providerId }, routes: asJsonValue(routes), attempts } }
+        this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: result.finishReason === 'refusal' ? 'refused' : 'succeeded', ...(result.usage === undefined ? {} : { usage: result.usage }) })
+        return { value: asJsonValue(output), privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: { selected: { id: candidate.id, providerId: candidate.providerId }, routes: asJsonValue(routes), attempts } }
+      } catch (cause) {
+        lastError = cause
+        attempts.push({ attemptId, attemptNo: attempts.length + 1, modelId: candidate.id, providerId: candidate.providerId, error: cause instanceof Error ? cause.message : String(cause) })
+        this.modelRouter.recordFeedback({ modelId: candidate.id, providerId: candidate.providerId, outcome: 'failed' })
+      }
+    }
+    const error = lastError === undefined ? { code: candidates.length === 0 ? 'NO_ELIGIBLE_MODEL' : 'MODEL_ADAPTER_NOT_BOUND', message: candidates.length === 0 ? 'No model candidate satisfies the task, privacy, capability, and context requirements.' : 'No routed model candidate has a bound adapter.' } : runtimeErrorFromCause(lastError, 'MODEL_EXECUTION_FAILED')
+    return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error, metadata: { routes: asJsonValue(routes), attempts } }
   }
   private journalEffect(effect: EffectRecord, transactionId: string, result?: import('../core/types.js').ResultRecord, events: import('../core/types.js').RuntimeEvent[] = [], lane?: LaneRecord, correlation?: ToolCallCorrelation, artifact?: ArtifactRecord): void {
     const mutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: structuredClone(effect) }]
