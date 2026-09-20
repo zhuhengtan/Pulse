@@ -377,7 +377,11 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `9199fbd`：成功 LLMEffect history 归档；`9eda5b1` / `2009eaa`：JSON Schema、`rejected_output` 与 DSL 自愈链路。
 - `0d0ea33`：ToolCallCorrelation 持久化；`015c959`：Provider/Model 可取消并发槽。
 - `79a993f` / `324f1bc` / `e6c228b`：warm start 筛选、递归 Draft Proxy、ReAct 完成回调 ResultRef 契约。
-- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，40 个测试文件、160 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- `a95d4f5` / `8d2d0bb`：Tool admission 默认值、可信 workspace shared/exclusive 锁回退和显式资源声明覆盖。
+- `b4461a8` / `1dccd67`：可恢复 Tool 对账、Runtime 对账入口和 quarantine 终态闭环。
+- `af1ff6f` / `f523c71` / `32e4487`：any/quorum Join、Wait deadline 和 DSL Join 参数暴露。
+- `6ac1183`：DSL 收到 `FORK_AFFINITY_COLLAPSIBLE` 后自动将可安全折叠的同 Program 组重提为 series Lane，并在 Join 恢复原始成员 key；不满足折叠条件时保留 ack 路径。
+- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，40 个测试文件、163 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
@@ -385,7 +389,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | --- | --- | --- |
 | 真实 Provider Live Smoke | 已执行但被鉴权阻塞 | 请求已到真实 HTTP endpoint，当前返回 `PROVIDER_HTTP_401`；需要有效凭证验证 token、取消、structured output 和 tool-call 往返 |
 | Runtime Storage pin/retention | 确定性代码与后端快照已覆盖 | 自动 pin、hard-limit 预检、compact、backend 确认后的 `persisted` 标记和 restore 已有测试；旧 Snapshot/Result 外部索引与所有进程入口的统一写事务仍需生产实现 |
-| 崩溃恢复与副作用对账 | 部分完成 | 有快照、Mutation Log、Outbox、backend restore 和启动 quarantine；仍缺进程级故障注入、真正的持久化事务边界和真实写副作用 reconcile 证明 |
+| 崩溃恢复与副作用对账 | 部分完成 | 有快照、Mutation Log、Outbox、backend restore、启动 quarantine 和 Runtime/Tool 对账入口；仍缺进程级故障注入、真正的持久化事务边界和真实写副作用 reconcile 证明 |
 | Provider 请求完整能力 | 确定性映射已覆盖，真实厂商仍待验证 | OpenAI-compatible/Anthropic 请求带 model、tool schema、structured schema，usage 已归一化；真实 endpoint 的字段兼容、计费口径、取消和 tool-call 往返仍需有效凭证 |
 | 运行观测 | Runtime 侧已补齐只读出口 | `inspect/explain` 加上 telemetry，覆盖 route 排除原因、provider/model slot、Attempt usage/cost；生产 exporter、长期聚合和告警仍未实现 |
 
@@ -405,7 +409,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 本方案继承并落地《Pulse Runtime 架构设计》与《Pulse Application DSL 规范》：
 1. 以主架构第 26 节的 M0/M1 标注为唯一验收来源，不重复维护场景数量。
 2. M1 的真实 Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder、Session 和确定性端到端示例已贯通；其他 Provider 与真实网络任务属于独立集成验证。
-3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore 和 correlated telemetry 已实现并有确定性测试；真实 Provider smoke、进程级故障恢复与生产 exporter 仍未勾选。
+3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity（含可安全组的 DSL series collapse）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射、backend restore、Tool admission 默认锁和 correlated telemetry 已实现并有确定性测试；真实 Provider smoke、进程级故障恢复与生产 exporter 仍未勾选。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
 已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
