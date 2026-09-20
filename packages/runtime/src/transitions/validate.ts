@@ -321,7 +321,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       if (sourcePrivacy.error) return { rejection: error(sourcePrivacy.error, 'Privacy downgrade references an unknown result.') }
       const result: import('../core/types.js').ResultRecord = {
         id: action.outputRef,
-        value: clone(action.value),
+        value: clone(action.value ?? null),
         privacy: action.targetPrivacy,
         derivedFrom: [...action.sourceRefs],
         ...(action.summary === undefined ? {} : { summary: clone(action.summary) }),

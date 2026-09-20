@@ -147,7 +147,7 @@ export interface AttemptRecord {
 export interface ResultRecord {
   id: ResultRef
   effectId?: EffectId
-  value: JsonValue
+  value?: JsonValue
   privacy: PrivacyLabel
   derivedFrom: string[]
   summary?: JsonValue

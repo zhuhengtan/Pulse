@@ -44,7 +44,7 @@ export class ContextBuilder {
       { kind: 'global' as const, content: global },
       { kind: 'history' as const, content: input.lane.context.history.map((record) => ({ seq: record.seq, instruction: record.instruction, resultRefs: record.resultRefs, output: record.output, privacy: record.privacy })) },
     ]
-    const blocks = [...prefixBlocks, { kind: 'lane' as const, content: input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: results.map((result) => ({ id: result.id, value: result.value })) }, { kind: 'instruction' as const, content: input.instruction }]
+    const blocks = [...prefixBlocks, { kind: 'lane' as const, content: input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: results.map((result) => ({ id: result.id, value: result.value ?? null })) }, { kind: 'instruction' as const, content: input.instruction }]
     return { contextSpec, blocks, prefixHash: hash(prefixBlocks), projectionHash: hash(blocks), builderVersion: this.version, policyVersion: '1', toolSetVersion: input.toolSetId, privacy, privacyRefs }
   }
 }
