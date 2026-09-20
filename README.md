@@ -263,10 +263,10 @@ const finalOutcome = await session.outcome()
 
 | 阶段 | 交付内容 |
 | --- | --- |
-| M0 | Lane 状态机、StepTransaction、依赖图、Scheduler、TimerWheel、取消、Quarantine、虚拟时钟验收 |
-| M1 | 三层 Context、稳定前缀、一个真实 Provider Adapter、MockAdapter、Tool SDK、LLMResult、ModelRouter、DSL、确定性 E2E |
-| M1.5 | record 级 Privacy/`derivedFrom`、Progress Watchdog、Storage pin/compact、Fork Affinity、warm start |
-| M2 | 持久化事务/outbox、崩溃恢复、对账恢复、分布式和更高级的路由/Join 能力 |
+| M0 | Lane 状态机、StepTransaction、依赖图、Scheduler、TimerWheel、取消、Quarantine、虚拟/真实单调时钟验收 |
+| M1 | 三层 Context、稳定前缀、Provider Adapter、MockAdapter、Tool SDK、LLMResult、ModelRouter、DSL、确定性 E2E |
+| M1.5 | record/leaf 级 Privacy/`derivedFrom`、Progress Watchdog、Storage pin/compact、Fork Affinity、warm start、动态 ToolSet、Host 工具 allow/deny |
+| M2 | 持久化事务/outbox、崩溃恢复、RecoverableTool 对账、HTTP/HTTPS 与 SQLite Worker 协调、自适应路由、观察导出 |
 
 M1 的真实 Provider 和网络任务通过独立 Live Smoke 验证；确定性 Gate 使用 Mock Executor、Virtual Clock 和离线 Fixtures。
 
@@ -276,8 +276,8 @@ M1 的真实 Provider 和网络任务通过独立 Live Smoke 验证；确定性 
 - [Application DSL 规范](./pulse-application-dsl-spec.md)：StepBuilder、模板、Session API 和应用层约束。
 - [MVP 开发计划](./pulse-mvp-development-plan.md)：M0/M1 里程碑、任务拆解、门禁和测试策略。
 
-## 设计边界
+## 当前验证边界
 
-Pulse 当前明确不把以下能力当作 M1 已完成能力：可靠崩溃恢复、持久数据库、分布式 Worker、Provider Thread 作为状态源、自动 Fork 合并、隐式跨 Session 继承、动态工具检索和自适应模型路由。
+确定性实现和本地故障恢复已经由仓库测试覆盖，但这不等于所有生产环境都已验收。当前仍需要独立环境证明的项目包括：真实 Provider 凭证下的 Live Smoke、真实远程写系统的副作用对账、生产级持久化事务与多主机 Worker 故障注入、跨进程 Detached Agent scope 迁移、细粒度宿主权限/隐私策略，以及外部指标系统接入。
 
-这些能力可以在不改变 Lane、Step、Action、Effect 和 StepTransaction 核心语义的前提下继续扩展。
+Provider Thread 仍不是状态源；自动 Fork 合并、动态工具检索和自适应路由已有确定性实现，但生产样本校准与外部服务兼容性仍需单独验证。所有能力继续遵守 Lane、Step、Action、Effect 和 StepTransaction 的核心语义。
