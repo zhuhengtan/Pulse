@@ -89,6 +89,7 @@
 | 动态工具检索与 Context 接入 | Tool Registry 支持 tags、文本相关性、side-effect/concurrency 过滤和稳定排序；查询结果编译为带稳定版本的 ToolSet 并写入下一次 LLM Context | `tests/tool-discovery.test.ts`、`tests/tool-host.test.ts` | `88970c4`、`480a81a` |
 | Checkpoint 事实事件截断 | Checkpoint 保存状态与日志水位后截断已纳入快照的事实事件；恢复后的 Session 通过 `gap` 要求 Host 重同步，并对事件水位 fail-closed 校验 | `tests/storage-outbox.test.ts`、`tests/m4-dsl-e2e.test.ts` | `2ea2a6b`、`e86093a` |
 | Worker 执行边界 | `WorkerCoordinator` 提供 Worker 注册、lease、幂等键、取消、过期回收、snapshot/restore 和 Runtime `EffectExecutor` 适配；adapters 提供带 Bearer 鉴权的 HTTP claim/renew/complete/fail 与 polling Worker | `tests/worker-coordinator.test.ts`、`tests/worker-http.test.ts` | `d221466`、`2250df2`、`685be10`、`47791bd` |
+| SQLite Worker 持久化 | Worker Coordinator 提供 SQLite snapshot backend；WAL/FULL synchronous、lease 状态恢复和 digest CAS 可供多进程共享持久化使用 | `tests/sqlite-worker-persistence.test.ts` | `7453d01` |
 | Worker 鉴权轮换 | HTTP Worker Server 支持每请求解析当前允许 token，恒时比较，并允许新旧 token 重叠后无重启轮换 | `tests/worker-http.test.ts` | 本轮 Worker 鉴权轮换提交 |
 | Worker TLS 传输 | HTTP Worker Server 可配置 HTTPS key/cert，返回 `https://` 地址；真实 TLS 握手与 Bearer 鉴权已验证 | `tests/worker-http.test.ts`、`tests/fixtures/worker-http-*.pem` | 本轮 Worker TLS 提交 |
 | Worker 网络超时 | HTTP Worker Client 为每个请求设置有界超时；Coordinator/网络分区不会让 register、claim 或 polling 永久悬挂 | `tests/worker-http.test.ts` | 本轮 Worker 网络超时提交 |
@@ -568,6 +569,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `a65affa`：Host 命令的 Reply/Cancel/优先级拒绝结果与 `command.applied` 确认改为同一只读 MutationLog 事务，避免重试重复生成拒绝事件。
 - `06e061a`：Human Reply 的 `command.applied` 确认并入 Effect 结算事务；结算存储拒绝时，只有失败兜底与确认事件共同落盘才消费 Fact。
 - `0372a5a`：增加 SQLite RuntimePersistenceBackend，以 WAL/FULL synchronous、`BEGIN IMMEDIATE` 和 digest CAS 提供真实数据库快照保存/恢复事务。
+- `7453d01`：增加 SQLite WorkerPersistenceBackend，lease snapshot 支持数据库恢复与 stale digest CAS。
 - `bec3ba9`：`cancel_effect` 的确认事件并入 queued 终结、立即 quarantine 或 cancel-requested 事务，覆盖不同取消阶段的 Fact 消费边界。
 - `a866a6c`：Agent Host Cancel 的确认事件并入首次 `setAgent(state=cancelling)` 事务，避免接受状态未提交时提前消费 Fact。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
@@ -579,7 +581,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，50 个测试文件、288 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，51 个测试文件、289 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
@@ -596,7 +598,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | Host 工具权限 | 单进程 allow/deny 和 Zod 参数约束已实现 | deny 优先策略已经覆盖 Registry 目录、动态 ToolSet、执行和 admission；更细 workspace/网络权限、审计系统和生产策略配置仍需宿主接入 |
 | Checkpoint / 事实事件保留 | 单进程 checkpoint 截断、EventArchive 归档与恢复 gap 已实现 | 事实状态、Mutation 水位、事件截断水位、外部归档水位和 Session gap 已有测试；跨进程故障注入和生产存储仍需验证 |
 | Fork Affinity | DSL 在收到建议后可安全折叠同 Program 组；Runtime 提供可选自动 coalesce | 已验证组内依赖拓扑、成员结果注入、失败传播、原始 Join key 恢复，以及 `forkAffinity=coalesce` 的通用运行时路径；复杂跨组/外部依赖保持不折叠，生产负载校准仍需验证 |
-| Worker 执行与迁移 | 本地 HTTP/HTTPS lease transport、Bearer 鉴权、polling Worker、请求超时、远程未知对账、snapshot/restore、Runtime 适配、无重启 token 轮换和文件 lease CAS 已实现 | 已验证真实 HTTP/HTTPS claim/renew/complete/fail、未授权拒绝、短 lease heartbeat、token 重叠轮换、请求超时、写副作用响应丢失后的 `remote_unknown`/`executionRef`、in-flight lease 恢复、多 Worker 语义、陈旧 Coordinator 冲突和 Runtime Effect 闭环；跨主机故障注入、真正外部共享数据库和 Worker 迁移仍需验证 |
+| Worker 执行与迁移 | 本地 HTTP/HTTPS lease transport、Bearer 鉴权、polling Worker、请求超时、远程未知对账、snapshot/restore、Runtime 适配、无重启 token 轮换、文件和 SQLite lease CAS 已实现 | 已验证真实 HTTP/HTTPS claim/renew/complete/fail、未授权拒绝、短 lease heartbeat、token 重叠轮换、请求超时、写副作用响应丢失后的 `remote_unknown`/`executionRef`、in-flight lease 恢复、多 Worker 语义、陈旧 Coordinator 冲突和 Runtime Effect 闭环；跨主机故障注入、共享 SQLite claim 的完整多进程协调和 Worker 迁移仍需验证 |
 | 运行观测 | Runtime 侧已有只读出口、JSONL/HTTP exporter、聚合和告警规则 | `inspect/explain`、`telemetry()`、JSONL/HTTP exporter 和有界聚合器已覆盖 route 排除原因、provider/model slot、Attempt usage/cost、峰值与阈值告警；外部生产指标系统接入仍需宿主配置 |
 
 ## 6. 实施时间线与任务清单（Checklist）
