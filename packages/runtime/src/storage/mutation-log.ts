@@ -130,6 +130,8 @@ export function commitMutationTransaction(state: RuntimeState, log: MutationLog,
   const existing = log.findTransaction(transactionId)
   if (existing) return existing
   const transactionalMutations = mutations.map((mutation) => mutation.op === 'appendEvent' && mutation.event.txId === undefined ? { ...mutation, event: { ...mutation.event, txId: transactionId } } : mutation)
+  const candidate = structuredClone(state)
+  apply(candidate, transactionalMutations, { sessionId, timestamp: committedAt })
   const entry = log.append(transactionId, transactionalMutations, committedAt)
   apply(state, entry.mutations, { sessionId, timestamp: committedAt })
   return entry

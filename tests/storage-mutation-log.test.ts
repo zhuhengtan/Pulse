@@ -50,4 +50,13 @@ describe('mutation log and replay', () => {
     const restored = MutationLog.fromSnapshot(JSON.parse(JSON.stringify(log.snapshot())))
     expect(restored.entries[0]?.seq).toBe(3)
   })
+
+  it('preflights apply so an invalid transaction cannot leave state or log partially committed', () => {
+    const state = createRuntimeState()
+    const log = new MutationLog()
+    const before = structuredClone(state)
+    expect(() => commitMutationTransaction(state, log, 'invalid', [{ op: 'setGlobal', agentId: 'missing', version: 1, value: {} }])).toThrow()
+    expect(state).toEqual(before)
+    expect(log.size).toBe(0)
+  })
 })
