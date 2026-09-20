@@ -64,6 +64,7 @@ export interface RuntimeConfig {
 
 export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' | 'final'; include?: 'facts' | 'facts_and_findings'; relevanceRefs?: string[] }
 export interface AgentCreateRequest { goal: string; program: LaneProgram; agentId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string; inheritedFloor?: number }
+export interface BackgroundAgentInfo { agentId: string; rootLaneId: string; state: NonNullable<import('../core/types.js').AgentRecord['state']>; detached: true }
 
 function warmStartGlobal(value: JsonValue, include: 'facts' | 'facts_and_findings', relevanceRefs: string[] | undefined): JsonValue {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return structuredClone(value)
@@ -219,6 +220,25 @@ export class PulseRuntime {
     return { agentId: agent.id, laneId: root.id }
   }
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
+  detachAgent(agentId: string): BackgroundAgentInfo {
+    const agent = this.state.agents.get(agentId)
+    if (!agent) throw new Error(`UNKNOWN_AGENT:${agentId}`)
+    agent.detached = true
+    this.emit({ type: 'agent.detached', agentId, data: { agentId } })
+    this.schedulePersistence()
+    return { agentId, rootLaneId: agent.rootLaneId, state: agent.state ?? 'created', detached: true }
+  }
+  attachAgent(agentId: string): void {
+    const agent = this.state.agents.get(agentId)
+    if (!agent) throw new Error(`UNKNOWN_AGENT:${agentId}`)
+    if (!agent.detached) return
+    delete agent.detached
+    this.emit({ type: 'agent.attached', agentId, data: { agentId } })
+    this.schedulePersistence()
+  }
+  backgroundAgents(): BackgroundAgentInfo[] {
+    return [...this.state.agents.values()].filter((agent) => agent.detached === true).map((agent) => ({ agentId: agent.id, rootLaneId: agent.rootLaneId, state: agent.state ?? 'created', detached: true }))
+  }
   exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine, this.storagePolicy) }
   async persist(backend: RuntimePersistenceBackend): Promise<void> {
     const persistedPolicy = this.storagePolicy.clone()
@@ -537,6 +557,7 @@ export class PulseRuntime {
       const root = child ? this.state.lanes.get(child.rootLaneId) : undefined
       if (!child || !root || !['succeeded', 'failed', 'cancelled'].includes(root.status)) continue
       const status = root.status === 'succeeded' ? 'succeeded' : root.status === 'cancelled' ? 'cancelled' : 'failed'
+      child.state = status
       this.completeEffect(effect.id, { value: { agentId: child.id, status } }, status, status === 'failed' ? { code: 'CHILD_AGENT_FAILED', message: 'Child Agent failed.' } : undefined)
     }
   }
@@ -686,7 +707,7 @@ export class PulseRuntime {
     const agent = this.state.agents.get(agentId)
     if (!agent || ['succeeded', 'failed', 'cancelled'].includes(agent.state ?? '')) return
     agent.state = 'cancelling'
-    for (const lane of this.state.lanes.values()) if (lane.agentId === agentId && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'cancelled'; lane.version++; this.emit({ type: 'lane.cancelling', laneId: lane.id, data: reason }); for (const effectId of lane.ownedEffectIds) { const childAgentId = this.state.effects.get(effectId)?.childAgentId; if (childAgentId) this.cancelAgent(childAgentId, reason); this.requestEffectCancellation(effectId, reason, this.state.effects.get(effectId)?.cancelGraceMs ?? 0) } }
+    for (const lane of this.state.lanes.values()) if (lane.agentId === agentId && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'cancelled'; lane.version++; this.emit({ type: 'lane.cancelling', laneId: lane.id, data: reason }); for (const effectId of lane.ownedEffectIds) { const effect = this.state.effects.get(effectId); const childAgent = effect?.childAgentId === undefined ? undefined : this.state.agents.get(effect.childAgentId); if (childAgent?.detached === true) continue; if (effect?.childAgentId) this.cancelAgent(effect.childAgentId, reason); this.requestEffectCancellation(effectId, reason, effect?.cancelGraceMs ?? 0) } }
     agent.state = 'cancelled'
     this.emit({ type: 'agent.cancelled', data: reason })
     this.schedulePersistence()
@@ -868,7 +889,12 @@ export class PulseRuntime {
   }
 
   private propagateCancelledLanes(): void {
-    for (const lane of this.state.lanes.values()) if (lane.status === 'cancelled') for (const effectId of lane.ownedEffectIds) this.requestEffectCancellation(effectId, 'LANE_CANCELLED', this.state.effects.get(effectId)?.cancelGraceMs ?? 0)
+    for (const lane of this.state.lanes.values()) if (lane.status === 'cancelled') for (const effectId of lane.ownedEffectIds) {
+      const effect = this.state.effects.get(effectId)
+      const childAgent = effect?.childAgentId === undefined ? undefined : this.state.agents.get(effect.childAgentId)
+      if (childAgent?.detached === true) continue
+      this.requestEffectCancellation(effectId, 'LANE_CANCELLED', effect?.cancelGraceMs ?? 0)
+    }
   }
 
   private runningCount(concurrencyClass: import('../core/types.js').ConcurrencyClass): number { return [...this.state.effects.values()].filter((effect) => effect.concurrencyClass === concurrencyClass && effect.state === 'running').length }

@@ -74,6 +74,7 @@ export interface AgentRecord {
   maxActiveLanes: number
   parentAgentId?: AgentId
   depth?: number
+  detached?: boolean
 }
 
 export interface LaneRecord {

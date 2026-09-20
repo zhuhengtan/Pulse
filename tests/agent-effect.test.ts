@@ -56,4 +56,30 @@ describe('built-in Child Agent Effect host', () => {
     expect(childRoot?.inheritedFloor).toBeUndefined()
     expect(runtime.state.events.some((event) => event.type === 'agent.effect_started')).toBe(true)
   })
+
+  it('keeps a detached child running after its parent is cancelled and exposes background scope state', () => {
+    const runtime = new PulseRuntime()
+    const child: LaneProgram = { id: 'detached-child', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'timer', kind: 'timer', concurrencyClass: 'none', input: { delayMs: 5 } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('detached-child', 'finish') }
+      : { actions: [{ type: 'complete', result: { child: true } }], next: point('detached-child', 'finish') } }
+    const parent: LaneProgram = { id: 'detached-parent', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'child', kind: 'agent', concurrencyClass: 'agent', input: { goal: 'detached child', programId: child.id, programVersion: child.version } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('detached-parent', 'finish') }) }
+    runtime.register(child)
+    const { agentId: parentAgentId } = runtime.createAgent('parent', parent)
+    runtime.tick()
+    const childAgent = [...runtime.state.agents.values()].find((agent) => agent.parentAgentId === parentAgentId)
+    expect(childAgent).toBeDefined()
+    const childAgentId = childAgent!.id
+    expect(runtime.detachAgent(childAgentId)).toMatchObject({ agentId: childAgentId, detached: true })
+    runtime.cancelAgent(parentAgentId)
+    expect(runtime.state.agents.get(childAgentId)?.state).toBe('running')
+    expect(runtime.backgroundAgents()).toEqual([expect.objectContaining({ agentId: childAgentId, detached: true })])
+
+    runtime.clock.advance(5)
+    runtime.tick()
+    runtime.tick()
+    expect(runtime.state.agents.get(childAgentId)?.state).toBe('succeeded')
+    expect(runtime.state.effects.get('effect-1')?.outcome?.status).toBe('succeeded')
+    runtime.attachAgent(childAgentId)
+    expect(runtime.backgroundAgents()).toEqual([])
+  })
 })
