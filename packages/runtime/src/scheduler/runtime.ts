@@ -7,6 +7,7 @@ import { createRuntimeState, effectivePrivacy, privacyMetadataForDerivedRef, pri
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
 import { assertProgramPure } from '../dsl/program.js'
+import type { ProgramRef } from '../dsl/templates.js'
 import { FactInbox, ObservationInbox } from '../core/inbox.js'
 import { observeProgress, type ProgressObservation } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
@@ -87,8 +88,34 @@ export interface RuntimeConfig {
 
 export interface RuntimeBudgetConfig { maxTotalAttempts?: number; maxLLMAttempts?: number; maxToolAttempts?: number; maxCostByCurrency?: Record<string, number> }
 export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' | 'final'; include?: 'facts' | 'facts_and_findings'; relevanceRefs?: string[] }
-export interface AgentCreateRequest { goal: string; program: LaneProgram; agentId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string; inheritedFloor?: number }
+export interface AgentCreateRequest { goal: string; program: LaneProgram | ProgramRef; agentId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string; inheritedFloor?: number }
 export interface BackgroundAgentInfo { agentId: string; rootLaneId: string; state: NonNullable<import('../core/types.js').AgentRecord['state']>; detached: true }
+
+export class ProgramRegistry {
+  private readonly records = new Map<string, LaneProgram>()
+
+  register(program: LaneProgram): void {
+    assertProgramPure(program)
+    this.records.set(`${program.id}@${program.version}`, program)
+    if (program.seriesMemberProgram) this.register(program.seriesMemberProgram)
+  }
+
+  get(programId: string, programVersion?: string): LaneProgram | undefined {
+    return this.records.get(programVersion === undefined ? programId : `${programId}@${programVersion}`)
+  }
+
+  resolve(ref: ProgramRef): LaneProgram {
+    const program = this.get(ref.programId, ref.programVersion)
+    if (!program) throw new Error(`PROGRAM_NOT_REGISTERED:${ref.programId}@${ref.programVersion}`)
+    return program
+  }
+
+  has(programId: string, programVersion?: string): boolean {
+    return this.records.has(programVersion === undefined ? programId : `${programId}@${programVersion}`)
+  }
+
+  entries(): IterableIterator<[string, LaneProgram]> { return this.records.entries() }
+}
 
 function warmStartGlobal(value: JsonValue, include: 'facts' | 'facts_and_findings', relevanceRefs: string[] | undefined): JsonValue {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return structuredClone(value)
@@ -161,7 +188,7 @@ export class PulseRuntime {
   readonly storagePolicy: SessionStoragePolicy
   readonly factInbox: FactInbox<HostCommand>
   readonly observationInbox: ObservationInbox
-  private readonly programs = new Map<string, LaneProgram>()
+  readonly programs = new ProgramRegistry()
   private readonly executions = new Map<string, { controller: AbortController; promise: Promise<void>; timeoutTimer?: string; deadlineTimer?: string; cancelTimer?: string }>()
   private readonly lockReleases = new Map<string, Array<() => void>>()
   private readonly waitDeadlineTimers = new Map<string, string>()
@@ -267,12 +294,14 @@ export class PulseRuntime {
     this.syncStoragePolicy()
   }
 
-  register(program: LaneProgram): void { assertProgramPure(program); this.programs.set(`${program.id}@${program.version}`, program); if (program.seriesMemberProgram) this.register(program.seriesMemberProgram) }
+  register(program: LaneProgram): void { this.programs.register(program) }
   createAgent(request: AgentCreateRequest): { agentId: string; laneId: string }
   createAgent(goal: string, program: LaneProgram, agentId?: string): { agentId: string; laneId: string }
   createAgent(goalOrRequest: string | AgentCreateRequest, program?: LaneProgram, agentId?: string): { agentId: string; laneId: string } {
     if (this.shuttingDown) throw new Error('RUNTIME_SHUTTING_DOWN')
     const request: AgentCreateRequest = typeof goalOrRequest === 'string' ? { goal: goalOrRequest, program: program!, ...(agentId === undefined ? {} : { agentId }) } : goalOrRequest
+    const programRef = 'programId' in request.program ? request.program : undefined
+    const rootProgram: LaneProgram = programRef === undefined ? request.program as LaneProgram : this.programs.resolve(programRef)
     const warmStart = request.warmStart
     let initialGlobal: JsonValue | undefined
     let initialGlobalPrivacy: PrivacyMetadata | undefined
@@ -292,14 +321,17 @@ export class PulseRuntime {
         if (sourceRoot?.visibleResultRefs !== undefined && !sourceRoot.visibleResultRefs.has(ref)) throw new Error(`WARM_START_RESULT_NOT_VISIBLE:${ref}`)
       }
     }
-    this.register(request.program)
+    if (programRef === undefined) this.register(rootProgram)
     if (this.state.lanes.size >= this.state.maxTotalLanes) throw new Error('MAX_TOTAL_LANES')
     if (request.agentId !== undefined && this.state.agents.has(request.agentId)) throw new Error(`AGENT_ID_EXISTS:${request.agentId}`)
     const parent = request.parentAgentId === undefined ? undefined : this.state.agents.get(request.parentAgentId)
     if (request.parentAgentId !== undefined && !parent) throw new Error(`PARENT_AGENT_NOT_FOUND:${request.parentAgentId}`)
-    const { agent, root, nextIds } = buildAgent(this.state, request.goal, { programId: request.program.id, programVersion: request.program.version, step: (request.program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(request.maxActiveLanes === undefined ? {} : { maxActiveLanes: request.maxActiveLanes }), ...(initialGlobal === undefined ? {} : { initialGlobal }), ...(initialGlobalPrivacy === undefined ? {} : { initialGlobalPrivacy }), ...(request.parentAgentId === undefined ? {} : { parentAgentId: request.parentAgentId, depth: (parent?.depth ?? 0) + 1 }), ...(request.inheritedFloor === undefined ? {} : { inheritedFloor: request.inheritedFloor }) })
+    const rootResume = programRef === undefined
+      ? { programId: rootProgram.id, programVersion: rootProgram.version, step: (rootProgram as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }
+      : { programId: rootProgram.id, programVersion: rootProgram.version, step: programRef.step ?? (rootProgram as LaneProgram & { entry?: string }).entry ?? 'start', locals: programRef.locals ?? {} }
+    const { agent, root, nextIds } = buildAgent(this.state, request.goal, rootResume, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(request.maxActiveLanes === undefined ? {} : { maxActiveLanes: request.maxActiveLanes }), ...(initialGlobal === undefined ? {} : { initialGlobal }), ...(initialGlobalPrivacy === undefined ? {} : { initialGlobalPrivacy }), ...(request.parentAgentId === undefined ? {} : { parentAgentId: request.parentAgentId, depth: (parent?.depth ?? 0) + 1 }), ...(request.inheritedFloor === undefined ? {} : { inheritedFloor: request.inheritedFloor }) })
     if (warmStartResultRefs.length) root.visibleResultRefs = new Set(warmStartResultRefs)
-    if (request.program.seriesKeys?.length) root.resume.locals = { $sdk: { series: { keys: [...request.program.seriesKeys], index: 0 } } }
+    if (rootProgram.seriesKeys?.length && programRef === undefined) root.resume.locals = { $sdk: { series: { keys: [...rootProgram.seriesKeys], index: 0 } } }
     root.enqueueSeq = this.enqueueSeq++
     agent.state = 'running'
     const mutations: Mutation[] = [
