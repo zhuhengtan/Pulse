@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { PulseRuntime } from '@pulse/runtime'
-import type { LaneProgram } from '@pulse/runtime'
+import type { EffectRecord, LaneProgram } from '@pulse/runtime'
 
 const point = (programId: string, step: string) => ({ programId, programVersion: '1', step, locals: {} })
 
@@ -80,6 +80,18 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.effects.get('effect-1')).toMatchObject({ state: 'running', executionState: 'running' })
     expect(runtime.state.effects.get('effect-1')?.cancelRequested).toBeUndefined()
     expect(runtime.state.events).toHaveLength(eventCount)
+  })
+
+  it('rejects remote-unknown admission before mutating the Effect or quarantine', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 1 } })
+    const { agentId, laneId } = runtime.createAgent('remote unknown admission', { id: 'remote-unknown-admission', version: '1', step: () => ({ actions: [], next: point('remote-unknown-admission', 'done') }) })
+    const effect: EffectRecord = { id: 'effect-1', agentId, ownerLaneId: laneId, key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, state: 'running', attemptId: 'effect-1-attempt-1', attemptNo: 1, executionState: 'running', sideEffectState: 'none' }
+    runtime.state.effects.set(effect.id, effect)
+    runtime.state.lanes.get(laneId)!.ownedEffectIds.add(effect.id)
+    expect(() => runtime.markRemoteUnknown(effect.id, 'unknown')).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect(runtime.state.effects.get(effect.id)).toMatchObject({ state: 'running', executionState: 'running', sideEffectState: 'none' })
+    expect(runtime.quarantine.unresolvedEffectIds).toEqual([])
+    expect(runtime.state.events).toHaveLength(0)
   })
 
   it('supports explicit quarantine abandonment without claiming side-effect absence', async () => {

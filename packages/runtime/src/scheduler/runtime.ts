@@ -904,31 +904,51 @@ export class PulseRuntime {
   markRemoteUnknown(effectId: string, sideEffectState: 'none' | 'applied' | 'known' | 'unknown'): void {
     const effect = this.state.effects.get(effectId)
     if (!effect || effect.outcome) return
+    const candidate = structuredClone(effect)
+    candidate.executionState = 'remote_unknown'
+    candidate.sideEffectState = sideEffectState
+    const attempt = candidate.attempts?.at(-1)
+    if (attempt) { attempt.executionState = 'remote_unknown'; attempt.sideEffectState = sideEffectState; attempt.settledAt = this.state.now }
+    const lane = this.state.lanes.get(effect.ownerLaneId)
+    const candidateLane = lane === undefined ? undefined : structuredClone(lane)
+    if (sideEffectState === 'unknown') {
+      candidate.state = 'reconcile_required'
+      if (candidateLane) candidateLane.unresolvedEffectIds = [...new Set([...(candidateLane.unresolvedEffectIds ?? []), effectId])]
+    } else {
+      const unknownAttempts = candidate.attempts?.filter((item) => item.executionState === 'remote_unknown').length ?? 0
+      const canRetry = candidate.duplicateExecutionPolicy === 'allow' && candidate.maxUnknownAttempts !== undefined && unknownAttempts <= candidate.maxUnknownAttempts
+      if (canRetry) {
+        const settledAttemptId = candidate.attemptId
+        const running = this.executions.get(effectId)
+        if (running) { running.controller.abort(); this.executions.delete(effectId) }
+        Object.assign(effect, candidate)
+        if (this.scheduleRetry(effect, { code: 'REMOTE_EXECUTION_UNKNOWN', message: 'Remote execution outcome is unknown.', details: { unknownAttempts } })) {
+          this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:remote-unknown-retry`)
+          this.releaseEffectLocks(effectId)
+          this.outbox.ack(`${effect.id}:${settledAttemptId}`)
+          this.refreshWaits()
+          this.schedulePersistence()
+          return
+        }
+      }
+      candidate.state = 'failed'
+      candidate.outcome = { status: 'failed', error: { code: 'REMOTE_UNKNOWN', message: 'Remote execution outcome is unknown but no side effect was recorded.' } }
+    }
+    const remoteEvent: import('../core/types.js').RuntimeEventInput = { type: 'effect.remote_unknown', effectId, data: { executionState: 'remote_unknown', sideEffectState } }
+    const admission: Mutation[] = [{ op: 'setEffect', effectId, record: candidate }]
+    if (candidateLane) admission.push({ op: 'setLane', laneId: candidateLane.id, record: candidateLane })
+    admission.push({ op: 'appendEvent', event: remoteEvent })
+    this.assertStorageAdmission(admission)
     const running = this.executions.get(effectId)
     if (running) { running.controller.abort(); this.executions.delete(effectId) }
-    effect.executionState = 'remote_unknown'
-    effect.sideEffectState = sideEffectState
-    const attempt = effect.attempts?.at(-1)
-    if (attempt) { attempt.executionState = 'remote_unknown'; attempt.sideEffectState = sideEffectState; attempt.settledAt = this.state.now }
+    Object.assign(effect, candidate)
+    if (candidateLane) this.state.lanes.set(candidateLane.id, candidateLane)
     if (sideEffectState === 'unknown') { effect.state = 'reconcile_required'; this.quarantine.add(effect.id, this.state.now, 'in_doubt') }
     else {
-      const unknownAttempts = effect.attempts?.filter((attempt) => attempt.executionState === 'remote_unknown').length ?? 0
-      const settledAttemptId = effect.attemptId
-      if (effect.duplicateExecutionPolicy === 'allow' && effect.maxUnknownAttempts !== undefined && unknownAttempts <= effect.maxUnknownAttempts && this.scheduleRetry(effect, { code: 'REMOTE_EXECUTION_UNKNOWN', message: 'Remote execution outcome is unknown.', details: { unknownAttempts } })) {
-        this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:remote-unknown-retry`)
-        this.releaseEffectLocks(effectId)
-        this.outbox.ack(`${effect.id}:${settledAttemptId}`)
-        this.refreshWaits()
-        this.schedulePersistence()
-        return
-      }
-      effect.state = 'failed'
-      effect.outcome = { status: 'failed', error: { code: 'REMOTE_UNKNOWN', message: 'Remote execution outcome is unknown but no side effect was recorded.' } }
-      const remoteEvent = this.emit({ type: 'effect.remote_unknown', effectId, data: { executionState: 'remote_unknown', sideEffectState } })
-      this.journalEffect(effect, `effect:${effect.id}:${effect.attemptId}:remote-unknown`, undefined, [remoteEvent])
       this.releaseEffectLocks(effectId)
     }
-    if (sideEffectState !== 'unknown') this.releaseEffectLocks(effectId)
+    const committedRemoteEvent = this.emit(remoteEvent)
+    this.journalEffect(effect, `effect:${effect.id}:${effect.attemptId}:remote-unknown`, undefined, [committedRemoteEvent])
     this.refreshWaits()
     this.schedulePersistence()
   }
