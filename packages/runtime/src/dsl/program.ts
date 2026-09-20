@@ -69,6 +69,21 @@ function sameProgram(left: ForkLaneSpec, right: ForkLaneSpec): boolean {
   return left.program.programId === right.program.programId && left.program.programVersion === right.program.programVersion && left.program.step === right.program.step && JSON.stringify(left.program.locals ?? {}) === JSON.stringify(right.program.locals ?? {})
 }
 
+function seriesOrder(members: ForkLaneSpec[]): ForkLaneSpec[] | undefined {
+  const byKey = new Map(members.map((lane) => [lane.key, lane]))
+  const visiting = new Set<string>(); const visited = new Set<string>(); const ordered: ForkLaneSpec[] = []
+  const visit = (key: string): boolean => {
+    if (visited.has(key)) return true
+    if (visiting.has(key)) return false
+    visiting.add(key)
+    const lane = byKey.get(key)
+    if (!lane) return false
+    for (const dependency of lane.dependsOn ?? []) if ('local' in dependency.target && byKey.has(dependency.target.local) && !visit(dependency.target.local)) return false
+    visiting.delete(key); visited.add(key); ordered.push(lane); return true
+  }
+  return members.every((lane) => visit(lane.key)) ? ordered : undefined
+}
+
 function collapseAffinityLanes(name: string, lanes: ForkLaneSpec[], groups: AffinityAdviceGroup[], enabled: boolean, joinMode: 'all' | 'any' | 'quorum', condition: 'success' | 'settled'): { lanes: ForkLaneSpec[]; aliases?: Record<string, string> } {
   if (!enabled || joinMode !== 'all' || condition !== 'settled') return { lanes }
   const byKey = new Map(lanes.map((lane) => [lane.key, lane]))
@@ -78,11 +93,17 @@ function collapseAffinityLanes(name: string, lanes: ForkLaneSpec[], groups: Affi
   let groupIndex = 0
   for (const group of groups) {
     const members = group.keys.map((key) => byKey.get(key)).filter((lane): lane is ForkLaneSpec => lane !== undefined)
-    if (members.length !== group.keys.length || members.some((lane) => lane.dependsOn?.length) || members.some((lane) => !sameProgram(lane, members[0]!))) continue
+    if (members.length !== group.keys.length || members.some((lane) => (lane.dependsOn ?? []).some((dependency) => !('local' in dependency.target) || !group.keys.includes(dependency.target.local))) || members.some((lane) => !sameProgram(lane, members[0]!))) continue
+    const ordered = seriesOrder(members)
+    if (!ordered) continue
     const key = `__series_${name}_${groupIndex++}`
-    const member = members[0]!
-    output.push({ key, goal: members.map((lane) => `${lane.key}: ${lane.goal}`).join('\n'), program: member.program, ...(member.priority === undefined ? {} : { priority: member.priority }), ...(member.contextVersion === undefined ? {} : { contextVersion: member.contextVersion }), ...(member.resources === undefined ? {} : { resources: member.resources }), series: { member: member.program, keys: members.map((lane) => lane.key), goals: Object.fromEntries(members.map((lane) => [lane.key, lane.goal])), onMemberFailure: 'continue' } })
-    for (const lane of members) { collapsed.add(lane.key); aliases[lane.key] = key }
+    const member = ordered[0]!
+    const internalDependencies = Object.fromEntries(ordered.flatMap((lane) => {
+      const dependsOn = (lane.dependsOn ?? []).filter((dependency): dependency is typeof dependency & { target: { local: string } } => 'local' in dependency.target).map((dependency) => ({ key: dependency.target.local, condition: dependency.condition }))
+      return dependsOn.length ? [[lane.key, { dependsOn }]] : []
+    }))
+    output.push({ key, goal: ordered.map((lane) => `${lane.key}: ${lane.goal}`).join('\n'), program: member.program, ...(member.priority === undefined ? {} : { priority: member.priority }), ...(member.contextVersion === undefined ? {} : { contextVersion: member.contextVersion }), ...(member.resources === undefined ? {} : { resources: member.resources }), series: { member: member.program, keys: ordered.map((lane) => lane.key), goals: Object.fromEntries(ordered.map((lane) => [lane.key, lane.goal])), ...(Object.keys(internalDependencies).length ? { members: internalDependencies } : {}), onMemberFailure: 'continue' } })
+    for (const lane of ordered) { collapsed.add(lane.key); aliases[lane.key] = key }
   }
   output.push(...lanes.filter((lane) => !collapsed.has(lane.key)))
   return Object.keys(aliases).length ? { lanes: output, aliases } : { lanes }

@@ -275,22 +275,34 @@ export class PulseRuntime {
     const memberLane = structuredClone(context.lane) as LaneRecord
     memberLane.resume = { programId: member.id, programVersion: member.version, step: typeof sdkValue.memberStep === 'string' ? sdkValue.memberStep : memberRef.step ?? (member as LaneProgram & { entry?: string }).entry ?? 'start', locals: structuredClone(memberLocals) }
     memberLane.goal = series?.goals?.[keys[index]!] ?? `${context.lane.goal} [series:${keys[index]}]`
-    const output = member.step({ ...context, lane: memberLane })
-    const terminal = output.actions.find((action) => action.type === 'complete' || action.type === 'fail')
     const seriesResults = sdkValue.seriesResults && typeof sdkValue.seriesResults === 'object' && !Array.isArray(sdkValue.seriesResults) ? sdkValue.seriesResults as Record<string, JsonValue> : {}
     const nextLocals = (nextSdk: Record<string, JsonValue>): JsonValue => ({ ...locals, $sdk: nextSdk })
+    const nextAfterMember = (nextIndex: number): LaneStepOutput => { const nextSdk: Record<string, JsonValue> = { ...sdkValue, series: { keys, index: nextIndex }, seriesResults }; delete nextSdk.memberStep; delete nextSdk.memberLocals; return nextIndex >= keys.length ? { actions: [{ type: 'complete', result: { results: seriesResults } }], next: { programId: program.id, programVersion: program.version, step: 'start', locals: nextLocals(nextSdk) } } : { actions: [], next: { programId: program.id, programVersion: program.version, step: 'start', locals: nextLocals(nextSdk) } } }
+    const memberDependencies = series?.members?.[keys[index]!]?.dependsOn ?? []
+    const dependencyObservations = Object.fromEntries(memberDependencies.map((dependency) => {
+      const record = seriesResults[dependency.key]
+      const value = record && typeof record === 'object' && !Array.isArray(record) ? record as Record<string, JsonValue> : {}
+      const status = value.status === 'succeeded' || value.status === 'failed' || value.status === 'cancelled' ? value.status : undefined
+      const outcome: Outcome = status === undefined ? { status: 'failed', error: { code: 'SERIES_DEPENDENCY_MISSING', message: `Series dependency ${dependency.key} is not settled.` } } : { status, ...(value.result === undefined ? {} : { result: value.result }), ...(value.error && typeof value.error === 'object' && !Array.isArray(value.error) ? { error: value.error as unknown as RuntimeError } : {}) }
+      return [dependency.key, { state: 'settled' as const, target: { kind: 'lane' as const, id: `series:${dependency.key}` }, outcome }]
+    }))
+    const blocked = memberDependencies.find((dependency) => dependency.condition === 'success' && dependencyObservations[dependency.key]?.outcome.status !== 'succeeded')
+    if (blocked) {
+      seriesResults[keys[index]!] = { status: 'failed', error: { code: 'DEPENDENCY_FAILED', message: `Series dependency ${blocked.key} did not succeed` } }
+      if ((series?.onMemberFailure ?? program.seriesOnMemberFailure ?? 'continue') === 'abort') return { actions: [{ type: 'fail', error: { code: 'DEPENDENCY_FAILED', message: `Series dependency ${blocked.key} did not succeed` } }], next: { programId: program.id, programVersion: program.version, step: 'start', locals: nextLocals({ ...sdkValue, series: { keys, index }, seriesResults }) } }
+      return nextAfterMember(index + 1)
+    }
+    const output = member.step({ ...context, lane: memberLane, ...(memberDependencies.length && sdkValue.memberStep === undefined ? { resumeInput: { type: 'wait', resolution: { waitId: `series:${keys[index]}`, status: 'satisfied', dependencies: dependencyObservations } } } : {}) })
+    const terminal = output.actions.find((action) => action.type === 'complete' || action.type === 'fail')
     if (terminal?.type === 'fail') {
       seriesResults[keys[index]!] = { status: 'failed', error: terminal.error as unknown as JsonValue }
-      if ((program.seriesOnMemberFailure ?? 'continue') === 'abort') return output
+      if ((series?.onMemberFailure ?? program.seriesOnMemberFailure ?? 'continue') === 'abort') return output
     } else if (terminal?.type === 'complete') {
       seriesResults[keys[index]!] = { status: 'succeeded', result: terminal.result }
     }
     if (terminal) {
       const nextIndex = index + 1
-      const nextSdk: Record<string, JsonValue> = { ...sdkValue, series: { keys, index: nextIndex }, seriesResults }
-      delete nextSdk.memberStep; delete nextSdk.memberLocals
-      if (nextIndex >= keys.length) return { actions: [{ type: 'complete', result: { results: seriesResults } }], next: { programId: program.id, programVersion: program.version, step: 'start', locals: nextLocals(nextSdk) } }
-      return { actions: [], next: { programId: program.id, programVersion: program.version, step: 'start', locals: nextLocals(nextSdk) } }
+      return nextAfterMember(nextIndex)
     }
     const nextSdk: Record<string, JsonValue> = { ...sdkValue, series: { keys, index }, memberStep: output.next.step, memberLocals: output.next.locals }
     return { ...output, next: { programId: program.id, programVersion: program.version, step: 'start', locals: nextLocals(nextSdk) } }

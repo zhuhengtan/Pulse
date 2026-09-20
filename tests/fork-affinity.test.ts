@@ -67,4 +67,27 @@ describe('fork affinity admission', () => {
     expect(result).toMatchObject({ outcomes: { first: { status: 'succeeded', result: { goal: 'first goal' } }, second: { status: 'succeeded', result: { goal: 'second goal' } } } })
     expect(runtime.state.events.some((event) => event.type === 'fork.affinity_advice')).toBe(true)
   })
+
+  it('preserves group-internal dependency order and delivers the prior member outcome', async () => {
+    const worker = defineLaneProgram({ id: 'dependent-worker', version: '1' }, (builder) => {
+      builder.addStep('start', (ctx) => ({ actions: [{ type: 'complete', result: ctx.resumeInput?.type === 'wait' ? { dependency: ctx.resumeInput.resolution.dependencies.first?.outcome.result } : { goal: ctx.goal } }], next: 'start' }))
+    })
+    const parent = defineLaneProgram({ id: 'dependent-parent', version: '1' }, (builder) => {
+      builder.addParallelStep('dispatch', {
+        lanes: {
+          first: { goal: 'first', program: { programId: worker.id, programVersion: worker.version }, resources: [{ resource: 'module', mode: 'exclusive' }] },
+          second: { goal: 'second', program: { programId: worker.id, programVersion: worker.version }, resources: [{ resource: 'module', mode: 'exclusive' }], dependsOn: [{ key: 'first', target: { local: 'first' }, condition: 'success' }] },
+        },
+        onJoin: (outcomes, ctx) => { ctx.mutateLane((state) => { (state as Record<string, unknown>).outcomes = outcomes }); return 'finish' },
+      })
+      builder.addStep('finish', (ctx) => ({ actions: [{ type: 'complete', result: ctx.lane.context.state }], next: 'finish' }))
+    })
+    const runtime = new PulseRuntime({ forkAffinity: 'advise' })
+    runtime.register(worker)
+    const { agentId } = runtime.createAgent('dependent parent', parent)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    const root = [...runtime.state.lanes.values()].find((lane) => lane.ownerLaneId === undefined)!
+    const result = root.resultRef ? runtime.state.results.get(root.resultRef)?.value : undefined
+    expect(result).toMatchObject({ outcomes: { first: { status: 'succeeded' }, second: { status: 'succeeded', result: { dependency: { goal: 'first' } } } } })
+  })
 })

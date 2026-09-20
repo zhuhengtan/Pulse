@@ -256,6 +256,7 @@ export interface SeriesLaneSpec {
   member: ResumePoint
   keys: string[]
   goals?: Record<string, string>
+  members?: Record<string, { dependsOn: Array<{ key: string; condition: 'success' | 'settled' }> }>
   onMemberFailure?: 'continue' | 'abort'
 }
 
