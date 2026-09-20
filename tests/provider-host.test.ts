@@ -68,4 +68,18 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     expect(outcomes.map((outcome) => outcome.status)).toEqual(['succeeded', 'succeeded'])
     expect(maximum).toBe(1)
   })
+
+  it('publishes rejected output metadata when every provider candidate violates the schema', async () => {
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'invalid-model', providerId: 'invalid-provider', tasks: ['plan'], capabilities: { local: true, structuredOutput: true, maxContextTokens: 4096 }, priority: 1 })
+    const providers = new Map<string, ProviderAdapter>([['invalid-provider', { id: 'invalid-provider', name: 'invalid', executeAttempt: async () => ({ text: 'not-json', toolCalls: [], finishReason: 'stop' }) }]])
+    const runtime = new PulseRuntime({ effectExecutor: createModelEffectExecutor({ router: new ModelRouter(registry), providers }) })
+    const program: LaneProgram = { id: 'provider-rejected', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'plan', kind: 'llm', concurrencyClass: 'llm', input: { task: 'plan', request: projection, outputSchema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } } } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('provider-rejected', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('provider-rejected', 'finish') } }
+    const { agentId } = runtime.createAgent('rejected', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect([...runtime.state.results.values()]).toContainEqual(expect.objectContaining({ kind: 'rejected_output', value: 'not-json' }))
+    expect(runtime.state.effects.get('effect-1')?.outcome).toMatchObject({ error: { code: 'OUTPUT_SCHEMA_VIOLATION' }, rejectedOutputRefs: [expect.any(String)] })
+  })
 })

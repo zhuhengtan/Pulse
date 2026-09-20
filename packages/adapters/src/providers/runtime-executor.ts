@@ -63,6 +63,7 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
     const dynamicRequirements = input.requirements && typeof input.requirements === 'object' && !Array.isArray(input.requirements) ? input.requirements as Partial<ModelCandidate['capabilities']> : {}
     const candidates = config.router.routeProjection(task, projection, { ...config.requirements, ...dynamicRequirements })
     const result = await fallback.execute(effect.id, candidates, async (attempt) => {
+      failedForSchema = false
       const provider = config.providers.get(attempt.candidate.providerId)
       if (!provider) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause: new Error(`UNKNOWN_PROVIDER:${attempt.candidate.providerId}`) })
       const providerRelease = await providerSlots.get(attempt.candidate.providerId).acquire(signal)
