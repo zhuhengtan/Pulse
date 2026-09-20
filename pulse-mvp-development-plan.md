@@ -140,6 +140,7 @@
 | Host 命令拒绝事务 | Host Reply/Cancel/优先级命令的拒绝与 `command.applied` 确认事件作为同一只读事务提交，拒绝路径失败时 Fact 保留 | `tests/effect-hosts.test.ts`、`tests/host-commands.test.ts` | `a65affa` |
 | Human Reply 结算事务 | Human Effect 的回复确认事件并入 Effect settled/Result/Lane 结算事务；存储拒绝兜底也必须同时写入确认后才消费 Fact | `tests/effect-hosts.test.ts` | `06e061a` |
 | Effect Cancel 确认事务 | queued、立即 quarantine 和带宽限期的取消请求都把 `command.applied` 绑定到对应 Effect 状态事务，确认未提交时保留 Fact | `tests/host-commands.test.ts`、`tests/runtime-control.test.ts` | `bec3ba9` |
+| Agent Cancel 确认事务 | Agent Host Cancel 在首次进入 `cancelling` 的 `setAgent` 事务中写入 `command.applied`，后续取消传播与 quarantine 独立收尾 | `tests/host-commands.test.ts`、`tests/runtime-control.test.ts` | `a866a6c` |
 | Host Reply 类型边界 | Reply 只允许未结算的 HumanEffect；Tool/Timer/其他 Effect 仍由各自 Executor 结算 | `tests/effect-hosts.test.ts` | 本轮 Reply 类型提交 |
 | Host Fact 存储准入原子性 | 排队 Host Fact 先在候选 Inbox/StoragePolicy 上预检；快照 hard limit 失败时不进入真实队列、不消耗命令序号、不留下半个 pin 记录 | `tests/storage-policy.test.ts` | 本轮 Host Fact 准入提交 |
 | Host 命令 API | `requestCancel()`、`setLanePriority()`、`inspectLane()` 已接入 FactInbox；优先级修改与审计事件通过同一 MutationLog 事务提交，递增 Lane version，排队期间不重入当前 Step | `tests/host-commands.test.ts` | `5cf3af9`、`d96dd00` |
@@ -566,6 +567,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `a65affa`：Host 命令的 Reply/Cancel/优先级拒绝结果与 `command.applied` 确认改为同一只读 MutationLog 事务，避免重试重复生成拒绝事件。
 - `06e061a`：Human Reply 的 `command.applied` 确认并入 Effect 结算事务；结算存储拒绝时，只有失败兜底与确认事件共同落盘才消费 Fact。
 - `bec3ba9`：`cancel_effect` 的确认事件并入 queued 终结、立即 quarantine 或 cancel-requested 事务，覆盖不同取消阶段的 Fact 消费边界。
+- `a866a6c`：Agent Host Cancel 的确认事件并入首次 `setAgent(state=cancelling)` 事务，避免接受状态未提交时提前消费 Fact。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
