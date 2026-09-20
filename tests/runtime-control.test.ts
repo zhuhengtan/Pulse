@@ -130,6 +130,24 @@ describe('runtime control boundaries', () => {
     expect(runtime.mutationLog.entries.some((entry) => entry.mutations.some((mutation) => mutation.op === 'setEffect' && mutation.effectId === 'effect-1' && mutation.record.state === 'reconcile_required'))).toBe(true)
   })
 
+  it('preserves a closing Lane pending Outcome when cancellation arrives during child cleanup', () => {
+    const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
+    const childPoint = (step: string) => ({ programId: 'cancel-closing', programVersion: '1', step, locals: {} })
+    const program: LaneProgram = { id: 'cancel-closing', version: '1', step: ({ lane }) => {
+      if (lane.goal === 'parent' && lane.resume.step === 'start') return { actions: [{ type: 'fork', lanes: [{ key: 'child', goal: 'child', program: childPoint('child') }] }], next: childPoint('close') }
+      if (lane.goal === 'parent' && lane.resume.step === 'close') return { actions: [{ type: 'complete', result: { joined: true }, children: 'await' }], next: childPoint('close') }
+      if (lane.resume.step === 'child') return { actions: [{ type: 'submit_effects', effects: [{ key: 'child-work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: childPoint('child-done') }
+      return { actions: [{ type: 'complete', result: { child: true } }], next: childPoint('child-done') }
+    } }
+    const { agentId, laneId } = runtime.createAgent('parent', program)
+    runtime.tick()
+    expect(runtime.state.lanes.get(laneId)).toMatchObject({ status: 'waiting', closingResult: { value: { joined: true } } })
+    runtime.cancelAgent(agentId, 'USER_REQUESTED')
+    expect(runtime.state.lanes.get(laneId)).toMatchObject({ status: 'succeeded', cancelReason: 'USER_REQUESTED' })
+    expect(runtime.state.agents.get(agentId)?.state).toBe('succeeded')
+    expect([...runtime.state.results.values()].some((result) => (result.value as { joined?: boolean }).joined === true)).toBe(true)
+  })
+
   it('rejects cancellation before mutating state when event storage admission fails', () => {
     const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 1 } })
     const program: LaneProgram = { id: 'cancel-admission', version: '1', step: () => ({ actions: [], next: point('cancel-admission', 'done') }) }

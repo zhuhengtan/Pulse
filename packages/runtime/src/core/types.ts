@@ -13,7 +13,7 @@ export function provenanceRefKind(ref: ProvenanceRef): 'legacy' | DataRef['kind'
 export type ContextVersion = number
 export type PrivacyLabel = 'public' | 'cloud_allowed' | 'local_only'
 export type ForkAffinityMode = 'off' | 'advise' | 'coalesce'
-export type LaneStatus = 'ready' | 'running' | 'waiting' | 'closing' | 'succeeded' | 'failed' | 'cancelled'
+export type LaneStatus = 'ready' | 'running' | 'waiting' | 'closing' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled'
 export type EffectState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'retry_wait' | 'reconcile_required'
 export type ConcurrencyClass = 'llm' | 'tool' | 'agent' | 'none'
 export type OutcomeStatus = 'succeeded' | 'failed' | 'cancelled'

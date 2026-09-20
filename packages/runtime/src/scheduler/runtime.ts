@@ -714,6 +714,7 @@ export class PulseRuntime {
       progressed++
     }
     this.completeFinishedChildAgents()
+    this.finalizeCancellations()
     this.syncStoragePolicy()
     this.schedulePersistence()
     return progressed
@@ -1226,6 +1227,7 @@ export class PulseRuntime {
     const targetEffects = [...this.state.effects.values()].filter((effect) => targetAgentSet.has(effect.agentId) && !effect.outcome)
     const cancellableEffects = targetEffects.filter((effect) => effect.childAgentId === undefined || this.state.agents.get(effect.childAgentId)?.detached !== true)
     const cancellationEvents: RuntimeEventInput[] = [
+      ...targetAgentIds.map((targetId) => ({ type: 'agent.cancelling', agentId: targetId, data: reason })),
       ...targetLanes.map((lane) => ({ type: 'lane.cancelling', laneId: lane.id, data: reason })),
       ...cancellableEffects.map((effect) => ({ type: 'effect.cancel_requested', effectId: effect.id, data: { reason } })),
       ...cancellableEffects.flatMap((effect) => {
@@ -1237,6 +1239,7 @@ export class PulseRuntime {
         return [] as RuntimeEventInput[]
       }),
       ...targetAgentIds.map((targetId) => ({ type: 'agent.cancelled', agentId: targetId, data: reason })),
+      ...targetLanes.map((lane) => ({ type: 'lane.cancelled', laneId: lane.id, data: reason })),
     ]
     const cancellationPreflight: Mutation[] = [
       ...additionalMutations.map((mutation) => structuredClone(mutation)),
@@ -1245,12 +1248,13 @@ export class PulseRuntime {
         const current = this.state.agents.get(targetId)
         if (!current) return []
         const candidate = structuredClone(current)
-        candidate.state = 'cancelled'
+        candidate.state = 'cancelling'
         return [{ op: 'setAgent' as const, agentId: targetId, record: candidate }]
       }),
       ...targetLanes.flatMap((lane) => {
         const candidate = structuredClone(lane)
-        candidate.status = 'cancelled'
+        if ((lane.status === 'closing' || lane.status === 'waiting') && lane.closingResult !== undefined) candidate.pendingOutcome = { status: 'succeeded', result: structuredClone(lane.closingResult.value) }
+        candidate.status = 'cancelling'
         candidate.cancelReason = reason
         candidate.version++
         candidate.unresolvedEffectIds = [...new Set([...(candidate.unresolvedEffectIds ?? []), ...cancellableEffects.filter((effect) => effect.ownerLaneId === lane.id && effect.sideEffectPolicy === 'write').map((effect) => effect.id)])]
@@ -1276,12 +1280,15 @@ export class PulseRuntime {
     this.assertStorageAdmission(cancellationPreflight)
     let commandApplied = additionalMutations.length === 0
     for (const [index, targetId] of targetAgentIds.entries()) {
-      const committed = this.commitAgentState(targetId, 'cancelling', index === 0 && commandTransactionId ? commandTransactionId : `agent:${targetId}:cancelling:${this.state.now}`, index === 0 ? additionalMutations : [])
+      const initialMutations: Mutation[] = [{ op: 'appendEvent', event: { type: 'agent.cancelling', agentId: targetId, data: reason } }]
+      if (index === 0) initialMutations.push(...additionalMutations)
+      const committed = this.commitAgentState(targetId, 'cancelling', index === 0 && commandTransactionId ? commandTransactionId : `agent:${targetId}:cancelling:${this.state.now}`, initialMutations)
       if (index === 0 && additionalMutations.length > 0) commandApplied = committed
     }
     for (const lane of targetLanes) {
       const nextLane = structuredClone(lane)
-      nextLane.status = 'cancelled'
+      if ((lane.status === 'closing' || lane.status === 'waiting') && lane.closingResult !== undefined) nextLane.pendingOutcome = { status: 'succeeded', result: structuredClone(lane.closingResult.value) }
+      nextLane.status = 'cancelling'
       nextLane.cancelReason = reason
       nextLane.version++
       const event = { type: 'lane.cancelling' as const, laneId: lane.id, data: reason }
@@ -1296,11 +1303,57 @@ export class PulseRuntime {
       if (childAgent?.detached === true) continue
       this.requestEffectCancellation(effect.id, reason, effect.cancelGraceMs ?? 0)
     }
-    for (const targetId of targetAgentIds) {
-      this.commitAgentState(targetId, 'cancelled', `agent:${targetId}:cancelled:${this.state.now}`, [{ op: 'appendEvent', event: { type: 'agent.cancelled', agentId: targetId, data: reason } }])
-    }
+    this.finalizeCancellations()
     this.schedulePersistence()
     return commandApplied
+  }
+
+  private finalizeCancellations(): void {
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const lane of [...this.state.lanes.values()]) {
+        if (lane.status !== 'cancelling') continue
+        const wait = lane.activeWaitId === undefined ? undefined : this.state.waits.get(lane.activeWaitId)
+        if (lane.pendingOutcome?.status === 'succeeded' && wait?.state === 'pending') continue
+        const nextLane = structuredClone(lane)
+        const mutations: Mutation[] = []
+        if (wait?.state === 'pending') {
+          const dependencies: Record<string, import('../core/types.js').DependencyObservation> = {}
+          for (const dependency of wait.spec.dependencies) {
+            const target = dependency.target as TargetRef
+            const outcome = target.kind === 'lane' ? outcomeForSeriesMember(this.state, this.state.lanes.get(target.id)!, dependency.key) : this.state.effects.get(target.id)?.outcome
+            dependencies[dependency.key] = outcome === undefined ? { state: 'pending', target } : { state: 'settled', target, outcome }
+          }
+          const resolution = { waitId: wait.id, status: 'unsatisfied' as const, dependencies, error: { code: 'CANCELLED', message: 'Lane cancellation interrupted the wait.' } }
+          const nextWait = structuredClone(wait)
+          nextWait.state = 'unsatisfied'
+          nextWait.resolution = resolution
+          delete nextLane.activeWaitId
+          mutations.push({ op: 'setWait', waitId: wait.id, record: nextWait })
+        }
+        nextLane.status = 'cancelled'
+        nextLane.cancelReason = nextLane.cancelReason ?? 'USER_REQUESTED'
+        nextLane.version++
+        mutations.push({ op: 'setLane', laneId: nextLane.id, record: nextLane }, { op: 'appendEvent', event: { type: 'lane.cancelled', laneId: nextLane.id, data: nextLane.cancelReason } })
+        this.assertStorageAdmission(mutations)
+        commitMutationTransaction(this.state, this.mutationLog, `lane:${nextLane.id}:cancelled:${nextLane.version}`, mutations, this.state.now, this.sessionId)
+        Object.assign(lane, nextLane)
+        this.state.lanes.set(lane.id, lane)
+        changed = true
+      }
+      if (changed) this.refreshWaits()
+    }
+    for (const agent of [...this.state.agents.values()]) {
+      if (agent.state !== 'cancelling') continue
+      const lanes = [...this.state.lanes.values()].filter((lane) => lane.agentId === agent.id)
+      if (lanes.some((lane) => !['succeeded', 'failed', 'cancelled'].includes(lane.status))) continue
+      const effects = [...this.state.effects.values()].filter((effect) => effect.agentId === agent.id)
+      if (effects.some((effect) => !effect.outcome && !['cancelled', 'reconcile_required', 'succeeded', 'failed'].includes(effect.state))) continue
+      const root = this.state.lanes.get(agent.rootLaneId)
+      const finalState = root?.status === 'succeeded' && root.cancelReason !== undefined ? 'succeeded' : root?.status === 'failed' && root.cancelReason === undefined ? 'failed' : 'cancelled'
+      this.commitAgentState(agent.id, finalState, `agent:${agent.id}:${finalState}:${this.state.now}`, [{ op: 'appendEvent', event: { type: `agent.${finalState}`, agentId: agent.id, data: root?.cancelReason ?? 'USER_REQUESTED' } }])
+    }
   }
 
   explain(laneId?: string): JsonValue {
@@ -1729,12 +1782,14 @@ export class PulseRuntime {
           const nextLane = lane === undefined || ['succeeded', 'failed', 'cancelled'].includes(lane.status) ? undefined : structuredClone(lane)
           if (nextLane) {
             exposeResolutionResults(nextLane, observations)
-            nextLane.status = 'failed'
-            nextLane.failure = { error: structuredClone(error), privacy: 'public' }
+            const cancelled = nextLane.status === 'cancelling'
+            nextLane.status = cancelled ? 'cancelled' : 'failed'
+            if (cancelled) nextLane.cancelReason = nextLane.cancelReason ?? 'USER_REQUESTED'
+            else nextLane.failure = { error: structuredClone(error), privacy: 'public' }
             delete nextLane.activeWaitId
             nextLane.version++
           }
-          commitResolution(nextWait, nextLane, nextLane === undefined ? [] : [{ op: 'appendEvent', event: { type: 'lane.failed', laneId: nextLane.id, data: error as unknown as JsonValue } }])
+          commitResolution(nextWait, nextLane, nextLane === undefined ? [] : [{ op: 'appendEvent', event: { type: nextLane.status === 'cancelled' ? 'lane.cancelled' : 'lane.failed', laneId: nextLane.id, data: nextLane.status === 'cancelled' ? nextLane.cancelReason as unknown as JsonValue : error as unknown as JsonValue } }])
         } else if (modeUnsatisfied || (hardFailure && !pending)) {
           const resolution = { waitId: wait.id, status: 'unsatisfied' as const, dependencies: observations, error: unsatisfied ?? { code: 'WAIT_QUORUM_UNREACHABLE', message: 'Wait can no longer satisfy its quorum.' } }
           const nextWait = structuredClone(wait)
@@ -1744,11 +1799,13 @@ export class PulseRuntime {
           const nextLane = lane === undefined || ['succeeded', 'failed', 'cancelled'].includes(lane.status) ? undefined : structuredClone(lane)
           if (nextLane) {
             exposeResolutionResults(nextLane, observations)
-            nextLane.status = 'ready'
+            const cancelled = nextLane.status === 'cancelling'
+            nextLane.status = cancelled ? 'cancelled' : 'ready'
+            if (cancelled) nextLane.cancelReason = nextLane.cancelReason ?? 'USER_REQUESTED'
             delete nextLane.activeWaitId
-            nextLane.pendingResumeInput = { type: 'wait', resolution }
+            if (!cancelled) nextLane.pendingResumeInput = { type: 'wait', resolution }
           }
-          commitResolution(nextWait, nextLane)
+          commitResolution(nextWait, nextLane, nextLane?.status === 'cancelled' ? [{ op: 'appendEvent', event: { type: 'lane.cancelled', laneId: nextLane.id, data: nextLane.cancelReason ?? 'USER_REQUESTED' } }] : [])
         } else if (modeSatisfied || (!pending && !unsatisfied && wait.spec.mode === 'all')) {
           const resolution = { waitId: wait.id, status: 'satisfied' as const, dependencies: observations }
           const nextWait = structuredClone(wait)
@@ -1765,6 +1822,7 @@ export class PulseRuntime {
               const result = { id: resultId, value: nextLane.closingResult.value, storageState: 'memory' as const, pinCount: 0, privacy: nextLane.closingResult.privacy, ...(nextLane.closingResult.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(nextLane.closingResult.privacyTaints) }), derivedFrom: [...(nextLane.closingResult.derivedFrom ?? [])] }
               delete nextLane.activeWaitId
               nextLane.status = 'succeeded'
+              delete nextLane.pendingOutcome
               nextLane.resultRef = resultId
               delete nextLane.closingResult
               if (nextLane.visibleResultRefs) nextLane.visibleResultRefs.add(resultId)
@@ -1783,9 +1841,15 @@ export class PulseRuntime {
               }
             } else {
               delete nextLane.activeWaitId
-              nextLane.status = 'ready'
-              nextLane.pendingResumeInput = { type: 'wait', resolution }
-              commitResolution(nextWait, nextLane)
+              if (nextLane.status === 'cancelling') {
+                nextLane.status = 'cancelled'
+                nextLane.cancelReason = nextLane.cancelReason ?? 'USER_REQUESTED'
+                commitResolution(nextWait, nextLane, [{ op: 'appendEvent', event: { type: 'lane.cancelled', laneId: nextLane.id, data: nextLane.cancelReason } }])
+              } else {
+                nextLane.status = 'ready'
+                nextLane.pendingResumeInput = { type: 'wait', resolution }
+                commitResolution(nextWait, nextLane)
+              }
             }
           } else {
             commitResolution(nextWait)
