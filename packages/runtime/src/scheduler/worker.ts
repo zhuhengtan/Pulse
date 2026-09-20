@@ -1,4 +1,5 @@
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { dirname } from 'node:path'
 import type { EffectExecution } from './runtime.js'
 import type { EffectRecord, JsonValue, RuntimeError } from '../core/types.js'
@@ -18,7 +19,7 @@ export interface WorkerTaskRecord {
 }
 
 export interface WorkerLease { task: WorkerTaskRecord; workerId: string; leaseId: string }
-export interface WorkerCoordinatorSnapshot { schemaVersion: 1; sequence: number; tasks: WorkerTaskRecord[]; idempotency: Record<string, string> }
+export interface WorkerCoordinatorSnapshot { schemaVersion: 1; sequence: number; tasks: WorkerTaskRecord[]; idempotency: Record<string, string>; integrity?: { algorithm: 'sha256'; digest: string } }
 export interface WorkerPersistenceBackend { load(): Promise<WorkerCoordinatorSnapshot | undefined>; save(snapshot: WorkerCoordinatorSnapshot): Promise<void> }
 
 export class FileWorkerPersistenceBackend implements WorkerPersistenceBackend {
@@ -72,6 +73,12 @@ function runtimeError(cause: unknown): RuntimeError {
   return { code: 'WORKER_FAILED', message: cause instanceof Error ? cause.message : String(cause) }
 }
 
+function workerSnapshotDigest(snapshot: WorkerCoordinatorSnapshot): string {
+  const copy = structuredClone(snapshot) as unknown as Record<string, unknown>
+  delete copy.integrity
+  return createHash('sha256').update(JSON.stringify(copy)).digest('hex')
+}
+
 /** A lease-based worker coordinator. A network transport can implement the same claim/complete contract. */
 export class WorkerCoordinator {
   private readonly tasks = new Map<string, WorkerTaskRecord>()
@@ -97,6 +104,7 @@ export class WorkerCoordinator {
       if (task.state === 'leased') { task.state = 'queued'; delete task.leaseId; delete task.workerId; delete task.leaseExpiresAt }
       coordinator.tasks.set(task.id, task)
     }
+    if (snapshot.integrity !== undefined && (snapshot.integrity.algorithm !== 'sha256' || !/^[a-f0-9]{64}$/.test(snapshot.integrity.digest) || snapshot.integrity.digest !== workerSnapshotDigest(snapshot))) throw new Error('INVALID_WORKER_INTEGRITY')
     for (const [key, taskId] of Object.entries(snapshot.idempotency ?? {})) if (coordinator.tasks.has(taskId)) coordinator.idempotency.set(key, taskId)
     return coordinator
   }
@@ -212,7 +220,8 @@ export class WorkerCoordinator {
   }
 
   snapshot(): WorkerCoordinatorSnapshot {
-    return { schemaVersion: 1, sequence: this.sequence, tasks: this.inspect(), idempotency: Object.fromEntries(this.idempotency) }
+    const snapshot: WorkerCoordinatorSnapshot = { schemaVersion: 1, sequence: this.sequence, tasks: this.inspect(), idempotency: Object.fromEntries(this.idempotency) }
+    return { ...snapshot, integrity: { algorithm: 'sha256', digest: workerSnapshotDigest(snapshot) } }
   }
 
   cancel(taskId: string, reason = 'WORKER_CANCELLED'): boolean {

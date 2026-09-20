@@ -129,4 +129,12 @@ describe('lease-based WorkerCoordinator', () => {
       expect(final.get('durable-file-task')).toMatchObject({ state: 'succeeded', result: { recovered: 'file' } })
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
+
+  it('rejects a tampered Worker snapshot before lease recovery', () => {
+    const snapshot = new WorkerCoordinator().snapshot()
+    expect(snapshot.integrity).toMatchObject({ algorithm: 'sha256', digest: expect.stringMatching(/^[a-f0-9]{64}$/) })
+    const tampered = structuredClone(snapshot)
+    tampered.sequence = 99
+    expect(() => WorkerCoordinator.restore(tampered)).toThrow('INVALID_WORKER_INTEGRITY')
+  })
 })
