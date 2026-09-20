@@ -142,6 +142,13 @@ export interface ResultRecord {
   privacy: PrivacyLabel
   derivedFrom: string[]
   summary?: JsonValue
+  downgrade?: {
+    sourceRefs: ResultRef[]
+    targetPrivacy: 'cloud_allowed'
+    method: 'human_approval' | 'sanitizer'
+    approvalRef?: string
+    sanitizerId?: string
+  }
 }
 
 export interface DependencySpec {
@@ -234,8 +241,19 @@ export interface ProposeCancelAction extends RuntimeActionBase { type: 'propose_
 export interface CompleteAction extends RuntimeActionBase { type: 'complete'; result: JsonValue; privacy?: PrivacyLabel; derivedFrom?: ResultRef[]; children?: 'reject_if_active' | 'cancel' | 'await' }
 export interface FailAction extends RuntimeActionBase { type: 'fail'; error: RuntimeError; privacy?: PrivacyLabel; derivedFrom?: ResultRef[] }
 export interface AdoptContextAction extends RuntimeActionBase { type: 'adopt_context'; version: ContextVersion | 'latest' }
+export interface DowngradePrivacyAction extends RuntimeActionBase {
+  type: 'downgrade_privacy'
+  sourceRefs: ResultRef[]
+  outputRef: ResultRef
+  value: JsonValue
+  targetPrivacy: 'cloud_allowed'
+  method: 'human_approval' | 'sanitizer'
+  approvalRef?: string
+  sanitizerId?: string
+  summary?: JsonValue
+}
 
-export type RuntimeAction = SubmitEffectsAction | WaitAction | ForkAction | CancelLaneAction | ProposeCancelAction | CompleteAction | FailAction | AdoptContextAction
+export type RuntimeAction = SubmitEffectsAction | WaitAction | ForkAction | CancelLaneAction | ProposeCancelAction | CompleteAction | FailAction | AdoptContextAction | DowngradePrivacyAction
 
 export interface ContextOp {
   op: 'set' | 'append' | 'remove' | 'compact_history'

@@ -254,6 +254,30 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       const version = action.version === 'latest' ? state.agents.get(lane.agentId)!.latestGlobalVersion : action.version
       if (!state.agents.get(lane.agentId)!.globalVersions.has(version)) return { rejection: error('UNKNOWN_CONTEXT_VERSION', String(version)) }
       workingLane.contextSnapshotVersion = version
+    } else if (action.type === 'downgrade_privacy') {
+      if (!action.outputRef || state.results.has(action.outputRef)) return { rejection: error('INVALID_PRIVACY_OUTPUT_REF', 'downgrade_privacy requires a fresh outputRef') }
+      if (action.targetPrivacy !== 'cloud_allowed') return { rejection: error('INVALID_PRIVACY_TARGET', 'Only cloud_allowed is a supported downgrade target.') }
+      if (action.sourceRefs.length === 0) return { rejection: error('EMPTY_PRIVACY_SOURCES', 'downgrade_privacy requires at least one source reference.') }
+      if (action.method === 'human_approval' && !action.approvalRef) return { rejection: error('MISSING_PRIVACY_APPROVAL', 'human_approval requires approvalRef.') }
+      if (action.method === 'sanitizer' && !action.sanitizerId) return { rejection: error('MISSING_PRIVACY_SANITIZER', 'sanitizer requires sanitizerId.') }
+      const sourcePrivacy = derivedPrivacy(state, action.sourceRefs)
+      if (sourcePrivacy.error) return { rejection: error(sourcePrivacy.error, 'Privacy downgrade references an unknown result.') }
+      const result: import('../core/types.js').ResultRecord = {
+        id: action.outputRef,
+        value: clone(action.value),
+        privacy: action.targetPrivacy,
+        derivedFrom: [...action.sourceRefs],
+        ...(action.summary === undefined ? {} : { summary: clone(action.summary) }),
+        downgrade: {
+          sourceRefs: [...action.sourceRefs],
+          targetPrivacy: action.targetPrivacy,
+          method: action.method,
+          ...(action.approvalRef === undefined ? {} : { approvalRef: action.approvalRef }),
+          ...(action.sanitizerId === undefined ? {} : { sanitizerId: action.sanitizerId }),
+        },
+      }
+      mutations.push({ op: 'publishResult', record: result })
+      mutations.push({ op: 'appendEvent', event: { type: 'privacy.downgraded', laneId: lane.id, data: { outputRef: action.outputRef, sourceRefs: action.sourceRefs, method: action.method } as unknown as JsonValue } })
     } else if (action.type === 'complete') {
       const activeChildren = [...lane.children].some((childId) => !['succeeded', 'failed', 'cancelled'].includes(state.lanes.get(childId)?.status ?? 'cancelled'))
       if (activeChildren && (action.children ?? 'reject_if_active') === 'reject_if_active') return { rejection: error('CHILDREN_STILL_ACTIVE', 'complete requires an explicit child join or cancellation') }
