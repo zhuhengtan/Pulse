@@ -1,4 +1,4 @@
-import type { JsonValue, LLMRequestProjection, PrivacyLabel } from '../core/types.js'
+import type { JsonValue, LLMRequestProjection, PrivacyLabel, ProvenanceRef } from '../core/types.js'
 
 export type ReasoningLevel = 'low' | 'medium' | 'high'
 export interface ModelCapabilities { toolCalling?: boolean; structuredOutput?: boolean; reasoning?: ReasoningLevel; maxContextTokens: number; maxOutputTokens?: number; local?: boolean }
@@ -203,7 +203,7 @@ export interface LLMResult {
   finishReason: 'stop' | 'tool_calls' | 'length' | 'error' | 'refusal'
   usage?: ModelUsage
   privacy?: PrivacyLabel
-  derivedFrom?: string[]
+  derivedFrom?: ProvenanceRef[]
 }
 
 /** Provider call ids are adapter-local; Runtime owns the stable ToolCall id. */

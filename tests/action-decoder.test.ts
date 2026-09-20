@@ -8,17 +8,17 @@ describe('LLM action decoder', () => {
   })
 
   it('propagates tool-call privacy and provenance to the effect and input', () => {
-    const actions = decodeLLMActions({ text: '', finishReason: 'tool_calls', privacy: 'local_only', derivedFrom: ['result:secret'], toolCalls: [{ toolCallId: 'pulse-tool-2', name: 'read_file', input: { path: 'secret.txt' } }] }, {
+    const actions = decodeLLMActions({ text: '', finishReason: 'tool_calls', privacy: 'local_only', derivedFrom: [{ kind: 'artifact', ref: 'artifact:secret' }], toolCalls: [{ toolCallId: 'pulse-tool-2', name: 'read_file', input: { path: 'secret.txt' } }] }, {
       allowedTools: new Set(['read_file']),
     })
     expect(actions[0]).toMatchObject({
       type: 'submit_effects',
       effects: [{
         privacy: 'local_only',
-        derivedFrom: ['result:secret'],
+        derivedFrom: [{ kind: 'artifact', ref: 'artifact:secret' }],
         input: {
           privacy: 'local_only',
-          derivedFrom: ['result:secret'],
+          derivedFrom: [{ kind: 'artifact', ref: 'artifact:secret' }],
         },
       }],
     })
