@@ -144,8 +144,13 @@ export class StepBuilder<TState = JsonValue> {
   }
   addMergeStep(name: string, options: { task: string; next: NextStepTarget; sources?: { proposals?: 'joined' | LaneId[]; outcomes?: 'joined' | LaneId[] }; instruction?: string | ((ctx: StepContext<TState>) => string); schema?: ZodTypeAny; onSynthesized?: (value: unknown, ctx: StepContext<TState>) => NextStepTarget }): this {
     this.handlers.set(name, (ctx) => {
-      const joined = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef ? [dependency.outcome.resultRef] : []) : []
-      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: asJson({ task: options.task, merge: true, sources: joined, proposals: ctx.mergeProposals.map((proposal) => ({ id: proposal.id, sourceLaneId: proposal.sourceLaneId, delta: proposal.delta })), ...(options.instruction === undefined ? {} : { instruction: typeof options.instruction === 'string' ? options.instruction : options.instruction(ctx) }) }) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:decode` }
+      const dependencies = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies) : []
+      const joinedLaneIds = new Set(dependencies.filter((dependency) => dependency.target.kind === 'lane').map((dependency) => dependency.target.id))
+      const outcomeSource = options.sources?.outcomes
+      const joined = dependencies.flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef && (outcomeSource === undefined || outcomeSource === 'joined' || outcomeSource.includes(dependency.target.id)) ? [dependency.outcome.resultRef] : [])
+      const proposalSource = options.sources?.proposals
+      const proposals = ctx.mergeProposals.filter((proposal) => proposalSource === undefined || (proposalSource === 'joined' ? joinedLaneIds.has(proposal.sourceLaneId) : proposalSource.includes(proposal.sourceLaneId)))
+      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: asJson({ task: options.task, merge: true, sources: joined, proposals: proposals.map((proposal) => ({ id: proposal.id, sourceLaneId: proposal.sourceLaneId, delta: proposal.delta })), ...(options.instruction === undefined ? {} : { instruction: typeof options.instruction === 'string' ? options.instruction : options.instruction(ctx) }) }) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:decode` }
     })
     this.handlers.set(`${name}:decode`, (ctx) => {
       const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined

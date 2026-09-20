@@ -15,4 +15,18 @@ describe('MergeProposal isolation', () => {
     expect(runtime.state.mergeProposals.get('proposal-1')?.delta.ops[0]?.path).toEqual(['candidate'])
     expect([...runtime.state.results.values()].at(-1)?.value).toEqual({ global: {}, proposals: 1 })
   })
+
+  it('filters merge proposals by the explicitly declared source lanes', async () => {
+    let mergeInput: any
+    const program = defineLaneProgram({ id: 'merge-sources', version: '1' }, (builder) => {
+      builder.addMergeStep('merge', { task: 'synthesize', sources: { proposals: ['lane-allowed'] }, next: 'finish' })
+      builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' }))
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => { mergeInput = effect.input; return { value: { ok: true } } } })
+    const { agentId } = runtime.createAgent('merge sources', program)
+    runtime.state.mergeProposals.set('allowed', { id: 'allowed', agentId, sourceLaneId: 'lane-allowed', baseGlobalVersion: 0, delta: { target: 'global', baseVersion: 0, proposal: true, ops: [{ op: 'set', path: ['allowed'], value: true }] }, createdAt: 1 })
+    runtime.state.mergeProposals.set('hidden', { id: 'hidden', agentId, sourceLaneId: 'lane-hidden', baseGlobalVersion: 0, delta: { target: 'global', baseVersion: 0, proposal: true, ops: [{ op: 'set', path: ['hidden'], value: true }] }, createdAt: 2 })
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(mergeInput.proposals.map((proposal: any) => proposal.id)).toEqual(['allowed'])
+  })
 })
