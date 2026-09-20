@@ -2,6 +2,7 @@ import type { JsonValue, LLMRequestProjection, PrivacyLabel } from '../core/type
 
 export type ReasoningLevel = 'low' | 'medium' | 'high'
 export interface ModelCapabilities { toolCalling?: boolean; structuredOutput?: boolean; reasoning?: ReasoningLevel; maxContextTokens: number; maxOutputTokens?: number; local?: boolean }
+export interface ModelRouteRequirements extends Partial<ModelCapabilities> { contextSize?: number }
 export interface ModelUsage {
   inputTokens?: number
   outputTokens?: number
@@ -69,9 +70,9 @@ export class ModelRouter {
     this.routes.set(route.task, [...new Set(route.candidates)])
   }
 
-  route(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] { return this.rankCandidates(this.candidates(task, privacy, requirements), this.routes.get(task)) }
-  routeProjection(task: string, projection: LLMRequestProjection, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] {
-    const estimatedTokens = estimateProjectionTokens(projection) + (typeof requirements.maxOutputTokens === 'number' ? requirements.maxOutputTokens : 0)
+  route(task: string, privacy: PrivacyLabel, requirements: ModelRouteRequirements = {}): ModelCandidate[] { return this.rankCandidates(this.candidates(task, privacy, requirements), this.routes.get(task)) }
+  routeProjection(task: string, projection: LLMRequestProjection, requirements: ModelRouteRequirements = {}): ModelCandidate[] {
+    const estimatedTokens = Math.max(estimateProjectionTokens(projection) + (typeof requirements.maxOutputTokens === 'number' ? requirements.maxOutputTokens : 0), typeof requirements.contextSize === 'number' ? requirements.contextSize : 0)
     return this.rankCandidates(this.candidates(task, projection.privacy, requirements, estimatedTokens), this.routes.get(task))
   }
   recordFeedback(_feedback: ModelRouteFeedback): void {}
@@ -82,13 +83,13 @@ export class ModelRouter {
     }
     return candidates.sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
   }
-  private candidates(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities>, estimatedTokens?: number): ModelCandidate[] {
+  private candidates(task: string, privacy: PrivacyLabel, requirements: ModelRouteRequirements, estimatedTokens?: number): ModelCandidate[] {
     const candidates = this.registry.list()
     const allowed = this.routes.get(task)
     const diagnostics = this.diagnostics(task, privacy, requirements, estimatedTokens)
     return diagnostics.filter((item) => item.accepted && (allowed === undefined || allowed.includes(item.id))).map((item) => candidates.find((candidate) => candidate.id === item.id)!).filter(Boolean)
   }
-  diagnostics(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}, estimatedTokens?: number): ModelRouteDiagnostic[] {
+  diagnostics(task: string, privacy: PrivacyLabel, requirements: ModelRouteRequirements = {}, estimatedTokens?: number): ModelRouteDiagnostic[] {
     const preferred = this.routes.get(task)
     return this.registry.list().map((candidate) => {
       const reasons: string[] = []
@@ -96,7 +97,7 @@ export class ModelRouter {
       if (!candidate.tasks.includes(task)) reasons.push('TASK_NOT_SUPPORTED')
       if (privacy === 'local_only' && candidate.capabilities.local !== true) reasons.push('PRIVACY_CLOUD_BLOCKED')
       for (const [key, value] of Object.entries(requirements)) {
-        if (key === 'maxOutputTokens') continue
+        if (key === 'maxOutputTokens' || key === 'contextSize') continue
         if (key === 'reasoning') {
           const levels: Record<ReasoningLevel, number> = { low: 1, medium: 2, high: 3 }
           const required = value as ReasoningLevel
@@ -106,6 +107,7 @@ export class ModelRouter {
         if (candidate.capabilities[key as keyof ModelCapabilities] !== value) reasons.push(`CAPABILITY_MISSING:${key}`)
       }
       if (typeof requirements.maxOutputTokens === 'number' && (candidate.capabilities.maxOutputTokens === undefined || candidate.capabilities.maxOutputTokens < requirements.maxOutputTokens)) reasons.push('OUTPUT_BUDGET_TOO_SMALL')
+      if (typeof requirements.contextSize === 'number' && candidate.capabilities.maxContextTokens < requirements.contextSize) reasons.push('CONTEXT_WINDOW_TOO_SMALL')
       if (estimatedTokens !== undefined && candidate.capabilities.maxContextTokens < estimatedTokens) reasons.push('CONTEXT_WINDOW_TOO_SMALL')
       return { id: candidate.id, providerId: candidate.providerId, accepted: reasons.length === 0, reasons }
     })

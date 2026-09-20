@@ -32,6 +32,15 @@ describe('Runtime model registry and task routes', () => {
     expect(runtime.modelRouter.diagnostics('reason', 'local_only', { reasoning: 'medium' })).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'low', accepted: false, reasons: ['CAPABILITY_MISSING:reasoning'] })]))
   })
 
+  it('enforces an explicit minimum context size in route admission', () => {
+    const runtime = new PulseRuntime()
+    runtime.models.register({ id: 'small', providerId: 'local', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 2 })
+    runtime.models.register({ id: 'large', providerId: 'local', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 16384 }, priority: 1 })
+    runtime.modelRouter.register({ task: 'reason', candidates: ['small', 'large'] })
+    expect(runtime.modelRouter.route('reason', 'local_only', { contextSize: 8192 }).map((candidate) => candidate.id)).toEqual(['large'])
+    expect(runtime.modelRouter.diagnostics('reason', 'local_only', { contextSize: 8192 })).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'small', accepted: false, reasons: ['CONTEXT_WINDOW_TOO_SMALL'] })]))
+  })
+
   it('reuses a supplied router registry when only a router is configured', () => {
     const router = new ModelRouter({ register: () => {}, list: () => [{ id: 'local:only', providerId: 'local', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 1 }] })
     const runtime = new PulseRuntime({ modelRouter: router, programs: [program] })
