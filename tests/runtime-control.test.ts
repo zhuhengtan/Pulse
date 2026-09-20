@@ -24,6 +24,12 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.events.some((event) => event.type === 'lane.failed' && (event.data as any)?.code === 'ASYNC_STEP_FORBIDDEN')).toBe(true)
   })
 
+  it('rejects impure Steps before they enter the scheduler', () => {
+    const runtime = new PulseRuntime()
+    const program: LaneProgram = { id: 'impure-step', version: '1', step: () => ({ actions: [{ type: 'complete', result: Date.now() }], next: point('impure-step', 'done') }) }
+    expect(() => runtime.createAgent('impure step', program)).toThrow('ASYNC_STEP_NOT_ALLOWED:Date.now(')
+  })
+
   it('turns a stuck attempt timeout into a terminal outcome without waiting forever', async () => {
     const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
     const program: LaneProgram = { id: 'attempt-timeout', version: '1', step: ({ lane }) => lane.resume.step === 'start'

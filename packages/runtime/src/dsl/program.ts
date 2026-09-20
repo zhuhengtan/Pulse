@@ -429,8 +429,9 @@ export class StepBuilder<TState = JsonValue> {
 
 export function defineLaneProgram<TState = JsonValue>(config: { id: string; version: string; system?: string; toolSet?: string; state?: z.ZodType<TState>; historyCompaction?: HistoryCompactionOptions }, define: (builder: StepBuilder<TState>) => void): LaneProgramDefinition { const builder = new StepBuilder(config); define(builder); return builder.build() }
 
-export function assertProgramPure(program: LaneProgramDefinition): void {
-  const source = [program.step.toString(), ...(program.debugSources ?? [])].join('\n')
+export function assertProgramPure(program: LaneProgramDefinition | LaneProgram): void {
+  const candidate = program as LaneProgramDefinition
+  const source = [program.step.toString(), program.errorBoundary?.toString() ?? '', ...(candidate.debugSources ?? []), program.seriesMemberProgram?.step.toString() ?? '', program.seriesMemberProgram?.errorBoundary?.toString() ?? ''].join('\n')
   for (const forbidden of ['Date.now(', 'Math.random(', 'fetch(', 'await ']) if (source.includes(forbidden)) throw new Error(`ASYNC_STEP_NOT_ALLOWED:${forbidden}`)
-  if (program.steps.some((step) => step.includes('undefined'))) throw new Error('INVALID_STEP_NAME')
+  if ((candidate.steps ?? []).some((step) => step.includes('undefined'))) throw new Error('INVALID_STEP_NAME')
 }

@@ -6,6 +6,7 @@ import type { EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOut
 import { createRuntimeState, effectivePrivacy, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, provenanceRefId, provenanceRefKind, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
+import { assertProgramPure } from '../dsl/program.js'
 import { FactInbox, ObservationInbox } from '../core/inbox.js'
 import { observeProgress } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
@@ -209,7 +210,7 @@ export class PulseRuntime {
     this.syncStoragePolicy()
   }
 
-  register(program: LaneProgram): void { this.programs.set(`${program.id}@${program.version}`, program); if (program.seriesMemberProgram) this.register(program.seriesMemberProgram) }
+  register(program: LaneProgram): void { assertProgramPure(program); this.programs.set(`${program.id}@${program.version}`, program); if (program.seriesMemberProgram) this.register(program.seriesMemberProgram) }
   createAgent(request: AgentCreateRequest): { agentId: string; laneId: string }
   createAgent(goal: string, program: LaneProgram, agentId?: string): { agentId: string; laneId: string }
   createAgent(goalOrRequest: string | AgentCreateRequest, program?: LaneProgram, agentId?: string): { agentId: string; laneId: string } {
