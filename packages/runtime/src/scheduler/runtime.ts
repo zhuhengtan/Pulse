@@ -10,7 +10,7 @@ import { assertProgramPure } from '../dsl/program.js'
 import { FactInbox, ObservationInbox } from '../core/inbox.js'
 import { observeProgress, type ProgressObservation } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
-import { exportRuntimeCheckpoint, exportRuntimePersistence, importRuntimePersistence, type RuntimePersistenceBackend, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
+import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, hydrateRuntimeResultBodies, importRuntimePersistence, type RuntimePersistenceBackend, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
 import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import { apply, type Mutation } from '../core/mutations.js'
@@ -165,7 +165,9 @@ export class PulseRuntime {
   private factWaiters: Array<() => void> = []
 
   static async restore(backend: RuntimePersistenceBackend, config: Omit<RuntimeConfig, 'persistence'> = {}): Promise<PulseRuntime> {
-    const snapshot = await backend.load()
+    const loaded = await backend.load()
+    const snapshot = loaded === undefined || backend.resultStore === undefined ? loaded : await hydrateRuntimeResultBodies(loaded, backend.resultStore)
+    if (snapshot?.resultBodies === 'external' && backend.resultStore === undefined) throw new Error('RUNTIME_RESULT_STORE_REQUIRED')
     return new PulseRuntime(snapshot === undefined ? config : { ...config, persistence: snapshot })
   }
 
@@ -295,7 +297,8 @@ export class PulseRuntime {
   async persist(backend: RuntimePersistenceBackend): Promise<void> {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
-    const snapshot = exportRuntimePersistence(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, this.factInbox.snapshot())
+    const exported = exportRuntimePersistence(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, this.factInbox.snapshot())
+    const snapshot = backend.resultStore === undefined ? exported : await externalizeRuntimeResultBodies(exported, backend.resultStore)
     await backend.save(snapshot, backend === this.persistenceBackend ? this.persistenceDigest : undefined)
     if (backend === this.persistenceBackend) this.persistenceDigest = snapshot.integrity?.digest
     this.storagePolicy.markPersisted()
@@ -314,7 +317,8 @@ export class PulseRuntime {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
     const eventWatermark = options.compactEventsThrough ?? this.state.events.at(-1)?.seq
-    const snapshot = exportRuntimeCheckpoint(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark }, this.factInbox.snapshot())
+    const exported = exportRuntimeCheckpoint(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark }, this.factInbox.snapshot())
+    const snapshot = backend.resultStore === undefined ? exported : await externalizeRuntimeResultBodies(exported, backend.resultStore)
     await backend.save(snapshot, backend === this.persistenceBackend ? this.persistenceDigest : undefined)
     if (backend === this.persistenceBackend) this.persistenceDigest = snapshot.integrity?.digest
     this.storagePolicy.markPersisted()

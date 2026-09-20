@@ -19,12 +19,20 @@ export interface RuntimePersistenceSnapshot {
   storage?: StoragePolicySnapshot
   factInbox?: FactInboxSnapshot
   checkpoint?: { schemaVersion: 1; logWatermark: number; eventWatermark?: number; state: SessionSnapshot }
+  resultBodies?: 'inline' | 'external'
+  externalResultRefs?: string[]
   integrity?: { algorithm: 'sha256'; digest: string }
+}
+
+export interface RuntimeResultStore {
+  save(ref: string, value: JsonValue): Promise<void>
+  load(ref: string): Promise<JsonValue | undefined>
 }
 
 export interface RuntimePersistenceBackend {
   load(): Promise<RuntimePersistenceSnapshot | undefined>
   save(snapshot: RuntimePersistenceSnapshot, expectedDigest?: string): Promise<void>
+  resultStore?: RuntimeResultStore
 }
 
 function hasTarget(state: SessionSnapshot['state'], target: { kind: string; id: string }): boolean {
@@ -182,6 +190,41 @@ export function exportRuntimeCheckpoint(state: RuntimeState, mutationLog: Mutati
   }
   const snapshot: RuntimePersistenceSnapshot = { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: checkpointLog.snapshot(), outbox: outbox.snapshot(), ...(quarantine === undefined ? {} : { quarantine: quarantine.snapshot() }), ...(storagePolicy === undefined ? {} : { storage: storagePolicy.snapshot() }), ...(factInbox === undefined ? {} : { factInbox: structuredClone(factInbox) }), checkpoint: { schemaVersion: 1, logWatermark: watermark, ...(eventWatermark === undefined ? {} : { eventWatermark }), state: checkpointState } }
   return { ...snapshot, integrity: { algorithm: 'sha256', digest: integrityDigest(snapshot) } }
+}
+
+export async function externalizeRuntimeResultBodies(snapshot: RuntimePersistenceSnapshot, store: RuntimeResultStore): Promise<RuntimePersistenceSnapshot> {
+  const copy = structuredClone(snapshot)
+  const refs = new Set<string>(copy.externalResultRefs ?? [])
+  const states = [copy.state, ...(copy.checkpoint === undefined ? [] : [copy.checkpoint.state])]
+  for (const session of states) {
+    for (const [ref, result] of session.state.results) {
+      if (result.value === undefined) continue
+      await store.save(ref, result.value)
+      delete result.value
+      refs.add(ref)
+    }
+  }
+  copy.resultBodies = 'external'
+  copy.externalResultRefs = [...refs].sort()
+  delete copy.integrity
+  return { ...copy, integrity: { algorithm: 'sha256', digest: integrityDigest(copy) } }
+}
+
+export async function hydrateRuntimeResultBodies(snapshot: RuntimePersistenceSnapshot, store: RuntimeResultStore): Promise<RuntimePersistenceSnapshot> {
+  if (snapshot.resultBodies !== 'external') return snapshot
+  const copy = structuredClone(snapshot)
+  const refs = copy.externalResultRefs ?? []
+  const sessions = [copy.checkpoint?.state ?? copy.state]
+  for (const session of sessions) {
+    for (const [ref, result] of session.state.results) {
+      if (!refs.includes(ref) || result.value !== undefined) continue
+      const value = await store.load(ref)
+      if (value === undefined) throw new Error(`RUNTIME_RESULT_NOT_FOUND:${ref}`)
+      result.value = value
+    }
+  }
+  delete copy.integrity
+  return { ...copy, integrity: { algorithm: 'sha256', digest: integrityDigest(copy) } }
 }
 
 export function serializeRuntimePersistence(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox, storagePolicy?: SessionStoragePolicy): JsonValue {

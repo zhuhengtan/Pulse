@@ -60,6 +60,34 @@ describe('effect outbox and runtime persistence envelope', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('externalizes Result bodies while preserving a durable ResultRef index', async () => {
+    let saved: any
+    const values = new Map<string, any>()
+    const backend = {
+      load: async () => saved,
+      save: async (snapshot: any) => { saved = structuredClone(snapshot) },
+      resultStore: {
+        save: async (ref: string, value: any) => { values.set(ref, structuredClone(value)) },
+        load: async (ref: string) => values.has(ref) ? structuredClone(values.get(ref)) : undefined,
+      },
+    }
+    const program = { id: 'external-result', version: '1', step: ({ lane }: any) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects' as const, effects: [{ key: 'work', kind: 'tool' as const, concurrencyClass: 'tool' as const, input: {} }], wait: { onUnsatisfied: 'resume_with_error' as const } }], next: { programId: 'external-result', programVersion: '1', step: 'finish', locals: {} } }
+      : { actions: [{ type: 'complete' as const, result: { done: true } }], next: { programId: 'external-result', programVersion: '1', step: 'finish', locals: {} } } }
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { answer: 42 } }) })
+    const { agentId } = runtime.createAgent('external result', program)
+    await runtime.start(agentId).outcome()
+    const resultRef = [...runtime.state.results.values()].find((result) => result.effectId === 'effect-1')?.id
+    expect(resultRef).toBeDefined()
+    await runtime.persist(backend)
+    const persistedResult = saved.state.state.results.find(([ref]: [string, unknown]) => ref === resultRef)?.[1]
+    expect(persistedResult.value).toBeUndefined()
+    expect(saved.resultBodies).toBe('external')
+    expect(values.get(resultRef as string)).toEqual({ answer: 42 })
+    const restored = await PulseRuntime.restore(backend, { programs: [program] })
+    expect(restored.state.results.get(resultRef as string)?.value).toEqual({ answer: 42 })
+  })
+
   it('rejects malformed persistence envelopes before recovery', () => {
     expect(() => importRuntimePersistence({ schemaVersion: 1 } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
     expect(() => importRuntimePersistence({ schemaVersion: 1, state: { state: {} }, mutationLog: {}, outbox: {} } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
