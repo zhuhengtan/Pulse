@@ -14,7 +14,7 @@ import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import type { Mutation } from '../core/mutations.js'
 import { ContextMerger, type MergePlan } from '../context/merger.js'
-import { historyPressure } from '../context/builder.js'
+import { appendHistory, historyPressure } from '../context/builder.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number; observe?: (event: { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }) => void }
 export interface LaneProgram {
@@ -168,9 +168,10 @@ export class PulseRuntime {
   }
 
   private emit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent { return appendRuntimeEvent(this.state, event, { sessionId: this.sessionId, timestamp: this.state.now }) }
-  private journalEffect(effect: EffectRecord, transactionId: string, result?: import('../core/types.js').ResultRecord, events: import('../core/types.js').RuntimeEvent[] = []): void {
+  private journalEffect(effect: EffectRecord, transactionId: string, result?: import('../core/types.js').ResultRecord, events: import('../core/types.js').RuntimeEvent[] = [], lane?: LaneRecord): void {
     const mutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: structuredClone(effect) }]
     if (result) mutations.push({ op: 'publishResult', record: structuredClone(result) })
+    if (lane) mutations.push({ op: 'setLane', laneId: lane.id, record: structuredClone(lane) })
     for (const event of events) { const { seq: _seq, ...input } = event; mutations.push({ op: 'appendEvent', event: input }) }
     this.mutationLog.append(transactionId, mutations, this.state.now)
   }
@@ -368,16 +369,28 @@ export class PulseRuntime {
     this.outbox.ack(`${effect.id}:${effect.attemptId}`)
     for (const observation of execution.observations ?? []) this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now })
     const ownerLane = this.state.lanes.get(effect.ownerLaneId)
-    if (ownerLane && effectiveStatus === 'succeeded') {
-      if (ownerLane.visibleResultRefs) ownerLane.visibleResultRefs.add(resultId)
-      else ownerLane.visibleResultRefs = new Set([resultId])
-    }
     const sourcePrivacy = effect.derivedFrom?.map((ref) => this.state.results.get(ref)?.privacy).filter((privacy): privacy is NonNullable<typeof privacy> => privacy !== undefined) ?? []
     const result = effectiveStatus === 'succeeded' ? { id: resultId, effectId, value: execution.value, privacy: strictestPrivacy([execution.privacy ?? 'public', ...sourcePrivacy]), derivedFrom: [...(effect.derivedFrom ?? [])], ...(execution.summary === undefined ? {} : { summary: execution.summary }) } : undefined
     if (result) this.state.results.set(resultId, result)
+    let journalLane: LaneRecord | undefined
+    if (ownerLane && effectiveStatus === 'succeeded') {
+      journalLane = structuredClone(ownerLane)
+      if (journalLane.visibleResultRefs) journalLane.visibleResultRefs.add(resultId)
+      else journalLane.visibleResultRefs = new Set([resultId])
+      if (effect.kind === 'llm' && result) {
+        const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+        const request = input.request && typeof input.request === 'object' && !Array.isArray(input.request) ? input.request as Record<string, JsonValue> : undefined
+        const contextSpec = request?.contextSpec && typeof request.contextSpec === 'object' && !Array.isArray(request.contextSpec) ? request.contextSpec as Record<string, JsonValue> : undefined
+        const refs = Array.isArray(contextSpec?.resultRefs) ? contextSpec.resultRefs.filter((ref): ref is string => typeof ref === 'string') : effect.derivedFrom ?? []
+        const instruction = typeof contextSpec?.instruction === 'string' ? contextSpec.instruction : typeof input.instruction === 'string' ? input.instruction : typeof input.task === 'string' ? input.task : effect.key
+        journalLane = appendHistory(journalLane, { instruction, resultRefs: [...new Set(refs)], output: structuredClone(execution.value), privacy: result.privacy })
+        journalLane.visibleResultRefs!.add(resultId)
+      }
+      this.state.lanes.set(journalLane.id, journalLane)
+    }
     const settledEvent = this.emit({ type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
     const metadataEvent = execution.metadata === undefined ? undefined : this.emit({ type: 'effect.execution_metadata', effectId, data: execution.metadata })
-    this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:settled`, result, [settledEvent, ...(metadataEvent ? [metadataEvent] : [])])
+    this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:settled`, result, [settledEvent, ...(metadataEvent ? [metadataEvent] : [])], journalLane)
     this.refreshWaits()
     this.dispatchQueuedEffects()
   }
