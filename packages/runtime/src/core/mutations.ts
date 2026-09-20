@@ -10,6 +10,7 @@ export type Mutation =
   | { op: 'insertWait'; record: WaitRecord }
   | { op: 'publishResult'; record: ResultRecord }
   | { op: 'insertMergeProposal'; proposal: MergeProposal }
+  | { op: 'removeMergeProposal'; proposalId: string }
   | { op: 'setGlobal'; agentId: string; version: ContextVersion; value: JsonValue }
   | { op: 'setLaneContext'; laneId: LaneId; value: JsonValue; version: ContextVersion; history?: HistoryRecord[] }
   | { op: 'appendEvent'; event: RuntimeEventInput }
@@ -30,6 +31,7 @@ export function apply(state: RuntimeState, mutations: Mutation[], defaults: { se
       case 'insertWait': state.waits.set(mutation.record.id, mutation.record); break
       case 'publishResult': state.results.set(mutation.record.id, mutation.record); break
       case 'insertMergeProposal': state.mergeProposals.set(mutation.proposal.id, mutation.proposal); break
+      case 'removeMergeProposal': state.mergeProposals.delete(mutation.proposalId); break
       case 'setGlobal': state.agents.get(mutation.agentId)!.globalVersions.set(mutation.version, mutation.value); state.agents.get(mutation.agentId)!.latestGlobalVersion = mutation.version; break
       case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version, ...(mutation.history === undefined ? {} : { history: structuredClone(mutation.history) }) }; break }
       case 'appendEvent': appendRuntimeEvent(state, mutation.event, defaults); break

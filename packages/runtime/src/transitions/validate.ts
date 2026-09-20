@@ -346,6 +346,7 @@ function requireMutations(): typeof import('../core/mutations.js') {
         case 'setLaneContext': { const lane = state.lanes.get(mutation.laneId)!; lane.context = { ...lane.context, state: mutation.value, version: mutation.version, ...(mutation.history === undefined ? {} : { history: structuredClone(mutation.history) }) }; break }
         case 'appendEvent': appendRuntimeEvent(state, mutation.event); break
         case 'insertMergeProposal': state.mergeProposals.set(mutation.proposal.id, mutation.proposal); break
+        case 'removeMergeProposal': state.mergeProposals.delete(mutation.proposalId); break
         case 'setNow': state.now = mutation.now; break
       }
     }

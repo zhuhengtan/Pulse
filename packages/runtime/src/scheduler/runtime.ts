@@ -13,6 +13,7 @@ import { exportRuntimePersistence, importRuntimePersistence, type RuntimePersist
 import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import type { Mutation } from '../core/mutations.js'
+import { ContextMerger, type MergePlan } from '../context/merger.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number }
 export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput; errorBoundary?: (error: RuntimeError, context: LaneStepContext) => LaneStepOutput }
@@ -134,6 +135,12 @@ export class PulseRuntime {
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
   exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox) }
   async persist(backend: RuntimePersistenceBackend): Promise<void> { await backend.save(this.exportPersistence()) }
+  mergeProposals(agentId: string, proposalIds?: string[]): MergePlan {
+    const plan = new ContextMerger(this.state).plan(agentId, proposalIds)
+    if (plan.conflicts.length || plan.mutations.length === 0) return plan
+    commitMutationTransaction(this.state, this.mutationLog, `context-merge:${agentId}:${plan.version ?? this.state.now}`, plan.mutations, this.state.now, this.sessionId)
+    return plan
+  }
 
   private emit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent { return appendRuntimeEvent(this.state, event, { sessionId: this.sessionId, timestamp: this.state.now }) }
   private journalEffect(effect: EffectRecord, transactionId: string, result?: import('../core/types.js').ResultRecord, events: import('../core/types.js').RuntimeEvent[] = []): void {
