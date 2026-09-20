@@ -81,7 +81,7 @@ export function importRuntimeState(snapshot: SessionSnapshot | JsonValue): Runti
   }
   for (const [id, effect] of value.state.effects) state.effects.set(id, structuredClone(effect))
   for (const [id, wait] of value.state.waits) state.waits.set(id, structuredClone(wait))
-  for (const [id, result] of value.state.results) state.results.set(id, structuredClone(result))
+  for (const [id, result] of value.state.results) state.results.set(id, { ...structuredClone(result), storageState: result.storageState ?? 'memory', pinCount: result.pinCount ?? 0 })
   for (const [ref, artifact] of value.state.artifacts ?? []) state.artifacts.set(ref, structuredClone(artifact))
   for (const [id, correlation] of value.state.toolCallCorrelations ?? []) state.toolCallCorrelations.set(id, structuredClone(correlation))
   for (const [id, proposal] of value.state.mergeProposals ?? []) state.mergeProposals.set(id, structuredClone(proposal))

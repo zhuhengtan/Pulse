@@ -43,6 +43,8 @@ export function prepareFindingPublication(state: RuntimeState, publication: Find
     statement: publication.statement,
     evidenceRefs: structuredClone(publication.evidenceRefs),
     value: { statement: publication.statement, evidenceRefs: structuredClone(publication.evidenceRefs) },
+    storageState: 'memory',
+    pinCount: 0,
     privacy,
     ...(sourceTaints.length || publication.privacyTaints?.length ? { privacyTaints: [...sourceTaints, ...(publication.privacyTaints ?? [])] } : {}),
     derivedFrom: structuredClone(publication.evidenceRefs),

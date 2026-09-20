@@ -183,6 +183,8 @@ export interface ResultRecord {
   statement?: string
   evidenceRefs?: DataRef[]
   value?: JsonValue
+  storageState?: 'memory' | 'persisted'
+  pinCount?: number
   privacy: PrivacyLabel
   privacyTaints?: PrivacyTaint[]
   derivedFrom: ProvenanceRef[]

@@ -303,6 +303,7 @@ export class PulseRuntime {
     if (backend === this.persistenceBackend) this.persistenceDigest = snapshot.integrity?.digest
     this.storagePolicy.markPersisted()
     this.markArtifactsPersisted()
+    this.syncStoragePolicy()
   }
   async flushPersistence(): Promise<void> {
     if (!this.persistenceBackend) return
@@ -329,6 +330,7 @@ export class PulseRuntime {
     if (backend === this.persistenceBackend) this.persistenceDigest = snapshot.integrity?.digest
     this.storagePolicy.markPersisted()
     this.markArtifactsPersisted()
+    this.syncStoragePolicy()
     const watermark = snapshot.checkpoint?.logWatermark ?? 0
     if (watermark > 0 && this.mutationLog.lastSequence >= watermark) this.mutationLog.truncateThrough(watermark)
     if (eventWatermark !== undefined) {
@@ -727,7 +729,14 @@ export class PulseRuntime {
         policy.put('snapshot', key, { effectId: effect.id, attemptId: effect.attemptId, input: effect.input } as unknown as JsonValue)
       }
     }
-    for (const result of state.results.values()) policy.put('result', `result:${result.id}`, result as unknown as JsonValue)
+    for (const result of state.results.values()) {
+      const policyValue = structuredClone(result) as import('../core/types.js').ResultRecord
+      delete policyValue.storageState
+      delete policyValue.pinCount
+      const stored = policy.put('result', `result:${result.id}`, policyValue as unknown as JsonValue)
+      result.storageState = stored.storageState === 'memory' ? 'memory' : 'persisted'
+      result.pinCount = stored.pinCount
+    }
     for (const artifact of state.artifacts.values()) policy.put('artifact', `artifact:${artifact.ref}`, artifact as unknown as JsonValue)
     for (const event of state.events) policy.put('event', `event:${event.id}`, event as unknown as JsonValue)
     for (const lane of state.lanes.values()) if (lane.pendingResumeInput) policy.put('snapshot', `snapshot:resume:${lane.id}:${lane.version}`, lane.pendingResumeInput as unknown as JsonValue)
@@ -817,7 +826,7 @@ export class PulseRuntime {
     const outputTaints = [...sourceTaints, ...(effectiveExecution.privacyTaints ?? [])]
     const rejectedTaints = [...sourceTaints, ...(effectiveExecution.rejectedOutput?.privacyTaints ?? [])]
     const summaryAllowed = effectiveExecution.summary === undefined || Buffer.byteLength(JSON.stringify(effectiveExecution.summary), 'utf8') <= this.state.maxResultSummaryBytes
-    const result = effectiveStatus === 'succeeded' && !taintError ? { id: resultId, effectId, value: effectiveExecution.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), outputTaints), ...(outputTaints.length ? { privacyTaints: outputTaints } : {}), derivedFrom: resultDerivedFrom, ...(effectiveExecution.normalized === undefined ? {} : { normalized: effectiveExecution.normalized }), ...(summaryAllowed && effectiveExecution.summary !== undefined ? { summary: effectiveExecution.summary } : {}) } : rejectedOutputId && effectiveExecution.rejectedOutput && !taintError ? { id: rejectedOutputId, effectId, kind: 'rejected_output' as const, value: effectiveExecution.rejectedOutput.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.rejectedOutput.privacy ?? effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), rejectedTaints), ...(rejectedTaints.length ? { privacyTaints: rejectedTaints } : {}), derivedFrom: [...(effectiveExecution.rejectedOutput.derivedFrom ?? effect.derivedFrom ?? [])] } : undefined
+    const result = effectiveStatus === 'succeeded' && !taintError ? { id: resultId, effectId, value: effectiveExecution.value, storageState: 'memory' as const, pinCount: 0, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), outputTaints), ...(outputTaints.length ? { privacyTaints: outputTaints } : {}), derivedFrom: resultDerivedFrom, ...(effectiveExecution.normalized === undefined ? {} : { normalized: effectiveExecution.normalized }), ...(summaryAllowed && effectiveExecution.summary !== undefined ? { summary: effectiveExecution.summary } : {}) } : rejectedOutputId && effectiveExecution.rejectedOutput && !taintError ? { id: rejectedOutputId, effectId, kind: 'rejected_output' as const, value: effectiveExecution.rejectedOutput.value, storageState: 'memory' as const, pinCount: 0, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.rejectedOutput.privacy ?? effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), rejectedTaints), ...(rejectedTaints.length ? { privacyTaints: rejectedTaints } : {}), derivedFrom: [...(effectiveExecution.rejectedOutput.derivedFrom ?? effect.derivedFrom ?? [])] } : undefined
     let journalLane: LaneRecord | undefined
     if (ownerLane && result) {
       journalLane = structuredClone(ownerLane)

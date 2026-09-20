@@ -474,6 +474,8 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       const result: import('../core/types.js').ResultRecord = {
         id: action.outputRef,
         value: clone(action.value ?? null),
+        storageState: 'memory',
+        pinCount: 0,
         privacy: action.targetPrivacy,
         derivedFrom: [...action.sourceRefs],
         ...(action.summary === undefined ? {} : { summary: clone(action.summary) }),
@@ -516,7 +518,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         }
       }
       const resultId = `result-${resultCounter++}`
-      mutations.push({ op: 'publishResult', record: { id: resultId, value: clone(action.result), privacy, ...(propagatedTaints.length ? { privacyTaints: propagatedTaints } : {}), derivedFrom: [...(action.derivedFrom ?? [])] } })
+      mutations.push({ op: 'publishResult', record: { id: resultId, value: clone(action.result), storageState: 'memory', pinCount: 0, privacy, ...(propagatedTaints.length ? { privacyTaints: propagatedTaints } : {}), derivedFrom: [...(action.derivedFrom ?? [])] } })
       if (workingLane.visibleResultRefs) workingLane.visibleResultRefs.add(resultId)
       else workingLane.visibleResultRefs = new Set([resultId])
       if (lane.ownerLaneId !== undefined) {

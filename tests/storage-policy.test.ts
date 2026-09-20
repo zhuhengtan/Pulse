@@ -97,5 +97,17 @@ describe('session storage policy', () => {
     const effect = runtime.state.effects.get('effect-1')!
     runtime.completeEffect(effect.id, { value: { ok: true } })
     expect(runtime.storagePolicy.inspect().some((record) => record.key === 'result:result-1')).toBe(true)
+    expect(runtime.state.results.get('result-1')).toMatchObject({ storageState: 'memory', pinCount: expect.any(Number) })
+  })
+
+  it('keeps Result residency and pin count aligned with backend acknowledgement', async () => {
+    const program: LaneProgram = { id: 'result-residency', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: 'result-residency', programVersion: '1', step: 'done', locals: {} } }) }
+    const runtime = new PulseRuntime()
+    runtime.createAgent('result residency', program)
+    runtime.tick()
+    runtime.completeEffect('effect-1', { value: { ok: true } })
+    expect(runtime.state.results.get('result-1')).toMatchObject({ storageState: 'memory', pinCount: expect.any(Number) })
+    await runtime.persist({ save: async () => undefined })
+    expect(runtime.state.results.get('result-1')).toMatchObject({ storageState: 'persisted', pinCount: expect.any(Number) })
   })
 })
