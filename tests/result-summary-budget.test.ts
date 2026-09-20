@@ -55,4 +55,17 @@ describe('Result summary budget', () => {
     expect(runtime.state.lanes.get(laneId)).toMatchObject({ status: 'failed', failure: { error: { code: 'SESSION_STORAGE_LIMIT_EXCEEDED' } } })
     expect(runtime.state.lanes.get(laneId)?.resultRef).toBeUndefined()
   })
+
+  it('fails closed when the fact-event budget cannot record the storage rejection', async () => {
+    const program: LaneProgram = {
+      id: 'event-storage-limit',
+      version: '1',
+      step: () => ({ actions: [{ type: 'complete', result: { done: true } }], next: { programId: 'event-storage-limit', programVersion: '1', step: 'done', locals: {} } }),
+    }
+    const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 1 } })
+    const { agentId, laneId } = runtime.createAgent('event storage limit', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+    expect(runtime.state.lanes.get(laneId)).toMatchObject({ status: 'failed', failure: { error: { code: 'SESSION_STORAGE_LIMIT_EXCEEDED' } } })
+    expect(runtime.state.events).toHaveLength(0)
+  })
 })

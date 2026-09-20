@@ -318,6 +318,14 @@ export class PulseRuntime {
   }
 
   private emit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent { return appendRuntimeEvent(this.state, event, { sessionId: this.sessionId, timestamp: this.state.now }) }
+  private tryEmit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent | undefined {
+    try {
+      this.assertStorageAdmission([{ op: 'appendEvent', event }])
+      return this.emit(event)
+    } catch {
+      return undefined
+    }
+  }
   private prepareStepOutput(output: LaneStepOutput): LaneStepOutput {
     if (!this.effectSubmissionPreparer) return output
     return { ...output, actions: output.actions.map((action) => action.type === 'submit_effects' ? { ...action, effects: action.effects.map((effect) => this.effectSubmissionPreparer!(effect)) } : action) }
@@ -461,9 +469,10 @@ export class PulseRuntime {
         try { this.assertStorageAdmission(result.mutations) }
         catch (cause) {
           const storageError: RuntimeError = { code: 'SESSION_STORAGE_LIMIT_EXCEEDED', message: cause instanceof Error ? cause.message : String(cause) }
-          lane.pendingResumeInput = { type: 'control_error', error: storageError, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
-          this.emit({ type: 'storage.limit_exceeded', laneId: lane.id, data: storageError as unknown as JsonValue })
-          this.enqueueLane(lane.id)
+          lane.status = 'failed'
+          lane.failure = { error: storageError, privacy: 'public' }
+          lane.version++
+          this.tryEmit({ type: 'storage.limit_exceeded', laneId: lane.id, data: storageError as unknown as JsonValue })
           progressed++
           continue
         }
@@ -778,6 +787,9 @@ export class PulseRuntime {
     if (result) publicationMutations.push({ op: 'publishResult', record: structuredClone(result) })
     if (journalLane) publicationMutations.push({ op: 'setLane', laneId: journalLane.id, record: structuredClone(journalLane) })
     if (correlation) publicationMutations.push({ op: 'setToolCallCorrelation', record: structuredClone(correlation) })
+    if (effectiveExecution.summary !== undefined && !summaryAllowed) publicationMutations.push({ op: 'appendEvent', event: { type: 'result.summary_rejected', effectId, data: { maxBytes: this.state.maxResultSummaryBytes, actualBytes: Buffer.byteLength(JSON.stringify(effectiveExecution.summary), 'utf8') } } })
+    publicationMutations.push({ op: 'appendEvent', event: { type: 'effect.settled', effectId, data: outcome as unknown as JsonValue } })
+    if (execution.metadata !== undefined) publicationMutations.push({ op: 'appendEvent', event: { type: 'effect.execution_metadata', effectId, data: execution.metadata } })
     try {
       this.assertStorageAdmission(publicationMutations)
     } catch (cause) {
@@ -790,8 +802,8 @@ export class PulseRuntime {
       Object.assign(storedEffect, effect)
       this.releaseEffectLocks(effectId)
       this.outbox.ack(`${effect.id}:${effect.attemptId}`)
-      const storageEvent = this.emit({ type: 'effect.settled', effectId, data: effect.outcome as unknown as JsonValue })
-      this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:storage-rejected`, undefined, [storageEvent])
+      const storageEvent = this.tryEmit({ type: 'effect.settled', effectId, data: effect.outcome as unknown as JsonValue })
+      this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:storage-rejected`, undefined, storageEvent === undefined ? [] : [storageEvent])
       this.refreshWaits()
       this.schedulePersistence()
       return
