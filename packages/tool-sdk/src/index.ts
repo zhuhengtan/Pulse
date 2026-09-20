@@ -19,6 +19,7 @@ export interface ToolManifest {
   name: string
   version: string
   description: string
+  tags?: string[]
   inputSchema: Record<string, unknown>
   outputSchema: Record<string, unknown>
   concurrencyClass: ConcurrencyClass
@@ -30,6 +31,8 @@ export interface ToolManifest {
   defaultTimeoutMs: number
   maxResultSummaryBytes?: number
 }
+export interface ToolDiscoveryQuery { text?: string; tags?: string[]; sideEffectPolicy?: ToolManifest['sideEffectPolicy']; concurrencyClass?: ConcurrencyClass; limit?: number }
+export interface ToolDiscoveryResult { manifest: ToolManifest; score: number }
 export interface ToolAdmission { locks: ResourceClaim[]; sideEffectPolicy: ToolManifest['sideEffectPolicy']; defaultTimeoutMs: number; retrySafety: ToolManifest['retrySafety'] }
 export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   manifest: ToolManifest
@@ -54,6 +57,21 @@ export class ToolRegistry {
   }
   get(name: string): ToolDefinition<any, any> | undefined { return this.definitions.get(name) }
   list(): ToolManifest[] { return [...this.definitions.values()].map((definition) => structuredClone(definition.manifest)) }
+  discover(query: ToolDiscoveryQuery = {}): ToolDiscoveryResult[] {
+    const terms = (query.text ?? '').toLocaleLowerCase().split(/[^a-z0-9_:-]+/).filter(Boolean)
+    const requestedTags = new Set((query.tags ?? []).map((tag) => tag.toLocaleLowerCase()))
+    const results = this.list().flatMap((manifest) => {
+      if (query.sideEffectPolicy !== undefined && manifest.sideEffectPolicy !== query.sideEffectPolicy) return []
+      if (query.concurrencyClass !== undefined && manifest.concurrencyClass !== query.concurrencyClass) return []
+      const tags = (manifest.tags ?? []).map((tag) => tag.toLocaleLowerCase())
+      if ([...requestedTags].some((tag) => !tags.includes(tag))) return []
+      const haystack = [manifest.name, manifest.description, ...tags].join(' ').toLocaleLowerCase()
+      const score = terms.length === 0 ? 1 + requestedTags.size * 2 : terms.reduce((total, term) => total + (manifest.name.toLocaleLowerCase() === term ? 10 : manifest.name.toLocaleLowerCase().includes(term) ? 5 : haystack.includes(term) ? 1 : 0), requestedTags.size * 2)
+      return score > 0 ? [{ manifest, score }] : []
+    })
+    results.sort((left, right) => right.score - left.score || left.manifest.name.localeCompare(right.manifest.name) || left.manifest.version.localeCompare(right.manifest.version))
+    return query.limit === undefined ? results : results.slice(0, Math.max(0, query.limit))
+  }
   async execute(name: string, input: unknown, context: ToolContext | AbortSignal): Promise<unknown> {
     const definition = this.definitions.get(name)
     if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`)
@@ -168,6 +186,7 @@ export function defineTool<TInput, TOutput>(config: {
   name: string
   version?: string
   description: string
+  tags?: string[]
   input: z.ZodType<TInput>
   output: z.ZodType<TOutput>
   concurrencyClass?: ConcurrencyClass
@@ -185,6 +204,6 @@ export function defineTool<TInput, TOutput>(config: {
   execute(input: TInput, context: ToolContext): Promise<TOutput> | TOutput
   executionRef?: (input: TInput, context: ToolContext) => JsonValue
 }): ToolDefinition<TInput, TOutput> {
-  const manifest: ToolManifest = { name: config.name, version: config.version ?? '1', description: config.description, inputSchema: zodToJsonSchema(config.input), outputSchema: zodToJsonSchema(config.output), concurrencyClass: config.concurrencyClass ?? 'tool', locks: config.locks ?? [], ...(config.resources === undefined ? {} : { resources: config.resources }), supportsAbortSignal: config.supportsAbortSignal ?? true, sideEffectPolicy: config.sideEffectPolicy ?? 'none', retrySafety: config.retrySafety ?? (config.sideEffectPolicy === 'write' ? 'unsafe' : 'read_only'), defaultTimeoutMs: config.defaultTimeoutMs ?? 30_000, ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }) }
+  const manifest: ToolManifest = { name: config.name, version: config.version ?? '1', description: config.description, ...(config.tags === undefined ? {} : { tags: [...new Set(config.tags)] }), inputSchema: zodToJsonSchema(config.input), outputSchema: zodToJsonSchema(config.output), concurrencyClass: config.concurrencyClass ?? 'tool', locks: config.locks ?? [], ...(config.resources === undefined ? {} : { resources: config.resources }), supportsAbortSignal: config.supportsAbortSignal ?? true, sideEffectPolicy: config.sideEffectPolicy ?? 'none', retrySafety: config.retrySafety ?? (config.sideEffectPolicy === 'write' ? 'unsafe' : 'read_only'), defaultTimeoutMs: config.defaultTimeoutMs ?? 30_000, ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }) }
   return { manifest, resourceAdmissionMode: config.resolveResources !== undefined || config.resources !== undefined || config.locks !== undefined ? 'explicit' : 'default', execute: async (input, context) => config.output.parse(await config.execute(config.input.parse(input), context)), ...(config.executionRef === undefined ? {} : { executionRef: (input: TInput, context: ToolContext) => config.executionRef!(config.input.parse(input), context) }), ...(config.resolveResources === undefined ? {} : { resolveResources: (input: TInput) => config.resolveResources!(config.input.parse(input)) }), ...(config.reconcile === undefined ? {} : { reconcile: async (executionRef: JsonValue, context: ReconcileContext) => { const result = await config.reconcile!(executionRef, context); return result.status === 'succeeded' && result.output !== undefined ? { ...result, output: config.output.parse(result.output) } : result } }), ...(config.normalize === undefined ? {} : { normalize: config.normalize }), ...(config.summarize === undefined ? {} : { summarize: (output: TOutput) => config.summarize!(output) }) }
 }
