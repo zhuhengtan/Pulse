@@ -102,4 +102,16 @@ describe('runtime control boundaries', () => {
     expect(recovered.state.events.some((event) => event.type === 'outbox.requeued')).toBe(true)
     expect(recovered.state.agents.has(agentId)).toBe(true)
   })
+
+  it('rebuilds ready work after persistence recovery', async () => {
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { ok: true } }) })
+    const program: LaneProgram = { id: 'recover-ready', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [], next: point('recover-ready', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('recover-ready', 'finish') } }
+    const created = runtime.createAgent('recover', program)
+    const restored = new PulseRuntime({ persistence: runtime.exportPersistence(), effectExecutor: async () => ({ value: { ok: true } }) })
+    restored.register(program)
+    expect(restored.ready.has(created.laneId)).toBe(true)
+    expect((await restored.start(created.agentId).outcome()).status).toBe('succeeded')
+  })
 })

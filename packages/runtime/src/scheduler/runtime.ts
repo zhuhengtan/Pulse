@@ -85,6 +85,18 @@ export class PulseRuntime {
     }
     this.clock = new VirtualClock()
     this.ready = new ReadyQueue(config.agingIntervalMs ?? 1000, config.agingCap ?? Number.POSITIVE_INFINITY)
+    if (restored) {
+      this.clock.set(this.state.now)
+      for (const lane of this.state.lanes.values()) if (lane.status === 'ready') this.ready.enqueue(readyItemFromLane(lane))
+      for (const effect of this.state.effects.values()) {
+        const outboxEntry = this.outbox.get(`${effect.id}:${effect.attemptId}`)
+        if (effect.state === 'running' && outboxEntry?.state === 'pending') {
+          if (effect.sideEffectPolicy === 'write') { effect.state = 'reconcile_required'; effect.executionState = 'remote_unknown'; effect.sideEffectState = 'unknown'; this.quarantine.add(effect.id, this.state.now, 'recovery_in_doubt') }
+          else { effect.state = 'queued'; effect.executionState = 'local' }
+        }
+        if (effect.state === 'retry_wait' && effect.retryAt !== undefined) this.clock.timers.schedule(effect.retryAt, () => { if (!effect.outcome && effect.state === 'retry_wait') { effect.state = 'queued'; delete effect.retryAt; this.dispatchQueuedEffects() } })
+      }
+    }
     this.maxSteps = config.maxLaneStepsPerTick ?? 32
     this.maxConsecutiveControlErrors = config.maxConsecutiveControlErrors ?? 2
     if (config.maxRuntimeMs !== undefined) this.maxRuntimeMs = config.maxRuntimeMs
