@@ -89,6 +89,32 @@ describe('effect outbox and runtime persistence envelope', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('queues persistence when an async effect settles outside run()', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-async-auto-persist-'))
+    try {
+      const fileBackend = new FileRuntimePersistenceBackend(join(directory, 'runtime.json'))
+      let saves = 0
+      const backend = { load: () => fileBackend.load(), save: async (snapshot: Parameters<typeof fileBackend.save>[0]) => { saves++; await fileBackend.save(snapshot) } }
+      let settle!: () => void
+      let executionDone!: () => void
+      const effectExecutionDone = new Promise<void>((resolve) => { executionDone = resolve })
+      const runtime = new PulseRuntime({ persistenceBackend: backend, effectExecutor: async () => { const value = await new Promise((resolve) => { settle = () => resolve({ value: { ok: true } }) }); executionDone(); return value as any } })
+      const program = { id: 'async-auto-persist', version: '1', step: ({ lane }: any) => lane.resume.step === 'start'
+        ? { actions: [{ type: 'submit_effects' as const, effects: [{ key: 'work', kind: 'tool' as const, concurrencyClass: 'tool' as const, input: {} }], wait: { onUnsatisfied: 'resume_with_error' as const } }], next: { programId: 'async-auto-persist', programVersion: '1', step: 'finish', locals: {} } }
+        : { actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'async-auto-persist', programVersion: '1', step: 'finish', locals: {} } } }
+      runtime.createAgent('async persistence', program)
+      runtime.tick()
+      await runtime.flushPersistence()
+      const savesBeforeSettlement = saves
+      settle()
+      await effectExecutionDone
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(saves).toBeGreaterThan(savesBeforeSettlement)
+      await runtime.flushPersistence()
+      expect((await backend.load())?.state.state.effects.find(([id]) => id === 'effect-1')?.[1].state).toBe('succeeded')
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('restores through the backend and quarantines an in-flight write effect', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-restore-'))
     try {

@@ -215,6 +215,7 @@ export class PulseRuntime {
     agent.state = 'running'
     this.ready.enqueue(readyItemFromLane(root))
     this.syncStoragePolicy()
+    this.schedulePersistence()
     return { agentId: agent.id, laneId: root.id }
   }
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
@@ -248,6 +249,7 @@ export class PulseRuntime {
     const plan = new ContextMerger(this.state).plan(agentId, proposalIds)
     if (plan.conflicts.length || plan.mutations.length === 0) return plan
     commitMutationTransaction(this.state, this.mutationLog, `context-merge:${agentId}:${plan.version ?? this.state.now}`, plan.mutations, this.state.now, this.sessionId)
+    this.schedulePersistence()
     return plan
   }
 
@@ -566,6 +568,7 @@ export class PulseRuntime {
       this.releaseEffectLocks(effectId)
       this.outbox.ack(`${effect.id}:${settledAttemptId}`)
       this.refreshWaits()
+      this.schedulePersistence()
       return
     }
     const resultId = `result-${this.state.nextIds.result++}`
@@ -608,6 +611,7 @@ export class PulseRuntime {
     this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:settled`, result, [settledEvent, ...(metadataEvent ? [metadataEvent] : [])], journalLane, correlation)
     this.refreshWaits()
     this.dispatchQueuedEffects()
+    this.schedulePersistence()
   }
 
   markRemoteUnknown(effectId: string, sideEffectState: 'none' | 'applied' | 'known' | 'unknown'): void {
@@ -628,6 +632,7 @@ export class PulseRuntime {
         this.releaseEffectLocks(effectId)
         this.outbox.ack(`${effect.id}:${settledAttemptId}`)
         this.refreshWaits()
+        this.schedulePersistence()
         return
       }
       effect.state = 'failed'
@@ -638,6 +643,7 @@ export class PulseRuntime {
     }
     if (sideEffectState !== 'unknown') this.releaseEffectLocks(effectId)
     this.refreshWaits()
+    this.schedulePersistence()
   }
 
   reconcileEffect(effectId: string, value: JsonValue, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded'): void {
@@ -669,6 +675,7 @@ export class PulseRuntime {
     const abandonedEvent = this.emit({ type: 'resource.abandoned', effectId, data: { code: 'RESOURCE_ABANDONED' } })
     this.journalEffect(effect, `effect:${effect.id}:${effect.attemptId}:abandoned`, undefined, [abandonedEvent])
     this.refreshWaits()
+    this.schedulePersistence()
   }
 
   cancelEffect(effectId: string, graceMs = 0): void {
@@ -682,6 +689,7 @@ export class PulseRuntime {
     for (const lane of this.state.lanes.values()) if (lane.agentId === agentId && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'cancelled'; lane.version++; this.emit({ type: 'lane.cancelling', laneId: lane.id, data: reason }); for (const effectId of lane.ownedEffectIds) { const childAgentId = this.state.effects.get(effectId)?.childAgentId; if (childAgentId) this.cancelAgent(childAgentId, reason); this.requestEffectCancellation(effectId, reason, this.state.effects.get(effectId)?.cancelGraceMs ?? 0) } }
     agent.state = 'cancelled'
     this.emit({ type: 'agent.cancelled', data: reason })
+    this.schedulePersistence()
   }
 
   explain(laneId?: string): JsonValue {
@@ -701,6 +709,7 @@ export class PulseRuntime {
     const effect = this.state.effects.get(effectId)
     if (!effect || effect.outcome) return
     this.scheduleRetry(effect, undefined, delayMs)
+    this.schedulePersistence()
   }
 
   private scheduleRetry(effect: EffectRecord, error?: RuntimeError, forcedDelayMs?: number): boolean {
@@ -812,6 +821,7 @@ export class PulseRuntime {
       this.emit({ type: 'llm.request_prepared', effectId: effect.id, data: { generation, projectionRef: effect.preparation.projectionRef ?? null } })
       this.dispatchQueuedEffects()
       this.syncStoragePolicy()
+      this.schedulePersistence()
     })
     return false
   }
@@ -824,6 +834,7 @@ export class PulseRuntime {
     execution.controller.abort()
     this.emit({ type: 'limit.rejected', effectId, data: { code: reason } })
     this.quarantineEffect(effectId, reason, effect.cancelGraceMs ?? 0)
+    this.schedulePersistence()
   }
 
   private requestEffectCancellation(effectId: string, reason: string, graceMs: number): void {
@@ -853,6 +864,7 @@ export class PulseRuntime {
     const quarantineEvent = this.emit({ type: 'effect.quarantined', effectId, data: { reason, state: effect.state } })
     this.journalEffect(effect, `effect:${effect.id}:${effect.attemptId}:quarantined`, undefined, [quarantineEvent])
     this.refreshWaits()
+    this.schedulePersistence()
   }
 
   private propagateCancelledLanes(): void {
