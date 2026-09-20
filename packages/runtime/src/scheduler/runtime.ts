@@ -410,8 +410,8 @@ export class PulseRuntime {
       this.emit({ id: envelope.eventId, type: 'command.enqueued', data: envelope.fact as unknown as JsonValue })
       if (envelope.fact.type === 'reply') {
         const effect = this.state.effects.get(envelope.fact.effectId)
-        if (effect?.agentId === envelope.fact.agentId) this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value })
-        else this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: 'EFFECT_NOT_OWNED' } })
+        if (effect?.agentId === envelope.fact.agentId && effect.kind === 'human' && !effect.outcome) this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value })
+        else this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: effect?.agentId !== envelope.fact.agentId ? 'EFFECT_NOT_OWNED' : 'EFFECT_NOT_REPLYABLE' } })
       } else this.cancelAgent(envelope.fact.agentId, 'USER_REQUESTED')
       this.emit({ type: 'command.applied', data: { eventId: envelope.eventId } })
     }

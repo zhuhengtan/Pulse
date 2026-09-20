@@ -51,4 +51,19 @@ describe('built-in Timer and Human Effect hosts', () => {
     await expect(secondSession.outcome()).resolves.toMatchObject({ status: 'succeeded' })
     expect(runtime.state.events.some((event) => event.type === 'command.rejected')).toBe(true)
   })
+
+  it('does not let Reply bypass a non-human Effect executor', async () => {
+    const program: LaneProgram = { id: 'reply-kind', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'tool', kind: 'tool', concurrencyClass: 'tool', input: {} }] }], next: point('reply-kind', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('reply-kind', 'finish') } }
+    let release!: () => void
+    const runtime = new PulseRuntime({ effectExecutor: async (_effect, signal) => await new Promise((resolve) => { release = () => resolve({ value: { ok: true } }); signal.addEventListener('abort', () => resolve({ value: null }), { once: true }) }) })
+    const { agentId } = runtime.createAgent('reply kind', program)
+    runtime.tick()
+    const session = runtime.start(agentId)
+    await expect(session.reply('effect-1', { forged: true })).rejects.toThrow('EFFECT_NOT_REPLYABLE')
+    expect(runtime.state.effects.get('effect-1')?.outcome).toBeUndefined()
+    release()
+    await expect(session.outcome()).resolves.toMatchObject({ status: 'succeeded' })
+  })
 })
