@@ -6,7 +6,7 @@ import type { ArtifactRecord, EffectRecord, EffectSubmission, EffectState, JsonV
 import { createRuntimeState, effectivePrivacy, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, provenanceRefId, provenanceRefKind, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
-import { assertProgramPure } from '../dsl/program.js'
+import { assertProgramPure, withPureStepGuard } from '../dsl/program.js'
 import type { ProgramRef } from '../dsl/templates.js'
 import { FactInbox, ObservationInbox } from '../core/inbox.js'
 import { observeProgress, type ProgressObservation } from '../lifecycle/watchdog.js'
@@ -668,11 +668,11 @@ export class PulseRuntime {
       if (!program) { this.failLane(lane, { code: 'PROGRAM_NOT_REGISTERED', message: `${lane.resume.programId}@${lane.resume.programVersion}` }); continue }
       let output: LaneStepOutput
       const stepContext: LaneStepContext = { lane: stepLane, state: structuredClone(this.state), ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), now: this.state.now, observe: (event) => { this.observationInbox.enqueue({ ...event, agentId: lane.agentId, laneId: lane.id, timestamp: this.state.now }) } }
-      try { output = lane.series || program.seriesMember ? this.seriesStep(program, stepContext, lane.series) : program.step(stepContext) }
+      try { output = withPureStepGuard(() => lane.series || program.seriesMember ? this.seriesStep(program, stepContext, lane.series) : program.step(stepContext)) }
       catch (cause) {
         const failure: RuntimeError = runtimeErrorFromCause(cause, 'STEP_FAILED')
         if (!program.errorBoundary) { this.failLane(lane, failure); continue }
-        try { output = program.errorBoundary(failure, stepContext) }
+        try { output = withPureStepGuard(() => program.errorBoundary!(failure, stepContext)) }
         catch (boundaryCause) { this.failLane(lane, { code: 'ERROR_BOUNDARY_FAILED', message: boundaryCause instanceof Error ? boundaryCause.message : String(boundaryCause) }); continue }
       }
       if (output && typeof output === 'object' && typeof (output as unknown as { then?: unknown }).then === 'function') {

@@ -543,6 +543,56 @@ export class StepBuilder<TState = JsonValue> {
 
 export function defineLaneProgram<TState = JsonValue>(config: { id: string; version: string; system?: string; toolSet?: string; state?: z.ZodType<TState>; historyCompaction?: HistoryCompactionOptions }, define: (builder: StepBuilder<TState>) => void): LaneProgramDefinition { const builder = new StepBuilder(config); define(builder); return builder.build() }
 
+function pureStepViolation(api: string): never {
+  throw Object.assign(new Error(`Pure Step attempted to access ${api}. Use StepContext.now or ctx.trace().`), { code: 'PURE_STEP_VIOLATION' })
+}
+
+function patchGlobalValue(target: object, key: PropertyKey, value: unknown): () => void {
+  const descriptor = Object.getOwnPropertyDescriptor(target, key)
+  try {
+    const replacement: PropertyDescriptor = descriptor !== undefined && ('get' in descriptor || 'set' in descriptor)
+      ? { configurable: descriptor.configurable ?? false, enumerable: descriptor.enumerable ?? false, writable: true, value }
+      : descriptor === undefined ? { configurable: true, enumerable: true, writable: true, value } : { configurable: descriptor.configurable ?? false, enumerable: descriptor.enumerable ?? false, writable: true, value }
+    Object.defineProperty(target, key, replacement)
+    return () => {
+      try {
+        if (descriptor === undefined) delete (target as Record<PropertyKey, unknown>)[key]
+        else Object.defineProperty(target, key, descriptor)
+      } catch { /* best-effort restoration after a synchronous Step */ }
+    }
+  } catch {
+    return () => undefined
+  }
+}
+
+/** Run a synchronous Step inside the development-only impurity boundary. */
+export function withPureStepGuard<T>(callback: () => T): T {
+  const environment = typeof process === 'undefined' ? undefined : process.env.NODE_ENV
+  if (environment === 'production') return callback()
+
+  const restores: Array<() => void> = []
+  const violation = (api: string): never => pureStepViolation(api)
+  const globalObject = globalThis as unknown as Record<PropertyKey, unknown>
+  const math = globalObject.Math as Record<PropertyKey, unknown> | undefined
+  if (math) restores.push(patchGlobalValue(math, 'random', () => violation('Math.random')))
+  const date = globalObject.Date as Record<PropertyKey, unknown> | undefined
+  if (date) restores.push(patchGlobalValue(date, 'now', () => violation('Date.now')))
+  if (typeof globalObject.fetch === 'function') restores.push(patchGlobalValue(globalObject, 'fetch', () => violation('fetch')))
+
+  const consoleObject = globalObject.console as Record<PropertyKey, unknown> | undefined
+  if (consoleObject) for (const method of ['debug', 'dir', 'error', 'info', 'log', 'trace', 'warn']) if (typeof consoleObject[method] === 'function') restores.push(patchGlobalValue(consoleObject, method, () => violation(`console.${method}`)))
+
+  const processObject = globalObject.process
+  if (processObject && (typeof processObject === 'object' || typeof processObject === 'function')) {
+    try {
+      const guardedProcess = new Proxy(processObject as object, { get: () => violation('process'), set: () => violation('process') })
+      restores.push(patchGlobalValue(globalObject, 'process', guardedProcess))
+    } catch { /* static purity checks still protect environments with an immutable process binding */ }
+  }
+
+  try { return callback() } finally { for (const restore of restores.reverse()) restore() }
+}
+
 export function assertProgramPure(program: LaneProgramDefinition | LaneProgram): void {
   const candidate = program as LaneProgramDefinition
   const source = [program.step.toString(), program.errorBoundary?.toString() ?? '', ...(candidate.debugSources ?? []), program.seriesMemberProgram?.step.toString() ?? '', program.seriesMemberProgram?.errorBoundary?.toString() ?? ''].join('\n')
