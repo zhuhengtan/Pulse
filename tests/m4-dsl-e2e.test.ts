@@ -48,6 +48,7 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     const program = { id: 'session-test', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'session-test', programVersion: '1', step: 'done', locals: {} } }) }
     const { agentId } = runtime.createAgent('session', program)
     const session = runtime.start(agentId)
+    expect(session.snapshot()).toMatchObject({ schemaVersion: 1, agentId, eventSeq: expect.any(Number), lanes: expect.any(Array), effects: expect.any(Array), waits: expect.any(Array), results: expect.any(Array) })
     const events: string[] = []
     for await (const event of session.stream()) events.push(event.type)
     expect(events).toContain('fact')
