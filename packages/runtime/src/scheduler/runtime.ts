@@ -963,14 +963,14 @@ export class PulseRuntime {
     this.assertStorageAdmission(admission)
     const running = this.executions.get(effectId)
     if (running) { running.controller.abort(); this.executions.delete(effectId) }
+    commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${effect.attemptId}:remote-unknown`, admission, this.state.now, this.sessionId)
     Object.assign(effect, candidate)
-    if (candidateLane) this.state.lanes.set(candidateLane.id, candidateLane)
-    if (sideEffectState === 'unknown') { effect.state = 'reconcile_required'; this.quarantine.add(effect.id, this.state.now, 'in_doubt') }
+    this.state.effects.set(effectId, effect)
+    if (candidateLane && lane) { Object.assign(lane, candidateLane); this.state.lanes.set(candidateLane.id, lane) }
+    if (sideEffectState === 'unknown') this.quarantine.add(effect.id, this.state.now, 'in_doubt')
     else {
       this.releaseEffectLocks(effectId)
     }
-    const committedRemoteEvent = this.emit(remoteEvent)
-    this.journalEffect(effect, `effect:${effect.id}:${effect.attemptId}:remote-unknown`, undefined, [committedRemoteEvent])
     this.refreshWaits()
     this.schedulePersistence()
   }
@@ -1008,11 +1008,11 @@ export class PulseRuntime {
     admission.push({ op: 'appendEvent', event: abandonedEvent })
     this.assertStorageAdmission(admission)
     if (!this.quarantine.abandon(effectId)) return
+    commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${effect.attemptId}:abandoned`, admission, this.state.now, this.sessionId)
     Object.assign(effect, candidate)
-    if (candidateLane) this.state.lanes.set(candidateLane.id, candidateLane)
+    this.state.effects.set(effectId, effect)
+    if (candidateLane && lane) { Object.assign(lane, candidateLane); this.state.lanes.set(candidateLane.id, lane) }
     this.releaseEffectLocks(effectId)
-    const committedAbandonedEvent = this.emit(abandonedEvent)
-    this.journalEffect(effect, `effect:${effect.id}:${effect.attemptId}:abandoned`, undefined, [committedAbandonedEvent])
     this.refreshWaits()
     this.schedulePersistence()
   }
@@ -1074,6 +1074,8 @@ export class PulseRuntime {
       const mutations: Mutation[] = [{ op: 'setLane', laneId: lane.id, record: nextLane }, { op: 'appendEvent', event }]
       this.assertStorageAdmission(mutations)
       commitMutationTransaction(this.state, this.mutationLog, `lane:${lane.id}:cancelling:${nextLane.version}`, mutations, this.state.now, this.sessionId)
+      Object.assign(lane, nextLane)
+      this.state.lanes.set(lane.id, lane)
     }
     for (const effect of targetEffects) {
       const childAgent = effect.childAgentId === undefined ? undefined : this.state.agents.get(effect.childAgentId)
@@ -1115,9 +1117,10 @@ export class PulseRuntime {
     delete ready.retryAt
     const readyEvent: import('../core/types.js').RuntimeEventInput = { type: 'effect.retry_ready', effectId: current.id, data: current.attemptId }
     this.assertStorageAdmission([{ op: 'setEffect', effectId: current.id, record: ready }, { op: 'appendEvent', event: readyEvent }])
+    commitMutationTransaction(this.state, this.mutationLog, `effect:${current.id}:${current.attemptId}:retry-ready`, [{ op: 'setEffect', effectId: current.id, record: ready }, { op: 'appendEvent', event: readyEvent }], this.state.now, this.sessionId)
     Object.assign(current, ready)
     delete current.retryAt
-    this.emit(readyEvent)
+    this.state.effects.set(current.id, current)
     this.dispatchQueuedEffects()
   }
 
@@ -1143,8 +1146,9 @@ export class PulseRuntime {
     if (candidate.kind === 'llm') candidate.preparation = { state: 'stale', generation: (candidate.preparation?.generation ?? 0) + 1 }
     const retryEvent: import('../core/types.js').RuntimeEventInput = { type: 'effect.retry_scheduled', effectId: effect.id, data: { previousAttemptId, nextAttemptId: candidate.attemptId, delayMs, ...(error ? { error } : {}) } as unknown as JsonValue }
     this.assertStorageAdmission([{ op: 'setEffect', effectId: effect.id, record: candidate }, { op: 'appendEvent', event: retryEvent }])
+    commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${previousAttemptId}:retry-scheduled`, [{ op: 'setEffect', effectId: effect.id, record: candidate }, { op: 'appendEvent', event: retryEvent }], this.state.now, this.sessionId)
     Object.assign(effect, candidate)
-    this.emit(retryEvent)
+    this.state.effects.set(effect.id, effect)
     this.clock.timers.schedule(candidate.retryAt, () => this.readyRetryEffect(effect.id, candidate.attemptId))
     return true
   }
@@ -1273,6 +1277,8 @@ export class PulseRuntime {
     admitted.cancelRequested = { reason, at: this.state.now }
     this.assertStorageAdmission([{ op: 'setEffect', effectId, record: admitted }, { op: 'appendEvent', event: cancelEvent }])
     commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${effect.attemptId}:cancel-requested`, [{ op: 'setEffect', effectId, record: admitted }, { op: 'appendEvent', event: cancelEvent }], this.state.now, this.sessionId)
+    Object.assign(effect, admitted)
+    this.state.effects.set(effectId, effect)
     if (!this.executions.has(effectId)) { this.completeEffect(effectId, { value: null }, 'cancelled', { code: 'CANCELLED', message: reason }); return }
     this.executions.get(effectId)!.controller.abort()
     if (graceMs === 0) this.quarantineEffect(effectId, reason, 0)
@@ -1301,6 +1307,9 @@ export class PulseRuntime {
     if (execution) { execution.controller.abort(); this.executions.delete(effectId) }
     this.releaseEffectLocks(effectId)
     commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${effect.attemptId}:quarantined`, admission, this.state.now, this.sessionId)
+    Object.assign(effect, candidate)
+    this.state.effects.set(effectId, effect)
+    if (candidateLane && lane) { Object.assign(lane, candidateLane); this.state.lanes.set(candidateLane.id, lane) }
     this.quarantine.add(effectId, this.state.now, reason)
     this.refreshWaits()
     this.schedulePersistence()

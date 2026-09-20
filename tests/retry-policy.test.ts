@@ -21,6 +21,7 @@ describe('Effect retry policy', () => {
     expect(runtime.state.effects.get('effect-1')?.attempts).toHaveLength(2)
     expect(runtime.state.effects.get('effect-1')?.attemptId).toBe('effect-1-attempt-2')
     expect(runtime.state.events.some((event) => event.type === 'effect.retry_scheduled')).toBe(true)
+    expect(runtime.mutationLog.entries.some((entry) => entry.mutations.some((mutation) => mutation.op === 'setEffect' && mutation.effectId === 'effect-1' && mutation.record.state === 'retry_wait'))).toBe(true)
   })
 
   it('does not retry a failed write when duplicate execution is forbidden', async () => {
