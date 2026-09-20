@@ -93,6 +93,7 @@
 | Agent 终态事务 | `run()` / `runAgent()` 的根 Lane 终态通过 `setAgent` Mutation 提交，运行入口不再直接改写 Agent 状态 | `tests/m0-acceptance.test.ts` | 本轮 Agent 终态事务提交 |
 | Agent 取消状态事务 | `cancelAgent()` 的 `cancelling/cancelled` 状态通过 `setAgent` Mutation 提交，并保留未决副作用的 Quarantine 语义 | `tests/runtime-control.test.ts` | 本轮 Agent 取消状态事务提交 |
 | Agent 取消级联准入 | 取消入口预审整条 Agent/Lane/Effect/quarantine/settlement 级联及终态事件；`agent.cancelled` 确认与终态状态同事务提交，后续存储拒绝不留下半取消状态 | `tests/runtime-control.test.ts` | `7bfd5d8` |
+| 取消原因与终态 Outcome | Lane、Effect、Series member 和 Wait 可观察的取消 Outcome 保留 `USER_REQUESTED` / `SUPERSEDED` / `POLICY` 等原因；失败 Lane 暴露结构化错误，Quarantine 未决 Effect 继续随 Outcome 传递 | `tests/m0-acceptance.test.ts`、`tests/runtime-control.test.ts` | `25c6c65` |
 | Agent 终态准入失败 | Agent 终态 `setAgent` 的 storage admission 失败不再静默返回，`run()`/`runAgent()` fail-closed 暴露 `SESSION_STORAGE_LIMIT_EXCEEDED` | `tests/runtime-control.test.ts` | `11aa4d4` |
 | Lane/Effect 取消事务 | Lane 取消、Effect cancel-requested 与 Quarantine 的状态和事件统一通过 MutationLog 提交，避免取消过程中直接改写 live record | `tests/runtime-control.test.ts` | 本轮 Lane/Effect 取消事务提交 |
 | 重试/Remote Unknown 事务 | retry scheduled/ready、Remote Unknown 和 reconciliation abandon 的 Effect/Lane 状态与事件统一通过 MutationLog 提交 | `tests/retry-policy.test.ts`、`tests/runtime-control.test.ts` | 本轮重试与 Remote Unknown 事务提交 |
@@ -186,7 +187,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 61 个测试文件、336/336 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 61 个测试文件、336/336 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome 和未决 Effect 传播回归。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
