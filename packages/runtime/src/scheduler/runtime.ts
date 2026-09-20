@@ -547,7 +547,7 @@ export class PulseRuntime {
         if (!this.state.events.some((event) => event.id === envelope.eventId && event.type === 'command.enqueued')) this.emit({ id: envelope.eventId, type: 'command.enqueued', data: envelope.fact as unknown as JsonValue })
       if (envelope.fact.type === 'reply') {
         const effect = this.state.effects.get(envelope.fact.effectId)
-        if (effect?.agentId === envelope.fact.agentId && effect.kind === 'human' && !effect.outcome) this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value })
+        if (effect?.agentId === envelope.fact.agentId && effect.kind === 'human' && !effect.outcome) commandApplied = this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value }, 'succeeded', undefined, [{ op: 'appendEvent', event: { type: 'command.applied', data: { eventId: envelope.eventId } } }])
         else { this.rejectHostCommand(envelope.eventId, effect?.agentId !== envelope.fact.agentId ? 'EFFECT_NOT_OWNED' : 'EFFECT_NOT_REPLYABLE'); commandApplied = true }
       } else if (envelope.fact.type === 'cancel') this.cancelAgent(envelope.fact.agentId, envelope.fact.reason)
       else if (envelope.fact.type === 'cancel_effect') {
@@ -884,14 +884,14 @@ export class PulseRuntime {
     }
   }
 
-  completeEffect(effectId: string, execution: EffectExecution, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded', error?: RuntimeError, additionalMutations: Mutation[] = []): void {
+  completeEffect(effectId: string, execution: EffectExecution, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded', error?: RuntimeError, additionalMutations: Mutation[] = []): boolean {
     const storedEffect = this.state.effects.get(effectId)
-    if (!storedEffect) return
-    if (storedEffect.outcome) { this.tryEmit({ type: 'attempt.late_emit', effectId, data: { status: storedEffect.outcome.status } }); return }
+    if (!storedEffect) return false
+    if (storedEffect.outcome) { this.tryEmit({ type: 'attempt.late_emit', effectId, data: { status: storedEffect.outcome.status } }); return false }
     const effect = structuredClone(storedEffect)
     const running = this.executions.get(effectId)
     if (running) { running.controller.abort(); this.executions.delete(effectId) }
-    if (execution.executionState === 'remote_unknown') { this.markRemoteUnknown(effectId, execution.sideEffectState ?? 'none'); return }
+    if (execution.executionState === 'remote_unknown') { this.markRemoteUnknown(effectId, execution.sideEffectState ?? 'none'); return false }
     let effectiveExecution = execution
     let outputError = error ?? execution.error
     let resultDerivedFrom = [...(effect.derivedFrom ?? [])]
@@ -932,7 +932,7 @@ export class PulseRuntime {
       this.outbox.ack(`${effect.id}:${settledAttemptId}`)
       this.refreshWaits()
       this.schedulePersistence()
-      return
+      return false
     }
     let resultSequence = this.state.nextIds.result
     while (this.state.results.has(`result-${resultSequence}`)) resultSequence++
@@ -995,7 +995,8 @@ export class PulseRuntime {
       const failedAttempt = effect.attempts?.at(-1)
       if (failedAttempt) failedAttempt.error = storageError
       const failureEvent: import('../core/types.js').RuntimeEventInput = { type: 'effect.settled', effectId, data: effect.outcome as unknown as JsonValue }
-      const failureMutations: Mutation[] = [{ op: 'setEffect', effectId, record: structuredClone(effect) }]
+      const commandAckMutations = additionalMutations.filter((mutation) => mutation.op === 'appendEvent' && mutation.event.type === 'command.applied').map((mutation) => structuredClone(mutation))
+      const failureMutations: Mutation[] = [{ op: 'setEffect', effectId, record: structuredClone(effect) }, ...commandAckMutations]
       try {
         this.assertStorageAdmission([...failureMutations, { op: 'appendEvent', event: failureEvent }])
         failureMutations.push({ op: 'appendEvent', event: failureEvent })
@@ -1010,7 +1011,7 @@ export class PulseRuntime {
       this.syncStoragePolicy()
       this.refreshWaits()
       this.schedulePersistence()
-      return
+      return commandAckMutations.length > 0
     }
     this.releaseEffectLocks(effectId)
     this.outbox.ack(`${effect.id}:${effect.attemptId}`)
@@ -1026,6 +1027,7 @@ export class PulseRuntime {
     this.refreshWaits()
     this.dispatchQueuedEffects()
     this.schedulePersistence()
+    return true
   }
 
   markRemoteUnknown(effectId: string, sideEffectState: 'none' | 'applied' | 'known' | 'unknown'): void {
@@ -1332,7 +1334,7 @@ export class PulseRuntime {
         this.emit({ type: 'agent.effect_started', effectId: effect.id, data: child.agentId })
         continue
       }
-      const promise = this.executor(effect, controller.signal).then((execution) => this.completeEffect(effect.id, execution)).catch((cause) => { const runtimeError = runtimeErrorFromCause(cause); this.tryEmit({ type: 'effect.dispatch_failed', effectId: effect.id, data: runtimeError as unknown as JsonValue }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', runtimeError) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
+      const promise = this.executor(effect, controller.signal).then((execution) => { this.completeEffect(effect.id, execution) }).catch((cause) => { const runtimeError = runtimeErrorFromCause(cause); this.tryEmit({ type: 'effect.dispatch_failed', effectId: effect.id, data: runtimeError as unknown as JsonValue }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', runtimeError) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
       executionRecord.promise = promise
       if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.clock.schedule(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
       if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.clock.timers.schedule(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))

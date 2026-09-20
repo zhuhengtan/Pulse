@@ -30,6 +30,10 @@ describe('built-in Timer and Human Effect hosts', () => {
     const outcome = await session.outcome()
     expect(outcome.status).toBe('succeeded')
     expect(runtime.state.events.some((event) => event.type === 'human.requested')).toBe(true)
+    const settlement = runtime.mutationLog.entries.find((entry) => entry.mutations.some((mutation) => mutation.op === 'appendEvent' && mutation.event.type === 'effect.settled'))
+    expect(settlement?.mutations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ op: 'appendEvent', event: expect.objectContaining({ type: 'command.applied', data: { eventId: 'host-command-1' } }) }),
+    ]))
   })
 
   it('rejects a Human reply submitted by a different Agent Session', async () => {
