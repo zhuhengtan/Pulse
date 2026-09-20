@@ -35,7 +35,7 @@ describe('Host command API', () => {
     const { laneId } = runtime.createAgent('priority from host', program)
     runtime.setLanePriority(laneId, 9)
     runtime.tick()
-    expect(runtime.state.lanes.get(laneId)?.priority).toBe(9)
+    expect(runtime.state.lanes.get(laneId)).toMatchObject({ priority: 9, version: 1 })
     const transaction = runtime.mutationLog.entries.find((entry) => entry.mutations.some((mutation) => mutation.op === 'appendEvent' && mutation.event.type === 'lane.priority_changed'))
     expect(transaction?.mutations).toEqual(expect.arrayContaining([
       expect.objectContaining({ op: 'setLane', laneId, record: expect.objectContaining({ priority: 9 }) }),

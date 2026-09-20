@@ -540,6 +540,7 @@ export class PulseRuntime {
         else {
           const nextLane = structuredClone(lane)
           nextLane.priority = envelope.fact.priority
+          nextLane.version++
           const event = { type: 'lane.priority_changed' as const, laneId: lane.id, data: { previous: lane.priority, priority: nextLane.priority } }
           const mutations: Mutation[] = [{ op: 'setLane', laneId: lane.id, record: nextLane }, { op: 'appendEvent', event }]
           this.assertStorageAdmission(mutations)
