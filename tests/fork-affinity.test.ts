@@ -4,6 +4,20 @@ import { createAgent, createRuntimeState, defineLaneProgram, validateStep, Pulse
 const point = (step: string) => ({ programId: 'affinity', programVersion: '1', step, locals: {} })
 
 describe('fork affinity admission', () => {
+  it('defaults to the architecture-defined advise mode after M1.5', () => {
+    const state = createRuntimeState(8)
+    expect(state.forkAffinity).toBe('advise')
+    const { root } = createAgent(state, 'root', point('start'))
+    const result = validateStep(state, root.id, {
+      actions: [{ type: 'fork', lanes: [
+        { key: 'read', goal: 'read', program: point('worker'), resources: [{ resource: 'src/auth', mode: 'exclusive' }] },
+        { key: 'fix', goal: 'fix', program: point('worker'), resources: [{ resource: 'src/auth', mode: 'exclusive' }] },
+      ] }],
+      next: point('next'),
+    })
+    expect('rejection' in result && result.rejection.code).toBe('FORK_AFFINITY_COLLAPSIBLE')
+  })
+
   it('returns a collapsible-group advice without creating partial lanes', () => {
     const state = createRuntimeState(8, { forkAffinity: 'advise' })
     const { root } = createAgent(state, 'root', point('start'))
