@@ -32,4 +32,14 @@ describe('Finding evidence records', () => {
     expect(runtime.state.results.get(finding.id)).toMatchObject({ kind: 'finding', statement: finding.statement })
     expect(runtime.mutationLog.entries.at(-1)?.mutations).toEqual([{ op: 'publishFinding', record: finding }])
   })
+
+  it('rejects an over-limit Finding before state or mutation-log commit', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxResultBytes: 1 } })
+    const program = { id: 'finding-limit', version: '1', step: () => ({ actions: [], next: { programId: 'finding-limit', programVersion: '1', step: 'start', locals: {} } }) }
+    const { laneId } = runtime.createAgent('finding limit', program)
+    const artifact = runtime.publishArtifact({ mediaType: 'text/plain', content: 'x', laneId })
+    expect(() => runtime.publishFinding({ laneId, statement: 'This Finding cannot fit.', evidenceRefs: [{ kind: 'artifact', ref: artifact.ref }] })).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect([...runtime.state.results.values()].some((result) => result.kind === 'finding')).toBe(false)
+    expect(runtime.mutationLog.entries.some((entry) => entry.transactionId.startsWith('finding:'))).toBe(false)
+  })
 })

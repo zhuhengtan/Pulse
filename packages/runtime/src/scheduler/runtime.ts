@@ -857,6 +857,7 @@ export class PulseRuntime {
 
   publishArtifact(publication: ArtifactPublication): import('../core/types.js').ArtifactRecord {
     const record = prepareArtifactPublication(this.state, publication)
+    this.assertStorageAdmission([{ op: 'publishArtifact', record }])
     commitMutationTransaction(this.state, this.mutationLog, `artifact:${record.ref}`, [{ op: 'publishArtifact', record }], this.state.now, this.sessionId)
     this.syncStoragePolicy()
     this.schedulePersistence()
@@ -865,6 +866,7 @@ export class PulseRuntime {
 
   publishFinding(publication: FindingPublication): import('../core/types.js').FindingRecord {
     const record = prepareFindingPublication(this.state, publication)
+    this.assertStorageAdmission([{ op: 'publishFinding', record }])
     commitMutationTransaction(this.state, this.mutationLog, `finding:${record.id}`, [{ op: 'publishFinding', record }], this.state.now, this.sessionId)
     this.syncStoragePolicy()
     this.schedulePersistence()

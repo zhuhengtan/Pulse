@@ -56,4 +56,13 @@ describe('Artifact store', () => {
     runtime.pinArtifact(record.ref)
     expect(runtime.storagePolicy.inspect().find((item) => item.key === `artifact:${record.ref}`)?.pinCount).toBeGreaterThan(0)
   })
+
+  it('rejects an over-limit public publication before state or mutation-log commit', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxArtifactBytes: 1 } })
+    const program = { id: 'artifact-limit', version: '1', step: () => ({ actions: [], next: { programId: 'artifact-limit', programVersion: '1', step: 'start', locals: {} } }) }
+    const { laneId } = runtime.createAgent('artifact limit', program)
+    expect(() => runtime.publishArtifact({ mediaType: 'text/plain', content: 'too large', laneId })).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect(runtime.state.artifacts.size).toBe(0)
+    expect(runtime.mutationLog.size).toBe(0)
+  })
 })
