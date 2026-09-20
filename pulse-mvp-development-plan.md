@@ -64,7 +64,7 @@
 | 自适应模型路由 | `AdaptiveModelRouter` 基于质量、延迟、价格、缓存和探索项重排合规候选；Provider Executor 自动记录 Attempt 反馈，并支持经过校验的 snapshot/restore | `tests/adaptive-routing.test.ts`、`tests/provider-host.test.ts` | `0d17d7c`、`4c65d38` |
 | DSL Draft 数组语义与运行诊断 | `push→append`、数组索引/splice/sort→整数组 set；explain 补充队列、等待、watchdog、preparation、execution metadata | `tests/dsl-context.test.ts`、`tests/runtime-control.test.ts` | `d5c6ef2`、`f57ae27` |
 | Mutation 事务预检 | clone 预检失败不写日志、不改变运行时；提交时保留 Lane/Effect 对象身份；日志预备失败不消耗序号，状态 apply 与日志提交分层 | `tests/storage-mutation-log.test.ts` | `70c3534`、`6c89fe2` |
-| Tool Schema 与 Provider 上限 | 不支持的 Zod 类型构建时 fail-closed；Anthropic `maxOutputTokens` 不再写死；Tool 输入在资源准入前由 Zod 校验，非法输入转结构化 `control_error`，不入队、不执行 | `tests/m3-context-adapters.test.ts`、`tests/tool-host.test.ts` | `e21907a`、`7a2ad53` |
+| Tool Schema 与 Provider 上限 | 不支持的 Zod 类型构建时 fail-closed；Anthropic `maxOutputTokens` 不再写死；Tool 输入在资源准入前由 Zod 校验，缺少工具名/非法输入转结构化 `control_error`，不入队、不执行 | `tests/m3-context-adapters.test.ts`、`tests/tool-host.test.ts` | `e21907a`、`7a2ad53`、`e7017f4` |
 | 持久化恢复边界 | `persisted` 驻留状态、backend restore、在途写副作用 quarantine、journal event `txId` 一致 | `tests/storage-policy.test.ts`、`tests/storage-outbox.test.ts` | `00d49f6`、`f7ba385`、`9b22fd3`、`c0e87f6` |
 | Result residency 元数据 | ResultRecord 保留 `storageState/pinCount`，并与 StoragePolicy 的 pin/持久化确认同步；residency 元数据不参与正文哈希 | `tests/storage-policy.test.ts` | 本轮 Result residency 提交 |
 | Snapshot 外部索引与读穿 | Lane/Global Context Snapshot 正文可写入 SnapshotStore，持久化 envelope 只保留稳定引用；恢复时读穿，缺少 SnapshotStore fail-closed | `tests/storage-outbox.test.ts` | 本轮 SnapshotStore 提交 |
@@ -601,6 +601,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `1488b0f`：FilesystemTool 增加带 SHA-256 基线检查和跨进程锁的原子写入，拒绝陈旧补丁覆盖外部变更。
 - `28e4722`：Provider/Action 输出边界改为 fail-closed；畸形 SSE/工具参数、循环对象和非 JSON 值不再被包装或序列化成可执行的伪成功结果。
 - `7a2ad53`：Tool Registry 在资源准入前执行输入 schema 校验；未知/非法工具输入不再被 preparer 吞掉，Runtime 以结构化 `control_error` 拒绝并保持 Effect 未入队。
+- `e7017f4`：ToolEffect 缺少可信工具名时在 admission 阶段直接拒绝，避免无名 Effect 绕过准入进入派发队列。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
