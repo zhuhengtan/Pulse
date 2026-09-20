@@ -21,6 +21,13 @@ export interface StoredRecord {
   value?: JsonValue
 }
 
+export interface StoragePolicySnapshot {
+  schemaVersion: 1
+  limits: Required<StoragePolicyConfig>
+  records: StoredRecord[]
+  pinSources: Array<[string, string[]]>
+}
+
 export class SessionStoragePolicy {
   private readonly records = new Map<string, StoredRecord>()
   private readonly pinSources = new Map<string, Set<string>>()
@@ -71,6 +78,16 @@ export class SessionStoragePolicy {
     return copy
   }
 
+  snapshot(): StoragePolicySnapshot { return { schemaVersion: 1, limits: { ...this.limits }, records: [...this.records.values()].map((record) => this.copyRecord(record)), pinSources: [...this.pinSources.entries()].map(([source, keys]) => [source, [...keys]]) } }
+
+  static fromSnapshot(snapshot: StoragePolicySnapshot | JsonValue): SessionStoragePolicy {
+    const value = snapshot as StoragePolicySnapshot
+    if (!value || value.schemaVersion !== 1 || !value.limits || !Array.isArray(value.records) || !Array.isArray(value.pinSources)) throw new Error('INVALID_STORAGE_POLICY_SNAPSHOT')
+    const policy = new SessionStoragePolicy(value.limits)
+    policy.restore(value)
+    return policy
+  }
+
   compact(key: string): boolean {
     const record = this.require(key)
     if (record.kind === 'event') throw new Error('FACT_EVENT_REQUIRES_PERSISTENCE')
@@ -95,8 +112,7 @@ export class SessionStoragePolicy {
   private require(key: string): StoredRecord { const record = this.records.get(key); if (!record) throw new Error(`UNKNOWN_STORAGE_KEY:${key}`); return record }
   private copyRecord(record: StoredRecord): StoredRecord { return { ...record, ...(record.value === undefined ? {} : { value: structuredClone(record.value) }) } }
   private isManagedPinned(key: string): boolean { return [...this.pinSources.values()].some((keys) => keys.has(key)) }
-  private snapshot(): { records: StoredRecord[]; pinSources: Array<[string, string[]]> } { return { records: [...this.records.values()].map((record) => this.copyRecord(record)), pinSources: [...this.pinSources.entries()].map(([source, keys]) => [source, [...keys]]) } }
-  private restore(snapshot: { records: StoredRecord[]; pinSources: Array<[string, string[]]> }): void {
+  private restore(snapshot: StoragePolicySnapshot): void {
     this.records.clear()
     for (const record of snapshot.records) this.records.set(record.key, this.copyRecord(record))
     this.pinSources.clear()

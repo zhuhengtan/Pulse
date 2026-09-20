@@ -53,4 +53,13 @@ describe('session storage policy', () => {
     expect(records.find((record) => record.key.startsWith('snapshot:request:'))?.pinCount).toBeGreaterThan(0)
     release()
   })
+
+  it('persists residency and pin sources for restart reconstruction', () => {
+    const policy = new SessionStoragePolicy({ maxResultBytes: 100 })
+    policy.replacePinSource('lane-1', ['result:r1'])
+    policy.put('result', 'result:r1', { answer: 1 })
+    const restored = SessionStoragePolicy.fromSnapshot(JSON.parse(JSON.stringify(policy.snapshot())))
+    expect(restored.get('result:r1')).toEqual({ answer: 1 })
+    expect(restored.inspect().find((record) => record.key === 'result:r1')).toMatchObject({ pinCount: 1, storageState: 'memory' })
+  })
 })

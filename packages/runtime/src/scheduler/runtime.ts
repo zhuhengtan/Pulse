@@ -118,7 +118,7 @@ export class PulseRuntime {
     const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
     this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }), ...(config.forkAffinity === undefined ? {} : { forkAffinity: config.forkAffinity }), ...(config.historySoftTokens === undefined ? {} : { historySoftTokens: config.historySoftTokens }), ...(config.historyHardTokens === undefined ? {} : { historyHardTokens: config.historyHardTokens }) })
     this.sessionId = config.sessionId ?? 'session-local'
-    this.storagePolicy = new SessionStoragePolicy(config.storagePolicy)
+    this.storagePolicy = restored?.storagePolicy ?? new SessionStoragePolicy(config.storagePolicy)
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
     if (restored?.quarantine) this.quarantine.restore(restored.quarantine)
@@ -189,10 +189,10 @@ export class PulseRuntime {
     return { agentId: agent.id, laneId: root.id }
   }
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
-  exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine) }
+  exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine, this.storagePolicy) }
   async persist(backend: RuntimePersistenceBackend): Promise<void> { await backend.save(this.exportPersistence()) }
   async checkpoint(backend: RuntimePersistenceBackend): Promise<RuntimePersistenceSnapshot> {
-    const snapshot = exportRuntimeCheckpoint(this.state, this.mutationLog, this.outbox, this.quarantine)
+    const snapshot = exportRuntimeCheckpoint(this.state, this.mutationLog, this.outbox, this.quarantine, this.storagePolicy)
     await backend.save(snapshot)
     const watermark = snapshot.checkpoint?.logWatermark ?? 0
     if (watermark > 0 && this.mutationLog.lastSequence >= watermark) this.mutationLog.truncateThrough(watermark)

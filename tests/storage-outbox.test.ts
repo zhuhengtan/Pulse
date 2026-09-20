@@ -74,4 +74,12 @@ describe('effect outbox and runtime persistence envelope', () => {
       expect(restored.mutationLog.watermark).toBe(1)
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
+
+  it('round-trips Runtime Storage Policy with the persistence envelope', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxResultBytes: 1024 } })
+    const program = { id: 'persist-storage', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'persist-storage', programVersion: '1', step: 'done', locals: {} } }) }
+    runtime.createAgent('storage persistence', program)
+    const restored = new PulseRuntime({ persistence: runtime.exportPersistence() })
+    expect(restored.storagePolicy.inspect().some((record) => record.key.startsWith('snapshot:lane:'))).toBe(true)
+  })
 })
