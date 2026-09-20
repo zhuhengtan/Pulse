@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { FileRuntimeTelemetryExporter, PulseRuntime, defineLaneProgram } from '@pulse/runtime'
+import { FileRuntimeTelemetryExporter, PulseRuntime, RuntimeTelemetryAggregator, defineLaneProgram } from '@pulse/runtime'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -41,5 +41,17 @@ describe('observation inbox and shutdown', () => {
       expect(lines[0]).toMatchObject({ schemaVersion: 1, timestamp: 123, snapshot: { agents: { total: 0 } } })
       expect(lines[1]?.timestamp).toBe(124)
     } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('aggregates telemetry peaks and emits cooled-down threshold alerts', () => {
+    const aggregator = new RuntimeTelemetryAggregator([{ id: 'lanes-high', metric: 'lanes.total', threshold: 2, direction: 'above', cooldownMs: 100 }])
+    const runtime = new PulseRuntime()
+    const first = runtime.telemetry(); first.lanes.total = 2
+    const second = runtime.telemetry(); second.lanes.total = 3
+    const third = runtime.telemetry(); third.lanes.total = 4
+    expect(aggregator.ingest({ schemaVersion: 1, timestamp: 0, snapshot: first })).toHaveLength(1)
+    expect(aggregator.ingest({ schemaVersion: 1, timestamp: 50, snapshot: second })).toHaveLength(0)
+    expect(aggregator.ingest({ schemaVersion: 1, timestamp: 100, snapshot: third })).toHaveLength(1)
+    expect(aggregator.snapshot()).toMatchObject({ sampleCount: 3, peaks: { 'lanes.total': 4 }, alerts: [{ ruleId: 'lanes-high', value: 2 }, { ruleId: 'lanes-high', value: 4 }] })
   })
 })

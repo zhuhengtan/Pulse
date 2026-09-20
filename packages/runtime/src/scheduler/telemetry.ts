@@ -38,6 +38,78 @@ export interface RuntimeTelemetryExporter {
   publish(envelope: RuntimeTelemetryEnvelope): Promise<void> | void
 }
 
+export interface RuntimeTelemetryAlertRule {
+  id: string
+  metric: string
+  threshold: number
+  direction: 'above' | 'below'
+  cooldownMs?: number
+}
+
+export interface RuntimeTelemetryAlert {
+  ruleId: string
+  metric: string
+  value: number
+  threshold: number
+  direction: RuntimeTelemetryAlertRule['direction']
+  timestamp: number
+}
+
+export interface RuntimeTelemetryAggregateSnapshot {
+  schemaVersion: 1
+  sampleCount: number
+  firstTimestamp?: number
+  lastTimestamp?: number
+  latest?: RuntimeTelemetryEnvelope
+  peaks: Record<string, number>
+  alerts: RuntimeTelemetryAlert[]
+}
+
+function metricValue(snapshot: RuntimeTelemetrySnapshot, path: string): number | undefined {
+  let current: unknown = snapshot
+  for (const segment of path.split('.')) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined
+    current = (current as Record<string, unknown>)[segment]
+  }
+  return typeof current === 'number' && Number.isFinite(current) ? current : undefined
+}
+
+/** Aggregates exported samples without retaining the full telemetry stream in Runtime state. */
+export class RuntimeTelemetryAggregator {
+  private sampleCount = 0
+  private firstTimestamp: number | undefined
+  private lastTimestamp: number | undefined
+  private latest: RuntimeTelemetryEnvelope | undefined
+  private readonly peaks = new Map<string, number>()
+  private readonly alerts: RuntimeTelemetryAlert[] = []
+  private readonly lastAlertAt = new Map<string, number>()
+  constructor(readonly rules: readonly RuntimeTelemetryAlertRule[] = []) {}
+  ingest(envelope: RuntimeTelemetryEnvelope): RuntimeTelemetryAlert[] {
+    if (envelope.schemaVersion !== 1 || !Number.isFinite(envelope.timestamp)) throw new Error('INVALID_TELEMETRY_ENVELOPE')
+    const emitted: RuntimeTelemetryAlert[] = []
+    this.sampleCount++
+    this.firstTimestamp ??= envelope.timestamp
+    this.lastTimestamp = envelope.timestamp
+    this.latest = structuredClone(envelope)
+    for (const rule of this.rules) {
+      const value = metricValue(envelope.snapshot, rule.metric)
+      if (value === undefined) continue
+      this.peaks.set(rule.metric, Math.max(this.peaks.get(rule.metric) ?? Number.NEGATIVE_INFINITY, value))
+      const matched = rule.direction === 'above' ? value >= rule.threshold : value <= rule.threshold
+      const last = this.lastAlertAt.get(rule.id)
+      if (!matched || (last !== undefined && envelope.timestamp - last < (rule.cooldownMs ?? 0))) continue
+      const alert: RuntimeTelemetryAlert = { ruleId: rule.id, metric: rule.metric, value, threshold: rule.threshold, direction: rule.direction, timestamp: envelope.timestamp }
+      this.lastAlertAt.set(rule.id, envelope.timestamp)
+      this.alerts.push(alert)
+      emitted.push(alert)
+    }
+    return emitted
+  }
+  snapshot(): RuntimeTelemetryAggregateSnapshot {
+    return { schemaVersion: 1, sampleCount: this.sampleCount, ...(this.firstTimestamp === undefined ? {} : { firstTimestamp: this.firstTimestamp }), ...(this.lastTimestamp === undefined ? {} : { lastTimestamp: this.lastTimestamp }), ...(this.latest === undefined ? {} : { latest: structuredClone(this.latest) }), peaks: Object.fromEntries(this.peaks.entries()), alerts: structuredClone(this.alerts) }
+  }
+}
+
 /** A durable, append-only exporter suitable for a local host or sidecar collector. */
 export class FileRuntimeTelemetryExporter implements RuntimeTelemetryExporter {
   private pending: Promise<void> = Promise.resolve()
