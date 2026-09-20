@@ -2,7 +2,7 @@ import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.
 import { buildAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock, type RuntimeClock } from './index.js'
-import type { ArtifactRecord, EffectRecord, EffectSubmission, EffectState, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, RuntimeEventInput, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata, ProvenanceRef } from '../core/types.js'
+import type { ArtifactRecord, EffectRecord, EffectSubmission, EffectState, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, RuntimeEventInput, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata, ProvenanceRef, ResumePoint } from '../core/types.js'
 import { createRuntimeState, effectivePrivacy, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, provenanceRefId, provenanceRefKind, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
@@ -30,7 +30,7 @@ export interface LaneProgram {
   entry?: string
   step: (context: LaneStepContext) => LaneStepOutput
   errorBoundary?: (error: RuntimeError, context: LaneStepContext) => LaneStepOutput
-  seriesMember?: { programId: string; programVersion: string }
+  seriesMember?: ResumePoint
   seriesMemberProgram?: LaneProgram
   seriesKeys?: string[]
   seriesOnMemberFailure?: 'continue' | 'abort'
@@ -529,11 +529,11 @@ export class PulseRuntime {
     const seriesValue = sdkValue.series && typeof sdkValue.series === 'object' && !Array.isArray(sdkValue.series) ? sdkValue.series as Record<string, JsonValue> : {}
     const keys = Array.isArray(seriesValue.keys) ? seriesValue.keys.filter((key): key is string => typeof key === 'string') : (series?.keys ?? program.seriesKeys ?? ['member'])
     const index = typeof seriesValue.index === 'number' && Number.isInteger(seriesValue.index) && seriesValue.index >= 0 ? seriesValue.index : 0
-    const memberRef = series?.member ?? (program.seriesMember ? { programId: program.seriesMember.programId, programVersion: program.seriesMember.programVersion, step: 'start', locals: {} } : undefined)
+    const memberRef = series?.member ?? (program.seriesMember ? { programId: program.seriesMember.programId, programVersion: program.seriesMember.programVersion, step: program.seriesMember.step ?? 'start', locals: program.seriesMember.locals ?? {} } : undefined)
     const member = memberRef === undefined ? undefined : this.programs.get(`${memberRef.programId}@${memberRef.programVersion}`)
     if (!member || memberRef === undefined) return { actions: [{ type: 'fail', error: { code: 'PROGRAM_NOT_REGISTERED', message: memberRef ? `${memberRef.programId}@${memberRef.programVersion}` : 'series member' } }], next: { programId: program.id, programVersion: program.version, step: 'start', locals } }
     if (index >= keys.length) return { actions: [{ type: 'complete', result: sdkValue.seriesResults ?? { results: {} } }], next: { programId: program.id, programVersion: program.version, step: 'start', locals } }
-    const memberLocals = sdkValue.memberLocals ?? {}
+    const memberLocals = sdkValue.memberLocals ?? memberRef.locals ?? {}
     const memberLane = structuredClone(context.lane) as LaneRecord
     memberLane.resume = { programId: member.id, programVersion: member.version, step: typeof sdkValue.memberStep === 'string' ? sdkValue.memberStep : memberRef.step ?? (member as LaneProgram & { entry?: string }).entry ?? 'start', locals: structuredClone(memberLocals) }
     memberLane.goal = series?.goals?.[keys[index]!] ?? `${context.lane.goal} [series:${keys[index]}]`

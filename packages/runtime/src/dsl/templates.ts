@@ -17,7 +17,7 @@ export function defineReActLane(config: { id: string; version?: string; system?:
 export function defineSeriesLane(config: { id: string; version?: string; steps: string[] } | { id: string; version?: string; member: LaneProgram | ProgramRef; keys?: string[]; onMemberFailure?: 'continue' | 'abort' }): LaneProgramDefinition {
   if ('steps' in config) return defineLaneProgram({ id: config.id, version: config.version ?? '1' }, (builder) => { config.steps.forEach((step, index) => builder.addStep(step, () => ({ actions: [{ type: 'complete', result: { step } }], next: config.steps[index + 1] ?? 'finish' }))); builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' })) })
   const member = config.member
-  const ref = 'id' in member ? { programId: member.id, programVersion: member.version } : { programId: member.programId, programVersion: member.programVersion }
+  const ref = 'id' in member ? { programId: member.id, programVersion: member.version, step: member.entry ?? 'start', locals: {} } : { programId: member.programId, programVersion: member.programVersion, step: member.step ?? 'start', locals: member.locals ?? {} }
   const wrapper = defineLaneProgram({ id: config.id, version: config.version ?? '1' }, (builder) => { builder.addStep('start', () => ({ actions: [{ type: 'complete', result: { results: {} } }], next: 'start' })) })
   wrapper.entry = 'start'
   wrapper.seriesMember = ref
