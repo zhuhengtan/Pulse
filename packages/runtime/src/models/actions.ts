@@ -35,18 +35,20 @@ export function decodeLLMActions(result: LLMResult, options: ActionDecoderOption
   validateActionToolCalls(result, options.allowedTools)
   if (result.finishReason !== 'tool_calls') return []
   if (result.toolCalls.length === 0) throw new Error('INVALID_TOOL_CALL_FINISH_REASON')
+  const privacy = options.privacy ?? result.privacy
+  const inheritedDerivedFrom = cloneProvenanceRefs(options.derivedFrom ?? result.derivedFrom)
   return [{
     type: 'submit_effects',
     effects: result.toolCalls.map((call) => {
-      const derivedFrom = cloneProvenanceRefs(options.derivedFrom)
+      const derivedFrom = inheritedDerivedFrom === undefined ? undefined : cloneProvenanceRefs(inheritedDerivedFrom)
       const input: Record<string, JsonValue> = { toolCallId: call.toolCallId, name: call.name, arguments: toJsonValue(call.input) }
-      if (options.privacy !== undefined) input.privacy = options.privacy
+      if (privacy !== undefined) input.privacy = privacy
       if (derivedFrom !== undefined) input.derivedFrom = derivedFrom as unknown as JsonValue
       return {
         key: `tool:${call.toolCallId}`,
         toolCallId: call.toolCallId,
         ...(options.llmEffectId === undefined ? {} : { llmEffectId: options.llmEffectId }),
-        ...(options.privacy === undefined ? {} : { privacy: options.privacy }),
+        ...(privacy === undefined ? {} : { privacy }),
         ...(derivedFrom === undefined ? {} : { derivedFrom }),
         kind: 'tool' as const,
         concurrencyClass: 'tool' as const,
