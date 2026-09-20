@@ -23,5 +23,6 @@ describe('observation inbox and shutdown', () => {
     const result = await runtime.shutdown()
     expect(result.status).toBe('stopped')
     expect(result.unresolvedEffectIds).toEqual([])
+    expect(() => runtime.createAgent('after shutdown', program)).toThrow('RUNTIME_SHUTTING_DOWN')
   })
 })

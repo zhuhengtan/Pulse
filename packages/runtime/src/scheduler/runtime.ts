@@ -88,6 +88,7 @@ function outcomeForLane(lane: LaneRecord): Outcome | undefined {
 
 export class PulseRuntime {
   readonly state: RuntimeState
+  private shuttingDown = false
   readonly mutationLog: MutationLog
   readonly outbox: EffectOutbox
   readonly clock: VirtualClock
@@ -170,6 +171,7 @@ export class PulseRuntime {
   createAgent(request: AgentCreateRequest): { agentId: string; laneId: string }
   createAgent(goal: string, program: LaneProgram, agentId?: string): { agentId: string; laneId: string }
   createAgent(goalOrRequest: string | AgentCreateRequest, program?: LaneProgram, agentId?: string): { agentId: string; laneId: string } {
+    if (this.shuttingDown) throw new Error('RUNTIME_SHUTTING_DOWN')
     const request: AgentCreateRequest = typeof goalOrRequest === 'string' ? { goal: goalOrRequest, program: program!, ...(agentId === undefined ? {} : { agentId }) } : goalOrRequest
     const warmStart = request.warmStart
     let initialGlobal: JsonValue | undefined
@@ -400,6 +402,7 @@ export class PulseRuntime {
   async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await Promise.resolve() } }
 
   async shutdown(timeoutMs = 5_000): Promise<{ status: 'stopped' | 'timed_out'; unresolvedEffectIds: string[]; quarantine: string[] }> {
+    this.shuttingDown = true
     for (const agent of this.state.agents.values()) if (agent.state === 'running' || agent.state === 'cancelling') this.cancelAgent(agent.id, 'USER_REQUESTED')
     const deadline = Date.now() + Math.max(0, timeoutMs)
     while ((this.ready.size || this.executions.size) && Date.now() < deadline) {
