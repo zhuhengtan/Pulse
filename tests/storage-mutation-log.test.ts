@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, commitMutationTransaction, createAgent, createRuntimeState, MutationLog } from '@pulse/runtime'
+import { apply, commitMutationTransaction, createAgent, createRuntimeState, MutationLog, prepareArtifactPublication } from '@pulse/runtime'
 
 describe('mutation log and replay', () => {
   it('records idempotent transactions and replays Map/Set-bearing mutations', () => {
@@ -37,6 +37,19 @@ describe('mutation log and replay', () => {
     const gap = JSON.parse(JSON.stringify(log.snapshot()))
     gap.entries[0].seq = 2
     expect(() => MutationLog.fromSnapshot(gap)).toThrow('INVALID_MUTATION_LOG')
+  })
+
+  it('replays Artifact publication together with the Result reference it supports', () => {
+    const state = createRuntimeState()
+    const { agent, root } = createAgent(state, 'artifact replay', { programId: 'p', programVersion: '1', step: 'start', locals: {} })
+    const record = prepareArtifactPublication(state, { mediaType: 'text/plain', content: 'durable', laneId: root.id })
+    const log = new MutationLog()
+    commitMutationTransaction(state, log, 'artifact-transaction', [{ op: 'publishArtifact', record }])
+    const restored = createRuntimeState()
+    createAgent(restored, 'artifact replay', { programId: 'p', programVersion: '1', step: 'start', locals: {} }, agent.id)
+    log.replay(restored)
+    expect(restored.artifacts.get(record.ref)).toMatchObject({ ref: record.ref, contentBase64: record.contentBase64, agentId: agent.id })
+    expect(restored.nextIds.artifact).toBe(2)
   })
 
   it('truncates through a checkpoint watermark while preserving sequence continuity', () => {

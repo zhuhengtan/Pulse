@@ -1,4 +1,4 @@
-import type { RuntimeEventInput, RuntimeState, RuntimeError, ContextVersion, JsonValue, LaneRecord, EffectRecord, WaitRecord, ResultRecord, ContextDelta, LaneId, WaitId, EffectId, HistoryRecord, MergeProposal, ToolCallCorrelation, PrivacyMetadata } from './types.js'
+import type { RuntimeEventInput, RuntimeState, RuntimeError, ContextVersion, JsonValue, LaneRecord, EffectRecord, WaitRecord, ResultRecord, ArtifactRecord, ContextDelta, LaneId, WaitId, EffectId, HistoryRecord, MergeProposal, ToolCallCorrelation, PrivacyMetadata } from './types.js'
 import { appendRuntimeEvent } from './events.js'
 
 export type Mutation =
@@ -9,6 +9,7 @@ export type Mutation =
   | { op: 'insertEffect'; record: EffectRecord }
   | { op: 'insertWait'; record: WaitRecord }
   | { op: 'publishResult'; record: ResultRecord }
+  | { op: 'publishArtifact'; record: ArtifactRecord }
   | { op: 'setToolCallCorrelation'; record: ToolCallCorrelation }
   | { op: 'insertMergeProposal'; proposal: MergeProposal }
   | { op: 'removeMergeProposal'; proposalId: string }
@@ -31,6 +32,12 @@ export function apply(state: RuntimeState, mutations: Mutation[], defaults: { se
       case 'insertEffect': state.effects.set(mutation.record.id, mutation.record); break
       case 'insertWait': state.waits.set(mutation.record.id, mutation.record); break
       case 'publishResult': state.results.set(mutation.record.id, mutation.record); break
+      case 'publishArtifact': {
+        state.artifacts.set(mutation.record.ref, mutation.record)
+        const match = /^artifact-(\d+)$/.exec(mutation.record.ref)
+        if (match) state.nextIds.artifact = Math.max(state.nextIds.artifact, Number(match[1]) + 1)
+        break
+      }
       case 'setToolCallCorrelation': state.toolCallCorrelations.set(mutation.record.toolCallId, mutation.record); break
       case 'insertMergeProposal': state.mergeProposals.set(mutation.proposal.id, mutation.proposal); break
       case 'removeMergeProposal': state.mergeProposals.delete(mutation.proposalId); break

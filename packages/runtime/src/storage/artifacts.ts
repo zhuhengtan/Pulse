@@ -19,7 +19,7 @@ function mergeTaints(...groups: Array<readonly PrivacyTaint[] | undefined>): Pri
   return output
 }
 
-export function publishArtifact(state: RuntimeState, publication: ArtifactPublication): ArtifactRecord {
+export function prepareArtifactPublication(state: RuntimeState, publication: ArtifactPublication): ArtifactRecord {
   if (!publication.mediaType || publication.mediaType.length > 255) throw new Error('INVALID_ARTIFACT_MEDIA_TYPE')
   const taintError = validatePrivacyTaints(publication.privacyTaints)
   if (taintError) throw new Error(taintError)
@@ -33,7 +33,7 @@ export function publishArtifact(state: RuntimeState, publication: ArtifactPublic
   if (publication.privacy !== undefined && privacyRank(publication.privacy) < privacyRank(strictestPrivacy(sourcePrivacy))) throw new Error('PRIVACY_DOWNGRADE_WITHOUT_PROOF')
   const sourceTaints = lane ? privacyTaintsForDerivedRefs(state, lane, refs) : []
   const content = bytesOf(publication.content)
-  const ref = publication.ref ?? `artifact-${state.nextIds.artifact++}`
+  const ref = publication.ref ?? `artifact-${state.nextIds.artifact}`
   if (state.artifacts.has(ref)) throw new Error('ARTIFACT_REF_ALREADY_EXISTS')
   const record: ArtifactRecord = {
     ref,
@@ -48,8 +48,19 @@ export function publishArtifact(state: RuntimeState, publication: ArtifactPublic
     storageState: 'memory',
     pinCount: 0,
   }
-  state.artifacts.set(ref, record)
   return structuredClone(record)
+}
+
+export function publishArtifact(state: RuntimeState, publication: ArtifactPublication): ArtifactRecord {
+  const record = prepareArtifactPublication(state, publication)
+  state.artifacts.set(record.ref, record)
+  advanceArtifactId(state, record.ref)
+  return structuredClone(record)
+}
+
+export function advanceArtifactId(state: RuntimeState, ref: ArtifactRef): void {
+  const match = /^artifact-(\d+)$/.exec(ref)
+  if (match) state.nextIds.artifact = Math.max(state.nextIds.artifact, Number(match[1]) + 1)
 }
 
 export function readArtifact(state: RuntimeState, ref: ArtifactRef): Uint8Array {

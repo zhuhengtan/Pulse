@@ -2,7 +2,7 @@ import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.
 import { createAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
-import type { EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata, ProvenanceRef } from '../core/types.js'
+import type { ArtifactRecord, EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata, ProvenanceRef } from '../core/types.js'
 import { createRuntimeState, effectivePrivacy, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, provenanceRefId, provenanceRefKind, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
@@ -19,7 +19,7 @@ import { appendHistory, contentHash, historyPressure } from '../context/builder.
 import { validateJsonSchema } from '../models/router.js'
 import { SessionStoragePolicy, type StoragePolicyConfig } from '../storage/policy.js'
 import { collectRuntimeTelemetry, type RuntimeTelemetryExporter, type RuntimeTelemetrySnapshot } from './telemetry.js'
-import { markArtifactPersisted, pinArtifact, publishArtifact, readArtifact, unpinArtifact, type ArtifactPublication } from '../storage/artifacts.js'
+import { advanceArtifactId, markArtifactPersisted, pinArtifact, prepareArtifactPublication, readArtifact, unpinArtifact, type ArtifactPublication } from '../storage/artifacts.js'
 import { runtimeErrorFromCause } from '../core/errors.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number; observe?: (event: { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }) => void }
@@ -319,8 +319,9 @@ export class PulseRuntime {
     if (!this.effectSubmissionPreparer) return output
     return { ...output, actions: output.actions.map((action) => action.type === 'submit_effects' ? { ...action, effects: action.effects.map((effect) => this.effectSubmissionPreparer!(effect)) } : action) }
   }
-  private journalEffect(effect: EffectRecord, transactionId: string, result?: import('../core/types.js').ResultRecord, events: import('../core/types.js').RuntimeEvent[] = [], lane?: LaneRecord, correlation?: ToolCallCorrelation): void {
+  private journalEffect(effect: EffectRecord, transactionId: string, result?: import('../core/types.js').ResultRecord, events: import('../core/types.js').RuntimeEvent[] = [], lane?: LaneRecord, correlation?: ToolCallCorrelation, artifact?: ArtifactRecord): void {
     const mutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: structuredClone(effect) }]
+    if (artifact) mutations.push({ op: 'publishArtifact', record: structuredClone(artifact) })
     if (result) mutations.push({ op: 'publishResult', record: structuredClone(result) })
     if (lane) mutations.push({ op: 'setLane', laneId: lane.id, record: structuredClone(lane) })
     if (correlation) mutations.push({ op: 'setToolCallCorrelation', record: structuredClone(correlation) })
@@ -676,10 +677,14 @@ export class PulseRuntime {
     let effectiveExecution = execution
     let outputError = error ?? execution.error
     let resultDerivedFrom = [...(effect.derivedFrom ?? [])]
+    let publishedArtifact: ArtifactRecord | undefined
     const rawInput = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
     if (execution.artifact !== undefined) {
       try {
-        const artifact = publishArtifact(this.state, { ...execution.artifact, laneId: effect.ownerLaneId, derivedFrom: [...(effect.derivedFrom ?? []), ...(execution.artifact.derivedFrom ?? [])] })
+        const artifact = prepareArtifactPublication(this.state, { ...execution.artifact, laneId: effect.ownerLaneId, derivedFrom: [...(effect.derivedFrom ?? []), ...(execution.artifact.derivedFrom ?? [])] })
+        this.state.artifacts.set(artifact.ref, artifact)
+        advanceArtifactId(this.state, artifact.ref)
+        publishedArtifact = artifact
         resultDerivedFrom = [...resultDerivedFrom, { kind: 'artifact', ref: artifact.ref }]
         effectiveExecution = { ...effectiveExecution, value: { artifactRef: artifact.ref }, privacy: artifact.privacy, ...(artifact.privacyTaints === undefined ? {} : { privacyTaints: artifact.privacyTaints }) }
       } catch (cause) {
@@ -763,7 +768,7 @@ export class PulseRuntime {
     const settledEvent = this.emit({ type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
     const metadataEvent = execution.metadata === undefined ? undefined : this.emit({ type: 'effect.execution_metadata', effectId, data: execution.metadata })
     this.recordBudgetMetadata(execution.metadata)
-    this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:settled`, result, [settledEvent, ...(metadataEvent ? [metadataEvent] : [])], journalLane, correlation)
+    this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:settled`, result, [settledEvent, ...(metadataEvent ? [metadataEvent] : [])], journalLane, correlation, publishedArtifact)
     this.refreshWaits()
     this.dispatchQueuedEffects()
     this.schedulePersistence()
@@ -838,7 +843,8 @@ export class PulseRuntime {
   }
 
   publishArtifact(publication: ArtifactPublication): import('../core/types.js').ArtifactRecord {
-    const record = publishArtifact(this.state, publication)
+    const record = prepareArtifactPublication(this.state, publication)
+    commitMutationTransaction(this.state, this.mutationLog, `artifact:${record.ref}`, [{ op: 'publishArtifact', record }], this.state.now, this.sessionId)
     this.syncStoragePolicy()
     this.schedulePersistence()
     return record
