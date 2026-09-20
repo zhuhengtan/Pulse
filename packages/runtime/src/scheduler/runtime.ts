@@ -56,6 +56,22 @@ export interface RuntimeConfig {
 export interface WarmStartSpec { agentId: string; globalVersion?: number | 'latest' | 'final'; include?: 'facts' | 'facts_and_findings'; relevanceRefs?: string[] }
 export interface AgentCreateRequest { goal: string; program: LaneProgram; agentId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string; inheritedFloor?: number }
 
+function warmStartGlobal(value: JsonValue, include: 'facts' | 'facts_and_findings', relevanceRefs: string[] | undefined): JsonValue {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return structuredClone(value)
+  const output = structuredClone(value) as Record<string, JsonValue>
+  if (include === 'facts') { delete output.findings }
+  else if (relevanceRefs !== undefined && Array.isArray(output.findings)) {
+    const refs = new Set(relevanceRefs)
+    output.findings = output.findings.filter((finding) => {
+      if (!finding || typeof finding !== 'object' || Array.isArray(finding)) return false
+      const record = finding as Record<string, JsonValue>
+      if (typeof record.ref === 'string' || typeof record.id === 'string') return refs.has((record.ref ?? record.id) as string)
+      return Array.isArray(record.derivedFrom) && record.derivedFrom.some((ref) => typeof ref === 'string' && refs.has(ref))
+    })
+  }
+  return output
+}
+
 function outcomeForLane(lane: LaneRecord): Outcome | undefined {
   if (lane.status === 'succeeded') return { status: 'succeeded', ...(lane.resultRef === undefined ? {} : { resultRef: lane.resultRef }) }
   if (lane.status === 'failed') return { status: 'failed' }
@@ -132,19 +148,27 @@ export class PulseRuntime {
     const request: AgentCreateRequest = typeof goalOrRequest === 'string' ? { goal: goalOrRequest, program: program!, ...(agentId === undefined ? {} : { agentId }) } : goalOrRequest
     const warmStart = request.warmStart
     let initialGlobal: JsonValue | undefined
+    let warmStartResultRefs: string[] = []
     if (warmStart) {
       const source = this.state.agents.get(warmStart.agentId)
       if (!source) throw new Error(`WARM_START_SOURCE_NOT_FOUND:${warmStart.agentId}`)
       const version = warmStart.globalVersion === 'latest' || warmStart.globalVersion === 'final' || warmStart.globalVersion === undefined ? source.latestGlobalVersion : warmStart.globalVersion
       const value = source.globalVersions.get(version)
       if (value === undefined) throw new Error(`WARM_START_VERSION_NOT_FOUND:${version}`)
-      initialGlobal = structuredClone(value)
+      initialGlobal = warmStartGlobal(value, warmStart.include ?? 'facts', warmStart.relevanceRefs)
+      warmStartResultRefs = [...new Set(warmStart.relevanceRefs ?? [])]
+      const sourceRoot = this.state.lanes.get(source.rootLaneId)
+      for (const ref of warmStartResultRefs) {
+        if (!this.state.results.has(ref)) throw new Error(`WARM_START_RESULT_NOT_FOUND:${ref}`)
+        if (sourceRoot?.visibleResultRefs !== undefined && !sourceRoot.visibleResultRefs.has(ref)) throw new Error(`WARM_START_RESULT_NOT_VISIBLE:${ref}`)
+      }
     }
     this.register(request.program)
     if (this.state.lanes.size >= this.state.maxTotalLanes) throw new Error('MAX_TOTAL_LANES')
     const parent = request.parentAgentId === undefined ? undefined : this.state.agents.get(request.parentAgentId)
     if (request.parentAgentId !== undefined && !parent) throw new Error(`PARENT_AGENT_NOT_FOUND:${request.parentAgentId}`)
     const { agent, root } = createAgent(this.state, request.goal, { programId: request.program.id, programVersion: request.program.version, step: (request.program as LaneProgram & { entry?: string }).entry ?? 'start', locals: {} }, { ...(request.agentId === undefined ? {} : { agentId: request.agentId }), ...(initialGlobal === undefined ? {} : { initialGlobal }), ...(request.parentAgentId === undefined ? {} : { parentAgentId: request.parentAgentId, depth: (parent?.depth ?? 0) + 1 }), ...(request.inheritedFloor === undefined ? {} : { inheritedFloor: request.inheritedFloor }) })
+    if (warmStartResultRefs.length) root.visibleResultRefs = new Set(warmStartResultRefs)
     if (request.program.seriesKeys?.length) root.resume.locals = { $sdk: { series: { keys: [...request.program.seriesKeys], index: 0 } } }
     root.enqueueSeq = this.enqueueSeq++
     agent.state = 'running'
