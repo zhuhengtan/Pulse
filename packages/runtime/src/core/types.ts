@@ -448,6 +448,23 @@ export function privacyForContextSnapshot(state: RuntimeState, lane: LaneRecord,
   return { privacy: lane.context.privacy ?? 'public', ...(lane.context.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(lane.context.privacyTaints) }) }
 }
 
+export function privacyMetadataForDerivedRef(state: RuntimeState, lane: LaneRecord, ref: string): PrivacyMetadata | undefined {
+  const result = state.results.get(ref)
+  if (result) return { privacy: result.privacy, ...(result.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(result.privacyTaints) }) }
+  return privacyForContextSnapshot(state, lane, ref)
+}
+
+export function privacyTaintsForDerivedRefs(state: RuntimeState, lane: LaneRecord, refs: readonly string[]): PrivacyTaint[] {
+  const output: PrivacyTaint[] = []
+  const seen = new Set<string>()
+  for (const ref of refs) for (const taint of privacyMetadataForDerivedRef(state, lane, ref)?.privacyTaints ?? []) {
+    const value = { path: [ref, ...taint.path], privacy: taint.privacy }
+    const key = JSON.stringify(value)
+    if (!seen.has(key)) { seen.add(key); output.push(value) }
+  }
+  return output
+}
+
 export interface ToolCallCorrelation {
   toolCallId: string
   llmEffectId: EffectId

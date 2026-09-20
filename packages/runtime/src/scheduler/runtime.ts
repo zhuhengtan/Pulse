@@ -3,7 +3,7 @@ import { createAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
 import type { EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata } from '../core/types.js'
-import { createRuntimeState, effectivePrivacy, privacyForContextSnapshot, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
+import { createRuntimeState, effectivePrivacy, privacyForContextSnapshot, privacyTaintsForDerivedRefs, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
 import { FactInbox, ObservationInbox } from '../core/inbox.js'
@@ -687,7 +687,10 @@ export class PulseRuntime {
       const snapshot = ownerLane ? privacyForContextSnapshot(this.state, ownerLane, ref) : undefined
       return snapshot ? [effectivePrivacy(snapshot.privacy, snapshot.privacyTaints)] : []
     }) ?? []
-    const result = effectiveStatus === 'succeeded' && !taintError ? { id: resultId, effectId, value: effectiveExecution.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), effectiveExecution.privacyTaints), ...(effectiveExecution.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(effectiveExecution.privacyTaints) }), derivedFrom: [...(effect.derivedFrom ?? [])], ...(effectiveExecution.summary === undefined ? {} : { summary: effectiveExecution.summary }) } : rejectedOutputId && effectiveExecution.rejectedOutput && !taintError ? { id: rejectedOutputId, effectId, kind: 'rejected_output' as const, value: effectiveExecution.rejectedOutput.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.rejectedOutput.privacy ?? effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), effectiveExecution.rejectedOutput.privacyTaints), ...(effectiveExecution.rejectedOutput.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(effectiveExecution.rejectedOutput.privacyTaints) }), derivedFrom: [...(effectiveExecution.rejectedOutput.derivedFrom ?? effect.derivedFrom ?? [])] } : undefined
+    const sourceTaints = ownerLane ? privacyTaintsForDerivedRefs(this.state, ownerLane, effect.derivedFrom ?? []) : []
+    const outputTaints = [...sourceTaints, ...(effectiveExecution.privacyTaints ?? [])]
+    const rejectedTaints = [...sourceTaints, ...(effectiveExecution.rejectedOutput?.privacyTaints ?? [])]
+    const result = effectiveStatus === 'succeeded' && !taintError ? { id: resultId, effectId, value: effectiveExecution.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), outputTaints), ...(outputTaints.length ? { privacyTaints: outputTaints } : {}), derivedFrom: [...(effect.derivedFrom ?? [])], ...(effectiveExecution.summary === undefined ? {} : { summary: effectiveExecution.summary }) } : rejectedOutputId && effectiveExecution.rejectedOutput && !taintError ? { id: rejectedOutputId, effectId, kind: 'rejected_output' as const, value: effectiveExecution.rejectedOutput.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.rejectedOutput.privacy ?? effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), rejectedTaints), ...(rejectedTaints.length ? { privacyTaints: rejectedTaints } : {}), derivedFrom: [...(effectiveExecution.rejectedOutput.derivedFrom ?? effect.derivedFrom ?? [])] } : undefined
     if (result) this.state.results.set(resultId, result)
     let journalLane: LaneRecord | undefined
     if (ownerLane && result) {

@@ -135,6 +135,20 @@ describe('result privacy provenance', () => {
     expect(new ModelRouter(registry).routeProjection('reason', projection).map((candidate) => candidate.id)).toEqual(['local'])
   })
 
+  it('carries source leaf taints into derived results and ContextDelta metadata', async () => {
+    const program = defineLaneProgram({ id: 'source-taint-propagation', version: '1' }, (builder) => {
+      builder.addStep('start', (ctx) => { ctx.results.meta('source'); ctx.commitGlobal({ ops: [{ op: 'set', path: ['finding'], value: true }] }); return { actions: [{ type: 'complete', result: { done: true } }], next: 'start' } })
+    })
+    const runtime = new PulseRuntime()
+    const created = runtime.createAgent('taint propagation', program)
+    runtime.state.results.set('source', { id: 'source', value: { secret: 'x' }, privacy: 'cloud_allowed', privacyTaints: [{ path: ['secret'], privacy: 'local_only' }], derivedFrom: [] })
+    runtime.state.lanes.get(created.laneId)!.visibleResultRefs!.add('source')
+    expect((await runtime.start(created.agentId).outcome()).status).toBe('succeeded')
+    const result = [...runtime.state.results.values()].find((item) => item.id !== 'source')
+    expect(result).toMatchObject({ privacy: 'local_only', privacyTaints: [{ path: ['source', 'secret'], privacy: 'local_only' }] })
+    expect(runtime.state.agents.get(created.agentId)?.globalPrivacy?.get(1)).toMatchObject({ privacy: 'local_only', privacyTaints: [{ path: ['source', 'secret'], privacy: 'local_only' }] })
+  })
+
   it('preserves effect-output leaf taints and widens the record label only to the strictest level', async () => {
     const program = defineLaneProgram({ id: 'effect-leaf-taint', version: '1' }, (builder) => {
       builder.addStep('start', () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'read', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'finish' }))

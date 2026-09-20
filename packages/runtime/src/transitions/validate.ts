@@ -2,14 +2,19 @@ import { error } from '../core/errors.js'
 import { apply } from '../core/mutations.js'
 import { DependencyGraph } from '../dependencies/graph.js'
 import type { ValidationResult, Mutation } from '../core/mutations.js'
-import { effectivePrivacy, privacyForContextSnapshot, privacyRank, privacyTaintPrivacy, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
-import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord, ForkLaneSpec, PrivacyMetadata } from '../core/types.js'
+import { effectivePrivacy, privacyMetadataForDerivedRef, privacyRank, privacyTaintPrivacy, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
+import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord, ForkLaneSpec, PrivacyMetadata, PrivacyTaint } from '../core/types.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import { ContextBuilder, estimateHistoryTokens, historyPressure } from '../context/builder.js'
 
 const isLocal = (value: TargetRef | LocalRef): value is LocalRef => 'local' in value
 const clone = <T>(value: T): T => structuredClone(value)
 const laneCopy = (lane: LaneRecord): LaneRecord => ({ ...lane, resume: clone(lane.resume), context: clone(lane.context), ...(lane.visibleResultRefs === undefined ? {} : { visibleResultRefs: new Set(lane.visibleResultRefs) }), children: new Set(lane.children), ownedEffectIds: new Set(lane.ownedEffectIds), ...(lane.pendingResumeInput === undefined ? {} : { pendingResumeInput: clone(lane.pendingResumeInput) }) })
+function mergePrivacyTaints(...groups: Array<readonly PrivacyTaint[] | undefined>): PrivacyTaint[] {
+  const output: PrivacyTaint[] = []; const seen = new Set<string>()
+  for (const group of groups) for (const taint of group ?? []) { const key = JSON.stringify(taint); if (!seen.has(key)) { seen.add(key); output.push(clone(taint)) } }
+  return output
+}
 
 function validResume(resume: ResumePoint): boolean {
   return Boolean(resume.programId && resume.programVersion && resume.step) && resume.locals !== undefined
@@ -220,9 +225,10 @@ function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: Context
   const nextVersion = base + 1
   const baseMetadata = delta.target === 'global' ? state.agents.get(lane.agentId)!.globalPrivacy?.get(base) ?? { privacy: 'public' as const } : { privacy: lane.context.privacy ?? 'public', privacyTaints: lane.context.privacyTaints }
   const derived = derivedPrivacy(state, lane, delta.derivedFrom ?? [])
+  const propagatedTaints = mergePrivacyTaints(baseMetadata.privacyTaints, derived.privacyTaints, delta.privacyTaints)
   const metadata: PrivacyMetadata = {
     privacy: strictestPrivacy([baseMetadata.privacy, delta.privacy ?? 'public', privacyTaintPrivacy(delta.privacyTaints), derived.privacy ?? 'public']),
-    ...(baseMetadata.privacyTaints?.length || delta.privacyTaints?.length ? { privacyTaints: [...(baseMetadata.privacyTaints ?? []), ...(delta.privacyTaints ?? [])] } : {}),
+    ...(propagatedTaints.length ? { privacyTaints: propagatedTaints } : {}),
   }
   if (delta.target === 'global' && delta.proposal) mutations.push({ op: 'insertMergeProposal', proposal: { id: proposalId ?? `proposal-${state.nextIds.proposal}`, agentId: lane.agentId, sourceLaneId: lane.id, baseGlobalVersion: base, delta: { ...clone(delta), sourceLaneId: lane.id }, createdAt: state.now } })
   else if (delta.target === 'global') mutations.push({ op: 'setGlobal', agentId: lane.agentId, version: nextVersion, value: result, metadata })
@@ -240,20 +246,28 @@ function addWait(state: RuntimeState, lane: LaneRecord, spec: WaitSpec, targets:
 
 function resultVisible(lane: LaneRecord, ref: string): boolean { return lane.visibleResultRefs === undefined || lane.visibleResultRefs.has(ref) }
 
-function derivedPrivacy(state: RuntimeState, lane: LaneRecord, refs: string[]): { privacy?: PrivacyLabel; error?: string } {
+function derivedPrivacy(state: RuntimeState, lane: LaneRecord, refs: string[]): { privacy?: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[]; error?: string } {
   const labels: PrivacyLabel[] = []
+  const privacyTaints: import('../core/types.js').PrivacyTaint[] = []
+  const seenTaints = new Set<string>()
   for (const ref of refs) {
     const result = state.results.get(ref)
     if (result) {
       if (!resultVisible(lane, ref)) return { error: 'RESULT_NOT_VISIBLE' }
-      labels.push(effectivePrivacy(result.privacy, result.privacyTaints))
+    } else if (!privacyMetadataForDerivedRef(state, lane, ref)) return { error: 'UNKNOWN_RESULT_REF' }
+    const metadata = privacyMetadataForDerivedRef(state, lane, ref)!
+    labels.push(effectivePrivacy(metadata.privacy, metadata.privacyTaints))
+    for (const taint of metadata.privacyTaints ?? []) {
+      const value = { path: [ref, ...taint.path], privacy: taint.privacy }
+      const key = JSON.stringify(value)
+      if (!seenTaints.has(key)) { seenTaints.add(key); privacyTaints.push(value) }
+    }
+    /* Keep the visibility check above separate from snapshot resolution. */
+    if (result) {
       continue
     }
-    const snapshot = privacyForContextSnapshot(state, lane, ref)
-    if (!snapshot) return { error: 'UNKNOWN_RESULT_REF' }
-    labels.push(effectivePrivacy(snapshot.privacy, snapshot.privacyTaints))
   }
-  return { privacy: strictestPrivacy(labels) }
+  return { privacy: strictestPrivacy(labels), ...(privacyTaints.length ? { privacyTaints } : {}) }
 }
 
 function prepareLLMInput(state: RuntimeState, lane: LaneRecord, submission: SubmitEffectsAction['effects'][number]): { input?: JsonValue; error?: string } {
@@ -485,11 +499,12 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       const taintError = validatePrivacyTaints(action.privacyTaints)
       if (taintError) return { rejection: error(taintError, 'Result privacy taints are invalid') }
       if (action.privacy !== undefined && derived.privacy !== undefined && privacyRank(action.privacy) < privacyRank(derived.privacy)) return { rejection: error('PRIVACY_DOWNGRADE_WITHOUT_PROOF', 'Result privacy cannot be broader than its sources') }
-      const privacy = effectivePrivacy(strictestPrivacy([derived.privacy ?? 'public', action.privacy ?? 'public']), action.privacyTaints)
+      const propagatedTaints = mergePrivacyTaints(derived.privacyTaints, action.privacyTaints)
+      const privacy = effectivePrivacy(strictestPrivacy([derived.privacy ?? 'public', action.privacy ?? 'public']), propagatedTaints)
       if (activeChildren && action.children === 'await') {
         const dependencies = [...lane.children].filter((childId) => !['succeeded', 'failed', 'cancelled'].includes(state.lanes.get(childId)?.status ?? 'cancelled')).map((childId) => ({ key: childId, target: { kind: 'lane' as const, id: childId }, condition: 'settled' as const }))
         if (hasDependencyCycle(state, dependencies.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: dependency.target, kind: 'wait' as const })))) return { rejection: error('DEPENDENCY_CYCLE', 'closing wait would create a dependency cycle') }
-        workingLane.closingResult = { value: clone(action.result), privacy, ...(action.privacyTaints === undefined ? {} : { privacyTaints: clone(action.privacyTaints) }), ...(action.derivedFrom === undefined ? {} : { derivedFrom: [...action.derivedFrom] }) }
+        workingLane.closingResult = { value: clone(action.result), privacy, ...(propagatedTaints.length ? { privacyTaints: propagatedTaints } : {}), ...(action.derivedFrom === undefined ? {} : { derivedFrom: [...action.derivedFrom] }) }
         addWait(state, workingLane, { dependencies, mode: 'all', onUnsatisfied: 'resume_with_error', reason: 'join' }, new Map(dependencies.map((dependency) => [dependency.key, dependency.target] as const)), mutations, `wait-${waitCounter++}`)
         workingLane.status = 'waiting'
         mutations.push({ op: 'setLane', laneId: lane.id, record: { ...workingLane, version: lane.version + 1 } })
@@ -503,7 +518,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         }
       }
       const resultId = `result-${resultCounter++}`
-      mutations.push({ op: 'publishResult', record: { id: resultId, value: clone(action.result), privacy, ...(action.privacyTaints === undefined ? {} : { privacyTaints: clone(action.privacyTaints) }), derivedFrom: [...(action.derivedFrom ?? [])] } })
+      mutations.push({ op: 'publishResult', record: { id: resultId, value: clone(action.result), privacy, ...(propagatedTaints.length ? { privacyTaints: propagatedTaints } : {}), derivedFrom: [...(action.derivedFrom ?? [])] } })
       if (workingLane.visibleResultRefs) workingLane.visibleResultRefs.add(resultId)
       else workingLane.visibleResultRefs = new Set([resultId])
       if (lane.ownerLaneId !== undefined) {
