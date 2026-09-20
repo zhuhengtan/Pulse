@@ -85,9 +85,10 @@ function affinityGroups(lanes: ForkLaneSpec[]): AffinityGroup[] {
 }
 
 function validateWait(state: RuntimeState, laneId: string, spec: WaitSpec, locals: Map<string, TargetRef>, newTargets: Map<string, TargetRef>): string | undefined {
-  if (!['all', 'any', 'quorum'].includes(spec.mode) || spec.dependencies.length === 0 || spec.dependencies.some((dependency) => !dependency.key || !resolveTarget(dependency.target, newTargets.size ? newTargets : locals))) return 'INVALID_WAIT_DEPENDENCY'
+  if (!['all', 'any', 'quorum'].includes(spec.mode) || (spec.dependencies.length === 0 && spec.mode !== 'all') || spec.dependencies.some((dependency) => !dependency.key || !resolveTarget(dependency.target, newTargets.size ? newTargets : locals))) return 'INVALID_WAIT_DEPENDENCY'
   if (spec.mode === 'quorum' && (!Number.isInteger(spec.quorum) || spec.quorum! < 1 || spec.quorum! > spec.dependencies.length)) return 'INVALID_WAIT_QUORUM'
   if (spec.mode !== 'quorum' && spec.quorum !== undefined) return 'INVALID_WAIT_QUORUM'
+  if (spec.deadlineAt !== undefined && (!Number.isFinite(spec.deadlineAt) || spec.deadlineAt < state.now)) return 'INVALID_WAIT_DEADLINE'
   const keys = new Set<string>()
   const targets = new Set<string>()
   for (const dependency of spec.dependencies) {

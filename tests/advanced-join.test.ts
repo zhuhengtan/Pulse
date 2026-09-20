@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { PulseRuntime, createAgent, createRuntimeState, validateStep } from '@pulse/runtime'
 import type { EffectRecord, LaneProgram } from '@pulse/runtime'
 
-const point = (step: string) => ({ programId: 'join', programVersion: '1', step, locals: {} })
+const point = (step: string, programId = 'join') => ({ programId, programVersion: '1', step, locals: {} })
 
 describe('advanced any/quorum waits', () => {
   it('accepts any and quorum modes and rejects invalid quorum values atomically', () => {
@@ -31,5 +31,22 @@ describe('advanced any/quorum waits', () => {
     runtime.tick()
     expect(runtime.state.lanes.get(laneId)?.status).toBe('succeeded')
     expect(runtime.state.agents.get(agentId)?.state).toBe('running')
+  })
+
+  it('wakes a waiting lane through the TimerWheel when its deadline expires', () => {
+    const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
+    const program: LaneProgram = { id: 'deadline', version: '1', step: ({ lane }) => {
+      if (lane.resume.step === 'start') return { actions: [{ type: 'submit_effects', effects: [{ key: 'slow', kind: 'tool', concurrencyClass: 'tool', input: {} }] }], next: point('wait', 'deadline') }
+      if (lane.resume.step === 'wait') return { actions: [{ type: 'wait', spec: { dependencies: [{ key: 'slow', target: { kind: 'effect', id: 'effect-1' }, condition: 'settled' }], mode: 'all', deadlineAt: 5, onUnsatisfied: 'resume_with_error', reason: 'dependency' } }], next: point('finish', 'deadline') }
+      return { actions: [{ type: 'complete', result: { timedOut: lane.pendingResumeInput?.type === 'wait' && lane.pendingResumeInput.resolution.error?.code === 'WAIT_DEADLINE_EXCEEDED' } }], next: point('finish', 'deadline') }
+    } }
+    const { laneId } = runtime.createAgent('deadline', program)
+    runtime.tick()
+    expect(runtime.state.lanes.get(laneId)?.status).toBe('waiting')
+    runtime.clock.advance(5)
+    expect(runtime.state.lanes.get(laneId)?.status).toBe('ready')
+    runtime.tick()
+    expect(runtime.state.lanes.get(laneId)?.status).toBe('succeeded')
+    expect([...runtime.state.results.values()].some((result) => JSON.stringify(result.value).includes('timedOut'))).toBe(true)
   })
 })

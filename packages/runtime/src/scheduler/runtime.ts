@@ -100,6 +100,7 @@ export class PulseRuntime {
   private readonly programs = new Map<string, LaneProgram>()
   private readonly executions = new Map<string, { controller: AbortController; promise: Promise<void>; timeoutTimer?: string; deadlineTimer?: string; cancelTimer?: string }>()
   private readonly lockReleases = new Map<string, Array<() => void>>()
+  private readonly waitDeadlineTimers = new Map<string, string>()
   private readonly lockBlocked = new Set<string>()
   private readonly executor: EffectExecutor
   private readonly customExecutor: boolean
@@ -148,6 +149,7 @@ export class PulseRuntime {
         }
         if (effect.state === 'retry_wait' && effect.retryAt !== undefined) this.clock.timers.schedule(effect.retryAt, () => { if (!effect.outcome && effect.state === 'retry_wait') { effect.state = 'queued'; delete effect.retryAt; this.dispatchQueuedEffects() } })
       }
+      for (const wait of this.state.waits.values()) if (wait.state === 'pending') this.scheduleWaitDeadline(wait)
     }
     this.maxSteps = config.maxLaneStepsPerTick ?? 32
     this.maxConsecutiveControlErrors = config.maxConsecutiveControlErrors ?? 2
@@ -334,6 +336,7 @@ export class PulseRuntime {
         }
         commitMutationTransaction(this.state, this.mutationLog, `step:${lane.id}:${lane.version + 1}`, result.mutations, this.state.now, this.sessionId)
         for (const mutation of result.mutations) if (mutation.op === 'insertEffect') this.outbox.enqueue(mutation.record, this.state.now)
+        for (const mutation of result.mutations) if (mutation.op === 'insertWait') this.scheduleWaitDeadline(mutation.record)
         const updated = this.state.lanes.get(lane.id)
         if (updated) delete updated.consecutiveControlErrors
         if (updated && updated.pendingResumeInput) delete updated.pendingResumeInput
@@ -843,17 +846,21 @@ export class PulseRuntime {
         const modeSatisfied = satisfied >= required
         const impossible = wait.spec.mode === 'all' ? Boolean(unsatisfied && !pending) : satisfied + pendingCount < required
         const modeUnsatisfied = !modeSatisfied && (impossible || (!pending && satisfied < required))
-        if (modeUnsatisfied && wait.spec.onUnsatisfied === 'fail_lane') {
+        const hardFailure = wait.spec.mode === 'all' && unsatisfied !== undefined
+        if ((hardFailure || modeUnsatisfied) && wait.spec.onUnsatisfied === 'fail_lane') {
+          this.cancelWaitDeadline(wait.id)
           wait.state = 'unsatisfied'; wait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error: unsatisfied ?? { code: 'WAIT_QUORUM_UNREACHABLE', message: 'Wait can no longer satisfy its quorum.' } }
           const lane = this.state.lanes.get(wait.laneId); if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'failed'; delete lane.activeWaitId; lane.version++ }
           changed = true
-        } else if (modeUnsatisfied && (!pending || wait.spec.mode !== 'all')) {
+        } else if (modeUnsatisfied || (hardFailure && !pending)) {
+          this.cancelWaitDeadline(wait.id)
           wait.state = 'unsatisfied'
           wait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error: unsatisfied ?? { code: 'WAIT_QUORUM_UNREACHABLE', message: 'Wait can no longer satisfy its quorum.' } }
           const lane = this.state.lanes.get(wait.laneId)
           if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'ready'; delete lane.activeWaitId; lane.pendingResumeInput = { type: 'wait', resolution: wait.resolution }; this.enqueueLane(lane.id) }
           changed = true
         } else if (modeSatisfied || (!pending && !unsatisfied && wait.spec.mode === 'all')) {
+          this.cancelWaitDeadline(wait.id)
           wait.state = 'satisfied'; wait.resolution = { waitId: wait.id, status: 'satisfied', dependencies: observations }
           const lane = this.state.lanes.get(wait.laneId)
           if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) {
@@ -872,6 +879,40 @@ export class PulseRuntime {
       }
     }
     this.recomputePriorityInheritance()
+  }
+
+  private scheduleWaitDeadline(wait: import('../core/types.js').WaitRecord): void {
+    if (wait.state !== 'pending' || wait.spec.deadlineAt === undefined || this.waitDeadlineTimers.has(wait.id)) return
+    const timerId = this.clock.timers.schedule(wait.spec.deadlineAt, () => this.expireWait(wait.id))
+    this.waitDeadlineTimers.set(wait.id, timerId)
+  }
+
+  private cancelWaitDeadline(waitId: string): void {
+    const timerId = this.waitDeadlineTimers.get(waitId)
+    if (timerId !== undefined) { this.clock.timers.cancel(timerId); this.waitDeadlineTimers.delete(waitId) }
+  }
+
+  private expireWait(waitId: string): void {
+    this.waitDeadlineTimers.delete(waitId)
+    const wait = this.state.waits.get(waitId)
+    if (!wait || wait.state !== 'pending') return
+    const observations: Record<string, import('../core/types.js').DependencyObservation> = {}
+    for (const dependency of wait.spec.dependencies) {
+      const target = dependency.target as TargetRef
+      const outcome = target.kind === 'lane' ? outcomeForLane(this.state.lanes.get(target.id)!) : this.state.effects.get(target.id)?.outcome
+      observations[dependency.key] = outcome === undefined ? { state: 'pending', target } : outcome.status === 'cancelled' && wait.spec.onCancelled === 'ignore' ? { state: 'ignored', target, outcome } : { state: 'settled', target, outcome }
+    }
+    const error: RuntimeError = { code: 'WAIT_DEADLINE_EXCEEDED', message: 'Wait deadline exceeded.', details: { deadlineAt: wait.spec.deadlineAt ?? this.state.now } }
+    wait.state = 'unsatisfied'
+    wait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error }
+    const lane = this.state.lanes.get(wait.laneId)
+    if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) {
+      delete lane.activeWaitId
+      if (wait.spec.onUnsatisfied === 'fail_lane') { lane.status = 'failed'; lane.version++; this.emit({ type: 'lane.failed', laneId: lane.id, data: error as unknown as JsonValue }) }
+      else { lane.status = 'ready'; lane.pendingResumeInput = { type: 'wait', resolution: wait.resolution }; this.enqueueLane(lane.id) }
+    }
+    this.emit({ type: 'wait.deadline_exceeded', laneId: wait.laneId, data: { waitId: wait.id, deadlineAt: wait.spec.deadlineAt ?? this.state.now } })
+    this.refreshWaits()
   }
 
   private recomputePriorityInheritance(): void {
