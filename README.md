@@ -4,7 +4,7 @@ Pulse 是一个面向多步骤 Agent 应用的可恢复运行时。它把 Agent 
 
 Pulse 关注的是执行语义：状态如何提交、并发如何调度、结果如何传递、取消和重试是否安全，以及模型换 Provider 后上下文是否仍然可重建。模型 Provider、工具和宿主 UI 都是可替换的适配层。
 
-> 当前仓库包含架构规范、应用 DSL 规范和 M0/M1 实施计划。它们描述目标 Runtime 与 MVP 交付边界，不代表全部代码能力已经完成。
+> 当前仓库包含架构规范、应用 DSL 规范和 M0/M1 实施计划；M0/M1 主链及部分 M1.5/M2 本地扩展已经实现并由确定性测试覆盖。真实 Provider、远程副作用和生产运维仍需独立环境验收。
 
 ## 为什么需要 Pulse
 
@@ -214,7 +214,7 @@ localsHash
 
 ## DSL 示例
 
-下面是应用层 DSL 的目标用法。它编译成纯函数 Step 和可序列化 ResumePoint；示例表达的是 DSL 契约，不代表当前仓库已经实现全部 API。
+下面是应用层 DSL 的可运行用法。它编译成纯函数 Step 和可序列化 ResumePoint；Provider、ToolSet 和宿主凭证仍由应用侧注册与配置。
 
 ```ts
 const program = defineLaneProgram({
