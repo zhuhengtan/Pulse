@@ -41,6 +41,14 @@ describe('session storage policy', () => {
     expect(policy.inspect().find((record) => record.key === 'r1')?.pinCount).toBe(0)
   })
 
+  it('pins queued Host facts until the Scheduler drains them', () => {
+    const runtime = new PulseRuntime()
+    runtime.enqueueHostCommand({ type: 'cancel', agentId: 'missing-agent', reason: 'USER_REQUESTED' })
+    expect(runtime.storagePolicy.inspect().find((record) => record.key === 'snapshot:fact:host-command-1')).toMatchObject({ pinCount: 1 })
+    runtime.tick()
+    expect(runtime.storagePolicy.inspect().some((record) => record.key === 'snapshot:fact:host-command-1')).toBe(false)
+  })
+
   it('automatically pins active lane snapshots and LLM requests', async () => {
     let release!: () => void
     const program: LaneProgram = { id: 'storage-pins', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'request', kind: 'llm', concurrencyClass: 'llm', input: { request: {} } }] }], next: { programId: 'storage-pins', programVersion: '1', step: 'done', locals: {} } }) }

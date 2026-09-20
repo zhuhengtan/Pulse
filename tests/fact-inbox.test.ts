@@ -19,4 +19,14 @@ describe('FactInbox', () => {
     expect(inbox.drain()[0]?.fact.payload.ok).toBe(true)
     expect(() => inbox.drain(-1)).toThrow('INVALID_FACT_DRAIN_LIMIT')
   })
+
+  it('round-trips queued facts and deduplication history', () => {
+    const inbox = new FactInbox<{ kind: string; value: number }>()
+    inbox.enqueue({ kind: 'complete', value: 1 }, 'event-1')
+    inbox.enqueue({ kind: 'cancel', value: 2 }, 'event-2')
+    const restored = FactInbox.fromSnapshot(JSON.parse(JSON.stringify(inbox.snapshot())))
+    expect(restored.drain(1)[0]).toMatchObject({ eventId: 'event-1', receivedSeq: 1 })
+    expect(restored.enqueue({ kind: 'duplicate', value: 3 }, 'event-1')).toBeUndefined()
+    expect(restored.drain()[0]).toMatchObject({ eventId: 'event-2', receivedSeq: 2 })
+  })
 })

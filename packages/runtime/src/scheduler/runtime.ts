@@ -135,7 +135,7 @@ export class PulseRuntime {
   readonly priorityInheritance = new PriorityInheritance()
   readonly resourceLocks = new ResourceLockManager()
   readonly storagePolicy: SessionStoragePolicy
-  readonly factInbox = new FactInbox<HostCommand>()
+  readonly factInbox: FactInbox<HostCommand>
   readonly observationInbox = new ObservationInbox()
   private readonly programs = new Map<string, LaneProgram>()
   private readonly executions = new Map<string, { controller: AbortController; promise: Promise<void>; timeoutTimer?: string; deadlineTimer?: string; cancelTimer?: string }>()
@@ -172,6 +172,9 @@ export class PulseRuntime {
     this.storagePolicy = restored?.storagePolicy ?? new SessionStoragePolicy(config.storagePolicy)
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
+    this.factInbox = restored?.factInbox === undefined ? new FactInbox<HostCommand>() : FactInbox.fromSnapshot<HostCommand>(restored.factInbox as unknown as import('../core/inbox.js').FactInboxSnapshot<HostCommand>)
+    const restoredCommandIds = this.factInbox.snapshot().seen.map((eventId) => /^host-command-(\d+)$/.exec(eventId)?.[1]).filter((value): value is string => value !== undefined).map(Number)
+    if (restoredCommandIds.length) this.hostCommandSeq = Math.max(...restoredCommandIds) + 1
     if (restored?.quarantine) this.quarantine.restore(restored.quarantine)
     if (restored) {
       const recovery = this.outbox.recover(this.state)
@@ -275,11 +278,11 @@ export class PulseRuntime {
   backgroundAgents(): BackgroundAgentInfo[] {
     return [...this.state.agents.values()].filter((agent) => agent.detached === true).map((agent) => ({ agentId: agent.id, rootLaneId: agent.rootLaneId, state: agent.state ?? 'created', detached: true }))
   }
-  exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine, this.storagePolicy) }
+  exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine, this.storagePolicy, this.factInbox.snapshot()) }
   async persist(backend: RuntimePersistenceBackend): Promise<void> {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
-    await backend.save(exportRuntimePersistence(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy))
+    await backend.save(exportRuntimePersistence(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, this.factInbox.snapshot()))
     this.storagePolicy.markPersisted()
     this.markArtifactsPersisted()
   }
@@ -296,7 +299,7 @@ export class PulseRuntime {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
     const eventWatermark = options.compactEventsThrough ?? this.state.events.at(-1)?.seq
-    const snapshot = exportRuntimeCheckpoint(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark })
+    const snapshot = exportRuntimeCheckpoint(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark }, this.factInbox.snapshot())
     await backend.save(snapshot)
     this.storagePolicy.markPersisted()
     this.markArtifactsPersisted()
@@ -345,7 +348,10 @@ export class PulseRuntime {
   }
 
   enqueueHostCommand(command: HostCommand): void {
-    this.factInbox.enqueue(command, `host-command-${this.hostCommandSeq++}`)
+    const envelope = this.factInbox.enqueue(command, `host-command-${this.hostCommandSeq++}`)
+    if (!envelope) return
+    this.syncStoragePolicy()
+    this.schedulePersistence()
     for (const resolve of this.factWaiters.splice(0)) resolve()
   }
 
@@ -648,6 +654,7 @@ export class PulseRuntime {
       if (!effect.outcome && effect.kind === 'llm') pinKeys.add(`snapshot:request:${effect.id}:${effect.attemptId}`)
       if (!effect.outcome) for (const ref of effect.derivedFrom ?? []) pinKeys.add(`${provenanceRefKind(ref) === 'artifact' ? 'artifact' : 'result'}:${provenanceRefId(ref)}`)
     }
+    for (const envelope of this.factInbox.snapshot().queue) pinKeys.add(`snapshot:fact:${envelope.eventId}`)
     policy.replacePinSource('runtime', pinKeys)
     for (const lane of state.lanes.values()) {
       const snapshotKey = `snapshot:lane:${lane.id}:${lane.context.version}`
@@ -673,6 +680,9 @@ export class PulseRuntime {
     for (const artifact of state.artifacts.values()) policy.put('artifact', `artifact:${artifact.ref}`, artifact as unknown as JsonValue)
     for (const event of state.events) policy.put('event', `event:${event.id}`, event as unknown as JsonValue)
     for (const lane of state.lanes.values()) if (lane.pendingResumeInput) policy.put('snapshot', `snapshot:resume:${lane.id}:${lane.version}`, lane.pendingResumeInput as unknown as JsonValue)
+    const factKeys = new Set(this.factInbox.snapshot().queue.map((envelope) => `snapshot:fact:${envelope.eventId}`))
+    for (const envelope of this.factInbox.snapshot().queue) policy.put('snapshot', `snapshot:fact:${envelope.eventId}`, envelope as unknown as JsonValue)
+    for (const record of policy.inspect()) if (record.key.startsWith('snapshot:fact:') && !factKeys.has(record.key)) policy.remove(record.key)
   }
 
   private hasPendingHostInteraction(agentId?: string): boolean { return [...this.state.effects.values()].some((effect) => effect.kind === 'human' && !effect.outcome && (agentId === undefined || effect.agentId === agentId)) }

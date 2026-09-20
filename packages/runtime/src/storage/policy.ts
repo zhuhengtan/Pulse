@@ -64,6 +64,16 @@ export class SessionStoragePolicy {
 
   pin(key: string): void { const record = this.require(key); record.pinCount++ }
   unpin(key: string): void { const record = this.require(key); record.pinCount = Math.max(0, record.pinCount - 1) }
+  remove(key: string): boolean {
+    const record = this.records.get(key)
+    if (!record || record.pinCount > 0 || record.kind === 'event') return false
+    this.records.delete(key)
+    for (const [source, keys] of this.pinSources) {
+      keys.delete(key)
+      if (keys.size === 0) this.pinSources.delete(source)
+    }
+    return true
+  }
 
   /** Replace one logical owner’s pins without double-counting repeated reconciliation. */
   replacePinSource(source: string, keys: Iterable<string>): void {

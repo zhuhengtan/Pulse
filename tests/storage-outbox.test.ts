@@ -32,6 +32,16 @@ describe('effect outbox and runtime persistence envelope', () => {
     expect(exportRuntimePersistence(state, log, outbox).schemaVersion).toBe(1)
   })
 
+  it('persists queued Host facts and resumes command ids after restore', () => {
+    const runtime = new PulseRuntime()
+    runtime.enqueueHostCommand({ type: 'cancel', agentId: 'agent-1', reason: 'USER_REQUESTED' })
+    const restored = new PulseRuntime({ persistence: runtime.exportPersistence() })
+    expect(restored.factInbox.snapshot().queue).toHaveLength(1)
+    expect(restored.factInbox.snapshot().queue[0]?.eventId).toBe('host-command-1')
+    restored.enqueueHostCommand({ type: 'cancel', agentId: 'agent-2', reason: 'USER_REQUESTED' })
+    expect(restored.factInbox.snapshot().queue.map((envelope) => envelope.eventId)).toEqual(['host-command-1', 'host-command-2'])
+  })
+
   it('marks Artifact residency persisted only after the backend acknowledges the save', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-artifact-persisted-'))
     try {
