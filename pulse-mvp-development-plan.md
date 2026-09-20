@@ -67,6 +67,7 @@
 | Detached 生命周期事务 | `detachAgent/attachAgent` 的 Agent record 与事实事件通过同一 MutationLog 事务提交 | `tests/agent-effect.test.ts` | 本轮 Detached 生命周期事务提交 |
 | Agent 终态事务 | `run()` / `runAgent()` 的根 Lane 终态通过 `setAgent` Mutation 提交，运行入口不再直接改写 Agent 状态 | `tests/m0-acceptance.test.ts` | 本轮 Agent 终态事务提交 |
 | Agent 取消状态事务 | `cancelAgent()` 的 `cancelling/cancelled` 状态通过 `setAgent` Mutation 提交，并保留未决副作用的 Quarantine 语义 | `tests/runtime-control.test.ts` | 本轮 Agent 取消状态事务提交 |
+| Agent 取消级联准入 | 取消入口预审整条 Agent/Lane/Effect/quarantine/settlement 级联及终态事件；`agent.cancelled` 确认与终态状态同事务提交，后续存储拒绝不留下半取消状态 | `tests/runtime-control.test.ts` | `7bfd5d8` |
 | Agent 终态准入失败 | Agent 终态 `setAgent` 的 storage admission 失败不再静默返回，`run()`/`runAgent()` fail-closed 暴露 `SESSION_STORAGE_LIMIT_EXCEEDED` | `tests/runtime-control.test.ts` | `11aa4d4` |
 | Lane/Effect 取消事务 | Lane 取消、Effect cancel-requested 与 Quarantine 的状态和事件统一通过 MutationLog 提交，避免取消过程中直接改写 live record | `tests/runtime-control.test.ts` | 本轮 Lane/Effect 取消事务提交 |
 | 重试/Remote Unknown 事务 | retry scheduled/ready、Remote Unknown 和 reconciliation abandon 的 Effect/Lane 状态与事件统一通过 MutationLog 提交 | `tests/retry-policy.test.ts`、`tests/runtime-control.test.ts` | 本轮重试与 Remote Unknown 事务提交 |
@@ -574,6 +575,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `a3fbfd3`：增加 `SqliteDistributedWorkerCoordinator`，把 queued/lease/renew/complete/fail/cancel/recovery 放入 SQLite `BEGIN IMMEDIATE` 条件事务，支持独立进程单任务认领和跨进程结果观察。
 - `bec3ba9`：`cancel_effect` 的确认事件并入 queued 终结、立即 quarantine 或 cancel-requested 事务，覆盖不同取消阶段的 Fact 消费边界。
 - `a866a6c`：Agent Host Cancel 的确认事件并入首次 `setAgent(state=cancelling)` 事务，避免接受状态未提交时提前消费 Fact。
+- `7bfd5d8`：Agent 取消级联预审全部目标状态与事实事件，并将 `agent.cancelled` 事件并入 Agent 终态事务，拒绝后续存储失败造成半取消状态。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
@@ -583,7 +585,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，52 个测试文件、292 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，52 个测试文件、293 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
