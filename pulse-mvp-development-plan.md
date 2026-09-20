@@ -58,8 +58,9 @@
 | 高级 Wait 与 Tool 准入 | Wait 支持 `any/quorum`、独立 deadline 和恢复重建；Tool Manifest 可在提交前注入可信锁、副作用策略与默认超时 | `tests/advanced-join.test.ts`、`tests/tool-host.test.ts` | `af1ff6f`、`f523c71`、`a95d4f5` |
 | Fork Affinity 组内依赖 | 相同 Program 的亲和折叠支持组内 `dependsOn` 拓扑排序、成功/已结算条件、成员结果注入与失败传播；组外依赖仍保持 fail-closed | `tests/fork-affinity.test.ts` | `c0bb520` |
 | 可复用 ReAct Lane 模板 | `defineReActLane` 保留最终 `resultRef`，支持模板级 `system/toolSet`、`outputSchema` 与 `historyCompaction`，模型请求继续走统一 ContextBuilder | `tests/dsl-host-macros.test.ts` | `6151318` |
+| 进程级恢复验收 | 子进程先持久化在途写 Effect 后被 `SIGKILL`，父进程通过真实文件后端恢复 `reconcile_required`、Quarantine 与资源锁隔离 | `tests/storage-outbox.test.ts`、`tests/process-recovery-child.ts` | `29a8e4c` |
 
-统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 40 个测试文件、168/168 通过，`pnpm build` 也已通过。
+统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 40 个测试文件、169/169 通过，`pnpm build` 也已通过。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、进程级故障注入后的完整崩溃恢复/副作用对账，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、恢复、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实进程/网络证据。
 
@@ -386,7 +387,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `639c6cb`：RuntimeTelemetryExporter、原子追加的 JSONL 文件 exporter 和显式 `runtime.exportTelemetry()` 宿主出口。
 - `ad09a2f`：有界 `RuntimeTelemetryAggregator`、峰值统计、阈值告警和冷却窗口。
 - `290c559` / `b8f6aec` / `417ecb1`：恢复时重建 quarantine 资源锁、放弃后释放隔离锁、校验快照引用并对 malformed snapshot fail closed。
-- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，40 个测试文件、168 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，40 个测试文件、169 个测试通过；`pnpm build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
@@ -394,7 +395,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | --- | --- | --- |
 | 真实 Provider Live Smoke | 已执行但被鉴权阻塞 | 请求已到真实 HTTP endpoint，当前返回 `PROVIDER_HTTP_401`；需要有效凭证验证 token、取消、structured output 和 tool-call 往返 |
 | Runtime Storage pin/retention | 确定性代码与后端快照已覆盖 | 自动 pin、hard-limit 预检、compact、backend 确认后的 `persisted` 标记和 restore 已有测试；旧 Snapshot/Result 外部索引与所有进程入口的统一写事务仍需生产实现 |
-| 崩溃恢复与副作用对账 | 部分完成 | 有快照引用校验、Mutation Log、Outbox、backend restore、启动 quarantine、恢复资源锁和 Runtime/Tool 对账入口；仍缺进程级故障注入、真正的持久化事务边界和真实写副作用 reconcile 证明 |
+| 崩溃恢复与副作用对账 | 进程级重启路径已验证，真实副作用仍待验证 | 已补子进程 `SIGKILL` 后恢复、启动 quarantine 和资源锁隔离；仍缺真实外部写副作用 reconcile，以及生产环境的持久化事务边界证明 |
 | Provider 请求完整能力 | 确定性映射已覆盖，真实厂商仍待验证 | OpenAI-compatible/Anthropic 请求带 model、tool schema、structured schema，usage 已归一化；真实 endpoint 的字段兼容、计费口径、取消和 tool-call 往返仍需有效凭证 |
 | 运行观测 | Runtime 侧已有只读出口、可持久化 exporter、聚合和告警规则 | `inspect/explain`、`telemetry()`、JSONL exporter 和有界聚合器已覆盖 route 排除原因、provider/model slot、Attempt usage/cost、峰值与阈值告警；外部生产指标系统接入仍需宿主配置 |
 
