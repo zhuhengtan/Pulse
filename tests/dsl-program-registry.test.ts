@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defineLaneProgram, PulseRuntime, type ProgramRef } from '../packages/runtime/src/index.js'
+import { defineLaneProgram, PulseRuntime, type LaneProgram, type ProgramRef } from '../packages/runtime/src/index.js'
 
 describe('DSL program registry contract', () => {
   it('registers programs and starts an agent from a ProgramRef', async () => {
@@ -37,5 +37,15 @@ describe('DSL program registry contract', () => {
 
     expect((await runtime.run(created.agentId)).status).toBe('succeeded')
     expect(runtime.programs.has(program.id, program.version)).toBe(true)
+  })
+
+  it('rejects cyclic series program registration atomically', () => {
+    const runtime = new PulseRuntime()
+    const first: LaneProgram = { id: 'cycle-a', version: '1', step: () => ({ actions: [], next: { programId: 'cycle-a', programVersion: '1', step: 'start', locals: {} } }) }
+    const second: LaneProgram = { id: 'cycle-b', version: '1', step: () => ({ actions: [], next: { programId: 'cycle-b', programVersion: '1', step: 'start', locals: {} } }), seriesMemberProgram: first }
+    first.seriesMemberProgram = second
+    expect(() => runtime.programs.register(first)).toThrow('PROGRAM_REGISTRATION_CYCLE:cycle-a@1')
+    expect(runtime.programs.has('cycle-a', '1')).toBe(false)
+    expect(runtime.programs.has('cycle-b', '1')).toBe(false)
   })
 })

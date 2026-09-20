@@ -119,9 +119,20 @@ export class ProgramRegistry {
   private readonly records = new Map<string, LaneProgram>()
 
   register(program: LaneProgram): void {
-    assertProgramPure(program)
-    this.records.set(`${program.id}@${program.version}`, program)
-    if (program.seriesMemberProgram) this.register(program.seriesMemberProgram)
+    const pending = new Map<string, LaneProgram>()
+    const visiting = new Set<string>()
+    const visit = (candidate: LaneProgram): void => {
+      const key = `${candidate.id}@${candidate.version}`
+      if (visiting.has(key)) throw new Error(`PROGRAM_REGISTRATION_CYCLE:${key}`)
+      if (pending.has(key)) return
+      visiting.add(key)
+      assertProgramPure(candidate)
+      pending.set(key, candidate)
+      if (candidate.seriesMemberProgram) visit(candidate.seriesMemberProgram)
+      visiting.delete(key)
+    }
+    visit(program)
+    for (const [key, candidate] of pending) this.records.set(key, candidate)
   }
 
   get(programId: string, programVersion?: string): LaneProgram | undefined {
