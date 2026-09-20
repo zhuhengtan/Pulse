@@ -1,4 +1,4 @@
-import type { AgentRecord, EffectRecord, JsonValue, LaneRecord, MergeProposal, PrivacyMetadata, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord, ToolCallCorrelation } from '../core/types.js'
+import type { AgentRecord, ArtifactRecord, EffectRecord, JsonValue, LaneRecord, MergeProposal, PrivacyMetadata, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord, ToolCallCorrelation } from '../core/types.js'
 import { createRuntimeState } from '../core/types.js'
 import { normalizeRuntimeEvent } from '../core/events.js'
 
@@ -11,6 +11,7 @@ export interface SessionSnapshot {
     effects: Array<[string, EffectRecord]>
     waits: Array<[string, WaitRecord]>
     results: Array<[string, ResultRecord]>
+    artifacts?: Array<[string, ArtifactRecord]>
     toolCallCorrelations?: Array<[string, ToolCallCorrelation]>
     mergeProposals: Array<[string, MergeProposal]>
     events: RuntimeEvent[]
@@ -44,6 +45,7 @@ export function exportRuntimeState(state: RuntimeState): SessionSnapshot {
       effects: [...state.effects.entries()].map(([id, effect]) => [id, structuredClone(effect)]),
       waits: [...state.waits.entries()].map(([id, wait]) => [id, structuredClone(wait)]),
       results: [...state.results.entries()].map(([id, result]) => [id, structuredClone(result)]),
+      artifacts: [...state.artifacts.entries()].map(([ref, artifact]) => [ref, structuredClone(artifact)]),
       toolCallCorrelations: [...state.toolCallCorrelations.entries()].map(([id, correlation]) => [id, structuredClone(correlation)]),
       mergeProposals: [...state.mergeProposals.entries()].map(([id, proposal]) => [id, structuredClone(proposal)]),
       events: state.events.map((event) => normalizeRuntimeEvent(event as unknown as RuntimeEventInput, event.seq, { sessionId: event.sessionId, timestamp: event.timestamp })),
@@ -68,7 +70,7 @@ export function importRuntimeState(snapshot: SessionSnapshot | JsonValue): Runti
   if (!value || value.schemaVersion !== 1 || !value.state || !Array.isArray(value.state.agents) || !Array.isArray(value.state.lanes) || !Array.isArray(value.state.effects) || !Array.isArray(value.state.waits) || !Array.isArray(value.state.results) || !Array.isArray(value.state.events) || (value.state.eventsCompactedThrough !== undefined && (!Number.isInteger(value.state.eventsCompactedThrough) || value.state.eventsCompactedThrough < 0))) throw new Error('INVALID_SESSION_SNAPSHOT')
   const state = createRuntimeState(value.state.maxTotalLanes, { maxQueuedEffects: value.state.maxQueuedEffects, maxRunning: { llm: decodeNumber(value.state.maxRunning.llm), tool: decodeNumber(value.state.maxRunning.tool), agent: decodeNumber(value.state.maxRunning.agent), none: decodeNumber(value.state.maxRunning.none) }, forkAffinity: value.state.forkAffinity ?? 'off', ...(value.state.historySoftTokens === undefined ? {} : { historySoftTokens: value.state.historySoftTokens }), ...(value.state.historyHardTokens === undefined ? {} : { historyHardTokens: value.state.historyHardTokens }), ...(value.state.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: value.state.maxResultSummaryBytes }), ...(value.state.trustedSanitizerIds === undefined ? {} : { trustedSanitizerIds: value.state.trustedSanitizerIds }) })
   state.now = value.state.now
-  state.nextIds = { ...value.state.nextIds, proposal: value.state.nextIds.proposal ?? 1 }
+  state.nextIds = { ...value.state.nextIds, artifact: value.state.nextIds.artifact ?? 1, proposal: value.state.nextIds.proposal ?? 1 }
   for (const [id, agent] of value.state.agents) {
     const { globalVersions, globalPrivacy, ...agentValue } = agent
     state.agents.set(id, { ...agentValue, globalVersions: new Map(globalVersions.map(([version, context]) => [version, structuredClone(context)] as [number, JsonValue])), ...(globalPrivacy === undefined ? {} : { globalPrivacy: new Map(globalPrivacy.map(([version, metadata]) => [version, structuredClone(metadata)] as [number, PrivacyMetadata])) }) })
@@ -80,6 +82,7 @@ export function importRuntimeState(snapshot: SessionSnapshot | JsonValue): Runti
   for (const [id, effect] of value.state.effects) state.effects.set(id, structuredClone(effect))
   for (const [id, wait] of value.state.waits) state.waits.set(id, structuredClone(wait))
   for (const [id, result] of value.state.results) state.results.set(id, structuredClone(result))
+  for (const [ref, artifact] of value.state.artifacts ?? []) state.artifacts.set(ref, structuredClone(artifact))
   for (const [id, correlation] of value.state.toolCallCorrelations ?? []) state.toolCallCorrelations.set(id, structuredClone(correlation))
   for (const [id, proposal] of value.state.mergeProposals ?? []) state.mergeProposals.set(id, structuredClone(proposal))
   state.events = value.state.events.map((event) => normalizeRuntimeEvent(event as unknown as RuntimeEventInput, (event as RuntimeEvent).seq, { sessionId: (event as RuntimeEvent).sessionId, timestamp: (event as RuntimeEvent).timestamp }))

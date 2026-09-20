@@ -3,7 +3,7 @@ import { createAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
 import type { EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata } from '../core/types.js'
-import { createRuntimeState, effectivePrivacy, privacyForContextSnapshot, privacyTaintsForDerivedRefs, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
+import { createRuntimeState, effectivePrivacy, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
 import { FactInbox, ObservationInbox } from '../core/inbox.js'
@@ -18,6 +18,7 @@ import { appendHistory, historyPressure } from '../context/builder.js'
 import { validateJsonSchema } from '../models/router.js'
 import { SessionStoragePolicy, type StoragePolicyConfig } from '../storage/policy.js'
 import { collectRuntimeTelemetry, type RuntimeTelemetryExporter, type RuntimeTelemetrySnapshot } from './telemetry.js'
+import { markArtifactPersisted, pinArtifact, publishArtifact, readArtifact, unpinArtifact, type ArtifactPublication } from '../storage/artifacts.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number; observe?: (event: { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }) => void }
 export interface LaneProgram {
@@ -685,8 +686,8 @@ export class PulseRuntime {
     const sourcePrivacy = effect.derivedFrom?.flatMap((ref) => {
       const result = this.state.results.get(ref)
       if (result) return [effectivePrivacy(result.privacy, result.privacyTaints)]
-      const snapshot = ownerLane ? privacyForContextSnapshot(this.state, ownerLane, ref) : undefined
-      return snapshot ? [effectivePrivacy(snapshot.privacy, snapshot.privacyTaints)] : []
+      const source = ownerLane ? privacyMetadataForDerivedRef(this.state, ownerLane, ref) : undefined
+      return source ? [effectivePrivacy(source.privacy, source.privacyTaints)] : []
     }) ?? []
     const sourceTaints = ownerLane ? privacyTaintsForDerivedRefs(this.state, ownerLane, effect.derivedFrom ?? []) : []
     const outputTaints = [...sourceTaints, ...(effectiveExecution.privacyTaints ?? [])]
@@ -795,6 +796,17 @@ export class PulseRuntime {
   cancelEffect(effectId: string, graceMs = 0): void {
     this.requestEffectCancellation(effectId, 'USER_REQUESTED', graceMs)
   }
+
+  publishArtifact(publication: ArtifactPublication): import('../core/types.js').ArtifactRecord {
+    const record = publishArtifact(this.state, publication)
+    this.schedulePersistence()
+    return record
+  }
+
+  readArtifact(ref: string): Uint8Array { return readArtifact(this.state, ref) }
+  pinArtifact(ref: string): void { pinArtifact(this.state, ref); this.schedulePersistence() }
+  unpinArtifact(ref: string): void { unpinArtifact(this.state, ref); this.schedulePersistence() }
+  markArtifactPersisted(ref: string): void { markArtifactPersisted(this.state, ref); this.schedulePersistence() }
 
   cancelAgent(agentId: string, reason: 'USER_REQUESTED' | 'SUPERSEDED' | 'POLICY' | 'TIMEOUT' = 'USER_REQUESTED'): void {
     const agent = this.state.agents.get(agentId)

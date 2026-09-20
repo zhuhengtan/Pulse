@@ -27,8 +27,13 @@ function hasTarget(state: SessionSnapshot['state'], target: { kind: string; id: 
   return target.kind === 'lane' ? state.lanes.some(([id]) => id === target.id) : target.kind === 'effect' ? state.effects.some(([id]) => id === target.id) : false
 }
 
-function hasDerivedReference(ref: string, ownerLaneId: string, agents: Map<string, any>, lanes: Map<string, any>, results: Map<string, any>): boolean {
+function hasDerivedReference(ref: string, ownerLaneId: string, agents: Map<string, any>, lanes: Map<string, any>, results: Map<string, any>, artifacts: Map<string, any>): boolean {
   if (results.has(ref)) return true
+  const artifact = artifacts.get(ref)
+  if (artifact) {
+    const lane = lanes.get(ownerLaneId)
+    return artifact.agentId === undefined || artifact.agentId === lane?.agentId
+  }
   const parsed = parseContextSnapshotRef(ref)
   if (!parsed) return false
   if (parsed.kind === 'global') {
@@ -50,7 +55,12 @@ export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceS
   const effects = new Map(state.effects)
   const waits = new Map(state.waits)
   const results = new Map(state.results)
+  const artifacts = new Map(state.artifacts ?? [])
   for (const [id, agent] of agents) if (!lanes.has(agent.rootLaneId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:agent.rootLaneId:${id}`)
+  for (const [ref, artifact] of artifacts) {
+    if (artifact.ref !== ref || !artifact.mediaType || !Number.isInteger(artifact.sizeBytes) || artifact.sizeBytes < 0 || typeof artifact.contentBase64 !== 'string' || typeof artifact.contentHash !== 'string' || artifact.pinCount < 0) throw new Error(`INVALID_RUNTIME_PERSISTENCE_ARTIFACT:${ref}`)
+    if (artifact.agentId !== undefined && !agents.has(artifact.agentId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:artifact.agentId:${ref}`)
+  }
   for (const [id, lane] of lanes) {
     if (!agents.has(lane.agentId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:lane.agentId:${id}`)
     if (lane.ownerLaneId !== undefined && !lanes.has(lane.ownerLaneId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:lane.ownerLaneId:${id}`)
@@ -63,7 +73,7 @@ export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceS
   for (const [id, effect] of effects) {
     if (!lanes.has(effect.ownerLaneId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:effect.ownerLaneId:${id}`)
     if (effect.childAgentId !== undefined && !agents.has(effect.childAgentId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:effect.childAgentId:${id}`)
-    for (const resultRef of effect.derivedFrom ?? []) if (!hasDerivedReference(resultRef, effect.ownerLaneId, agents, lanes, results)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:effect.derivedFrom:${id}`)
+    for (const resultRef of effect.derivedFrom ?? []) if (!hasDerivedReference(resultRef, effect.ownerLaneId, agents, lanes, results, artifacts)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:effect.derivedFrom:${id}`)
   }
   for (const [id, wait] of waits) {
     if (!lanes.has(wait.laneId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:wait.laneId:${id}`)
@@ -72,7 +82,7 @@ export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceS
   }
   for (const [id, proposal] of new Map(state.mergeProposals)) {
     if (!agents.has(proposal.agentId) || !lanes.has(proposal.sourceLaneId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:mergeProposal:${id}`)
-    for (const ref of proposal.delta.derivedFrom ?? []) if (!hasDerivedReference(ref, proposal.sourceLaneId, agents, lanes, results)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:mergeProposal.derivedFrom:${id}`)
+    for (const ref of proposal.delta.derivedFrom ?? []) if (!hasDerivedReference(ref, proposal.sourceLaneId, agents, lanes, results, artifacts)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:mergeProposal.derivedFrom:${id}`)
   }
   for (const entry of value.quarantine ?? []) if (!effects.has(entry.effectId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:quarantine:${entry.effectId}`)
 }

@@ -4,6 +4,8 @@ export type AgentId = string
 export type EffectId = string
 export type WaitId = string
 export type ResultRef = string
+export type ArtifactRef = string
+export type DataRef = { kind: 'result'; ref: ResultRef } | { kind: 'artifact'; ref: ArtifactRef }
 export type ContextVersion = number
 export type PrivacyLabel = 'public' | 'cloud_allowed' | 'local_only'
 export type ForkAffinityMode = 'off' | 'advise' | 'coalesce'
@@ -177,6 +179,20 @@ export interface ResultRecord {
     approvalRef?: string
     sanitizerId?: string
   }
+}
+
+export interface ArtifactRecord {
+  ref: ArtifactRef
+  agentId?: AgentId
+  mediaType: string
+  sizeBytes: number
+  contentHash: string
+  contentBase64: string
+  privacy: PrivacyLabel
+  privacyTaints?: PrivacyTaint[]
+  derivedFrom?: string[]
+  storageState: 'memory' | 'persisted'
+  pinCount: number
 }
 
 export interface DependencySpec {
@@ -404,11 +420,12 @@ export interface RuntimeState {
   effects: Map<EffectId, EffectRecord>
   waits: Map<WaitId, WaitRecord>
   results: Map<ResultRef, ResultRecord>
+  artifacts: Map<ArtifactRef, ArtifactRecord>
   toolCallCorrelations: Map<string, ToolCallCorrelation>
   mergeProposals: Map<string, MergeProposal>
   events: RuntimeEvent[]
   eventsCompactedThrough?: number
-  nextIds: { agent: number; lane: number; effect: number; wait: number; result: number; proposal: number; event: number }
+  nextIds: { agent: number; lane: number; effect: number; wait: number; result: number; artifact: number; proposal: number; event: number }
   maxTotalLanes: number
   maxQueuedEffects: number
   maxRunning: Record<ConcurrencyClass, number>
@@ -452,6 +469,8 @@ export function privacyForContextSnapshot(state: RuntimeState, lane: LaneRecord,
 export function privacyMetadataForDerivedRef(state: RuntimeState, lane: LaneRecord, ref: string): PrivacyMetadata | undefined {
   const result = state.results.get(ref)
   if (result) return { privacy: result.privacy, ...(result.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(result.privacyTaints) }) }
+  const artifact = state.artifacts.get(ref)
+  if (artifact && (artifact.agentId === undefined || artifact.agentId === lane.agentId)) return { privacy: artifact.privacy, ...(artifact.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(artifact.privacyTaints) }) }
   return privacyForContextSnapshot(state, lane, ref)
 }
 
@@ -474,7 +493,7 @@ export interface ToolCallCorrelation {
 }
 
 export function createRuntimeState(maxTotalLanes = 64, options: { maxQueuedEffects?: number; maxRunning?: Partial<Record<ConcurrencyClass, number>>; forkAffinity?: ForkAffinityMode; historySoftTokens?: number; historyHardTokens?: number; maxResultSummaryBytes?: number; trustedSanitizerIds?: Iterable<string> } = {}): RuntimeState {
-  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), toolCallCorrelations: new Map(), mergeProposals: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, proposal: 1, event: 1 }, maxTotalLanes, maxQueuedEffects: options.maxQueuedEffects ?? 256, maxRunning: { llm: 4, tool: 16, agent: 4, none: Number.POSITIVE_INFINITY, ...(options.maxRunning ?? {}) }, forkAffinity: options.forkAffinity ?? 'off', historySoftTokens: options.historySoftTokens ?? 8_000, historyHardTokens: options.historyHardTokens ?? 16_000, maxResultSummaryBytes: options.maxResultSummaryBytes ?? 4_096, trustedSanitizerIds: new Set(options.trustedSanitizerIds ?? []) }
+  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), artifacts: new Map(), toolCallCorrelations: new Map(), mergeProposals: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, artifact: 1, proposal: 1, event: 1 }, maxTotalLanes, maxQueuedEffects: options.maxQueuedEffects ?? 256, maxRunning: { llm: 4, tool: 16, agent: 4, none: Number.POSITIVE_INFINITY, ...(options.maxRunning ?? {}) }, forkAffinity: options.forkAffinity ?? 'off', historySoftTokens: options.historySoftTokens ?? 8_000, historyHardTokens: options.historyHardTokens ?? 16_000, maxResultSummaryBytes: options.maxResultSummaryBytes ?? 4_096, trustedSanitizerIds: new Set(options.trustedSanitizerIds ?? []) }
 }
 
 export function privacyRank(label: PrivacyLabel): number { return label === 'public' ? 0 : label === 'cloud_allowed' ? 1 : 2 }
