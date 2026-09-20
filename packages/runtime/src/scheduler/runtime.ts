@@ -649,7 +649,8 @@ export class PulseRuntime {
     const routes = this.modelRouter.diagnostics(task, projection.privacy, requirements)
     const attempts: JsonValue[] = []
     let lastError: unknown
-    for (const candidate of candidates) {
+    const maxAttempts = effect.retryPolicy?.maxAttempts ?? candidates.length
+    for (const candidate of candidates.slice(0, Math.max(0, maxAttempts))) {
       if (candidate.adapter === undefined) continue
       const attemptId = `${effect.id}-attempt-${attempts.length + 1}`
       const startedAt = Date.now()

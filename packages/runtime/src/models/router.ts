@@ -281,11 +281,12 @@ export class ModelFallbackController {
     effectId: string,
     candidates: ModelCandidate[],
     run: (attempt: ModelAttemptDescriptor) => Promise<LLMResult>,
+    maxAttempts = candidates.length,
   ): Promise<ModelFallbackResult> {
     if (candidates.length === 0) throw new Error('NO_MODEL_CANDIDATE')
     const attempts: ModelAttemptDescriptor[] = []
     let lastError: ModelFallbackError | undefined
-    for (const [index, candidate] of candidates.entries()) {
+    for (const [index, candidate] of candidates.slice(0, Math.max(0, maxAttempts)).entries()) {
       if (lastError && (!lastError.retryable || !lastError.localClosed || (lastError.sideEffectState === 'unknown' && !lastError.reconciled) || (lastError.sideEffectState === 'applied' && !lastError.reconciled))) break
       const attempt: ModelAttemptDescriptor = { effectId, attemptId: `${effectId}-attempt-${index + 1}`, attemptNo: index + 1, candidate }
       attempts.push(attempt)

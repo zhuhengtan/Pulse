@@ -71,6 +71,18 @@ describe('Runtime model registry and task routes', () => {
     expect(calls).toEqual(['refusing', 'fallback'])
   })
 
+  it('honors an explicit retry policy across registered model candidates', async () => {
+    const projection: LLMRequestProjection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'default', instruction: 'reason', privacy: 'public', privacyRefs: [] }, blocks: [{ kind: 'instruction', content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'default', privacy: 'public', privacyRefs: [] }
+    const runtime = new PulseRuntime()
+    const calls: string[] = []
+    runtime.models.register({ id: 'first-only', providerId: 'p1', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 2, adapter: { executeAttempt: async () => { calls.push('first-only'); return { text: '', refusal: 'no', toolCalls: [], finishReason: 'refusal' } } } })
+    runtime.models.register({ id: 'must-not-run', providerId: 'p2', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 1, adapter: { executeAttempt: async () => { calls.push('must-not-run'); return { text: 'unexpected', toolCalls: [], finishReason: 'stop' } } } })
+    runtime.modelRouter.register({ task: 'reason', candidates: ['first-only', 'must-not-run'] })
+    const effect = { id: 'effect-max-attempts', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request: projection }, retryPolicy: { maxAttempts: 1, initialBackoffMs: 0, maxBackoffMs: 0, jitter: false }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as any
+    await expect((runtime as any).executor(effect, new AbortController().signal)).resolves.toMatchObject({ status: 'failed', error: { code: 'MODEL_REFUSAL' } })
+    expect(calls).toEqual(['first-only'])
+  })
+
   it('does not publish an adapter error as a successful Result', async () => {
     const projection: LLMRequestProjection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'default', instruction: 'reason', privacy: 'public', privacyRefs: [] }, blocks: [{ kind: 'instruction', content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'default', privacy: 'public', privacyRefs: [] }
     const runtime = new PulseRuntime()

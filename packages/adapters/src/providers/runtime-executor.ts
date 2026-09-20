@@ -126,7 +126,7 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
         if (signal.aborted) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause })
         throw modelFallbackError({ retryable: true, localClosed: true, sideEffectState: 'none', cause })
       } finally { for (const release of releases.reverse()) release() }
-    }).catch((cause) => {
+    }, effect.retryPolicy?.maxAttempts).catch((cause) => {
       if (failedForSchema && lastSchemaViolation !== undefined) return { result: { text: '', toolCalls: [], finishReason: 'error' as const }, candidate: candidates.at(-1)!, attempts: [], schemaRejected: lastSchemaViolation }
       const inner = cause && typeof cause === 'object' && 'modelFallback' in cause ? (cause as { modelFallback?: { cause?: unknown } }).modelFallback?.cause : cause
       if (inner instanceof OutputValidationError && inner.code === 'MODEL_REFUSAL') return { result: { text: '', refusal: inner.message, toolCalls: [], finishReason: 'refusal' as const }, candidate: candidates.at(-1)!, attempts: [], refused: true }
