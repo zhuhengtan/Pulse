@@ -66,6 +66,8 @@ export interface RuntimeConfig {
   watchdogRepeatedActionThreshold?: number
   maxPreparingLLMs?: number
   maxPreparedLLMs?: number
+  maxObservationEntries?: number
+  maxObservationBytes?: number
   clock?: RuntimeClock
   trustedSanitizerIds?: string[]
   storagePolicy?: StoragePolicyConfig
@@ -158,7 +160,7 @@ export class PulseRuntime {
   readonly resourceLocks = new ResourceLockManager()
   readonly storagePolicy: SessionStoragePolicy
   readonly factInbox: FactInbox<HostCommand>
-  readonly observationInbox = new ObservationInbox()
+  readonly observationInbox: ObservationInbox
   private readonly programs = new Map<string, LaneProgram>()
   private readonly executions = new Map<string, { controller: AbortController; promise: Promise<void>; timeoutTimer?: string; deadlineTimer?: string; cancelTimer?: string }>()
   private readonly lockReleases = new Map<string, Array<() => void>>()
@@ -193,6 +195,7 @@ export class PulseRuntime {
   constructor(config: RuntimeConfig = {}) {
     const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
     this.enforcingRecoveryPrograms = restored !== undefined
+    this.observationInbox = new ObservationInbox(config.maxObservationEntries ?? 4096, config.maxObservationBytes ?? 1_000_000)
     this.toolVersions = { ...(config.toolVersions ?? {}) }
     this.policyVersion = config.policyVersion
     this.routerVersion = config.routerVersion

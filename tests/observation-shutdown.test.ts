@@ -24,6 +24,15 @@ describe('observation inbox and shutdown', () => {
     expect(inbox.droppedThrough('agent-a')).toBe(1)
   })
 
+  it('allows Runtime hosts to configure the observation ring limits', () => {
+    const runtime = new PulseRuntime({ maxObservationEntries: 1, maxObservationBytes: 120 })
+    runtime.observationInbox.enqueue({ agentId: 'agent-a', type: 'trace', data: { payload: 'first' }, timestamp: 1 })
+    runtime.observationInbox.enqueue({ agentId: 'agent-a', type: 'trace', data: { payload: 'second' }, timestamp: 2 })
+    expect(runtime.observationInbox.size).toBe(1)
+    expect(runtime.observationInbox.maxEntries).toBe(1)
+    expect(runtime.observationInbox.maxBytes).toBe(120)
+  })
+
   it('surfaces an observation gap through Session.stream()', async () => {
     const runtime = new PulseRuntime()
     const program = defineLaneProgram({ id: 'observation-gap', version: '1' }, (builder) => {
