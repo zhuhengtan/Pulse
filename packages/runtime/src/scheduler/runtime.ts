@@ -1890,7 +1890,12 @@ export class PulseRuntime {
     const events: import('../core/types.js').RuntimeEventInput[] = []
     if (candidateLane && !['succeeded', 'failed', 'cancelled'].includes(candidateLane.status)) {
       delete candidateLane.activeWaitId
-      if (wait.spec.onUnsatisfied === 'fail_lane') {
+      if (candidateLane.status === 'cancelling') {
+        candidateLane.status = 'cancelled'
+        candidateLane.cancelReason = candidateLane.cancelReason ?? 'USER_REQUESTED'
+        candidateLane.version++
+        events.push({ type: 'lane.cancelled', laneId: candidateLane.id, data: candidateLane.cancelReason })
+      } else if (wait.spec.onUnsatisfied === 'fail_lane') {
         candidateLane.status = 'failed'
         candidateLane.version++
         events.push({ type: 'lane.failed', laneId: candidateLane.id, data: error as unknown as JsonValue })
