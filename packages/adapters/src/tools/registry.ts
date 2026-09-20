@@ -1,5 +1,5 @@
 import type { EffectExecutor, EffectExecution, EffectRecord, EffectSubmission, JsonValue } from '@pulse/runtime'
-import { ToolRegistry, type ReconcileResult } from '@pulse/tool-sdk'
+import { ToolRegistry, type ReconcileResult, type ToolDiscoveryQuery } from '@pulse/tool-sdk'
 
 function toJson(value: unknown): import('@pulse/runtime').JsonValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') return value
@@ -60,7 +60,19 @@ export async function reconcileToolEffect(registry: ToolRegistry, effect: Readon
 }
 
 export function createToolEffectSubmissionPreparer(registry: ToolRegistry): (submission: EffectSubmission) => EffectSubmission {
-  return (submission) => {
+    return (submission) => {
+    if (submission.kind === 'llm') {
+      const input = submission.input && typeof submission.input === 'object' && !Array.isArray(submission.input) ? submission.input as Record<string, JsonValue> : {}
+      const rawQuery = input.toolDiscovery
+      if (rawQuery && typeof rawQuery === 'object' && !Array.isArray(rawQuery)) {
+        const query = rawQuery as ToolDiscoveryQuery
+        const requestedId = typeof input.toolSetId === 'string' ? input.toolSetId : 'dynamic'
+        const toolSet = registry.compileToolSet(requestedId, query)
+        const tools = toolSet.tools.map((manifest) => ({ name: manifest.name, description: manifest.description, inputSchema: manifest.inputSchema as JsonValue }))
+        return { ...submission, input: { ...input, toolSetId: `${toolSet.id}@${toolSet.version}`, tools: { tools } } }
+      }
+      return submission
+    }
     if (submission.kind !== 'tool') return submission
     const input = submission.input && typeof submission.input === 'object' && !Array.isArray(submission.input) ? submission.input as Record<string, JsonValue> : {}
     if (typeof input.name !== 'string') return submission

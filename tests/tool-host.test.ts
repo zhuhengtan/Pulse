@@ -86,6 +86,27 @@ describe('Tool SDK to Runtime Effect host', () => {
     expect(prepared).toMatchObject({ sideEffectPolicy: 'write', attemptTimeoutMs: 2500, locks: [{ resource: 'file:a.txt', mode: 'exclusive' }] })
   })
 
+  it('compiles dynamic tool discovery into a versioned Context ToolSet', async () => {
+    const registry = new ToolRegistry()
+    registry.register(defineTool({ name: 'read-file', description: 'read a file', tags: ['filesystem', 'read'], input: z.object({ path: z.string() }), output: z.object({ text: z.string() }), execute: () => ({ text: '' }) }))
+    registry.register(defineTool({ name: 'write-file', description: 'write a file', tags: ['filesystem', 'write'], input: z.object({ path: z.string() }), output: z.object({ ok: z.boolean() }), execute: () => ({ ok: true }) }))
+    let captured: import('@pulse/runtime').EffectRecord | undefined
+    const runtime = new PulseRuntime({
+      effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry),
+      effectExecutor: async (effect) => { captured = structuredClone(effect); return { value: { ok: true } } },
+    })
+    const program: LaneProgram = { id: 'dynamic-tools', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', instruction: 'choose a file tool', toolDiscovery: { tags: ['read'], limit: 1 } } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('dynamic-tools', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('dynamic-tools', 'finish') } }
+    const { agentId } = runtime.createAgent('dynamic tools', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    const input = captured?.input as Record<string, import('@pulse/runtime').JsonValue>
+    expect(input.toolSetId).toMatch(/^dynamic@[0-9a-f]{16}$/)
+    expect(input.tools).toEqual({ tools: [{ name: 'read-file', description: 'read a file', inputSchema: expect.any(Object) }] })
+    const request = input.request as Record<string, import('@pulse/runtime').JsonValue>
+    expect((request.blocks as Array<{ kind: string; content: import('@pulse/runtime').JsonValue }>).find((block) => block.kind === 'tools')?.content).toEqual(input.tools)
+  })
+
   it('lets Runtime reconcile a quarantined effect and publish its terminal outcome', async () => {
     const runtime = new PulseRuntime()
     runtime.state.effects.set('effect-3', { id: 'effect-3', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'job', kind: 'tool', concurrencyClass: 'tool', input: {}, executionRef: 'job-3', state: 'reconcile_required', attemptId: 'attempt-3', attemptNo: 1, executionState: 'remote_unknown', sideEffectState: 'unknown' })

@@ -1,4 +1,5 @@
 import { z, type ZodTypeAny } from 'zod'
+import { createHash } from 'node:crypto'
 
 export const TOOL_SDK_VERSION = '0.1.0'
 export type ConcurrencyClass = 'llm' | 'tool' | 'agent' | 'none'
@@ -33,6 +34,7 @@ export interface ToolManifest {
 }
 export interface ToolDiscoveryQuery { text?: string; tags?: string[]; sideEffectPolicy?: ToolManifest['sideEffectPolicy']; concurrencyClass?: ConcurrencyClass; limit?: number }
 export interface ToolDiscoveryResult { manifest: ToolManifest; score: number }
+export interface ToolSetSnapshot { id: string; version: string; tools: ToolManifest[] }
 export interface ToolAdmission { locks: ResourceClaim[]; sideEffectPolicy: ToolManifest['sideEffectPolicy']; defaultTimeoutMs: number; retrySafety: ToolManifest['retrySafety'] }
 export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   manifest: ToolManifest
@@ -71,6 +73,12 @@ export class ToolRegistry {
     })
     results.sort((left, right) => right.score - left.score || left.manifest.name.localeCompare(right.manifest.name) || left.manifest.version.localeCompare(right.manifest.version))
     return query.limit === undefined ? results : results.slice(0, Math.max(0, query.limit))
+  }
+  compileToolSet(id: string, query: ToolDiscoveryQuery = {}, version?: string): ToolSetSnapshot {
+    if (!id) throw new Error('INVALID_TOOL_SET_ID')
+    const tools = this.discover(query).map((result) => result.manifest)
+    const derivedVersion = createHash('sha256').update(JSON.stringify(tools)).digest('hex').slice(0, 16)
+    return { id, version: version ?? derivedVersion, tools: structuredClone(tools) }
   }
   async execute(name: string, input: unknown, context: ToolContext | AbortSignal): Promise<unknown> {
     const definition = this.definitions.get(name)
