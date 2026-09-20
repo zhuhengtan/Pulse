@@ -125,11 +125,37 @@ export class StepBuilder<TState = JsonValue> {
     })
     return this
   }
-  addReActLoopStep(name: string, options: { instruction: string | ((view: InstructionView<TState>) => string); maxTurns?: number; onFinish: (result: JsonValue, ctx: StepContext<TState>) => NextStepTarget<TState>; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
-    const readTurns = (ctx: StepContext<TState>): number => { const locals = ctx.lane.resume.locals; if (!locals || typeof locals !== 'object' || Array.isArray(locals)) return 0; const sdk = (locals as Record<string, unknown>).$sdk; if (!sdk || typeof sdk !== 'object' || Array.isArray(sdk)) return 0; const turn = (sdk as Record<string, unknown>)[`${name}Turns`]; return typeof turn === 'number' && Number.isInteger(turn) && turn >= 0 ? turn : 0 }
-    const writeTurns = (ctx: StepContext<TState>, turns: number): JsonValue => { const locals = ctx.lane.resume.locals; const base = locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}; const sdk = base.$sdk && typeof base.$sdk === 'object' && !Array.isArray(base.$sdk) ? base.$sdk as Record<string, JsonValue> : {}; return { ...base, $sdk: { ...sdk, [`${name}Turns`]: turns } } }
-    this.handlers.set(name, (ctx) => { const turns = readTurns(ctx) + 1; const instruction = typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: ctx.laneState }); return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turns}`, kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', instruction } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:decode`, locals: writeTurns(ctx, turns) } })
-    this.handlers.set(`${name}:decode`, (ctx) => { const turns = readTurns(ctx); if (turns >= (options.maxTurns ?? 10)) return { next: options.onMaxTurns ? options.onMaxTurns(ctx) : `${name}:decode` }; const input = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined; const ref = input?.state === 'settled' ? input.outcome.resultRef : undefined; return { next: options.onFinish(ref ? ctx.getResult(ref) ?? null : null, ctx) } })
+  addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[]; maxTurns?: number; onFinish: (result: JsonValue, ctx: StepContext<TState>) => NextStepTarget<TState>; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; onError?: (error: Error, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
+    const readTurns = (ctx: StepContext<TState>): number => { const sdk = sdkLocals(ctx.lane.resume.locals); const turn = sdk[`${name}Turns`]; return typeof turn === 'number' && Number.isInteger(turn) && turn >= 0 ? turn : 0 }
+    const writeTurns = (ctx: StepContext<TState>, turns: number): JsonValue => { const locals = ctx.lane.resume.locals; const base = locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}; return { ...base, $sdk: { ...sdkLocals(locals), [`${name}Turns`]: turns } } }
+    const resultRefFromWait = (ctx: StepContext<TState>): ResultRef | undefined => { const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined; return dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined }
+    const resultRefsFromWait = (ctx: StepContext<TState>): ResultRef[] => ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef ? [dependency.outcome.resultRef] : []) : []
+    const instruction = (ctx: StepContext<TState>): string => typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: ctx.laneState })
+    const submitModel = (ctx: StepContext<TState>, turn: number, resultRefs: ResultRef[] = []): LaneStepOutput => ({ actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { results: resultRefs }, turn }, ...(resultRefs.length ? { derivedFrom: resultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn) }, locals: writeTurns(ctx, turn) })
+    this.handlers.set(name, (ctx) => { const turn = readTurns(ctx) + 1; const inputs = options.inputs?.(ctx) ?? {}; const refs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? [])])]; const output = submitModel(ctx, turn, refs); return { ...output, next: `${name}:decode` } })
+    this.handlers.set(`${name}:tools`, (ctx) => { const turn = readTurns(ctx); const refs = resultRefsFromWait(ctx); return { ...submitModel(ctx, turn + 1, refs), next: `${name}:decode` } })
+    this.handlers.set(`${name}:decode`, (ctx) => {
+      const turns = readTurns(ctx)
+      const ref = resultRefFromWait(ctx)
+      const value = ref ? ctx.getResult(ref) ?? null : null
+      const record = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, JsonValue> : undefined
+      const finishReason = record?.finishReason
+      const toolCalls = Array.isArray(record?.toolCalls) ? record.toolCalls : []
+      if (finishReason === 'tool_calls') {
+        if (turns >= (options.maxTurns ?? 10) || toolCalls.length === 0) return { next: options.onMaxTurns ? options.onMaxTurns(ctx) : `${name}:decode` }
+        const invalidTool = toolCalls.find((call) => { const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}; const toolName = typeof item.name === 'string' ? item.name : ''; return !toolName || (options.toolAllow !== undefined && !options.toolAllow.includes(toolName)) })
+        if (invalidTool !== undefined) return { next: options.onError ? options.onError(new Error('ACTION_TOOL_NOT_ALLOWED'), ctx) : (options.onMaxTurns ? options.onMaxTurns(ctx) : `${name}:decode`) }
+        const effects = toolCalls.map((call, index) => {
+          const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}
+          const originalId = typeof item.toolCallId === 'string' ? item.toolCallId : `call-${index + 1}`
+          const toolName = typeof item.name === 'string' ? item.name : ''
+          return { key: `${name}-tool-${turns}-${index + 1}`, toolCallId: `${name}:${turns}:${originalId}`, kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { toolCallId: `${name}:${turns}:${originalId}`, name: toolName, arguments: item.input ?? {} } }
+        })
+        return { actions: [{ type: 'submit_effects', effects, wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:tools` }
+      }
+      if (turns >= (options.maxTurns ?? 10)) return { next: options.onMaxTurns ? options.onMaxTurns(ctx) : `${name}:decode` }
+      return { next: options.onFinish(value, ctx) }
+    })
     return this
   }
   addParallelStep(name: string, options: { lanes: Record<string, { goal: string; program: { programId: string; programVersion: string; step?: string; locals?: JsonValue }; priority?: number; contextVersion?: 'parent' | 'latest' | number; affinityKey?: string; resources?: ResourceLockSpec[]; dependsOn?: Array<{ key: string; target: { local: string } | { kind: 'lane' | 'effect'; id: string }; condition: 'success' | 'settled' }> }>; condition?: 'success' | 'settled'; affinity?: 'collapse' | 'ack'; next?: NextStepTarget; onJoin?: (outcomes: Record<string, Outcome>, ctx: StepContext<TState>) => NextStepTarget }): this {

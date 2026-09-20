@@ -46,4 +46,21 @@ describe('DSL Human/Timer host macros', () => {
     expect(calls).toEqual(['plan-llm', 'synthesize-llm'])
     expect(runtime.state.agents.get(agentId)?.globalVersions.get(1)).toEqual({ synthesis: { report: 'done' } })
   })
+
+  it('runs a bounded ReAct tool round before accepting the final model result', async () => {
+    const program = defineLaneProgram({ id: 'react-tools', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'inspect', toolAllow: ['read'], maxTurns: 3, onFinish: (result, ctx) => { ctx.mutateLane((draft) => { if (draft && typeof draft === 'object' && !Array.isArray(draft)) (draft as Record<string, unknown>).answer = result }); return 'finish' } })
+      builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' }))
+    })
+    const calls: string[] = []
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      calls.push(effect.key)
+      if (effect.kind === 'llm' && effect.key === 'reason-turn-1') return { value: { text: '', finishReason: 'tool_calls', toolCalls: [{ toolCallId: 'provider-call-1', name: 'read', input: { path: 'a' } }] } }
+      if (effect.kind === 'llm') return { value: { text: 'done', finishReason: 'stop', toolCalls: [] } }
+      return { value: { content: 'file' } }
+    } })
+    const { agentId } = runtime.createAgent('react tools', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(calls).toEqual(['reason-turn-1', 'reason-tool-1-1', 'reason-turn-2'])
+  })
 })
