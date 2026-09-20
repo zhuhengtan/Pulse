@@ -45,4 +45,20 @@ describe('effect outbox and runtime persistence envelope', () => {
       expect(restored?.state.schemaVersion).toBe(1)
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
+
+  it('writes a checkpoint snapshot and resumes mutation sequence after truncation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-checkpoint-'))
+    try {
+      const backend = new FileRuntimePersistenceBackend(join(directory, 'runtime.json'))
+      const runtime = new PulseRuntime()
+      runtime.state.now = 7
+      runtime.mutationLog.append('manual', [{ op: 'setNow', now: 7 }], 7)
+      const checkpoint = await runtime.checkpoint(backend)
+      expect(checkpoint.checkpoint?.logWatermark).toBe(1)
+      expect(runtime.mutationLog.watermark).toBe(1)
+      const restored = importRuntimePersistence(JSON.parse(JSON.stringify(await backend.load())))
+      expect(restored.state.now).toBe(7)
+      expect(restored.mutationLog.watermark).toBe(1)
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
 })

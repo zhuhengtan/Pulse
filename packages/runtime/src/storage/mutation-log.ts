@@ -13,6 +13,7 @@ export interface MutationLogEntry {
 
 export interface MutationLogSnapshot {
   schemaVersion: 1
+  baseSeq?: number
   nextSeq: number
   entries: Array<{ seq: number; transactionId: string; committedAt: number; checksum: string; mutations: JsonValue }>
 }
@@ -53,15 +54,19 @@ function cloneMutations(mutations: Mutation[]): Mutation[] { return structuredCl
 export class MutationLog {
   private readonly log: MutationLogEntry[]
   private nextSequence: number
+  private baseSequence: number
 
-  constructor(entries: MutationLogEntry[] = []) {
+  constructor(entries: MutationLogEntry[] = [], baseSequence = 0) {
     this.log = entries.map((entry) => ({ ...entry, mutations: cloneMutations(entry.mutations) }))
-    this.nextSequence = this.log.length ? Math.max(...this.log.map((entry) => entry.seq)) + 1 : 1
+    this.baseSequence = baseSequence
+    this.nextSequence = this.log.length ? Math.max(...this.log.map((entry) => entry.seq)) + 1 : baseSequence + 1
     this.validate()
   }
 
   get entries(): MutationLogEntry[] { return this.log.map((entry) => ({ ...entry, mutations: cloneMutations(entry.mutations) })) }
   get size(): number { return this.log.length }
+  get watermark(): number { return this.baseSequence }
+  get lastSequence(): number { return this.log.at(-1)?.seq ?? this.baseSequence }
 
   findTransaction(transactionId: string): MutationLogEntry | undefined {
     const entry = this.log.find((candidate) => candidate.transactionId === transactionId)
@@ -78,25 +83,33 @@ export class MutationLog {
   }
 
   snapshot(): MutationLogSnapshot {
-    return { schemaVersion: 1, nextSeq: this.nextSequence, entries: this.log.map((entry) => ({ seq: entry.seq, transactionId: entry.transactionId, committedAt: entry.committedAt, checksum: entry.checksum, mutations: encode(entry.mutations) })) }
+    return { schemaVersion: 1, ...(this.baseSequence === 0 ? {} : { baseSeq: this.baseSequence }), nextSeq: this.nextSequence, entries: this.log.map((entry) => ({ seq: entry.seq, transactionId: entry.transactionId, committedAt: entry.committedAt, checksum: entry.checksum, mutations: encode(entry.mutations) })) }
+  }
+
+  truncateThrough(seq: number): void {
+    if (!Number.isInteger(seq) || seq < this.baseSequence || seq > this.lastSequence) throw new Error('INVALID_CHECKPOINT_WATERMARK')
+    while (this.log[0] && this.log[0].seq <= seq) this.log.shift()
+    this.baseSequence = seq
+    this.nextSequence = this.log[0]?.seq ?? seq + 1
+    this.validate()
   }
 
   static fromSnapshot(snapshot: MutationLogSnapshot | JsonValue): MutationLog {
     const value = snapshot as MutationLogSnapshot
-    if (!value || value.schemaVersion !== 1 || !Number.isInteger(value.nextSeq) || !Array.isArray(value.entries)) throw new Error('INVALID_MUTATION_LOG')
+    if (!value || value.schemaVersion !== 1 || !Number.isInteger(value.nextSeq) || !Array.isArray(value.entries) || (value.baseSeq !== undefined && (!Number.isInteger(value.baseSeq) || value.baseSeq < 0))) throw new Error('INVALID_MUTATION_LOG')
     const entries = value.entries.map((entry) => {
       if (!entry || !Number.isInteger(entry.seq) || typeof entry.transactionId !== 'string' || typeof entry.committedAt !== 'number' || typeof entry.checksum !== 'string') throw new Error('INVALID_MUTATION_LOG')
       const mutations = decode(entry.mutations)
       if (!Array.isArray(mutations)) throw new Error('INVALID_MUTATION_LOG')
       return { seq: entry.seq, transactionId: entry.transactionId, committedAt: entry.committedAt, checksum: entry.checksum, mutations: mutations as Mutation[] }
     })
-    const log = new MutationLog(entries)
+    const log = new MutationLog(entries, value.baseSeq ?? 0)
     if (log.nextSequence !== value.nextSeq) throw new Error('INVALID_MUTATION_LOG')
     return log
   }
 
   replay(state: RuntimeState, entries: MutationLogEntry[] = this.log): void {
-    let expected = 1
+    let expected = this.baseSequence + 1
     for (const entry of entries) {
       if (entry.seq !== expected || checksum(entry.seq, entry.transactionId, entry.mutations) !== entry.checksum) throw new Error('INVALID_MUTATION_LOG')
       apply(state, cloneMutations(entry.mutations))
@@ -105,7 +118,7 @@ export class MutationLog {
   }
 
   private validate(): void {
-    let expected = 1
+    let expected = this.baseSequence + 1
     for (const entry of this.log) {
       if (entry.seq !== expected || checksum(entry.seq, entry.transactionId, entry.mutations) !== entry.checksum) throw new Error('INVALID_MUTATION_LOG')
       expected++

@@ -9,7 +9,7 @@ import { PulseSession } from '../dsl/session.js'
 import { FactInbox } from '../core/inbox.js'
 import { observeProgress } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
-import { exportRuntimePersistence, importRuntimePersistence, type RuntimePersistenceBackend, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
+import { exportRuntimeCheckpoint, exportRuntimePersistence, importRuntimePersistence, type RuntimePersistenceBackend, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
 import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import type { Mutation } from '../core/mutations.js'
@@ -150,6 +150,13 @@ export class PulseRuntime {
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
   exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox) }
   async persist(backend: RuntimePersistenceBackend): Promise<void> { await backend.save(this.exportPersistence()) }
+  async checkpoint(backend: RuntimePersistenceBackend): Promise<RuntimePersistenceSnapshot> {
+    const snapshot = exportRuntimeCheckpoint(this.state, this.mutationLog, this.outbox)
+    await backend.save(snapshot)
+    const watermark = snapshot.checkpoint?.logWatermark ?? 0
+    if (watermark > 0 && this.mutationLog.lastSequence >= watermark) this.mutationLog.truncateThrough(watermark)
+    return snapshot
+  }
   mergeProposals(agentId: string, proposalIds?: string[]): MergePlan {
     const plan = new ContextMerger(this.state).plan(agentId, proposalIds)
     if (plan.conflicts.length || plan.mutations.length === 0) return plan

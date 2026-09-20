@@ -38,4 +38,16 @@ describe('mutation log and replay', () => {
     gap.entries[0].seq = 2
     expect(() => MutationLog.fromSnapshot(gap)).toThrow('INVALID_MUTATION_LOG')
   })
+
+  it('truncates through a checkpoint watermark while preserving sequence continuity', () => {
+    const log = new MutationLog()
+    log.append('tx-1', [{ op: 'setNow', now: 1 }], 1)
+    log.append('tx-2', [{ op: 'setNow', now: 2 }], 2)
+    log.truncateThrough(2)
+    expect(log.watermark).toBe(2)
+    expect(log.size).toBe(0)
+    log.append('tx-3', [{ op: 'setNow', now: 3 }], 3)
+    const restored = MutationLog.fromSnapshot(JSON.parse(JSON.stringify(log.snapshot())))
+    expect(restored.entries[0]?.seq).toBe(3)
+  })
 })

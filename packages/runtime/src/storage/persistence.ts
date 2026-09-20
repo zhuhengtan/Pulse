@@ -10,6 +10,7 @@ export interface RuntimePersistenceSnapshot {
   state: SessionSnapshot
   mutationLog: MutationLogSnapshot
   outbox: OutboxSnapshot
+  checkpoint?: { schemaVersion: 1; logWatermark: number; state: SessionSnapshot }
 }
 
 export interface RuntimePersistenceBackend {
@@ -35,6 +36,12 @@ export function exportRuntimePersistence(state: RuntimeState, mutationLog: Mutat
   return { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: mutationLog.snapshot(), outbox: outbox.snapshot() }
 }
 
+export function exportRuntimeCheckpoint(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox): RuntimePersistenceSnapshot {
+  const watermark = mutationLog.lastSequence
+  const checkpointLog = new MutationLog([], watermark)
+  return { schemaVersion: 1, state: exportRuntimeState(state), mutationLog: checkpointLog.snapshot(), outbox: outbox.snapshot(), checkpoint: { schemaVersion: 1, logWatermark: watermark, state: exportRuntimeState(state) } }
+}
+
 export function serializeRuntimePersistence(state: RuntimeState, mutationLog: MutationLog, outbox: EffectOutbox): JsonValue {
   return exportRuntimePersistence(state, mutationLog, outbox) as unknown as JsonValue
 }
@@ -42,5 +49,8 @@ export function serializeRuntimePersistence(state: RuntimeState, mutationLog: Mu
 export function importRuntimePersistence(snapshot: RuntimePersistenceSnapshot | JsonValue): { state: RuntimeState; mutationLog: MutationLog; outbox: EffectOutbox } {
   const value = snapshot as RuntimePersistenceSnapshot
   if (!value || value.schemaVersion !== 1 || !value.state || !value.mutationLog || !value.outbox) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
-  return { state: importRuntimeState(value.state), mutationLog: MutationLog.fromSnapshot(value.mutationLog), outbox: EffectOutbox.fromSnapshot(value.outbox) }
+  const mutationLog = MutationLog.fromSnapshot(value.mutationLog)
+  const state = importRuntimeState(value.checkpoint?.state ?? value.state)
+  if (value.checkpoint) mutationLog.replay(state)
+  return { state, mutationLog, outbox: EffectOutbox.fromSnapshot(value.outbox) }
 }
