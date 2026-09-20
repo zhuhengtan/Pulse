@@ -2,7 +2,7 @@ import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.
 import { buildAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
-import type { ArtifactRecord, EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata, ProvenanceRef } from '../core/types.js'
+import type { ArtifactRecord, EffectRecord, EffectSubmission, EffectState, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata, ProvenanceRef } from '../core/types.js'
 import { createRuntimeState, effectivePrivacy, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, provenanceRefId, provenanceRefKind, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
@@ -39,9 +39,11 @@ export interface EffectObservation { type: 'progress' | 'chunk' | 'trace' | 'war
 export interface EffectArtifactOutput { mediaType: string; content: Uint8Array | string; privacy?: 'public' | 'cloud_allowed' | 'local_only'; privacyTaints?: PrivacyTaint[]; derivedFrom?: ProvenanceRef[] }
 export interface EffectExecution { value: JsonValue; normalized?: JsonValue; artifact?: EffectArtifactOutput; summary?: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; privacyTaints?: PrivacyTaint[]; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionRef?: JsonValue; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled'; error?: RuntimeError; rejectedOutput?: { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; privacyTaints?: PrivacyTaint[]; derivedFrom?: ProvenanceRef[] }; metadata?: JsonValue; observations?: EffectObservation[] }
 export type EffectExecutor = (effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<EffectExecution>
+export interface EffectHandle { id: string; status(): EffectState; requestCancel(reason: string): void }
 export type HostCommand =
   | { type: 'reply'; agentId: string; effectId: string; value: JsonValue }
   | { type: 'cancel'; agentId: string; reason: string }
+  | { type: 'cancel_effect'; agentId: string; effectId: string; reason: string }
   | { type: 'set_lane_priority'; laneId: string; priority: number }
 
 export interface RuntimeConfig {
@@ -302,6 +304,22 @@ export class PulseRuntime {
     if (!Number.isFinite(priority)) throw new Error('INVALID_LANE_PRIORITY')
     this.enqueueHostCommand({ type: 'set_lane_priority', laneId, priority })
   }
+  effectHandle(effectId: string): EffectHandle {
+    const effect = this.state.effects.get(effectId)
+    if (!effect) throw new Error(`UNKNOWN_EFFECT:${effectId}`)
+    return {
+      id: effectId,
+      status: () => {
+        const current = this.state.effects.get(effectId)
+        if (!current) throw new Error(`UNKNOWN_EFFECT:${effectId}`)
+        return current.state
+      },
+      requestCancel: (reason) => {
+        if (!reason) throw new Error('INVALID_CANCEL_REASON')
+        this.enqueueHostCommand({ type: 'cancel_effect', agentId: effect.agentId, effectId, reason })
+      },
+    }
+  }
   inspectLane(laneId: string): JsonValue {
     if (!laneId) throw new Error('INVALID_LANE_ID')
     return this.explain(laneId)
@@ -510,7 +528,12 @@ export class PulseRuntime {
         if (effect?.agentId === envelope.fact.agentId && effect.kind === 'human' && !effect.outcome) this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value })
         else this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: effect?.agentId !== envelope.fact.agentId ? 'EFFECT_NOT_OWNED' : 'EFFECT_NOT_REPLYABLE' } })
       } else if (envelope.fact.type === 'cancel') this.cancelAgent(envelope.fact.agentId, envelope.fact.reason)
-      else {
+      else if (envelope.fact.type === 'cancel_effect') {
+        const effect = this.state.effects.get(envelope.fact.effectId)
+        if (!effect || effect.agentId !== envelope.fact.agentId) this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: 'EFFECT_NOT_OWNED' } })
+        else if (effect.outcome) this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: 'EFFECT_ALREADY_SETTLED' } })
+        else this.cancelEffect(envelope.fact.effectId, 0, envelope.fact.reason)
+      } else {
         const lane = this.state.lanes.get(envelope.fact.laneId)
         if (!lane) this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: 'LANE_NOT_FOUND' } })
         else if (['succeeded', 'failed', 'cancelled'].includes(lane.status)) this.emit({ type: 'command.rejected', data: { eventId: envelope.eventId, code: 'LANE_TERMINAL' } })
@@ -1075,8 +1098,8 @@ export class PulseRuntime {
     this.schedulePersistence()
   }
 
-  cancelEffect(effectId: string, graceMs = 0): void {
-    this.requestEffectCancellation(effectId, 'USER_REQUESTED', graceMs)
+  cancelEffect(effectId: string, graceMs = 0, reason = 'USER_REQUESTED'): void {
+    this.requestEffectCancellation(effectId, reason, graceMs)
   }
 
   publishArtifact(publication: ArtifactPublication): import('../core/types.js').ArtifactRecord {

@@ -53,4 +53,18 @@ describe('Host command API', () => {
     expect(runtime.state.lanes.get(laneId)?.priority).toBe(0)
     expect(runtime.mutationLog.entries.some((entry) => entry.transactionId === `lane:${laneId}:priority:1`)).toBe(false)
   })
+
+  it('exposes an EffectHandle whose cancellation is also queued through FactInbox', () => {
+    const runtime = new PulseRuntime({ maxRunning: { tool: 0 } })
+    const program: LaneProgram = { id: 'effect-handle', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'blocked', kind: 'tool', concurrencyClass: 'tool', input: {} }] }], next: point('effect-handle', 'done') }) }
+    runtime.createAgent('effect handle', program)
+    runtime.tick()
+    const handle = runtime.effectHandle('effect-1')
+    expect(handle.status()).toBe('queued')
+    handle.requestCancel('HOST_REQUESTED')
+    expect(handle.status()).toBe('queued')
+    runtime.tick()
+    expect(handle.status()).toBe('cancelled')
+    expect(runtime.state.events.some((event) => event.type === 'command.applied')).toBe(true)
+  })
 })
