@@ -1686,6 +1686,16 @@ export class PulseRuntime {
           changed = true
           return true
         }
+        const exposeResolutionResults = (nextLane: LaneRecord | undefined, observations: Record<string, import('../core/types.js').DependencyObservation>): void => {
+          if (!nextLane) return
+          const refs = Object.values(observations).flatMap((observation) => observation.state === 'pending' ? [] : [
+            ...(observation.outcome?.resultRef === undefined ? [] : [observation.outcome.resultRef]),
+            ...(observation.outcome?.rejectedOutputRefs ?? []),
+          ])
+          if (!refs.length) return
+          if (nextLane.visibleResultRefs) for (const ref of refs) nextLane.visibleResultRefs.add(ref)
+          else nextLane.visibleResultRefs = new Set(refs)
+        }
         const observations: Record<string, import('../core/types.js').DependencyObservation> = {}
         let pending = false
         let unsatisfied: RuntimeError | undefined
@@ -1714,6 +1724,7 @@ export class PulseRuntime {
           const lane = this.state.lanes.get(wait.laneId)
           const nextLane = lane === undefined || ['succeeded', 'failed', 'cancelled'].includes(lane.status) ? undefined : structuredClone(lane)
           if (nextLane) {
+            exposeResolutionResults(nextLane, observations)
             nextLane.status = 'failed'
             nextLane.failure = { error: structuredClone(error), privacy: 'public' }
             delete nextLane.activeWaitId
@@ -1728,6 +1739,7 @@ export class PulseRuntime {
           const lane = this.state.lanes.get(wait.laneId)
           const nextLane = lane === undefined || ['succeeded', 'failed', 'cancelled'].includes(lane.status) ? undefined : structuredClone(lane)
           if (nextLane) {
+            exposeResolutionResults(nextLane, observations)
             nextLane.status = 'ready'
             delete nextLane.activeWaitId
             nextLane.pendingResumeInput = { type: 'wait', resolution }
@@ -1741,6 +1753,7 @@ export class PulseRuntime {
           const lane = this.state.lanes.get(wait.laneId)
           const nextLane = lane === undefined || ['succeeded', 'failed', 'cancelled'].includes(lane.status) ? undefined : structuredClone(lane)
           if (nextLane) {
+            exposeResolutionResults(nextLane, observations)
             if (nextLane.closingResult) {
               let resultSequence = this.state.nextIds.result
               while (this.state.results.has(`result-${resultSequence}`)) resultSequence++
