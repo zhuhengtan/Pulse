@@ -243,6 +243,7 @@ export interface ContextOp {
   value?: JsonValue
   upToSeq?: number
   summary?: JsonValue
+  summaryRef?: ResultRef
 }
 
 export interface ContextDelta {

@@ -65,10 +65,12 @@ function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: Context
   for (const op of delta.ops) {
     if (op.op === 'compact_history') {
       const upToSeq = op.upToSeq
-      const summary = op.summary
-      if (delta.target !== 'lane' || upToSeq === undefined || summary === undefined || !Number.isInteger(upToSeq) || upToSeq < 1) return { nextVersion: base, error: 'INVALID_HISTORY_COMPACTION' }
+      const summaryResult = op.summaryRef === undefined ? undefined : state.results.get(op.summaryRef)
+      if (op.summaryRef !== undefined && !summaryResult) return { nextVersion: base, error: 'UNKNOWN_SUMMARY_REF' }
+      const summary = op.summary ?? summaryResult?.summary ?? summaryResult?.value
+      if (delta.target !== 'lane' || upToSeq === undefined || summary === undefined || (op.summary === undefined && op.summaryRef === undefined) || !Number.isInteger(upToSeq) || upToSeq < 1) return { nextVersion: base, error: 'INVALID_HISTORY_COMPACTION' }
       if (!history.some((record) => record.seq <= upToSeq)) return { nextVersion: base, error: 'INVALID_HISTORY_COMPACTION' }
-      history = [{ seq: upToSeq, instruction: '[history compacted]', resultRefs: [], output: clone(summary), privacy: delta.privacy ?? 'public' }, ...history.filter((record) => record.seq > upToSeq)]
+      history = [{ seq: upToSeq, instruction: '[history compacted]', resultRefs: op.summaryRef === undefined ? [] : [op.summaryRef], output: clone(summary), privacy: delta.privacy ?? summaryResult?.privacy ?? 'public' }, ...history.filter((record) => record.seq > upToSeq)]
       continue
     }
     if (!op.path || op.path.length === 0) return { nextVersion: base, error: 'INVALID_CONTEXT_PATH' }
@@ -101,7 +103,7 @@ function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: Context
   const nextVersion = base + 1
   if (delta.target === 'global' && delta.proposal) mutations.push({ op: 'insertMergeProposal', proposal: { id: proposalId ?? `proposal-${state.nextIds.proposal}`, agentId: lane.agentId, sourceLaneId: lane.id, baseGlobalVersion: base, delta: { ...clone(delta), sourceLaneId: lane.id }, createdAt: state.now } })
   else if (delta.target === 'global') mutations.push({ op: 'setGlobal', agentId: lane.agentId, version: nextVersion, value: result })
-  else mutations.push({ op: 'setLaneContext', laneId: lane.id, version: nextVersion, value: result, ...(history.length === lane.context.history.length && history.every((record, index) => record.seq === lane.context.history[index]?.seq) ? {} : { history }) })
+  else mutations.push({ op: 'setLaneContext', laneId: lane.id, version: nextVersion, value: result, ...(history.length === lane.context.history.length && history.every((record, index) => JSON.stringify(record) === JSON.stringify(lane.context.history[index])) ? {} : { history }) })
   return { nextVersion, ...(delta.target === 'lane' ? { history } : {}) }
 }
 
