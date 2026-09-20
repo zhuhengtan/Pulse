@@ -1393,8 +1393,20 @@ export class PulseRuntime {
     let changed = true
     while (changed) {
       changed = false
-      for (const wait of this.state.waits.values()) {
+      for (const wait of [...this.state.waits.values()]) {
         if (wait.state !== 'pending') continue
+        const commitResolution = (nextWait: import('../core/types.js').WaitRecord, nextLane?: LaneRecord, extra: Mutation[] = []): boolean => {
+          const mutations: Mutation[] = [{ op: 'setWait', waitId: nextWait.id, record: nextWait }]
+          if (nextLane) mutations.push({ op: 'setLane', laneId: nextLane.id, record: nextLane })
+          mutations.push(...extra)
+          try { this.assertStorageAdmission(mutations) } catch { return false }
+          commitMutationTransaction(this.state, this.mutationLog, `wait:${nextWait.id}:${nextWait.state}:${this.state.now}`, mutations, this.state.now, this.sessionId)
+          this.cancelWaitDeadline(nextWait.id)
+          if (nextLane?.status === 'ready') this.enqueueLane(nextLane.id)
+          this.schedulePersistence()
+          changed = true
+          return true
+        }
         const observations: Record<string, import('../core/types.js').DependencyObservation> = {}
         let pending = false
         let unsatisfied: RuntimeError | undefined
@@ -1415,70 +1427,73 @@ export class PulseRuntime {
         const modeUnsatisfied = !modeSatisfied && (impossible || (!pending && satisfied < required))
         const hardFailure = wait.spec.mode === 'all' && unsatisfied !== undefined
         if ((hardFailure || modeUnsatisfied) && wait.spec.onUnsatisfied === 'fail_lane') {
-          this.cancelWaitDeadline(wait.id)
-          wait.state = 'unsatisfied'; wait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error: unsatisfied ?? { code: 'WAIT_QUORUM_UNREACHABLE', message: 'Wait can no longer satisfy its quorum.' } }
-          const lane = this.state.lanes.get(wait.laneId); if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'failed'; delete lane.activeWaitId; lane.version++ }
-          changed = true
+          const error = unsatisfied ?? { code: 'WAIT_QUORUM_UNREACHABLE', message: 'Wait can no longer satisfy its quorum.' }
+          const resolution = { waitId: wait.id, status: 'unsatisfied' as const, dependencies: observations, error }
+          const nextWait = structuredClone(wait)
+          nextWait.state = 'unsatisfied'
+          nextWait.resolution = resolution
+          const lane = this.state.lanes.get(wait.laneId)
+          const nextLane = lane === undefined || ['succeeded', 'failed', 'cancelled'].includes(lane.status) ? undefined : structuredClone(lane)
+          if (nextLane) {
+            nextLane.status = 'failed'
+            nextLane.failure = { error: structuredClone(error), privacy: 'public' }
+            delete nextLane.activeWaitId
+            nextLane.version++
+          }
+          commitResolution(nextWait, nextLane, nextLane === undefined ? [] : [{ op: 'appendEvent', event: { type: 'lane.failed', laneId: nextLane.id, data: error as unknown as JsonValue } }])
         } else if (modeUnsatisfied || (hardFailure && !pending)) {
-          this.cancelWaitDeadline(wait.id)
-          wait.state = 'unsatisfied'
-          wait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error: unsatisfied ?? { code: 'WAIT_QUORUM_UNREACHABLE', message: 'Wait can no longer satisfy its quorum.' } }
+          const resolution = { waitId: wait.id, status: 'unsatisfied' as const, dependencies: observations, error: unsatisfied ?? { code: 'WAIT_QUORUM_UNREACHABLE', message: 'Wait can no longer satisfy its quorum.' } }
+          const nextWait = structuredClone(wait)
+          nextWait.state = 'unsatisfied'
+          nextWait.resolution = resolution
           const lane = this.state.lanes.get(wait.laneId)
-          if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) { lane.status = 'ready'; delete lane.activeWaitId; lane.pendingResumeInput = { type: 'wait', resolution: wait.resolution }; this.enqueueLane(lane.id) }
-          changed = true
+          const nextLane = lane === undefined || ['succeeded', 'failed', 'cancelled'].includes(lane.status) ? undefined : structuredClone(lane)
+          if (nextLane) {
+            nextLane.status = 'ready'
+            delete nextLane.activeWaitId
+            nextLane.pendingResumeInput = { type: 'wait', resolution }
+          }
+          commitResolution(nextWait, nextLane)
         } else if (modeSatisfied || (!pending && !unsatisfied && wait.spec.mode === 'all')) {
-          this.cancelWaitDeadline(wait.id)
           const resolution = { waitId: wait.id, status: 'satisfied' as const, dependencies: observations }
+          const nextWait = structuredClone(wait)
+          nextWait.state = 'satisfied'
+          nextWait.resolution = resolution
           const lane = this.state.lanes.get(wait.laneId)
-          if (lane && !['succeeded', 'failed', 'cancelled'].includes(lane.status)) {
-            if (lane.closingResult) {
+          const nextLane = lane === undefined || ['succeeded', 'failed', 'cancelled'].includes(lane.status) ? undefined : structuredClone(lane)
+          if (nextLane) {
+            if (nextLane.closingResult) {
               let resultSequence = this.state.nextIds.result
               while (this.state.results.has(`result-${resultSequence}`)) resultSequence++
               const resultId = `result-${resultSequence}`
-              const result = { id: resultId, value: lane.closingResult.value, privacy: lane.closingResult.privacy, ...(lane.closingResult.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(lane.closingResult.privacyTaints) }), derivedFrom: [...(lane.closingResult.derivedFrom ?? [])] }
-              const nextWait = structuredClone(wait)
-              nextWait.state = 'satisfied'
-              nextWait.resolution = resolution
-              const nextLane = structuredClone(lane)
+              const result = { id: resultId, value: nextLane.closingResult.value, storageState: 'memory' as const, pinCount: 0, privacy: nextLane.closingResult.privacy, ...(nextLane.closingResult.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(nextLane.closingResult.privacyTaints) }), derivedFrom: [...(nextLane.closingResult.derivedFrom ?? [])] }
               delete nextLane.activeWaitId
               nextLane.status = 'succeeded'
               nextLane.resultRef = resultId
               delete nextLane.closingResult
               if (nextLane.visibleResultRefs) nextLane.visibleResultRefs.add(resultId)
               else nextLane.visibleResultRefs = new Set([resultId])
-              const mutations: Mutation[] = [
-                { op: 'setWait', waitId: nextWait.id, record: nextWait },
-                { op: 'publishResult', record: result },
-                { op: 'setLane', laneId: nextLane.id, record: nextLane },
-                { op: 'appendEvent', event: { type: 'lane.succeeded', laneId: nextLane.id, data: resultId } },
-              ]
-              let closingCommitted = false
-              try {
-                this.assertStorageAdmission(mutations)
-                closingCommitted = true
-              } catch {
+              if (!commitResolution(nextWait, nextLane, [{ op: 'publishResult', record: result }, { op: 'appendEvent', event: { type: 'lane.succeeded', laneId: nextLane.id, data: resultId } }])) {
                 const storageError: RuntimeError = { code: 'SESSION_STORAGE_LIMIT_EXCEEDED', message: 'Session storage limit exceeded while committing a closing Lane result.' }
                 const failedWait = structuredClone(wait)
                 failedWait.state = 'unsatisfied'
                 failedWait.resolution = { waitId: wait.id, status: 'unsatisfied', dependencies: observations, error: storageError }
-                const failedLane = structuredClone(lane)
+                const failedLane = structuredClone(lane!)
                 delete failedLane.activeWaitId
                 failedLane.status = 'failed'
                 failedLane.failure = { error: storageError, privacy: 'public' }
                 failedLane.version++
-                this.state.waits.set(failedWait.id, failedWait)
-                this.state.lanes.set(failedLane.id, failedLane)
+                commitResolution(failedWait, failedLane, [{ op: 'appendEvent', event: { type: 'lane.failed', laneId: failedLane.id, data: storageError as unknown as JsonValue } }])
               }
-              if (closingCommitted) commitMutationTransaction(this.state, this.mutationLog, `wait:${wait.id}:closing:${resultId}`, mutations, this.state.now, this.sessionId)
             } else {
-              wait.state = 'satisfied'; wait.resolution = resolution
-              delete lane.activeWaitId
-              lane.status = 'ready'; lane.pendingResumeInput = { type: 'wait', resolution }; this.enqueueLane(lane.id)
+              delete nextLane.activeWaitId
+              nextLane.status = 'ready'
+              nextLane.pendingResumeInput = { type: 'wait', resolution }
+              commitResolution(nextWait, nextLane)
             }
           } else {
-            wait.state = 'satisfied'; wait.resolution = resolution
+            commitResolution(nextWait)
           }
-          changed = true
         }
       }
     }

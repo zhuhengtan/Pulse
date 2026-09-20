@@ -122,6 +122,20 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.lanes.get('lane-1')?.status).toBe('waiting')
   })
 
+  it('does not mutate a Wait or Lane when dependency resolution storage admission fails', () => {
+    const runtime = new PulseRuntime({ maxRunning: { tool: 0 }, storagePolicy: { maxSnapshotBytes: 100_000 } })
+    const program: LaneProgram = { id: 'wait-resolution-admission', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'blocked', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('wait-resolution-admission', 'done') }) }
+    runtime.createAgent('wait resolution admission', program)
+    runtime.tick()
+    const waitId = runtime.state.lanes.get('lane-1')?.activeWaitId
+    expect(waitId).toBeDefined()
+    runtime.state.effects.get('effect-1')!.outcome = { status: 'succeeded', resultRef: 'result-1' }
+    ;(runtime.storagePolicy as any).limits.maxSnapshotBytes = 1
+    expect(() => (runtime as any).refreshWaits()).not.toThrow()
+    expect(runtime.state.waits.get(waitId as string)?.state).toBe('pending')
+    expect(runtime.state.lanes.get('lane-1')?.status).toBe('waiting')
+  })
+
   it('contains Executor failures when dispatch audit events cannot fit the event budget', async () => {
     const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 100_000 }, effectExecutor: async () => { throw new Error('executor failed') } })
     const program: LaneProgram = { id: 'dispatch-failure-admission', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('dispatch-failure-admission', 'done') }) }

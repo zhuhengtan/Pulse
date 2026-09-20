@@ -60,6 +60,7 @@
 | 异步派发失败边界 | `dispatch_failed` 审计事件无法进入事实日志时使用 fail-closed 旁路，不让异步 Promise 逃逸；Effect 仍进入统一结算路径 | `tests/runtime-control.test.ts` | 本轮异步失败边界提交 |
 | Durable outbox dispatch gate | 配置持久化后，Effect Executor 只有在包含 pending outbox 的快照 durable save 完成后才启动；保存失败时保留队列，不进入外部执行 | `tests/storage-outbox.test.ts` | 本轮 Durable outbox 提交 |
 | 恢复定时器与 Wait deadline | 恢复后以持久化 `state.now` 立即 flush 过期 retry/wait timer；retry 入队和 Wait/Lane deadline 结算均经过 StoragePolicy 预检 | `tests/storage-outbox.test.ts`、`tests/runtime-control.test.ts` | 本轮恢复定时器提交 |
+| Wait 依赖结算事务 | Effect/Lane 终态触发 Wait resolution 时，Wait、Lane、closing Result 与恢复输入统一走 storage admission + MutationLog；准入失败不改变 pending Wait/Lane | `tests/runtime-control.test.ts`、`tests/result-summary-budget.test.ts` | 本轮 Wait 结算事务提交 |
 | Effect 控制路径准入 | 取消、超时、立即隔离、Remote Unknown、对账放弃、重试的控制事件与 Effect/Lane 状态变更先做统一 StoragePolicy 预检，失败时不留下半完成状态 | `tests/runtime-control.test.ts`、`tests/retry-policy.test.ts` | 本轮 Effect 控制准入提交、本轮 Remote Unknown 准入提交、本轮对账放弃准入提交、本轮重试准入提交 |
 | Runtime 生命周期自动持久化 | 配置 `persistenceBackend` 后，Tick/异步 Effect 结算、取消与对账自动排队保存；`run()`、`shutdown()` 等待 durable save；显式 `flushPersistence()` 支持宿主主动冲刷 | `tests/storage-outbox.test.ts` | `7a2ed52`、`3bb7ac0` |
 | 运行观测 | 只读 telemetry 聚合 agent/lane/effect/attempt、route 排除、provider/model、slot wait、usage/cost | `tests/provider-host.test.ts` | `e68cae0` |
@@ -124,7 +125,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、264/264 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、265/265 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -496,6 +497,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - 本轮 File body/event store 提交：提供可直接使用的 FileRuntimeEventArchive，checkpoint 事实事件按 seq 幂等归档、冲突拒绝并支持范围读回。
 - 本轮异步失败边界提交：Executor 抛错时 dispatch_failed 事件写入受限不会逃逸 Promise，Effect 仍进入失败结算和后续状态收尾。
 - 本轮 Durable outbox 提交：配置持久化后，pending outbox 必须先完成 durable save 才允许 Effect Executor 启动；持久化失败时不派发外部操作。
+- 本轮 Wait 结算事务提交：依赖满足/失败与 closing Lane 结果统一经 storage admission 和 MutationLog，失败时不再直接修改 Wait/Lane 内存状态。
 - 本轮取消准入提交：取消父/子 Agent 前统一预检 Lane、Effect、Agent 事件，存储准入失败时不修改任何取消状态。
 - 本轮事件归档提交：Checkpoint 截断前写入 EventArchive 并记录归档水位，归档失败时保留内存事实事件和旧持久化快照。
 - `2250df2`：Runtime Worker lease 暴露远程 claim/renew/complete/fail 协议；adapters 增加 HTTP Coordinator Server、Client、polling Worker 和 HTTP EffectExecutor，测试覆盖真实本机 HTTP 往返、heartbeat 与 Runtime Effect 闭环。
@@ -509,7 +511,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `8bb07e5`：Global/Lane Context 增加不改变业务 JSON 形状的 privacy metadata sidecar；版本、持久化恢复、ContextBuilder、ContextMerger 和 warm start 均保留该元数据。
 - `fe9554a` / `596fecb`：Session outcome 和 fact stream 均按 Agent 隔离，Host snapshot 暴露 Global Context privacy metadata。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
-- 当前确定性门禁：`npm exec tsc -b --pretty false && npm test`，47 个测试文件、264 个测试通过；`npm run build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- 当前确定性门禁：`npm exec tsc -b --pretty false && npm test`，47 个测试文件、265 个测试通过；`npm run build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
