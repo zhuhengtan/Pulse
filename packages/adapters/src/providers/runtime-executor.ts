@@ -1,5 +1,5 @@
 import type { EffectExecutor, EffectExecution, JsonValue, LLMRequestProjection, LLMResult, ModelCandidate, ModelRouter } from '@pulse/runtime'
-import { ModelFallbackController, OutputValidationError, validateAdapterResult, validateJsonSchema, modelFallbackError } from '@pulse/runtime'
+import { ModelFallbackController, OutputValidationError, estimateProjectionTokens, validateAdapterResult, validateJsonSchema, modelFallbackError } from '@pulse/runtime'
 import type { ProviderAdapter } from './types.js'
 
 class AsyncSlot {
@@ -37,11 +37,12 @@ function toJson(value: unknown): JsonValue {
   throw new Error('LLM_OUTPUT_NOT_SERIALIZABLE')
 }
 
-function candidateMetadata(candidate: ModelCandidate, attempts: Array<{ attemptId: string; attemptNo: number; candidate: ModelCandidate }>, usage: ReadonlyMap<string, NonNullable<LLMResult['usage']>>): JsonValue {
-  return { selected: { id: candidate.id, providerId: candidate.providerId }, attempts: attempts.map((attempt) => {
+function candidateMetadata(candidate: ModelCandidate, attempts: Array<{ attemptId: string; attemptNo: number; candidate: ModelCandidate }>, usage: ReadonlyMap<string, NonNullable<LLMResult['usage']>>, slotWaitMs: ReadonlyMap<string, number>, routes: JsonValue): JsonValue {
+  return { selected: { id: candidate.id, providerId: candidate.providerId }, routes, attempts: attempts.map((attempt) => {
     const recorded = usage.get(attempt.attemptId)
     const usageJson = recorded === undefined ? undefined : { ...(recorded.inputTokens === undefined ? {} : { inputTokens: recorded.inputTokens }), ...(recorded.outputTokens === undefined ? {} : { outputTokens: recorded.outputTokens }), ...(recorded.cachedInputTokens === undefined ? {} : { cachedInputTokens: recorded.cachedInputTokens }), ...(recorded.uncachedInputTokens === undefined ? {} : { uncachedInputTokens: recorded.uncachedInputTokens }), ...(recorded.latencyMs === undefined ? {} : { latencyMs: recorded.latencyMs }), ...(recorded.cost === undefined ? {} : { cost: recorded.cost }) }
-    return { attemptId: attempt.attemptId, attemptNo: attempt.attemptNo, modelId: attempt.candidate.id, providerId: attempt.candidate.providerId, ...(usageJson === undefined ? {} : { usage: usageJson }) }
+    const waited = slotWaitMs.get(attempt.attemptId)
+    return { attemptId: attempt.attemptId, attemptNo: attempt.attemptNo, modelId: attempt.candidate.id, providerId: attempt.candidate.providerId, ...(waited === undefined ? {} : { slotWaitMs: waited }), ...(usageJson === undefined ? {} : { usage: usageJson }) }
   }) }
 }
 
@@ -58,17 +59,26 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
     const projection = request as unknown as LLMRequestProjection
     const observations: NonNullable<EffectExecution['observations']> = []
     const usage = new Map<string, NonNullable<LLMResult['usage']>>()
+    const slotWaitMs = new Map<string, number>()
     let lastSchemaViolation: JsonValue | undefined
     let failedForSchema = false
     const dynamicRequirements = input.requirements && typeof input.requirements === 'object' && !Array.isArray(input.requirements) ? input.requirements as Partial<ModelCandidate['capabilities']> : {}
-    const candidates = config.router.routeProjection(task, projection, { ...config.requirements, ...dynamicRequirements })
+    const routeRequirements = { ...config.requirements, ...dynamicRequirements }
+    const routeDiagnostics = config.router.diagnostics(task, projection.privacy, routeRequirements, estimateProjectionTokens(projection))
+    const candidates = config.router.routeProjection(task, projection, routeRequirements)
     const result = await fallback.execute(effect.id, candidates, async (attempt) => {
       failedForSchema = false
       const provider = config.providers.get(attempt.candidate.providerId)
       if (!provider) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause: new Error(`UNKNOWN_PROVIDER:${attempt.candidate.providerId}`) })
-      const providerRelease = await providerSlots.get(attempt.candidate.providerId).acquire(signal)
+      const slotStartedAt = Date.now()
+      let providerRelease: (() => void)
+      try { providerRelease = await providerSlots.get(attempt.candidate.providerId).acquire(signal) } catch (cause) {
+        if (signal.aborted) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause })
+        throw cause
+      }
       let modelRelease: (() => void) | undefined
-      try { modelRelease = await modelSlots.get(attempt.candidate.id).acquire(signal) } catch (cause) { providerRelease(); throw cause }
+      try { modelRelease = await modelSlots.get(attempt.candidate.id).acquire(signal) } catch (cause) { providerRelease(); if (signal.aborted) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause }); throw cause }
+      slotWaitMs.set(attempt.attemptId, Math.max(0, Date.now() - slotStartedAt))
       const releases = [providerRelease, modelRelease]
       try {
         const startedAt = Date.now()
@@ -86,6 +96,7 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
         failedForSchema = false
         return output
       } catch (cause) {
+        if (signal.aborted) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause })
         throw modelFallbackError({ retryable: true, localClosed: true, sideEffectState: 'none', cause })
       } finally { for (const release of releases.reverse()) release() }
     }).catch((cause) => {
@@ -95,6 +106,6 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
     if ('schemaRejected' in result) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Provider output did not match the declared schema.' }, rejectedOutput: { value: result.schemaRejected, privacy: projection.privacy, derivedFrom: [...(effect.derivedFrom ?? [])] } }
     const modelValue = input.outputSchema !== undefined || typeof input.schema === 'string' ? (result.result.structured ?? result.result.text) : result.result
     const value = toJson(modelValue)
-    return { value, privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: candidateMetadata(result.candidate, result.attempts, usage), ...(observations.length ? { observations } : {}) }
+    return { value, privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue), ...(observations.length ? { observations } : {}) }
   }
 }

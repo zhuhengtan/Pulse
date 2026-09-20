@@ -39,6 +39,8 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.data).includes('cachedInputTokens'))).toBe(true)
     expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.data).includes('uncachedInputTokens'))).toBe(true)
     expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.data).includes('latencyMs'))).toBe(true)
+    expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.data).includes('PRIVACY_CLOUD_BLOCKED'))).toBe(true)
+    expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.data).includes('slotWaitMs'))).toBe(true)
   })
 
   it('passes a Provider structured payload to the DSL schema decoder', async () => {

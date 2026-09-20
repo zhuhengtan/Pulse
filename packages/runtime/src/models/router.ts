@@ -10,6 +10,7 @@ export interface ModelUsage {
   cost?: { amount: number; currency: string; source: 'reported' | 'estimated'; pricingVersion?: string }
 }
 export interface ModelCandidate { id: string; providerId: string; tasks: string[]; capabilities: ModelCapabilities; priority: number }
+export interface ModelRouteDiagnostic { id: string; providerId: string; accepted: boolean; reasons: string[] }
 export interface ModelRegistry { register(candidate: ModelCandidate): void; list(): ModelCandidate[] }
 
 export class InMemoryModelRegistry implements ModelRegistry {
@@ -25,12 +26,20 @@ export function estimateProjectionTokens(projection: LLMRequestProjection): numb
 
 export class ModelRouter {
   constructor(private readonly registry: ModelRegistry) {}
-  route(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] {
-    return this.registry.list().filter((candidate) => candidate.tasks.includes(task) && (privacy !== 'local_only' || candidate.capabilities.local === true) && Object.entries(requirements).every(([key, value]) => candidate.capabilities[key as keyof ModelCapabilities] === value)).sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
-  }
+  route(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] { return this.diagnostics(task, privacy, requirements).filter((item) => item.accepted).map((item) => this.registry.list().find((candidate) => candidate.id === item.id)!).sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id)) }
   routeProjection(task: string, projection: LLMRequestProjection, requirements: Partial<ModelCapabilities> = {}): ModelCandidate[] {
     const estimatedTokens = estimateProjectionTokens(projection)
-    return this.route(task, projection.privacy, requirements).filter((candidate) => candidate.capabilities.maxContextTokens >= estimatedTokens)
+    return this.diagnostics(task, projection.privacy, requirements, estimatedTokens).filter((item) => item.accepted).map((item) => this.registry.list().find((candidate) => candidate.id === item.id)!).sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
+  }
+  diagnostics(task: string, privacy: PrivacyLabel, requirements: Partial<ModelCapabilities> = {}, estimatedTokens?: number): ModelRouteDiagnostic[] {
+    return this.registry.list().map((candidate) => {
+      const reasons: string[] = []
+      if (!candidate.tasks.includes(task)) reasons.push('TASK_NOT_SUPPORTED')
+      if (privacy === 'local_only' && candidate.capabilities.local !== true) reasons.push('PRIVACY_CLOUD_BLOCKED')
+      for (const [key, value] of Object.entries(requirements)) if (candidate.capabilities[key as keyof ModelCapabilities] !== value) reasons.push(`CAPABILITY_MISSING:${key}`)
+      if (estimatedTokens !== undefined && candidate.capabilities.maxContextTokens < estimatedTokens) reasons.push('CONTEXT_WINDOW_TOO_SMALL')
+      return { id: candidate.id, providerId: candidate.providerId, accepted: reasons.length === 0, reasons }
+    })
   }
 }
 
