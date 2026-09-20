@@ -330,6 +330,7 @@ describe('effect outbox and runtime persistence envelope', () => {
       expect(exit.signal).toBe('SIGKILL')
       const restored = await PulseRuntime.restore(new FileRuntimePersistenceBackend(filePath))
       expect(restored.state.effects.get('effect-1')?.state).toBe('reconcile_required')
+      expect(restored.mutationLog.entries.some((entry) => entry.transactionId.startsWith('recovery:effect-1:'))).toBe(true)
       expect(restored.quarantine.unresolvedEffectIds).toEqual(['effect-1'])
       expect(restored.resourceLocks.isHeld('workspace', 'exclusive')).toBe(true)
     } finally { await rm(directory, { recursive: true, force: true }) }

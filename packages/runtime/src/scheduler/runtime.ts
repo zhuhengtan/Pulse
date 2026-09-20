@@ -203,8 +203,12 @@ export class PulseRuntime {
       for (const effect of this.state.effects.values()) {
         const outboxEntry = this.outbox.get(`${effect.id}:${effect.attemptId}`)
         if (effect.state === 'running' && (outboxEntry === undefined || outboxEntry.state === 'pending')) {
-          if (effect.sideEffectPolicy === 'write') { effect.state = 'reconcile_required'; effect.executionState = 'remote_unknown'; effect.sideEffectState = 'unknown'; this.quarantine.add(effect.id, this.state.now, 'recovery_in_doubt') }
-          else { effect.state = 'queued'; effect.executionState = 'local' }
+          const recovered = structuredClone(effect)
+          const recoveryReason = effect.sideEffectPolicy === 'write' ? 'recovery_in_doubt' : 'recovery_requeue'
+          if (effect.sideEffectPolicy === 'write') { recovered.state = 'reconcile_required'; recovered.executionState = 'remote_unknown'; recovered.sideEffectState = 'unknown' }
+          else { recovered.state = 'queued'; recovered.executionState = 'local' }
+          commitMutationTransaction(this.state, this.mutationLog, `recovery:${effect.id}:${effect.attemptId}:${recoveryReason}`, [{ op: 'setEffect', effectId: effect.id, record: recovered }], this.state.now, this.sessionId)
+          if (effect.sideEffectPolicy === 'write') this.quarantine.add(effect.id, this.state.now, 'recovery_in_doubt')
         }
         if (effect.state === 'retry_wait' && effect.retryAt !== undefined) {
           const attemptId = effect.attemptId
