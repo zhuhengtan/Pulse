@@ -172,7 +172,10 @@ describe('Tool SDK to Runtime Effect host', () => {
     registry.register({ manifest: { name: 'manual', version: '1', description: 'manual schema', inputSchema: { type: 'object', required: ['value'], properties: { value: { type: 'integer', minimum: 1 } }, additionalProperties: false }, outputSchema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } }, additionalProperties: false }, concurrencyClass: 'tool', locks: [], supportsAbortSignal: true, sideEffectPolicy: 'none', retrySafety: 'read_only', defaultTimeoutMs: 1000 }, execute: () => ({ ok: 'yes' }) })
     expect(() => registry.admission('manual', { value: 0 })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_INPUT' }))
     const executor = createToolEffectExecutor(registry)
+    await expect(registry.execute('manual', { value: 0 }, new AbortController().signal)).rejects.toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_INPUT' }))
+    await expect(registry.executeDetailed('manual', { value: 0 }, new AbortController().signal)).rejects.toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_INPUT' }))
     const effect = { id: 'manual-effect', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'manual', kind: 'tool', concurrencyClass: 'tool', input: { name: 'manual', arguments: { value: 1 } }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as EffectRecord
+    await expect(registry.execute('manual', { value: 1 }, new AbortController().signal)).rejects.toThrowError(expect.objectContaining({ code: 'TOOL_OUTPUT_SCHEMA_VIOLATION' }))
     await expect(executor(effect, new AbortController().signal)).rejects.toThrowError(expect.objectContaining({ code: 'TOOL_OUTPUT_SCHEMA_VIOLATION' }))
   })
 

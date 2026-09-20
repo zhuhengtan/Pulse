@@ -115,13 +115,17 @@ export class ToolRegistry {
   }
   async execute(name: string, input: unknown, context: ToolContext | AbortSignal): Promise<unknown> {
     const definition = this.require(name)
+    const parsedInput = this.validateInput(name, input)
     const toolContext: ToolContext = 'aborted' in context ? { toolCallId: '', effectId: '', attemptId: '', agentId: '', laneId: '', signal: context, emit: () => {} } : context
-    return definition.execute(input, toolContext)
+    const output = await definition.execute(parsedInput, toolContext)
+    if (!matchesJsonSchema(output, definition.manifest.outputSchema)) throw new ToolError('TOOL_OUTPUT_SCHEMA_VIOLATION', `Output does not match the manifest for tool ${name}.`, { retryable: false })
+    return output
   }
   async executeDetailed(name: string, input: unknown, context: ToolContext | AbortSignal): Promise<{ output: unknown; normalized?: JsonValue; summary?: JsonValue; manifest: ToolManifest }> {
     const definition = this.require(name)
+    const parsedInput = this.validateInput(name, input)
     const toolContext: ToolContext = 'aborted' in context ? { toolCallId: '', effectId: '', attemptId: '', agentId: '', laneId: '', signal: context, emit: () => {} } : context
-    const output = await definition.execute(input, toolContext)
+    const output = await definition.execute(parsedInput, toolContext)
     if (!matchesJsonSchema(output, definition.manifest.outputSchema)) throw new ToolError('TOOL_OUTPUT_SCHEMA_VIOLATION', `Output does not match the manifest for tool ${name}.`, { retryable: false })
     const summary = definition.summarize?.(output)
     if (summary !== undefined && Buffer.byteLength(JSON.stringify(summary), 'utf8') > (definition.manifest.maxResultSummaryBytes ?? 4096)) throw new Error('TOOL_SUMMARY_TOO_LARGE')
