@@ -33,4 +33,14 @@ describe('Agent creation transaction', () => {
     const { agentId } = runtime.createAgent('run one agent', program)
     await expect(runtime.run(agentId)).resolves.toMatchObject({ status: 'succeeded', unresolvedEffectIds: [] })
   })
+
+  it('keeps explicit and generated Agent IDs unique', () => {
+    const runtime = new PulseRuntime()
+    const program: LaneProgram = { id: 'unique-agent', version: '1', step: () => ({ actions: [], next: point('unique-agent') }) }
+    const explicit = runtime.createAgent({ agentId: 'agent-1', goal: 'explicit', program })
+    const generated = runtime.createAgent('generated', program)
+    expect(explicit.agentId).toBe('agent-1')
+    expect(generated.agentId).toBe('agent-2')
+    expect(() => runtime.createAgent({ agentId: explicit.agentId, goal: 'duplicate', program })).toThrow('AGENT_ID_EXISTS:agent-1')
+  })
 })
