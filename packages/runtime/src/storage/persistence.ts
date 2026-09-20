@@ -1,6 +1,7 @@
 import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
+import { createRequire } from 'node:module'
 import { parseContextSnapshotRef, provenanceRefId, provenanceRefKind } from '../core/types.js'
 import type { DataRef, JsonValue, ProvenanceRef, ResultRecord, RuntimeEvent, RuntimeState } from '../core/types.js'
 import { stableSerialize } from '../context/builder.js'
@@ -372,6 +373,78 @@ export class FileRuntimePersistenceBackend implements RuntimePersistenceBackend 
     })
     this.pending = operation.catch(() => undefined)
     await operation
+  }
+}
+
+interface SqliteStatement {
+  get(...params: unknown[]): Record<string, unknown> | undefined
+  run(...params: unknown[]): unknown
+}
+
+interface SqliteDatabase {
+  exec(sql: string): void
+  prepare(sql: string): SqliteStatement
+  close(): void
+}
+
+type SqliteDatabaseConstructor = new (path: string) => SqliteDatabase
+
+/** Durable single-snapshot backend using Node's built-in SQLite transaction support. */
+export class SqliteRuntimePersistenceBackend implements RuntimePersistenceBackend {
+  private database: SqliteDatabase | undefined
+  private tail: Promise<void> = Promise.resolve()
+
+  constructor(readonly filePath: string) {}
+
+  async load(): Promise<RuntimePersistenceSnapshot | undefined> {
+    return this.enqueue(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true })
+      const row = this.open().prepare('SELECT payload FROM runtime_snapshot WHERE id = 1').get()
+      if (!row) return undefined
+      if (typeof row.payload !== 'string') throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
+      return JSON.parse(row.payload) as RuntimePersistenceSnapshot
+    })
+  }
+
+  async save(snapshot: RuntimePersistenceSnapshot, expectedDigest?: string): Promise<void> {
+    await this.enqueue(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true })
+      const database = this.open()
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        const current = database.prepare('SELECT digest FROM runtime_snapshot WHERE id = 1').get()
+        const currentDigest = current && typeof current.digest === 'string' ? current.digest : undefined
+        if (expectedDigest !== undefined && currentDigest !== expectedDigest) throw new Error('RUNTIME_PERSISTENCE_CONFLICT')
+        const payload = JSON.stringify(snapshot)
+        database.prepare('INSERT INTO runtime_snapshot (id, payload, digest) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, digest = excluded.digest').run(payload, snapshot.integrity?.digest ?? null)
+        database.exec('COMMIT')
+      } catch (cause) {
+        try { database.exec('ROLLBACK') } catch { /* transaction already closed */ }
+        throw cause
+      }
+    })
+  }
+
+  async close(): Promise<void> {
+    await this.enqueue(async () => {
+      this.database?.close()
+      this.database = undefined
+    })
+  }
+
+  private open(): SqliteDatabase {
+    if (this.database) return this.database
+    const require = createRequire(import.meta.url)
+    const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: SqliteDatabaseConstructor }
+    this.database = new DatabaseSync(this.filePath)
+    this.database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 30000; CREATE TABLE IF NOT EXISTS runtime_snapshot (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL, digest TEXT)')
+    return this.database
+  }
+
+  private enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const operation = this.tail.then(work, work)
+    this.tail = operation.then(() => undefined, () => undefined)
+    return operation
   }
 }
 
