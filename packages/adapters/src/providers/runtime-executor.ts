@@ -37,12 +37,12 @@ function toJson(value: unknown): JsonValue {
   throw new Error('LLM_OUTPUT_NOT_SERIALIZABLE')
 }
 
-function candidateMetadata(candidate: ModelCandidate, attempts: Array<{ attemptId: string; attemptNo: number; candidate: ModelCandidate }>, usage: ReadonlyMap<string, NonNullable<LLMResult['usage']>>, slotWaitMs: ReadonlyMap<string, number>, routes: JsonValue): JsonValue {
+function candidateMetadata(candidate: ModelCandidate, attempts: Array<{ effectId: string; attemptId: string; attemptNo: number; candidate: ModelCandidate }>, usage: ReadonlyMap<string, NonNullable<LLMResult['usage']>>, slotWaitMs: ReadonlyMap<string, number>, routes: JsonValue): JsonValue {
   return { selected: { id: candidate.id, providerId: candidate.providerId }, routes, attempts: attempts.map((attempt) => {
     const recorded = usage.get(attempt.attemptId)
     const usageJson = recorded === undefined ? undefined : { ...(recorded.inputTokens === undefined ? {} : { inputTokens: recorded.inputTokens }), ...(recorded.outputTokens === undefined ? {} : { outputTokens: recorded.outputTokens }), ...(recorded.cachedInputTokens === undefined ? {} : { cachedInputTokens: recorded.cachedInputTokens }), ...(recorded.uncachedInputTokens === undefined ? {} : { uncachedInputTokens: recorded.uncachedInputTokens }), ...(recorded.latencyMs === undefined ? {} : { latencyMs: recorded.latencyMs }), ...(recorded.cost === undefined ? {} : { cost: recorded.cost }) }
     const waited = slotWaitMs.get(attempt.attemptId)
-    return { attemptId: attempt.attemptId, attemptNo: attempt.attemptNo, modelId: attempt.candidate.id, providerId: attempt.candidate.providerId, ...(waited === undefined ? {} : { slotWaitMs: waited }), ...(usageJson === undefined ? {} : { usage: usageJson }) }
+    return { effectId: attempt.effectId, attemptId: attempt.attemptId, attemptNo: attempt.attemptNo, modelId: attempt.candidate.id, providerId: attempt.candidate.providerId, ...(waited === undefined ? {} : { slotWaitMs: waited }), ...(usageJson === undefined ? {} : { usage: usageJson }) }
   }) }
 }
 

@@ -17,6 +17,7 @@ import { ContextMerger, type MergePlan } from '../context/merger.js'
 import { appendHistory, historyPressure } from '../context/builder.js'
 import { validateJsonSchema } from '../models/router.js'
 import { SessionStoragePolicy, type StoragePolicyConfig } from '../storage/policy.js'
+import { collectRuntimeTelemetry, type RuntimeTelemetrySnapshot } from './telemetry.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number; observe?: (event: { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }) => void }
 export interface LaneProgram {
@@ -396,6 +397,8 @@ export class PulseRuntime {
   }
 
   inspect(): JsonValue { const explanation = this.explain() as Record<string, JsonValue>; return { ...explanation, quarantineEntries: this.quarantine.snapshot() as unknown as JsonValue, observationsPending: this.observationInbox.size } }
+
+  telemetry(): RuntimeTelemetrySnapshot { return collectRuntimeTelemetry(this.state) }
 
   private assertStorageAdmission(mutations: Mutation[]): void {
     const candidate = structuredClone(this.state)

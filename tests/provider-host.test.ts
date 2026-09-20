@@ -41,6 +41,10 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.data).includes('latencyMs'))).toBe(true)
     expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.data).includes('PRIVACY_CLOUD_BLOCKED'))).toBe(true)
     expect(runtime.state.events.some((event) => event.type === 'effect.execution_metadata' && JSON.stringify(event.data).includes('slotWaitMs'))).toBe(true)
+    const telemetry = runtime.telemetry()
+    expect(telemetry.llm.attempts).toEqual(expect.arrayContaining([expect.objectContaining({ effectId: 'effect-1', modelId: 'local-second', providerId: 'p2', usage: expect.objectContaining({ inputTokens: 12, cachedInputTokens: 5, uncachedInputTokens: 7 }) })]))
+    expect(telemetry.llm.routeRejections).toMatchObject({ PRIVACY_CLOUD_BLOCKED: 1 })
+    expect(telemetry.llm.usage).toMatchObject({ inputTokens: 12, outputTokens: 3, cachedInputTokens: 5, uncachedInputTokens: 7 })
   })
 
   it('passes a Provider structured payload to the DSL schema decoder', async () => {
