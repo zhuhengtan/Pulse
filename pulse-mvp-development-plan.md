@@ -554,6 +554,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `11aa4d4`：Agent 终态 `setAgent` storage admission 失败时 fail-closed 抛出 `SESSION_STORAGE_LIMIT_EXCEEDED`，不再让 Lane 结果掩盖 Agent 状态未提交。
 - `02c0162`：Session `reply()`/`cancel()` 统一为真实 Promise API，非法 reason、跨 Agent Effect 和入队准入异常均以 reject 交付 Host。
 - `e29d501`：FactInbox 改为逐条处理，命令事务失败时恢复当前 Fact；重复重试不会再次写入同一 `command.enqueued` 镜像事件。
+- `6e1d295`：补充 Host Fact 存储拒绝后的恢复重试回归，验证命令最终应用且 `command.enqueued` 镜像保持幂等。
 - `5cf3af9`：补齐 `requestCancel()`、`setLanePriority()`、`inspectLane()` Host API；优先级变更经过 FactInbox、存储准入和 MutationLog 事务，不重入当前 Step。
 - `94c4d69`：Runtime Agent 创建改为 Agent、Root Lane 与 ID 游标一同提交；创建准入失败不会留下半个 Agent 或消耗 ID。
 - `ced2266`：补齐架构示例使用的 `runtime.run(agentId)`，并保留旧的无参/数字 tick 上限调用。
