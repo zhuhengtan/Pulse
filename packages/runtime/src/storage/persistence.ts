@@ -314,6 +314,7 @@ export function serializeRuntimePersistence(state: RuntimeState, mutationLog: Mu
 export function importRuntimePersistence(snapshot: RuntimePersistenceSnapshot | JsonValue): { state: RuntimeState; mutationLog: MutationLog; outbox: EffectOutbox; quarantine?: QuarantineEntry[]; storagePolicy?: SessionStoragePolicy; factInbox?: FactInboxSnapshot } {
   const value = snapshot as RuntimePersistenceSnapshot
   validateRuntimePersistenceSnapshot(value)
+  if (value.snapshotBodies === 'external') throw new Error('RUNTIME_SNAPSHOT_STORE_REQUIRED')
   const mutationLog = MutationLog.fromSnapshot(value.mutationLog)
   const state = importRuntimeState(value.checkpoint?.state ?? value.state)
   if (value.checkpoint) mutationLog.replay(state)
