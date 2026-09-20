@@ -8,7 +8,7 @@ import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
 import { assertProgramPure } from '../dsl/program.js'
 import { FactInbox, ObservationInbox } from '../core/inbox.js'
-import { observeProgress } from '../lifecycle/watchdog.js'
+import { observeProgress, type ProgressObservation } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
 import { exportRuntimeCheckpoint, exportRuntimePersistence, importRuntimePersistence, type RuntimePersistenceBackend, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
 import { ResourceLockManager } from './locks.js'
@@ -55,6 +55,7 @@ export interface RuntimeConfig {
   sessionId?: string
   maxAgentDepth?: number
   watchdogNoProgressThreshold?: number
+  watchdogRepeatedActionThreshold?: number
   maxPreparingLLMs?: number
   maxPreparedLLMs?: number
   trustedSanitizerIds?: string[]
@@ -146,6 +147,7 @@ export class PulseRuntime {
   private readonly maxConsecutiveControlErrors: number
   private readonly maxRuntimeMs?: number
   private readonly watchdogNoProgressThreshold: number
+  private readonly watchdogRepeatedActionThreshold: number
   private readonly maxAgentDepth: number
   private readonly maxPreparingLLMs: number
   private readonly maxPreparedLLMs: number
@@ -198,6 +200,7 @@ export class PulseRuntime {
     this.maxConsecutiveControlErrors = config.maxConsecutiveControlErrors ?? 2
     if (config.maxRuntimeMs !== undefined) this.maxRuntimeMs = config.maxRuntimeMs
     this.watchdogNoProgressThreshold = config.watchdogNoProgressThreshold ?? 3
+    this.watchdogRepeatedActionThreshold = config.watchdogRepeatedActionThreshold ?? 3
     this.maxAgentDepth = config.maxAgentDepth ?? 1
     this.maxPreparingLLMs = config.maxPreparingLLMs ?? 2
     this.maxPreparedLLMs = config.maxPreparedLLMs ?? 8
@@ -434,6 +437,22 @@ export class PulseRuntime {
           }
         }
       } else {
+        let watchdogObservation: ProgressObservation | undefined
+        if (preparedOutput.actions.some((action) => action.type === 'submit_effects')) {
+          const observation = observeProgress(lane, preparedOutput, this.state, lane.progressWatchdog, { noProgressThreshold: this.watchdogNoProgressThreshold, repeatedActionThreshold: this.watchdogRepeatedActionThreshold, admission: true })
+          if (observation.rejected) {
+            lane.progressWatchdog = observation.state
+            if (observation.rejected.code === 'NO_PROGRESS_DETECTED') this.failLane(lane, observation.rejected)
+            else {
+              lane.pendingResumeInput = { type: 'control_error', error: observation.rejected, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
+              this.emit({ type: 'progress.intervention_applied', laneId: lane.id, data: observation.rejected as unknown as JsonValue })
+              this.enqueueLane(lane.id)
+            }
+            progressed++
+            continue
+          }
+          watchdogObservation = observation
+        }
         try { this.assertStorageAdmission(result.mutations) }
         catch (cause) {
           const storageError: RuntimeError = { code: 'SESSION_STORAGE_LIMIT_EXCEEDED', message: cause instanceof Error ? cause.message : String(cause) }
@@ -450,7 +469,7 @@ export class PulseRuntime {
         if (updated) delete updated.consecutiveControlErrors
         if (updated && updated.pendingResumeInput) delete updated.pendingResumeInput
         if (updated) {
-          const watchdog = observeProgress(lane, preparedOutput, this.state, lane.progressWatchdog, { noProgressThreshold: this.watchdogNoProgressThreshold })
+          const watchdog = watchdogObservation ?? observeProgress(lane, preparedOutput, this.state, lane.progressWatchdog, { noProgressThreshold: this.watchdogNoProgressThreshold, repeatedActionThreshold: this.watchdogRepeatedActionThreshold })
           updated.progressWatchdog = watchdog.state
           if (!watchdog.progressed) this.emit({ type: watchdog.state.interventionLevel >= 3 ? 'progress.no_progress_detected' : 'progress.intervention_applied', laneId: lane.id, data: { noProgressCount: watchdog.state.noProgressCount, interventionLevel: watchdog.state.interventionLevel } })
           if (watchdog.state.interventionLevel >= 3 && !['succeeded', 'failed', 'cancelled'].includes(updated.status)) this.failLane(updated, { code: 'NO_PROGRESS_DETECTED', message: 'Lane made no observable progress within the watchdog threshold.' })

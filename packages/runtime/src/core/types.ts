@@ -67,6 +67,8 @@ export interface LaneContext {
 
 export interface ProgressWatchdogState {
   window: string[]
+  actionSignatures?: string[]
+  progressKeys?: string[]
   noProgressCount: number
   interventionLevel: 0 | 1 | 2 | 3
   lastFingerprint?: string
