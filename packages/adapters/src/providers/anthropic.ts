@@ -1,16 +1,46 @@
 import type { JsonValue, LLMRequestProjection } from '@pulse/runtime'
-import { normalizeAnthropicResponse } from './normalize.js'
+import { consumeProviderSse, normalizeAnthropicResponse } from './normalize.js'
 import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'Anthropic Messages'
   constructor(readonly id: string, private readonly config: ProviderPresetConfig) {}
-  async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; outputSchema?: JsonValue; model?: string; maxOutputTokens?: number }) {
+  async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; outputSchema?: JsonValue; model?: string; maxOutputTokens?: number }) {
     const system = params.request.blocks.filter((block) => block.kind === 'system' || block.kind === 'policy' || block.kind === 'tools').map((block) => typeof block.content === 'string' ? block.content : JSON.stringify(block.content)).join('\n')
     const messages = [{ role: 'user', content: params.request.blocks.filter((block) => !['system', 'policy', 'tools'].includes(block.kind)).map((block) => ({ type: 'text', text: typeof block.content === 'string' ? block.content : JSON.stringify(block.content) })) }]
-    const body = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096, ...(system ? { system } : {}), messages, ...(toolDefinitions(params.request).length ? { tools: toolDefinitions(params.request) } : {}), ...(params.outputSchema === undefined ? {} : { output_format: { type: 'json_schema', schema: params.outputSchema } }) }
+    const streaming = params.onObservation !== undefined
+    const body = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096, ...(system ? { system } : {}), messages, ...(toolDefinitions(params.request).length ? { tools: toolDefinitions(params.request) } : {}), ...(params.outputSchema === undefined ? {} : { output_format: { type: 'json_schema', schema: params.outputSchema } }), ...(streaming ? { stream: true } : {}) }
     const response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
     if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`)
-    return normalizeAnthropicResponse(await response.json())
+    if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeAnthropicResponse(await response.json())
+    const events = await consumeProviderSse(response)
+    const blocks: Array<Record<string, unknown>> = []
+    let stopReason: string | undefined
+    let usage: Record<string, unknown> = {}
+    for (const event of events) {
+      if (!event.data || typeof event.data !== 'object') continue
+      const data = event.data
+      if (event.event === 'message_start' && data.message?.usage && typeof data.message.usage === 'object') usage = { ...usage, ...data.message.usage }
+      if (event.event === 'content_block_start' && data.content_block && typeof data.content_block === 'object') blocks[Number(data.index ?? blocks.length)] = { ...data.content_block }
+      if (event.event === 'content_block_delta' && data.delta && typeof data.delta === 'object') {
+        const index = Number(data.index ?? 0)
+        const block = blocks[index] ?? {}
+        if (data.delta.type === 'text_delta' && typeof data.delta.text === 'string') { block.type = 'text'; block.text = `${typeof block.text === 'string' ? block.text : ''}${data.delta.text}`; params.onObservation?.(data.delta.text) }
+        if (data.delta.type === 'input_json_delta' && typeof data.delta.partial_json === 'string') block.inputJson = `${typeof block.inputJson === 'string' ? block.inputJson : ''}${data.delta.partial_json}`
+        blocks[index] = block
+      }
+      if (event.event === 'message_delta') {
+        if (typeof data.delta?.stop_reason === 'string') stopReason = data.delta.stop_reason
+        if (data.usage && typeof data.usage === 'object') usage = { ...usage, ...data.usage }
+      }
+    }
+    const content = blocks.filter(Boolean).map((block) => {
+      if (block.type === 'tool_use' && typeof block.inputJson === 'string') {
+        try { return { ...block, input: JSON.parse(block.inputJson) as unknown } }
+        catch { return { ...block, input: { raw: block.inputJson } } }
+      }
+      return block
+    })
+    return normalizeAnthropicResponse({ content, stop_reason: stopReason, ...(Object.keys(usage).length ? { usage } : {}) })
   }
 }
 

@@ -71,6 +71,43 @@ describe('M1-3 context, models and adapters', () => {
     vi.unstubAllGlobals()
   })
 
+  it('streams provider text as observations but only normalizes complete tool arguments', async () => {
+    const request = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'stream@1', instruction: 'stream', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'instruction' as const, content: 'stream' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'stream@1', privacy: 'public' as const, privacyRefs: [] }
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const openaiStream = [
+      { choices: [{ delta: { content: 'Hel' } }] },
+      { choices: [{ delta: { content: 'lo ' } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'provider-call', function: { name: 'read', arguments: '{"path":"a' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"}' } }] }, finish_reason: 'tool_calls' }] },
+      { usage: { prompt_tokens: 4, completion_tokens: 2 } },
+    ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n'
+    fetchMock.mockResolvedValueOnce(new Response(openaiStream, { headers: { 'content-type': 'text/event-stream' } }))
+    const openaiChunks: string[] = []
+    const openai = await new OpenAICompatibleAdapter('openai-stream', { provider: 'openai', defaultModel: 'stream-model' }).executeAttempt({ request, signal: new AbortController().signal, onObservation: (chunk) => openaiChunks.push(chunk) })
+    expect(openaiChunks).toEqual(['Hel', 'lo '])
+    expect(openai.text).toBe('Hello ')
+    expect(openai.toolCalls[0]).toMatchObject({ name: 'read', input: { path: 'a' } })
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).stream).toBe(true)
+
+    const anthropicStream = [
+      ['message_start', { message: { usage: { input_tokens: 5 } } }],
+      ['content_block_start', { index: 0, content_block: { type: 'text', text: '' } }],
+      ['content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'Hi' } }],
+      ['content_block_start', { index: 1, content_block: { type: 'tool_use', id: 'provider-call', name: 'read', input: {} } }],
+      ['content_block_delta', { index: 1, delta: { type: 'input_json_delta', partial_json: '{"path":"a"}' } }],
+      ['message_delta', { delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 3 } }],
+    ].map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join('')
+    fetchMock.mockResolvedValueOnce(new Response(anthropicStream, { headers: { 'content-type': 'text/event-stream' } }))
+    const anthropicChunks: string[] = []
+    const anthropic = await new AnthropicAdapter('anthropic-stream', { provider: 'anthropic', defaultModel: 'stream-model' }).executeAttempt({ request, signal: new AbortController().signal, onObservation: (chunk) => anthropicChunks.push(chunk) })
+    expect(anthropicChunks).toEqual(['Hi'])
+    expect(anthropic.text).toBe('Hi')
+    expect(anthropic.toolCalls[0]).toMatchObject({ name: 'read', input: { path: 'a' } })
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).stream).toBe(true)
+    vi.unstubAllGlobals()
+  })
+
   it('fails closed when a Tool schema cannot be represented in JSON Schema', () => {
     expect(() => defineTool({ name: 'unsupported', description: 'unsupported', input: z.date(), output: z.string(), execute: (input) => input.toISOString() })).toThrow('UNSUPPORTED_SCHEMA_TYPE:ZodDate')
     const schema = z.object({ kind: z.literal('ok'), value: z.number().int().min(1) }).strict()

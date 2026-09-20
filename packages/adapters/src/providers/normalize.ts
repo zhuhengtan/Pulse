@@ -1,5 +1,48 @@
 import type { LLMResult } from '@pulse/runtime'
 
+export interface ProviderSseEvent { event?: string; data: any }
+
+/** Read provider SSE frames without treating incomplete tool arguments as executable input. */
+export async function consumeProviderSse(response: Response): Promise<ProviderSseEvent[]> {
+  if (!response.body) throw new Error('PROVIDER_STREAM_BODY_MISSING')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  const events: ProviderSseEvent[] = []
+  let buffer = ''
+  let eventName: string | undefined
+  let dataLines: string[] = []
+  const flush = (): void => {
+    if (dataLines.length === 0) { eventName = undefined; return }
+    const raw = dataLines.join('\n')
+    dataLines = []
+    const data = raw === '[DONE]' ? raw : (() => { try { return JSON.parse(raw) } catch { return { raw } } })()
+    events.push({ ...(eventName === undefined ? {} : { event: eventName }), data })
+    eventName = undefined
+  }
+  const consumeLines = (text: string): void => {
+    buffer += text
+    let newline = buffer.indexOf('\n')
+    while (newline >= 0) {
+      let line = buffer.slice(0, newline)
+      buffer = buffer.slice(newline + 1)
+      if (line.endsWith('\r')) line = line.slice(0, -1)
+      if (line.length === 0) flush()
+      else if (line.startsWith(':')) { /* SSE comment */ }
+      else if (line.startsWith('event:')) eventName = line.slice('event:'.length).trim()
+      else if (line.startsWith('data:')) dataLines.push(line.slice('data:'.length).trimStart())
+      newline = buffer.indexOf('\n')
+    }
+  }
+  while (true) {
+    const chunk = await reader.read()
+    if (chunk.done) break
+    consumeLines(decoder.decode(chunk.value, { stream: true }))
+  }
+  consumeLines(decoder.decode())
+  if (buffer.length > 0 || dataLines.length > 0) flush()
+  return events
+}
+
 export function normalizeOpenAIResponse(response: any): LLMResult {
   const message = response?.choices?.[0]?.message ?? {}
   const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls.map((call: any, index: number) => ({ toolCallId: `pulse-tool-${index + 1}`, name: String(call.function?.name ?? ''), input: parseJson(call.function?.arguments) })) : []
