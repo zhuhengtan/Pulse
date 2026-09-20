@@ -1095,19 +1095,27 @@ export class PulseRuntime {
     const jitter = forcedDelayMs === undefined && policy?.jitter ? Math.floor(baseDelay / 2) : 0
     const delayMs = baseDelay + jitter
     const previousAttemptId = effect.attemptId
-    effect.state = 'retry_wait'
-    effect.executionState = 'local'
-    effect.attemptNo += 1
-    effect.attemptId = `${effect.id}-attempt-${effect.attemptNo}`
-    effect.retryAt = this.state.now + delayMs
-    if (effect.kind === 'llm') { effect.preparation = { state: 'stale', generation: (effect.preparation?.generation ?? 0) + 1 } }
-    this.emit({ type: 'effect.retry_scheduled', effectId: effect.id, data: { previousAttemptId, nextAttemptId: effect.attemptId, delayMs, ...(error ? { error } : {}) } as unknown as JsonValue })
-    this.clock.timers.schedule(effect.retryAt, () => {
+    const candidate = structuredClone(effect)
+    candidate.state = 'retry_wait'
+    candidate.executionState = 'local'
+    candidate.attemptNo += 1
+    candidate.attemptId = `${candidate.id}-attempt-${candidate.attemptNo}`
+    candidate.retryAt = this.state.now + delayMs
+    if (candidate.kind === 'llm') candidate.preparation = { state: 'stale', generation: (candidate.preparation?.generation ?? 0) + 1 }
+    const retryEvent: import('../core/types.js').RuntimeEventInput = { type: 'effect.retry_scheduled', effectId: effect.id, data: { previousAttemptId, nextAttemptId: candidate.attemptId, delayMs, ...(error ? { error } : {}) } as unknown as JsonValue }
+    this.assertStorageAdmission([{ op: 'setEffect', effectId: effect.id, record: candidate }, { op: 'appendEvent', event: retryEvent }])
+    Object.assign(effect, candidate)
+    this.emit(retryEvent)
+    this.clock.timers.schedule(candidate.retryAt, () => {
       const current = this.state.effects.get(effect.id)
       if (current && !current.outcome && current.state === 'retry_wait' && current.attemptId === effect.attemptId) {
-        current.state = 'queued'
-        delete current.retryAt
-        this.emit({ type: 'effect.retry_ready', effectId: current.id, data: current.attemptId })
+        const ready = structuredClone(current)
+        ready.state = 'queued'
+        delete ready.retryAt
+        const readyEvent: import('../core/types.js').RuntimeEventInput = { type: 'effect.retry_ready', effectId: current.id, data: current.attemptId }
+        try { this.assertStorageAdmission([{ op: 'setEffect', effectId: current.id, record: ready }, { op: 'appendEvent', event: readyEvent }]) } catch { return }
+        Object.assign(current, ready)
+        this.emit(readyEvent)
         this.dispatchQueuedEffects()
       }
     })

@@ -34,4 +34,14 @@ describe('Effect retry policy', () => {
     expect(calls).toBe(1)
     expect(runtime.state.effects.get('effect-1')?.attempts).toHaveLength(1)
   })
+
+  it('rejects retry admission before changing the logical Effect when storage is full', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 100_000 }, effectExecutor: async () => await new Promise(() => undefined) })
+    const program: LaneProgram = { id: 'retry-admission', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'unstable', kind: 'tool', concurrencyClass: 'tool', input: {}, retryPolicy: { maxAttempts: 2, initialBackoffMs: 1, maxBackoffMs: 1, jitter: false } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('retry-admission', 'finish') }) }
+    runtime.createAgent('retry admission', program)
+    runtime.tick()
+    ;(runtime.storagePolicy as any).limits.maxEventLogBytes = 1
+    expect(() => runtime.completeEffect('effect-1', { value: null, executionState: 'failed', status: 'failed' }, 'failed', { code: 'TRANSIENT', message: 'retry me' })).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect(runtime.state.effects.get('effect-1')).toMatchObject({ state: 'running', attemptNo: 1, attemptId: 'effect-1-attempt-1' })
+  })
 })
