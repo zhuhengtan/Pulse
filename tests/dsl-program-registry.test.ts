@@ -14,6 +14,7 @@ describe('DSL program registry contract', () => {
     const outcome = await runtime.run(created.agentId)
 
     expect(outcome.status).toBe('succeeded')
+    expect(outcome.resultRef).toBeDefined()
     const root = runtime.state.lanes.get(created.laneId)
     expect(root?.resultRef).toBeDefined()
     expect(runtime.state.results.get(root!.resultRef!)?.value).toEqual({ marker: 'from-ref' })

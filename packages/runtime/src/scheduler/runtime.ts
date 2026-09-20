@@ -141,6 +141,13 @@ function outcomeForLane(lane: LaneRecord): Outcome | undefined {
   return undefined
 }
 
+function runOutcome(lane: LaneRecord | undefined, unresolvedEffectIds: string[]): Outcome {
+  const outcome = lane === undefined ? undefined : outcomeForLane(lane)
+  const unresolved = [...new Set([...(outcome?.unresolvedEffectIds ?? []), ...unresolvedEffectIds])]
+  if (outcome) return { ...outcome, unresolvedEffectIds: unresolved }
+  return { status: 'failed', error: { code: 'RUNTIME_IDLE_BLOCKED', message: 'Runtime stopped before the root Lane reached a terminal state.' }, unresolvedEffectIds: unresolved }
+}
+
 function outcomeForSeriesMember(state: RuntimeState, lane: LaneRecord, key: string): Outcome | undefined {
   const aggregate = outcomeForLane(lane)
   if (!aggregate || lane.series === undefined || lane.resultRef === undefined) return aggregate
@@ -755,10 +762,10 @@ export class PulseRuntime {
     return progressed
   }
 
-  async run(): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }>
-  async run(maxTicks: number): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }>
-  async run(agentId: string, maxTicks?: number): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }>
-  async run(agentOrMaxTicks: string | number = 10_000, requestedMaxTicks = 10_000): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }> {
+  async run(): Promise<Outcome>
+  async run(maxTicks: number): Promise<Outcome>
+  async run(agentId: string, maxTicks?: number): Promise<Outcome>
+  async run(agentOrMaxTicks: string | number = 10_000, requestedMaxTicks = 10_000): Promise<Outcome> {
     if (typeof agentOrMaxTicks === 'string') return this.runAgent(agentOrMaxTicks, requestedMaxTicks)
     for (let tick = 0; tick < agentOrMaxTicks; tick++) {
       const work = this.tick()
@@ -785,15 +792,15 @@ export class PulseRuntime {
       else if (work === 0) await new Promise<void>((resolve) => setImmediate(resolve))
     }
     const root = [...this.state.lanes.values()].find((lane) => lane.ownerLaneId === undefined)
-    const status = root?.status === 'succeeded' ? 'succeeded' : root?.status === 'cancelled' ? 'cancelled' : 'failed'
+    const status: 'succeeded' | 'failed' | 'cancelled' = root?.status === 'succeeded' ? 'succeeded' : root?.status === 'cancelled' ? 'cancelled' : 'failed'
     if (root && !['succeeded', 'failed', 'cancelled'].includes(root.status)) this.emit({ type: 'runtime.idle_blocked', laneId: root.id, data: { status: root.status } })
     const agent = root ? this.state.agents.get(root.agentId) : undefined
     if (agent && ['succeeded', 'failed', 'cancelled'].includes(root?.status ?? 'failed')) this.commitAgentState(agent.id, status, `agent:${agent.id}:run-settled:${root?.version ?? this.state.now}`)
     await this.flushPersistence()
-    return { status, unresolvedEffectIds: this.quarantine.unresolvedEffectIds }
+    return runOutcome(root, this.quarantine.unresolvedEffectIds)
   }
 
-  async runAgent(agentId: string, maxTicks = 10_000): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }> {
+  async runAgent(agentId: string, maxTicks = 10_000): Promise<Outcome> {
     const agent = this.state.agents.get(agentId)
     if (!agent) throw new Error(`UNKNOWN_AGENT:${agentId}`)
     for (let tick = 0; tick < maxTicks; tick++) {
@@ -806,7 +813,7 @@ export class PulseRuntime {
         this.commitAgentState(agent.id, status, `agent:${agent.id}:run-agent-settled:${root.version}`)
         const effectIds = new Set([...this.state.effects.values()].filter((effect) => effect.agentId === agentId).map((effect) => effect.id))
         await this.flushPersistence()
-        return { status, unresolvedEffectIds: this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)) }
+        return runOutcome(root, this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)))
       }
       if (this.ready.size === 0 && this.executions.size === 0) {
         if (this.preparingLLMs.size) { await Promise.resolve(); continue }
@@ -832,7 +839,7 @@ export class PulseRuntime {
     const root = this.state.lanes.get(agent.rootLaneId)
     if (root && !['succeeded', 'failed', 'cancelled'].includes(root.status)) this.emit({ type: 'runtime.idle_blocked', laneId: root.id, data: { status: root.status } })
     const effectIds = new Set([...this.state.effects.values()].filter((effect) => effect.agentId === agentId).map((effect) => effect.id))
-    return { status: root?.status === 'succeeded' ? 'succeeded' : root?.status === 'cancelled' ? 'cancelled' : 'failed', unresolvedEffectIds: this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)) }
+    return runOutcome(root, this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)))
   }
 
   async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await Promise.resolve() } }

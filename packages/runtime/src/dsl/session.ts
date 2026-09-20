@@ -19,7 +19,7 @@ export class PulseSession {
         ...(root?.resultRef === undefined ? {} : { resultRef: root.resultRef }),
         ...(root?.failure === undefined ? {} : { error: root.failure.error }),
         ...(result.status === 'cancelled' && root?.cancelReason !== undefined ? { reason: root.cancelReason } : {}),
-        ...(result.unresolvedEffectIds.length ? { unresolvedEffectIds: [...result.unresolvedEffectIds] } : {}),
+        ...((result.unresolvedEffectIds ?? []).length ? { unresolvedEffectIds: [...(result.unresolvedEffectIds ?? [])] } : {}),
       }
     })
   }
