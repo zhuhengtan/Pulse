@@ -27,6 +27,10 @@ describe('Host command API', () => {
     runtime.tick()
     expect(runtime.state.agents.get(agentId)?.state).toBe('cancelled')
     expect(runtime.state.events.some((event) => event.type === 'agent.cancelled' && event.agentId === agentId)).toBe(true)
+    const cancellation = runtime.mutationLog.entries.find((entry) => entry.mutations.some((mutation) => mutation.op === 'setAgent' && mutation.agentId === agentId && mutation.record.state === 'cancelling'))
+    expect(cancellation?.mutations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ op: 'appendEvent', event: expect.objectContaining({ type: 'command.applied', data: { eventId: 'host-command-1' } }) }),
+    ]))
   })
 
   it('applies setLanePriority through one state-and-event transaction', () => {

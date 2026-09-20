@@ -549,7 +549,7 @@ export class PulseRuntime {
         const effect = this.state.effects.get(envelope.fact.effectId)
         if (effect?.agentId === envelope.fact.agentId && effect.kind === 'human' && !effect.outcome) commandApplied = this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value }, 'succeeded', undefined, [{ op: 'appendEvent', event: { type: 'command.applied', data: { eventId: envelope.eventId } } }])
         else { this.rejectHostCommand(envelope.eventId, effect?.agentId !== envelope.fact.agentId ? 'EFFECT_NOT_OWNED' : 'EFFECT_NOT_REPLYABLE'); commandApplied = true }
-      } else if (envelope.fact.type === 'cancel') this.cancelAgent(envelope.fact.agentId, envelope.fact.reason)
+      } else if (envelope.fact.type === 'cancel') commandApplied = this.cancelAgent(envelope.fact.agentId, envelope.fact.reason, [{ op: 'appendEvent', event: { type: 'command.applied', data: { eventId: envelope.eventId } } }], `host-command:${envelope.eventId}`)
       else if (envelope.fact.type === 'cancel_effect') {
         const effect = this.state.effects.get(envelope.fact.effectId)
         if (!effect || effect.agentId !== envelope.fact.agentId) { this.rejectHostCommand(envelope.eventId, 'EFFECT_NOT_OWNED'); commandApplied = true }
@@ -1151,9 +1151,9 @@ export class PulseRuntime {
   unpinArtifact(ref: string): void { unpinArtifact(this.state, ref); this.syncStoragePolicy(); this.schedulePersistence() }
   markArtifactPersisted(ref: string): void { markArtifactPersisted(this.state, ref); this.syncStoragePolicy(); this.schedulePersistence() }
 
-  cancelAgent(agentId: string, reason = 'USER_REQUESTED'): void {
+  cancelAgent(agentId: string, reason = 'USER_REQUESTED', additionalMutations: Mutation[] = [], commandTransactionId?: string): boolean {
     const agent = this.state.agents.get(agentId)
-    if (!agent || ['succeeded', 'failed', 'cancelled'].includes(agent.state ?? '')) return
+    if (!agent || ['succeeded', 'failed', 'cancelled'].includes(agent.state ?? '')) return false
     const targetAgentIds: string[] = []
     const collect = (currentAgentId: string): void => {
       if (targetAgentIds.includes(currentAgentId)) return
@@ -1172,7 +1172,11 @@ export class PulseRuntime {
       ...targetAgentIds.map((targetId) => ({ type: 'agent.cancelled', agentId: targetId, data: reason })),
     ]
     this.assertStorageAdmission(cancellationEvents.map((event) => ({ op: 'appendEvent' as const, event })))
-    for (const targetId of targetAgentIds) this.commitAgentState(targetId, 'cancelling', `agent:${targetId}:cancelling:${this.state.now}`)
+    let commandApplied = additionalMutations.length === 0
+    for (const [index, targetId] of targetAgentIds.entries()) {
+      const committed = this.commitAgentState(targetId, 'cancelling', index === 0 && commandTransactionId ? commandTransactionId : `agent:${targetId}:cancelling:${this.state.now}`, index === 0 ? additionalMutations : [])
+      if (index === 0 && additionalMutations.length > 0) commandApplied = committed
+    }
     for (const lane of targetLanes) {
       const nextLane = structuredClone(lane)
       nextLane.status = 'cancelled'
@@ -1194,6 +1198,7 @@ export class PulseRuntime {
       this.emit({ type: 'agent.cancelled', agentId: targetId, data: reason })
     }
     this.schedulePersistence()
+    return commandApplied
   }
 
   explain(laneId?: string): JsonValue {
@@ -1504,16 +1509,17 @@ export class PulseRuntime {
     for (const lane of this.state.lanes.values()) if (lane.status === 'ready' && !this.ready.has(lane.id)) this.enqueueLane(lane.id)
   }
 
-  private commitAgentState(agentId: string, state: 'created' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled', transactionId: string): void {
+  private commitAgentState(agentId: string, state: 'created' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled', transactionId: string, additionalMutations: Mutation[] = []): boolean {
     const agent = this.state.agents.get(agentId)
-    if (!agent || agent.state === state) return
+    if (!agent || agent.state === state) return false
     const nextAgent = structuredClone(agent)
     nextAgent.state = state
-    const mutations: Mutation[] = [{ op: 'setAgent', agentId, record: nextAgent }]
+    const mutations: Mutation[] = [{ op: 'setAgent', agentId, record: nextAgent }, ...additionalMutations.map((mutation) => structuredClone(mutation))]
     try { this.assertStorageAdmission(mutations) }
     catch (cause) { throw cause instanceof Error ? cause : new Error(String(cause)) }
     commitMutationTransaction(this.state, this.mutationLog, transactionId, mutations, this.state.now, this.sessionId)
     this.schedulePersistence()
+    return true
   }
 
   private commitLaneControlInput(lane: LaneRecord, input: ResumeInput, event: import('../core/types.js').RuntimeEventInput, patch: Partial<LaneRecord> = {}): boolean {
