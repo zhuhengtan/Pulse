@@ -223,7 +223,7 @@ describe('runtime control boundaries', () => {
       : { actions: [{ type: 'complete', result: { ok: true } }], next: point('outbox-runtime', 'done') } }
     const { agentId } = runtime.createAgent('outbox', program)
     runtime.tick()
-    expect(runtime.mutationLog.size).toBe(1)
+    expect(runtime.mutationLog.entries.some((entry) => entry.transactionId === 'effect:effect-1:effect-1-attempt-1:dispatched')).toBe(true)
     expect(runtime.outbox.claimed().map((entry) => entry.effectId)).toEqual(['effect-1'])
     const recovered = new PulseRuntime({ persistence: runtime.exportPersistence(), effectExecutor: async () => await new Promise(() => undefined) })
     expect(recovered.outbox.pending().map((entry) => entry.effectId)).toEqual(['effect-1'])

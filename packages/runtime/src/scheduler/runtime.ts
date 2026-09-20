@@ -1181,11 +1181,17 @@ export class PulseRuntime {
       const outboxEntry = this.outbox.enqueue(effect, this.state.now)
       if (outboxEntry.state === 'claimed') continue
       if (!this.acquireEffectLocks(effect)) continue
-      if (!this.outbox.claim(outboxEntry.id)) { this.releaseEffectLocks(effect.id); continue }
-      effect.state = 'running'
-      effect.executionState = 'running'
+      const running = structuredClone(effect)
+      running.state = 'running'
+      running.executionState = 'running'
       const attempt: import('../core/types.js').AttemptRecord = { id: effect.attemptId, effectId: effect.id, executionState: 'running', sideEffectState: effect.sideEffectState, startedAt: this.state.now }
-      effect.attempts = [...(effect.attempts ?? []), attempt]
+      running.attempts = [...(running.attempts ?? []), attempt]
+      const dispatchMutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: running }]
+      try { this.assertStorageAdmission(dispatchMutations) } catch { this.releaseEffectLocks(effect.id); continue }
+      if (!this.outbox.claim(outboxEntry.id)) { this.releaseEffectLocks(effect.id); continue }
+      commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${effect.attemptId}:dispatched`, dispatchMutations, this.state.now, this.sessionId)
+      Object.assign(effect, running)
+      this.state.effects.set(effect.id, effect)
       const controller = new AbortController()
       if (effect.kind === 'human' && !this.customExecutor) {
         this.emit({ type: 'human.requested', effectId: effect.id, data: effect.input })
