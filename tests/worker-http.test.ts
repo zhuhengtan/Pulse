@@ -3,6 +3,9 @@ import { createHttpWorkerEffectExecutor, HttpWorkerClient, startHttpWorker, star
 import { PulseRuntime } from '@pulse/runtime'
 import type { JsonValue, LaneProgram, WorkerCoordinator } from '@pulse/runtime'
 import { WorkerCoordinator as Coordinator } from '@pulse/runtime'
+import { readFile } from 'node:fs/promises'
+import { request as httpsRequest } from 'node:https'
+import { resolve } from 'node:path'
 
 const point = (programId: string, step: string) => ({ programId, programVersion: '1', step, locals: {} })
 
@@ -57,6 +60,31 @@ describe('HTTP Worker transport', () => {
       await newClient.unregister().catch(() => undefined)
       await server.close()
     }
+  })
+
+  it('serves the coordinator over HTTPS with the configured Bearer policy', async () => {
+    const coordinator = new Coordinator()
+    const server = await startWorkerCoordinatorServer(coordinator, {
+      authToken: 'tls-worker-token',
+      tls: {
+        key: await readFile(resolve('tests/fixtures/worker-http-key.pem')),
+        cert: await readFile(resolve('tests/fixtures/worker-http-cert.pem')),
+      },
+    })
+    try {
+      expect(server.url.startsWith('https://')).toBe(true)
+      const response = await new Promise<{ statusCode?: number; body: string }>((resolveResponse, reject) => {
+        const request = httpsRequest(`${server.url}/health`, { rejectUnauthorized: false, headers: { authorization: 'Bearer tls-worker-token' } }, (response) => {
+          const chunks: Buffer[] = []
+          response.on('data', (chunk: Buffer | string) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
+          response.on('end', () => resolveResponse({ statusCode: response.statusCode, body: Buffer.concat(chunks).toString('utf8') }))
+        })
+        request.on('error', reject)
+        request.end()
+      })
+      expect(response.statusCode).toBe(200)
+      expect(JSON.parse(response.body)).toEqual({ ok: true })
+    } finally { await server.close() }
   })
 
   it('executes a Runtime Effect through an HTTP polling Worker with heartbeat renewal', async () => {

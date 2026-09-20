@@ -65,6 +65,7 @@
 | Checkpoint 事实事件截断 | Checkpoint 保存状态与日志水位后截断已纳入快照的事实事件；恢复后的 Session 通过 `gap` 要求 Host 重同步，并对事件水位 fail-closed 校验 | `tests/storage-outbox.test.ts`、`tests/m4-dsl-e2e.test.ts` | `2ea2a6b`、`e86093a` |
 | Worker 执行边界 | `WorkerCoordinator` 提供 Worker 注册、lease、幂等键、取消、过期回收、snapshot/restore 和 Runtime `EffectExecutor` 适配；adapters 提供带 Bearer 鉴权的 HTTP claim/renew/complete/fail 与 polling Worker | `tests/worker-coordinator.test.ts`、`tests/worker-http.test.ts` | `d221466`、`2250df2`、`685be10`、`47791bd` |
 | Worker 鉴权轮换 | HTTP Worker Server 支持每请求解析当前允许 token，恒时比较，并允许新旧 token 重叠后无重启轮换 | `tests/worker-http.test.ts` | 本轮 Worker 鉴权轮换提交 |
+| Worker TLS 传输 | HTTP Worker Server 可配置 HTTPS key/cert，返回 `https://` 地址；真实 TLS 握手与 Bearer 鉴权已验证 | `tests/worker-http.test.ts`、`tests/fixtures/worker-http-*.pem` | 本轮 Worker TLS 提交 |
 | Host 工具权限 | Tool Registry deny 优先的 allow/deny 策略作用于 list/discover/ToolSet/execute/admission；参数仍由 Zod schema fail-closed 校验 | `tests/tool-context.test.ts`、`tests/tool-host.test.ts` | `a333a98` |
 | 叶子级隐私 taint | Result/History/Effect/Complete/LLM 投影传播叶子路径 taint；严格级别提升并阻断云端路由；ContextDelta 同时校验来源和 taint | `tests/privacy-provenance.test.ts` | `0e64cb0`、`8b9e3db` |
 | DSL 快照来源追踪 | DSL 自动记录 Global/Lane Snapshot、历史与 Join Outcome 的 `derivedFrom`；Runtime、Effect 结算和持久化校验识别快照来源并继承隐私 | `tests/privacy-provenance.test.ts`、`tests/m4-dsl-e2e.test.ts` | `03a3646` |
@@ -103,7 +104,7 @@
 | Fact Inbox 快照顺序校验 | 恢复时拒绝重复去重历史和乱序 `receivedSeq`，不把损坏快照静默归一化成另一条事实顺序 | `tests/fact-inbox.test.ts` | 本轮 Fact Inbox 校验提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、236/236 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、237/237 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -453,6 +454,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - 本轮 Detached 准入提交：后台 Scope 的审计事件先做 storage admission，失败时不修改 Agent detached 状态。
 - 本轮 Fact Inbox 校验提交：恢复时拒绝重复 `seen` 和乱序 `receivedSeq`，保持事实去重与 FIFO 语义。
 - 本轮 Worker 鉴权轮换提交：HTTP Worker 支持新旧 Bearer token 重叠窗口、每请求更新和恒时比较。
+- 本轮 Worker TLS 提交：HTTP Worker Server 支持 HTTPS key/cert 配置，并用真实 TLS 握手验证健康检查与 Bearer 鉴权。
 - `2250df2`：Runtime Worker lease 暴露远程 claim/renew/complete/fail 协议；adapters 增加 HTTP Coordinator Server、Client、polling Worker 和 HTTP EffectExecutor，测试覆盖真实本机 HTTP 往返、heartbeat 与 Runtime Effect 闭环。
 - `685be10`：HTTP Worker Server/Client 增加 Bearer token 鉴权，未授权请求在任务访问前拒绝，并有回归测试。
 - `47791bd`：WorkerCoordinator 增加 schemaVersion=1 的 snapshot/restore；恢复时将 in-flight lease 重新入队，并让终态/幂等任务在重启后仍可返回结果。
@@ -464,7 +466,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `8bb07e5`：Global/Lane Context 增加不改变业务 JSON 形状的 privacy metadata sidecar；版本、持久化恢复、ContextBuilder、ContextMerger 和 warm start 均保留该元数据。
 - `fe9554a` / `596fecb`：Session outcome 和 fact stream 均按 Agent 隔离，Host snapshot 暴露 Global Context privacy metadata。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
-- 当前确定性门禁：`npm exec tsc -b --pretty false && npm test`，47 个测试文件、236 个测试通过；`npm run build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- 当前确定性门禁：`npm exec tsc -b --pretty false && npm test`，47 个测试文件、237 个测试通过；`npm run build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
@@ -481,7 +483,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | Host 工具权限 | 单进程 allow/deny 和 Zod 参数约束已实现 | deny 优先策略已经覆盖 Registry 目录、动态 ToolSet、执行和 admission；更细 workspace/网络权限、审计系统和生产策略配置仍需宿主接入 |
 | Checkpoint / 事实事件保留 | 单进程 checkpoint 截断与恢复 gap 已实现 | 事实状态、Mutation 水位、事件截断水位和 Session gap 已有测试；外部归档索引、跨进程故障注入和生产存储仍需验证 |
 | Fork Affinity | DSL 在收到建议后可安全折叠同 Program 组；Runtime 提供可选自动 coalesce | 已验证组内依赖拓扑、成员结果注入、失败传播、原始 Join key 恢复，以及 `forkAffinity=coalesce` 的通用运行时路径；复杂跨组/外部依赖保持不折叠，生产负载校准仍需验证 |
-| Worker 执行与迁移 | 本地 HTTP lease transport、Bearer 鉴权、polling Worker、snapshot/restore、Runtime 适配和无重启 token 轮换已实现 | 已验证真实 HTTP claim/renew/complete/fail、未授权拒绝、短 lease heartbeat、token 重叠轮换、in-flight lease 恢复、多 Worker 语义和 Runtime Effect 闭环；生产级 TLS、共享 durable lease store、跨主机故障注入、Worker 迁移和网络分区仍需验证 |
+| Worker 执行与迁移 | 本地 HTTP/HTTPS lease transport、Bearer 鉴权、polling Worker、snapshot/restore、Runtime 适配和无重启 token 轮换已实现 | 已验证真实 HTTP/HTTPS claim/renew/complete/fail、未授权拒绝、短 lease heartbeat、token 重叠轮换、in-flight lease 恢复、多 Worker 语义和 Runtime Effect 闭环；共享 durable lease store、跨主机故障注入、Worker 迁移和网络分区仍需验证 |
 | 运行观测 | Runtime 侧已有只读出口、JSONL/HTTP exporter、聚合和告警规则 | `inspect/explain`、`telemetry()`、JSONL/HTTP exporter 和有界聚合器已覆盖 route 排除原因、provider/model slot、Attempt usage/cost、峰值与阈值告警；外部生产指标系统接入仍需宿主配置 |
 
 ## 6. 实施时间线与任务清单（Checklist）

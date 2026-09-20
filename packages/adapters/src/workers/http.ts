@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http'
+import { createServer as createHttpsServer, type ServerOptions as HttpsServerOptions } from 'node:https'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import type { EffectExecution, EffectExecutor, EffectRecord, JsonValue, RuntimeError, WorkerHandler, WorkerLease, WorkerSubmitOptions, WorkerTaskRecord } from '@pulse/runtime'
@@ -59,12 +60,14 @@ export interface WorkerHttpServerOptions {
   authTokens?: readonly string[]
   /** Resolve accepted credentials for every request so key rotation can overlap old and new tokens. */
   authTokenProvider?: () => AuthTokenSource
+  /** Enable HTTPS for the coordinator transport. The caller owns certificate rotation and reload. */
+  tls?: Pick<HttpsServerOptions, 'key' | 'cert' | 'ca' | 'passphrase' | 'requestCert' | 'rejectUnauthorized'>
   recoveryIntervalMs?: number
 }
 
 export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinator, options: WorkerHttpServerOptions = {}): Promise<WorkerHttpServer> {
   const registrations = new Map<string, () => void>()
-  const server: Server = createServer(async (request, response) => {
+  const handler = async (request: IncomingMessage, response: import('node:http').ServerResponse): Promise<void> => {
     try {
       const method = request.method ?? 'GET'
       const path = request.url?.split('?')[0] ?? '/'
@@ -136,12 +139,13 @@ export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinato
     } catch (cause) {
       send(response, 400, { error: errorMessage(cause) })
     }
-  })
+  }
+  const server: Server = options.tls === undefined ? createServer(handler) : createHttpsServer(options.tls, handler)
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, options.host ?? '127.0.0.1', resolve) })
   const address = server.address()
   if (address === null || typeof address === 'string') throw new Error('WORKER_HTTP_ADDRESS_UNAVAILABLE')
   const host = options.host === '0.0.0.0' || options.host === '::' || options.host === undefined ? '127.0.0.1' : options.host
-  const url = `http://${host}:${(address as AddressInfo).port}`
+  const url = `${options.tls === undefined ? 'http' : 'https'}://${host}:${(address as AddressInfo).port}`
   const recoveryIntervalMs = options.recoveryIntervalMs ?? 1_000
   const recoveryTimer = recoveryIntervalMs > 0 ? setInterval(() => { coordinator.recoverExpired(Date.now()) }, recoveryIntervalMs) : undefined
   recoveryTimer?.unref()
