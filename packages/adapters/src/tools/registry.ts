@@ -104,11 +104,7 @@ export function createToolEffectSubmissionPreparer(registry: ToolRegistry): (sub
     if (submission.kind !== 'tool') return submission
     const input = submission.input && typeof submission.input === 'object' && !Array.isArray(submission.input) ? submission.input as Record<string, JsonValue> : {}
     if (typeof input.name !== 'string') return submission
-    try {
-      const admission = registry.admission(input.name, input.arguments ?? {})
-      return { ...submission, ...(submission.locks === undefined ? { locks: admission.locks } : {}), ...(submission.sideEffectPolicy === undefined ? { sideEffectPolicy: admission.sideEffectPolicy } : {}), ...(submission.attemptTimeoutMs === undefined ? { attemptTimeoutMs: admission.defaultTimeoutMs } : {}), ...(submission.toolVersion === undefined ? { toolVersion: admission.version } : {}) }
-    } catch {
-      return submission
-    }
+    const admission = registry.admission(input.name, input.arguments ?? {})
+    return { ...submission, ...(submission.locks === undefined ? { locks: admission.locks } : {}), ...(submission.sideEffectPolicy === undefined ? { sideEffectPolicy: admission.sideEffectPolicy } : {}), ...(submission.attemptTimeoutMs === undefined ? { attemptTimeoutMs: admission.defaultTimeoutMs } : {}), ...(submission.toolVersion === undefined ? { toolVersion: admission.version } : {}) }
   }
 }

@@ -642,7 +642,20 @@ export class PulseRuntime {
         this.failLane(lane, { code: 'ASYNC_STEP_FORBIDDEN', message: 'LaneProgram.step() must return synchronously; external work belongs in an Effect.' })
         continue
       }
-      const preparedOutput = this.prepareStepOutput(output)
+      let preparedOutput: LaneStepOutput
+      try { preparedOutput = this.prepareStepOutput(output) }
+      catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause)
+        const candidate = cause && typeof cause === 'object' ? cause as { code?: unknown } : undefined
+        const code = typeof candidate?.code === 'string' ? candidate.code : message.split(':', 1)[0] || 'STEP_OUTPUT_PREPARATION_FAILED'
+        const rejection: RuntimeError = { code, message }
+        const consecutive = (lane.consecutiveControlErrors ?? 0) + 1
+        const controlInput: ResumeInput = { type: 'control_error', error: rejection, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
+        if (consecutive >= this.maxConsecutiveControlErrors) this.failLane(lane, { code: 'CONTROL_ERROR_LOOP', message: 'Lane exceeded the consecutive control error limit.', details: { lastError: rejection as unknown as JsonValue } })
+        else this.commitLaneControlInput(lane, controlInput, { type: 'step.rejected', laneId: lane.id, data: rejection as unknown as JsonValue }, { consecutiveControlErrors: consecutive })
+        progressed++
+        continue
+      }
       const result = validateStep(this.state, lane.id, preparedOutput)
       if ('rejection' in result) {
         const consecutive = (lane.consecutiveControlErrors ?? 0) + 1

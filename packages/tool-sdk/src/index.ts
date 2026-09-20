@@ -40,6 +40,7 @@ export interface ToolAdmission { locks: ResourceClaim[]; sideEffectPolicy: ToolM
 export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   manifest: ToolManifest
   resourceAdmissionMode?: 'explicit' | 'default'
+  validateInput?(input: unknown): TInput
   execute(input: TInput, context: ToolContext): Promise<TOutput> | TOutput
   executionRef?(input: TInput, context: ToolContext): JsonValue
   resolveResources?(input: TInput): ResourceClaim[]
@@ -77,6 +78,11 @@ export class ToolRegistry {
     this.definitions.set(definition.manifest.name, definition)
   }
   get(name: string): ToolDefinition<any, any> | undefined { return this.isAllowed(name) ? this.definitions.get(name) : undefined }
+  validateInput(name: string, input: unknown): unknown {
+    const definition = this.require(name)
+    try { return definition.validateInput ? definition.validateInput(input) : input }
+    catch { throw new ToolError('INVALID_TOOL_INPUT', `Input does not match the manifest for tool ${name}.`, { retryable: false }) }
+  }
   isAllowed(name: string): boolean { return this.policy.deny.has(name) === false && (this.policy.allow === undefined || this.policy.allow.has(name)) }
   list(): ToolManifest[] { return [...this.definitions.values()].filter((definition) => this.isAllowed(definition.manifest.name)).map((definition) => structuredClone(definition.manifest)) }
   discover(query: ToolDiscoveryQuery = {}): ToolDiscoveryResult[] {
@@ -133,7 +139,7 @@ export class ToolRegistry {
     if (definition.manifest.sideEffectPolicy === 'read') return [{ resource: 'workspace', mode: 'shared' }]
     return []
   }
-  admission(name: string, input: unknown): ToolAdmission { const definition = this.require(name); return { locks: structuredClone(this.resolveResources(name, input)), sideEffectPolicy: definition.manifest.sideEffectPolicy, defaultTimeoutMs: definition.manifest.defaultTimeoutMs, retrySafety: definition.manifest.retrySafety, version: definition.manifest.version } }
+  admission(name: string, input: unknown): ToolAdmission { const definition = this.require(name); const parsedInput = this.validateInput(name, input); return { locks: structuredClone(this.resolveResources(name, parsedInput)), sideEffectPolicy: definition.manifest.sideEffectPolicy, defaultTimeoutMs: definition.manifest.defaultTimeoutMs, retrySafety: definition.manifest.retrySafety, version: definition.manifest.version } }
   private require(name: string): ToolDefinition<any, any> {
     if (!this.isAllowed(name)) throw new Error(`TOOL_NOT_ALLOWED:${name}`)
     const definition = this.definitions.get(name)
@@ -236,5 +242,5 @@ export function defineTool<TInput, TOutput>(config: {
   executionRef?: (input: TInput, context: ToolContext) => JsonValue
 }): ToolDefinition<TInput, TOutput> {
   const manifest: ToolManifest = { name: config.name, version: config.version ?? '1', description: config.description, ...(config.tags === undefined ? {} : { tags: [...new Set(config.tags)] }), inputSchema: zodToJsonSchema(config.input), outputSchema: zodToJsonSchema(config.output), concurrencyClass: config.concurrencyClass ?? 'tool', locks: config.locks ?? [], ...(config.resources === undefined ? {} : { resources: config.resources }), supportsAbortSignal: config.supportsAbortSignal ?? true, sideEffectPolicy: config.sideEffectPolicy ?? 'none', retrySafety: config.retrySafety ?? (config.sideEffectPolicy === 'write' ? 'unsafe' : 'read_only'), defaultTimeoutMs: config.defaultTimeoutMs ?? 30_000, ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }) }
-  return { manifest, resourceAdmissionMode: config.resolveResources !== undefined || config.resources !== undefined || config.locks !== undefined ? 'explicit' : 'default', execute: async (input, context) => config.output.parse(await config.execute(config.input.parse(input), context)), ...(config.executionRef === undefined ? {} : { executionRef: (input: TInput, context: ToolContext) => config.executionRef!(config.input.parse(input), context) }), ...(config.resolveResources === undefined ? {} : { resolveResources: (input: TInput) => config.resolveResources!(config.input.parse(input)) }), ...(config.reconcile === undefined ? {} : { reconcile: async (executionRef: JsonValue, context: ReconcileContext) => { const result = await config.reconcile!(executionRef, context); return result.status === 'succeeded' && result.output !== undefined ? { ...result, output: config.output.parse(result.output) } : result } }), ...(config.normalize === undefined ? {} : { normalize: config.normalize }), ...(config.summarize === undefined ? {} : { summarize: (output: TOutput) => config.summarize!(output) }) }
+  return { manifest, resourceAdmissionMode: config.resolveResources !== undefined || config.resources !== undefined || config.locks !== undefined ? 'explicit' : 'default', validateInput: (input: unknown) => config.input.parse(input), execute: async (input, context) => config.output.parse(await config.execute(config.input.parse(input), context)), ...(config.executionRef === undefined ? {} : { executionRef: (input: TInput, context: ToolContext) => config.executionRef!(config.input.parse(input), context) }), ...(config.resolveResources === undefined ? {} : { resolveResources: (input: TInput) => config.resolveResources!(config.input.parse(input)) }), ...(config.reconcile === undefined ? {} : { reconcile: async (executionRef: JsonValue, context: ReconcileContext) => { const result = await config.reconcile!(executionRef, context); return result.status === 'succeeded' && result.output !== undefined ? { ...result, output: config.output.parse(result.output) } : result } }), ...(config.normalize === undefined ? {} : { normalize: config.normalize }), ...(config.summarize === undefined ? {} : { summarize: (output: TOutput) => config.summarize!(output) }) }
 }

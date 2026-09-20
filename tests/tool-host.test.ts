@@ -151,6 +151,21 @@ describe('Tool SDK to Runtime Effect host', () => {
     expect(prepared).toMatchObject({ sideEffectPolicy: 'write', toolVersion: '1', attemptTimeoutMs: 2500, locks: [{ resource: 'file:a.txt', mode: 'exclusive' }] })
   })
 
+  it('rejects invalid tool input during admission before queueing or execution', async () => {
+    const registry = new ToolRegistry()
+    registry.register(defineTool({ name: 'typed-write', description: 'typed write', input: z.object({ path: z.string() }), output: z.object({ ok: z.boolean() }), sideEffectPolicy: 'write', resolveResources: ({ path }) => [{ resource: `file:${path}`, mode: 'exclusive' }], execute: () => ({ ok: true }) }))
+    const prepare = createToolEffectSubmissionPreparer(registry)
+    expect(() => prepare({ key: 'invalid', kind: 'tool', concurrencyClass: 'tool', input: { name: 'typed-write', arguments: {} } })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_INPUT' }))
+    let executed = false
+    const runtime = new PulseRuntime({ effectSubmissionPreparer: prepare, effectExecutor: async () => { executed = true; return { value: { ok: true } } } })
+    const program: LaneProgram = { id: 'invalid-tool-input', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'invalid', kind: 'tool', concurrencyClass: 'tool', input: { name: 'typed-write', arguments: {} } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('invalid-tool-input', 'done') }) }
+    const { agentId } = runtime.createAgent('invalid input', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+    expect(executed).toBe(false)
+    expect(runtime.state.events.some((event) => event.type === 'step.rejected' && JSON.stringify(event.data).includes('INVALID_TOOL_INPUT'))).toBe(true)
+    expect(runtime.state.effects.size).toBe(0)
+  })
+
   it('compiles dynamic tool discovery into a versioned Context ToolSet', async () => {
     const registry = new ToolRegistry()
     registry.register(defineTool({ name: 'read-file', description: 'read a file', tags: ['filesystem', 'read'], input: z.object({ path: z.string() }), output: z.object({ text: z.string() }), execute: () => ({ text: '' }) }))
