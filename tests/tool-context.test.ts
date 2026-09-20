@@ -19,6 +19,18 @@ describe('ToolContext and manifest contract', () => {
     expect(registry.resolveResources('contextual', { value: 4 })).toEqual([{ resource: 'file', mode: 'exclusive' }])
   })
 
+  it('uses trusted workspace locks when a tool does not resolve resources', () => {
+    const registry = new ToolRegistry()
+    registry.register(defineTool({ name: 'read', description: 'read', sideEffectPolicy: 'read', input: z.object({}), output: z.object({}), execute: () => ({}) }))
+    registry.register(defineTool({ name: 'write', description: 'write', sideEffectPolicy: 'write', input: z.object({}), output: z.object({}), execute: () => ({}) }))
+    registry.register(defineTool({ name: 'none', description: 'none', sideEffectPolicy: 'none', input: z.object({}), output: z.object({}), execute: () => ({}) }))
+    registry.register(defineTool({ name: 'explicit-none', description: 'explicit none', sideEffectPolicy: 'write', locks: [], input: z.object({}), output: z.object({}), execute: () => ({}) }))
+    expect(registry.admission('read', {}).locks).toEqual([{ resource: 'workspace', mode: 'shared' }])
+    expect(registry.admission('write', {}).locks).toEqual([{ resource: 'workspace', mode: 'exclusive' }])
+    expect(registry.admission('none', {}).locks).toEqual([])
+    expect(registry.admission('explicit-none', {}).locks).toEqual([])
+  })
+
   it('rejects manifests that do not declare abort support', () => {
     const registry = new ToolRegistry()
     expect(() => registry.register(defineTool({ name: 'unsafe', description: 'unsafe', supportsAbortSignal: false, input: z.object({}), output: z.object({}), execute: () => ({}) }))).toThrow('TOOL_ABORT_SIGNAL_REQUIRED')
