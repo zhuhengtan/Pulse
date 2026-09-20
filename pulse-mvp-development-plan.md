@@ -1,6 +1,6 @@
 # Pulse Runtime MVP 开发方案（M0 + M1 贯通交付计划）
 
-> 设计版本：2026-09-19 · 状态：MVP 实施基准 + 代码验收记录（Execution Blueprint）
+> 设计版本：2026-09-19 · 更新：2026-09-20 · 状态：MVP 实施基准 + 代码验收记录（Execution Blueprint）
 > 
 > 上游依据：
 > - `pulse-runtime-architecture.md`（内核规范与验收标准）
@@ -36,20 +36,22 @@
 
 ### 5.1 本次实现与证据记录
 
-本仓库已从空仓库落地四个可独立运行的模块，并遵守“模块测试全绿后提交”：
+本仓库已完成 M0 + M1 主要确定性实现，并遵守“模块测试全绿后提交”。近期按架构补齐的关键模块如下：
 
 | 模块 | 实现 | 测试证据 | 提交 |
 | --- | --- | --- | --- |
-| M1-1 内核契约 | Monorepo、records/actions、`validate → Mutation[] → apply`、依赖图、SCC、WaitingIndex | `tests/m1-core.test.ts`：6/6 | `ef1b95a` |
-| M1-2 调度闭环 | VirtualClock/TimerWheel、ReadyQueue、aging、锁、Cancellation/Quarantine、Effect 调度 | `tests/m2-scheduler.test.ts`：9/9 | `7a0a262` |
-| M1-3 Context/模型/工具 | 三层 Context 投影、稳定 hash、隐私路由、Provider Fixture、Zod Manifest、Filesystem/Shell、hard cap | `tests/m3-context-adapters.test.ts`：6/6 | `cd00c9a` |
-| M1-4 DSL/Session/E2E | StepBuilder 宏步、纯函数边界扫描、Session、模板、登录排障示例 | `tests/m4-dsl-e2e.test.ts`：4/4 | `89b5e24`、`23af0f7` |
+| ResultRef 可见性 | Lane 默认隔离、`inputResultRefs` 显式授权、ContextBuilder/DSL/快照恢复统一校验 | `tests/result-visibility.test.ts` 等 | `50d21b3` |
+| LLM history | 成功 LLMEffect 在结算 journal 中追加 instruction、消费引用和结果；拒绝输出不进 history | `tests/history-llm-settlement.test.ts`、`tests/m4-dsl-e2e.test.ts` | `9199fbd`、`9eda5b1` |
+| 结构化输出分层 | JSON Schema、`rejected_output`、`rejectedOutputRefs`、DSL self-correction | `tests/provider-host.test.ts`、`tests/m4-dsl-e2e.test.ts` | `9eda5b1`、`2009eaa` |
+| ToolCallCorrelation | `toolCallId → LLM Effect → Tool Effect → ResultRef` 持久化及 ReAct 关联 | `tests/dsl-host-macros.test.ts` | `0d0ea33` |
+| 模型并发槽 | Runtime LLM 槽之外增加可取消 provider/model 槽 | `tests/provider-host.test.ts` | `015c959` |
+| warm start / DSL | facts/findings 筛选、ResultRef 授权、递归 Draft Proxy、ReAct 完成回调只传 ResultRef | `tests/warm-start.test.ts`、`tests/dsl-context.test.ts`、`tests/m4-dsl-e2e.test.ts` | `79a993f`、`324f1bc`、`e6c228b` |
 
-统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`，当前结果为 4 个测试文件、25/25 通过。
+统一验证命令为 `pnpm exec tsc -b --pretty false && pnpm test`；当前结果为 39 个测试文件、135/135 通过，`pnpm build` 也已通过。
 
-以下内容没有被本次无凭证确定性测试伪装成“已完成”：完整第 26 节 M0 矩阵尚未逐项覆盖；真实 Provider Live Smoke、Shell 长进程组取消残留检查、Session 慢消费者背压基准、完整 fallback/remote_unknown 对账、持久化恢复、M1.5 Watchdog/record 级 Privacy/Fork Affinity，以及 M2 能力仍需独立实现或在真实环境验证。未勾选的 Gate 条目继续表示这些证据缺口。
+以下内容没有被无凭证确定性测试伪装成“已完成”：真实 Provider Live Smoke、生产级 Storage pin/retention 与持久化后端对接、故障注入后的完整崩溃恢复/副作用对账，以及真实网络下的 Provider 工具 schema/取消验证。未勾选的 Gate 条目继续表示这些证据缺口。
 
-> **里程碑边界**：M1 只做请求级 `local_only` 云端阻断、简单驻内存 hard cap 与显式 `compact_history`；M1.5 才做 record 级 Privacy Label/`derivedFrom`、Progress Watchdog、精细 Storage pin/compact、Fork Affinity 和 warm start。M2 再做可靠崩溃恢复、持久化 outbox、分布式 Worker 与其他扩展。
+> **里程碑边界**：M1 的 Context/模型/DSL 主链已经实现；record 级 Privacy、Progress Watchdog、Fork Affinity、warm start、ResultRef 隔离和结构化拒绝输出已补入当前代码。精细 Storage pin/retention、真实崩溃故障注入和生产级 Provider 验证仍保持独立 Gate，不用本地单测冒充完成。
 
 ---
 
@@ -275,23 +277,23 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
    - 实现 LaneContext 的 `history` 与 `state` 物理分段存储
    - 实现 `ContextBuilder`：严格按照 `System -> Policy -> Tools -> Global 快照 -> Lane History` 生成逐字节一致的稳定请求前缀，并计算 `prefixHash`
    - 实现显式 `adopt_context` 与同事务 `adoptCommittedContext`
-   - 实现 M1 请求级 `local_only` 云端阻断；record 级 Privacy Label、`derivedFrom` 重算与显式降级留到 M1.5
+   - 实现请求级与 ResultRef 级 `local_only` 云端阻断、`derivedFrom` 重算、Lane 可见性和显式隐私降级
 2. **模型路由器与候选管理 (`packages/runtime/src/models/`)**
    - 实现 `ModelRegistry` 与 `ModelRouter`：根据任务类型（`plan`, `reason`, `summarize` 等）与隐私标记匹配合规候选
-   - 静态并发槽位原子申请（Runtime 槽 + Provider 槽），槽位满整批等待
+   - 实现 Runtime LLM 槽，以及 Provider/Model 执行边界的可取消静态并发槽；Provider 槽不改变 Effect 身份
    - 实现候选 Fallback：复用 Effect 标识，按 RetryPolicy 顺序尝试后继模型候选；只有错误可重试、本地清理完成、deadline/limits 允许且 `sideEffectState` 为 `none` 或已完成对账时才允许切换
 3. **Provider 适配器实现 (`packages/adapters/src/providers/`)**
    - 实现一个 M1 选定的真实 Adapter，以及 `MockAdapter`；其他 Provider 通过 Fixture 验证字段归一化，不作为 M1 必交付
    - Anthropic/Provider cache control 作为后续 Adapter 优化；支持时记录指标，不把缓存命中当成 Runtime 正确性的前提
    - 实现统一 `LLMResult` 归一化与 Pulse 自有 `toolCallId` 强绑定；Adapter 不产生 RuntimeAction、不执行工具
-   - 实现三层输出校验：Adapter 字段归一化、`outputSchema`/structured 校验、下一同步 Step 的 Action Decoder；非法输出进入 `rejected_output`，不发布业务 ResultRef
+   - 实现三层输出校验：Adapter 字段归一化、`outputSchema`/structured 校验、下一同步 Step 的 Action Decoder；非法输出进入 `rejected_output`，不发布业务 ResultRef，并通过 `rejectedOutputRefs` 供新 Effect 自愈
 4. **工具 SDK 与真实执行器 (`packages/tool-sdk/`, `packages/adapters/src/tools/`)**
    - 实现 `defineTool` API，自动由 Zod 生成标准 JSON Schema Manifest
    - Manifest 必须声明输入/输出 schema、`concurrencyClass`、资源锁、AbortSignal 能力与副作用策略；工具不得自行循环重试
    - 实现 `FilesystemTool`：安全路径沙箱校验、读写与列表
    - 实现 `ShellTool`：子进程组管理、POSIX 信号优雅终止、`cancelGraceMs` 超时升级与输出缓冲截断
 5. **M1 存储边界 (`packages/runtime/src/storage/`)**
-   - 实现简单驻内存 hard cap、大小预估和 `SESSION_STORAGE_LIMIT_EXCEEDED`；M1 不实现精细 pin/compact，不能把未落盘数据标记为 persisted
+   - 已实现独立的驻内存 hard cap、大小预估、显式 pin/compact 和 `SESSION_STORAGE_LIMIT_EXCEEDED`；Runtime 全自动 pin/retention 编排仍是未完成 Gate
 
 #### 验收门禁 Gate 3
 - [x] 稳定前缀测试：固定块顺序、Global/Lane 版本、History 追加行为和前缀稳定序列化通过测试。
@@ -361,12 +363,21 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 
 ### 5.1 当前实现与测试证据（2026-09-20）
 
-- `f7e55a1`：M0 admission、依赖闭环、等待终态、收尾 join/cancel、并发槽位、远端未知副作用隔离与优先级继承实现；`tests/m0-acceptance.test.ts` 覆盖 11 项验收。
-- `9b9544a`：模型候选 Fallback（同一 `EffectId`、递增 `AttemptId`、未知副作用禁止重放）、三层输出错误和 Shell 进程组取消。
-- `e81abc4`：Host drain 队列和慢消费者 session 回归测试。
-- `f9d4ec9`：late wakeup、StepTransaction 原子拒绝、动态依赖环、隐含收尾边、依赖优先级继承和不可抢占回归测试。
-- `eac0d48`：稳定前缀逐字节序列化与 Step 只读 Runtime 状态隔离回归测试。
-- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，5 个测试文件、45 个测试通过。Live Smoke 仍为可选的真实 Provider 集成验证，未将其冒烟结果冒充内核证明。
+- `50d21b3`：Lane ResultRef 可见性隔离、显式 Fork 输入授权、ContextBuilder/DSL/快照恢复统一校验。
+- `9199fbd`：成功 LLMEffect history 归档；`9eda5b1` / `2009eaa`：JSON Schema、`rejected_output` 与 DSL 自愈链路。
+- `0d0ea33`：ToolCallCorrelation 持久化；`015c959`：Provider/Model 可取消并发槽。
+- `79a993f` / `324f1bc` / `e6c228b`：warm start 筛选、递归 Draft Proxy、ReAct 完成回调 ResultRef 契约。
+- 当前确定性门禁：`pnpm exec tsc -b --pretty false && pnpm test`，39 个测试文件、135 个测试通过；`pnpm build` 通过。Live Smoke 仍为真实 Provider 集成验证，未将其冒烟结果冒充内核证明。
+
+### 5.2 当前仍未达到“完全可用”的验收项
+
+| 验收项 | 当前状态 | 缺口 |
+| --- | --- | --- |
+| 真实 Provider Live Smoke | 未执行 | 需要有效凭证、真实网络、真实 token/取消/工具调用证据；当前只有 Fixture 和可运行 HTTP Adapter |
+| Runtime Storage pin/retention | 部分完成 | `SessionStoragePolicy` 有单测，但活动 Lane、Wait、LLM Request、未消费输入和 ResultRef 尚未由 Runtime 自动建立/释放 pin 来源 |
+| 崩溃恢复与副作用对账 | 部分完成 | 有快照、Mutation Log、Outbox 和恢复路径，但仍缺进程级故障注入、持久化事务边界和真实写副作用 reconcile 证明 |
+| Provider 请求完整能力 | 部分完成 | OpenAI-compatible/Anthropic Adapter 已能请求与归一化，但真实 provider 的 tool schema、structured schema、usage/cost/cache 口径仍需逐厂商验证 |
+| 生产运行观测 | 部分完成 | 本地 `inspect`/事件流可用；provider 槽排队、准备阶段、完整路由排除原因和成本指标仍不完整 |
 
 ## 6. 实施时间线与任务清单（Checklist）
 
@@ -383,8 +394,8 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 
 本方案继承并落地《Pulse Runtime 架构设计》与《Pulse Application DSL 规范》：
 1. 以主架构第 26 节的 M0/M1 标注为唯一验收来源，不重复维护场景数量。
-2. M1 交付一个真实 Provider Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder 和确定性端到端示例；其他 Provider 与真实网络任务属于独立集成验证。
-3. M1 不提前承诺 M1.5 的 Watchdog、record 级 Privacy、精细 Storage、Fork Affinity 和 warm start；这些能力按主架构单独排期。
+2. M1 的真实 Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder、Session 和确定性端到端示例已贯通；其他 Provider 与真实网络任务属于独立集成验证。
+3. ResultRef 隔离、record Privacy、Watchdog、Fork Affinity、warm start、history 归档、结构化拒绝输出和 ToolCallCorrelation 已实现并有确定性测试；Runtime 自动 Storage pin/retention 与故障注入恢复仍未勾选。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
 已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
