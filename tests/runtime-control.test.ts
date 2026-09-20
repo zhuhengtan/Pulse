@@ -124,6 +124,7 @@ describe('runtime control boundaries', () => {
     expect(outcome.unresolvedEffectIds).toEqual(['effect-1'])
     expect(runtime.state.lanes.get(laneId)?.unresolvedEffectIds).toEqual(['effect-1'])
     expect(runtime.state.lanes.get(laneId)?.cancelReason).toBe('USER_REQUESTED')
+    expect(runtime.inspectLane(laneId)).toMatchObject({ lanes: [{ id: laneId, status: 'cancelled', cancelReason: 'USER_REQUESTED' }] })
     expect(runtime.state.effects.get('effect-1')?.state).toBe('reconcile_required')
     expect(runtime.mutationLog.entries.some((entry) => entry.mutations.some((mutation) => mutation.op === 'setLane' && mutation.laneId === laneId && mutation.record.status === 'cancelled'))).toBe(true)
     expect(runtime.mutationLog.entries.some((entry) => entry.mutations.some((mutation) => mutation.op === 'setEffect' && mutation.effectId === 'effect-1' && mutation.record.state === 'reconcile_required'))).toBe(true)

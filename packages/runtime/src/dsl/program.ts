@@ -152,7 +152,7 @@ function joinedOutcome(ctx: StepContext, dependency: { state: string; outcome: O
   const record = result as Record<string, JsonValue>
   const status = record.status
   if (status !== 'succeeded' && status !== 'failed' && status !== 'cancelled') return dependency.outcome
-  return { status, resultRef: dependency.outcome.resultRef, ...(record.result === undefined ? {} : { result: record.result } as { result: JsonValue }), ...(record.error && typeof record.error === 'object' && !Array.isArray(record.error) ? { error: record.error as unknown as RuntimeError } : {}) }
+  return { status, resultRef: dependency.outcome.resultRef, ...(record.result === undefined ? {} : { result: record.result } as { result: JsonValue }), ...(record.error && typeof record.error === 'object' && !Array.isArray(record.error) ? { error: record.error as unknown as RuntimeError } : {}), ...(typeof record.reason === 'string' ? { reason: record.reason } : {}), ...(Array.isArray(record.unresolvedEffectIds) ? { unresolvedEffectIds: record.unresolvedEffectIds.filter((value): value is string => typeof value === 'string') } : {}) }
 }
 
 function zodJsonSchema(schema: ZodTypeAny): JsonValue {
