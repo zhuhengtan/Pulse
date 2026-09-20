@@ -17,7 +17,7 @@ export interface StepContext<TState = JsonValue> {
   goal: string
   global: Readonly<JsonValue>
   globalVersion: number
-  laneState: TState
+  laneState: Readonly<TState>
   history: ReadonlyArray<HistoryRecordMeta>
   now: number
   watchdog?: ProgressWatchdogState
@@ -57,6 +57,12 @@ function target(step: NextStepTarget, fallback: string): { step: string; action?
   return { step: fallback, action: { type: 'fail', error: { code: step.fail.code, message: step.fail.message, ...(step.fail.retryable === undefined ? {} : { retryable: step.fail.retryable }), ...(step.fail.details === undefined ? {} : { details: step.fail.details }) }, ...(step.fail.privacy === undefined ? {} : { privacy: step.fail.privacy }), ...(step.fail.derivedFrom === undefined ? {} : { derivedFrom: step.fail.derivedFrom }) } }
 }
 function clone<T>(value: T): T { return structuredClone(value) }
+function deepFreeze<T>(value: T, seen = new Set<object>()): T {
+  if (!value || typeof value !== 'object' || seen.has(value as object)) return value
+  seen.add(value as object)
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child, seen)
+  return Object.freeze(value)
+}
 function asJson(value: unknown): JsonValue { return value as JsonValue }
 function scalarProjection(value: unknown): JsonValue {
   if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value
@@ -222,6 +228,7 @@ function ordinaryLocals(locals: JsonValue): Record<string, JsonValue> {
 
 function makeContext<TState>(context: LaneStepContext, initialState: TState): { ctx: StepContext<TState>; getDelta: () => ContextDelta | undefined; getActions: () => RuntimeAction[]; getDerivedRefs: () => ProvenanceRef[]; getAdoptImmediately: () => boolean } {
   const draft = clone(initialState)
+  const readonlyState = deepFreeze(clone(initialState))
   const draftProxy = draft && typeof draft === 'object' && !Array.isArray(draft) ? createDraftProxy(draft as Record<string, unknown>) : undefined
   let delta: ContextDelta | undefined
   const actions: RuntimeAction[] = []
@@ -229,8 +236,9 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
   let adoptImmediately = false
   const agent = context.state.agents.get(context.lane.agentId)
   const globalVersion = context.lane.contextSnapshotVersion
-  const global = clone(agent?.globalVersions.get(globalVersion) ?? {})
-  const globalDraftProxy = global && typeof global === 'object' && !Array.isArray(global) ? createDraftProxy(global as Record<string, unknown>) : undefined
+  const globalDraft = clone(agent?.globalVersions.get(globalVersion) ?? {})
+  const global = deepFreeze(clone(globalDraft))
+  const globalDraftProxy = globalDraft && typeof globalDraft === 'object' && !Array.isArray(globalDraft) ? createDraftProxy(globalDraft as Record<string, unknown>) : undefined
   if (agent) derivedRefs.add(globalContextRef(agent.id, globalVersion))
   derivedRefs.add(laneContextRef(context.lane.id, context.lane.context.version))
   collectResumeResultRefs(context.resumeInput, derivedRefs)
@@ -242,7 +250,7 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
     delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, sourceLaneId: context.lane.id, ops: clone(ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal }
   }
   const ctx: InternalStepContext<TState> = {
-    lane: context.lane, goal: context.lane.goal, global, globalVersion, laneState: draft, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}),
+    lane: context.lane, goal: context.lane.goal, global, globalVersion, laneState: readonlyState, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}),
     [RESULT_READER]: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return findResult(context, ref) },
     results: { meta: resultMeta, summary: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return resultMeta(ref)?.summary } },
     mergeProposals: [...context.state.mergeProposals.values()].filter((proposal) => proposal.agentId === context.lane.agentId).map((proposal) => { for (const ref of proposal.delta.derivedFrom ?? []) derivedRefs.add(ref); return clone(proposal) }),
