@@ -213,6 +213,7 @@ export class PulseRuntime {
       for (const id of recovery.unknown) this.emit({ type: 'outbox.discarded', data: id })
     }
     this.clock = config.clock ?? new VirtualClock()
+    if (!restored && config.clock) this.state.now = this.clock.now()
     this.ready = new ReadyQueue(config.agingIntervalMs ?? 1000, config.agingCap ?? Number.POSITIVE_INFINITY)
     if (restored) {
       this.clock.set(this.state.now)
@@ -714,12 +715,16 @@ export class PulseRuntime {
         if (this.factInbox.size > 0) continue
         if (this.hasPendingHostInteraction()) { await this.waitForFact(); continue }
         const nextAt = this.clock.timers.nextAt()
-        if (nextAt !== undefined && nextAt > this.clock.now()) { this.clock.set(nextAt); continue }
+        if (nextAt !== undefined && nextAt > this.clock.now()) { if (this.clock.waitUntil) await this.clock.waitUntil(nextAt); else this.clock.set(nextAt); continue }
         break
       }
       if (work === 0 && this.executions.size) {
         const nextAt = this.clock.timers.nextAt()
-        if (nextAt !== undefined && nextAt > this.clock.now()) { this.clock.set(nextAt); continue }
+        if (nextAt !== undefined && nextAt > this.clock.now()) {
+          if (this.clock.waitUntil) await Promise.race([this.clock.waitUntil(nextAt), ...[...this.executions.values()].map((execution) => execution.promise)])
+          else this.clock.set(nextAt)
+          continue
+        }
         await Promise.race([...this.executions.values()].map((execution) => execution.promise))
       }
       else if (work === 0 && this.factInbox.size === 0 && this.hasPendingHostInteraction()) await this.waitForFact()
@@ -754,13 +759,17 @@ export class PulseRuntime {
         if (this.factInbox.size > 0) continue
         if (this.hasPendingHostInteraction(agentId)) { await this.waitForFact(); continue }
         const nextAt = this.clock.timers.nextAt()
-        if (nextAt !== undefined && nextAt > this.clock.now()) { this.clock.set(nextAt); continue }
+        if (nextAt !== undefined && nextAt > this.clock.now()) { if (this.clock.waitUntil) await this.clock.waitUntil(nextAt); else this.clock.set(nextAt); continue }
         break
       }
       if (work === 0 && this.executions.size) {
-        const nextAt = this.clock.timers.nextAt()
-        if (nextAt !== undefined && nextAt > this.clock.now()) { this.clock.set(nextAt); continue }
         const executions = [...this.executions.entries()].filter(([effectId]) => this.state.effects.get(effectId)?.agentId === agentId).map(([, execution]) => execution.promise)
+        const nextAt = this.clock.timers.nextAt()
+        if (nextAt !== undefined && nextAt > this.clock.now()) {
+          if (this.clock.waitUntil) await Promise.race([this.clock.waitUntil(nextAt), ...executions])
+          else this.clock.set(nextAt)
+          continue
+        }
         if (executions.length) await Promise.race(executions)
         else await Promise.resolve()
       } else if (work === 0 && this.factInbox.size === 0 && this.hasPendingHostInteraction(agentId)) await this.waitForFact()

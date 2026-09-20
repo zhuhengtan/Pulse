@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, VirtualClock } from '@pulse/runtime'
+import { MonotonicClock, PulseRuntime, VirtualClock } from '@pulse/runtime'
 import type { EffectRecord, LaneProgram } from '@pulse/runtime'
 
 const point = (programId: string, step: string) => ({ programId, programVersion: '1', step, locals: {} })
@@ -10,6 +10,26 @@ describe('runtime control boundaries', () => {
     const runtime = new PulseRuntime({ clock })
     expect(runtime.clock).toBe(clock)
     expect(runtime.clock.now()).toBe(0)
+  })
+
+  it('waits for a real monotonic timer instead of fast-forwarding it', async () => {
+    const clock = new MonotonicClock()
+    const started = clock.now()
+    let fired = false
+    clock.schedule(10, () => { fired = true })
+    await clock.waitUntil!(started + 10)
+    expect(fired).toBe(true)
+    expect(clock.now()).toBeGreaterThanOrEqual(started + 10)
+  })
+
+  it('runs Timer Effects against a real monotonic clock', async () => {
+    const runtime = new PulseRuntime({ clock: new MonotonicClock() })
+    const program: LaneProgram = { id: 'monotonic-timer', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'timer', kind: 'timer', concurrencyClass: 'none', input: { delayMs: 10 } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('monotonic-timer', 'finish') }
+      : { actions: [{ type: 'complete', result: { fired: true } }], next: point('monotonic-timer', 'finish') } }
+    const { agentId } = runtime.createAgent('monotonic timer', program)
+    await expect(runtime.start(agentId).outcome()).resolves.toMatchObject({ status: 'succeeded' })
+    expect(runtime.state.now).toBeGreaterThan(0)
   })
 
   it('fails a Lane after the configured consecutive control-error limit', () => {
