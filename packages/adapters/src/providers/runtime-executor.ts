@@ -22,18 +22,19 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
     const request = input.request
     if (typeof task !== 'string' || !request || typeof request !== 'object' || Array.isArray(request)) throw new Error('INVALID_LLM_EFFECT_INPUT')
     const projection = request as unknown as LLMRequestProjection
+    const observations: NonNullable<EffectExecution['observations']> = []
     const candidates = config.router.routeProjection(task, projection, config.requirements)
     const result = await fallback.execute(effect.id, candidates, async (attempt) => {
       const provider = config.providers.get(attempt.candidate.providerId)
       if (!provider) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause: new Error(`UNKNOWN_PROVIDER:${attempt.candidate.providerId}`) })
       try {
-        const output = validateAdapterResult(await provider.executeAttempt({ request: projection, signal }))
+        const output = validateAdapterResult(await provider.executeAttempt({ request: projection, signal, onObservation: (chunk) => observations.push({ type: 'chunk', data: chunk }) }))
         return output
       } catch (cause) {
         throw modelFallbackError({ retryable: true, localClosed: true, sideEffectState: 'none', cause })
       }
     })
     const value = toJson(result.result)
-    return { value, privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: candidateMetadata(result.candidate, result.attempts) }
+    return { value, privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: candidateMetadata(result.candidate, result.attempts), ...(observations.length ? { observations } : {}) }
   }
 }
