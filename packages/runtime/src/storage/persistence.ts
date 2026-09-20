@@ -1,7 +1,7 @@
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { parseContextSnapshotRef, provenanceRefId, provenanceRefKind } from '../core/types.js'
-import type { DataRef, JsonValue, ProvenanceRef, RuntimeState } from '../core/types.js'
+import type { DataRef, JsonValue, ProvenanceRef, ResultRecord, RuntimeState } from '../core/types.js'
 import { exportRuntimeState, importRuntimeState, type SessionSnapshot } from './session.js'
 import { EffectOutbox, type OutboxSnapshot } from './outbox.js'
 import { MutationLog, type MutationLogSnapshot } from './mutation-log.js'
@@ -63,6 +63,10 @@ export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceS
   for (const [ref, artifact] of artifacts) {
     if (artifact.ref !== ref || !artifact.mediaType || !Number.isInteger(artifact.sizeBytes) || artifact.sizeBytes < 0 || typeof artifact.contentBase64 !== 'string' || typeof artifact.contentHash !== 'string' || artifact.pinCount < 0) throw new Error(`INVALID_RUNTIME_PERSISTENCE_ARTIFACT:${ref}`)
     if (artifact.agentId !== undefined && !agents.has(artifact.agentId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:artifact.agentId:${ref}`)
+  }
+  for (const [id, result] of results) {
+    if (result.id !== id || (result.kind === 'finding' && (!result.statement || !Array.isArray(result.evidenceRefs) || result.evidenceRefs.length === 0))) throw new Error(`INVALID_RUNTIME_PERSISTENCE_RESULT:${id}`)
+    if (result.kind === 'finding') for (const ref of result.evidenceRefs ?? []) if (!ref || (ref.kind !== 'result' && ref.kind !== 'artifact') || !hasDerivedReference(ref, (result as ResultRecord & { laneId?: string }).laneId ?? (result.effectId ? effects.get(result.effectId)?.ownerLaneId ?? '' : ''), agents, lanes, results, artifacts)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:finding.evidenceRefs:${id}`)
   }
   for (const [id, lane] of lanes) {
     if (!agents.has(lane.agentId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:lane.agentId:${id}`)

@@ -5,6 +5,7 @@ export type EffectId = string
 export type WaitId = string
 export type ResultRef = string
 export type ArtifactRef = string
+export type FindingRef = ResultRef
 export type DataRef = { kind: 'result'; ref: ResultRef } | { kind: 'artifact'; ref: ArtifactRef }
 export type ProvenanceRef = string | DataRef
 export function provenanceRefId(ref: ProvenanceRef): string { return typeof ref === 'string' ? ref : ref.ref }
@@ -169,7 +170,9 @@ export interface AttemptRecord {
 export interface ResultRecord {
   id: ResultRef
   effectId?: EffectId
-  kind?: 'result' | 'rejected_output'
+  kind?: 'result' | 'finding' | 'rejected_output'
+  statement?: string
+  evidenceRefs?: DataRef[]
   value?: JsonValue
   privacy: PrivacyLabel
   privacyTaints?: PrivacyTaint[]
@@ -182,6 +185,14 @@ export interface ResultRecord {
     approvalRef?: string
     sanitizerId?: string
   }
+}
+
+export interface FindingRecord extends ResultRecord {
+  kind: 'finding'
+  statement: string
+  evidenceRefs: DataRef[]
+  agentId: AgentId
+  laneId: LaneId
 }
 
 export interface ArtifactRecord {
