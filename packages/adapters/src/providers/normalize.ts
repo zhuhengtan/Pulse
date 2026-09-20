@@ -4,12 +4,20 @@ export function normalizeOpenAIResponse(response: any): LLMResult {
   const message = response?.choices?.[0]?.message ?? {}
   const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls.map((call: any, index: number) => ({ toolCallId: `pulse-tool-${index + 1}`, name: String(call.function?.name ?? ''), input: parseJson(call.function?.arguments) })) : []
   const finishReason = response?.choices?.[0]?.finish_reason
-  return { text: String(message.content ?? ''), toolCalls, finishReason: finishReason === 'tool_calls' ? 'tool_calls' : finishReason === 'length' ? 'length' : 'stop', ...(response?.usage ? { usage: { inputTokens: response.usage.prompt_tokens, outputTokens: response.usage.completion_tokens, ...(response.usage.prompt_tokens_details?.cached_tokens === undefined ? {} : { cachedInputTokens: response.usage.prompt_tokens_details.cached_tokens }) } } : {}) }
+  const text = String(message.content ?? '')
+  const cachedInputTokens = response?.usage?.prompt_tokens_details?.cached_tokens ?? response?.usage?.cache_read_input_tokens
+  const inputTokens = response?.usage?.prompt_tokens
+  const cost = response?.usage?.cost && typeof response.usage.cost === 'object' ? { amount: Number(response.usage.cost.amount), currency: String(response.usage.cost.currency ?? 'USD'), source: 'reported' as const, ...(response.usage.cost.pricing_version === undefined ? {} : { pricingVersion: String(response.usage.cost.pricing_version) }) } : undefined
+  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, finishReason: finishReason === 'tool_calls' ? 'tool_calls' : finishReason === 'length' ? 'length' : finishReason === 'error' ? 'error' : 'stop', ...(response?.usage ? { usage: { ...(inputTokens === undefined ? {} : { inputTokens }), ...(response.usage.completion_tokens === undefined ? {} : { outputTokens: response.usage.completion_tokens }), ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }), ...(inputTokens !== undefined && cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens) } : {}), ...(cost === undefined ? {} : { cost }) } } : {}) }
 }
 export function normalizeAnthropicResponse(response: any): LLMResult {
   const blocks = Array.isArray(response?.content) ? response.content : []
   const text = blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('')
   const toolCalls = blocks.filter((block: any) => block.type === 'tool_use').map((block: any, index: number) => ({ toolCallId: `pulse-tool-${index + 1}`, name: String(block.name), input: block.input ?? {} }))
-  return { text, toolCalls, finishReason: toolCalls.length ? 'tool_calls' : 'stop', ...(response?.usage ? { usage: { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens } } : {}) }
+  const inputTokens = response?.usage?.input_tokens
+  const cachedInputTokens = response?.usage?.cache_read_input_tokens
+  const cost = response?.usage?.cost && typeof response.usage.cost === 'object' ? { amount: Number(response.usage.cost.amount), currency: String(response.usage.cost.currency ?? 'USD'), source: 'reported' as const } : undefined
+  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, finishReason: toolCalls.length ? 'tool_calls' : 'stop', ...(response?.usage ? { usage: { ...(inputTokens === undefined ? {} : { inputTokens }), ...(response.usage.output_tokens === undefined ? {} : { outputTokens: response.usage.output_tokens }), ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }), ...(inputTokens !== undefined && cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens) } : {}), ...(cost === undefined ? {} : { cost }) } } : {}) }
 }
 function parseJson(value: unknown): unknown { if (typeof value !== 'string') return value ?? {}; try { return JSON.parse(value) } catch { return { raw: value } } }
+function parseStructured(value: string): unknown | undefined { if (!value.trim()) return undefined; try { const parsed = JSON.parse(value); return parsed !== null && typeof parsed === 'object' ? parsed : undefined } catch { return undefined } }

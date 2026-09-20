@@ -40,7 +40,7 @@ function toJson(value: unknown): JsonValue {
 function candidateMetadata(candidate: ModelCandidate, attempts: Array<{ attemptId: string; attemptNo: number; candidate: ModelCandidate }>, usage: ReadonlyMap<string, NonNullable<LLMResult['usage']>>): JsonValue {
   return { selected: { id: candidate.id, providerId: candidate.providerId }, attempts: attempts.map((attempt) => {
     const recorded = usage.get(attempt.attemptId)
-    const usageJson = recorded === undefined ? undefined : { ...(recorded.inputTokens === undefined ? {} : { inputTokens: recorded.inputTokens }), ...(recorded.outputTokens === undefined ? {} : { outputTokens: recorded.outputTokens }), ...(recorded.cachedInputTokens === undefined ? {} : { cachedInputTokens: recorded.cachedInputTokens }) }
+    const usageJson = recorded === undefined ? undefined : { ...(recorded.inputTokens === undefined ? {} : { inputTokens: recorded.inputTokens }), ...(recorded.outputTokens === undefined ? {} : { outputTokens: recorded.outputTokens }), ...(recorded.cachedInputTokens === undefined ? {} : { cachedInputTokens: recorded.cachedInputTokens }), ...(recorded.uncachedInputTokens === undefined ? {} : { uncachedInputTokens: recorded.uncachedInputTokens }), ...(recorded.latencyMs === undefined ? {} : { latencyMs: recorded.latencyMs }), ...(recorded.cost === undefined ? {} : { cost: recorded.cost }) }
     return { attemptId: attempt.attemptId, attemptNo: attempt.attemptNo, modelId: attempt.candidate.id, providerId: attempt.candidate.providerId, ...(usageJson === undefined ? {} : { usage: usageJson }) }
   }) }
 }
@@ -71,8 +71,10 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
       try { modelRelease = await modelSlots.get(attempt.candidate.id).acquire(signal) } catch (cause) { providerRelease(); throw cause }
       const releases = [providerRelease, modelRelease]
       try {
-        const output = validateAdapterResult(await provider.executeAttempt({ request: projection, signal, onObservation: (chunk) => observations.push({ type: 'chunk', data: chunk }) }))
-        if (output.usage) usage.set(attempt.attemptId, output.usage)
+        const startedAt = Date.now()
+        const output = validateAdapterResult(await provider.executeAttempt({ request: projection, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), onObservation: (chunk) => { observations.push({ type: 'chunk', data: chunk }) } }))
+        const measuredUsage = output.usage === undefined ? { latencyMs: Math.max(0, Date.now() - startedAt) } : { ...output.usage, latencyMs: output.usage.latencyMs ?? Math.max(0, Date.now() - startedAt), ...(output.usage.uncachedInputTokens === undefined && output.usage.inputTokens !== undefined && output.usage.cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, output.usage.inputTokens - output.usage.cachedInputTokens) } : {}) }
+        usage.set(attempt.attemptId, measuredUsage)
         if (input.outputSchema !== undefined) {
           const candidateValue = output.structured ?? output.text
           if (!validateJsonSchema(candidateValue, input.outputSchema)) {

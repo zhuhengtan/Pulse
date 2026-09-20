@@ -1,6 +1,14 @@
 import type { LLMRequestProjection, PrivacyLabel } from '../core/types.js'
 
 export interface ModelCapabilities { toolCalling?: boolean; structuredOutput?: boolean; maxContextTokens: number; local?: boolean }
+export interface ModelUsage {
+  inputTokens?: number
+  outputTokens?: number
+  cachedInputTokens?: number
+  uncachedInputTokens?: number
+  latencyMs?: number
+  cost?: { amount: number; currency: string; source: 'reported' | 'estimated'; pricingVersion?: string }
+}
 export interface ModelCandidate { id: string; providerId: string; tasks: string[]; capabilities: ModelCapabilities; priority: number }
 export interface ModelRegistry { register(candidate: ModelCandidate): void; list(): ModelCandidate[] }
 
@@ -31,7 +39,7 @@ export interface LLMResult {
   structured?: unknown
   toolCalls: Array<{ toolCallId: string; name: string; input: unknown }>
   finishReason: 'stop' | 'tool_calls' | 'length' | 'error'
-  usage?: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number }
+  usage?: ModelUsage
   privacy?: PrivacyLabel
   derivedFrom?: string[]
 }

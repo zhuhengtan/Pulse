@@ -1,10 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { ContextBuilder, InMemoryModelRegistry, ModelFallbackController, ModelRouter, OutputValidationError, PulseRuntime, appendHistory, createAgent, createRuntimeState, modelFallbackError, stableSerialize, validateActionToolCalls, validateAdapterResult, validateStructuredOutput, MemoryStorage } from '@pulse/runtime'
-import { FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, runShell } from '@pulse/adapters'
+import { AnthropicAdapter, FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, OpenAICompatibleAdapter, runShell } from '@pulse/adapters'
 import { defineTool } from '@pulse/tool-sdk'
 
 const resume = { programId: 'context', programVersion: '1', step: 'start', locals: {} }
@@ -45,6 +45,26 @@ describe('M1-3 context, models and adapters', () => {
     expect(openai.toolCalls[0]).toEqual({ toolCallId: 'pulse-tool-1', name: 'read', input: { path: 'a' } })
     expect(anthropic.toolCalls[0]?.toolCallId).toBe('pulse-tool-1')
     expect(openai.finishReason).toBe('tool_calls')
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 3 } } }).usage).toMatchObject({ inputTokens: 10, outputTokens: 2, cachedInputTokens: 3, uncachedInputTokens: 7 })
+  })
+
+  it('maps tool and structured-output contracts into real provider request bodies', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => ({ ok: true, json: async () => ({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }] }) }) as Response)
+    vi.stubGlobal('fetch', fetchMock)
+    const request = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'tools@1', instruction: 'inspect', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'system' as const, content: 'system' }, { kind: 'tools' as const, content: [{ name: 'read', description: 'Read a file', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } }] }, { kind: 'instruction' as const, content: 'inspect' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'tools@1', privacy: 'public' as const, privacyRefs: [] }
+    const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] }
+    await new OpenAICompatibleAdapter('openai', { provider: 'openai', defaultModel: 'fallback' }).executeAttempt({ request, signal: new AbortController().signal, model: 'candidate', outputSchema: schema })
+    const openaiBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(openaiBody.model).toBe('candidate')
+    expect(openaiBody.tools[0].function.parameters).toEqual(request.blocks[1].content[0].inputSchema)
+    expect(openaiBody.response_format.json_schema.schema).toEqual(schema)
+    fetchMock.mockClear()
+    await new AnthropicAdapter('anthropic', { provider: 'anthropic', defaultModel: 'fallback' }).executeAttempt({ request, signal: new AbortController().signal, model: 'candidate', outputSchema: schema })
+    const anthropicBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(anthropicBody.model).toBe('candidate')
+    expect(anthropicBody.tools[0].input_schema).toEqual(request.blocks[1].content[0].inputSchema)
+    expect(anthropicBody.output_format.schema).toEqual(schema)
+    vi.unstubAllGlobals()
   })
 
   it('validates provider, structured, and action output as separate layers', () => {
