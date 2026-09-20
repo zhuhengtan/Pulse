@@ -12,6 +12,7 @@ export type EffectState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cance
 export type ConcurrencyClass = 'llm' | 'tool' | 'agent' | 'none'
 export type OutcomeStatus = 'succeeded' | 'failed' | 'cancelled'
 export interface ResourceLockSpec { resource: string; mode: 'shared' | 'exclusive' }
+export interface PrivacyTaint { path: string[]; privacy: PrivacyLabel }
 
 export interface RuntimeError {
   code: string
@@ -40,6 +41,7 @@ export interface HistoryRecord {
   resultRefs: ResultRef[]
   output: JsonValue
   privacy: PrivacyLabel
+  privacyTaints?: PrivacyTaint[]
 }
 
 export interface LaneContext {
@@ -97,7 +99,7 @@ export interface LaneRecord {
   enqueueSeq: number
   readySince: number
   ownedEffectIds: Set<EffectId>
-  closingResult?: { value: JsonValue; privacy: PrivacyLabel; derivedFrom?: ResultRef[] }
+  closingResult?: { value: JsonValue; privacy: PrivacyLabel; privacyTaints?: PrivacyTaint[]; derivedFrom?: ResultRef[] }
   resultRef?: ResultRef
   consecutiveControlErrors?: number
   pendingOutcome?: Outcome
@@ -160,6 +162,7 @@ export interface ResultRecord {
   kind?: 'result' | 'rejected_output'
   value?: JsonValue
   privacy: PrivacyLabel
+  privacyTaints?: PrivacyTaint[]
   derivedFrom: string[]
   summary?: JsonValue
   downgrade?: {
@@ -277,7 +280,7 @@ export interface ForkAction extends RuntimeActionBase {
 }
 export interface CancelLaneAction extends RuntimeActionBase { type: 'cancel_lane'; laneId: LaneId; reason: 'SUPERSEDED' | 'USER_REQUESTED' | 'POLICY' }
 export interface ProposeCancelAction extends RuntimeActionBase { type: 'propose_cancel'; laneId: LaneId; reason: 'SUPERSEDED' | 'POLICY' }
-export interface CompleteAction extends RuntimeActionBase { type: 'complete'; result: JsonValue; privacy?: PrivacyLabel; derivedFrom?: ResultRef[]; children?: 'reject_if_active' | 'cancel' | 'await' }
+export interface CompleteAction extends RuntimeActionBase { type: 'complete'; result: JsonValue; privacy?: PrivacyLabel; privacyTaints?: PrivacyTaint[]; derivedFrom?: ResultRef[]; children?: 'reject_if_active' | 'cancel' | 'await' }
 export interface FailAction extends RuntimeActionBase { type: 'fail'; error: RuntimeError; privacy?: PrivacyLabel; derivedFrom?: ResultRef[] }
 export interface AdoptContextAction extends RuntimeActionBase { type: 'adopt_context'; version: ContextVersion | 'latest' }
 export interface DowngradePrivacyAction extends RuntimeActionBase {
@@ -309,6 +312,7 @@ export interface ContextDelta {
   sourceLaneId?: LaneId
   ops: ContextOp[]
   privacy?: PrivacyLabel
+  privacyTaints?: PrivacyTaint[]
   derivedFrom?: string[]
   proposal?: boolean
 }
@@ -339,6 +343,7 @@ export interface LLMContextSpec {
   instruction: string
   privacy: PrivacyLabel
   privacyRefs: string[]
+  privacyTaints?: PrivacyTaint[]
 }
 
 export interface LLMRequestProjection {
@@ -351,6 +356,7 @@ export interface LLMRequestProjection {
   toolSetVersion: string
   privacy: PrivacyLabel
   privacyRefs: string[]
+  privacyTaints?: PrivacyTaint[]
 }
 
 export interface RuntimeEvent {
@@ -420,3 +426,17 @@ export function createRuntimeState(maxTotalLanes = 64, options: { maxQueuedEffec
 
 export function privacyRank(label: PrivacyLabel): number { return label === 'public' ? 0 : label === 'cloud_allowed' ? 1 : 2 }
 export function strictestPrivacy(labels: PrivacyLabel[]): PrivacyLabel { return labels.reduce<PrivacyLabel>((current, next) => privacyRank(next) > privacyRank(current) ? next : current, 'public') }
+export function privacyTaintPrivacy(taints: readonly PrivacyTaint[] | undefined): PrivacyLabel { return strictestPrivacy((taints ?? []).map((taint) => taint.privacy)) }
+export function effectivePrivacy(base: PrivacyLabel, taints: readonly PrivacyTaint[] | undefined): PrivacyLabel { return strictestPrivacy([base, privacyTaintPrivacy(taints)]) }
+export function validatePrivacyTaints(value: readonly PrivacyTaint[] | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const paths = new Set<string>()
+  for (const taint of value) {
+    if (!taint || !Array.isArray(taint.path) || taint.path.length === 0 || taint.path.some((part) => typeof part !== 'string' || part.length === 0)) return 'INVALID_PRIVACY_TAINT'
+    const key = JSON.stringify(taint.path)
+    if (paths.has(key)) return 'DUPLICATE_PRIVACY_TAINT'
+    paths.add(key)
+    if (taint.privacy !== 'public' && taint.privacy !== 'cloud_allowed' && taint.privacy !== 'local_only') return 'INVALID_PRIVACY_TAINT'
+  }
+  return undefined
+}

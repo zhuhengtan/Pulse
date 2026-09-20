@@ -2,8 +2,8 @@ import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.
 import { createAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock } from './index.js'
-import type { EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode } from '../core/types.js'
-import { createRuntimeState, strictestPrivacy } from '../core/types.js'
+import type { EffectRecord, EffectSubmission, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint } from '../core/types.js'
+import { createRuntimeState, effectivePrivacy, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
 import { FactInbox, ObservationInbox } from '../core/inbox.js'
@@ -32,7 +32,7 @@ export interface LaneProgram {
   seriesOnMemberFailure?: 'continue' | 'abort'
 }
 export interface EffectObservation { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }
-export interface EffectExecution { value: JsonValue; summary?: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionRef?: JsonValue; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled'; error?: RuntimeError; rejectedOutput?: { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; derivedFrom?: string[] }; metadata?: JsonValue; observations?: EffectObservation[] }
+export interface EffectExecution { value: JsonValue; summary?: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; privacyTaints?: PrivacyTaint[]; sideEffectState?: 'none' | 'applied' | 'known' | 'unknown'; executionRef?: JsonValue; executionState?: 'succeeded' | 'failed' | 'remote_unknown'; status?: 'succeeded' | 'failed' | 'cancelled'; error?: RuntimeError; rejectedOutput?: { value: JsonValue; privacy?: 'public' | 'cloud_allowed' | 'local_only'; privacyTaints?: PrivacyTaint[]; derivedFrom?: string[] }; metadata?: JsonValue; observations?: EffectObservation[] }
 export type EffectExecutor = (effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<EffectExecution>
 type HostCommand = { type: 'reply'; effectId: string; value: JsonValue } | { type: 'cancel'; agentId: string; reason: string }
 
@@ -612,6 +612,11 @@ export class PulseRuntime {
       effectiveExecution = { ...execution, status: 'failed', executionState: 'failed', rejectedOutput: { value: structuredClone(execution.value), ...(execution.privacy === undefined ? {} : { privacy: execution.privacy }), derivedFrom: [...(effect.derivedFrom ?? [])] } }
       outputError = { code: 'OUTPUT_SCHEMA_VIOLATION', message: 'LLM output did not satisfy the declared output schema.' }
     }
+    const taintError = validatePrivacyTaints(effectiveExecution.privacyTaints) ?? validatePrivacyTaints(effectiveExecution.rejectedOutput?.privacyTaints)
+    if (taintError) {
+      effectiveExecution = { ...effectiveExecution, status: 'failed', executionState: 'failed', error: { code: taintError, message: 'Effect output contains invalid privacy taints.' } }
+      outputError = effectiveExecution.error
+    }
     const effectiveStatus = effect.cancelRequested && (effectiveExecution.status ?? status) === 'succeeded' ? 'cancelled' : (effectiveExecution.status ?? status)
     effect.state = effectiveStatus
     effect.executionState = effectiveStatus === 'succeeded' ? 'succeeded' : effectiveStatus === 'cancelled' ? 'failed' : 'failed'
@@ -636,7 +641,7 @@ export class PulseRuntime {
     for (const observation of effectiveExecution.observations ?? []) this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now })
     const ownerLane = this.state.lanes.get(effect.ownerLaneId)
     const sourcePrivacy = effect.derivedFrom?.map((ref) => this.state.results.get(ref)?.privacy).filter((privacy): privacy is NonNullable<typeof privacy> => privacy !== undefined) ?? []
-    const result = effectiveStatus === 'succeeded' ? { id: resultId, effectId, value: effectiveExecution.value, privacy: strictestPrivacy([effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), derivedFrom: [...(effect.derivedFrom ?? [])], ...(effectiveExecution.summary === undefined ? {} : { summary: effectiveExecution.summary }) } : rejectedOutputId && effectiveExecution.rejectedOutput ? { id: rejectedOutputId, effectId, kind: 'rejected_output' as const, value: effectiveExecution.rejectedOutput.value, privacy: strictestPrivacy([effectiveExecution.rejectedOutput.privacy ?? effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), derivedFrom: [...(effectiveExecution.rejectedOutput.derivedFrom ?? effect.derivedFrom ?? [])] } : undefined
+    const result = effectiveStatus === 'succeeded' && !taintError ? { id: resultId, effectId, value: effectiveExecution.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), effectiveExecution.privacyTaints), ...(effectiveExecution.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(effectiveExecution.privacyTaints) }), derivedFrom: [...(effect.derivedFrom ?? [])], ...(effectiveExecution.summary === undefined ? {} : { summary: effectiveExecution.summary }) } : rejectedOutputId && effectiveExecution.rejectedOutput && !taintError ? { id: rejectedOutputId, effectId, kind: 'rejected_output' as const, value: effectiveExecution.rejectedOutput.value, privacy: effectivePrivacy(strictestPrivacy([effectiveExecution.rejectedOutput.privacy ?? effectiveExecution.privacy ?? 'public', ...sourcePrivacy]), effectiveExecution.rejectedOutput.privacyTaints), ...(effectiveExecution.rejectedOutput.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(effectiveExecution.rejectedOutput.privacyTaints) }), derivedFrom: [...(effectiveExecution.rejectedOutput.derivedFrom ?? effect.derivedFrom ?? [])] } : undefined
     if (result) this.state.results.set(resultId, result)
     let journalLane: LaneRecord | undefined
     if (ownerLane && result) {
@@ -649,7 +654,7 @@ export class PulseRuntime {
         const contextSpec = request?.contextSpec && typeof request.contextSpec === 'object' && !Array.isArray(request.contextSpec) ? request.contextSpec as Record<string, JsonValue> : undefined
         const refs = Array.isArray(contextSpec?.resultRefs) ? contextSpec.resultRefs.filter((ref): ref is string => typeof ref === 'string') : effect.derivedFrom ?? []
         const instruction = typeof contextSpec?.instruction === 'string' ? contextSpec.instruction : typeof input.instruction === 'string' ? input.instruction : typeof input.task === 'string' ? input.task : effect.key
-        journalLane = appendHistory(journalLane, { instruction, resultRefs: [...new Set(refs)], output: structuredClone(effectiveExecution.value), privacy: result.privacy })
+        journalLane = appendHistory(journalLane, { instruction, resultRefs: [...new Set(refs)], output: structuredClone(effectiveExecution.value), privacy: result.privacy, ...(result.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(result.privacyTaints) }) })
         journalLane.visibleResultRefs!.add(result.id)
       }
       this.state.lanes.set(journalLane.id, journalLane)
@@ -1045,7 +1050,7 @@ export class PulseRuntime {
             delete lane.activeWaitId
             if (lane.closingResult) {
               const resultId = `result-${this.state.nextIds.result++}`
-              this.state.results.set(resultId, { id: resultId, value: lane.closingResult.value, privacy: lane.closingResult.privacy, derivedFrom: [...(lane.closingResult.derivedFrom ?? [])] })
+              this.state.results.set(resultId, { id: resultId, value: lane.closingResult.value, privacy: lane.closingResult.privacy, ...(lane.closingResult.privacyTaints === undefined ? {} : { privacyTaints: structuredClone(lane.closingResult.privacyTaints) }), derivedFrom: [...(lane.closingResult.derivedFrom ?? [])] })
               if (lane.visibleResultRefs) lane.visibleResultRefs.add(resultId)
               else lane.visibleResultRefs = new Set([resultId])
               lane.status = 'succeeded'; lane.resultRef = resultId; delete lane.closingResult

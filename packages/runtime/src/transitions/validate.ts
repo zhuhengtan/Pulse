@@ -2,7 +2,7 @@ import { error } from '../core/errors.js'
 import { apply } from '../core/mutations.js'
 import { DependencyGraph } from '../dependencies/graph.js'
 import type { ValidationResult, Mutation } from '../core/mutations.js'
-import { privacyRank, strictestPrivacy } from '../core/types.js'
+import { effectivePrivacy, privacyRank, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord, ForkLaneSpec } from '../core/types.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import { ContextBuilder, estimateHistoryTokens, historyPressure } from '../context/builder.js'
@@ -240,7 +240,7 @@ function derivedPrivacy(state: RuntimeState, lane: LaneRecord, refs: string[]): 
     const result = state.results.get(ref)
     if (!result) return { error: 'UNKNOWN_RESULT_REF' }
     if (!resultVisible(lane, ref)) return { error: 'RESULT_NOT_VISIBLE' }
-    labels.push(result.privacy)
+    labels.push(effectivePrivacy(result.privacy, result.privacyTaints))
   }
   return { privacy: strictestPrivacy(labels) }
 }
@@ -466,12 +466,14 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       if (activeChildren && (action.children ?? 'reject_if_active') === 'reject_if_active') return { rejection: error('CHILDREN_STILL_ACTIVE', 'complete requires an explicit child join or cancellation') }
       const derived = derivedPrivacy(state, lane, action.derivedFrom ?? [])
       if (derived.error) return { rejection: error(derived.error, 'Result provenance references an unknown result') }
+      const taintError = validatePrivacyTaints(action.privacyTaints)
+      if (taintError) return { rejection: error(taintError, 'Result privacy taints are invalid') }
       if (action.privacy !== undefined && derived.privacy !== undefined && privacyRank(action.privacy) < privacyRank(derived.privacy)) return { rejection: error('PRIVACY_DOWNGRADE_WITHOUT_PROOF', 'Result privacy cannot be broader than its sources') }
-      const privacy = strictestPrivacy([derived.privacy ?? 'public', action.privacy ?? 'public'])
+      const privacy = effectivePrivacy(strictestPrivacy([derived.privacy ?? 'public', action.privacy ?? 'public']), action.privacyTaints)
       if (activeChildren && action.children === 'await') {
         const dependencies = [...lane.children].filter((childId) => !['succeeded', 'failed', 'cancelled'].includes(state.lanes.get(childId)?.status ?? 'cancelled')).map((childId) => ({ key: childId, target: { kind: 'lane' as const, id: childId }, condition: 'settled' as const }))
         if (hasDependencyCycle(state, dependencies.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: dependency.target, kind: 'wait' as const })))) return { rejection: error('DEPENDENCY_CYCLE', 'closing wait would create a dependency cycle') }
-        workingLane.closingResult = { value: clone(action.result), privacy, ...(action.derivedFrom === undefined ? {} : { derivedFrom: [...action.derivedFrom] }) }
+        workingLane.closingResult = { value: clone(action.result), privacy, ...(action.privacyTaints === undefined ? {} : { privacyTaints: clone(action.privacyTaints) }), ...(action.derivedFrom === undefined ? {} : { derivedFrom: [...action.derivedFrom] }) }
         addWait(state, workingLane, { dependencies, mode: 'all', onUnsatisfied: 'resume_with_error', reason: 'join' }, new Map(dependencies.map((dependency) => [dependency.key, dependency.target] as const)), mutations, `wait-${waitCounter++}`)
         workingLane.status = 'waiting'
         mutations.push({ op: 'setLane', laneId: lane.id, record: { ...workingLane, version: lane.version + 1 } })
@@ -485,7 +487,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         }
       }
       const resultId = `result-${resultCounter++}`
-      mutations.push({ op: 'publishResult', record: { id: resultId, value: clone(action.result), privacy, derivedFrom: [...(action.derivedFrom ?? [])] } })
+      mutations.push({ op: 'publishResult', record: { id: resultId, value: clone(action.result), privacy, ...(action.privacyTaints === undefined ? {} : { privacyTaints: clone(action.privacyTaints) }), derivedFrom: [...(action.derivedFrom ?? [])] } })
       if (workingLane.visibleResultRefs) workingLane.visibleResultRefs.add(resultId)
       else workingLane.visibleResultRefs = new Set([resultId])
       if (lane.ownerLaneId !== undefined) {

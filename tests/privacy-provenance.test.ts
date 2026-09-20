@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, createAgent, createRuntimeState, defineLaneProgram, PulseRuntime, validateStep } from '@pulse/runtime'
+import { apply, ContextBuilder, createAgent, createRuntimeState, defineLaneProgram, InMemoryModelRegistry, ModelRouter, PulseRuntime, validateStep } from '@pulse/runtime'
 
 describe('result privacy provenance', () => {
   it('recomputes the strictest source label and preserves derivedFrom', () => {
@@ -55,5 +55,30 @@ describe('result privacy provenance', () => {
     const closing = validateStep(state, root.id, { actions: [{ type: 'complete', result: { done: true }, derivedFrom: ['source'], children: 'await' }], next: { programId: 'p', programVersion: '1', step: 'wait', locals: {} } })
     expect('rejection' in closing).toBe(false)
     if (!('rejection' in closing)) expect(closing.mutations.find((mutation) => mutation.op === 'setLane' && mutation.laneId === root.id)).toMatchObject({ record: { closingResult: { privacy: 'local_only', derivedFrom: ['source'] } } })
+  })
+
+  it('promotes a local-only leaf taint to the request privacy and cloud routing gate', () => {
+    const state = createRuntimeState()
+    const { agent, root } = createAgent(state, 'leaf taint', { programId: 'taint', programVersion: '1', step: 'start', locals: {} })
+    state.results.set('record', { id: 'record', value: { public: 'ok', secret: 'hidden' }, privacy: 'cloud_allowed', privacyTaints: [{ path: ['secret'], privacy: 'local_only' }], derivedFrom: [] })
+    root.visibleResultRefs!.add('record')
+    const projection = new ContextBuilder(state).build({ agent, lane: root, resultRefs: ['record'], instruction: 'inspect', toolSetId: 'default' })
+    expect(projection.privacy).toBe('local_only')
+    expect(projection.privacyTaints).toEqual([{ path: ['record', 'secret'], privacy: 'local_only' }])
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'cloud', providerId: 'cloud', tasks: ['reason'], capabilities: { local: false, maxContextTokens: 4096 }, priority: 2 })
+    registry.register({ id: 'local', providerId: 'local', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 1 })
+    expect(new ModelRouter(registry).routeProjection('reason', projection).map((candidate) => candidate.id)).toEqual(['local'])
+  })
+
+  it('preserves effect-output leaf taints and widens the record label only to the strictest level', async () => {
+    const program = defineLaneProgram({ id: 'effect-leaf-taint', version: '1' }, (builder) => {
+      builder.addStep('start', () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'read', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'finish' }))
+      builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { done: true } }], next: 'finish' }))
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { public: 'ok', secret: 'hidden' }, privacy: 'cloud_allowed', privacyTaints: [{ path: ['secret'], privacy: 'local_only' }] }) })
+    const { agentId } = runtime.createAgent('effect leaf taint', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect([...runtime.state.results.values()].find((result) => result.effectId === 'effect-1')).toMatchObject({ privacy: 'local_only', privacyTaints: [{ path: ['secret'], privacy: 'local_only' }] })
   })
 })

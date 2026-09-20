@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { AgentRecord, LaneRecord, LLMContextSpec, LLMRequestProjection, PrivacyLabel, ResultRef, RuntimeState, JsonValue, ContextDelta, ContextOp } from '../core/types.js'
-import { privacyRank, strictestPrivacy } from '../core/types.js'
+import { effectivePrivacy, privacyRank, strictestPrivacy } from '../core/types.js'
 
 function stable(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
@@ -35,9 +35,11 @@ export class ContextBuilder {
       if (input.lane.visibleResultRefs !== undefined && !input.lane.visibleResultRefs.has(ref)) throw new Error(`RESULT_NOT_VISIBLE:${ref}`)
       return result
     })
-    const privacy = strictestPrivacy(results.map((result) => result.privacy))
-    const privacyRefs = results.filter((result) => privacyRank(result.privacy) > 0).map((result) => result.id)
-    const contextSpec: LLMContextSpec = { globalSnapshotVersion: input.lane.contextSnapshotVersion, laneSnapshotVersion: input.lane.context.version, resultRefs, eventIds: input.eventIds ?? [], toolSetId: input.toolSetId, instruction: input.instruction, privacy, privacyRefs }
+    const effectiveResults = results.map((result) => ({ result, privacy: effectivePrivacy(result.privacy, result.privacyTaints) }))
+    const privacy = strictestPrivacy(effectiveResults.map((item) => item.privacy))
+    const privacyRefs = effectiveResults.filter((item) => privacyRank(item.privacy) > 0).map((item) => item.result.id)
+    const privacyTaints = effectiveResults.flatMap((item) => (item.result.privacyTaints ?? []).map((taint) => ({ path: [item.result.id, ...taint.path], privacy: taint.privacy })))
+    const contextSpec: LLMContextSpec = { globalSnapshotVersion: input.lane.contextSnapshotVersion, laneSnapshotVersion: input.lane.context.version, resultRefs, eventIds: input.eventIds ?? [], toolSetId: input.toolSetId, instruction: input.instruction, privacy, privacyRefs, ...(privacyTaints.length ? { privacyTaints } : {}) }
     const prefixBlocks = [
       { kind: 'system' as const, content: input.system ?? '' },
       { kind: 'policy' as const, content: input.policy ?? {} },
@@ -45,8 +47,8 @@ export class ContextBuilder {
       { kind: 'global' as const, content: global },
       { kind: 'history' as const, content: input.lane.context.history.map((record) => ({ seq: record.seq, instruction: record.instruction, resultRefs: record.resultRefs, output: record.output, privacy: record.privacy })) },
     ]
-    const blocks = [...prefixBlocks, { kind: 'lane' as const, content: input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: results.map((result) => ({ id: result.id, value: result.value ?? null })) }, { kind: 'instruction' as const, content: input.instruction }]
-    return { contextSpec, blocks, prefixHash: hash(prefixBlocks), projectionHash: hash(blocks), builderVersion: this.version, policyVersion: '1', toolSetVersion: input.toolSetId, privacy, privacyRefs }
+    const blocks = [...prefixBlocks, { kind: 'lane' as const, content: input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: results.map((result) => ({ id: result.id, value: result.value ?? null, ...(result.privacyTaints === undefined ? {} : { privacyTaints: result.privacyTaints.map((taint) => ({ path: [...taint.path], privacy: taint.privacy }) as unknown as JsonValue) }) })) }, { kind: 'instruction' as const, content: input.instruction }]
+    return { contextSpec, blocks, prefixHash: hash(prefixBlocks), projectionHash: hash(blocks), builderVersion: this.version, policyVersion: '1', toolSetVersion: input.toolSetId, privacy, privacyRefs, ...(privacyTaints.length ? { privacyTaints } : {}) }
   }
 }
 
