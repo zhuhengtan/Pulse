@@ -97,9 +97,10 @@
 | Fact Inbox 持久化与 pin | 未消费 Host Fact 随 Runtime persistence 快照恢复，去重历史与 `host-command-N` 序号保持连续；队列期间 pin，消费后清理索引 | `tests/fact-inbox.test.ts`、`tests/storage-outbox.test.ts`、`tests/storage-policy.test.ts` | 本轮 Fact Inbox 提交 |
 | Host Fact Agent 隔离 | Reply Fact 携带 Agent 身份；Session API 与 Runtime apply 双重校验，跨 Agent Human Effect 响应被拒绝并记录 `command.rejected` | `tests/effect-hosts.test.ts` | 本轮 Host 隔离提交 |
 | Host Reply 类型边界 | Reply 只允许未结算的 HumanEffect；Tool/Timer/其他 Effect 仍由各自 Executor 结算 | `tests/effect-hosts.test.ts` | 本轮 Reply 类型提交 |
+| Host Fact 存储准入原子性 | 排队 Host Fact 先在候选 Inbox/StoragePolicy 上预检；快照 hard limit 失败时不进入真实队列、不消耗命令序号、不留下半个 pin 记录 | `tests/storage-policy.test.ts` | 本轮 Host Fact 准入提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、232/232 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npm exec tsc -b --pretty false && npm test`；当前结果为 47 个测试文件、233/233 通过，`npm run build` 和 `git diff --check` 也已通过。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -445,6 +446,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - 本轮 Fact Inbox 提交：持久化未消费 Host Fact、恢复去重与命令序号，并纳入 StoragePolicy pin/消费后清理。
 - 本轮 Host 隔离提交：Reply Fact 增加 Agent 归属，Session 与 Runtime 双重拒绝跨 Agent 响应。
 - 本轮 Reply 类型提交：Reply 仅能完成 HumanEffect，避免绕过 Tool/Timer Executor。
+- 本轮 Host Fact 准入提交：排队命令先在候选 FactInbox/StoragePolicy 上做快照 hard-limit 预检，失败时不修改真实队列、不消耗命令序号。
 - `2250df2`：Runtime Worker lease 暴露远程 claim/renew/complete/fail 协议；adapters 增加 HTTP Coordinator Server、Client、polling Worker 和 HTTP EffectExecutor，测试覆盖真实本机 HTTP 往返、heartbeat 与 Runtime Effect 闭环。
 - `685be10`：HTTP Worker Server/Client 增加 Bearer token 鉴权，未授权请求在任务访问前拒绝，并有回归测试。
 - `47791bd`：WorkerCoordinator 增加 schemaVersion=1 的 snapshot/restore；恢复时将 in-flight lease 重新入队，并让终态/幂等任务在重启后仍可返回结果。
@@ -456,7 +458,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `8bb07e5`：Global/Lane Context 增加不改变业务 JSON 形状的 privacy metadata sidecar；版本、持久化恢复、ContextBuilder、ContextMerger 和 warm start 均保留该元数据。
 - `fe9554a` / `596fecb`：Session outcome 和 fact stream 均按 Agent 隔离，Host snapshot 暴露 Global Context privacy metadata。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
-- 当前确定性门禁：`npm exec tsc -b --pretty false && npm test`，47 个测试文件、232 个测试通过；`npm run build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
+- 当前确定性门禁：`npm exec tsc -b --pretty false && npm test`，47 个测试文件、233 个测试通过；`npm run build` 通过。Live Smoke 已执行到真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`，未将其失败冒充内核证明。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 

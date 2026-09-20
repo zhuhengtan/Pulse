@@ -348,8 +348,14 @@ export class PulseRuntime {
   }
 
   enqueueHostCommand(command: HostCommand): void {
-    const envelope = this.factInbox.enqueue(command, `host-command-${this.hostCommandSeq++}`)
+    const eventId = `host-command-${this.hostCommandSeq}`
+    const candidateInbox = FactInbox.fromSnapshot(this.factInbox.snapshot())
+    if (!candidateInbox.enqueue(command, eventId)) return
+    const candidatePolicy = this.storagePolicy.clone()
+    this.syncStoragePolicy(candidatePolicy, this.state, candidateInbox)
+    const envelope = this.factInbox.enqueue(command, eventId)
     if (!envelope) return
+    this.hostCommandSeq++
     this.syncStoragePolicy()
     this.schedulePersistence()
     for (const resolve of this.factWaiters.splice(0)) resolve()
@@ -638,7 +644,7 @@ export class PulseRuntime {
     for (const artifact of this.state.artifacts.values()) artifact.storageState = 'persisted'
   }
 
-  private syncStoragePolicy(policy = this.storagePolicy, state = this.state): void {
+  private syncStoragePolicy(policy = this.storagePolicy, state = this.state, factInbox = this.factInbox): void {
     const pinKeys = new Set<string>()
     for (const lane of state.lanes.values()) {
       const active = !['succeeded', 'failed', 'cancelled'].includes(lane.status)
@@ -657,7 +663,7 @@ export class PulseRuntime {
       if (!effect.outcome && effect.kind === 'llm') pinKeys.add(`snapshot:request:${effect.id}:${effect.attemptId}`)
       if (!effect.outcome) for (const ref of effect.derivedFrom ?? []) pinKeys.add(`${provenanceRefKind(ref) === 'artifact' ? 'artifact' : 'result'}:${provenanceRefId(ref)}`)
     }
-    for (const envelope of this.factInbox.snapshot().queue) pinKeys.add(`snapshot:fact:${envelope.eventId}`)
+    for (const envelope of factInbox.snapshot().queue) pinKeys.add(`snapshot:fact:${envelope.eventId}`)
     policy.replacePinSource('runtime', pinKeys)
     for (const lane of state.lanes.values()) {
       const snapshotKey = `snapshot:lane:${lane.id}:${lane.context.version}`
@@ -683,8 +689,8 @@ export class PulseRuntime {
     for (const artifact of state.artifacts.values()) policy.put('artifact', `artifact:${artifact.ref}`, artifact as unknown as JsonValue)
     for (const event of state.events) policy.put('event', `event:${event.id}`, event as unknown as JsonValue)
     for (const lane of state.lanes.values()) if (lane.pendingResumeInput) policy.put('snapshot', `snapshot:resume:${lane.id}:${lane.version}`, lane.pendingResumeInput as unknown as JsonValue)
-    const factKeys = new Set(this.factInbox.snapshot().queue.map((envelope) => `snapshot:fact:${envelope.eventId}`))
-    for (const envelope of this.factInbox.snapshot().queue) policy.put('snapshot', `snapshot:fact:${envelope.eventId}`, envelope as unknown as JsonValue)
+    const factKeys = new Set(factInbox.snapshot().queue.map((envelope) => `snapshot:fact:${envelope.eventId}`))
+    for (const envelope of factInbox.snapshot().queue) policy.put('snapshot', `snapshot:fact:${envelope.eventId}`, envelope as unknown as JsonValue)
     for (const record of policy.inspect()) if (record.key.startsWith('snapshot:fact:') && !factKeys.has(record.key)) policy.remove(record.key)
   }
 

@@ -49,6 +49,13 @@ describe('session storage policy', () => {
     expect(runtime.storagePolicy.inspect().some((record) => record.key === 'snapshot:fact:host-command-1')).toBe(false)
   })
 
+  it('rejects a Host fact before enqueue when storage admission fails', () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxSnapshotBytes: 1 } })
+    expect(() => runtime.enqueueHostCommand({ type: 'cancel', agentId: 'agent-1', reason: 'USER_REQUESTED' })).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    expect(runtime.factInbox.snapshot().queue).toHaveLength(0)
+    expect(runtime.storagePolicy.inspect().some((record) => record.key.startsWith('snapshot:fact:'))).toBe(false)
+  })
+
   it('automatically pins active lane snapshots and LLM requests', async () => {
     let release!: () => void
     const program: LaneProgram = { id: 'storage-pins', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'request', kind: 'llm', concurrencyClass: 'llm', input: { request: {} } }] }], next: { programId: 'storage-pins', programVersion: '1', step: 'done', locals: {} } }) }
