@@ -770,7 +770,7 @@ export class PulseRuntime {
   completeEffect(effectId: string, execution: EffectExecution, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded', error?: RuntimeError): void {
     const storedEffect = this.state.effects.get(effectId)
     if (!storedEffect) return
-    if (storedEffect.outcome) { this.emit({ type: 'attempt.late_emit', effectId, data: { status: storedEffect.outcome.status } }); return }
+    if (storedEffect.outcome) { this.tryEmit({ type: 'attempt.late_emit', effectId, data: { status: storedEffect.outcome.status } }); return }
     const effect = structuredClone(storedEffect)
     const running = this.executions.get(effectId)
     if (running) { running.controller.abort(); this.executions.delete(effectId) }
@@ -1184,7 +1184,7 @@ export class PulseRuntime {
         this.emit({ type: 'agent.effect_started', effectId: effect.id, data: child.agentId })
         continue
       }
-      const promise = this.executor(effect, controller.signal).then((execution) => this.completeEffect(effect.id, execution)).catch((cause) => { const runtimeError = runtimeErrorFromCause(cause); this.emit({ type: 'effect.dispatch_failed', effectId: effect.id, data: runtimeError as unknown as JsonValue }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', runtimeError) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
+      const promise = this.executor(effect, controller.signal).then((execution) => this.completeEffect(effect.id, execution)).catch((cause) => { const runtimeError = runtimeErrorFromCause(cause); this.tryEmit({ type: 'effect.dispatch_failed', effectId: effect.id, data: runtimeError as unknown as JsonValue }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', runtimeError) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
       executionRecord.promise = promise
       if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.clock.schedule(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
       if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.clock.timers.schedule(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))

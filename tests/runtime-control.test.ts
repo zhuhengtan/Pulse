@@ -122,6 +122,17 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.lanes.get('lane-1')?.status).toBe('waiting')
   })
 
+  it('contains Executor failures when dispatch audit events cannot fit the event budget', async () => {
+    const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 100_000 }, effectExecutor: async () => { throw new Error('executor failed') } })
+    const program: LaneProgram = { id: 'dispatch-failure-admission', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('dispatch-failure-admission', 'done') }) }
+    runtime.createAgent('dispatch failure admission', program)
+    runtime.tick()
+    const existingEventBytes = runtime.storagePolicy.inspect().filter((record) => record.kind === 'event').reduce((total, record) => total + record.bytes, 0)
+    ;(runtime.storagePolicy as any).limits.maxEventLogBytes = existingEventBytes
+    await expect(runtime.waitForIdle()).resolves.toBeUndefined()
+    expect(runtime.state.effects.get('effect-1')?.outcome?.status).toBe('failed')
+  })
+
   it('supports explicit quarantine abandonment without claiming side-effect absence', async () => {
     const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
     const program: LaneProgram = { id: 'abandon-quarantine', version: '1', step: ({ lane }) => lane.resume.step === 'start'
