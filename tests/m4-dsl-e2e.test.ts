@@ -125,6 +125,15 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     await stream.return?.()
   })
 
+  it('rejects invalid Session host commands through the Promise API', async () => {
+    const runtime = new PulseRuntime()
+    const program = { id: 'session-command-validation', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'session-command-validation', programVersion: '1', step: 'done', locals: {} } }) }
+    const { agentId } = runtime.createAgent('command validation', program)
+    const session = runtime.start(agentId)
+    await expect(session.cancel('')).rejects.toThrow('INVALID_CANCEL_REASON')
+    await expect(session.reply('missing-effect', { ok: true })).rejects.toThrow('EFFECT_NOT_OWNED')
+  })
+
   it('reports a stream gap after fact history is compacted and routes host cancel through the inbox', async () => {
     const runtime = new PulseRuntime()
     const program = { id: 'gap-test', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'gap-test', programVersion: '1', step: 'done', locals: {} } }) }

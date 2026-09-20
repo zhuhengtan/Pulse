@@ -57,12 +57,11 @@ export class PulseSession {
     }
   }
   async outcome(): Promise<{ status: 'succeeded' | 'failed' | 'cancelled'; unresolvedEffectIds: string[] }> { return this.execution }
-  reply(effectId: string, value: JsonValue): Promise<void> {
+  async reply(effectId: string, value: JsonValue): Promise<void> {
     const effect = this.runtime.state.effects.get(effectId)
-    if (!effect || effect.agentId !== this.agentId) return Promise.reject(new Error('EFFECT_NOT_OWNED'))
-    if (effect.kind !== 'human' || effect.outcome) return Promise.reject(new Error('EFFECT_NOT_REPLYABLE'))
+    if (!effect || effect.agentId !== this.agentId) throw new Error('EFFECT_NOT_OWNED')
+    if (effect.kind !== 'human' || effect.outcome) throw new Error('EFFECT_NOT_REPLYABLE')
     this.runtime.enqueueHostCommand({ type: 'reply', agentId: this.agentId, effectId, value })
-    return Promise.resolve()
   }
-  cancel(reason: string): Promise<void> { this.runtime.enqueueHostCommand({ type: 'cancel', agentId: this.agentId, reason }); return Promise.resolve() }
+  async cancel(reason: string): Promise<void> { this.runtime.requestCancel(this.agentId, reason) }
 }
