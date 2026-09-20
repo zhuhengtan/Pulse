@@ -29,4 +29,13 @@ describe('FactInbox', () => {
     expect(restored.enqueue({ kind: 'duplicate', value: 3 }, 'event-1')).toBeUndefined()
     expect(restored.drain()[0]).toMatchObject({ eventId: 'event-2', receivedSeq: 2 })
   })
+
+  it('rejects ambiguous or reordered snapshots instead of normalizing facts', () => {
+    const inbox = new FactInbox<{ value: number }>()
+    inbox.enqueue({ value: 1 }, 'event-1')
+    inbox.enqueue({ value: 2 }, 'event-2')
+    const snapshot = inbox.snapshot()
+    expect(() => FactInbox.fromSnapshot({ ...snapshot, seen: [...snapshot.seen, 'event-1'] })).toThrow('INVALID_FACT_INBOX_SNAPSHOT')
+    expect(() => FactInbox.fromSnapshot({ ...snapshot, queue: [...snapshot.queue].reverse() })).toThrow('INVALID_FACT_INBOX_SNAPSHOT')
+  })
 })

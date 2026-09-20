@@ -37,12 +37,14 @@ export class FactInbox<T extends JsonValue = JsonValue> {
   static fromSnapshot<T extends JsonValue = JsonValue>(snapshot: FactInboxSnapshot<T> | JsonValue): FactInbox<T> {
     const value = snapshot as FactInboxSnapshot<T>
     if (!value || value.schemaVersion !== 1 || !Number.isInteger(value.nextSeq) || value.nextSeq < 1 || !Array.isArray(value.seen) || value.seen.some((eventId) => typeof eventId !== 'string' || eventId.length === 0) || !Array.isArray(value.queue)) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
+    if (new Set(value.seen).size !== value.seen.length) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
     const inbox = new FactInbox<T>()
     const seen = new Set(value.seen)
     let maxReceivedSeq = 0
     for (const envelope of value.queue) {
       if (!envelope || typeof envelope.eventId !== 'string' || !seen.has(envelope.eventId) || !Number.isInteger(envelope.receivedSeq) || envelope.receivedSeq < 1 || envelope.fact === undefined) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
       if (inbox.queue.some((candidate) => candidate.eventId === envelope.eventId || candidate.receivedSeq === envelope.receivedSeq)) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
+      if (envelope.receivedSeq <= maxReceivedSeq) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
       inbox.queue.push({ eventId: envelope.eventId, receivedSeq: envelope.receivedSeq, fact: structuredClone(envelope.fact) })
       maxReceivedSeq = Math.max(maxReceivedSeq, envelope.receivedSeq)
     }
