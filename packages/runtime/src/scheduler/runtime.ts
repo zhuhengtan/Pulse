@@ -214,10 +214,6 @@ export class PulseRuntime {
     }
     this.clock = config.clock ?? new VirtualClock()
     if (!restored && config.clock) this.state.now = this.clock.now()
-    if (config.maxRuntimeMs !== undefined) {
-      if (!Number.isFinite(config.maxRuntimeMs) || config.maxRuntimeMs < 0) throw new Error('INVALID_MAX_RUNTIME')
-      this.maxRuntimeAt = this.state.now + config.maxRuntimeMs
-    }
     this.ready = new ReadyQueue(config.agingIntervalMs ?? 1000, config.agingCap ?? Number.POSITIVE_INFINITY)
     if (restored) {
       this.clock.set(this.state.now)
@@ -259,6 +255,10 @@ export class PulseRuntime {
     this.customExecutor = config.effectExecutor !== undefined
     this.executor = config.effectExecutor ?? (async () => ({ value: null }))
     if (restored) this.clock.set(this.state.now)
+    if (config.maxRuntimeMs !== undefined) {
+      if (!Number.isFinite(config.maxRuntimeMs) || config.maxRuntimeMs < 0) throw new Error('INVALID_MAX_RUNTIME')
+      this.maxRuntimeAt = this.clock.now() + config.maxRuntimeMs
+    }
     this.syncStoragePolicy()
   }
 

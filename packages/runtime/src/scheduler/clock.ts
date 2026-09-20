@@ -72,8 +72,10 @@ export class MonotonicClock implements RuntimeClock {
 
   async waitUntil(at: number): Promise<void> {
     if (!Number.isFinite(at)) throw new Error('INVALID_TIMER_DEADLINE')
-    const remaining = at - this.now()
-    if (remaining > 0) await new Promise<void>((resolve) => setTimeout(resolve, remaining))
+    while (this.now() < at) {
+      const remaining = at - this.current
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.max(1, remaining)))
+    }
     this.now()
   }
 

@@ -14,12 +14,12 @@ describe('runtime control boundaries', () => {
 
   it('waits for a real monotonic timer instead of fast-forwarding it', async () => {
     const clock = new MonotonicClock()
-    const started = clock.now()
     let fired = false
     clock.schedule(10, () => { fired = true })
-    await clock.waitUntil!(started + 10)
+    const deadline = clock.timers.nextAt()!
+    await clock.waitUntil!(deadline)
     expect(fired).toBe(true)
-    expect(clock.now()).toBeGreaterThanOrEqual(started + 10)
+    expect(clock.now()).toBeGreaterThanOrEqual(deadline)
   })
 
   it('runs Timer Effects against a real monotonic clock', async () => {
@@ -45,6 +45,18 @@ describe('runtime control boundaries', () => {
     clock.advance(1_001)
     runtime.tick()
     expect(runtime.state.agents.get(agentId)?.state).not.toBe('running')
+  })
+
+  it('anchors a restored runtime limit to the new host clock', () => {
+    const source = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
+    const program: LaneProgram = { id: 'restored-runtime-limit', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'pending', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('restored-runtime-limit', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('restored-runtime-limit', 'finish') } }
+    const { agentId } = source.createAgent('restored runtime limit', program)
+    source.tick()
+    const restored = new PulseRuntime({ persistence: source.exportPersistence(), programs: [program], clock: new MonotonicClock(), maxRuntimeMs: 1_000, effectExecutor: async () => await new Promise(() => undefined) })
+    restored.tick()
+    expect(restored.state.agents.get(agentId)?.state).toBe('running')
   })
 
   it('fails a Lane after the configured consecutive control-error limit', () => {
