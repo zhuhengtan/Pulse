@@ -35,6 +35,12 @@ describe('effect outbox and runtime persistence envelope', () => {
     expect(() => importRuntimePersistence({ schemaVersion: 1 } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
   })
 
+  it('rejects a persistence snapshot with dangling runtime references', () => {
+    const snapshot = exportRuntimePersistence(createRuntimeState(), new MutationLog(), new EffectOutbox())
+    snapshot.state.state.agents.push(['agent-1', { id: 'agent-1', rootLaneId: 'missing', globalVersions: [], latestGlobalVersion: 0, maxActiveLanes: 1 } as any])
+    expect(() => importRuntimePersistence(snapshot)).toThrow('INVALID_RUNTIME_PERSISTENCE_REFERENCE:agent.rootLaneId:agent-1')
+  })
+
   it('writes a complete snapshot through an atomic temporary file', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-persistence-'))
     try {
@@ -65,7 +71,8 @@ describe('effect outbox and runtime persistence envelope', () => {
     try {
       const backend = new FileRuntimePersistenceBackend(join(directory, 'runtime.json'))
       const source = new PulseRuntime()
-      source.state.effects.set('effect-1', { id: 'effect-1', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, locks: [{ resource: 'workspace', mode: 'exclusive' }], state: 'running', attemptId: 'effect-1-attempt-1', attemptNo: 1, executionState: 'running', sideEffectState: 'applied', sideEffectPolicy: 'write' })
+      const { agentId, laneId } = source.createAgent('restore', { id: 'restore', version: '1', step: () => ({ actions: [], next: { programId: 'restore', programVersion: '1', step: 'start', locals: {} } }) })
+      source.state.effects.set('effect-1', { id: 'effect-1', agentId, ownerLaneId: laneId, key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, locks: [{ resource: 'workspace', mode: 'exclusive' }], state: 'running', attemptId: 'effect-1-attempt-1', attemptNo: 1, executionState: 'running', sideEffectState: 'applied', sideEffectPolicy: 'write' })
       source.outbox.enqueue({ id: 'effect-1', attemptId: 'effect-1-attempt-1' })
       await source.persist(backend)
       const restored = await PulseRuntime.restore(backend)
