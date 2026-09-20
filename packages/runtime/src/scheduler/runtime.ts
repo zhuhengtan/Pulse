@@ -12,6 +12,7 @@ import { EffectOutbox } from '../storage/outbox.js'
 import { exportRuntimePersistence, importRuntimePersistence, type RuntimePersistenceBackend, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
 import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
+import type { Mutation } from '../core/mutations.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number }
 export interface LaneProgram { id: string; version: string; step: (context: LaneStepContext) => LaneStepOutput }
@@ -122,7 +123,13 @@ export class PulseRuntime {
   exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox) }
   async persist(backend: RuntimePersistenceBackend): Promise<void> { await backend.save(this.exportPersistence()) }
 
-  private emit(event: import('../core/types.js').RuntimeEventInput): void { appendRuntimeEvent(this.state, event, { sessionId: this.sessionId, timestamp: this.state.now }) }
+  private emit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent { return appendRuntimeEvent(this.state, event, { sessionId: this.sessionId, timestamp: this.state.now }) }
+  private journalEffect(effect: EffectRecord, transactionId: string, result?: import('../core/types.js').ResultRecord, events: import('../core/types.js').RuntimeEvent[] = []): void {
+    const mutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: structuredClone(effect) }]
+    if (result) mutations.push({ op: 'publishResult', record: structuredClone(result) })
+    for (const event of events) { const { seq: _seq, ...input } = event; mutations.push({ op: 'appendEvent', event: input }) }
+    this.mutationLog.append(transactionId, mutations, this.state.now)
+  }
 
   enqueueHostCommand(command: HostCommand): void {
     this.factInbox.enqueue(command, `host-command-${this.hostCommandSeq++}`)
@@ -253,9 +260,11 @@ export class PulseRuntime {
     effect.outcome = outcome
     this.releaseEffectLocks(effectId)
     this.outbox.ack(`${effect.id}:${effect.attemptId}`)
-    if (effectiveStatus === 'succeeded') this.state.results.set(resultId, { id: resultId, effectId, value: execution.value, privacy: execution.privacy ?? 'public', derivedFrom: [], ...(execution.summary === undefined ? {} : { summary: execution.summary }) })
-    this.emit({ type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
-    if (execution.metadata !== undefined) this.emit({ type: 'effect.execution_metadata', effectId, data: execution.metadata })
+    const result = effectiveStatus === 'succeeded' ? { id: resultId, effectId, value: execution.value, privacy: execution.privacy ?? 'public', derivedFrom: [], ...(execution.summary === undefined ? {} : { summary: execution.summary }) } : undefined
+    if (result) this.state.results.set(resultId, result)
+    const settledEvent = this.emit({ type: 'effect.settled', effectId, data: outcome as unknown as JsonValue })
+    const metadataEvent = execution.metadata === undefined ? undefined : this.emit({ type: 'effect.execution_metadata', effectId, data: execution.metadata })
+    this.journalEffect(effect, `effect:${effect.id}:${settledAttemptId}:settled`, result, [settledEvent, ...(metadataEvent ? [metadataEvent] : [])])
     this.refreshWaits()
     this.dispatchQueuedEffects()
   }

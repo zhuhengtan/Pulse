@@ -16,6 +16,7 @@ describe('late Attempt and remote-unknown boundaries', () => {
     runtime.completeEffect('effect-1', { value: { late: true } })
     expect(runtime.state.effects.get('effect-1')?.outcome).toEqual(before)
     expect(runtime.state.events.some((event) => event.type === 'attempt.late_emit')).toBe(true)
+    expect(runtime.mutationLog.entries.some((entry) => entry.transactionId === 'effect:effect-1:effect-1-attempt-1:settled')).toBe(true)
   })
 
   it('bounds remote-unknown retries for pure computation', () => {
