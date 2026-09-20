@@ -86,4 +86,21 @@ describe('lease-based WorkerCoordinator', () => {
     expect(coordinator.inspect()).toMatchObject([{ id: 'task-cancel', state: 'cancelled', attempt: 1 }])
     expect(coordinator.cancel('task-cancel')).toBe(false)
   })
+
+  it('restores in-flight leases as queued work and preserves idempotency across restart', async () => {
+    const coordinator = new WorkerCoordinator()
+    coordinator.registerRemote('before-restart')
+    const original = coordinator.submit({ job: 'durable' }, { taskId: 'task-durable', idempotencyKey: 'durable-key', leaseMs: 50 })
+    const firstLease = coordinator.claim('before-restart')
+    expect(firstLease?.task.attempt).toBe(1)
+
+    const restored = WorkerCoordinator.restore(coordinator.snapshot())
+    restored.registerRemote('after-restart')
+    const recoveredLease = restored.claim('after-restart')
+    expect(recoveredLease).toMatchObject({ task: { id: 'task-durable', state: 'leased', attempt: 2 }, workerId: 'after-restart' })
+    expect(restored.completeRemote('after-restart', recoveredLease!.leaseId, { recovered: true })).toBe(true)
+    await expect(restored.submit({ job: 'duplicate-payload' }, { taskId: 'ignored', idempotencyKey: 'durable-key' })).resolves.toEqual({ recovered: true })
+    expect(restored.get('task-durable')).toMatchObject({ state: 'succeeded', attempt: 2 })
+    expect(original).toBeInstanceOf(Promise)
+  })
 })

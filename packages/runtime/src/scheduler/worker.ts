@@ -16,6 +16,7 @@ export interface WorkerTaskRecord {
 }
 
 export interface WorkerLease { task: WorkerTaskRecord; workerId: string; leaseId: string }
+export interface WorkerCoordinatorSnapshot { schemaVersion: 1; sequence: number; tasks: WorkerTaskRecord[]; idempotency: Record<string, string> }
 
 export type WorkerHandler = (payload: JsonValue, signal: AbortSignal) => Promise<JsonValue>
 export interface WorkerSubmitOptions { taskId?: string; idempotencyKey?: string; leaseMs?: number; signal?: AbortSignal }
@@ -39,6 +40,21 @@ export class WorkerCoordinator {
   private readonly remoteWorkers = new Set<string>()
   private readonly activeLeases = new Map<string, { leaseId: string; controller: AbortController }>()
   private sequence = 1
+
+  static restore(snapshot: WorkerCoordinatorSnapshot): WorkerCoordinator {
+    if (snapshot.schemaVersion !== 1 || !Number.isInteger(snapshot.sequence) || snapshot.sequence < 1 || !Array.isArray(snapshot.tasks)) throw new Error('INVALID_WORKER_SNAPSHOT')
+    const coordinator = new WorkerCoordinator()
+    coordinator.sequence = snapshot.sequence
+    for (const input of snapshot.tasks) {
+      if (!input || typeof input.id !== 'string' || typeof input.payload !== 'object' && input.payload !== null && typeof input.payload !== 'string' && typeof input.payload !== 'number' && typeof input.payload !== 'boolean' || !['queued', 'leased', 'succeeded', 'failed', 'cancelled'].includes(input.state)) throw new Error('INVALID_WORKER_SNAPSHOT')
+      const task = structuredClone(input)
+      if (coordinator.tasks.has(task.id)) throw new Error('DUPLICATE_WORKER_TASK')
+      if (task.state === 'leased') { task.state = 'queued'; delete task.leaseId; delete task.workerId; delete task.leaseExpiresAt }
+      coordinator.tasks.set(task.id, task)
+    }
+    for (const [key, taskId] of Object.entries(snapshot.idempotency ?? {})) if (coordinator.tasks.has(taskId)) coordinator.idempotency.set(key, taskId)
+    return coordinator
+  }
 
   register(workerId: string, handler: WorkerHandler): () => void {
     if (!workerId || this.handlers.has(workerId) || this.remoteWorkers.has(workerId)) throw new Error(`WORKER_ALREADY_REGISTERED:${workerId}`)
@@ -65,13 +81,13 @@ export class WorkerCoordinator {
 
   submit(payload: JsonValue, options: WorkerSubmitOptions = {}): Promise<JsonValue> {
     const existingId = options.idempotencyKey === undefined ? undefined : this.idempotency.get(options.idempotencyKey)
-    if (existingId !== undefined) return this.deferreds.get(existingId)!.promise
+    if (existingId !== undefined) return this.promiseFor(this.tasks.get(existingId)!).promise
     const taskId = options.taskId ?? `worker-task-${this.sequence++}`
     if (this.tasks.has(taskId)) throw new Error(`WORKER_TASK_ALREADY_EXISTS:${taskId}`)
     const leaseMs = options.leaseMs ?? 30_000
     if (!Number.isFinite(leaseMs) || leaseMs <= 0) throw new Error('INVALID_WORKER_LEASE')
     const task: WorkerTaskRecord = { id: taskId, payload: structuredClone(payload), state: 'queued', attempt: 0, ...(options.idempotencyKey === undefined ? {} : { idempotencyKey: options.idempotencyKey }) }
-    const result = deferred()
+    const result = this.ensureDeferred(taskId)
     this.tasks.set(taskId, task)
     this.deferreds.set(taskId, result)
     if (options.idempotencyKey !== undefined) this.idempotency.set(options.idempotencyKey, taskId)
@@ -136,13 +152,17 @@ export class WorkerCoordinator {
     return task === undefined ? undefined : structuredClone(task)
   }
 
+  snapshot(): WorkerCoordinatorSnapshot {
+    return { schemaVersion: 1, sequence: this.sequence, tasks: this.inspect(), idempotency: Object.fromEntries(this.idempotency) }
+  }
+
   cancel(taskId: string, reason = 'WORKER_CANCELLED'): boolean {
     const task = this.tasks.get(taskId)
     if (!task || ['succeeded', 'failed', 'cancelled'].includes(task.state)) return false
     const active = task.workerId === undefined ? undefined : this.activeLeases.get(task.workerId)
     if (active !== undefined && active.leaseId === task.leaseId) { active.controller.abort(); this.activeLeases.delete(task.workerId!) }
     task.state = 'cancelled'; delete task.leaseId; delete task.workerId; delete task.leaseExpiresAt
-    this.deferreds.get(task.id)?.reject(new Error(reason))
+    this.ensureDeferred(task.id).reject(new Error(reason))
     this.pump()
     return true
   }
@@ -151,6 +171,23 @@ export class WorkerCoordinator {
 
   private requeue(task: WorkerTaskRecord): void {
     task.state = 'queued'; delete task.leaseId; delete task.workerId; delete task.leaseExpiresAt
+  }
+
+  private ensureDeferred(taskId: string): Deferred {
+    const existing = this.deferreds.get(taskId)
+    if (existing) return existing
+    const result = deferred()
+    this.deferreds.set(taskId, result)
+    const task = this.tasks.get(taskId)
+    if (task?.state === 'succeeded') result.resolve(task.result ?? null)
+    else if (task?.state === 'failed') result.reject(new Error(task.error?.message ?? 'WORKER_FAILED'))
+    else if (task?.state === 'cancelled') result.reject(new Error('WORKER_CANCELLED'))
+    return result
+  }
+
+  private promiseFor(task: WorkerTaskRecord): Deferred {
+    if (!task) throw new Error('WORKER_IDEMPOTENCY_TARGET_MISSING')
+    return this.ensureDeferred(task.id)
   }
 
   private pump(): void {
@@ -193,7 +230,7 @@ export class WorkerCoordinator {
     const task = this.tasks.get(taskId)
     if (!task || task.state !== 'leased' || task.leaseId !== leaseId) return false
     task.state = 'succeeded'; task.result = structuredClone(value); delete task.leaseId; delete task.workerId; delete task.leaseExpiresAt
-    this.deferreds.get(taskId)?.resolve(value)
+    this.ensureDeferred(taskId).resolve(value)
     return true
   }
 
@@ -201,7 +238,7 @@ export class WorkerCoordinator {
     const task = this.tasks.get(taskId)
     if (!task || task.state !== 'leased' || task.leaseId !== leaseId) return false
     task.state = 'failed'; task.error = error; delete task.leaseId; delete task.workerId; delete task.leaseExpiresAt
-    this.deferreds.get(taskId)?.reject(new Error(error.message))
+    this.ensureDeferred(taskId).reject(new Error(error.message))
     return true
   }
 }
