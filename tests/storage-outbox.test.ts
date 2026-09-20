@@ -33,6 +33,7 @@ describe('effect outbox and runtime persistence envelope', () => {
 
   it('rejects malformed persistence envelopes before recovery', () => {
     expect(() => importRuntimePersistence({ schemaVersion: 1 } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
+    expect(() => importRuntimePersistence({ schemaVersion: 1, state: { state: {} }, mutationLog: {}, outbox: {} } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
   })
 
   it('rejects a persistence snapshot with dangling runtime references', () => {

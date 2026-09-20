@@ -28,8 +28,8 @@ function hasTarget(state: SessionSnapshot['state'], target: { kind: string; id: 
 
 export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceSnapshot | JsonValue): void {
   const value = snapshot as RuntimePersistenceSnapshot
-  if (!value || value.schemaVersion !== 1 || !value.state || !value.state.state || !value.mutationLog || !value.outbox) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
-  const state = value.checkpoint?.state.state ?? value.state.state
+  const state = value?.checkpoint?.state?.state ?? value?.state?.state
+  if (!value || value.schemaVersion !== 1 || !value.state || !value.state.state || !value.mutationLog || !value.outbox || !Array.isArray(state?.agents) || !Array.isArray(state?.lanes) || !Array.isArray(state?.effects) || !Array.isArray(state?.waits) || !Array.isArray(state?.results) || !Array.isArray(state?.mergeProposals)) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
   const agents = new Map(state.agents)
   const lanes = new Map(state.lanes)
   const effects = new Map(state.effects)
