@@ -579,9 +579,16 @@ export class PulseRuntime {
   }
 
   explain(laneId?: string): JsonValue {
-    const lanes = [...this.state.lanes.values()].filter((lane) => laneId === undefined || lane.id === laneId).map((lane) => ({ id: lane.id, agentId: lane.agentId, status: lane.status, goal: lane.goal, basePriority: lane.priority, effectivePriority: this.ready.snapshot(this.state.now).find((item) => item.laneId === lane.id)?.effectivePriority ?? lane.priority, activeWaitId: lane.activeWaitId ?? null, consecutiveControlErrors: lane.consecutiveControlErrors ?? 0, unresolvedEffectIds: lane.unresolvedEffectIds ?? [] }))
-    const effects = [...this.state.effects.values()].filter((effect) => laneId === undefined || effect.ownerLaneId === laneId).map((effect) => ({ id: effect.id, state: effect.state, executionState: effect.executionState, sideEffectState: effect.sideEffectState, attemptId: effect.attemptId, inheritedFloor: effect.inheritedFloor ?? null, deadlineAt: effect.deadlineAt ?? null, preparation: effect.preparation ?? null }))
-    return { now: this.state.now, lanes, effects, preparation: { preparing: this.preparingLLMs.size, prepared: [...this.state.effects.values()].filter((effect) => effect.state === 'queued' && effect.preparation?.state === 'prepared').length, maxPreparing: this.maxPreparingLLMs, maxPrepared: this.maxPreparedLLMs }, quarantine: this.quarantine.unresolvedEffectIds }
+    const readyItems = this.ready.snapshot(this.state.now)
+    const lastEvent = (kind: 'lane' | 'effect', id: string): number | null => { const matching = this.state.events.filter((event) => (kind === 'lane' ? event.laneId === id : event.effectId === id)); return matching.at(-1)?.seq ?? null }
+    const latestEffectMetadata = (effectId: string): JsonValue | null => { const event = [...this.state.events].reverse().find((candidate) => candidate.type === 'effect.execution_metadata' && candidate.effectId === effectId); return event?.data ?? event?.payload ?? null }
+    const lanes = [...this.state.lanes.values()].filter((lane) => laneId === undefined || lane.id === laneId).map((lane) => {
+      const ready = readyItems.find((item) => item.laneId === lane.id)
+      const blockedBy = lane.activeWaitId ? `wait:${lane.activeWaitId}` : [...lane.ownedEffectIds].some((effectId) => this.lockBlocked.has(effectId)) ? 'resource_lock' : null
+      return { id: lane.id, agentId: lane.agentId, status: lane.status, goal: lane.goal, basePriority: lane.priority, effectivePriority: ready?.effectivePriority ?? lane.priority, queueWaitMs: ready ? Math.max(0, this.state.now - lane.readySince) : 0, blockedBy, activeWaitId: lane.activeWaitId ?? null, lastEventSeq: lastEvent('lane', lane.id), watchdog: lane.progressWatchdog ?? null, consecutiveControlErrors: lane.consecutiveControlErrors ?? 0, lastInterventionReason: lane.progressWatchdog?.lastReason ?? null, unresolvedEffectIds: lane.unresolvedEffectIds ?? [] }
+    })
+    const effects = [...this.state.effects.values()].filter((effect) => laneId === undefined || effect.ownerLaneId === laneId).map((effect) => ({ id: effect.id, state: effect.state, executionState: effect.executionState, sideEffectState: effect.sideEffectState, attemptId: effect.attemptId, inheritedFloor: effect.inheritedFloor ?? null, deadlineAt: effect.deadlineAt ?? null, lastEventSeq: lastEvent('effect', effect.id), preparation: effect.preparation ?? null, metadata: latestEffectMetadata(effect.id) }))
+    return { now: this.state.now, lanes, effects, preparation: { preparing: this.preparingLLMs.size, prepared: [...this.state.effects.values()].filter((effect) => effect.state === 'queued' && effect.preparation?.state === 'prepared').length, maxPreparing: this.maxPreparingLLMs, maxPrepared: this.maxPreparedLLMs }, quarantine: this.quarantine.unresolvedEffectIds } as unknown as JsonValue
   }
 
   retryEffect(effectId: string, delayMs: number): void {
