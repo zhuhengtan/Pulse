@@ -56,7 +56,7 @@
 | Provider 输出 fail-closed | 畸形 SSE/工具参数直接拒绝；LLM structured/tool 输出遇到循环对象、`Date`、二进制或非有限数字时不发布伪造 JSON；Action Decoder 同步拒绝不可序列化参数 | `tests/m3-context-adapters.test.ts`、`tests/action-decoder.test.ts` | `28e4722` |
 | Effect 实时观测桥接 | EffectExecutor 提供实时 observation emitter；Tool progress 与 Provider chunk 在 Effect 尚未结算时进入 ObservationInbox，Session stream 可即时读到；直接调用 EffectExecutor 时仍保留结算 observations 兼容行为 | `tests/tool-host.test.ts` | `8e14534` |
 | 终态观测审计 | Effect 终态后的迟到 observation 不进入 ObservationInbox、不改变 Outcome，并记录 `attempt.late_emit` 事实 | `tests/late-attempt.test.ts` | `73c438b` |
-| Observation gap 重同步 | ObservationInbox 按 Agent 记录被 ring 丢弃的最高序号；`Session.stream()` 在观测缺口前发出 `{ kind: 'gap', fromSeq, toSeq }`，宿主可调用 `session.snapshot()` 重同步，事实流仍保持独立 | `tests/observation-shutdown.test.ts` | `6d8388e` |
+| Observation gap 重同步 | ObservationInbox 按条数与字节双重有界，并按 Agent 记录 ring 丢弃的最高序号；`Session.stream()` 在观测缺口前发出 `{ kind: 'gap', fromSeq, toSeq }`，宿主可调用 `session.snapshot()` 重同步，事实流仍保持独立 | `tests/observation-shutdown.test.ts` | `6d8388e`、`e92e9ff` |
 | RuntimeClock 注入 | Scheduler 接受宿主提供的 RuntimeClock；默认仍使用 VirtualClock，恢复、TimerWheel 与已有确定性调度保持兼容 | `tests/runtime-control.test.ts` | `488e3e7` |
 | MonotonicClock 与真实 Timer 等待 | 提供基于 `performance.now()` 的真实单调时钟；`run`/`runAgent` 在真实时钟下等待 Timer 或 Effect 完成，不再快进 deadline | `tests/runtime-control.test.ts` | `d4f5d8a` |
 | Runtime 绝对时限锚定 | `maxRuntimeMs` 按 Runtime 启动/恢复时钟作为相对时限计算；接入 epoch 单调时钟时不会首 Tick 误判超时；恢复后 `waitUntil` 严格等待实际 Timer deadline | `tests/runtime-control.test.ts` | `e91602f`、`ce8da5a` |
@@ -193,7 +193,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 61 个测试文件、340/340 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播和 Observation gap 重同步回归。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 61 个测试文件、341/341 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步和 observation 字节上限回归。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -615,6 +615,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `3627c75`：恢复外置 Result/Snapshot 正文后保留后端原始 digest 作为下一次自动持久化的 CAS 基线，避免读穿后的重算 digest 误报共享快照冲突；仅显式配置 `persistenceBackend` 时续写恢复状态。
 - `73c438b`：Effect 终态后的迟到 observation 以 `attempt.late_emit` 记录，不重新进入 ObservationInbox，也不改变已发布 Outcome。
 - `6d8388e`：ObservationInbox 按 Agent 记录 ring 丢弃水位，`Session.stream()` 对观测缺口发出 `gap`，宿主可用 `session.snapshot()` 完成重同步；新增慢消费者回归。
+- `e92e9ff`：ObservationInbox 增加字节上限，与条数上限共同限制观测流驻内存占用；drain 同步维护字节水位，超限仍按 Agent 暴露 gap。
 - `488e3e7`：Runtime 接受宿主注入的 RuntimeClock，默认 VirtualClock 保持现有确定性调度和恢复语义。
 - `d4f5d8a`：补齐基于 `performance.now()` 的 MonotonicClock，真实时钟下 Timer 不再被虚拟快进，`run`/`runAgent` 会等待真实 deadline 或 Effect 结算。
 - `e91602f`：将 `maxRuntimeMs` 锚定到 Runtime 启动/恢复时刻；修复真实单调时钟使用 epoch 时间后首 Tick 立即超时的问题。
@@ -669,7 +670,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | Checkpoint / 事实事件保留 | 单进程 checkpoint 截断、File/SQLite EventArchive 归档与恢复 gap 已实现 | 事实状态、Mutation 水位、事件截断水位、外部归档水位和 Session gap 已有测试；跨进程故障注入和生产存储仍需验证 |
 | Fork Affinity | DSL 在收到建议后可安全折叠同 Program 组；Runtime 提供可选自动 coalesce | 已验证组内依赖拓扑、成员结果注入、失败传播、原始 Join key 恢复，以及 `forkAffinity=coalesce` 的通用运行时路径；复杂跨组/外部依赖保持不折叠，生产负载校准仍需验证 |
 | Worker 执行与迁移 | 本地 HTTP/HTTPS lease transport、Bearer 鉴权、polling Worker、请求超时、远程未知对账、snapshot/restore、Runtime 适配、无重启 token 轮换、文件和 SQLite lease CAS、SQLite 分布式条件事务已实现 | 已验证真实 HTTP/HTTPS claim/renew/complete/fail、未授权拒绝、短 lease heartbeat、token 重叠轮换、请求超时、写副作用响应丢失后的 `remote_unknown`/`executionRef`、in-flight lease 恢复、多 Worker 语义、独立 SQLite Coordinator 单任务认领、陈旧 Coordinator 冲突和 Runtime Effect 闭环；真实多主机故障注入、生产 SQLite 运维、Worker 迁移和跨进程 Agent scope 仍需验证 |
-| 运行观测 | Runtime 侧已有只读出口、实时 ObservationInbox 镜像、按 Agent 的 observation gap、JSONL/HTTP exporter、聚合和告警规则 | `inspect/explain`、`telemetry()`、`session.stream()`、Observation ring 丢弃水位、JSONL/HTTP exporter 和有界聚合器已覆盖 Tool progress、Provider chunk、route 排除原因、provider/model slot、Attempt usage/cost、峰值与阈值告警；外部生产指标系统接入仍需宿主配置 |
+| 运行观测 | Runtime 侧已有只读出口、条数/字节双重有界的 ObservationInbox 镜像、按 Agent 的 observation gap、JSONL/HTTP exporter、聚合和告警规则 | `inspect/explain`、`telemetry()`、`session.stream()`、Observation ring 字节水位与丢弃水位、JSONL/HTTP exporter 和有界聚合器已覆盖 Tool progress、Provider chunk、route 排除原因、provider/model slot、Attempt usage/cost、峰值与阈值告警；外部生产指标系统接入仍需宿主配置 |
 
 ## 6. 实施时间线与任务清单（Checklist）
 
