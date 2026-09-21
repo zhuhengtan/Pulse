@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
-import { homedir } from 'node:os'
+import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 import { z } from 'zod'
 import { assertPublicNetworkUrl, conversationDirectory, publicUrl, safeShellEnv, searchFiles, within } from './security.js'
 import {
@@ -28,11 +27,15 @@ import {
   type ProviderPresetConfig,
 } from '@hunterzhu/pulse-adapters'
 import { defineTool, ToolRegistry } from '@hunterzhu/pulse-tool-sdk'
+import { legacyPulseDataPath, pulseDataPath, pulseLogPath } from './paths.js'
+
+export { legacyPulseDataPath, pulseDataPath, pulseHomePath, pulseLogPath } from './paths.js'
 
 export type ApprovalMode = 'read-only' | 'ask' | 'auto'
 export interface LocalHostOptions {
   cwd?: string
   dataDir?: string
+  logDir?: string
   provider?: ProviderPresetConfig
   mockResponse?: string
   mockToolCalls?: Array<{ name: string; input?: JsonValue; toolCallId?: string }>
@@ -140,12 +143,31 @@ function providerFromOptions(options: LocalHostOptions): { adapter: ProviderAdap
 export class LocalHost {
   private readonly root: string
   private readonly dataDir: string
+  private readonly logDir: string
+  private readonly usesDefaultDataDir: boolean
+  private readonly shouldMigrateLegacyData: boolean
   private readonly options: LocalHostOptions
   private readonly approvedToolCalls = new Map<string, Set<string>>()
   private readonly active = new Map<string, { runtime: PulseRuntime; session: PulseSession; conversationId: string; runId: string }>()
   private readonly conversationLocks = new Map<string, Awaited<ReturnType<typeof open>>>()
-  constructor(options: LocalHostOptions = {}) { this.root = resolve(options.cwd ?? process.cwd()); this.dataDir = resolve(options.dataDir ?? process.env.PULSE_DATA_DIR ?? join(homedir(), '.local', 'share', 'pulse')); this.options = options }
-  async init(): Promise<void> { await mkdir(this.dataDir, { recursive: true }); await stat(this.root) }
+  constructor(options: LocalHostOptions = {}) {
+    this.root = resolve(options.cwd ?? process.cwd())
+    this.usesDefaultDataDir = options.dataDir === undefined && process.env.PULSE_DATA_DIR === undefined
+    this.shouldMigrateLegacyData = this.usesDefaultDataDir && process.env.PULSE_HOME === undefined
+    this.dataDir = resolve(options.dataDir ?? process.env.PULSE_DATA_DIR ?? pulseDataPath())
+    this.logDir = resolve(options.logDir ?? process.env.PULSE_LOG_DIR ?? pulseLogPath())
+    this.options = options
+  }
+  private async migrateLegacyData(): Promise<void> {
+    if (!this.shouldMigrateLegacyData) return
+    const legacy = resolve(legacyPulseDataPath())
+    if (legacy === this.dataDir) return
+    try { await stat(this.dataDir); return } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    try { await stat(legacy) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+    await mkdir(dirname(this.dataDir), { recursive: true })
+    await rename(legacy, this.dataDir)
+  }
+  async init(): Promise<void> { await this.migrateLegacyData(); await mkdir(this.dataDir, { recursive: true }); if (this.usesDefaultDataDir || this.options.logDir !== undefined || process.env.PULSE_LOG_DIR !== undefined) await mkdir(this.logDir, { recursive: true }); await stat(this.root) }
   private conversationDir(id: string): string { return conversationDirectory(this.dataDir, id) }
   private manifestPath(id: string): string { return join(this.conversationDir(id), 'manifest.json') }
   private messagesPath(id: string): string { return join(this.conversationDir(id), 'messages.jsonl') }

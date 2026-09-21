@@ -291,6 +291,19 @@ npx @hunterzhu/pulse-cli
 - macOS/Linux：`~/.pulse/config.json`
 - Windows：`%USERPROFILE%\.pulse\config.json`
 
+Pulse 的用户级运行目录统一放在同一个 `.pulse` 目录下：
+
+```text
+~/.pulse/
+├── config.json       # 用户配置
+├── data/             # 会话、运行状态和恢复快照
+├── logs/             # 应用日志
+├── versions/pulse/   # 独立安装包及内置 server
+└── bin/pulse         # 独立安装的启动器
+```
+
+Windows 会把 `~` 解析为 `%USERPROFILE%`。可以用 `PULSE_HOME` 移动整个目录，用 `PULSE_DATA_DIR` 或 `PULSE_LOG_DIR` 单独覆盖数据和日志目录；命令行的 `--data-dir` 优先级更高。旧版本使用的 `~/.local/share/pulse` 会在首次启动时自动迁移到 `~/.pulse/data`。
+
 配置文件只保存 Provider 和运行策略，API Key 通过环境变量读取，不会写入配置或会话数据。初始配置使用本地 `mock` Provider，可以先用来验证 CLI 和工具链路。
 
 ### 常用命令

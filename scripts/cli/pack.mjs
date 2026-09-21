@@ -38,21 +38,21 @@ await chmod(join(stage, 'pulse/bin/pulse'), 0o755)
 
 await writeFile(join(stage, 'pulse/install.sh'), `#!/bin/sh
 set -eu
-ROOT="\${PULSE_INSTALL_ROOT:-\$HOME/.local}"
+ROOT="\${PULSE_HOME:-\${PULSE_INSTALL_ROOT:-\$HOME/.pulse}}"
 VERSION="\$(node -p "require(\\"./manifest.json\\").version")"
-mkdir -p "\$ROOT/opt/pulse/\$VERSION" "\$ROOT/bin"
-cp -R . "\$ROOT/opt/pulse/\$VERSION/"
-printf '#!/bin/sh\\nexec node "%s/bin/pulse" "\$@"\\n' "\$ROOT/opt/pulse/\$VERSION" > "\$ROOT/bin/pulse"
+mkdir -p "\$ROOT/versions/pulse/\$VERSION" "\$ROOT/bin"
+cp -R . "\$ROOT/versions/pulse/\$VERSION/"
+printf '#!/bin/sh\\nexec node "%s/bin/pulse" "\$@"\\n' "\$ROOT/versions/pulse/\$VERSION" > "\$ROOT/bin/pulse"
 chmod 755 "\$ROOT/bin/pulse"
-echo "Installed Pulse \$VERSION to \$ROOT/opt/pulse/\$VERSION"
+echo "Installed Pulse \$VERSION to \$ROOT/versions/pulse/\$VERSION"
 echo "Ensure \$ROOT/bin is on PATH."
 `)
 await chmod(join(stage, 'pulse/install.sh'), 0o755)
 
 await writeFile(join(stage, 'pulse/uninstall.sh'), `#!/bin/sh
 set -eu
-ROOT="\${PULSE_INSTALL_ROOT:-\$HOME/.local}"
-if [ -f "\$ROOT/bin/pulse" ] && grep -q "opt/pulse" "\$ROOT/bin/pulse"; then
+ROOT="\${PULSE_HOME:-\${PULSE_INSTALL_ROOT:-\$HOME/.pulse}}"
+if [ -f "\$ROOT/bin/pulse" ] && grep -q "versions/pulse" "\$ROOT/bin/pulse"; then
   rm "\$ROOT/bin/pulse"
   echo "Removed \$ROOT/bin/pulse; user data was preserved."
 else

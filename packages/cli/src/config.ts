@@ -1,6 +1,6 @@
 import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 export interface PulseCliConfig {
   cwd?: string
@@ -17,7 +17,11 @@ export const defaultPulseConfig: PulseCliConfig = {
 }
 
 export function defaultPulseConfigPath(): string {
-  return join(homedir(), '.pulse', 'config.json')
+  return join(defaultPulseHomePath(), 'config.json')
+}
+
+export function defaultPulseHomePath(): string {
+  return resolve(process.env.PULSE_HOME ?? join(homedir(), '.pulse'))
 }
 
 /** Create the user config on first run without replacing an existing file. */
@@ -76,7 +80,7 @@ export function mergePulseConfigs(layers: Array<{ value: PulseCliConfig; trust: 
 
 export async function loadPulseConfig(cwd: string, explicitPath?: string, trustWorkspace = false): Promise<{ value: PulseCliConfig; source?: string }> {
   const workspacePath = join(cwd, '.pulse', 'config.json')
-  const homePath = join(homedir(), '.pulse', 'config.json')
+  const homePath = defaultPulseConfigPath()
   const envPath = expandHome(process.env.PULSE_CONFIG)
   const layers: Array<{ value: PulseCliConfig; trust: 'workspace' | 'user'; source: string }> = []
   for (const [path, trust] of [

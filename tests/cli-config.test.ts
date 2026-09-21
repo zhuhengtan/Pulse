@@ -2,7 +2,7 @@ import { access, readFile, mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { defaultPulseConfig, ensurePulseUserConfig } from '../packages/cli/src/config.js'
+import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig } from '../packages/cli/src/config.js'
 
 const temporaryDirectories: string[] = []
 
@@ -11,6 +11,17 @@ afterEach(async () => {
 })
 
 describe('ensurePulseUserConfig', () => {
+  it('uses PULSE_HOME for the user configuration root', () => {
+    const previous = process.env.PULSE_HOME
+    try {
+      process.env.PULSE_HOME = '/tmp/pulse-config-home-test'
+      expect(defaultPulseConfigPath()).toBe('/tmp/pulse-config-home-test/config.json')
+    } finally {
+      if (previous === undefined) delete process.env.PULSE_HOME
+      else process.env.PULSE_HOME = previous
+    }
+  })
+
   it('creates the parent .pulse directory and default config on first run', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-config-'))
     temporaryDirectories.push(directory)
