@@ -573,6 +573,9 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         const groups = affinityGroups(forkAction.lanes)
         if (groups.length) return { rejection: error('FORK_AFFINITY_COLLAPSIBLE', 'Fork contains lanes that share a likely context affinity group.', { groups } as unknown as JsonValue) }
       }
+      const agent = state.agents.get(lane.agentId)
+      const activeAgentLanes = [...state.lanes.values()].filter((candidate) => candidate.agentId === lane.agentId && !['succeeded', 'failed', 'cancelled'].includes(candidate.status)).length
+      if (agent && activeAgentLanes + forkAction.lanes.length > agent.maxActiveLanes) return { rejection: error('AGENT_LANE_LIMIT_EXCEEDED', 'agent active lane limit exceeded') }
       const siblingTargets = new Map<string, TargetRef>()
       for (const child of forkAction.lanes) {
         if (forkTargets.has(child.key)) return { rejection: error('DUPLICATE_FORK_KEY', child.key) }

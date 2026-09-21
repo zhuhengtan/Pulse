@@ -57,6 +57,17 @@ describe('fork affinity admission', () => {
     expect(state.lanes.size).toBe(1)
   })
 
+  it('enforces the Agent active-lane limit before creating fork lanes', () => {
+    const state = createRuntimeState(8)
+    const { root } = createAgent(state, 'limited', point('start'), { maxActiveLanes: 2 })
+    const result = validateStep(state, root.id, { actions: [{ type: 'fork', affinityAck: true, lanes: [
+      { key: 'a', goal: 'a', program: point('worker') },
+      { key: 'b', goal: 'b', program: point('worker') },
+    ] }], next: point('next') })
+    expect('rejection' in result && result.rejection.code).toBe('AGENT_LANE_LIMIT_EXCEEDED')
+    expect(state.lanes.size).toBe(1)
+  })
+
   it('retries the DSL proposal as one series lane and restores original join keys', async () => {
     const worker = defineLaneProgram({ id: 'affinity-worker', version: '1' }, (builder) => {
       builder.addStep('start', (ctx) => ({ actions: [{ type: 'complete', result: { goal: ctx.goal } }], next: 'start' }))
