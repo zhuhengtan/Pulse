@@ -23,6 +23,13 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     expect(() => validateAdapterResult({ text: '', refusal: 'not allowed', toolCalls: [], finishReason: 'refusal' })).not.toThrow()
   })
 
+  it('rejects malformed usage before telemetry and routing feedback', () => {
+    expect(() => validateAdapterResult({ text: 'ok', toolCalls: [], finishReason: 'stop', usage: { inputTokens: -1 } })).toThrow('INVALID_USAGE')
+    expect(() => validateAdapterResult({ text: 'ok', toolCalls: [], finishReason: 'stop', usage: { inputTokens: 2, cachedInputTokens: 3 } })).toThrow('INVALID_USAGE')
+    expect(() => validateAdapterResult({ text: 'ok', toolCalls: [], finishReason: 'stop', usage: { cost: { amount: Number.NaN, currency: 'USD', source: 'reported' } } })).toThrow('INVALID_USAGE')
+    expect(() => validateAdapterResult({ text: 'ok', toolCalls: [], finishReason: 'stop', usage: { inputTokens: 3, cachedInputTokens: 1, uncachedInputTokens: 2, cost: { amount: 0, currency: 'USD', source: 'reported' } } })).not.toThrow()
+  })
+
   it('filters candidates whose context window cannot fit the immutable projection', () => {
     const registry = new InMemoryModelRegistry()
     registry.register({ id: 'too-small', providerId: 'p1', tasks: ['reason'], capabilities: { local: true, maxContextTokens: estimateProjectionTokens(projection) - 1 }, priority: 10 })

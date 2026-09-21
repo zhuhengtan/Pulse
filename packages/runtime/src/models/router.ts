@@ -341,8 +341,25 @@ export class OutputValidationError extends Error {
   constructor(readonly layer: OutputValidationLayer, readonly code: string, message: string) { super(`${code}: ${message}`) }
 }
 
+function validNonNegativeMetric(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value) && value >= 0 }
+function validateUsage(usage: unknown): void {
+  if (usage === undefined) return
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Provider usage must be an object')
+  const value = usage as Record<string, unknown>
+  for (const key of ['inputTokens', 'outputTokens', 'cachedInputTokens', 'uncachedInputTokens']) if (value[key] !== undefined && (!Number.isInteger(value[key]) || !validNonNegativeMetric(value[key]))) throw new OutputValidationError('adapter', 'INVALID_USAGE', `Provider usage ${key} must be a non-negative integer`)
+  if (value.latencyMs !== undefined && !validNonNegativeMetric(value.latencyMs)) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Provider usage latencyMs must be non-negative')
+  if (value.inputTokens !== undefined && value.cachedInputTokens !== undefined && (value.cachedInputTokens as number) > (value.inputTokens as number)) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Cached input tokens cannot exceed input tokens')
+  if (value.inputTokens !== undefined && value.uncachedInputTokens !== undefined && (value.uncachedInputTokens as number) > (value.inputTokens as number)) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Uncached input tokens cannot exceed input tokens')
+  if (value.cost !== undefined) {
+    if (!value.cost || typeof value.cost !== 'object' || Array.isArray(value.cost)) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Provider usage cost must be an object')
+    const cost = value.cost as Record<string, unknown>
+    if (!validNonNegativeMetric(cost.amount) || typeof cost.currency !== 'string' || cost.currency.length === 0 || !['reported', 'estimated'].includes(String(cost.source)) || (cost.pricingVersion !== undefined && typeof cost.pricingVersion !== 'string')) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Provider usage cost is malformed')
+  }
+}
+
 export function validateAdapterResult(result: LLMResult): LLMResult {
   if (typeof result.text !== 'string' || !Array.isArray(result.toolCalls) || !['stop', 'tool_calls', 'length', 'error', 'refusal'].includes(result.finishReason)) throw new OutputValidationError('adapter', 'INVALID_PROVIDER_RESPONSE', 'Provider response is not a normalized LLMResult')
+  validateUsage(result.usage)
   if (result.toolCalls.some((call) => typeof call.toolCallId !== 'string' || typeof call.name !== 'string' || call.name.length === 0)) throw new OutputValidationError('adapter', 'INVALID_TOOL_CALL', 'Normalized tool call is missing a stable id or name')
   if (result.finishReason === 'tool_calls' && result.toolCalls.length === 0) throw new OutputValidationError('adapter', 'INVALID_TOOL_CALL_FINISH_REASON', 'tool_calls finish reason requires at least one tool call')
   if (result.finishReason !== 'tool_calls' && result.toolCalls.length > 0) throw new OutputValidationError('adapter', 'UNEXPECTED_TOOL_CALL', 'A non-tool finish reason cannot contain tool calls')
