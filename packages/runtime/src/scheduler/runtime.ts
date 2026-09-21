@@ -232,6 +232,7 @@ export class PulseRuntime {
   private persistenceScheduled = false
   private persistenceDirty = false
   private dispatchPersistencePending = false
+  private readonly executionYieldPending = new Set<string>()
   readonly mutationLog: MutationLog
   readonly outbox: EffectOutbox
   readonly clock: RuntimeClock
@@ -977,7 +978,7 @@ export class PulseRuntime {
     for (let tick = 0; tick < agentOrMaxTicks; tick++) {
       const work = this.tick()
       await this.flushPersistence()
-      if (this.executions.size) await new Promise<void>((resolve) => setImmediate(resolve))
+      if (this.executionYieldPending.size) { this.executionYieldPending.clear(); await new Promise<void>((resolve) => setImmediate(resolve)) }
       this.refreshWaits()
       if (this.ready.size === 0 && this.executions.size === 0) {
         if (this.preparingLLMs.size) { await Promise.resolve(); continue }
@@ -1014,7 +1015,7 @@ export class PulseRuntime {
     for (let tick = 0; tick < maxTicks; tick++) {
       const work = this.tick()
       await this.flushPersistence()
-      if (this.executions.size) await new Promise<void>((resolve) => setImmediate(resolve))
+      if (this.executionYieldPending.size) { this.executionYieldPending.clear(); await new Promise<void>((resolve) => setImmediate(resolve)) }
       this.refreshWaits()
       const root = this.state.lanes.get(agent.rootLaneId)
       if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status)) {
@@ -1424,6 +1425,22 @@ export class PulseRuntime {
     return result
   }
 
+  async reconcileRegisteredEffect(effectId: string, signal = new AbortController().signal): Promise<{ status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; output?: JsonValue; error?: RuntimeError }> {
+    return this.reconcileEffectWith(effectId, async (executionRef, effect, resolverSignal) => {
+      const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+      const name = input.name
+      if (typeof name !== 'string') return { status: 'unknown' as const, error: { code: 'INVALID_TOOL_EFFECT_INPUT', message: 'Tool reconciliation requires a registered tool name.' } }
+      if (executionRef === undefined) return { status: 'unknown' as const, error: { code: 'MISSING_TOOL_EXECUTION_REF', message: 'Tool reconciliation requires an execution reference.' } }
+      try {
+        const result = await this.tools.reconcileDetailed(name, executionRef, { toolCallId: effect.toolCallId ?? '', effectId: effect.id, attemptId: effect.attemptId, agentId: effect.agentId, laneId: effect.ownerLaneId, signal: resolverSignal })
+        return { status: result.status, ...(result.output === undefined ? {} : { output: asJsonValue(result.output) }), ...(result.error === undefined ? {} : { error: result.error }) }
+      } catch (cause) {
+        const error = runtimeErrorFromCause(cause, 'TOOL_RECONCILE_FAILED')
+        return { status: 'unknown' as const, error }
+      }
+    }, signal)
+  }
+
   abandonEffect(effectId: string): void {
     const effect = this.state.effects.get(effectId)
     if (!effect || effect.state !== 'reconcile_required') return
@@ -1776,6 +1793,10 @@ export class PulseRuntime {
       if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.clock.schedule(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
       if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.clock.timers.schedule(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))
       this.executions.set(effect.id, executionRecord)
+      if (effect.kind === 'tool') {
+        const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+        if (typeof input.name === 'string' && this.tools.get(input.name) !== undefined) this.executionYieldPending.add(effect.id)
+      }
     }
   }
 

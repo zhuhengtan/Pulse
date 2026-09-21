@@ -82,4 +82,24 @@ describe('Runtime tool registry', () => {
     expect(toolResult?.value).toEqual({ value: 'from-runtime' })
     expect(runtime.state.effects.get('effect-1')?.outcome?.status).toBe('succeeded')
   })
+
+  it('reconciles a quarantined registered external Tool through its executionRef', async () => {
+    const recoverable = defineTool({
+      name: 'recoverable', description: 'reconcile an external job', input: z.object({}), output: z.object({ status: z.string() }), sideEffectPolicy: 'external',
+      executionRef: () => ({ job: 'job-1' }), execute: () => ({ status: 'done' }),
+      reconcile: async (executionRef) => executionRef && typeof executionRef === 'object' && !Array.isArray(executionRef) && executionRef.job === 'job-1' ? { status: 'succeeded' as const, output: { status: 'done' } } : { status: 'unknown' as const },
+    })
+    const runtime = new PulseRuntime()
+    runtime.tools.register(recoverable)
+    const { agentId, laneId } = runtime.createAgent('reconcile external tool', { id: 'reconcile-external', version: '1', step: () => ({ actions: [{ type: 'complete' as const, result: { done: true } }], next: { programId: 'reconcile-external', programVersion: '1', step: 'done', locals: {} } }) })
+    const effect = { id: 'effect-reconcile', agentId, ownerLaneId: laneId, key: 'recoverable', kind: 'tool', concurrencyClass: 'tool', input: { name: 'recoverable', arguments: {} }, state: 'reconcile_required', attemptId: 'effect-reconcile-attempt-1', attemptNo: 1, executionState: 'remote_unknown', sideEffectState: 'unknown', sideEffectPolicy: 'external', executionRef: { job: 'job-1' } } satisfies EffectRecord
+    runtime.state.effects.set(effect.id, effect)
+    runtime.state.lanes.get(laneId)!.ownedEffectIds.add(effect.id)
+    runtime.state.lanes.get(laneId)!.unresolvedEffectIds = [effect.id]
+    runtime.quarantine.add(effect.id, 0, 'in_doubt')
+    await expect(runtime.reconcileRegisteredEffect(effect.id)).resolves.toMatchObject({ status: 'succeeded', output: { status: 'done' } })
+    expect(runtime.quarantine.unresolvedEffectIds).toEqual([])
+    expect(runtime.state.effects.get(effect.id)?.outcome?.status).toBe('succeeded')
+    expect([...runtime.state.results.values()].find((result) => result.effectId === effect.id)?.value).toEqual({ status: 'done' })
+  })
 })
