@@ -640,11 +640,11 @@ async function main() {
   })
 
   const session = runtime.start(agent.id)
-  for await (const ev of session.stream()) {
-    if (ev.kind === 'llm:chunk') process.stdout.write(ev.token)
-    if (ev.kind === 'gap') await resync(session.snapshot())
-    if (ev.kind === 'human:requested') await session.reply(ev.effectId, await askUser(ev))
-  }
+for await (const ev of session.stream()) {
+    if (ev.kind === 'observation' && ev.observation && typeof ev.observation === 'object' && !Array.isArray(ev.observation) && ev.observation.type === 'llm:chunk') process.stdout.write(String(ev.observation.token ?? ''))
+    if (ev.kind === 'gap') await resync(await session.snapshot())
+    if (ev.kind === 'fact' && ev.event?.type === 'human.requested' && ev.event.effectId) await session.reply(ev.event.effectId, await askUser(ev.event))
+}
   const outcome = await session.outcome()
   console.log(outcome.status, outcome.unresolvedEffectIds)
 }
