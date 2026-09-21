@@ -303,6 +303,18 @@ function decodeNumber(value: unknown): number {
   return value
 }
 
+function validateStateConfiguration(value: SessionSnapshot['state']): void {
+  const nonNegativeInteger = (candidate: unknown): boolean => Number.isInteger(candidate) && (candidate as number) >= 0
+  if (typeof value.now !== 'number' || !Number.isFinite(value.now) || !nonNegativeInteger(value.maxTotalLanes) || !nonNegativeInteger(value.maxQueuedEffects) || !nonNegativeInteger(value.historySoftTokens ?? 0) || !nonNegativeInteger(value.historyHardTokens ?? 0) || !nonNegativeInteger(value.maxResultSummaryBytes ?? 0)) throw new Error('INVALID_SESSION_SNAPSHOT')
+  if (value.historyHardTokens !== undefined && value.historySoftTokens !== undefined && value.historyHardTokens < value.historySoftTokens) throw new Error('INVALID_SESSION_SNAPSHOT')
+  if (value.forkAffinity !== undefined && !['off', 'advise', 'coalesce'].includes(value.forkAffinity)) throw new Error('INVALID_SESSION_SNAPSHOT')
+  for (const key of ['llm', 'tool', 'agent'] as const) if (!nonNegativeInteger(decodeNumber(value.maxRunning?.[key]))) throw new Error('INVALID_SESSION_SNAPSHOT')
+  if (value.maxRunning?.none !== 'Infinity' && !nonNegativeInteger(decodeNumber(value.maxRunning?.none))) throw new Error('INVALID_SESSION_SNAPSHOT')
+  const ids = ['agent', 'lane', 'effect', 'wait', 'result', 'artifact', 'proposal', 'event'] as const
+  if (!value.nextIds || ids.some((key) => !Number.isInteger(value.nextIds[key]) || value.nextIds[key] < 1)) throw new Error('INVALID_SESSION_SNAPSHOT')
+  if (value.trustedSanitizerIds !== undefined && (!Array.isArray(value.trustedSanitizerIds) || new Set(value.trustedSanitizerIds).size !== value.trustedSanitizerIds.length || value.trustedSanitizerIds.some((id) => typeof id !== 'string' || id.length === 0))) throw new Error('INVALID_SESSION_SNAPSHOT')
+}
+
 export function exportRuntimeState(state: RuntimeState): SessionSnapshot {
   return {
     schemaVersion: 1,
@@ -412,6 +424,7 @@ export function serializeRuntimeState(state: RuntimeState): JsonValue { return e
 export function importRuntimeState(snapshot: SessionSnapshot | JsonValue): RuntimeState {
   const value = snapshot as SessionSnapshot
   if (!value || value.schemaVersion !== 1 || !value.state || !Array.isArray(value.state.agents) || !Array.isArray(value.state.lanes) || !Array.isArray(value.state.effects) || !Array.isArray(value.state.waits) || !Array.isArray(value.state.results) || !Array.isArray(value.state.events) || (value.state.eventsCompactedThrough !== undefined && (!Number.isInteger(value.state.eventsCompactedThrough) || value.state.eventsCompactedThrough < 0))) throw new Error('INVALID_SESSION_SNAPSHOT')
+  validateStateConfiguration(value.state)
   const state = createRuntimeState(value.state.maxTotalLanes, { maxQueuedEffects: value.state.maxQueuedEffects, maxRunning: { llm: decodeNumber(value.state.maxRunning.llm), tool: decodeNumber(value.state.maxRunning.tool), agent: decodeNumber(value.state.maxRunning.agent), none: decodeNumber(value.state.maxRunning.none) }, forkAffinity: value.state.forkAffinity ?? 'advise', ...(value.state.historySoftTokens === undefined ? {} : { historySoftTokens: value.state.historySoftTokens }), ...(value.state.historyHardTokens === undefined ? {} : { historyHardTokens: value.state.historyHardTokens }), ...(value.state.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: value.state.maxResultSummaryBytes }), ...(value.state.trustedSanitizerIds === undefined ? {} : { trustedSanitizerIds: value.state.trustedSanitizerIds }) })
   state.now = value.state.now
   state.nextIds = { ...value.state.nextIds, artifact: value.state.nextIds.artifact ?? 1, proposal: value.state.nextIds.proposal ?? 1 }

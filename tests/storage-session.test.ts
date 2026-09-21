@@ -27,6 +27,20 @@ describe('session serialization boundary', () => {
     expect(() => importRuntimeState({ schemaVersion: 1, state: { agents: [] } } as any)).toThrow('INVALID_SESSION_SNAPSHOT')
   })
 
+  it('rejects invalid scheduler limits and cursors in a recovery snapshot', () => {
+    const snapshot = exportRuntimeState(createRuntimeState())
+    snapshot.state.maxRunning.llm = -1
+    expect(() => importRuntimeState(snapshot)).toThrow('INVALID_SESSION_SNAPSHOT')
+
+    const cursorSnapshot = exportRuntimeState(createRuntimeState())
+    cursorSnapshot.state.nextIds.event = 0
+    expect(() => importRuntimeState(cursorSnapshot)).toThrow('INVALID_SESSION_SNAPSHOT')
+
+    const clockSnapshot = exportRuntimeState(createRuntimeState())
+    clockSnapshot.state.now = Number.NaN
+    expect(() => importRuntimeState(clockSnapshot)).toThrow('INVALID_SESSION_SNAPSHOT')
+  })
+
   it('redacts non-public bodies at the log export boundary without changing recovery snapshots', () => {
     const state = createRuntimeState()
     state.results.set('public', { id: 'public', value: { ok: true }, privacy: 'public', derivedFrom: [] })
