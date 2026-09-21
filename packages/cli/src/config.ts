@@ -1,6 +1,6 @@
-import { readFile } from 'node:fs/promises'
+import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 export interface PulseCliConfig {
   cwd?: string
@@ -8,6 +8,34 @@ export interface PulseCliConfig {
   provider?: { provider?: string; model?: string; baseURL?: string; apiKeyEnv?: string }
   approvalMode?: 'read-only' | 'ask' | 'auto'
   allowNetwork?: boolean
+}
+
+export const defaultPulseConfig: PulseCliConfig = {
+  provider: { provider: 'mock', model: 'mock', apiKeyEnv: 'OPENAI_API_KEY' },
+  approvalMode: 'ask',
+  allowNetwork: false,
+}
+
+export function defaultPulseConfigPath(): string {
+  return join(homedir(), '.pulse', 'config.json')
+}
+
+/** Create the user config on first run without replacing an existing file. */
+export async function ensurePulseUserConfig(path = defaultPulseConfigPath()): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  try {
+    await access(path)
+    return
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  try {
+    await writeFile(path, `${JSON.stringify(defaultPulseConfig, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
+  } catch (error) {
+    // Another process may have initialized the config between access and write.
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+  await chmod(path, 0o600)
 }
 
 export function expandHome(path: string | undefined): string | undefined {
