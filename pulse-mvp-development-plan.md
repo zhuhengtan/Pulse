@@ -600,6 +600,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `cfa9db2`：TimerWheel 不再在 `clock.advance/set/now` 外部直接执行 callback；Timer 只在 Runtime Tick 的 Timer phase 取出并执行，恢复后的 overdue timer 也保持同一单写者边界。
 - `6da19c5`：Executor completion 不再从 Promise 回调直接修改 Runtime；结果、失败、Artifact 二进制和晚到 attempt 统一编码为 `effect_completion` Fact，经过 coalesced wake 后由 Tick 结算。
 - `6e0a748`：queued Effect dispatch 纳入 Tick 共享软时间片；persistence backend 的 outbox gate 完成后改为唤醒下一 Tick，补充 `maxTickMs=0`、锁、异步持久化与 DSL 回归。
+- `1ebed01`：Plan & Execute 模板按 planner 输出的 `tasks` 动态选择 worker，保留任务 goal/affinityKey，并对未知、重复和非法任务 fail-closed；无 tasks 的旧版宽松 planner 继续兼容。
 - 本轮 Wait 结算事务提交：依赖满足/失败与 closing Lane 结果统一经 storage admission 和 MutationLog，失败时不再直接修改 Wait/Lane 内存状态。
 - 本轮 Lane failure 事务提交：程序异常、异步 Step、控制错误和 Watchdog 失败不再直接改写 Lane；事实事件无法容纳时保留失败状态并省略不可写审计事件。
 - 本轮 Agent 状态事务提交：Child Agent 的结束状态通过 `setAgent` Mutation + storage admission 落盘，避免 Effect 结算后的直接内存突变。
@@ -787,7 +788,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `62e0816`：Scheduler 默认启用 5ms 软时间片；事实 Inbox、到期 Timer 和 Lane Step 共享轮次时间预算，TimerWheel 支持分批取出且不丢失未处理项；`writerPreferenceBound` 防止排队写者被过多 shared 请求插队，并补充默认配置与 Timer 回归。
 - `27a1dfd`：`createAgent()` 返回 `id`、`agentId`、`laneId` 三字段，兼容架构示例的 `runtime.run(agent.id)` 与既有 API。
 - `db47ba4`：OpenAI/Anthropic Adapter 将原生网络异常归一化为可重试的 `PROVIDER_NETWORK_ERROR`，非流式非法 JSON 归一化为 `PROVIDER_RESPONSE_INVALID`，并保持 HTTP/取消错误语义。
-- 当前确定性门禁：`npm test`，68 个测试文件、444 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。最近一次全量测试已覆盖 Executor completion Fact、coalesced wake、bounded Effect dispatch 和 persistence dispatch gate；基准仍需在本轮最终工作区重新运行。
+- 当前确定性门禁：`npm test`，68 个测试文件、446 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。`node benchmarks/deterministic.mjs` 已在本轮最终工作区重新运行，serial/batch/lanes/coalesced 各 20/20 成功；最近一次全量测试已覆盖 Executor completion Fact、coalesced wake、bounded Effect dispatch、persistence dispatch gate 和 planner-selected workers。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
