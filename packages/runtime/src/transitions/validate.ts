@@ -33,6 +33,16 @@ function validProvenanceRef(value: unknown): boolean {
   return (ref.kind === 'result' || ref.kind === 'artifact') && nonEmptyString(ref.ref)
 }
 
+function validProvenanceRefs(value: unknown): value is ProvenanceRef[] {
+  return Array.isArray(value) && value.every(validProvenanceRef)
+}
+
+function validRuntimeError(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const candidate = value as Record<string, unknown>
+  return nonEmptyString(candidate.code) && typeof candidate.message === 'string' && (candidate.retryable === undefined || typeof candidate.retryable === 'boolean') && (candidate.details === undefined || isRuntimeJsonValue(candidate.details))
+}
+
 function validateEffectSubmission(submission: unknown): string | undefined {
   if (!submission || typeof submission !== 'object' || Array.isArray(submission)) return 'INVALID_EFFECT_SUBMISSION'
   const value = submission as Record<string, unknown>
@@ -401,9 +411,12 @@ function prepareLLMInput(state: RuntimeState, lane: LaneRecord, submission: Subm
 export function validateStep(state: RuntimeState, laneId: string, output: LaneStepOutput): ValidationResult {
   const lane = state.lanes.get(laneId)
   if (!lane) return { rejection: error('UNKNOWN_LANE', `Lane ${laneId} does not exist`) }
+  if (!output || typeof output !== 'object' || !Array.isArray(output.actions)) return { rejection: error('INVALID_STEP_OUTPUT', 'Step output must contain an actions array') }
   if (!validResume(output.next)) return { rejection: error('INVALID_RESUME_POINT', 'next must identify a registered program step') }
   if (lane.status !== 'ready' && lane.status !== 'running') return { rejection: error('LANE_NOT_RUNNABLE', `Lane is ${lane.status}`) }
   const actions = output.actions
+  const actionTypes = new Set(['submit_effects', 'fork', 'wait', 'cancel_lane', 'propose_cancel', 'adopt_context', 'downgrade_privacy', 'complete', 'fail'])
+  if (actions.some((action) => !action || typeof action !== 'object' || Array.isArray(action) || !actionTypes.has(String((action as RuntimeAction).type)))) return { rejection: error('INVALID_ACTION', 'Step output contains an unknown RuntimeAction') }
   const waitSources = actions.filter((action) => action.type === 'wait' || (action.type === 'submit_effects' && Boolean(action.wait)) || (action.type === 'fork' && Boolean(action.join))).length
   if (waitSources > 1) return { rejection: error('MULTIPLE_WAIT_SOURCES', 'a StepTransaction may have only one Wait source') }
   const terminal = actions.filter((action) => action.type === 'complete' || action.type === 'fail')
@@ -425,6 +438,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   const seenCancelTargets = new Set<string>()
 
   if (output.contextDelta) {
+    if (typeof output.contextDelta !== 'object' || Array.isArray(output.contextDelta) || !Array.isArray(output.contextDelta.ops) || !Number.isInteger(output.contextDelta.baseVersion) || !['lane', 'global'].includes(output.contextDelta.target) || (output.contextDelta.proposal !== undefined && typeof output.contextDelta.proposal !== 'boolean') || (output.contextDelta.derivedFrom !== undefined && !validProvenanceRefs(output.contextDelta.derivedFrom)) || (output.contextDelta.privacyTaints !== undefined && !Array.isArray(output.contextDelta.privacyTaints))) return { rejection: error('INVALID_CONTEXT_DELTA', 'ContextDelta shape is invalid') }
     const deltaPrivacyTaintError = validatePrivacyTaints(output.contextDelta.privacyTaints)
     if (deltaPrivacyTaintError) return { rejection: error(deltaPrivacyTaintError, 'ContextDelta privacy taints are invalid') }
     const deltaDerived = derivedPrivacy(state, lane, output.contextDelta.derivedFrom ?? [])
@@ -579,6 +593,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       if (!state.agents.get(lane.agentId)!.globalVersions.has(version)) return { rejection: error('UNKNOWN_CONTEXT_VERSION', String(version)) }
       workingLane.contextSnapshotVersion = version
     } else if (action.type === 'downgrade_privacy') {
+      if (!nonEmptyString(action.outputRef) || !isRuntimeJsonValue(action.value ?? null) || (action.summary !== undefined && !isRuntimeJsonValue(action.summary)) || !validProvenanceRefs(action.sourceRefs)) return { rejection: error('INVALID_PRIVACY_DOWNGRADE', 'Privacy downgrade shape is invalid') }
       if (!action.outputRef || state.results.has(action.outputRef)) return { rejection: error('INVALID_PRIVACY_OUTPUT_REF', 'downgrade_privacy requires a fresh outputRef') }
       if (action.targetPrivacy !== 'cloud_allowed') return { rejection: error('INVALID_PRIVACY_TARGET', 'Only cloud_allowed is a supported downgrade target.') }
       if (action.sourceRefs.length === 0) return { rejection: error('EMPTY_PRIVACY_SOURCES', 'downgrade_privacy requires at least one source reference.') }
@@ -620,6 +635,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       else workingLane.visibleResultRefs = new Set([action.outputRef])
       mutations.push({ op: 'appendEvent', event: { type: 'privacy.downgraded', laneId: lane.id, data: { outputRef: action.outputRef, sourceRefs: action.sourceRefs, method: action.method } as unknown as JsonValue } })
     } else if (action.type === 'complete') {
+      if (!isRuntimeJsonValue(action.result) || (action.derivedFrom !== undefined && !validProvenanceRefs(action.derivedFrom)) || (action.privacy !== undefined && !['public', 'cloud_allowed', 'local_only'].includes(action.privacy)) || (action.privacyTaints !== undefined && !Array.isArray(action.privacyTaints))) return { rejection: error('INVALID_COMPLETE', 'Complete action shape is invalid') }
       const activeChildren = [...lane.children].some((childId) => !['succeeded', 'failed', 'cancelled'].includes(state.lanes.get(childId)?.status ?? 'cancelled'))
       if (activeChildren && (action.children ?? 'reject_if_active') === 'reject_if_active') return { rejection: error('CHILDREN_STILL_ACTIVE', 'complete requires an explicit child join or cancellation') }
       const derived = derivedPrivacy(state, lane, action.derivedFrom ?? [])
@@ -673,6 +689,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       mutations.push({ op: 'appendEvent', event: { type: 'lane.succeeded', laneId: lane.id, data: resultId } })
       return { mutations }
     } else if (action.type === 'fail') {
+      if (!validRuntimeError(action.error) || (action.derivedFrom !== undefined && !validProvenanceRefs(action.derivedFrom)) || (action.privacy !== undefined && !['public', 'cloud_allowed', 'local_only'].includes(action.privacy))) return { rejection: error('INVALID_FAIL', 'Fail action shape is invalid') }
       const derived = derivedPrivacy(state, lane, action.derivedFrom ?? [])
       if (derived.error) return { rejection: error(derived.error, 'Failure provenance references an unknown or invisible result') }
       if (action.privacy !== undefined && derived.privacy !== undefined && privacyRank(action.privacy) < privacyRank(derived.privacy)) return { rejection: error('PRIVACY_DOWNGRADE_WITHOUT_PROOF', 'Failure privacy cannot be broader than its sources') }

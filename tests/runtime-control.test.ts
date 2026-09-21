@@ -98,6 +98,25 @@ describe('runtime control boundaries', () => {
     }
   })
 
+  it('rejects malformed terminal and unknown actions as control errors', () => {
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    const cases: Array<{ action: unknown; code: string }> = [
+      { action: { type: 'unknown_action' }, code: 'INVALID_ACTION' },
+      { action: { type: 'complete', result: cyclic }, code: 'INVALID_COMPLETE' },
+      { action: { type: 'fail', error: { code: 'BROKEN' } }, code: 'INVALID_FAIL' },
+    ]
+    for (const [index, candidate] of cases.entries()) {
+      const runtime = new PulseRuntime()
+      const program: LaneProgram = { id: `invalid-terminal-${index}`, version: '1', step: () => ({ actions: [candidate.action as never], next: point(`invalid-terminal-${index}`, 'done') }), }
+      const { laneId } = runtime.createAgent(`invalid terminal ${index}`, program)
+
+      runtime.tick()
+
+      expect(runtime.state.lanes.get(laneId)?.pendingResumeInput).toMatchObject({ type: 'control_error', error: { code: candidate.code } })
+    }
+  })
+
   it('rejects invalid RuntimeConfig values before constructing scheduler state', () => {
     expect(() => new PulseRuntime({ maxLaneStepsPerTick: -1 })).toThrow('INVALID_RUNTIME_CONFIG:maxLaneStepsPerTick')
     expect(() => new PulseRuntime({ agingIntervalMs: 0 })).toThrow('INVALID_RUNTIME_CONFIG:agingIntervalMs')
