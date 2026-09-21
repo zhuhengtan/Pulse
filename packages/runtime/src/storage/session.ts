@@ -1,4 +1,5 @@
-import type { AgentRecord, ArtifactRecord, EffectRecord, JsonValue, LaneRecord, MergeProposal, PrivacyMetadata, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord, ToolCallCorrelation } from '../core/types.js'
+import type { AgentRecord, ArtifactRecord, EffectRecord, JsonValue, LaneRecord, MergeProposal, PrivacyLabel, PrivacyMetadata, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord, ToolCallCorrelation } from '../core/types.js'
+import { privacyRank } from '../core/types.js'
 import { createRuntimeState } from '../core/types.js'
 import { normalizeRuntimeEvent } from '../core/events.js'
 
@@ -26,6 +27,17 @@ export interface SessionSnapshot {
     maxResultSummaryBytes?: number
     trustedSanitizerIds?: string[]
   }
+}
+
+export interface SessionLogExportOptions { maxPrivacy?: PrivacyLabel }
+export type SessionLogResult = Omit<ResultRecord, 'value' | 'summary'> & { value?: JsonValue; summary?: JsonValue; redacted?: boolean }
+export type SessionLogArtifact = Omit<ArtifactRecord, 'contentBase64'> & { contentBase64?: string; redacted?: boolean }
+export interface SessionLogExport {
+  schemaVersion: 1
+  maxPrivacy: PrivacyLabel
+  events: RuntimeEvent[]
+  results: SessionLogResult[]
+  artifacts: SessionLogArtifact[]
 }
 
 function encodeNumber(value: number): number | 'Infinity' { return Number.isFinite(value) ? value : 'Infinity' }
@@ -61,6 +73,54 @@ export function exportRuntimeState(state: RuntimeState): SessionSnapshot {
       trustedSanitizerIds: [...state.trustedSanitizerIds].sort(),
     },
   }
+}
+
+function relatedEventPrivacy(state: RuntimeState, event: RuntimeEvent): PrivacyLabel {
+  const labels: PrivacyLabel[] = []
+  const effect = event.effectId === undefined ? undefined : state.effects.get(event.effectId)
+  if (effect?.input && typeof effect.input === 'object' && !Array.isArray(effect.input)) {
+    const inputPrivacy = (effect.input as Record<string, JsonValue>).privacy
+    if (inputPrivacy === 'public' || inputPrivacy === 'cloud_allowed' || inputPrivacy === 'local_only') labels.push(inputPrivacy)
+  }
+  const resultRefs: string[] = []
+  if (effect?.outcome?.resultRef !== undefined) resultRefs.push(effect.outcome.resultRef)
+  if (event.type === 'lane.succeeded' && typeof event.data === 'string') resultRefs.push(event.data)
+  if (event.type === 'privacy.downgraded' && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
+    const outputRef = (event.data as Record<string, JsonValue>).outputRef
+    if (typeof outputRef === 'string') resultRefs.push(outputRef)
+  }
+  for (const ref of resultRefs) {
+    const result = state.results.get(ref)
+    if (result) labels.push(result.privacy)
+  }
+  return labels.length === 0 ? 'local_only' : labels.reduce<PrivacyLabel>((current, next) => privacyRank(next) > privacyRank(current) ? next : current, 'public')
+}
+
+function redactEvent(event: RuntimeEvent, privacy: PrivacyLabel): RuntimeEvent {
+  return { ...structuredClone(event), payload: { redacted: true, privacy }, data: { redacted: true, privacy } }
+}
+
+/** Export audit/log data with an explicit privacy ceiling; this is not a recovery snapshot. */
+export function exportRuntimeLog(state: RuntimeState, options: SessionLogExportOptions = {}): SessionLogExport {
+  const maxPrivacy = options.maxPrivacy ?? 'public'
+  const allowed = (privacy: PrivacyLabel): boolean => privacyRank(privacy) <= privacyRank(maxPrivacy)
+  const results = [...state.results.values()].map((result) => {
+    const copy = structuredClone(result)
+    if (allowed(copy.privacy)) return copy
+    const { value: _value, summary: _summary, ...metadata } = copy
+    return { ...metadata, redacted: true }
+  })
+  const artifacts = [...state.artifacts.values()].map((artifact) => {
+    const copy = structuredClone(artifact)
+    if (allowed(copy.privacy)) return copy
+    const { contentBase64: _content, ...metadata } = copy
+    return { ...metadata, redacted: true }
+  })
+  const events = state.events.map((event) => {
+    const privacy = relatedEventPrivacy(state, event)
+    return allowed(privacy) ? structuredClone(event) : redactEvent(event, privacy)
+  })
+  return { schemaVersion: 1, maxPrivacy, events, results, artifacts }
 }
 
 export function serializeRuntimeState(state: RuntimeState): JsonValue { return exportRuntimeState(state) as unknown as JsonValue }
