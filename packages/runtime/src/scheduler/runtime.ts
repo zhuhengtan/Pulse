@@ -132,6 +132,26 @@ function strictJsonValue(value: unknown, seen = new Set<object>()): JsonValue {
   throw new Error('TOOL_OUTPUT_NOT_SERIALIZABLE')
 }
 
+function validateHostCommand(command: unknown): asserts command is HostCommand {
+  if (!command || typeof command !== 'object' || Array.isArray(command)) throw new Error('INVALID_HOST_COMMAND')
+  const value = command as Record<string, unknown>
+  if (value.type === 'reply') {
+    if (typeof value.agentId !== 'string' || value.agentId.length === 0 || typeof value.effectId !== 'string' || value.effectId.length === 0) throw new Error('INVALID_HOST_COMMAND')
+    try { strictJsonValue(value.value) } catch { throw new Error('INVALID_HOST_COMMAND_VALUE') }
+    return
+  }
+  if (value.type === 'cancel' || value.type === 'cancel_effect') {
+    if (typeof value.agentId !== 'string' || value.agentId.length === 0 || typeof value.reason !== 'string' || value.reason.length === 0) throw new Error('INVALID_HOST_COMMAND')
+    if (value.type === 'cancel_effect' && (typeof value.effectId !== 'string' || value.effectId.length === 0)) throw new Error('INVALID_HOST_COMMAND')
+    return
+  }
+  if (value.type === 'set_lane_priority') {
+    if (typeof value.laneId !== 'string' || value.laneId.length === 0 || typeof value.priority !== 'number' || !Number.isFinite(value.priority)) throw new Error('INVALID_HOST_COMMAND')
+    return
+  }
+  throw new Error('INVALID_HOST_COMMAND')
+}
+
 function artifactOutput(value: unknown): EffectArtifactOutput {
   if (value instanceof Uint8Array) return { mediaType: 'application/octet-stream', content: new Uint8Array(value) }
   if (value instanceof ArrayBuffer) return { mediaType: 'application/octet-stream', content: new Uint8Array(value) }
@@ -846,6 +866,7 @@ export class PulseRuntime {
   }
 
   enqueueHostCommand(command: HostCommand): void {
+    validateHostCommand(command)
     const eventId = `host-command-${this.hostCommandSeq}`
     const candidateInbox = FactInbox.fromSnapshot(this.factInbox.snapshot())
     if (!candidateInbox.enqueue(command, eventId)) return

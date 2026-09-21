@@ -117,6 +117,16 @@ describe('runtime control boundaries', () => {
     }
   })
 
+  it('rejects malformed Host Facts before they enter the FactInbox', () => {
+    const runtime = new PulseRuntime()
+    expect(() => runtime.enqueueHostCommand({ type: 'cancel', agentId: '', reason: 'USER_REQUESTED' })).toThrow('INVALID_HOST_COMMAND')
+    expect(() => runtime.enqueueHostCommand({ type: 'set_lane_priority', laneId: 'lane-1', priority: Number.NaN })).toThrow('INVALID_HOST_COMMAND')
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    expect(() => runtime.enqueueHostCommand({ type: 'reply', agentId: 'agent-1', effectId: 'effect-1', value: cyclic as never })).toThrow('INVALID_HOST_COMMAND_VALUE')
+    expect(runtime.factInbox.size).toBe(0)
+  })
+
   it('rejects invalid RuntimeConfig values before constructing scheduler state', () => {
     expect(() => new PulseRuntime({ maxLaneStepsPerTick: -1 })).toThrow('INVALID_RUNTIME_CONFIG:maxLaneStepsPerTick')
     expect(() => new PulseRuntime({ agingIntervalMs: 0 })).toThrow('INVALID_RUNTIME_CONFIG:agingIntervalMs')
