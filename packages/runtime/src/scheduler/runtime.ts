@@ -1443,16 +1443,25 @@ export class PulseRuntime {
   reconcileEffect(effectId: string, value: JsonValue, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded'): void {
     const effect = this.state.effects.get(effectId)
     if (!effect || effect.state !== 'reconcile_required') return
+    const safeValue = strictJsonValue(value)
+    if (!['succeeded', 'failed', 'cancelled'].includes(status)) throw new Error('INVALID_RECONCILE_STATUS')
     this.quarantine.reconcile(effectId)
-    this.completeEffect(effectId, { value, sideEffectState: 'known' }, status)
+    this.completeEffect(effectId, { value: safeValue, sideEffectState: 'known' }, status)
   }
 
   async reconcileEffectWith(effectId: string, resolver: (executionRef: JsonValue | undefined, effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<{ status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; output?: JsonValue; error?: RuntimeError }>, signal = new AbortController().signal): Promise<{ status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; output?: JsonValue; error?: RuntimeError }> {
     const effect = this.state.effects.get(effectId)
     if (!effect || effect.state !== 'reconcile_required') return { status: 'unknown', error: { code: 'RECONCILE_NOT_REQUIRED', message: 'Effect is not waiting for reconciliation.' } }
-    const result = await resolver(effect.executionRef, effect, signal)
-    if (result.status === 'succeeded' || result.status === 'failed' || result.status === 'cancelled') this.reconcileEffect(effectId, result.output ?? null, result.status)
-    return result
+    let result: { status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; output?: JsonValue; error?: RuntimeError }
+    try { result = await resolver(effect.executionRef, effect, signal) } catch (cause) {
+      return { status: 'unknown', error: runtimeErrorFromCause(cause, 'RECONCILE_FAILED') }
+    }
+    if (!result || typeof result !== 'object' || !['succeeded', 'failed', 'cancelled', 'unknown'].includes(result.status)) return { status: 'unknown', error: { code: 'INVALID_RECONCILE_RESULT', message: 'Reconcile resolver returned an invalid status.', retryable: false } }
+    let output: JsonValue | undefined
+    try { output = result.output === undefined ? undefined : strictJsonValue(result.output) } catch { return { status: 'unknown', error: { code: 'INVALID_RECONCILE_OUTPUT', message: 'Reconcile resolver returned a non-JSON output.', retryable: false } } }
+    if (result.error !== undefined && (typeof result.error !== 'object' || result.error === null || typeof result.error.code !== 'string' || typeof result.error.message !== 'string')) return { status: 'unknown', error: { code: 'INVALID_RECONCILE_ERROR', message: 'Reconcile resolver returned an invalid error.', retryable: false } }
+    if (result.status === 'succeeded' || result.status === 'failed' || result.status === 'cancelled') this.reconcileEffect(effectId, output ?? null, result.status)
+    return { status: result.status, ...(output === undefined ? {} : { output }), ...(result.error === undefined ? {} : { error: result.error }) }
   }
 
   async reconcileRegisteredEffect(effectId: string, signal = new AbortController().signal): Promise<{ status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; output?: JsonValue; error?: RuntimeError }> {

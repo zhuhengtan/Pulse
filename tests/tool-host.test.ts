@@ -276,4 +276,17 @@ describe('Tool SDK to Runtime Effect host', () => {
     expect(runtime.state.effects.get('effect-3')?.outcome).toMatchObject({ status: 'succeeded', resultRef: expect.any(String) })
     expect(runtime.quarantine.has('effect-3')).toBe(false)
   })
+
+  it('normalizes reconcile failures and rejects malformed outputs without changing quarantine state', async () => {
+    const runtime = new PulseRuntime()
+    runtime.state.effects.set('effect-4', { id: 'effect-4', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'job', kind: 'tool', concurrencyClass: 'tool', input: {}, executionRef: 'job-4', state: 'reconcile_required', attemptId: 'attempt-4', attemptNo: 1, executionState: 'remote_unknown', sideEffectState: 'unknown' })
+    runtime.quarantine.add('effect-4', 0, 'in_doubt')
+    await expect(runtime.reconcileEffectWith('effect-4', async () => { throw Object.assign(new Error('remote unavailable'), { code: 'REMOTE_DOWN', retryable: true }) })).resolves.toMatchObject({ status: 'unknown', error: { code: 'REMOTE_DOWN', retryable: true } })
+    expect(runtime.state.effects.get('effect-4')?.state).toBe('reconcile_required')
+    expect(runtime.quarantine.has('effect-4')).toBe(true)
+    await expect(runtime.reconcileEffectWith('effect-4', async () => ({ status: 'bad' as never, output: { ok: true } }))).resolves.toMatchObject({ status: 'unknown', error: { code: 'INVALID_RECONCILE_RESULT' } })
+    await expect(runtime.reconcileEffectWith('effect-4', async () => ({ status: 'succeeded' as const, output: new Date() as never }))).resolves.toMatchObject({ status: 'unknown', error: { code: 'INVALID_RECONCILE_OUTPUT' } })
+    expect(runtime.state.effects.get('effect-4')?.state).toBe('reconcile_required')
+    expect(runtime.quarantine.has('effect-4')).toBe(true)
+  })
 })
