@@ -226,6 +226,27 @@ describe('Tool SDK to Runtime Effect host', () => {
     expect(() => sdkRegistry.resolveResources('bad-resources', {})).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_RESOURCE_LOCKS', retryable: false }))
   })
 
+  it('rejects non-JSON execution refs, normalized outputs, and reconcile outputs', async () => {
+    const definition = {
+      manifest: { name: 'bad-json-contracts', version: '1', description: 'bad JSON contracts', inputSchema: {}, outputSchema: {}, concurrencyClass: 'tool' as const, locks: [], supportsAbortSignal: true, sideEffectPolicy: 'external' as const, retrySafety: 'unsafe' as const, defaultTimeoutMs: 1000 },
+      executionRef: () => new Date() as never,
+      normalize: () => new Date() as never,
+      reconcile: async () => ({ status: 'succeeded' as const, output: new Date() }),
+      execute: () => ({ ok: true }),
+    }
+    const runtimeRegistry = new PulseRuntime().tools
+    runtimeRegistry.register(definition)
+    const context = { toolCallId: '', effectId: '', attemptId: '', agentId: '', laneId: '', signal: new AbortController().signal, emit: () => {} }
+    expect(() => runtimeRegistry.executionRef('bad-json-contracts', {}, context)).toThrowError(expect.objectContaining({ code: 'TOOL_EXECUTION_REF_INVALID' }))
+    await expect(runtimeRegistry.executeDetailed('bad-json-contracts', {}, context)).rejects.toThrowError(expect.objectContaining({ code: 'TOOL_NORMALIZED_OUTPUT_INVALID' }))
+    await expect(runtimeRegistry.reconcileDetailed('bad-json-contracts', 'ref', context)).rejects.toThrowError(expect.objectContaining({ code: 'TOOL_RECONCILE_OUTPUT_INVALID' }))
+    const sdkRegistry = new ToolRegistry()
+    sdkRegistry.register(definition as never)
+    expect(() => sdkRegistry.executionRef('bad-json-contracts', {}, context)).toThrowError(expect.objectContaining({ code: 'TOOL_EXECUTION_REF_INVALID' }))
+    await expect(sdkRegistry.executeDetailed('bad-json-contracts', {}, context)).rejects.toThrowError(expect.objectContaining({ code: 'TOOL_NORMALIZED_OUTPUT_INVALID' }))
+    await expect(sdkRegistry.reconcileDetailed('bad-json-contracts', 'ref', context)).rejects.toThrowError(expect.objectContaining({ code: 'TOOL_RECONCILE_OUTPUT_INVALID' }))
+  })
+
   it('compiles dynamic tool discovery into a versioned Context ToolSet', async () => {
     const registry = new ToolRegistry()
     registry.register(defineTool({ name: 'read-file', description: 'read a file', tags: ['filesystem', 'read'], input: z.object({ path: z.string() }), output: z.object({ text: z.string() }), execute: () => ({ text: '' }) }))

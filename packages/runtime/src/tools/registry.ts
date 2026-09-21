@@ -105,6 +105,20 @@ function isManifestContract(manifest: Record<string, unknown>): boolean {
 function summaryWithinBudget(value: unknown, maxBytes: number): boolean {
   try { return Buffer.byteLength(JSON.stringify(value), 'utf8') <= maxBytes } catch { return false }
 }
+function isStrictJsonValue(value: unknown, seen = new Set<object>()): value is JsonValue {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (typeof value !== 'object') return false
+  if (seen.has(value)) return false
+  if (Array.isArray(value)) { seen.add(value); try { return value.every((item) => isStrictJsonValue(item, seen)) } finally { seen.delete(value) } }
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return false
+  seen.add(value)
+  try { return Object.values(value as Record<string, unknown>).every((item) => isStrictJsonValue(item, seen)) } finally { seen.delete(value) }
+}
+function validateStrictJsonValue(value: unknown, code: string, message: string): JsonValue {
+  if (!isStrictJsonValue(value)) throw Object.assign(new Error(message), { code, retryable: false })
+  return value
+}
 function validateDiscoveryQuery(query: unknown): asserts query is RuntimeToolDiscoveryQuery {
   if (query === null || typeof query !== 'object' || Array.isArray(query)) throw Object.assign(new Error('Invalid tool discovery query.'), { code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false })
   const value = query as Record<string, unknown>
@@ -208,6 +222,7 @@ export class RuntimeToolRegistry {
     const summary = definition.summarize?.(output)
     const summaryAllowed = summary === undefined || summaryWithinBudget(summary, definition.manifest.maxResultSummaryBytes ?? 4096)
     const normalized = definition.normalize?.(output)
+    if (normalized !== undefined) validateStrictJsonValue(normalized, 'TOOL_NORMALIZED_OUTPUT_INVALID', `Normalized output is not JSON-serializable for tool ${name}.`)
     return { output, ...(normalized === undefined ? {} : { normalized }), ...(summaryAllowed && summary !== undefined ? { summary } : {}), manifest: structuredClone(definition.manifest) }
   }
 
@@ -217,13 +232,15 @@ export class RuntimeToolRegistry {
     const result = await definition.reconcile(executionRef, context)
     if (!result || typeof result !== 'object' || !['succeeded', 'failed', 'cancelled', 'unknown'].includes(result.status)) throw Object.assign(new Error(`Reconcile returned an invalid result for tool ${name}.`), { code: 'TOOL_RECONCILE_RESULT_INVALID', retryable: false })
     if (result.status === 'succeeded' && !validateJsonSchema(result.output, definition.manifest.outputSchema)) throw Object.assign(new Error(`Reconcile output does not match the manifest for tool ${name}.`), { code: 'TOOL_RECONCILE_OUTPUT_SCHEMA_VIOLATION', retryable: false })
-    if (result.error !== undefined && (typeof result.error !== 'object' || result.error === null || typeof result.error.code !== 'string' || typeof result.error.message !== 'string')) throw Object.assign(new Error(`Reconcile returned an invalid error for tool ${name}.`), { code: 'TOOL_RECONCILE_ERROR_INVALID', retryable: false })
+    if (result.status === 'succeeded' && result.output !== undefined) validateStrictJsonValue(result.output, 'TOOL_RECONCILE_OUTPUT_INVALID', `Reconcile output is not JSON-serializable for tool ${name}.`)
+    if (result.error !== undefined && (typeof result.error !== 'object' || result.error === null || typeof result.error.code !== 'string' || typeof result.error.message !== 'string' || (result.error.details !== undefined && !isStrictJsonValue(result.error.details)))) throw Object.assign(new Error(`Reconcile returned an invalid error for tool ${name}.`), { code: 'TOOL_RECONCILE_ERROR_INVALID', retryable: false })
     return result
   }
 
   executionRef(name: string, input: unknown, context: RuntimeToolContext): JsonValue | undefined {
     const definition = this.require(name)
-    return definition.executionRef?.(this.validateInput(name, input), context)
+    const executionRef = definition.executionRef?.(this.validateInput(name, input), context)
+    return executionRef === undefined ? undefined : validateStrictJsonValue(executionRef, 'TOOL_EXECUTION_REF_INVALID', `Execution reference is not JSON-serializable for tool ${name}.`)
   }
 
   resolveResources(name: string, input: unknown): ResourceLockSpec[] {
