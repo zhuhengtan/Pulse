@@ -69,8 +69,10 @@ function mergePrivacyTaints(...groups: Array<readonly PrivacyTaint[] | undefined
   return output
 }
 
-function validResume(resume: ResumePoint): boolean {
-  return Boolean(resume.programId && resume.programVersion && resume.step) && resume.locals !== undefined
+function validResume(resume: unknown): resume is ResumePoint {
+  if (!resume || typeof resume !== 'object' || Array.isArray(resume)) return false
+  const value = resume as Record<string, unknown>
+  return nonEmptyString(value.programId) && nonEmptyString(value.programVersion) && nonEmptyString(value.step) && isRuntimeJsonValue(value.locals)
 }
 
 function descendants(state: RuntimeState, ownerId: string, targetId: string): boolean {
@@ -214,6 +216,41 @@ function validTargetRef(value: unknown): value is TargetRef | LocalRef {
   const target = value as Record<string, unknown>
   if (nonEmptyString(target.local)) return true
   return (target.kind === 'lane' || target.kind === 'effect') && nonEmptyString(target.id)
+}
+
+function validResourceLocks(value: unknown): boolean {
+  return Array.isArray(value) && value.every((lock) => Boolean(lock && typeof lock === 'object' && !Array.isArray(lock) && nonEmptyString((lock as Record<string, unknown>).resource) && ['shared', 'exclusive'].includes(String((lock as Record<string, unknown>).mode))))
+}
+
+function validateForkActionShape(action: unknown): string | undefined {
+  if (!action || typeof action !== 'object' || Array.isArray(action) || !Array.isArray((action as Record<string, unknown>).lanes)) return 'INVALID_FORK'
+  const value = action as Record<string, unknown>
+  const lanes = value.lanes as unknown[]
+  if (lanes.some((candidate) => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return true
+    const child = candidate as Record<string, unknown>
+    if (!nonEmptyString(child.key) || typeof child.goal !== 'string' || !validResume(child.program)) return true
+    if (child.priority !== undefined && (typeof child.priority !== 'number' || !Number.isFinite(child.priority))) return true
+    if (child.contextVersion !== undefined && child.contextVersion !== 'parent' && child.contextVersion !== 'latest' && (!Number.isInteger(child.contextVersion) || (child.contextVersion as number) < 0)) return true
+    if (child.affinityKey !== undefined && !nonEmptyString(child.affinityKey)) return true
+    if (child.resources !== undefined && !validResourceLocks(child.resources)) return true
+    if (child.inputResultRefs !== undefined && (!Array.isArray(child.inputResultRefs) || child.inputResultRefs.some((ref) => !nonEmptyString(ref)))) return true
+    if (child.toolSetId !== undefined && !nonEmptyString(child.toolSetId)) return true
+    if (child.workspacePath !== undefined && !nonEmptyString(child.workspacePath)) return true
+    if (child.dependsOn !== undefined && (!Array.isArray(child.dependsOn) || child.dependsOn.some((dependency) => !dependency || typeof dependency !== 'object' || !nonEmptyString((dependency as Record<string, unknown>).key) || !validTargetRef((dependency as Record<string, unknown>).target) || !['success', 'settled'].includes(String((dependency as Record<string, unknown>).condition))))) return true
+    if (child.series !== undefined) {
+      const series = child.series as Record<string, unknown>
+      if (!series || typeof series !== 'object' || Array.isArray(series) || !validResume(series.member) || !Array.isArray(series.keys) || series.keys.length === 0 || series.keys.some((key) => !nonEmptyString(key)) || new Set(series.keys).size !== series.keys.length || (series.onMemberFailure !== undefined && !['continue', 'abort'].includes(String(series.onMemberFailure)))) return true
+    }
+    return false
+  })) return 'INVALID_FORK_LANE'
+  if (value.affinityAck !== undefined && typeof value.affinityAck !== 'boolean') return 'INVALID_FORK'
+  if (value.joinAliases !== undefined && (!value.joinAliases || typeof value.joinAliases !== 'object' || Array.isArray(value.joinAliases) || Object.entries(value.joinAliases as Record<string, unknown>).some(([key, laneKey]) => !nonEmptyString(key) || !nonEmptyString(laneKey)))) return 'INVALID_JOIN_ALIASES'
+  if (value.join !== undefined) {
+    const join = value.join as Record<string, unknown>
+    if (!join || typeof join !== 'object' || Array.isArray(join) || !['success', 'settled'].includes(String(join.condition)) || (join.mode !== undefined && !['all', 'any', 'quorum'].includes(String(join.mode))) || (join.quorum !== undefined && !Number.isInteger(join.quorum)) || (join.deadlineAt !== undefined && (typeof join.deadlineAt !== 'number' || !Number.isFinite(join.deadlineAt))) || !['fail_lane', 'resume_with_error'].includes(String(join.onUnsatisfied)) || (join.onCancelled !== undefined && !['unsatisfied', 'ignore'].includes(String(join.onCancelled)))) return 'INVALID_FORK_JOIN'
+  }
+  return undefined
 }
 
 function validateWait(state: RuntimeState, laneId: string, spec: WaitSpec, locals: Map<string, TargetRef>, newTargets: Map<string, TargetRef>): string | undefined {
@@ -450,6 +487,8 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         addWait(state, workingLane, spec, batchTargets, mutations, `wait-${waitCounter++}`)
       }
     } else if (action.type === 'fork') {
+      const forkShapeError = validateForkActionShape(action)
+      if (forkShapeError) return { rejection: error(forkShapeError, 'Fork rejected') }
       const forkAction = state.forkAffinity === 'coalesce' ? coalesceForkAction(action) : action
       if (forkAction.lanes.length === 0) return { rejection: error('EMPTY_FORK', 'fork requires at least one lane') }
       if (state.forkAffinity === 'advise' && forkAction.affinityAck !== true) {

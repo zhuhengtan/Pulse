@@ -79,6 +79,25 @@ describe('runtime control boundaries', () => {
     }
   })
 
+  it('rejects malformed Fork specifications before creating child lanes', () => {
+    const cases: Array<{ action: unknown; code: string }> = [
+      { action: { type: 'fork', lanes: undefined }, code: 'INVALID_FORK' },
+      { action: { type: 'fork', lanes: [{ key: 'child', goal: 'child', program: { programId: 'p', programVersion: '1', step: 'run' } }] }, code: 'INVALID_FORK_LANE' },
+      { action: { type: 'fork', lanes: [{ key: 'child', goal: 'child', program: point('fork-contract', 'run'), dependsOn: [{ key: 'bad', target: { kind: 'effect' }, condition: 'settled' }] }] }, code: 'INVALID_FORK_LANE' },
+      { action: { type: 'fork', lanes: [{ key: 'child', goal: 'child', program: point('fork-contract', 'run') }], join: { condition: 'settled', onUnsatisfied: 'invalid' } }, code: 'INVALID_FORK_JOIN' },
+    ]
+    for (const [index, candidate] of cases.entries()) {
+      const runtime = new PulseRuntime()
+      const program: LaneProgram = { id: 'fork-contract', version: '1', step: () => ({ actions: [candidate.action as never], next: point('fork-contract', 'done') }), }
+      const { laneId } = runtime.createAgent(`invalid fork ${index}`, program)
+
+      runtime.tick()
+
+      expect(runtime.state.lanes).toHaveLength(1)
+      expect(runtime.state.lanes.get(laneId)?.pendingResumeInput).toMatchObject({ type: 'control_error', error: { code: candidate.code } })
+    }
+  })
+
   it('rejects invalid RuntimeConfig values before constructing scheduler state', () => {
     expect(() => new PulseRuntime({ maxLaneStepsPerTick: -1 })).toThrow('INVALID_RUNTIME_CONFIG:maxLaneStepsPerTick')
     expect(() => new PulseRuntime({ agingIntervalMs: 0 })).toThrow('INVALID_RUNTIME_CONFIG:agingIntervalMs')
