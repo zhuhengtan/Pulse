@@ -30,6 +30,9 @@ describe('Runtime tool registry', () => {
     const invalidCategory = { ...echo, manifest: { ...echo.manifest, name: 'invalid-category', concurrencyClass: 'unknown' } }
     expect(() => new RuntimeToolRegistry().register(invalidCategory)).toThrow('INVALID_TOOL_MANIFEST:invalid-category')
     expect(() => new ToolRegistry().register(invalidCategory as never)).toThrow('INVALID_TOOL_MANIFEST:invalid-category')
+    const invalidSchema = { ...echo, manifest: { ...echo.manifest, name: 'invalid-schema', inputSchema: { type: 'unknown' }, outputSchema: { anyOf: [{}] } } }
+    expect(() => new RuntimeToolRegistry().register(invalidSchema)).toThrow('INVALID_TOOL_MANIFEST:invalid-schema')
+    expect(() => new ToolRegistry().register(invalidSchema as never)).toThrow('INVALID_TOOL_MANIFEST:invalid-schema')
   })
 
   it('filters manifest workspace and network permissions before discovery or execution', () => {

@@ -47,7 +47,31 @@ export interface ToolSetSnapshot { id: string; version: string; tools: ToolManif
 export interface ToolRegistryPolicy { allow?: string[]; deny?: string[]; workspaceRoots?: string[]; networkHosts?: string[]; allowNetwork?: boolean }
 export interface ToolAdmission { locks: ResourceClaim[]; sideEffectPolicy: ToolManifest['sideEffectPolicy']; defaultTimeoutMs: number; retrySafety: ToolManifest['retrySafety']; version: string }
 
-function isJsonSchema(value: unknown): boolean { return value !== null && typeof value === 'object' && !Array.isArray(value) }
+function isJsonSchema(value: unknown): boolean {
+  const seen = new Set<object>()
+  const visit = (candidate: unknown): boolean => {
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) return false
+    const schema = candidate as Record<string, unknown>
+    if (seen.has(schema)) return false
+    seen.add(schema)
+    try {
+      if (schema.type !== undefined && (typeof schema.type !== 'string' || !['null', 'boolean', 'number', 'integer', 'string', 'array', 'object'].includes(schema.type))) return false
+      for (const key of ['anyOf', 'oneOf', 'allOf']) if (schema[key] !== undefined && (!Array.isArray(schema[key]) || schema[key].length === 0 || !schema[key].every(visit))) return false
+      if (schema.not !== undefined && !visit(schema.not)) return false
+      if (schema.items !== undefined && !visit(schema.items)) return false
+      if (schema.properties !== undefined && (schema.properties === null || typeof schema.properties !== 'object' || Array.isArray(schema.properties) || !Object.values(schema.properties as Record<string, unknown>).every(visit))) return false
+      if (schema.additionalProperties !== undefined && typeof schema.additionalProperties !== 'boolean' && !visit(schema.additionalProperties)) return false
+      if (schema.required !== undefined && (!Array.isArray(schema.required) || new Set(schema.required).size !== schema.required.length || schema.required.some((key) => typeof key !== 'string'))) return false
+      if (schema.enum !== undefined && !Array.isArray(schema.enum)) return false
+      if (schema.pattern !== undefined) { if (typeof schema.pattern !== 'string') return false; try { new RegExp(schema.pattern) } catch { return false } }
+      for (const key of ['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf']) if (schema[key] !== undefined && (typeof schema[key] !== 'number' || !Number.isFinite(schema[key]))) return false
+      for (const key of ['minLength', 'maxLength', 'minItems', 'maxItems']) if (schema[key] !== undefined && (!Number.isInteger(schema[key]) || (schema[key] as number) < 0)) return false
+      if (schema.uniqueItems !== undefined && typeof schema.uniqueItems !== 'boolean') return false
+      return true
+    } finally { seen.delete(schema) }
+  }
+  return visit(value)
+}
 function isResourceClaims(value: unknown): value is ResourceClaim[] {
   if (!Array.isArray(value)) return false
   return value.every((claim) => {

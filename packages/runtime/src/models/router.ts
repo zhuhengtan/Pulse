@@ -226,7 +226,7 @@ export function validateJsonSchema(value: unknown, schema: unknown): boolean {
   if (document.const !== undefined && JSON.stringify(value) !== JSON.stringify(document.const)) return false
   if (Array.isArray(document.enum) && !document.enum.some((candidate) => JSON.stringify(value) === JSON.stringify(candidate))) return false
   if (typeof document.type === 'string') {
-    const matches = document.type === 'null' ? value === null : document.type === 'boolean' ? typeof value === 'boolean' : document.type === 'number' ? typeof value === 'number' && Number.isFinite(value) : document.type === 'integer' ? typeof value === 'number' && Number.isInteger(value) : document.type === 'string' ? typeof value === 'string' : document.type === 'array' ? Array.isArray(value) : document.type === 'object' ? typeof value === 'object' && value !== null && !Array.isArray(value) : true
+    const matches = document.type === 'null' ? value === null : document.type === 'boolean' ? typeof value === 'boolean' : document.type === 'number' ? typeof value === 'number' && Number.isFinite(value) : document.type === 'integer' ? typeof value === 'number' && Number.isInteger(value) : document.type === 'string' ? typeof value === 'string' : document.type === 'array' ? Array.isArray(value) : document.type === 'object' ? typeof value === 'object' && value !== null && !Array.isArray(value) : false
     if (!matches) return false
   }
   if (typeof value === 'string') {
