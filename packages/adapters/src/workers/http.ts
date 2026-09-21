@@ -32,6 +32,19 @@ function send(response: import('node:http').ServerResponse, status: number, valu
 
 function errorMessage(cause: unknown): string { return cause instanceof Error ? cause.message : String(cause) }
 
+function workerRuntimeError(cause: unknown): RuntimeError {
+  if (cause && typeof cause === 'object') {
+    const candidate = cause as { code?: unknown; message?: unknown; retryable?: unknown; details?: unknown }
+    return {
+      code: typeof candidate.code === 'string' ? candidate.code : 'WORKER_FAILED',
+      message: typeof candidate.message === 'string' ? candidate.message : errorMessage(cause),
+      ...(typeof candidate.retryable === 'boolean' ? { retryable: candidate.retryable } : {}),
+      ...(candidate.details === undefined ? {} : { details: candidate.details as JsonValue }),
+    }
+  }
+  return { code: 'WORKER_FAILED', message: errorMessage(cause) }
+}
+
 type AuthTokenSource = string | readonly string[]
 
 function secretEquals(left: string, right: string): boolean {
@@ -242,7 +255,7 @@ export async function startHttpWorker(client: HttpWorkerClient, handler: WorkerH
           const value = await handler(lease.task.payload, taskController.signal)
           if (!stopping.signal.aborted) await client.complete(lease.leaseId, value)
         } catch (cause) {
-          if (!stopping.signal.aborted) await client.fail(lease.leaseId, { code: 'WORKER_FAILED', message: errorMessage(cause) })
+          if (!stopping.signal.aborted) await client.fail(lease.leaseId, workerRuntimeError(cause))
         } finally {
           clearInterval(timer)
           stopping.signal.removeEventListener('abort', stopTask)
@@ -269,7 +282,7 @@ export function createHttpWorkerEffectExecutor(client: HttpWorkerClient, options
       if (message === 'WORKER_CANCELLED' || message === 'WORKER_FAILED' || /^WORKER_HTTP_4\d\d$/.test(message)) throw cause
       const task = await client.get(taskId).catch(() => undefined)
       if (task?.state === 'succeeded') return { value: task.result ?? null, executionState: 'succeeded', sideEffectState, executionRef }
-      if (task?.state === 'failed') return { value: null, executionState: 'failed', sideEffectState: 'none', executionRef, error: task.error ?? { code: 'WORKER_FAILED', message: 'Remote Worker task failed.' } }
+      if (task?.state === 'failed') return { value: null, status: 'failed', executionState: 'failed', sideEffectState: 'none', executionRef, error: task.error ?? { code: 'WORKER_FAILED', message: 'Remote Worker task failed.' } }
       if (task?.state === 'cancelled') return { value: null, status: 'cancelled', executionState: 'failed', sideEffectState: 'none', executionRef, error: { code: 'WORKER_CANCELLED', message: 'Remote Worker task was cancelled.' } }
       return { value: null, executionState: 'remote_unknown', sideEffectState: isSideEffectful(effect.sideEffectPolicy) ? 'unknown' : 'none', executionRef, error: { code: 'WORKER_EXECUTION_UNKNOWN', message: `Remote Worker task outcome is unknown: ${message}` } }
     }

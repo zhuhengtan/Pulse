@@ -142,6 +142,27 @@ describe('HTTP Worker transport', () => {
     }
   })
 
+  it('preserves a Worker handler retryability decision across HTTP', async () => {
+    const coordinator = new Coordinator()
+    const server = await startWorkerCoordinatorServer(coordinator)
+    const workerClient = new HttpWorkerClient({ baseUrl: server.url, workerId: 'error-semantics-worker', pollMs: 1 })
+    const worker = await startHttpWorker(workerClient, async () => { throw Object.assign(new Error('permanent worker failure'), { code: 'PERMANENT_WORKER_FAILURE', retryable: false, details: { source: 'worker' } }) })
+    const runtimeClient = new HttpWorkerClient({ baseUrl: server.url, workerId: 'error-semantics-host', pollMs: 1 })
+    const runtime = new PulseRuntime({ effectExecutor: createHttpWorkerEffectExecutor(runtimeClient) })
+    const program: LaneProgram = { id: 'http-worker-error', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'remote', kind: 'tool', concurrencyClass: 'tool', input: { request: 'run' }, retryPolicy: { maxAttempts: 3, initialBackoffMs: 1, maxBackoffMs: 1, jitter: false } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('http-worker-error', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('http-worker-error', 'finish') } }
+    try {
+      const { agentId } = runtime.createAgent('HTTP worker error semantics', program)
+      expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+      expect(runtime.state.effects.get('effect-1')?.attempts).toHaveLength(1)
+      expect(runtime.state.effects.get('effect-1')?.outcome).toMatchObject({ error: { code: 'PERMANENT_WORKER_FAILURE', retryable: false, details: { source: 'worker' } } })
+    } finally {
+      await worker.stop()
+      await server.close()
+    }
+  })
+
   it('reclaims an expired remote lease without an explicit host-side recovery call', async () => {
     const coordinator = new Coordinator()
     const server = await startWorkerCoordinatorServer(coordinator, { recoveryIntervalMs: 2 })
