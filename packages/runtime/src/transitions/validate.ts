@@ -209,8 +209,16 @@ function coalesceForkAction(action: ForkAction): ForkAction {
   return { ...action, lanes: [...output, ...action.lanes.filter((lane) => !collapsed.has(lane.key))], joinAliases: Object.fromEntries(aliases), affinityAck: true }
 }
 
+function validTargetRef(value: unknown): value is TargetRef | LocalRef {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const target = value as Record<string, unknown>
+  if (nonEmptyString(target.local)) return true
+  return (target.kind === 'lane' || target.kind === 'effect') && nonEmptyString(target.id)
+}
+
 function validateWait(state: RuntimeState, laneId: string, spec: WaitSpec, locals: Map<string, TargetRef>, newTargets: Map<string, TargetRef>): string | undefined {
-  if (!['all', 'any', 'quorum'].includes(spec.mode) || (spec.dependencies.length === 0 && spec.mode !== 'all') || spec.dependencies.some((dependency) => !dependency.key || !resolveTarget(dependency.target, newTargets.size ? newTargets : locals))) return 'INVALID_WAIT_DEPENDENCY'
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec) || !Array.isArray(spec.dependencies)) return 'INVALID_WAIT_DEPENDENCY'
+  if (!['all', 'any', 'quorum'].includes(spec.mode) || (spec.dependencies.length === 0 && spec.mode !== 'all') || !['fail_lane', 'resume_with_error'].includes(spec.onUnsatisfied) || (spec.onCancelled !== undefined && !['unsatisfied', 'ignore'].includes(spec.onCancelled)) || (spec.reason !== undefined && !['startup', 'effect', 'dependency', 'join', 'timer'].includes(spec.reason)) || spec.dependencies.some((dependency) => !dependency || typeof dependency !== 'object' || !nonEmptyString(dependency.key) || !validTargetRef(dependency.target) || !['success', 'settled'].includes(dependency.condition) || !resolveTarget(dependency.target, newTargets.size ? newTargets : locals))) return 'INVALID_WAIT_DEPENDENCY'
   if (spec.mode === 'quorum' && (!Number.isInteger(spec.quorum) || spec.quorum! < 1 || spec.quorum! > spec.dependencies.length)) return 'INVALID_WAIT_QUORUM'
   if (spec.mode !== 'quorum' && spec.quorum !== undefined) return 'INVALID_WAIT_QUORUM'
   if (spec.deadlineAt !== undefined && (!Number.isFinite(spec.deadlineAt) || spec.deadlineAt < state.now)) return 'INVALID_WAIT_DEADLINE'
@@ -492,13 +500,13 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         addWait(state, workingLane, spec, joinTargets, mutations, `wait-${waitCounter++}`)
       }
     } else if (action.type === 'wait') {
+      const waitError = validateWait(state, lane.id, action.spec, localTargets, new Map())
+      if (waitError) return { rejection: error(waitError, 'Wait rejected') }
       const targets = new Map<string, TargetRef>()
       for (const dependency of action.spec.dependencies) {
         const target = resolveTarget(dependency.target, localTargets)
         if (target) targets.set(dependency.key, target)
       }
-      const waitError = validateWait(state, lane.id, action.spec, localTargets, targets)
-      if (waitError) return { rejection: error(waitError, 'Wait rejected') }
       if (hasDependencyCycle(state, action.spec.dependencies.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: resolveTarget(dependency.target, localTargets)! })))) return { rejection: error('DEPENDENCY_CYCLE', 'Wait would create a dependency cycle') }
       addWait(state, workingLane, action.spec, targets, mutations, `wait-${waitCounter++}`)
     } else if (action.type === 'cancel_lane') {

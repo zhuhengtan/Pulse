@@ -61,6 +61,24 @@ describe('runtime control boundaries', () => {
     }
   })
 
+  it('rejects malformed Wait specifications without throwing from validation', () => {
+    const cases: Array<{ spec: unknown; code: string }> = [
+      { spec: { mode: 'all', dependencies: [{ key: 'missing-target', condition: 'settled' }], onUnsatisfied: 'resume_with_error', reason: 'dependency' }, code: 'INVALID_WAIT_DEPENDENCY' },
+      { spec: { mode: 'quorum', dependencies: [], quorum: 0, onUnsatisfied: 'resume_with_error', reason: 'dependency' }, code: 'INVALID_WAIT_DEPENDENCY' },
+      { spec: { mode: 'all', dependencies: [], onUnsatisfied: 'invalid', reason: 'dependency' }, code: 'INVALID_WAIT_DEPENDENCY' },
+    ]
+    for (const [index, candidate] of cases.entries()) {
+      const runtime = new PulseRuntime()
+      const program: LaneProgram = { id: `invalid-wait-${index}`, version: '1', step: () => ({ actions: [{ type: 'wait', spec: candidate.spec as never }], next: point(`invalid-wait-${index}`, 'done') }), }
+      const { laneId } = runtime.createAgent(`invalid wait ${index}`, program)
+
+      runtime.tick()
+
+      expect(runtime.state.waits).toHaveLength(0)
+      expect(runtime.state.lanes.get(laneId)?.pendingResumeInput).toMatchObject({ type: 'control_error', error: { code: candidate.code } })
+    }
+  })
+
   it('rejects invalid RuntimeConfig values before constructing scheduler state', () => {
     expect(() => new PulseRuntime({ maxLaneStepsPerTick: -1 })).toThrow('INVALID_RUNTIME_CONFIG:maxLaneStepsPerTick')
     expect(() => new PulseRuntime({ agingIntervalMs: 0 })).toThrow('INVALID_RUNTIME_CONFIG:agingIntervalMs')
