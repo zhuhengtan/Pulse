@@ -26,4 +26,13 @@ describe('createAgent DSL contract', () => {
     expect(() => runtime.createAgent({ goal: 'invalid', program, limits: { timeoutMs: -1 } })).toThrow('INVALID_AGENT_TIMEOUT')
     expect(runtime.state.agents.size).toBe(0)
   })
+
+  it('rejects malformed creation contracts before creating state', () => {
+    const runtime = new PulseRuntime()
+    expect(() => runtime.createAgent({ goal: '', program })).toThrow('INVALID_AGENT_GOAL')
+    expect(() => runtime.createAgent({ goal: 'invalid program', program: null as never })).toThrow('INVALID_AGENT_PROGRAM')
+    expect(() => runtime.createAgent({ goal: 'invalid priority', program, priority: 'urgent-ish' as never })).toThrow('INVALID_AGENT_PRIORITY')
+    expect(() => runtime.createAgent({ goal: 'invalid warm start', program, warmStart: { sessionId: 'source', include: 'everything' } as never })).toThrow('INVALID_WARM_START')
+    expect(runtime.state.agents.size).toBe(0)
+  })
 })

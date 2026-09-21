@@ -168,7 +168,9 @@ function priorityScore(priority: AgentCreateRequest['priority']): number | undef
     if (!Number.isFinite(priority)) throw new Error('INVALID_AGENT_PRIORITY')
     return priority
   }
-  return { background: -1, normal: 0, high: 1, urgent: 2 }[priority]
+  const scores: Record<AgentPriority, number> = { background: -1, normal: 0, high: 1, urgent: 2 }
+  if (!(priority in scores)) throw new Error('INVALID_AGENT_PRIORITY')
+  return scores[priority as AgentPriority]
 }
 
 function invalidConfig(field: string): never { throw new Error(`INVALID_RUNTIME_CONFIG:${field}`) }
@@ -184,6 +186,23 @@ function validateProgramShape(value: unknown): asserts value is LaneProgram {
   if (program.seriesMemberProgram !== undefined && (!program.seriesMemberProgram || typeof program.seriesMemberProgram !== 'object' || Array.isArray(program.seriesMemberProgram))) throw new Error('INVALID_PROGRAM')
   if (program.seriesKeys !== undefined && (!Array.isArray(program.seriesKeys) || program.seriesKeys.length === 0 || program.seriesKeys.some((key) => typeof key !== 'string' || key.length === 0) || new Set(program.seriesKeys).size !== program.seriesKeys.length)) throw new Error('INVALID_PROGRAM')
   if (program.seriesOnMemberFailure !== undefined && !['continue', 'abort'].includes(String(program.seriesOnMemberFailure))) throw new Error('INVALID_PROGRAM')
+}
+function validateProgramRefShape(value: unknown): asserts value is ProgramRef {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_PROGRAM_REF')
+  const ref = value as Record<string, unknown>
+  if (typeof ref.programId !== 'string' || ref.programId.length === 0 || typeof ref.programVersion !== 'string' || ref.programVersion.length === 0) throw new Error('INVALID_PROGRAM_REF')
+  if (ref.step !== undefined && (typeof ref.step !== 'string' || ref.step.length === 0)) throw new Error('INVALID_PROGRAM_REF')
+  if (ref.locals !== undefined) try { strictJsonValue(ref.locals) } catch { throw new Error('INVALID_PROGRAM_REF') }
+}
+function validateWarmStartShape(value: unknown): asserts value is WarmStartSpec {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_WARM_START')
+  const warmStart = value as Record<string, unknown>
+  if (warmStart.sessionId !== undefined && (typeof warmStart.sessionId !== 'string' || warmStart.sessionId.length === 0)) throw new Error('INVALID_WARM_START')
+  if (warmStart.agentId !== undefined && (typeof warmStart.agentId !== 'string' || warmStart.agentId.length === 0)) throw new Error('INVALID_WARM_START')
+  if (warmStart.sessionId === undefined && warmStart.agentId === undefined) throw new Error('WARM_START_SESSION_REQUIRED')
+  if (warmStart.globalVersion !== undefined && warmStart.globalVersion !== 'latest' && warmStart.globalVersion !== 'final' && (!Number.isInteger(warmStart.globalVersion) || (warmStart.globalVersion as number) < 0)) throw new Error('INVALID_WARM_START')
+  if (warmStart.include !== undefined && !['facts', 'facts_and_findings'].includes(String(warmStart.include))) throw new Error('INVALID_WARM_START')
+  if (warmStart.relevanceRefs !== undefined && (!Array.isArray(warmStart.relevanceRefs) || warmStart.relevanceRefs.some((ref) => typeof ref !== 'string' || ref.length === 0) || new Set(warmStart.relevanceRefs).size !== warmStart.relevanceRefs.length)) throw new Error('INVALID_WARM_START')
 }
 function validateRuntimeConfig(config: RuntimeConfig): void {
   optionalNonNegativeInteger(config.maxLaneStepsPerTick, 'maxLaneStepsPerTick')
@@ -482,17 +501,25 @@ export class PulseRuntime {
   createAgent(goalOrRequest: string | AgentCreateRequest, program?: LaneProgram, agentId?: string): { agentId: string; laneId: string } {
     if (this.shuttingDown) throw new Error('RUNTIME_SHUTTING_DOWN')
     const request: AgentCreateRequest = typeof goalOrRequest === 'string' ? { goal: goalOrRequest, program: program!, ...(agentId === undefined ? {} : { agentId }) } : goalOrRequest
+    if (!request || typeof request !== 'object' || typeof request.goal !== 'string' || request.goal.length === 0) throw new Error('INVALID_AGENT_GOAL')
+    if (!request.program || typeof request.program !== 'object' || Array.isArray(request.program)) throw new Error('INVALID_AGENT_PROGRAM')
     const programRef = 'programId' in request.program ? request.program : undefined
+    if (programRef !== undefined) validateProgramRefShape(programRef)
+    else validateProgramShape(request.program)
     const rootProgram: LaneProgram = programRef === undefined ? request.program as LaneProgram : this.programs.resolve(programRef)
     const rootPriority = priorityScore(request.priority)
     const policyId = request.policy?.id ?? request.policyId
     const limitsId = request.limits?.id ?? request.limitsId
-    if (request.policy !== undefined && !request.policy.id) throw new Error('INVALID_AGENT_POLICY')
+    if (request.policy !== undefined && (!request.policy || typeof request.policy !== 'object' || Array.isArray(request.policy) || typeof request.policy.id !== 'string' || request.policy.id.length === 0)) throw new Error('INVALID_AGENT_POLICY')
+    if (request.policyId !== undefined && (typeof request.policyId !== 'string' || request.policyId.length === 0)) throw new Error('INVALID_AGENT_POLICY')
+    if (request.limits !== undefined && (!request.limits || typeof request.limits !== 'object' || Array.isArray(request.limits))) throw new Error('INVALID_AGENT_LIMITS')
+    if (request.limitsId !== undefined && (typeof request.limitsId !== 'string' || request.limitsId.length === 0)) throw new Error('INVALID_AGENT_LIMITS')
     const timeoutMs = request.limits?.timeoutMs
     if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs < 0)) throw new Error('INVALID_AGENT_TIMEOUT')
     const maxActiveLanes = request.limits?.maxActiveLanes ?? request.maxActiveLanes
     if (maxActiveLanes !== undefined && (!Number.isInteger(maxActiveLanes) || maxActiveLanes < 1)) throw new Error('INVALID_AGENT_LIMITS')
     const warmStart = request.warmStart
+    if (warmStart !== undefined) validateWarmStartShape(warmStart)
     let initialGlobal: JsonValue | undefined
     let initialGlobalPrivacy: PrivacyMetadata | undefined
     let warmStartResultRefs: string[] = []
