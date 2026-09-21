@@ -28,6 +28,8 @@ export function defineSeriesLane(config: { id: string; version?: string; steps: 
 }
 
 export interface PlanWorker extends ProgramRef { goal?: string }
+export interface PlanTask { key: string; goal: string; affinityKey?: string }
+export interface PlanDocument { tasks: PlanTask[] }
 export interface PlanAndExecuteConfig {
   id: string
   version?: string
@@ -41,6 +43,38 @@ export interface PlanAndExecuteConfig {
 }
 
 const permissiveSchema = { safeParse: (value: unknown) => ({ success: true as const, data: value }) } as never
+
+function workerProgram(worker: PlanWorker | { goal: string; programId: string; programVersion?: string }): ProgramRef {
+  return { programId: worker.programId, programVersion: worker.programVersion ?? '1', ...(!('step' in worker) || worker.step === undefined ? {} : { step: worker.step }), ...(!('locals' in worker) || worker.locals === undefined ? {} : { locals: worker.locals }) }
+}
+
+function plannedWorkers(config: PlanAndExecuteConfig, ctx: StepContext<JsonValue>): Record<string, { goal: string; program: ProgramRef; affinityKey?: string }> {
+  const laneState = ctx.laneState
+  const plan = laneState && typeof laneState === 'object' && !Array.isArray(laneState)
+    ? (laneState as Record<string, JsonValue>).plan
+    : undefined
+  const tasks = plan && typeof plan === 'object' && !Array.isArray(plan)
+    ? (plan as Record<string, JsonValue>).tasks
+    : undefined
+
+  // Keep the legacy permissive-planner behavior when no task list was declared.
+  // A typed planner schema produces `tasks` and therefore takes the dynamic path.
+  if (!Array.isArray(tasks)) return Object.fromEntries(Object.entries(config.workers).map(([key, worker]) => [key, { goal: 'goal' in worker && worker.goal !== undefined ? worker.goal : key, program: workerProgram(worker) }]))
+
+  const lanes: Record<string, { goal: string; program: ProgramRef; affinityKey?: string }> = {}
+  for (const task of tasks) {
+    if (!task || typeof task !== 'object' || Array.isArray(task)) throw Object.assign(new Error('Planner task must be an object.'), { code: 'INVALID_PLAN' })
+    const entry = task as Record<string, JsonValue>
+    const key = entry.key
+    const goal = entry.goal
+    if (typeof key !== 'string' || key.length === 0 || typeof goal !== 'string' || goal.length === 0) throw Object.assign(new Error('Planner task requires a worker key and goal.'), { code: 'INVALID_PLAN' })
+    if (lanes[key] !== undefined || config.workers[key] === undefined) throw Object.assign(new Error(`Planner task references an unavailable or duplicate worker: ${key}`), { code: 'INVALID_PLAN' })
+    const affinityKey = entry.affinityKey
+    if (affinityKey !== undefined && (typeof affinityKey !== 'string' || affinityKey.length === 0)) throw Object.assign(new Error(`Planner task affinityKey must be a non-empty string: ${key}`), { code: 'INVALID_PLAN' })
+    lanes[key] = { goal, program: workerProgram(config.workers[key]), ...(affinityKey === undefined ? {} : { affinityKey }) }
+  }
+  return lanes
+}
 
 export function definePlanAndExecuteLane(config: PlanAndExecuteConfig): LaneProgramDefinition {
   const planner = config.planner ?? { task: 'plan', instruction: config.planInstruction ?? 'Create an executable plan for the goal.' }
@@ -58,10 +92,7 @@ export function definePlanAndExecuteLane(config: PlanAndExecuteConfig): LaneProg
       },
     })
     builder.addDynamicForkStep('dispatch', {
-      lanes: () => Object.fromEntries(Object.entries(config.workers).map(([key, worker]) => {
-        const program = { programId: worker.programId, programVersion: worker.programVersion ?? '1', ...(!('step' in worker) || worker.step === undefined ? {} : { step: worker.step }), ...(!('locals' in worker) || worker.locals === undefined ? {} : { locals: worker.locals }) }
-        return [key, { goal: 'goal' in worker && worker.goal !== undefined ? worker.goal : key, program }]
-      })),
+      lanes: (ctx) => plannedWorkers(config, ctx),
       affinity: config.affinity === 'ack' ? 'ack' : 'collapse',
       next: 'synthesize',
     })

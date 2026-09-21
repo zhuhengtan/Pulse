@@ -60,6 +60,29 @@ describe('DSL Human/Timer host macros', () => {
     expect(runtime.state.agents.get(agentId)?.globalVersions.get(1)).toEqual({ synthesis: { report: 'done' } })
   })
 
+  it('dispatches only the workers selected by the planner and preserves task metadata', async () => {
+    const worker = defineLaneProgram({ id: 'planned-worker', version: '1' }, (builder) => {
+      builder.addStep('start', () => ({ actions: [{ type: 'complete', result: { done: true } }], next: 'start' }))
+    })
+    const program = definePlanAndExecuteLane({
+      id: 'dynamic-plan-template',
+      version: '1',
+      planner: { instruction: 'choose work', schema: z.object({ tasks: z.array(z.object({ key: z.string(), goal: z.string(), affinityKey: z.string().optional() })) }) },
+      workers: {
+        first: { programId: worker.id, programVersion: worker.version },
+        second: { programId: worker.id, programVersion: worker.version },
+      },
+      synthesizer: { instruction: 'synthesize' },
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => effect.key === 'plan-llm' ? { value: { tasks: [{ key: 'second', goal: 'inspect the second target', affinityKey: 'same-target' }] } } : { value: { report: 'done' } } })
+    runtime.register(worker)
+    const { agentId, laneId } = runtime.createAgent('dynamic plan', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    const children = [...runtime.state.lanes.values()].filter((lane) => lane.id !== laneId)
+    expect(children).toHaveLength(1)
+    expect(children[0]).toMatchObject({ goal: 'inspect the second target' })
+  })
+
   it('runs a bounded ReAct tool round before accepting the final model result', async () => {
     const program = defineLaneProgram({ id: 'react-tools', version: '1' }, (builder) => {
       builder.addReActLoopStep('reason', { instruction: 'inspect', toolAllow: ['read'], maxTurns: 3, onFinish: (result, ctx) => { ctx.mutateLane((draft) => { if (draft && typeof draft === 'object' && !Array.isArray(draft)) (draft as Record<string, unknown>).answer = result }); return 'finish' } })
