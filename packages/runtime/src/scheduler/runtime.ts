@@ -2,7 +2,7 @@ import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.
 import { buildAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock, type RuntimeClock } from './index.js'
-import type { ArtifactRecord, EffectRecord, EffectSubmission, EffectState, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, RuntimeEventInput, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata, ProvenanceRef, ResumePoint } from '../core/types.js'
+import type { ArtifactRecord, EffectRecord, EffectSubmission, EffectState, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, RuntimeEventInput, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyLabel, PrivacyTaint, PrivacyMetadata, ProvenanceRef, ResumePoint } from '../core/types.js'
 import { createRuntimeState, effectivePrivacy, isSideEffectful, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, provenanceRefId, provenanceRefKind, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
@@ -12,7 +12,7 @@ import { FactInbox, ObservationInbox } from '../core/inbox.js'
 import { observeProgress, type ProgressObservation } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
 import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, externalizeRuntimeSnapshotBodies, hydrateRuntimeResultBodies, hydrateRuntimeSnapshotBodies, importRuntimePersistence, withRuntimePersistenceIntegrity, type RuntimePersistenceBackend, type RuntimePersistenceCompatibility, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
-import { exportWarmStartSession, type RuntimeSessionStore } from '../storage/session.js'
+import { exportRuntimeLog, exportRuntimeLogTo, exportWarmStartSession, type RuntimeLogSink, type RuntimeSessionStore, type SessionLogExport, type SessionLogExportOptions } from '../storage/session.js'
 import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import { apply, type Mutation } from '../core/mutations.js'
@@ -86,6 +86,8 @@ export interface RuntimeConfig {
   effectExecutor?: EffectExecutor
   effectSubmissionPreparer?: (submission: EffectSubmission) => EffectSubmission
   telemetryExporter?: RuntimeTelemetryExporter
+  auditLogSink?: RuntimeLogSink
+  auditLogPrivacy?: PrivacyLabel
   persistenceBackend?: RuntimePersistenceBackend
   sessionStore?: RuntimeSessionStore
   /** Internal restore CAS baseline; differs from the hydrated envelope digest. */
@@ -214,6 +216,8 @@ export class PulseRuntime {
   readonly state: RuntimeState
   private shuttingDown = false
   private readonly telemetryExporter: RuntimeTelemetryExporter | undefined
+  private readonly auditLogSink: RuntimeLogSink | undefined
+  private readonly auditLogPrivacy: PrivacyLabel | undefined
   private readonly persistenceBackend: RuntimePersistenceBackend | undefined
   private readonly sessionStore: RuntimeSessionStore | undefined
   private readonly enforcingRecoveryPrograms: boolean
@@ -339,6 +343,8 @@ export class PulseRuntime {
     this.maxPreparedLLMs = config.maxPreparedLLMs ?? 8
     this.effectSubmissionPreparer = config.effectSubmissionPreparer ?? ((submission) => this.prepareRegisteredToolSubmission(submission))
     this.telemetryExporter = config.telemetryExporter
+    this.auditLogSink = config.auditLogSink
+    this.auditLogPrivacy = config.auditLogPrivacy
     this.persistenceBackend = config.persistenceBackend
     this.sessionStore = config.sessionStore ?? config.persistenceBackend?.sessionStore
     this.budget = config.budget ?? {}
@@ -1040,6 +1046,12 @@ export class PulseRuntime {
     const snapshot = this.telemetry()
     if (this.telemetryExporter) await this.telemetryExporter.publish({ schemaVersion: 1, timestamp, snapshot })
     return snapshot
+  }
+
+  async exportAuditLog(options: SessionLogExportOptions = {}): Promise<SessionLogExport> {
+    const maxPrivacy = options.maxPrivacy ?? this.auditLogPrivacy
+    const effective = maxPrivacy === undefined ? options : { ...options, maxPrivacy }
+    return this.auditLogSink === undefined ? exportRuntimeLog(this.state, effective) : exportRuntimeLogTo(this.state, this.auditLogSink, effective)
   }
 
   private assertStorageAdmission(mutations: Mutation[]): void {

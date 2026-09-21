@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { createAgent, createRuntimeState, exportRuntimeLog, exportRuntimeLogTo, exportRuntimeState, FileRuntimeLogSink, HttpRuntimeLogSink, importRuntimeState, serializeRuntimeState } from '@pulse/runtime'
+import { createAgent, createRuntimeState, exportRuntimeLog, exportRuntimeLogTo, exportRuntimeState, FileRuntimeLogSink, HttpRuntimeLogSink, importRuntimeState, PulseRuntime, serializeRuntimeState } from '@pulse/runtime'
 
 describe('session serialization boundary', () => {
   it('round-trips Runtime state without losing Maps, Sets, references, events, or Infinity limits', () => {
@@ -76,5 +76,17 @@ describe('session serialization boundary', () => {
     expect(calls[0]?.init.headers).toMatchObject({ authorization: 'Bearer test', 'content-type': 'application/json' })
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual(log)
     await expect(new HttpRuntimeLogSink({ endpoint: 'https://audit.test/events', fetch: async () => new Response(null, { status: 503 }) }).append(log)).rejects.toThrow('RUNTIME_LOG_HTTP_503')
+  })
+
+  it('lets Runtime export through a configured audit sink with a host privacy ceiling', async () => {
+    const published: unknown[] = []
+    const runtime = new PulseRuntime({ auditLogPrivacy: 'cloud_allowed', auditLogSink: { append: (log) => { published.push(log) } } })
+    runtime.state.results.set('cloud', { id: 'cloud', value: { ok: true }, privacy: 'cloud_allowed', derivedFrom: [] })
+    runtime.state.results.set('local', { id: 'local', value: { token: 'do-not-export' }, privacy: 'local_only', derivedFrom: [] })
+    const log = await runtime.exportAuditLog()
+    expect(published).toEqual([log])
+    expect(log.maxPrivacy).toBe('cloud_allowed')
+    expect(log.results.find((result) => result.id === 'cloud')?.value).toEqual({ ok: true })
+    expect(log.results.find((result) => result.id === 'local')).toMatchObject({ redacted: true })
   })
 })
