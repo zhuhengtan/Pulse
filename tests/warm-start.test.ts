@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { InMemoryRuntimeSessionStore, PulseRuntime, exportWarmStartSession } from '@pulse/runtime'
+import { FileRuntimeSessionStore, InMemoryRuntimeSessionStore, PulseRuntime, SqliteRuntimeSessionStore, exportWarmStartSession } from '@pulse/runtime'
 import type { LaneProgram } from '@pulse/runtime'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 describe('explicit warm start', () => {
   it('copies the selected Global version once and keeps the new Agent isolated', () => {
@@ -74,5 +77,48 @@ describe('explicit warm start', () => {
     expect(target.state.results.get('result-1')).toMatchObject({ value: { statement: 'keep me' }, privacy: 'local_only' })
     expect(target.state.lanes.get(copied.laneId)?.visibleResultRefs).toEqual(new Set(['result-1']))
     expect(target.state.nextIds.result).toBeGreaterThanOrEqual(2)
+  })
+
+  it('persists cross-runtime warm-start snapshots and rejects stale file revisions', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-session-store-'))
+    try {
+      const filePath = join(directory, 'sessions.json')
+      const sourceStore = new FileRuntimeSessionStore(filePath)
+      const targetStore = new FileRuntimeSessionStore(filePath)
+      const source = new PulseRuntime({ sessionStore: sourceStore })
+      const program: LaneProgram = { id: 'file-session-store', version: '1', step: () => ({ actions: [{ type: 'complete', result: {} }], next: { programId: 'file-session-store', programVersion: '1', step: 'done', locals: {} } }) }
+      const created = source.createAgent('source', program)
+      source.state.agents.get(created.agentId)!.globalVersions.set(1, { facts: { durable: true } })
+      source.state.agents.get(created.agentId)!.latestGlobalVersion = 1
+      sourceStore.put(exportWarmStartSession(source.state, created.agentId))
+
+      const target = new PulseRuntime({ sessionStore: targetStore })
+      const copied = target.createAgent({ goal: 'target', program, warmStart: { sessionId: created.agentId, globalVersion: 1 } })
+      expect(target.state.agents.get(copied.agentId)?.globalVersions.get(0)).toEqual({ facts: { durable: true } })
+
+      const current = targetStore.getWithRevision(created.agentId)!
+      const stale = structuredClone(current.snapshot)
+      stale.agent.globalVersions = [[1, { facts: { stale: true } }]]
+      expect(sourceStore.putIfRevision(stale, current.revision)).toBe(current.revision + 1)
+      await expect(Promise.resolve().then(() => targetStore.putIfRevision(current.snapshot, current.revision))).rejects.toThrow('RUNTIME_SESSION_STORE_CONFLICT')
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('supports durable SQLite Session Store revisions', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-sqlite-session-store-'))
+    try {
+      const filePath = join(directory, 'sessions.db')
+      const first = new SqliteRuntimeSessionStore(filePath)
+      const snapshot = { schemaVersion: 1 as const, sessionId: 'session-sqlite', agent: { rootLaneId: 'lane-1', latestGlobalVersion: 0, globalVersions: [[0, { facts: ['x'] }] as [number, any]] }, visibleResultRefs: [], results: [] }
+      expect(first.putIfRevision(snapshot)).toBe(1)
+      const second = new SqliteRuntimeSessionStore(filePath)
+      expect(second.getWithRevision('session-sqlite')).toMatchObject({ revision: 1, snapshot })
+      const next = structuredClone(snapshot)
+      next.agent.globalVersions = [[1, { facts: ['y'] }]]
+      expect(second.putIfRevision(next, 1)).toBe(2)
+      expect(() => first.putIfRevision(snapshot, 1)).toThrow('RUNTIME_SESSION_STORE_CONFLICT')
+      first.close()
+      second.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
   })
 })

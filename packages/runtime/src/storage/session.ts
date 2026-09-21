@@ -1,3 +1,6 @@
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname } from 'node:path'
 import type { AgentRecord, ArtifactRecord, EffectRecord, JsonValue, LaneRecord, MergeProposal, PrivacyLabel, PrivacyMetadata, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord, ToolCallCorrelation } from '../core/types.js'
 import { privacyRank } from '../core/types.js'
 import { createRuntimeState } from '../core/types.js'
@@ -47,10 +50,182 @@ export interface RuntimeSessionStore {
   put(snapshot: RuntimeWarmStartSnapshot): void
 }
 
+export interface RuntimeSessionRevision {
+  snapshot: RuntimeWarmStartSnapshot
+  revision: number
+}
+
+export interface VersionedRuntimeSessionStore extends RuntimeSessionStore {
+  getWithRevision(sessionId: string): RuntimeSessionRevision | undefined
+  putIfRevision(snapshot: RuntimeWarmStartSnapshot, expectedRevision?: number): number
+}
+
 export class InMemoryRuntimeSessionStore implements RuntimeSessionStore {
-  private readonly snapshots = new Map<string, RuntimeWarmStartSnapshot>()
-  get(sessionId: string): RuntimeWarmStartSnapshot | undefined { const snapshot = this.snapshots.get(sessionId); return snapshot === undefined ? undefined : structuredClone(snapshot) }
-  put(snapshot: RuntimeWarmStartSnapshot): void { this.snapshots.set(snapshot.sessionId, structuredClone(snapshot)) }
+  private readonly snapshots = new Map<string, RuntimeSessionRevision>()
+  get(sessionId: string): RuntimeWarmStartSnapshot | undefined { return this.getWithRevision(sessionId)?.snapshot }
+  put(snapshot: RuntimeWarmStartSnapshot): void { this.putIfRevision(snapshot) }
+  getWithRevision(sessionId: string): RuntimeSessionRevision | undefined {
+    const entry = this.snapshots.get(sessionId)
+    return entry === undefined ? undefined : { revision: entry.revision, snapshot: structuredClone(entry.snapshot) }
+  }
+  putIfRevision(snapshot: RuntimeWarmStartSnapshot, expectedRevision?: number): number {
+    validateWarmStartSnapshot(snapshot)
+    const current = this.snapshots.get(snapshot.sessionId)
+    if (expectedRevision !== undefined && current?.revision !== expectedRevision) throw new Error('RUNTIME_SESSION_STORE_CONFLICT')
+    const revision = (current?.revision ?? 0) + 1
+    this.snapshots.set(snapshot.sessionId, { revision, snapshot: structuredClone(snapshot) })
+    return revision
+  }
+}
+
+interface FileRuntimeSessionEntry extends RuntimeSessionRevision { sessionId: string }
+interface FileRuntimeSessionEnvelope { schemaVersion: 1; sessions: FileRuntimeSessionEntry[] }
+
+function validateWarmStartSnapshot(snapshot: RuntimeWarmStartSnapshot): void {
+  if (!snapshot || snapshot.schemaVersion !== 1 || typeof snapshot.sessionId !== 'string' || snapshot.sessionId.length === 0 || !snapshot.agent || !Number.isInteger(snapshot.agent.latestGlobalVersion) || !Array.isArray(snapshot.agent.globalVersions) || !Array.isArray(snapshot.visibleResultRefs) || !Array.isArray(snapshot.results)) throw new Error('INVALID_RUNTIME_SESSION_SNAPSHOT')
+}
+
+function emptyRuntimeSessionEnvelope(): FileRuntimeSessionEnvelope { return { schemaVersion: 1, sessions: [] } }
+
+/** Durable synchronous Session Store for hosts that need createAgent() to remain synchronous. */
+export class FileRuntimeSessionStore implements VersionedRuntimeSessionStore {
+  constructor(readonly filePath: string) {}
+
+  get(sessionId: string): RuntimeWarmStartSnapshot | undefined { return this.getWithRevision(sessionId)?.snapshot }
+
+  getWithRevision(sessionId: string): RuntimeSessionRevision | undefined {
+    const entry = this.readEnvelope().sessions.find((candidate) => candidate.sessionId === sessionId)
+    return entry === undefined ? undefined : { revision: entry.revision, snapshot: structuredClone(entry.snapshot) }
+  }
+
+  put(snapshot: RuntimeWarmStartSnapshot): void { this.putIfRevision(snapshot) }
+
+  putIfRevision(snapshot: RuntimeWarmStartSnapshot, expectedRevision?: number): number {
+    validateWarmStartSnapshot(snapshot)
+    return this.withLock(() => {
+      const envelope = this.readEnvelope()
+      const current = envelope.sessions.find((candidate) => candidate.sessionId === snapshot.sessionId)
+      if (expectedRevision !== undefined && current?.revision !== expectedRevision) throw new Error('RUNTIME_SESSION_STORE_CONFLICT')
+      const revision = (current?.revision ?? 0) + 1
+      const next: FileRuntimeSessionEntry = { sessionId: snapshot.sessionId, revision, snapshot: structuredClone(snapshot) }
+      envelope.sessions = current === undefined ? [...envelope.sessions, next] : envelope.sessions.map((candidate) => candidate.sessionId === snapshot.sessionId ? next : candidate)
+      this.writeEnvelope(envelope)
+      return revision
+    })
+  }
+
+  private readEnvelope(): FileRuntimeSessionEnvelope {
+    try {
+      const parsed = JSON.parse(readFileSync(this.filePath, 'utf8')) as FileRuntimeSessionEnvelope
+      if (!parsed || parsed.schemaVersion !== 1 || !Array.isArray(parsed.sessions)) throw new Error('INVALID_RUNTIME_SESSION_STORE')
+      for (const entry of parsed.sessions) {
+        if (!entry || typeof entry.sessionId !== 'string' || !Number.isInteger(entry.revision) || entry.revision < 1) throw new Error('INVALID_RUNTIME_SESSION_STORE')
+        validateWarmStartSnapshot(entry.snapshot)
+      }
+      return parsed
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return emptyRuntimeSessionEnvelope()
+      if (cause instanceof Error && (cause.message === 'INVALID_RUNTIME_SESSION_STORE' || cause.message === 'INVALID_RUNTIME_SESSION_SNAPSHOT')) throw cause
+      throw new Error('INVALID_RUNTIME_SESSION_STORE')
+    }
+  }
+
+  private writeEnvelope(envelope: FileRuntimeSessionEnvelope): void {
+    mkdirSync(dirname(this.filePath), { recursive: true })
+    const temporaryPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${process.hrtime.bigint().toString()}`
+    let handle: number | undefined
+    try {
+      handle = openSync(temporaryPath, 'wx', 0o600)
+      writeFileSync(handle, JSON.stringify(envelope), 'utf8')
+      fsyncSync(handle)
+      closeSync(handle)
+      handle = undefined
+      renameSync(temporaryPath, this.filePath)
+    } finally {
+      if (handle !== undefined) closeSync(handle)
+      rmSync(temporaryPath, { force: true })
+    }
+  }
+
+  private withLock<T>(work: () => T): T {
+    mkdirSync(dirname(this.filePath), { recursive: true })
+    const lockPath = `${this.filePath}.lock`
+    const deadline = Date.now() + 30_000
+    const sleeper = new Int32Array(new SharedArrayBuffer(4))
+    let lock: number | undefined
+    while (lock === undefined) {
+      try { lock = openSync(lockPath, 'wx', 0o600) }
+      catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause
+        const lockStat = statSync(lockPath, { throwIfNoEntry: false })
+        if (lockStat && Date.now() - lockStat.mtimeMs > 30_000) { rmSync(lockPath, { force: true }); continue }
+        if (Date.now() >= deadline) throw new Error('RUNTIME_SESSION_STORE_LOCK_TIMEOUT')
+        Atomics.wait(sleeper, 0, 0, 5)
+      }
+    }
+    try { return work() } finally { closeSync(lock); rmSync(lockPath, { force: true }) }
+  }
+}
+
+interface RuntimeSessionSqliteStatement {
+  get(...params: unknown[]): Record<string, unknown> | undefined
+  run(...params: unknown[]): unknown
+}
+
+interface RuntimeSessionSqliteDatabase {
+  exec(sql: string): void
+  prepare(sql: string): RuntimeSessionSqliteStatement
+  close(): void
+}
+
+type RuntimeSessionSqliteDatabaseConstructor = new (path: string) => RuntimeSessionSqliteDatabase
+
+/** Durable SQLite Session Store with transaction-scoped revision CAS. */
+export class SqliteRuntimeSessionStore implements VersionedRuntimeSessionStore {
+  private database: RuntimeSessionSqliteDatabase | undefined
+  constructor(readonly filePath: string) {}
+
+  get(sessionId: string): RuntimeWarmStartSnapshot | undefined { return this.getWithRevision(sessionId)?.snapshot }
+
+  getWithRevision(sessionId: string): RuntimeSessionRevision | undefined {
+    const row = this.open().prepare('SELECT revision, snapshot FROM runtime_sessions WHERE session_id = ?').get(sessionId)
+    if (!row || typeof row.revision !== 'number' || typeof row.snapshot !== 'string') return undefined
+    const snapshot = JSON.parse(row.snapshot) as RuntimeWarmStartSnapshot
+    validateWarmStartSnapshot(snapshot)
+    return { revision: row.revision, snapshot: structuredClone(snapshot) }
+  }
+
+  put(snapshot: RuntimeWarmStartSnapshot): void { this.putIfRevision(snapshot) }
+
+  putIfRevision(snapshot: RuntimeWarmStartSnapshot, expectedRevision?: number): number {
+    validateWarmStartSnapshot(snapshot)
+    const database = this.open()
+    database.exec('BEGIN IMMEDIATE')
+    try {
+      const current = database.prepare('SELECT revision FROM runtime_sessions WHERE session_id = ?').get(snapshot.sessionId)
+      const currentRevision = current && typeof current.revision === 'number' ? current.revision : undefined
+      if (expectedRevision !== undefined && currentRevision !== expectedRevision) throw new Error('RUNTIME_SESSION_STORE_CONFLICT')
+      const revision = (currentRevision ?? 0) + 1
+      database.prepare('INSERT INTO runtime_sessions (session_id, revision, snapshot) VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET revision = excluded.revision, snapshot = excluded.snapshot').run(snapshot.sessionId, revision, JSON.stringify(snapshot))
+      database.exec('COMMIT')
+      return revision
+    } catch (cause) {
+      try { database.exec('ROLLBACK') } catch { /* transaction already closed */ }
+      throw cause
+    }
+  }
+
+  close(): void { this.database?.close(); this.database = undefined }
+
+  private open(): RuntimeSessionSqliteDatabase {
+    if (this.database) return this.database
+    mkdirSync(dirname(this.filePath), { recursive: true })
+    const require = createRequire(import.meta.url)
+    const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: RuntimeSessionSqliteDatabaseConstructor }
+    this.database = new DatabaseSync(this.filePath)
+    this.database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 30000; CREATE TABLE IF NOT EXISTS runtime_sessions (session_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, snapshot TEXT NOT NULL)')
+    return this.database
+  }
 }
 
 export interface SessionLogExportOptions { maxPrivacy?: PrivacyLabel }
