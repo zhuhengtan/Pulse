@@ -9,39 +9,38 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const streaming = params.onObservation !== undefined
     const tools = toolDefinitions(params.request)
     const body: Record<string, unknown> = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), ...((params.maxOutputTokens ?? this.config.maxOutputTokens) === undefined ? {} : { max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens }), messages: toMessages(params.request), ...(tools.length ? { tools, ...(this.config.toolChoice === undefined ? {} : { tool_choice: this.config.toolChoice }) } : {}), ...(params.outputSchema === undefined ? {} : { response_format: { type: 'json_schema', json_schema: { name: 'pulse_output', strict: true, schema: params.outputSchema } } }), ...(streaming ? { stream: true, stream_options: { include_usage: true } } : {}) }
-    let response: Response
     try {
-      response = await fetch(`${this.baseURL.replace(/\/$/, '')}/chat/completions`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}), ...(this.config.extraHeaders ?? {}) }, body: JSON.stringify(body) })
+      const response = await fetch(`${this.baseURL.replace(/\/$/, '')}/chat/completions`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}), ...(this.config.extraHeaders ?? {}) }, body: JSON.stringify(body) })
+      if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`)
+      if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeOpenAIResponse(await response.json())
+      const events = await consumeProviderSse(response)
+      const content: string[] = []
+      const refusals: string[] = []
+      const toolCalls = new Map<number, { id?: string; name: string; arguments: string }>()
+      let finishReason: string | undefined
+      let usage: any
+      for (const event of events) {
+        if (event.data === '[DONE]' || !event.data || typeof event.data !== 'object') continue
+        const choice = event.data.choices?.[0]
+        const delta = choice?.delta
+        if (typeof delta?.content === 'string') { content.push(delta.content); params.onObservation?.(delta.content) }
+        if (typeof delta?.refusal === 'string') { refusals.push(delta.refusal); params.onObservation?.(delta.refusal) }
+        if (typeof choice?.finish_reason === 'string') finishReason = choice.finish_reason
+        if (Array.isArray(delta?.tool_calls)) for (const call of delta.tool_calls) {
+          const index = Number(call.index ?? 0)
+          const current = toolCalls.get(index) ?? { name: '', arguments: '' }
+          if (typeof call.id === 'string') current.id = call.id
+          if (typeof call.function?.name === 'string') current.name += call.function.name
+          if (typeof call.function?.arguments === 'string') current.arguments += call.function.arguments
+          toolCalls.set(index, current)
+        }
+        if (event.data.usage !== undefined) usage = event.data.usage
+      }
+      return normalizeOpenAIResponse({ choices: [{ message: { content: content.join('') || null, ...(refusals.length ? { refusal: refusals.join('') } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => ({ id: call.id, function: { name: call.name, arguments: call.arguments } })) } : {}) }, finish_reason: finishReason ?? 'stop' }], ...(usage === undefined ? {} : { usage }) })
     } catch (cause) {
       if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
       throw cause
     }
-    if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`)
-    if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeOpenAIResponse(await response.json())
-    const events = await consumeProviderSse(response)
-    const content: string[] = []
-    const refusals: string[] = []
-    const toolCalls = new Map<number, { id?: string; name: string; arguments: string }>()
-    let finishReason: string | undefined
-    let usage: any
-    for (const event of events) {
-      if (event.data === '[DONE]' || !event.data || typeof event.data !== 'object') continue
-      const choice = event.data.choices?.[0]
-      const delta = choice?.delta
-      if (typeof delta?.content === 'string') { content.push(delta.content); params.onObservation?.(delta.content) }
-      if (typeof delta?.refusal === 'string') { refusals.push(delta.refusal); params.onObservation?.(delta.refusal) }
-      if (typeof choice?.finish_reason === 'string') finishReason = choice.finish_reason
-      if (Array.isArray(delta?.tool_calls)) for (const call of delta.tool_calls) {
-        const index = Number(call.index ?? 0)
-        const current = toolCalls.get(index) ?? { name: '', arguments: '' }
-        if (typeof call.id === 'string') current.id = call.id
-        if (typeof call.function?.name === 'string') current.name += call.function.name
-        if (typeof call.function?.arguments === 'string') current.arguments += call.function.arguments
-        toolCalls.set(index, current)
-      }
-      if (event.data.usage !== undefined) usage = event.data.usage
-    }
-    return normalizeOpenAIResponse({ choices: [{ message: { content: content.join('') || null, ...(refusals.length ? { refusal: refusals.join('') } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => ({ id: call.id, function: { name: call.name, arguments: call.arguments } })) } : {}) }, finish_reason: finishReason ?? 'stop' }], ...(usage === undefined ? {} : { usage }) })
   }
 }
 

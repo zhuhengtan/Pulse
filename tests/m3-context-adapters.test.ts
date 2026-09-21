@@ -90,6 +90,17 @@ describe('M1-3 context, models and adapters', () => {
     vi.unstubAllGlobals()
   })
 
+  it('normalizes provider stream cancellation into the same non-retryable adapter error', async () => {
+    const request = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'cancel-stream@1', instruction: 'cancel stream', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'instruction' as const, content: 'cancel stream' }], prefixHash: 'cancel-stream-prefix', projectionHash: 'cancel-stream-projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'cancel-stream@1', privacy: 'public' as const, privacyRefs: [] }
+    const controller = new AbortController()
+    const streamResponse = (): Response => ({ ok: true, headers: new Headers({ 'content-type': 'text/event-stream' }), body: { getReader: () => ({ read: async () => { controller.abort(); throw new Error('stream aborted') } }) } } as unknown as Response)
+    vi.stubGlobal('fetch', vi.fn(async () => streamResponse()))
+    await expect(new OpenAICompatibleAdapter('cancelled-stream-provider', { provider: 'openai', defaultModel: 'stream-model' }).executeAttempt({ request, signal: controller.signal, onObservation: () => undefined })).rejects.toMatchObject({ code: 'PROVIDER_REQUEST_CANCELLED', retryable: false })
+    controller.abort()
+    await expect(new AnthropicAdapter('cancelled-stream-anthropic', { provider: 'anthropic', defaultModel: 'stream-model' }).executeAttempt({ request, signal: controller.signal, onObservation: () => undefined })).rejects.toMatchObject({ code: 'PROVIDER_REQUEST_CANCELLED', retryable: false })
+    vi.unstubAllGlobals()
+  })
+
   it('streams provider text as observations but only normalizes complete tool arguments', async () => {
     const request = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'stream@1', instruction: 'stream', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'instruction' as const, content: 'stream' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'stream@1', privacy: 'public' as const, privacyRefs: [] }
     const fetchMock = vi.fn()

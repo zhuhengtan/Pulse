@@ -10,44 +10,43 @@ export class AnthropicAdapter implements ProviderAdapter {
     const streaming = params.onObservation !== undefined
     const tools = toolDefinitions(params.request)
     const body = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096, ...(system ? { system } : {}), messages, ...(tools.length ? { tools, ...(this.config.toolChoice === undefined ? {} : { tool_choice: anthropicToolChoice(this.config.toolChoice) }) } : {}), ...(params.outputSchema === undefined ? {} : { output_format: { type: 'json_schema', schema: params.outputSchema } }), ...(streaming ? { stream: true } : {}) }
-    let response: Response
     try {
-      response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
+      const response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
+      if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`)
+      if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeAnthropicResponse(await response.json())
+      const events = await consumeProviderSse(response)
+      const blocks: Array<Record<string, unknown>> = []
+      let stopReason: string | undefined
+      let usage: Record<string, unknown> = {}
+      for (const event of events) {
+        if (!event.data || typeof event.data !== 'object') continue
+        const data = event.data
+        if (event.event === 'message_start' && data.message?.usage && typeof data.message.usage === 'object') usage = { ...usage, ...data.message.usage }
+        if (event.event === 'content_block_start' && data.content_block && typeof data.content_block === 'object') blocks[Number(data.index ?? blocks.length)] = { ...data.content_block }
+        if (event.event === 'content_block_delta' && data.delta && typeof data.delta === 'object') {
+          const index = Number(data.index ?? 0)
+          const block = blocks[index] ?? {}
+          if (data.delta.type === 'text_delta' && typeof data.delta.text === 'string') { block.type = 'text'; block.text = `${typeof block.text === 'string' ? block.text : ''}${data.delta.text}`; params.onObservation?.(data.delta.text) }
+          if (data.delta.type === 'input_json_delta' && typeof data.delta.partial_json === 'string') block.inputJson = `${typeof block.inputJson === 'string' ? block.inputJson : ''}${data.delta.partial_json}`
+          blocks[index] = block
+        }
+        if (event.event === 'message_delta') {
+          if (typeof data.delta?.stop_reason === 'string') stopReason = data.delta.stop_reason
+          if (data.usage && typeof data.usage === 'object') usage = { ...usage, ...data.usage }
+        }
+      }
+      const content = blocks.filter(Boolean).map((block) => {
+        if (block.type === 'tool_use' && typeof block.inputJson === 'string') {
+          try { return { ...block, input: JSON.parse(block.inputJson) as unknown } }
+          catch { throw new Error('INVALID_TOOL_ARGUMENTS') }
+        }
+        return block
+      })
+      return normalizeAnthropicResponse({ content, stop_reason: stopReason, ...(Object.keys(usage).length ? { usage } : {}) })
     } catch (cause) {
       if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
       throw cause
     }
-    if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`)
-    if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeAnthropicResponse(await response.json())
-    const events = await consumeProviderSse(response)
-    const blocks: Array<Record<string, unknown>> = []
-    let stopReason: string | undefined
-    let usage: Record<string, unknown> = {}
-    for (const event of events) {
-      if (!event.data || typeof event.data !== 'object') continue
-      const data = event.data
-      if (event.event === 'message_start' && data.message?.usage && typeof data.message.usage === 'object') usage = { ...usage, ...data.message.usage }
-      if (event.event === 'content_block_start' && data.content_block && typeof data.content_block === 'object') blocks[Number(data.index ?? blocks.length)] = { ...data.content_block }
-      if (event.event === 'content_block_delta' && data.delta && typeof data.delta === 'object') {
-        const index = Number(data.index ?? 0)
-        const block = blocks[index] ?? {}
-        if (data.delta.type === 'text_delta' && typeof data.delta.text === 'string') { block.type = 'text'; block.text = `${typeof block.text === 'string' ? block.text : ''}${data.delta.text}`; params.onObservation?.(data.delta.text) }
-        if (data.delta.type === 'input_json_delta' && typeof data.delta.partial_json === 'string') block.inputJson = `${typeof block.inputJson === 'string' ? block.inputJson : ''}${data.delta.partial_json}`
-        blocks[index] = block
-      }
-      if (event.event === 'message_delta') {
-        if (typeof data.delta?.stop_reason === 'string') stopReason = data.delta.stop_reason
-        if (data.usage && typeof data.usage === 'object') usage = { ...usage, ...data.usage }
-      }
-    }
-    const content = blocks.filter(Boolean).map((block) => {
-      if (block.type === 'tool_use' && typeof block.inputJson === 'string') {
-        try { return { ...block, input: JSON.parse(block.inputJson) as unknown } }
-        catch { throw new Error('INVALID_TOOL_ARGUMENTS') }
-      }
-      return block
-    })
-    return normalizeAnthropicResponse({ content, stop_reason: stopReason, ...(Object.keys(usage).length ? { usage } : {}) })
   }
 }
 
