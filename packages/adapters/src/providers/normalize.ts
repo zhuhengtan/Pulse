@@ -9,7 +9,7 @@ export function providerHttpError(status: number): Error & { code: string; retry
 
 /** Read provider SSE frames without treating incomplete tool arguments as executable input. */
 export async function consumeProviderSse(response: Response): Promise<ProviderSseEvent[]> {
-  if (!response.body) throw new Error('PROVIDER_STREAM_BODY_MISSING')
+  if (!response.body) throw invalidProviderResponse('PROVIDER_STREAM_BODY_MISSING')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   const events: ProviderSseEvent[] = []
@@ -20,7 +20,7 @@ export async function consumeProviderSse(response: Response): Promise<ProviderSs
     if (dataLines.length === 0) { eventName = undefined; return }
     const raw = dataLines.join('\n')
     dataLines = []
-    const data = raw === '[DONE]' ? raw : (() => { try { return JSON.parse(raw) } catch { throw new Error('PROVIDER_STREAM_INVALID_JSON') } })()
+    const data = raw === '[DONE]' ? raw : (() => { try { return JSON.parse(raw) } catch { throw invalidProviderResponse('PROVIDER_STREAM_INVALID_JSON') } })()
     events.push({ ...(eventName === undefined ? {} : { event: eventName }), data })
     eventName = undefined
   }
@@ -159,6 +159,6 @@ function normalizeAnthropicFinishReason(raw: unknown, refusal: string | undefine
 function parseJson(value: unknown): unknown {
   if (value === undefined || value === null || value === '') return {}
   if (typeof value !== 'string') return value
-  try { return JSON.parse(value) } catch { throw new Error('INVALID_TOOL_ARGUMENTS') }
+  try { return JSON.parse(value) } catch { throw invalidProviderResponse('INVALID_TOOL_ARGUMENTS') }
 }
 function parseStructured(value: string): unknown | undefined { if (!value.trim()) return undefined; try { const parsed = JSON.parse(value); return parsed !== null && typeof parsed === 'object' ? parsed : undefined } catch { return undefined } }
