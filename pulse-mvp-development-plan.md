@@ -50,7 +50,7 @@
 | Cross-runtime Session Store warm start | 增加可注入 `RuntimeSessionStore`、文件/SQLite durable 实现与 revision CAS；File/SQLite `RuntimePersistenceBackend` 自动提供并绑定 Session Store；目标 Runtime 可按 `sessionId/globalVersion/relevanceRefs` 读取源快照，迁移选定 ResultRef、可见性、Privacy/Provenance，并推进结果 ID 水位 | `tests/warm-start.test.ts`、`tests/sqlite-persistence.test.ts` | `34067fd`、`257ab69`、`41f53ae` |
 | Runtime Storage 编排 | Runtime 自动登记 Event/Result/Snapshot/LLM Request，活动 Lane/Wait/未结算 Request/可见 ResultRef 幂等 pin；Step 提交前 clone 预检 hard limit | `tests/storage-policy.test.ts` | `43a9847` |
 | Privacy-aware log export | 新增独立 `exportRuntimeLog()` 审计出口；默认只导出 `public` 正文，`cloud_allowed`/`local_only` 和无法确认来源的事件只保留元数据/脱敏标记，不改变完整恢复快照 | `tests/storage-session.test.ts` | `1e385cc` |
-| Audit log sinks | `exportRuntimeLogTo()` 在隐私 ceiling 后写入宿主提供的 `FileRuntimeLogSink`（fsync JSONL）或 `HttpRuntimeLogSink`（超时、请求头、非 2xx 失败）；审计出口不改变恢复状态 | `tests/storage-session.test.ts` | `5dee352` |
+| Audit log sinks | `exportRuntimeLogTo()` 在隐私 ceiling 后写入宿主提供的 `FileRuntimeLogSink`（fsync JSONL）或 `HttpRuntimeLogSink`（超时、请求头、非 2xx 失败）；Runtime 可通过 `auditLogSink`/`auditLogPrivacy` 配置并调用 `exportAuditLog()`，审计出口不改变恢复状态 | `tests/storage-session.test.ts` | `5dee352`、`d504ddf` |
 | SQLite 持久化事务 | 提供 Node `node:sqlite` RuntimePersistenceBackend；WAL/FULL synchronous、单行快照、`BEGIN IMMEDIATE` 和 digest CAS 支持原子保存/恢复 | `tests/sqlite-persistence.test.ts` | `0372a5a` |
 | SQLite 持久化一体化 | RuntimePersistenceBackend 自动挂载 SQLite ResultStore、SnapshotStore 与 EventArchive；checkpoint 外置正文、事实归档和 static restore 可直接闭环；读穿外置正文后保留原始 digest 作为恢复续写 CAS 基线 | `tests/sqlite-persistence.test.ts` | `4ac21f3`、`3627c75` |
 | SQLite Result/Snapshot/EventArchive | 提供带 namespace 的 SQLite Result/Snapshot body store 与幂等冲突检测，以及按事件序号原子追加、范围读取的 SQLite EventArchive | `tests/sqlite-content-store.test.ts` | `b832588` |
@@ -212,7 +212,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、391/391 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、模型 fallback 的 `maxAttempts` 上限、Session `warmStart.sessionId`、跨 Runtime Session Store warm start、文件/SQLite Session Store durable 恢复与 revision CAS、Persistence Backend 自动绑定 Session Store、目标 Host Policy 的云端候选重算及 Runtime 配置 fail-closed、Manifest workspace/network 权限与动态 ToolSet fail-closed、external side-effect policy 的远程未知/取消/恢复处理、逻辑 ToolCall ID 稳定化、Action Decoder 工具隐私/来源传播、隐私感知日志导出、File/HTTP 审计日志 sink、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Watchdog 二级策略变更与推理能力提升、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、392/392 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、模型 fallback 的 `maxAttempts` 上限、Session `warmStart.sessionId`、跨 Runtime Session Store warm start、文件/SQLite Session Store durable 恢复与 revision CAS、Persistence Backend 自动绑定 Session Store、目标 Host Policy 的云端候选重算及 Runtime 配置 fail-closed、Manifest workspace/network 权限与动态 ToolSet fail-closed、external side-effect policy 的远程未知/取消/恢复处理、逻辑 ToolCall ID 稳定化、Action Decoder 工具隐私/来源传播、隐私感知日志导出、File/HTTP 审计日志 sink、Runtime `auditLogSink`/`auditLogPrivacy` 配置出口、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Watchdog 二级策略变更与推理能力提升、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -662,6 +662,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `b76de15`：Tool Manifest/Tool SDK 增加 workspace/network 权限声明；Runtime Registry 在发现、ToolSet 编译和执行 admission 统一按 Host 权限 fail-closed。
 - `d0f03ad`：补齐架构定义的 `external` side-effect policy；远程副作用工具在 SDK、Runtime、Adapter、Worker、取消和恢复路径统一进入 unknown/reconcile 语义。
 - `5dee352`：为隐私感知 Runtime 日志增加宿主可注入的 fsync JSONL 与 HTTP sink，并提供先裁剪后投递的 `exportRuntimeLogTo()`。
+- `d504ddf`：将审计日志 sink 和隐私 ceiling 接入 `RuntimeConfig`，提供 `exportAuditLog()` 宿主调用入口。
 - `a885019`：Progress Watchdog 只有在 Action 签名确实在窗口中重复时才升级；二级干预接受一次新策略并给 LLM 注入 `reasoning: high` floor，避免“换策略”被误判为重复而直接三级失败。
 - `b2de59b`：`createAgent` 补齐 priority/policy/limits 契约，Agent root Lane 使用声明优先级，`maxActiveLanes` 与 `timeoutMs` 真实生效并可恢复。
 - `0ce2a6e`：在开发模式为 Step/ErrorBoundary 增加运行时纯度守卫，阻断动态全局 IO/时间/随机源访问并保持生产模式兼容。
@@ -719,7 +720,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | --- | --- | --- |
 | 真实 Provider Live Smoke | 已执行但被鉴权阻塞 | 请求已到真实 HTTP endpoint，当前返回 `PROVIDER_HTTP_401`；需要有效凭证验证 token、取消、structured output 和 tool-call 往返 |
 | Runtime Storage pin/retention | 确定性代码、文件后端和 SQLite 事务后端已覆盖，生命周期自动落盘、完整性和 CAS、ResultStore/SnapshotStore 读穿已接入 | 自动 pin、hard-limit 预检、compact、backend 确认后的 `persisted` 标记、restore、完整性校验、共享快照 CAS、Result/Context Snapshot 正文外部化、外置索引 fail-closed，以及 Runtime `run()`/`shutdown()`/异步 Effect 结算自动持久化已有测试；多进程生产部署与外部数据库运维仍需验证 |
-| 隐私日志导出 | `exportRuntimeLog()` 已按 `public` / `cloud_allowed` / `local_only` ceiling 裁剪 Result、Artifact 和无法确认来源的事件 payload；`exportRuntimeLogTo()` 已提供 fsync JSONL 与 HTTP sink | 已有确定性导出、JSONL 落盘和 HTTP 请求/失败测试；外部审计系统的字段策略、密钥管理和生产脱敏规则仍需宿主配置 |
+| 隐私日志导出 | `exportRuntimeLog()` 已按 `public` / `cloud_allowed` / `local_only` ceiling 裁剪 Result、Artifact 和无法确认来源的事件 payload；`exportRuntimeLogTo()` 已提供 fsync JSONL 与 HTTP sink；Runtime 已支持 `auditLogSink`/`auditLogPrivacy` 配置 | 已有确定性导出、JSONL 落盘、HTTP 请求/失败和 Runtime 配置出口测试；外部审计系统的字段策略、密钥管理和生产脱敏规则仍需宿主配置 |
 | 崩溃恢复与副作用对账 | 进程级重启和本地真实写入对账已验证，远程副作用仍待验证 | 已补子进程 `SIGKILL` 后恢复、启动 quarantine、资源锁隔离，以及 `executionRef` 从 Tool 到 Runtime 的持久化链；仍缺真实远程写系统 reconcile 和生产环境的持久化事务边界证明 |
 | Provider 请求完整能力 | 确定性映射已覆盖，真实厂商仍待验证 | OpenAI-compatible/Anthropic 请求带 model、tool schema、structured schema，usage 已归一化；真实 endpoint 的字段兼容、计费口径、取消和 tool-call 往返仍需有效凭证 |
 | 跨运行时 Session warm start | 内存、文件和 SQLite `RuntimeSessionStore` 已支持跨 Runtime 的版本读取、ResultRef 迁移、可见性和 Privacy/Provenance 保留；Persistence Backend 自动绑定 Store；文件锁/原子替换与 SQLite 事务均有 revision CAS；目标 `ModelRouter` 已独立重算更严格的 Host Cloud Policy | 跨主机数据库运维、生产部署参数和真实多节点故障注入仍需接入与验证 |
