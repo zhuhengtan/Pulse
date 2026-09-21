@@ -10,7 +10,13 @@ export class AnthropicAdapter implements ProviderAdapter {
     const streaming = params.onObservation !== undefined
     const tools = toolDefinitions(params.request)
     const body = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096, ...(system ? { system } : {}), messages, ...(tools.length ? { tools, ...(this.config.toolChoice === undefined ? {} : { tool_choice: anthropicToolChoice(this.config.toolChoice) }) } : {}), ...(params.outputSchema === undefined ? {} : { output_format: { type: 'json_schema', schema: params.outputSchema } }), ...(streaming ? { stream: true } : {}) }
-    const response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
+    let response: Response
+    try {
+      response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
+    } catch (cause) {
+      if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
+      throw cause
+    }
     if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`)
     if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeAnthropicResponse(await response.json())
     const events = await consumeProviderSse(response)

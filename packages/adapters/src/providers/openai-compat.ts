@@ -9,7 +9,13 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const streaming = params.onObservation !== undefined
     const tools = toolDefinitions(params.request)
     const body: Record<string, unknown> = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), ...((params.maxOutputTokens ?? this.config.maxOutputTokens) === undefined ? {} : { max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens }), messages: toMessages(params.request), ...(tools.length ? { tools, ...(this.config.toolChoice === undefined ? {} : { tool_choice: this.config.toolChoice }) } : {}), ...(params.outputSchema === undefined ? {} : { response_format: { type: 'json_schema', json_schema: { name: 'pulse_output', strict: true, schema: params.outputSchema } } }), ...(streaming ? { stream: true, stream_options: { include_usage: true } } : {}) }
-    const response = await fetch(`${this.baseURL.replace(/\/$/, '')}/chat/completions`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}), ...(this.config.extraHeaders ?? {}) }, body: JSON.stringify(body) })
+    let response: Response
+    try {
+      response = await fetch(`${this.baseURL.replace(/\/$/, '')}/chat/completions`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}), ...(this.config.extraHeaders ?? {}) }, body: JSON.stringify(body) })
+    } catch (cause) {
+      if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
+      throw cause
+    }
     if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`)
     if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeOpenAIResponse(await response.json())
     const events = await consumeProviderSse(response)

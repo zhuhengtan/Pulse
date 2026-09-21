@@ -80,6 +80,16 @@ describe('M1-3 context, models and adapters', () => {
     vi.unstubAllGlobals()
   })
 
+  it('normalizes provider fetch cancellation into a non-retryable adapter error', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const cancellationRequest = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'cancel@1', instruction: 'cancel', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'instruction' as const, content: 'cancel' }], prefixHash: 'cancel-prefix', projectionHash: 'cancel-projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'cancel@1', privacy: 'public' as const, privacyRefs: [] }
+    vi.stubGlobal('fetch', vi.fn(async () => { throw Object.assign(new Error('aborted by fetch'), { name: 'AbortError' }) }))
+    await expect(new OpenAICompatibleAdapter('cancelled-provider', { provider: 'openai' }).executeAttempt({ request: cancellationRequest, signal: controller.signal })).rejects.toMatchObject({ code: 'PROVIDER_REQUEST_CANCELLED', retryable: false })
+    await expect(new AnthropicAdapter('cancelled-anthropic', { provider: 'anthropic' }).executeAttempt({ request: cancellationRequest, signal: controller.signal })).rejects.toMatchObject({ code: 'PROVIDER_REQUEST_CANCELLED', retryable: false })
+    vi.unstubAllGlobals()
+  })
+
   it('streams provider text as observations but only normalizes complete tool arguments', async () => {
     const request = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'stream@1', instruction: 'stream', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'instruction' as const, content: 'stream' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'stream@1', privacy: 'public' as const, privacyRefs: [] }
     const fetchMock = vi.fn()
