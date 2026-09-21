@@ -192,6 +192,22 @@ describe('Tool SDK to Runtime Effect host', () => {
     await expect(executor(effect, new AbortController().signal)).rejects.toThrowError(expect.objectContaining({ code: 'TOOL_OUTPUT_SCHEMA_VIOLATION' }))
   })
 
+  it('validates low-level executionRef input before deriving a remote identity', () => {
+    const definition = {
+      manifest: { name: 'ref-input', version: '1', description: 'validated execution reference', inputSchema: { type: 'object', required: ['value'], properties: { value: { type: 'string' } }, additionalProperties: false }, outputSchema: {}, concurrencyClass: 'tool' as const, locks: [], supportsAbortSignal: true, sideEffectPolicy: 'external' as const, retrySafety: 'unsafe' as const, defaultTimeoutMs: 1000,
+      },
+      executionRef: (input: { value: string }) => `ref:${input.value}`,
+      execute: () => ({ ok: true }),
+    }
+    const context = { toolCallId: '', effectId: '', attemptId: '', agentId: '', laneId: '', signal: new AbortController().signal, emit: () => {} }
+    const runtimeRegistry = new PulseRuntime().tools
+    runtimeRegistry.register(definition)
+    expect(() => runtimeRegistry.executionRef('ref-input', { value: 1 }, context)).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_INPUT' }))
+    const sdkRegistry = new ToolRegistry()
+    sdkRegistry.register(definition as never)
+    expect(() => sdkRegistry.executionRef('ref-input', { value: 1 }, context)).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_INPUT' }))
+  })
+
   it('compiles dynamic tool discovery into a versioned Context ToolSet', async () => {
     const registry = new ToolRegistry()
     registry.register(defineTool({ name: 'read-file', description: 'read a file', tags: ['filesystem', 'read'], input: z.object({ path: z.string() }), output: z.object({ text: z.string() }), execute: () => ({ text: '' }) }))

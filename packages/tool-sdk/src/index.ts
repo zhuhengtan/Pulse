@@ -209,7 +209,7 @@ export class ToolRegistry {
   executionRef(name: string, input: unknown, context: ToolContext): JsonValue | undefined {
     const definition = this.require(name)
     if (!definition.executionRef) return undefined
-    return definition.executionRef(input, context)
+    return definition.executionRef(this.validateInput(name, input), context)
   }
   resolveResources(name: string, input: unknown): ResourceClaim[] {
     const definition = this.require(name)

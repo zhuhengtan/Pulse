@@ -206,7 +206,7 @@ export class RuntimeToolRegistry {
 
   executionRef(name: string, input: unknown, context: RuntimeToolContext): JsonValue | undefined {
     const definition = this.require(name)
-    return definition.executionRef?.(input, context)
+    return definition.executionRef?.(this.validateInput(name, input), context)
   }
 
   resolveResources(name: string, input: unknown): ResourceLockSpec[] {
