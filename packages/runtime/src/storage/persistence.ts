@@ -1,11 +1,12 @@
 import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { parseContextSnapshotRef, provenanceRefId, provenanceRefKind } from '../core/types.js'
 import type { DataRef, JsonValue, ProvenanceRef, ResultRecord, RuntimeEvent, RuntimeState } from '../core/types.js'
 import { stableSerialize } from '../context/builder.js'
-import { FactInbox, type FactInboxSnapshot } from '../core/inbox.js'
+import { FactInbox, factInboxDedupeDigest, type FactInboxDedupeArchiveBatch, type FactInboxDedupeArchiveWriter, type FactInboxDedupeEntry, type FactInboxSnapshot } from '../core/inbox.js'
 import { exportRuntimeState, FileRuntimeSessionStore, importRuntimeState, SqliteRuntimeSessionStore, type RuntimeSessionStore, type SessionSnapshot } from './session.js'
 import { EffectOutbox, type OutboxSnapshot } from './outbox.js'
 import { MutationLog, type MutationLogSnapshot } from './mutation-log.js'
@@ -357,6 +358,174 @@ export class FileRuntimeEventArchive implements RuntimeEventArchive {
   }
 }
 
+interface FactInboxDedupeArchiveEnvelope {
+  schemaVersion: 1
+  archiveId: string
+  watermark: number
+  entries: FactInboxDedupeEntry[]
+  digest: string
+}
+
+const FILE_FACT_INBOX_DEDUPE_ARCHIVE_ID = 'pulse.fact-inbox-dedupe.file.v1'
+const SQLITE_FACT_INBOX_DEDUPE_ARCHIVE_ID = 'pulse.fact-inbox-dedupe.sqlite.v1'
+
+function sortedDedupeEntries(entries: Iterable<[number, string]>): FactInboxDedupeEntry[] {
+  return [...entries].sort(([left], [right]) => left - right).map(([receivedSeq, eventId]) => ({ eventId, receivedSeq }))
+}
+
+function validateDedupeEntries(entries: readonly FactInboxDedupeEntry[], archiveId: string, watermark: number, digest: string): Map<number, string> {
+  if (!Number.isInteger(watermark) || watermark < 0 || typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)) throw new Error('INVALID_FACT_INBOX_DEDUPE_ARCHIVE')
+  const bySeq = new Map<number, string>()
+  const ids = new Set<string>()
+  for (const entry of entries) {
+    if (!entry || typeof entry.eventId !== 'string' || entry.eventId.length === 0 || !Number.isInteger(entry.receivedSeq) || entry.receivedSeq < 1 || entry.receivedSeq > watermark || bySeq.has(entry.receivedSeq) || ids.has(entry.eventId)) throw new Error('INVALID_FACT_INBOX_DEDUPE_ARCHIVE')
+    bySeq.set(entry.receivedSeq, entry.eventId)
+    ids.add(entry.eventId)
+  }
+  if (bySeq.size !== watermark || [...bySeq.keys()].some((seq, index) => seq !== index + 1) || factInboxDedupeDigest(sortedDedupeEntries(bySeq.entries())) !== digest) throw new Error(`INVALID_FACT_INBOX_DEDUPE_ARCHIVE:${archiveId}`)
+  return bySeq
+}
+
+function mergeDedupeBatch(existing: Map<number, string>, archiveId: string, batch: FactInboxDedupeArchiveBatch): Map<number, string> {
+  if (!batch || batch.schemaVersion !== 1 || batch.archiveId !== archiveId || !Number.isInteger(batch.through) || batch.through < 1 || !Array.isArray(batch.entries) || batch.entries.length === 0) throw new Error('INVALID_FACT_INBOX_DEDUPE_ARCHIVE_BATCH')
+  const sorted = [...batch.entries].sort((left, right) => left.receivedSeq - right.receivedSeq)
+  if (sorted.some((entry, index) => !entry || typeof entry.eventId !== 'string' || entry.eventId.length === 0 || !Number.isInteger(entry.receivedSeq) || entry.receivedSeq !== sorted[0]!.receivedSeq + index || (index > 0 && entry.eventId === sorted[index - 1]!.eventId))) throw new Error('INVALID_FACT_INBOX_DEDUPE_ARCHIVE_BATCH')
+  if (sorted[0]!.receivedSeq > existing.size + 1 || sorted.at(-1)!.receivedSeq !== batch.through) throw new Error('INVALID_FACT_INBOX_DEDUPE_ARCHIVE_BATCH')
+  const merged = new Map(existing)
+  for (const entry of sorted) {
+    const previous = merged.get(entry.receivedSeq)
+    if (previous !== undefined && previous !== entry.eventId) throw new Error('RUNTIME_FACT_INBOX_DEDUPE_CONFLICT')
+    merged.set(entry.receivedSeq, entry.eventId)
+  }
+  if (merged.size < batch.through || [...Array(batch.through)].some((_, index) => !merged.has(index + 1))) throw new Error('FACT_INBOX_DEDUPE_LEDGER_INCOMPLETE')
+  const prefix = new Map([...merged.entries()].filter(([receivedSeq]) => receivedSeq <= batch.through))
+  if (factInboxDedupeDigest(sortedDedupeEntries(prefix.entries())) !== batch.ledgerDigest) throw new Error('INVALID_FACT_INBOX_DEDUPE_ARCHIVE_BATCH')
+  return merged
+}
+
+/** Durable file-backed membership archive for compacted FactInbox ids. */
+export class FileRuntimeFactInboxDedupeArchive implements FactInboxDedupeArchiveWriter {
+  readonly archiveId = FILE_FACT_INBOX_DEDUPE_ARCHIVE_ID
+  private readonly filePath: string
+  private entries = new Map<number, string>()
+
+  constructor(readonly directory: string) {
+    this.filePath = join(directory, 'fact-inbox-dedupe.json')
+    try {
+      const value = JSON.parse(readFileSync(this.filePath, 'utf8')) as FactInboxDedupeArchiveEnvelope
+      if (!value || value.schemaVersion !== 1 || value.archiveId !== this.archiveId) throw new Error('INVALID_FACT_INBOX_DEDUPE_ARCHIVE')
+      this.entries = validateDedupeEntries(value.entries, this.archiveId, value.watermark, value.digest)
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') {
+        if (cause instanceof Error && cause.message.startsWith('INVALID_FACT_INBOX_DEDUPE_ARCHIVE')) throw cause
+        throw new Error('INVALID_FACT_INBOX_DEDUPE_ARCHIVE')
+      }
+    }
+  }
+
+  get watermark(): number { return this.entries.size }
+  contains(eventId: string, receivedSeq?: number): boolean {
+    if (receivedSeq !== undefined) return this.entries.get(receivedSeq) === eventId
+    return [...this.entries.values()].includes(eventId)
+  }
+  digestThrough(through: number): string {
+    if (!Number.isInteger(through) || through < 0 || through > this.watermark) return ''
+    return factInboxDedupeDigest(sortedDedupeEntries([...this.entries.entries()].filter(([receivedSeq]) => receivedSeq <= through)))
+  }
+  async append(batch: FactInboxDedupeArchiveBatch): Promise<void> {
+    await mkdir(this.directory, { recursive: true })
+    await this.withLock(async () => {
+      const current = new Map(this.entries)
+      const merged = mergeDedupeBatch(current, this.archiveId, batch)
+      if (merged.size === current.size && [...merged.entries()].every(([seq, eventId]) => current.get(seq) === eventId)) return
+      const envelope: FactInboxDedupeArchiveEnvelope = { schemaVersion: 1, archiveId: this.archiveId, watermark: merged.size, entries: sortedDedupeEntries(merged.entries()), digest: factInboxDedupeDigest(sortedDedupeEntries(merged.entries())) }
+      const temporaryPath = `${this.filePath}.tmp-${process.pid}-${process.hrtime.bigint().toString()}`
+      let handle: Awaited<ReturnType<typeof open>> | undefined
+      try {
+        handle = await open(temporaryPath, 'wx', 0o600)
+        await handle.writeFile(JSON.stringify(envelope), 'utf8')
+        await handle.sync()
+        await handle.close()
+        handle = undefined
+        await rename(temporaryPath, this.filePath)
+        this.entries = merged
+      } finally {
+        if (handle) await handle.close().catch(() => undefined)
+        await rm(temporaryPath, { force: true }).catch(() => undefined)
+      }
+    })
+  }
+  private async withLock<T>(work: () => Promise<T>): Promise<T> {
+    const lockPath = `${this.filePath}.lock`
+    const deadline = Date.now() + 30_000
+    let lock: Awaited<ReturnType<typeof open>> | undefined
+    while (lock === undefined) {
+      try { lock = await open(lockPath, 'wx', 0o600) }
+      catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause
+        const lockStat = await stat(lockPath).catch(() => undefined)
+        if (lockStat && Date.now() - lockStat.mtimeMs > 30_000) { await rm(lockPath, { force: true }); continue }
+        if (Date.now() >= deadline) throw new Error('RUNTIME_FACT_INBOX_DEDUPE_LOCK_TIMEOUT')
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+    }
+    try { return await work() } finally { await lock.close().catch(() => undefined); await rm(lockPath, { force: true }).catch(() => undefined) }
+  }
+}
+
+/** Durable SQLite membership archive for compacted FactInbox ids. */
+export class SqliteRuntimeFactInboxDedupeArchive implements FactInboxDedupeArchiveWriter {
+  readonly archiveId = SQLITE_FACT_INBOX_DEDUPE_ARCHIVE_ID
+  private database: SqliteDatabase | undefined
+  private tail: Promise<void> = Promise.resolve()
+  private entries = new Map<number, string>()
+
+  constructor(readonly filePath: string) {
+    mkdirSync(dirname(filePath), { recursive: true })
+    const rows = this.open().prepare('SELECT received_seq, event_id FROM runtime_fact_inbox_dedupe ORDER BY received_seq').all()
+    this.entries = validateDedupeEntries(rows.map((row) => ({ receivedSeq: Number(row.received_seq), eventId: String(row.event_id) })), this.archiveId, rows.length, factInboxDedupeDigest(rows.map((row) => ({ receivedSeq: Number(row.received_seq), eventId: String(row.event_id) }))))
+  }
+  get watermark(): number { return this.entries.size }
+  contains(eventId: string, receivedSeq?: number): boolean {
+    if (receivedSeq !== undefined) return this.entries.get(receivedSeq) === eventId
+    return [...this.entries.values()].includes(eventId)
+  }
+  digestThrough(through: number): string {
+    if (!Number.isInteger(through) || through < 0 || through > this.watermark) return ''
+    return factInboxDedupeDigest(sortedDedupeEntries([...this.entries.entries()].filter(([receivedSeq]) => receivedSeq <= through)))
+  }
+  async append(batch: FactInboxDedupeArchiveBatch): Promise<void> {
+    await this.enqueue(async () => {
+      const merged = mergeDedupeBatch(this.entries, this.archiveId, batch)
+      if (merged.size === this.entries.size && [...merged.entries()].every(([seq, eventId]) => this.entries.get(seq) === eventId)) return
+      const database = this.open()
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        for (const [receivedSeq, eventId] of [...merged.entries()].filter(([seq]) => !this.entries.has(seq))) database.prepare('INSERT INTO runtime_fact_inbox_dedupe (received_seq, event_id) VALUES (?, ?)').run(receivedSeq, eventId)
+        database.exec('COMMIT')
+        this.entries = merged
+      } catch (cause) {
+        try { database.exec('ROLLBACK') } catch { /* transaction already closed */ }
+        throw cause
+      }
+    })
+  }
+  async close(): Promise<void> { await this.enqueue(async () => { this.database?.close(); this.database = undefined }) }
+  private open(): SqliteDatabase {
+    if (this.database) return this.database
+    const require = createRequire(import.meta.url)
+    const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: SqliteDatabaseConstructor }
+    this.database = new DatabaseSync(this.filePath)
+    this.database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 30000; CREATE TABLE IF NOT EXISTS runtime_fact_inbox_dedupe (received_seq INTEGER PRIMARY KEY, event_id TEXT NOT NULL UNIQUE)')
+    return this.database
+  }
+  private enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const operation = this.tail.then(work, work)
+    this.tail = operation.then(() => undefined, () => undefined)
+    return operation
+  }
+}
+
 export interface RuntimePersistenceBackend {
   load(): Promise<RuntimePersistenceSnapshot | undefined>
   save(snapshot: RuntimePersistenceSnapshot, expectedDigest?: string): Promise<void>
@@ -364,6 +533,7 @@ export interface RuntimePersistenceBackend {
   resultStore?: RuntimeResultStore
   snapshotStore?: RuntimeSnapshotStore
   eventArchive?: RuntimeEventArchive
+  factInboxDedupeArchive?: FactInboxDedupeArchiveWriter
 }
 
 function hasTarget(state: SessionSnapshot['state'], target: { kind: string; id: string }): boolean {
@@ -502,7 +672,11 @@ export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceS
 export class FileRuntimePersistenceBackend implements RuntimePersistenceBackend {
   private pending: Promise<void> = Promise.resolve()
   readonly sessionStore: FileRuntimeSessionStore
-  constructor(readonly filePath: string) { this.sessionStore = new FileRuntimeSessionStore(`${filePath}.sessions.json`) }
+  readonly factInboxDedupeArchive: FileRuntimeFactInboxDedupeArchive
+  constructor(readonly filePath: string) {
+    this.sessionStore = new FileRuntimeSessionStore(`${filePath}.sessions.json`)
+    this.factInboxDedupeArchive = new FileRuntimeFactInboxDedupeArchive(`${filePath}.fact-inbox-dedupe`)
+  }
   async load(): Promise<RuntimePersistenceSnapshot | undefined> {
     try { return JSON.parse(await readFile(this.filePath, 'utf8')) as RuntimePersistenceSnapshot }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
@@ -557,6 +731,7 @@ export class FileRuntimePersistenceBackend implements RuntimePersistenceBackend 
 
 interface SqliteStatement {
   get(...params: unknown[]): Record<string, unknown> | undefined
+  all(...params: unknown[]): Record<string, unknown>[]
   run(...params: unknown[]): unknown
 }
 
@@ -575,12 +750,14 @@ export class SqliteRuntimePersistenceBackend implements RuntimePersistenceBacken
   readonly resultStore: SqliteRuntimeContentStore
   readonly snapshotStore: SqliteRuntimeContentStore
   readonly eventArchive: SqliteRuntimeEventArchive
+  readonly factInboxDedupeArchive: SqliteRuntimeFactInboxDedupeArchive
   readonly sessionStore: SqliteRuntimeSessionStore
 
   constructor(readonly filePath: string) {
     this.resultStore = new SqliteRuntimeContentStore(filePath, 'result')
     this.snapshotStore = new SqliteRuntimeContentStore(filePath, 'snapshot')
     this.eventArchive = new SqliteRuntimeEventArchive(filePath)
+    this.factInboxDedupeArchive = new SqliteRuntimeFactInboxDedupeArchive(filePath)
     this.sessionStore = new SqliteRuntimeSessionStore(filePath)
   }
 
@@ -618,7 +795,7 @@ export class SqliteRuntimePersistenceBackend implements RuntimePersistenceBacken
       this.database?.close()
       this.database = undefined
     })
-    await Promise.all([this.resultStore.close(), this.snapshotStore.close(), this.eventArchive.close()])
+    await Promise.all([this.resultStore.close(), this.snapshotStore.close(), this.eventArchive.close(), this.factInboxDedupeArchive.close()])
     this.sessionStore.close()
   }
 

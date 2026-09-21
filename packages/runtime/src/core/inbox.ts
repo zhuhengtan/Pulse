@@ -31,6 +31,15 @@ export interface FactInboxDedupeArchive {
   digestThrough(through: number): string
 }
 
+/**
+ * A durable archive writer used by checkpoint implementations. Membership
+ * reads stay synchronous for the FactInbox hot path; checkpoint writes are
+ * explicitly asynchronous and must be durable before compaction is acked.
+ */
+export interface FactInboxDedupeArchiveWriter extends FactInboxDedupeArchive {
+  append(batch: FactInboxDedupeArchiveBatch): Promise<void>
+}
+
 export interface FactInboxDedupeArchiveBatch {
   schemaVersion: 1
   archiveId: string
@@ -74,10 +83,17 @@ export class FactInbox<T extends JsonValue = JsonValue> {
   private readonly seen = new Map<string, number | undefined>()
   private nextSeq = 1
   private archivedThrough = 0
-  private readonly dedupeArchive: FactInboxDedupeArchive | undefined
+  private dedupeArchive: FactInboxDedupeArchive | undefined
 
   constructor(options: { dedupeArchive?: FactInboxDedupeArchive } = {}) {
     this.dedupeArchive = options.dedupeArchive
+  }
+
+  /** Attach a backend-provided archive before the first compaction. */
+  attachDedupeArchive(archive: FactInboxDedupeArchive): void {
+    if (this.dedupeArchive !== undefined && this.dedupeArchive !== archive) throw new Error('FACT_INBOX_DEDUPE_ARCHIVE_MISMATCH')
+    if (this.archivedThrough > 0) throw new Error('FACT_INBOX_DEDUPE_ARCHIVE_ALREADY_COMPACTED')
+    this.dedupeArchive = archive
   }
 
   enqueue(fact: T, eventId: string): FactEnvelope<T> | undefined {

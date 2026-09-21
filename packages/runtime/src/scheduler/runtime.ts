@@ -8,7 +8,7 @@ import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
 import { assertProgramPure, withPureStepGuard } from '../dsl/program.js'
 import type { ProgramRef } from '../dsl/templates.js'
-import { FactInbox, ObservationInbox, type FactInboxDedupeArchive, type FactInboxDedupeArchiveBatch } from '../core/inbox.js'
+import { FactInbox, ObservationInbox, type FactInboxDedupeArchive, type FactInboxDedupeArchiveBatch, type FactInboxDedupeArchiveWriter } from '../core/inbox.js'
 import { observeProgress, type ProgressObservation } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
 import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, externalizeRuntimeSnapshotBodies, hydrateRuntimeResultBodies, hydrateRuntimeSnapshotBodies, importRuntimePersistence, withRuntimePersistenceIntegrity, type RuntimePersistenceBackend, type RuntimePersistenceCompatibility, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
@@ -454,6 +454,7 @@ export class PulseRuntime {
   private readonly lockBlocked = new Set<string>()
   private readonly grantedLockReleases = new Map<string, () => void>()
   private readonly executor: EffectExecutor
+  private factInboxDedupeArchive: FactInboxDedupeArchive | undefined
   private readonly customExecutor: boolean
   private enqueueSeq = 1
   private readonly maxSteps: number
@@ -482,7 +483,11 @@ export class PulseRuntime {
     const snapshot = withSnapshots === undefined || backend.resultStore === undefined ? withSnapshots : await hydrateRuntimeResultBodies(withSnapshots, backend.resultStore)
     if (snapshot?.resultBodies === 'external' && backend.resultStore === undefined) throw new Error('RUNTIME_RESULT_STORE_REQUIRED')
     const restoredConfig = snapshot === undefined ? config : { ...config, persistence: snapshot, ...(config.persistenceBackend === undefined || loaded?.integrity?.digest === undefined ? {} : { persistenceExpectedDigest: loaded.integrity.digest }) }
-    return new PulseRuntime(restoredConfig.sessionStore === undefined && backend.sessionStore === undefined ? restoredConfig : { ...restoredConfig, ...(restoredConfig.sessionStore === undefined ? { sessionStore: backend.sessionStore } : {}) })
+    return new PulseRuntime({
+      ...restoredConfig,
+      ...(restoredConfig.factInboxDedupeArchive === undefined && backend.factInboxDedupeArchive !== undefined ? { factInboxDedupeArchive: backend.factInboxDedupeArchive } : {}),
+      ...(restoredConfig.sessionStore === undefined && backend.sessionStore !== undefined ? { sessionStore: backend.sessionStore } : {}),
+    })
   }
 
   constructor(config: RuntimeConfig = {}) {
@@ -505,9 +510,10 @@ export class PulseRuntime {
     this.persistenceDigest = config.persistenceExpectedDigest ?? config.persistence?.integrity?.digest
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
+    this.factInboxDedupeArchive = config.factInboxDedupeArchive ?? config.persistenceBackend?.factInboxDedupeArchive
     this.factInbox = restored?.factInbox === undefined
-      ? new FactInbox<RuntimeFact>(config.factInboxDedupeArchive === undefined ? {} : { dedupeArchive: config.factInboxDedupeArchive })
-      : FactInbox.fromSnapshot<RuntimeFact>(restored.factInbox as unknown as import('../core/inbox.js').FactInboxSnapshot<RuntimeFact>, config.factInboxDedupeArchive === undefined ? {} : { dedupeArchive: config.factInboxDedupeArchive })
+      ? new FactInbox<RuntimeFact>(this.factInboxDedupeArchive === undefined ? {} : { dedupeArchive: this.factInboxDedupeArchive })
+      : FactInbox.fromSnapshot<RuntimeFact>(restored.factInbox as unknown as import('../core/inbox.js').FactInboxSnapshot<RuntimeFact>, this.factInboxDedupeArchive === undefined ? {} : { dedupeArchive: this.factInboxDedupeArchive })
     for (const program of config.programs ?? []) this.register(program)
     this.recoveryCompatibility = restored?.compatibility
     const restoredCommandIds = this.factInbox.snapshot().seen.map((eventId) => /^host-command-(\d+)$/.exec(eventId)?.[1]).filter((value): value is string => value !== undefined).map(Number)
@@ -754,6 +760,25 @@ export class PulseRuntime {
   async checkpoint(backend: RuntimePersistenceBackend, options: { compactEventsThrough?: number } = {}): Promise<RuntimePersistenceSnapshot> {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
+    const factArchive = backend.factInboxDedupeArchive
+    if (factArchive !== undefined && this.factInboxDedupeArchive === undefined) {
+      this.factInbox.attachDedupeArchive(factArchive)
+      this.factInboxDedupeArchive = factArchive
+    }
+    if (factArchive !== undefined && factArchive !== this.factInboxDedupeArchive) throw new Error('FACT_INBOX_DEDUPE_ARCHIVE_MISMATCH')
+    if (factArchive !== undefined) {
+      const inboxSnapshot = this.factInbox.snapshot()
+      const through = inboxSnapshot.nextSeq - 1
+      if (through > this.factInbox.dedupeWatermark) {
+        const batch = this.factInbox.createDedupeArchiveBatch(through)
+        await (factArchive as FactInboxDedupeArchiveWriter).append(batch)
+        if (this.factInbox.size === 0) {
+          // The enclosing checkpoint persists the compacted inbox atomically;
+          // avoid scheduling a second background save while that write is open.
+          this.factInbox.compactDedupeThrough(batch)
+        }
+      }
+    }
     const eventWatermark = options.compactEventsThrough ?? this.state.events.at(-1)?.seq
     if (backend.eventArchive !== undefined && eventWatermark !== undefined) {
       const fromSeq = (this.state.eventsCompactedThrough ?? 0) + 1
