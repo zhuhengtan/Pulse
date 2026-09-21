@@ -40,6 +40,27 @@ describe('M1-2 scheduler and lifecycle primitives', () => {
     expect(writerGranted).toBe(true)
   })
 
+  it('bounds shared locks released ahead of a queued writer', async () => {
+    const locks = new ResourceLockManager(1)
+    const releaseInitial = await locks.acquire('workspace', 'exclusive', 'initial')
+    const firstReader = locks.acquire('workspace', 'shared', 'reader-1')
+    const secondReader = locks.acquire('workspace', 'shared', 'reader-2')
+    const writer = locks.acquire('workspace', 'exclusive', 'writer')
+    let writerGranted = false
+    void writer.then(() => { writerGranted = true })
+
+    releaseInitial()
+    const releaseFirstReader = await firstReader
+    await Promise.resolve()
+    expect(writerGranted).toBe(false)
+
+    releaseFirstReader()
+    const releaseWriter = await writer
+    expect(writerGranted).toBe(true)
+    releaseWriter()
+    await expect(secondReader).resolves.toEqual(expect.any(Function))
+  })
+
   it('propagates owner cancellation only to descendants', () => {
     const root = new CancellationScope('root')
     const child = new CancellationScope('child', root)

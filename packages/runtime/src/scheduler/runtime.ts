@@ -52,6 +52,7 @@ export type HostCommand =
 
 export interface RuntimeConfig {
   maxLaneStepsPerTick?: number
+  maxTickMs?: number
   agingIntervalMs?: number
   agingCap?: number
   maxTotalLanes?: number
@@ -69,6 +70,7 @@ export interface RuntimeConfig {
   watchdogRepeatedActionThreshold?: number
   maxPreparingLLMs?: number
   maxPreparedLLMs?: number
+  writerPreferenceBound?: number
   maxObservationEntries?: number
   maxObservationBytes?: number
   clock?: RuntimeClock
@@ -207,6 +209,7 @@ function validateWarmStartShape(value: unknown): asserts value is WarmStartSpec 
 }
 function validateRuntimeConfig(config: RuntimeConfig): void {
   optionalNonNegativeInteger(config.maxLaneStepsPerTick, 'maxLaneStepsPerTick')
+  optionalNonNegativeNumber(config.maxTickMs, 'maxTickMs')
   if (config.agingIntervalMs !== undefined && (!Number.isFinite(config.agingIntervalMs) || config.agingIntervalMs <= 0)) invalidConfig('agingIntervalMs')
   if (config.agingCap !== undefined && (config.agingCap !== Number.POSITIVE_INFINITY && (typeof config.agingCap !== 'number' || !Number.isFinite(config.agingCap) || config.agingCap < 0))) invalidConfig('agingCap')
   optionalNonNegativeInteger(config.maxTotalLanes, 'maxTotalLanes')
@@ -224,6 +227,7 @@ function validateRuntimeConfig(config: RuntimeConfig): void {
   optionalNonNegativeInteger(config.watchdogRepeatedActionThreshold, 'watchdogRepeatedActionThreshold')
   optionalNonNegativeInteger(config.maxPreparingLLMs, 'maxPreparingLLMs')
   optionalNonNegativeInteger(config.maxPreparedLLMs, 'maxPreparedLLMs')
+  optionalNonNegativeInteger(config.writerPreferenceBound, 'writerPreferenceBound')
   optionalNonNegativeInteger(config.maxObservationEntries, 'maxObservationEntries')
   optionalNonNegativeInteger(config.maxObservationBytes, 'maxObservationBytes')
   if (config.trustedSanitizerIds !== undefined && (!Array.isArray(config.trustedSanitizerIds) || new Set(config.trustedSanitizerIds).size !== config.trustedSanitizerIds.length || config.trustedSanitizerIds.some((id) => typeof id !== 'string' || id.length === 0))) invalidConfig('trustedSanitizerIds')
@@ -374,7 +378,7 @@ export class PulseRuntime {
   readonly ready: ReadyQueue
   readonly quarantine = new QuarantineScope()
   readonly priorityInheritance = new PriorityInheritance()
-  readonly resourceLocks = new ResourceLockManager()
+  readonly resourceLocks: ResourceLockManager
   readonly storagePolicy: SessionStoragePolicy
   readonly factInbox: FactInbox<HostCommand>
   readonly observationInbox: ObservationInbox
@@ -390,6 +394,7 @@ export class PulseRuntime {
   private readonly customExecutor: boolean
   private enqueueSeq = 1
   private readonly maxSteps: number
+  private readonly maxTickMs: number
   private readonly maxConsecutiveControlErrors: number
   private readonly maxRuntimeAt?: number
   private readonly watchdogNoProgressThreshold: number
@@ -429,6 +434,7 @@ export class PulseRuntime {
     if (config.trustedSanitizerIds) for (const sanitizerId of config.trustedSanitizerIds) this.state.trustedSanitizerIds.add(sanitizerId)
     this.sessionId = config.sessionId ?? 'session-local'
     this.storagePolicy = restored?.storagePolicy ?? new SessionStoragePolicy(config.storagePolicy)
+    this.resourceLocks = new ResourceLockManager(config.writerPreferenceBound ?? 1)
     this.persistenceDigest = config.persistenceExpectedDigest ?? config.persistence?.integrity?.digest
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
@@ -472,6 +478,7 @@ export class PulseRuntime {
       for (const wait of this.state.waits.values()) if (wait.state === 'pending') this.scheduleWaitDeadline(wait)
     }
     this.maxSteps = config.maxLaneStepsPerTick ?? 32
+    this.maxTickMs = config.maxTickMs ?? Number.POSITIVE_INFINITY
     this.maxConsecutiveControlErrors = config.maxConsecutiveControlErrors ?? 2
     this.watchdogNoProgressThreshold = config.watchdogNoProgressThreshold ?? 3
     this.watchdogRepeatedActionThreshold = config.watchdogRepeatedActionThreshold ?? 3
@@ -972,6 +979,7 @@ export class PulseRuntime {
   tick(): number {
     this.assertRecoveryPrograms()
     this.state.now = this.clock.now()
+    const tickStartedAt = performance.now()
     while (this.factInbox.size > 0) {
       const before = this.factInbox.snapshot()
       const envelope = this.factInbox.drain(1)[0]
@@ -1018,7 +1026,7 @@ export class PulseRuntime {
     for (const agent of this.state.agents.values()) if (agent.state === 'running' && agent.deadlineAt !== undefined && this.state.now >= agent.deadlineAt) this.cancelAgent(agent.id, 'TIMEOUT')
     for (const timer of this.clock.timers.due(this.state.now)) timer.callback()
     let progressed = 0
-    while (progressed < this.maxSteps) {
+    while (progressed < this.maxSteps && (progressed === 0 || performance.now() - tickStartedAt < this.maxTickMs)) {
       const laneId = this.ready.dequeue(this.state.now)
       if (!laneId) break
       const lane = this.state.lanes.get(laneId)

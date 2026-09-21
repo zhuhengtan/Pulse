@@ -1,15 +1,19 @@
 export type LockMode = 'shared' | 'exclusive'
-interface Request { id: string; mode: LockMode; seq: number; resolve: (release: () => void) => void; reject: (error: Error) => void }
+interface Request { id: string; mode: LockMode; seq: number; aheadSharedIds?: string[]; resolve: (release: () => void) => void; reject: (error: Error) => void }
 
 export class ResourceLockManager {
   private readonly holders = new Map<string, Map<string, LockMode>>()
   private readonly queues = new Map<string, Request[]>()
   private seq = 0
 
+  constructor(readonly writerPreferenceBound = Number.POSITIVE_INFINITY) {
+    if (writerPreferenceBound !== Number.POSITIVE_INFINITY && (!Number.isInteger(writerPreferenceBound) || writerPreferenceBound < 0)) throw new Error('INVALID_WRITER_PREFERENCE_BOUND')
+  }
+
   acquire(resource: string, mode: LockMode, requestId = `lock-${++this.seq}`): Promise<() => void> {
     return new Promise((resolve, reject) => {
-      const request = { id: requestId, mode, seq: this.seq, resolve, reject }
       const queue = this.queues.get(resource) ?? []
+      const request = { id: requestId, mode, seq: ++this.seq, ...(mode === 'exclusive' ? { aheadSharedIds: queue.filter((queued) => queued.mode === 'shared').map((queued) => queued.id) } : {}), resolve, reject }
       queue.push(request)
       this.queues.set(resource, queue)
       this.drain(resource)
@@ -43,8 +47,13 @@ export class ResourceLockManager {
     if (request.mode === 'shared' && [...holders.values()].some((mode) => mode === 'exclusive')) return false
     if (request.mode === 'exclusive' && holders.size) return false
     const queue = this.queues.get(resource) ?? []
-    if (request.mode === 'shared' && queue.some((queued) => queued.seq < request.seq && queued.mode === 'exclusive')) return false
-    return queue[0]?.id === request.id || request.mode === 'shared' && !queue.slice(0, queue.findIndex((queued) => queued.id === request.id)).some((queued) => queued.mode === 'exclusive')
+    const index = queue.findIndex((queued) => queued.id === request.id)
+    if (index < 0) return false
+    if (request.mode === 'exclusive') return !queue.slice(0, index).some((queued) => queued.mode === 'exclusive')
+    const firstWriter = queue.find((queued) => queued.mode === 'exclusive')
+    if (firstWriter === undefined) return true
+    const sharedOrdinal = firstWriter.aheadSharedIds?.indexOf(request.id) ?? -1
+    return sharedOrdinal >= 0 && sharedOrdinal < this.writerPreferenceBound
   }
 
   private drain(resource: string): void {

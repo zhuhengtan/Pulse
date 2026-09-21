@@ -179,6 +179,8 @@ describe('runtime control boundaries', () => {
 
   it('rejects invalid RuntimeConfig values before constructing scheduler state', () => {
     expect(() => new PulseRuntime({ maxLaneStepsPerTick: -1 })).toThrow('INVALID_RUNTIME_CONFIG:maxLaneStepsPerTick')
+    expect(() => new PulseRuntime({ maxTickMs: -1 })).toThrow('INVALID_RUNTIME_CONFIG:maxTickMs')
+    expect(() => new PulseRuntime({ writerPreferenceBound: -1 })).toThrow('INVALID_RUNTIME_CONFIG:writerPreferenceBound')
     expect(() => new PulseRuntime({ agingIntervalMs: 0 })).toThrow('INVALID_RUNTIME_CONFIG:agingIntervalMs')
     expect(() => new PulseRuntime({ historySoftTokens: 100, historyHardTokens: 99 })).toThrow('INVALID_RUNTIME_CONFIG:historyHardTokens')
     expect(() => new PulseRuntime({ maxRunning: { tool: Number.NaN } })).toThrow('INVALID_RUNTIME_CONFIG:maxRunning.tool')
@@ -200,6 +202,22 @@ describe('runtime control boundaries', () => {
     const runtime = new PulseRuntime({ clock })
     expect(runtime.clock).toBe(clock)
     expect(runtime.clock.now()).toBe(0)
+  })
+
+  it('limits a tick by a soft time slice without interrupting the first Step', () => {
+    let calls = 0
+    const runtime = new PulseRuntime({ maxTickMs: 0, maxLaneStepsPerTick: 32 })
+    const program: LaneProgram = { id: 'tick-time-slice', version: '1', step: () => {
+      calls++
+      return calls < 3 ? { actions: [], next: point('tick-time-slice', `step-${calls}`) } : { actions: [{ type: 'complete', result: { calls } }], next: point('tick-time-slice', 'done') }
+    } }
+    runtime.createAgent('tick time slice', program)
+    expect(runtime.tick()).toBe(1)
+    expect(calls).toBe(1)
+    expect(runtime.tick()).toBe(1)
+    expect(calls).toBe(2)
+    expect(runtime.tick()).toBe(1)
+    expect(calls).toBe(3)
   })
 
   it('waits for a real monotonic timer instead of fast-forwarding it', async () => {
