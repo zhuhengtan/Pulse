@@ -213,9 +213,19 @@ function annotateAction(action: RuntimeAction, derivedFrom: ProvenanceRef[]): Ru
   return action
 }
 
-const RESULT_READER = Symbol('pulse.dsl.internal.result-reader')
-type InternalStepContext<TState> = StepContext<TState> & { [RESULT_READER]: (ref: ResultRef) => JsonValue | undefined }
-function readResult(ctx: StepContext, ref: ResultRef): JsonValue | undefined { return (ctx as InternalStepContext<JsonValue>)[RESULT_READER](ref) }
+const resultReaders = new WeakMap<object, (ref: ResultRef) => JsonValue | undefined>()
+function readResult(ctx: StepContext, ref: ResultRef): JsonValue | undefined { return resultReaders.get(ctx)?.(ref) }
+
+function waitFailure(ctx: StepContext): RuntimeError | undefined {
+  const resolution = ctx.resumeInput?.type === 'wait' ? ctx.resumeInput.resolution : undefined
+  if (!resolution) return undefined
+  let dependencyError: RuntimeError | undefined
+  for (const dependency of Object.values(resolution.dependencies)) {
+    if (dependency.state !== 'pending' && dependency.outcome.status === 'failed' && dependency.outcome.error && !(dependency.outcome.rejectedOutputRefs?.length)) { dependencyError = dependency.outcome.error; break }
+  }
+  if (dependencyError) return dependencyError
+  return resolution.status === 'unsatisfied' ? resolution.error ?? { code: 'WAIT_UNSATISFIED', message: 'Wait did not reach its required outcome.' } : undefined
+}
 
 function sdkLocals(locals: JsonValue): Record<string, JsonValue> {
   if (!locals || typeof locals !== 'object' || Array.isArray(locals)) return {}
@@ -230,7 +240,7 @@ function ordinaryLocals(locals: JsonValue): Record<string, JsonValue> {
 function makeContext<TState>(context: LaneStepContext, initialState: TState): { ctx: StepContext<TState>; getDelta: () => ContextDelta | undefined; getActions: () => RuntimeAction[]; getDerivedRefs: () => ProvenanceRef[]; getAdoptImmediately: () => boolean } {
   const draft = clone(initialState)
   const readonlyState = deepFreeze(clone(initialState))
-  const draftProxy = draft && typeof draft === 'object' && !Array.isArray(draft) ? createDraftProxy(draft as Record<string, unknown>) : undefined
+  const draftProxy = draft && typeof draft === 'object' ? createDraftProxy(draft as Record<string, unknown>) : undefined
   let delta: ContextDelta | undefined
   const actions: RuntimeAction[] = []
   const derivedRefs = new Set<ProvenanceRef>()
@@ -257,7 +267,6 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
   }))
   const resultMeta = (ref: ResultRef): ResultMeta | undefined => {
     const result = resultVisible(context, ref) ? context.state.results.get(ref) : undefined
-    if (result) derivedRefs.add(ref)
     if (!result) return undefined
     const value = result.value ?? null
     return {
@@ -274,9 +283,9 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
     const ops = typeof value.ops === 'function' ? (() => { if (!globalDraftProxy) throw Object.assign(new Error('GLOBAL_DRAFT_REQUIRES_OBJECT'), { code: 'GLOBAL_DRAFT_REQUIRES_OBJECT', retryable: false }); value.ops(globalDraftProxy.draft as Record<string, JsonValue>); return globalDraftProxy.changes().ops as ContextOp[] })() : value.ops
     delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, sourceLaneId: context.lane.id, ops: clone(ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal }
   }
-  const ctx: InternalStepContext<TState> = {
+  const ctx: StepContext<TState> = {
     lane: context.lane, goal: context.lane.goal, global, globalVersion, laneState: readonlyState, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}),
-    [RESULT_READER]: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return findResult(context, ref) },
+
     results: { meta: resultMeta, summary: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return resultMeta(ref)?.summary } },
     mergeProposals: [...context.state.mergeProposals.values()].filter((proposal) => proposal.agentId === context.lane.agentId).map((proposal) => { for (const ref of proposal.delta.derivedFrom ?? []) derivedRefs.add(ref); return clone(proposal) }),
     mutateLane: (mutator) => { mutator((draftProxy?.draft ?? draft) as TState); const changes = draftProxy?.changes(); delta = { target: 'lane', baseVersion: context.lane.context.version, ops: changes?.ops.map((op) => op.op === 'set' ? { op: 'set' as const, path: op.path, value: asJson(op.value) } : op.op === 'append' ? { op: 'append' as const, path: op.path, value: asJson(op.value) } : { op: 'remove' as const, path: op.path }) ?? [] } },
@@ -287,6 +296,7 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
     proposeCancel: (laneId, reason) => actions.push({ type: 'propose_cancel', laneId, reason }),
     trace: (message) => { context.observe?.({ type: 'trace', data: typeof message === 'string' ? message : asJson(message) }) },
   }
+  resultReaders.set(ctx, (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return findResult(context, ref) })
   return { ctx, getDelta: () => delta, getActions: () => actions, getDerivedRefs: () => [...derivedRefs], getAdoptImmediately: () => adoptImmediately }
 }
 
@@ -320,12 +330,16 @@ export class StepBuilder<TState = JsonValue> {
     this.handlers.set(name, (ctx) => {
       const instruction = boundedInstruction(typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: scalarProjection(ctx.laneState) as ScalarProjection<TState> }))
       const inputs = options.inputs?.(ctx) ?? {}
-      const inputResultRefs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? []), ...(inputs.artifacts ?? [])])]
+      const inputResultRefs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? [])])]
+      const inputArtifactRefs = [...new Set(inputs.artifacts ?? [])]
       const outputSchema = zodJsonSchema(options.schema)
-      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction, inputs: asJson(inputs), outputSchema, requirements: { ...requirements, structuredOutput: { schema: outputSchema } }, ...(options.executionPolicy === undefined ? {} : { executionPolicy: options.executionPolicy }) }), ...(retryPolicy === undefined ? {} : { retryPolicy }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode, locals: writeSdk(ctx, { [correctionRoundKey]: 0, [inputKey]: asJson(inputs) }) }
+      const derivedFrom: ProvenanceRef[] = [...inputResultRefs, ...inputArtifactRefs.map((ref) => ({ kind: 'artifact' as const, ref }))]
+      return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-llm`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction, inputs: asJson(inputs), outputSchema, requirements: { ...requirements, structuredOutput: { schema: outputSchema } }, ...(options.executionPolicy === undefined ? {} : { executionPolicy: options.executionPolicy }) }), ...(retryPolicy === undefined ? {} : { retryPolicy }), ...(derivedFrom.length ? { derivedFrom } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode, locals: writeSdk(ctx, { [correctionRoundKey]: 0, [inputKey]: asJson(inputs) }) }
     })
     this.handlers.set(submit, (ctx) => ({ next: decode }))
     this.handlers.set(decode, (ctx) => {
+      const dependencyError = waitFailure(ctx)
+      if (dependencyError) return fail(dependencyError, ctx)
       const input = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).find((dependency) => dependency.state !== 'pending') : undefined
       const ref = input?.state === 'settled' ? input.outcome.resultRef : undefined
       const rejectedRef = input?.state === 'settled' ? input.outcome.rejectedOutputRefs?.[0] : undefined
@@ -336,10 +350,12 @@ export class StepBuilder<TState = JsonValue> {
         const currentRound = typeof sdk[correctionRoundKey] === 'number' && Number.isInteger(sdk[correctionRoundKey]) ? sdk[correctionRoundKey] as number : 0
         if (currentRound >= maxCorrectionRounds) return fail({ code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Structured LLM output did not match the declared schema.', retryable: false, details: parsed.error.message }, ctx)
         const originalInputs = sdk[inputKey] && typeof sdk[inputKey] === 'object' && !Array.isArray(sdk[inputKey]) ? sdk[inputKey] as Record<string, JsonValue> : {}
-        const inputResultRefs = [...new Set([...(Array.isArray(originalInputs.results) ? originalInputs.results.filter((item): item is string => typeof item === 'string') : []), ...(Array.isArray(originalInputs.findings) ? originalInputs.findings.filter((item): item is string => typeof item === 'string') : []), ...(Array.isArray(originalInputs.artifacts) ? originalInputs.artifacts.filter((item): item is string => typeof item === 'string') : []), ...(rejectedRef ? [rejectedRef] : [])])]
+        const inputResultRefs = [...new Set([...(Array.isArray(originalInputs.results) ? originalInputs.results.filter((item): item is string => typeof item === 'string') : []), ...(Array.isArray(originalInputs.findings) ? originalInputs.findings.filter((item): item is string => typeof item === 'string') : []), ...(rejectedRef ? [rejectedRef] : [])])]
+        const inputArtifactRefs = [...new Set(Array.isArray(originalInputs.artifacts) ? originalInputs.artifacts.filter((item): item is string => typeof item === 'string') : [])]
+        const correctionDerivedFrom: ProvenanceRef[] = [...inputResultRefs, ...inputArtifactRefs.map((ref) => ({ kind: 'artifact' as const, ref }))]
         const outputSchema = zodJsonSchema(options.schema)
         const correctionInstruction = boundedInstruction(`${typeof options.instruction === 'string' ? options.instruction : 'structured'}\nValidation errors: ${parsed.error.message}`)
-        return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-correct-${currentRound + 1}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction: correctionInstruction, inputs: { ...originalInputs, rejectedOutputRefs: inputResultRefs }, outputSchema, requirements: { ...requirements, structuredOutput: { schema: outputSchema } }, ...(options.executionPolicy === undefined ? {} : { executionPolicy: options.executionPolicy }) }), ...(retryPolicy === undefined ? {} : { retryPolicy }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode, locals: writeSdk(ctx, { [correctionRoundKey]: currentRound + 1, [inputKey]: { ...originalInputs, rejectedOutputRefs: inputResultRefs } }) }
+        return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-correct-${currentRound + 1}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task, instruction: correctionInstruction, inputs: { ...originalInputs, rejectedOutputRefs: inputResultRefs }, outputSchema, requirements: { ...requirements, structuredOutput: { schema: outputSchema } }, ...(options.executionPolicy === undefined ? {} : { executionPolicy: options.executionPolicy }) }), ...(retryPolicy === undefined ? {} : { retryPolicy }), ...(correctionDerivedFrom.length ? { derivedFrom: correctionDerivedFrom } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode, locals: writeSdk(ctx, { [correctionRoundKey]: currentRound + 1, [inputKey]: { ...originalInputs, rejectedOutputRefs: inputResultRefs } }) }
       }
       const next = options.onSuccess(parsed.data, ctx)
       return { next }
@@ -348,13 +364,15 @@ export class StepBuilder<TState = JsonValue> {
   }
   addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; onFinish: ((resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>) | { text: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; structured?: { schema: ZodTypeAny; onParsed: (data: unknown, ctx: StepContext<TState>) => NextStepTarget<TState> } }; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
     const readTurns = (ctx: StepContext<TState>): number => { const sdk = sdkLocals(ctx.lane.resume.locals); const turn = sdk[`${name}Turns`]; return typeof turn === 'number' && Number.isInteger(turn) && turn >= 0 ? turn : 0 }
-    const writeTurns = (ctx: StepContext<TState>, turns: number): JsonValue => { const locals = ctx.lane.resume.locals; const base = locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}; return { ...base, $sdk: { ...sdkLocals(locals), [`${name}Turns`]: turns } } }
+    const inputKey = `${name}Inputs`
+    const readInputs = (ctx: StepContext<TState>): StepInputs => { const value = sdkLocals(ctx.lane.resume.locals)[inputKey]; return value && typeof value === 'object' && !Array.isArray(value) ? value as StepInputs : {} }
+    const writeTurns = (ctx: StepContext<TState>, turns: number, inputs: StepInputs = readInputs(ctx)): JsonValue => { const locals = ctx.lane.resume.locals; const base = locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}; return { ...base, $sdk: { ...sdkLocals(locals), [`${name}Turns`]: turns, [inputKey]: asJson(inputs) } } }
     const resultRefFromWait = (ctx: StepContext<TState>): ResultRef | undefined => { const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined; return dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined }
     const resultRefsFromWait = (ctx: StepContext<TState>): ResultRef[] => ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef ? [dependency.outcome.resultRef] : []) : []
     const instruction = (ctx: StepContext<TState>): string => boundedInstruction(typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: scalarProjection(ctx.laneState) as ScalarProjection<TState> }))
-    const submitModel = (ctx: StepContext<TState>, turn: number, resultRefs: ResultRef[] = [], artifactRefs: string[] = []): LaneStepOutput => { const dataRefs = [...new Set([...resultRefs, ...artifactRefs])]; const requirements = { ...(options.requirements ?? {}), ...(options.toolAllow === undefined ? {} : { toolCalling: true }) }; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { ...(resultRefs.length ? { results: resultRefs } : {}), ...(artifactRefs.length ? { artifacts: artifactRefs } : {}) }, turn, ...(options.outputSchema === undefined ? {} : { outputSchema: zodJsonSchema(options.outputSchema) }), ...(Object.keys(requirements).length ? { requirements } : {}) }), ...(dataRefs.length ? { derivedFrom: dataRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn) }, locals: writeTurns(ctx, turn) } }
-    this.handlers.set(name, (ctx) => { const turn = readTurns(ctx) + 1; const inputs = options.inputs?.(ctx) ?? {}; const refs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? [])])]; const output = submitModel(ctx, turn, refs, [...new Set(inputs.artifacts ?? [])]); return { ...output, next: `${name}:decode` } })
-    this.handlers.set(`${name}:tools`, (ctx) => { const turn = readTurns(ctx); const refs = resultRefsFromWait(ctx); return { ...submitModel(ctx, turn + 1, refs), next: `${name}:decode` } })
+    const submitModel = (ctx: StepContext<TState>, turn: number, inputs: StepInputs = {}): LaneStepOutput => { const resultRefs = [...new Set(inputs.results ?? [])]; const findingRefs = [...new Set(inputs.findings ?? [])]; const artifactRefs = [...new Set(inputs.artifacts ?? [])]; const dataRefs: ProvenanceRef[] = [...resultRefs, ...findingRefs, ...artifactRefs.map((ref) => ({ kind: 'artifact' as const, ref }))]; const requirements = { ...(options.requirements ?? {}), ...(options.toolAllow === undefined ? {} : { toolCalling: true }) }; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { ...(resultRefs.length ? { results: resultRefs } : {}), ...(findingRefs.length ? { findings: findingRefs } : {}), ...(artifactRefs.length ? { artifacts: artifactRefs } : {}), ...(inputs.events?.length ? { events: [...new Set(inputs.events)] } : {}) }, turn, ...(options.outputSchema === undefined ? {} : { outputSchema: zodJsonSchema(options.outputSchema) }), ...(Object.keys(requirements).length ? { requirements } : {}) }), ...(dataRefs.length ? { derivedFrom: dataRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn, inputs) }, locals: writeTurns(ctx, turn, inputs) } }
+    this.handlers.set(name, (ctx) => { const turn = readTurns(ctx) + 1; const inputs = options.inputs?.(ctx) ?? {}; const output = submitModel(ctx, turn, inputs); return { ...output, next: `${name}:decode` } })
+    this.handlers.set(`${name}:tools`, (ctx) => { const turn = readTurns(ctx); const previous = readInputs(ctx); const inputs = { ...previous, results: [...new Set([...(previous.results ?? []), ...resultRefsFromWait(ctx)])] }; return { ...submitModel(ctx, turn + 1, inputs), next: `${name}:decode` } })
     this.handlers.set(`${name}:decode`, (ctx) => {
       const turns = readTurns(ctx)
       const ref = resultRefFromWait(ctx)
@@ -363,6 +381,8 @@ export class StepBuilder<TState = JsonValue> {
       const finishReason = record?.finishReason
       const toolCalls = Array.isArray(record?.toolCalls) ? record.toolCalls : []
       const fail = (runtimeError: RuntimeError): { next: NextStepTarget<TState> } => options.onError ? { next: options.onError(runtimeError, ctx) } : (() => { const error = Object.assign(new Error(runtimeError.message), runtimeError); throw error })()
+      const dependencyError = waitFailure(ctx)
+      if (dependencyError) return fail(dependencyError)
       const maxTurns = Math.max(1, Math.floor(options.maxTurns ?? 10))
       const maxTurnsReached = (): { next: NextStepTarget<TState> } => options.onMaxTurns ? { next: options.onMaxTurns(ctx) } : fail({ code: 'MAX_TURNS_REACHED', message: `ReAct loop ${name} reached its maximum of ${maxTurns} turns.`, retryable: false })
       if (finishReason === 'tool_calls') {
@@ -441,6 +461,8 @@ export class StepBuilder<TState = JsonValue> {
       const ref = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined
       const value = ref ? readResult(ctx, ref) : undefined
       const fail = (runtimeError: RuntimeError): { next: NextStepTarget<TState> } => options.onError ? { next: options.onError(runtimeError, ctx) } : (() => { throw Object.assign(new Error(runtimeError.message), runtimeError) })()
+      const dependencyError = waitFailure(ctx)
+      if (dependencyError) return fail(dependencyError)
       if (options.schema) {
         const parsed = options.schema.safeParse(value)
         if (!parsed.success) return fail({ code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Merge result did not match schema.', retryable: false, details: parsed.error.message })

@@ -65,11 +65,11 @@ describe('result privacy provenance', () => {
 
   it('derives DSL terminal results and effect results from synchronous ResultRef reads', async () => {
     const terminalProgram = defineLaneProgram({ id: 'dsl-provenance-terminal', version: '1' }, (builder) => {
-      builder.addStep('start', (ctx) => { ctx.results.meta('source'); return { actions: [{ type: 'complete', result: { ok: true } }], next: 'start' } })
+      builder.addStep('start', (ctx) => { ctx.results.summary('source'); return { actions: [{ type: 'complete', result: { ok: true } }], next: 'start' } })
     })
     const terminalRuntime = new PulseRuntime()
     const terminal = terminalRuntime.createAgent('terminal', terminalProgram)
-    terminalRuntime.state.results.set('source', { id: 'source', value: { secret: true }, privacy: 'local_only', derivedFrom: [] })
+    terminalRuntime.state.results.set('source', { id: 'source', value: { secret: true }, summary: { secret: true }, privacy: 'local_only', derivedFrom: [] })
     terminalRuntime.state.lanes.get(terminal.laneId)!.visibleResultRefs!.add('source')
     expect((await terminalRuntime.start(terminal.agentId).outcome()).status).toBe('succeeded')
     const terminalResult = [...terminalRuntime.state.results.values()].find((result) => result.id !== 'source')
@@ -77,17 +77,31 @@ describe('result privacy provenance', () => {
     expect(terminalResult?.derivedFrom).toContain('source')
 
     const effectProgram = defineLaneProgram({ id: 'dsl-provenance-effect', version: '1' }, (builder) => {
-      builder.addStep('start', (ctx) => { ctx.results.meta('source'); return { actions: [{ type: 'submit_effects', effects: [{ key: 'derived-work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'finish' } })
+      builder.addStep('start', (ctx) => { ctx.results.summary('source'); return { actions: [{ type: 'submit_effects', effects: [{ key: 'derived-work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'finish' } })
       builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' }))
     })
     const effectRuntime = new PulseRuntime({ effectExecutor: async () => ({ value: { answer: 1 }, privacy: 'public' }) })
     const effectAgent = effectRuntime.createAgent('effect', effectProgram)
-    effectRuntime.state.results.set('source', { id: 'source', value: { secret: true }, privacy: 'local_only', derivedFrom: [] })
+    effectRuntime.state.results.set('source', { id: 'source', value: { secret: true }, summary: { secret: true }, privacy: 'local_only', derivedFrom: [] })
     effectRuntime.state.lanes.get(effectAgent.laneId)!.visibleResultRefs!.add('source')
     expect((await effectRuntime.start(effectAgent.agentId).outcome()).status).toBe('succeeded')
     const effectResult = [...effectRuntime.state.results.values()].find((result) => result.effectId === 'effect-1')
     expect(effectResult).toMatchObject({ privacy: 'local_only' })
     expect(effectResult?.derivedFrom).toContain('source')
+  })
+
+  it('keeps metadata-only ResultRef reads out of derived provenance', async () => {
+    const program = defineLaneProgram({ id: 'dsl-provenance-meta-only', version: '1' }, (builder) => {
+      builder.addStep('start', (ctx) => { expect(ctx.results.meta('source')?.privacy).toBe('local_only'); return { actions: [{ type: 'complete', result: { ok: true } }], next: 'start' } })
+    })
+    const runtime = new PulseRuntime()
+    const created = runtime.createAgent('metadata only', program)
+    runtime.state.results.set('source', { id: 'source', value: { secret: true }, privacy: 'local_only', derivedFrom: [] })
+    runtime.state.lanes.get(created.laneId)!.visibleResultRefs!.add('source')
+    expect((await runtime.start(created.agentId).outcome()).status).toBe('succeeded')
+    const result = [...runtime.state.results.values()].find((item) => item.id !== 'source')
+    expect(result?.derivedFrom).not.toContain('source')
+    expect(result?.privacy).toBe('public')
   })
 
   it('records Global/Lane snapshots and Join Outcome sources in DSL outputs', async () => {
@@ -138,7 +152,7 @@ describe('result privacy provenance', () => {
 
   it('carries source leaf taints into derived results and ContextDelta metadata', async () => {
     const program = defineLaneProgram({ id: 'source-taint-propagation', version: '1' }, (builder) => {
-      builder.addStep('start', (ctx) => { ctx.results.meta('source'); ctx.commitGlobal({ ops: [{ op: 'set', path: ['finding'], value: true }] }); return { actions: [{ type: 'complete', result: { done: true } }], next: 'start' } })
+      builder.addStep('start', (ctx) => { ctx.results.summary('source'); ctx.commitGlobal({ ops: [{ op: 'set', path: ['finding'], value: true }] }); return { actions: [{ type: 'complete', result: { done: true } }], next: 'start' } })
     })
     const runtime = new PulseRuntime()
     const created = runtime.createAgent('taint propagation', program)

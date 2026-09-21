@@ -55,4 +55,16 @@ describe('structured LLM DSL contract', () => {
     expect(keys).toEqual(['plan-llm', 'plan-correct-1'])
     expect(runtime.state.lanes.get(runtime.state.agents.get(agentId)!.rootLaneId)?.failure).toMatchObject({ error: { code: 'OUTPUT_SCHEMA_VIOLATION', retryable: false } })
   })
+
+  it('passes the original Effect RuntimeError to onError instead of schema correction', async () => {
+    const program = defineLaneProgram({ id: 'structured-error-propagation', version: '1' }, (builder) => {
+      builder.addStructuredLLMStep('plan', { task: 'plan', instruction: 'plan', schema: z.object({ ok: z.boolean() }), onSuccess: () => 'finish', onError: (error) => ({ fail: { code: error.code, message: error.message } }) })
+      builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { done: true } }], next: 'finish' }))
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async () => { throw Object.assign(new Error('upstream unavailable'), { code: 'UPSTREAM_UNAVAILABLE', retryable: false }) } })
+    const { agentId, laneId } = runtime.createAgent('structured error', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+    expect(runtime.state.lanes.get(laneId)?.failure).toMatchObject({ error: { code: 'UPSTREAM_UNAVAILABLE', message: 'upstream unavailable' } })
+    expect([...runtime.state.effects.values()].map((effect) => effect.key)).toEqual(['plan-llm'])
+  })
 })
