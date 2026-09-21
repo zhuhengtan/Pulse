@@ -1,4 +1,5 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdir, open } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname } from 'node:path'
 import type { AgentRecord, ArtifactRecord, EffectRecord, JsonValue, LaneRecord, MergeProposal, PrivacyLabel, PrivacyMetadata, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord, ToolCallCorrelation } from '../core/types.js'
@@ -239,6 +240,62 @@ export interface SessionLogExport {
   artifacts: SessionLogArtifact[]
 }
 
+export interface RuntimeLogSink {
+  append(log: SessionLogExport): Promise<void> | void
+}
+
+/** A durable JSONL audit sink. Each successfully returned append is fsync'd. */
+export class FileRuntimeLogSink implements RuntimeLogSink {
+  private pending: Promise<void> = Promise.resolve()
+  constructor(readonly filePath: string) {}
+  async append(log: SessionLogExport): Promise<void> {
+    const operation = this.pending.then(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true })
+      const handle = await open(this.filePath, 'a', 0o600)
+      try {
+        await handle.writeFile(`${JSON.stringify(log)}\n`, 'utf8')
+        await handle.sync()
+      } finally { await handle.close() }
+    })
+    this.pending = operation.catch(() => undefined)
+    await operation
+  }
+}
+
+export interface HttpRuntimeLogSinkOptions {
+  endpoint: string
+  headers?: Record<string, string>
+  timeoutMs?: number
+  fetch?: typeof globalThis.fetch
+}
+
+/** Sends privacy-filtered audit exports to a host-owned collector. */
+export class HttpRuntimeLogSink implements RuntimeLogSink {
+  private readonly endpoint: string
+  private readonly headers: Record<string, string>
+  private readonly timeoutMs: number
+  private readonly fetcher: typeof globalThis.fetch
+  constructor(options: HttpRuntimeLogSinkOptions) {
+    if (!options.endpoint) throw new Error('RUNTIME_LOG_ENDPOINT_REQUIRED')
+    this.endpoint = options.endpoint
+    this.headers = { 'content-type': 'application/json', ...(options.headers ?? {}) }
+    this.timeoutMs = options.timeoutMs ?? 10_000
+    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) throw new Error('INVALID_RUNTIME_LOG_TIMEOUT')
+    this.fetcher = options.fetch ?? globalThis.fetch
+  }
+  async append(log: SessionLogExport): Promise<void> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs)
+    try {
+      const response = await this.fetcher(this.endpoint, { method: 'POST', headers: this.headers, body: JSON.stringify(log), signal: controller.signal })
+      if (!response.ok) throw new Error(`RUNTIME_LOG_HTTP_${response.status}`)
+    } catch (cause) {
+      if (controller.signal.aborted) throw new Error('RUNTIME_LOG_HTTP_TIMEOUT')
+      throw cause
+    } finally { clearTimeout(timer) }
+  }
+}
+
 function encodeNumber(value: number): number | 'Infinity' { return Number.isFinite(value) ? value : 'Infinity' }
 function decodeNumber(value: unknown): number {
   if (value === 'Infinity') return Number.POSITIVE_INFINITY
@@ -341,6 +398,13 @@ export function exportRuntimeLog(state: RuntimeState, options: SessionLogExportO
     return allowed(privacy) ? structuredClone(event) : redactEvent(event, privacy)
   })
   return { schemaVersion: 1, maxPrivacy, events, results, artifacts }
+}
+
+/** Applies the privacy ceiling before handing an audit export to its sink. */
+export async function exportRuntimeLogTo(state: RuntimeState, sink: RuntimeLogSink, options: SessionLogExportOptions = {}): Promise<SessionLogExport> {
+  const log = exportRuntimeLog(state, options)
+  await sink.append(log)
+  return log
 }
 
 export function serializeRuntimeState(state: RuntimeState): JsonValue { return exportRuntimeState(state) as unknown as JsonValue }
