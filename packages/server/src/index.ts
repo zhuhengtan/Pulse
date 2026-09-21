@@ -124,8 +124,8 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
   }
 }
 
-function buildProgram(toolNames: string[]) {
-  return (approvalMode: ApprovalMode = 'ask') => defineReActLane({ id: 'pulse.assistant', version: '1', system: 'You are Pulse, a careful general task assistant. Use available tools when they help. Explain what you did and cite workspace paths. Never claim an action succeeded unless its tool result confirms it.', toolSet: 'pulse.default', task: 'reason', instruction: ({ goal }) => goal, toolAllow: toolNames, maxTurns: 12, ...(approvalMode === 'ask' ? { toolApproval: { prompt: () => 'Reply with approved=true to continue or approved=false to deny.' } } : {}) })
+function buildProgram(toolNames: string[], workspace: string) {
+  return (approvalMode: ApprovalMode = 'ask') => defineReActLane({ id: 'pulse.assistant', version: '1', system: `You are Pulse, a careful general task assistant. The current workspace is ${workspace}. When the user asks about the project, files, code, or directory contents, use the provided filesystem tools to inspect the workspace before answering. Paths passed to filesystem tools are relative to this workspace unless the tool says otherwise. Explain what you did and cite workspace paths. Never claim an action succeeded unless its tool result confirms it.`, toolSet: 'pulse.default', task: 'reason', instruction: ({ goal }) => goal, inputs: () => ({ toolDiscovery: { limit: toolNames.length } }), toolAllow: toolNames, maxTurns: 12, ...(approvalMode === 'ask' ? { toolApproval: { prompt: () => 'Reply with approved=true to continue or approved=false to deny.' } } : {}) })
 }
 
 function providerFromOptions(options: LocalHostOptions): { adapter: ProviderAdapter; model: { id: string; providerId: string; tasks: string[]; priority: number; capabilities: ModelCapabilities; adapter: ProviderAdapter } } {
@@ -218,7 +218,7 @@ export class LocalHost {
     const router = new ModelRouter(models)
     router.register({ task: 'reason', candidates: [provider.model.id] }); router.register({ task: 'plan', candidates: [provider.model.id] }); router.register({ task: 'merge', candidates: [provider.model.id] })
     const backend = new FileRuntimePersistenceBackend(join(this.runDir(conversationId, runId), 'runtime.json'))
-    const program = buildProgram(registry.list().map((tool) => tool.name))(this.options.approvalMode ?? 'ask')
+    const program = buildProgram(registry.list().map((tool) => tool.name), cwd)(this.options.approvalMode ?? 'ask')
     const toolVersions = Object.fromEntries(registry.list().map((tool) => [tool.name, tool.version]))
     const runtime = await PulseRuntime.restore(backend, { sessionId: runId, maxRuntimeMs: this.options.maxRuntimeMs ?? 15 * 60_000, programs: [program], models, modelRouter: router, toolVersions, builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') return createModelEffectExecutor({ router, providers: new Map([[provider.adapter.id, provider.adapter]]) })(effect, signal, observe); if (effect.kind === 'tool') return createToolEffectExecutor(registry)(effect, signal, observe); throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     return { runtime, registry }
@@ -238,7 +238,7 @@ export class LocalHost {
     const context = previous.split('\n').filter(Boolean).slice(-8).map((line) => { try { const message = JSON.parse(line) as StoredMessage; return `${message.role}: ${message.text.slice(0, 4_000)}` } catch { return '' } }).filter(Boolean).join('\n')
     const goal = context ? `Conversation context:\n${context}\n\nuser: ${input.text}` : input.text
     const now = new Date().toISOString(); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal: input.text, cwd: manifest.cwd, provider: this.options.provider?.provider ?? 'mock', approvalMode: this.options.approvalMode ?? 'ask', createdAt: now }, null, 2))
-    const { runtime, registry } = this.runtimeFor(conversationId, runId, manifest.cwd); const program = buildProgram(registry.list().map((tool) => tool.name))(this.options.approvalMode ?? 'ask'); runtime.register(program); const { agentId } = runtime.createAgent({ goal, program }); const session = runtime.start(agentId); this.active.set(runId, { runtime, session, conversationId, runId }); manifest.activeRunId = runId; manifest.runs.push(runId); manifest.updatedAt = now; await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
+    const { runtime, registry } = this.runtimeFor(conversationId, runId, manifest.cwd); const program = buildProgram(registry.list().map((tool) => tool.name), manifest.cwd)(this.options.approvalMode ?? 'ask'); runtime.register(program); const { agentId } = runtime.createAgent({ goal, program }); const session = runtime.start(agentId); this.active.set(runId, { runtime, session, conversationId, runId }); manifest.activeRunId = runId; manifest.runs.push(runId); manifest.updatedAt = now; await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
     return this.makeRunHandle(conversationId, runId, runtime, session)
     } catch (error) { await this.releaseConversationLock(conversationId); throw error }
   }

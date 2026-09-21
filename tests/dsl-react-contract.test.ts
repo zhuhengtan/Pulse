@@ -82,6 +82,23 @@ describe('DSL ReAct contract', () => {
     expect(llmRequests[1]?.inputs.results).toEqual(expect.arrayContaining(['result-1']))
   })
 
+  it('forwards tool discovery from ReAct inputs so providers receive tool definitions', async () => {
+    const requests: any[] = []
+    const program = defineLaneProgram({ id: 'react-tool-discovery', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', {
+        instruction: 'inspect the workspace',
+        toolAllow: ['fs.list'],
+        inputs: () => ({ toolDiscovery: { limit: 1 } }),
+        onFinish: { text: () => 'done' },
+      })
+      builder.addStep('done', () => ({ actions: [{ type: 'complete', result: { done: true } }], next: 'done' }))
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => { requests.push(structuredClone(effect.input)); return { value: { text: 'done', finishReason: 'stop', toolCalls: [] } } } })
+    const { agentId } = runtime.createAgent('discover tools', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(requests[0]?.toolDiscovery).toEqual({ limit: 1 })
+  })
+
   it('does not expose the internal raw Result reader on StepContext', async () => {
     let symbols: symbol[] = []
     const program = defineLaneProgram({ id: 'react-context-surface', version: '1' }, (builder) => {
