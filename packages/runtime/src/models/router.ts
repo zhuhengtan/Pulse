@@ -207,7 +207,7 @@ export class AdaptiveModelRouter extends ModelRouter {
     }
     if (preferredOrder !== undefined) {
       const order = new Map(preferredOrder.map((id, index) => [id, index]))
-      return candidates.sort((a, b) => (order.get(a.id) ?? Number.POSITIVE_INFINITY) - (order.get(b.id) ?? Number.POSITIVE_INFINITY) || score(b) - score(a) || b.priority - a.priority || a.id.localeCompare(b.id))
+      return candidates.sort((a, b) => score(b) - score(a) || (order.get(a.id) ?? Number.POSITIVE_INFINITY) - (order.get(b.id) ?? Number.POSITIVE_INFINITY) || b.priority - a.priority || a.id.localeCompare(b.id))
     }
     return candidates.sort((a, b) => score(b) - score(a) || b.priority - a.priority || a.id.localeCompare(b.id))
   }

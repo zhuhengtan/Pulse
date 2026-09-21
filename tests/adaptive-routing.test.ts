@@ -17,6 +17,18 @@ describe('adaptive model routing', () => {
     expect(router.metrics().get('fast-cheap')).toMatchObject({ attempts: 1, successes: 1, failures: 0, cachedInputTokens: 80, inputTokens: 100 })
   })
 
+  it('lets adaptive feedback reorder candidates inside an explicit task route', () => {
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'fallback-first', providerId: 'p1', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 1 })
+    registry.register({ id: 'learned-best', providerId: 'p2', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 1 })
+    const router = new AdaptiveModelRouter(registry, { priorityWeight: 0, qualityWeight: 10, latencyWeight: 0, costWeight: 0, cacheWeight: 0, explorationWeight: 0 })
+    router.register({ task: 'reason', candidates: ['fallback-first', 'learned-best'] })
+    router.recordFeedback({ modelId: 'fallback-first', outcome: 'failed', quality: 0 })
+    router.recordFeedback({ modelId: 'learned-best', outcome: 'succeeded', quality: 1 })
+
+    expect(router.route('reason', 'public').map((candidate) => candidate.id)).toEqual(['learned-best', 'fallback-first'])
+  })
+
   it('records provider attempt feedback through the standard executor', async () => {
     const registry = new InMemoryModelRegistry()
     registry.register({ id: 'feedback-model', providerId: 'feedback-provider', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 1 })
