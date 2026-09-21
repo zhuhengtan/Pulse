@@ -83,7 +83,7 @@
 | 终态观测审计 | Effect 终态后的迟到 observation 不进入 ObservationInbox、不改变 Outcome，并记录 `attempt.late_emit` 事实 | `tests/late-attempt.test.ts` | `73c438b` |
 | Observation gap 重同步 | ObservationInbox 按条数与字节双重有界，并按 Agent 记录 ring 丢弃的最高序号；Runtime Host 可配置两项上限；`Session.stream()` 在观测缺口前发出 `{ kind: 'gap', fromSeq, toSeq }`，宿主可调用 `session.snapshot()` 重同步，事实流仍保持独立 | `tests/observation-shutdown.test.ts` | `6d8388e`、`e92e9ff`、`67b1c64` |
 | RuntimeClock 注入 | Scheduler 接受宿主提供的 RuntimeClock；默认仍使用 VirtualClock，恢复、TimerWheel 与已有确定性调度保持兼容 | `tests/runtime-control.test.ts` | `488e3e7` |
-| Scheduler 软时间片与写者偏好 | 默认 `maxTickMs=5`；事实 Inbox、到期 Timer 和 Lane Step 共享软时间片，当前同步 Step 不被打断；`writerPreferenceBound` 限制排队写者前方 shared 插队数量 | `tests/m2-scheduler.test.ts`、`tests/runtime-control.test.ts` | `e0eff57`、`62e0816` |
+| Scheduler 软时间片与写者偏好 | 默认 `maxTickMs=5`；事实 Inbox、到期 Timer、queued Effect dispatch 和 Lane Step 共享软时间片，当前同步 Step 不被打断；`writerPreferenceBound` 限制排队写者前方 shared 插队数量；Timer 与 Executor completion 均只在 Runtime Tick 内结算 | `tests/m2-scheduler.test.ts`、`tests/runtime-control.test.ts`、`tests/storage-outbox.test.ts` | `e0eff57`、`62e0816`、`cfa9db2`、`6da19c5`、`6e0a748` |
 | MonotonicClock 与真实 Timer 等待 | 提供基于 `performance.now()` 的真实单调时钟；`run`/`runAgent` 在真实时钟下等待 Timer 或 Effect 完成，不再快进 deadline | `tests/runtime-control.test.ts` | `d4f5d8a` |
 | Runtime 绝对时限锚定 | `maxRuntimeMs` 按 Runtime 启动/恢复时钟作为相对时限计算；接入 epoch 单调时钟时不会首 Tick 误判超时；恢复后 `waitUntil` 严格等待实际 Timer deadline | `tests/runtime-control.test.ts` | `e91602f`、`ce8da5a` |
 | Shell 超时终止语义 | Shell 超时和 Abort 都终止整个进程组；先发送 `SIGTERM`，宽限后升级 `SIGKILL`，结果明确返回 `timedOut`/`aborted`，避免上层误判成功 | `tests/m3-context-adapters.test.ts` | `790c8da` |
@@ -113,6 +113,8 @@
 | File body/event store | `FileRuntimeContentStore` 为 ResultStore/SnapshotStore 提供带锁、临时文件 + rename、幂等写与内容冲突检测；`FileRuntimeEventArchive` 提供 checkpoint 事实事件的原子归档与范围读取 | `tests/storage-outbox.test.ts` | 本轮 File body/event store 提交 |
 | 异步派发失败边界 | `dispatch_failed` 审计事件无法进入事实日志时使用 fail-closed 旁路，不让异步 Promise 逃逸；Effect 仍进入统一结算路径 | `tests/runtime-control.test.ts` | 本轮异步失败边界提交 |
 | Durable outbox dispatch gate | 配置持久化后，Effect Executor 只有在包含 pending outbox 的快照 durable save 完成后才启动；保存失败时保留队列，不进入外部执行 | `tests/storage-outbox.test.ts` | 本轮 Durable outbox 提交 |
+| Executor completion Fact 边界 | Executor Promise 只编码并提交 `effect_completion` Fact；完成、失败、Artifact 解码、晚到 attempt 和 Wait 刷新统一由 Runtime Tick 处理；FactInbox wake 具备单 drain/coalescing，持久化 gate 完成后仅唤醒下一 Tick | `tests/runtime-control.test.ts`、`tests/late-attempt.test.ts`、`tests/storage-outbox.test.ts` | `6da19c5` |
+| Bounded Effect dispatch phase | queued Effect dispatch 受 Tick 软时间片约束；持久化 backend 的 pending outbox 保存完成后不在 Promise 回调中直接 dispatch，而是由下一 Tick 取出并按 budget 启动 | `tests/runtime-control.test.ts`、`tests/resource-locks.test.ts`、`tests/storage-outbox.test.ts` | `6e0a748` |
 | 恢复定时器与 Wait deadline | 恢复后以持久化 `state.now` 立即 flush 过期 retry/wait timer；retry 入队和 Wait/Lane deadline 结算均经过 StoragePolicy 预检 | `tests/storage-outbox.test.ts`、`tests/runtime-control.test.ts` | 本轮恢复定时器提交 |
 | Wait 依赖结算事务 | Effect/Lane 终态触发 Wait resolution 时，Wait、Lane、closing Result 与恢复输入统一走 storage admission + MutationLog；准入失败不改变 pending Wait/Lane | `tests/runtime-control.test.ts`、`tests/result-summary-budget.test.ts` | 本轮 Wait 结算事务提交 |
 | Lane failure 事务 | 程序异常、异步 Step、控制错误和 Watchdog 失败统一先构造候选 Lane，再经 storage admission + MutationLog；事实事件超限时仍可无事件 fail-closed 进入失败终态 | `tests/runtime-control.test.ts` | 本轮 Lane failure 事务提交 |
@@ -595,6 +597,9 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - 本轮 File body/event store 提交：提供可直接使用的 FileRuntimeEventArchive，checkpoint 事实事件按 seq 幂等归档、冲突拒绝并支持范围读回。
 - 本轮异步失败边界提交：Executor 抛错时 dispatch_failed 事件写入受限不会逃逸 Promise，Effect 仍进入失败结算和后续状态收尾。
 - 本轮 Durable outbox 提交：配置持久化后，pending outbox 必须先完成 durable save 才允许 Effect Executor 启动；持久化失败时不派发外部操作。
+- `cfa9db2`：TimerWheel 不再在 `clock.advance/set/now` 外部直接执行 callback；Timer 只在 Runtime Tick 的 Timer phase 取出并执行，恢复后的 overdue timer 也保持同一单写者边界。
+- `6da19c5`：Executor completion 不再从 Promise 回调直接修改 Runtime；结果、失败、Artifact 二进制和晚到 attempt 统一编码为 `effect_completion` Fact，经过 coalesced wake 后由 Tick 结算。
+- `6e0a748`：queued Effect dispatch 纳入 Tick 共享软时间片；persistence backend 的 outbox gate 完成后改为唤醒下一 Tick，补充 `maxTickMs=0`、锁、异步持久化与 DSL 回归。
 - 本轮 Wait 结算事务提交：依赖满足/失败与 closing Lane 结果统一经 storage admission 和 MutationLog，失败时不再直接修改 Wait/Lane 内存状态。
 - 本轮 Lane failure 事务提交：程序异常、异步 Step、控制错误和 Watchdog 失败不再直接改写 Lane；事实事件无法容纳时保留失败状态并省略不可写审计事件。
 - 本轮 Agent 状态事务提交：Child Agent 的结束状态通过 `setAgent` Mutation + storage admission 落盘，避免 Effect 结算后的直接内存突变。
@@ -782,7 +787,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `62e0816`：Scheduler 默认启用 5ms 软时间片；事实 Inbox、到期 Timer 和 Lane Step 共享轮次时间预算，TimerWheel 支持分批取出且不丢失未处理项；`writerPreferenceBound` 防止排队写者被过多 shared 请求插队，并补充默认配置与 Timer 回归。
 - `27a1dfd`：`createAgent()` 返回 `id`、`agentId`、`laneId` 三字段，兼容架构示例的 `runtime.run(agent.id)` 与既有 API。
 - `db47ba4`：OpenAI/Anthropic Adapter 将原生网络异常归一化为可重试的 `PROVIDER_NETWORK_ERROR`，非流式非法 JSON 归一化为 `PROVIDER_RESPONSE_INVALID`，并保持 HTTP/取消错误语义。
-- 当前确定性门禁：`npm test`，68 个测试文件、442 个测试通过；`npx tsc -b --pretty false`、`npm run build`、`node benchmarks/deterministic.mjs` 与 `git diff --check` 通过。
+- 当前确定性门禁：`npm test`，68 个测试文件、444 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。最近一次全量测试已覆盖 Executor completion Fact、coalesced wake、bounded Effect dispatch 和 persistence dispatch gate；基准仍需在本轮最终工作区重新运行。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
