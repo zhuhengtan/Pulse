@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime } from '@pulse/runtime'
+import { PulseRuntime, validateRuntimePersistenceSnapshot } from '@pulse/runtime'
 import type { LaneProgram } from '@pulse/runtime'
 
 describe('runtime persistence compatibility', () => {
@@ -20,5 +20,17 @@ describe('runtime persistence compatibility', () => {
     const snapshot = new PulseRuntime({ programs: [program] }).exportPersistence()
     const restored = new PulseRuntime({ persistence: snapshot })
     expect(() => restored.tick()).toThrow('PROGRAM_VERSION_UNAVAILABLE:compatibility-missing@2')
+  })
+
+  it('rejects quarantine snapshots that do not match an unknown reconcile-required Effect', () => {
+    const runtime = new PulseRuntime()
+    const { agentId, laneId } = runtime.createAgent('quarantine snapshot', { id: 'quarantine-snapshot', version: '1', step: () => ({ actions: [], next: { programId: 'quarantine-snapshot', programVersion: '1', step: 'start', locals: {} } }) })
+    runtime.state.effects.set('effect-q', { id: 'effect-q', agentId, ownerLaneId: laneId, key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, state: 'reconcile_required', attemptId: 'effect-q-attempt-1', attemptNo: 1, executionState: 'remote_unknown', sideEffectState: 'unknown' })
+    const snapshot = runtime.exportPersistence()
+    snapshot.quarantine = [{ effectId: 'effect-q', unresolvedAt: 0, reason: '' }]
+    delete snapshot.integrity
+    expect(() => validateRuntimePersistenceSnapshot(snapshot)).toThrow('INVALID_RUNTIME_PERSISTENCE_QUARANTINE')
+    snapshot.quarantine = [{ effectId: 'effect-q', unresolvedAt: 0, reason: 'in_doubt' }, { effectId: 'effect-q', unresolvedAt: 0, reason: 'duplicate' }]
+    expect(() => validateRuntimePersistenceSnapshot(snapshot)).toThrow('INVALID_RUNTIME_PERSISTENCE_QUARANTINE')
   })
 })

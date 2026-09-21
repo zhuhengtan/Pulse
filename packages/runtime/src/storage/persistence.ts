@@ -474,7 +474,14 @@ export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceS
     if (!agents.has(proposal.agentId) || !lanes.has(proposal.sourceLaneId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:mergeProposal:${id}`)
     for (const ref of proposal.delta.derivedFrom ?? []) if (!hasDerivedReference(ref, proposal.sourceLaneId, agents, lanes, results, artifacts)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:mergeProposal.derivedFrom:${id}`)
   }
-  for (const entry of value.quarantine ?? []) if (!effects.has(entry.effectId)) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:quarantine:${entry.effectId}`)
+  const quarantineIds = new Set<string>()
+  for (const entry of value.quarantine ?? []) {
+    if (!entry || typeof entry.effectId !== 'string' || entry.effectId.length === 0 || quarantineIds.has(entry.effectId) || !Number.isFinite(entry.unresolvedAt) || typeof entry.reason !== 'string' || entry.reason.length === 0) throw new Error('INVALID_RUNTIME_PERSISTENCE_QUARANTINE')
+    const effect = effects.get(entry.effectId)
+    if (!effect) throw new Error(`INVALID_RUNTIME_PERSISTENCE_REFERENCE:quarantine:${entry.effectId}`)
+    if (effect.state !== 'reconcile_required' || effect.sideEffectState !== 'unknown') throw new Error(`INVALID_RUNTIME_PERSISTENCE_QUARANTINE_STATE:${entry.effectId}`)
+    quarantineIds.add(entry.effectId)
+  }
   if (value.integrity !== undefined && (value.integrity.algorithm !== 'sha256' || !/^[a-f0-9]{64}$/.test(value.integrity.digest) || value.integrity.digest !== integrityDigest(value))) throw new Error('INVALID_RUNTIME_PERSISTENCE_INTEGRITY')
 }
 
