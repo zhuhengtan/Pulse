@@ -541,6 +541,12 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         const dependencies = (child.dependsOn ?? []).map((dependency) => ({ ...dependency, target: resolveTarget(dependency.target, siblingTargets) ?? resolveTarget(dependency.target, localTargets) }))
         if (dependencies.some((dependency) => !dependency.target)) return { rejection: error('UNKNOWN_TARGET', `fork dependency for ${child.key}`) }
         const record: LaneRecord = { id: target.id, agentId: lane.agentId, ownerLaneId: lane.id, status: dependencies.length ? 'waiting' : 'ready', version: 0, goal: child.goal, resume: clone(child.program), ...(child.series === undefined ? {} : { series: clone(child.series) }), contextSnapshotVersion: contextVersion, context: { version: 0, history: [], state: {} }, visibleResultRefs: new Set(child.inputResultRefs ?? []), children: new Set(), priority: child.priority ?? lane.priority, enqueueSeq: state.nextIds.event + laneCounter, readySince: state.now, ownedEffectIds: new Set() }
+        if (dependencies.length) {
+          const startupWait: WaitSpec = { dependencies: dependencies as DependencySpec[], mode: 'all', onUnsatisfied: 'fail_lane', reason: 'startup' }
+          const availableTargets = new Map([...siblingTargets, ...localTargets])
+          const startupWaitError = validateWait(state, record.id, startupWait, new Map(), availableTargets)
+          if (startupWaitError) return { rejection: error(startupWaitError, `fork dependency for ${child.key}`) }
+        }
         mutations.push({ op: 'insertLane', record })
         workingLane.children.add(record.id)
         if (!dependencies.length) mutations.push({ op: 'appendEvent', event: { type: 'lane.ready', laneId: record.id } })

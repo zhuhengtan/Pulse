@@ -85,6 +85,7 @@ describe('runtime control boundaries', () => {
       { action: { type: 'fork', lanes: [{ key: 'child', goal: 'child', program: { programId: 'p', programVersion: '1', step: 'run' } }] }, code: 'INVALID_FORK_LANE' },
       { action: { type: 'fork', lanes: [{ key: 'child', goal: 'child', program: point('fork-contract', 'run'), dependsOn: [{ key: 'bad', target: { kind: 'effect' }, condition: 'settled' }] }] }, code: 'INVALID_FORK_LANE' },
       { action: { type: 'fork', lanes: [{ key: 'child', goal: 'child', program: point('fork-contract', 'run') }], join: { condition: 'settled', onUnsatisfied: 'invalid' } }, code: 'INVALID_FORK_JOIN' },
+      { action: { type: 'fork', lanes: [{ key: 'other', goal: 'other', program: point('fork-contract', 'run') }, { key: 'child', goal: 'child', program: point('fork-contract', 'run'), dependsOn: [{ key: 'first', target: { local: 'other' }, condition: 'settled' }, { key: 'second', target: { local: 'other' }, condition: 'settled' }] }] }, code: 'DUPLICATE_WAIT_TARGET' },
     ]
     for (const [index, candidate] of cases.entries()) {
       const runtime = new PulseRuntime()
