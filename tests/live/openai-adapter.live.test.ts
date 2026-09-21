@@ -4,6 +4,7 @@ import type { LLMRequestProjection } from '@pulse/runtime'
 
 const apiKey = process.env.OPENAI_API_KEY
 const toolSmoke = process.env.PULSE_LIVE_TOOL_SMOKE === '1'
+const structuredSmoke = process.env.PULSE_LIVE_STRUCTURED_SMOKE === '1'
 
 describe.skipIf(!apiKey)('live OpenAI-compatible adapter', () => {
   it('performs one minimal request and normalizes the response', async () => {
@@ -51,5 +52,27 @@ describe.skipIf(!apiKey)('live OpenAI-compatible adapter', () => {
     const result = await adapter.executeAttempt({ request, signal: new AbortController().signal })
     expect(result.finishReason).toBe('tool_calls')
     expect(result.toolCalls).toEqual([expect.objectContaining({ name: 'report_status', input: { ok: true } })])
+  }, 30_000)
+
+  it.skipIf(!structuredSmoke)('requests and validates a real structured response', async () => {
+    const adapter = new OpenAICompatibleAdapter('openai-live-structured', {
+      provider: 'openai',
+      apiKey,
+      defaultModel: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
+      baseURL: process.env.OPENAI_BASE_URL,
+      maxOutputTokens: 64,
+    })
+    const outputSchema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false } as const
+    const request: LLMRequestProjection = {
+      contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'live-structured-smoke', instruction: 'Return JSON with the boolean field ok set to true.', privacy: 'public', privacyRefs: [] },
+      blocks: [
+        { kind: 'system', content: 'You are a live structured-output smoke-test.' },
+        { kind: 'instruction', content: 'Return JSON with the boolean field ok set to true.' },
+      ],
+      prefixHash: 'live-structured-prefix', projectionHash: 'live-structured-projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'live-structured-smoke', privacy: 'public', privacyRefs: [],
+    }
+    const result = await adapter.executeAttempt({ request, signal: new AbortController().signal, outputSchema })
+    expect(result.structured).toEqual({ ok: true })
+    expect(result.finishReason).toBe('stop')
   }, 30_000)
 })
