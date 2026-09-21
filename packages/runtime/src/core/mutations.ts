@@ -25,6 +25,41 @@ export interface ValidationSuccess { mutations: Mutation[] }
 export interface ValidationFailure { rejection: RuntimeError }
 export type ValidationResult = ValidationSuccess | ValidationFailure
 
+/** Shallow-fork maps and clone only records `apply()` mutates in place. */
+export function forkRuntimeStateForAdmission(state: RuntimeState, mutations: Mutation[]): RuntimeState {
+  const dirtyAgents = new Set<string>()
+  const dirtyLanes = new Set<string>()
+  for (const mutation of mutations) {
+    if (mutation.op === 'setGlobal') dirtyAgents.add(mutation.agentId)
+    else if (mutation.op === 'setLaneContext') dirtyLanes.add(mutation.laneId)
+    else if (mutation.op === 'publishFinding') dirtyLanes.add(mutation.record.laneId)
+  }
+  const agents = new Map(state.agents)
+  const lanes = new Map(state.lanes)
+  for (const id of dirtyAgents) {
+    const agent = agents.get(id)
+    if (agent) agents.set(id, { ...agent, globalVersions: new Map(agent.globalVersions), ...(agent.globalPrivacy === undefined ? {} : { globalPrivacy: new Map(agent.globalPrivacy) }) })
+  }
+  for (const id of dirtyLanes) {
+    const lane = lanes.get(id)
+    if (lane) lanes.set(id, { ...lane, ...(lane.visibleResultRefs === undefined ? {} : { visibleResultRefs: new Set(lane.visibleResultRefs) }) })
+  }
+  return {
+    ...state,
+    agents,
+    lanes,
+    effects: new Map(state.effects),
+    waits: new Map(state.waits),
+    results: new Map(state.results),
+    artifacts: new Map(state.artifacts),
+    toolCallCorrelations: new Map(state.toolCallCorrelations),
+    mergeProposals: new Map(state.mergeProposals),
+    events: state.events.slice(),
+    nextIds: { ...state.nextIds },
+    trustedSanitizerIds: new Set(state.trustedSanitizerIds),
+  }
+}
+
 export function apply(state: RuntimeState, mutations: Mutation[], defaults: { sessionId?: string; timestamp?: number } = {}): void {
   for (const mutation of mutations) {
     switch (mutation.op) {

@@ -803,7 +803,7 @@ export function commitStep(state: RuntimeState, laneId: string, output: LaneStep
   return result
 }
 
-function requireMutations(): typeof import('../core/mutations.js') {
+function requireMutations(): Pick<typeof import('../core/mutations.js'), 'apply'> {
   return { apply: (state: RuntimeState, mutations: Mutation[]) => {
     for (const mutation of mutations) {
       switch (mutation.op) {

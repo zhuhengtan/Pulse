@@ -369,7 +369,7 @@ export class StepBuilder<TState = JsonValue> {
     })
     return this
   }
-  addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; onFinish: ((resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>) | { text: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; structured?: { schema: ZodTypeAny; onParsed: (data: unknown, ctx: StepContext<TState>) => NextStepTarget<TState> } }; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
+  addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; toolApproval?: { prompt: string | ((calls: JsonValue, ctx: StepContext<TState>) => string); onDenied?: (reason: string, ctx: StepContext<TState>) => NextStepTarget<TState> }; onFinish: ((resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>) | { text: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; structured?: { schema: ZodTypeAny; onParsed: (data: unknown, ctx: StepContext<TState>) => NextStepTarget<TState> } }; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
     this.compactionBoundaries.add(name)
     const readTurns = (ctx: StepContext<TState>): number => { const sdk = sdkLocals(ctx.lane.resume.locals); const turn = sdk[`${name}Turns`]; return typeof turn === 'number' && Number.isInteger(turn) && turn >= 0 ? turn : 0 }
     const inputKey = `${name}Inputs`
@@ -400,13 +400,45 @@ export class StepBuilder<TState = JsonValue> {
         const sourceEffectId = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).find((dependency) => dependency.state === 'settled' && dependency.target.kind === 'effect')?.target.id : undefined
         const sourcePrivacy = ref === undefined ? undefined : ctx.results.meta(ref)?.privacy
         const toolDerivedFrom = ref === undefined ? [] : [ref]
-        const effects = toolCalls.map((call, index) => {
+        const calls = toolCalls.map((call, index) => {
           const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}
           const originalId = typeof item.toolCallId === 'string' ? item.toolCallId : `call-${index + 1}`
           const toolName = typeof item.name === 'string' ? item.name : ''
-          return { key: `${name}-tool-${turns}-${index + 1}`, toolCallId: `${name}:${turns}:${originalId}`, ...(sourceEffectId === undefined ? {} : { llmEffectId: sourceEffectId }), ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }), ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}), kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { toolCallId: `${name}:${turns}:${originalId}`, name: toolName, arguments: item.input ?? {}, ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }), ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}) } }
+          return { originalId, toolName, toolCallId: `${name}:${turns}:${originalId}`, input: item.input ?? {} }
         })
-        return { actions: [{ type: 'submit_effects', effects, wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:tools` }
+        const makeToolEffects = (approvedCalls: Array<{ originalId: JsonValue; toolName: JsonValue; toolCallId?: JsonValue; input: JsonValue }>): RuntimeAction => ({ type: 'submit_effects', effects: approvedCalls.map((call, index) => ({ key: `${name}-tool-${turns}-${index + 1}`, toolCallId: String(call.toolCallId ?? `${name}:${turns}:${String(call.originalId)}`), ...(sourceEffectId === undefined ? {} : { llmEffectId: sourceEffectId }), ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }), ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}), kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { toolCallId: String(call.toolCallId ?? `${name}:${turns}:${String(call.originalId)}`), name: String(call.toolName), arguments: call.input, ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }), ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}) } })), wait: { onUnsatisfied: 'resume_with_error' } })
+        if (options.toolApproval) {
+          const approvalKey = `${name}PendingToolCalls`
+          const digestKey = `${name}PendingToolDigest`
+          const locals = ctx.lane.resume.locals && typeof ctx.lane.resume.locals === 'object' && !Array.isArray(ctx.lane.resume.locals) ? ctx.lane.resume.locals as Record<string, JsonValue> : {}
+          const digest = contentHash(calls)
+          const listing = calls.map((call, index) => `${index + 1}. ${call.toolName} ${call.toolCallId}`).join('\n')
+          const extra = typeof options.toolApproval.prompt === 'string' ? options.toolApproval.prompt : options.toolApproval.prompt(calls.map((call) => ({ name: call.toolName, toolCallId: call.originalId })) as unknown as JsonValue, ctx)
+          const prompt = boundedInstruction(`Approve ${calls.length} tool call(s). Digest ${digest}.\n${listing}\n${extra}`)
+          this.handlers.set(`${name}:approval`, (approvalCtx) => {
+            const dependency = approvalCtx.resumeInput?.type === 'wait' ? Object.values(approvalCtx.resumeInput.resolution.dependencies)[0] : undefined
+            const approvalError = waitFailure(approvalCtx)
+            if (approvalError) return fail(approvalError)
+            if (dependency?.state !== 'settled') return fail({ code: 'APPROVAL_RESPONSE_MISSING', message: 'Approval response was not received.', retryable: false })
+            const value = dependency.outcome.resultRef ? readResult(approvalCtx, dependency.outcome.resultRef) : undefined
+            const parsed = z.object({ approved: z.boolean(), reason: z.string().optional() }).safeParse(value)
+            if (!parsed.success) return fail({ code: 'APPROVAL_RESPONSE_INVALID', message: 'Approval response must contain approved=true or false.', retryable: false, details: parsed.error.message })
+            if (!parsed.data.approved) {
+              const reason = parsed.data.reason ?? 'User denied the proposed tool call.'
+              if (options.toolApproval?.onDenied) return { next: options.toolApproval.onDenied(reason, approvalCtx) }
+              return fail({ code: 'APPROVAL_DENIED', message: reason, retryable: false })
+            }
+            const pendingLocals = sdkLocals(approvalCtx.lane.resume.locals)
+            const pending = pendingLocals[approvalKey]
+            if (!Array.isArray(pending)) return fail({ code: 'APPROVAL_CALLS_MISSING', message: 'Approved tool calls were not found in the persisted lane state.', retryable: false })
+            if (pendingLocals[digestKey] !== contentHash(pending)) return fail({ code: 'APPROVAL_DIGEST_MISMATCH', message: 'Persisted tool calls no longer match the approved digest.', retryable: false })
+            const approvedCalls = pending.flatMap((item) => item && typeof item === 'object' && !Array.isArray(item) ? [{ originalId: (item as Record<string, JsonValue>).originalId ?? '', toolName: (item as Record<string, JsonValue>).toolName ?? '', toolCallId: (item as Record<string, JsonValue>).toolCallId ?? '', input: (item as Record<string, JsonValue>).input ?? {} }] : [])
+            const cleared = { ...locals, $sdk: { ...pendingLocals, [approvalKey]: null, [digestKey]: null } }
+            return { actions: [makeToolEffects(approvedCalls)], next: `${name}:tools`, locals: cleared }
+          })
+          return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-approval-${turns}`, kind: 'human', concurrencyClass: 'none', input: { prompt, digest, tools: calls as unknown as JsonValue }, ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:approval`, locals: { ...locals, $sdk: { ...sdkLocals(locals), [approvalKey]: calls as unknown as JsonValue, [digestKey]: digest } } }
+        }
+        return { actions: [makeToolEffects(calls)], next: `${name}:tools` }
       }
       if (turns >= maxTurns) return maxTurnsReached()
       if (options.outputSchema) {

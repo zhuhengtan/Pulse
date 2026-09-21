@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -12,6 +12,36 @@ import { EffectOutbox, type OutboxSnapshot } from './outbox.js'
 import { MutationLog, type MutationLogSnapshot } from './mutation-log.js'
 import type { QuarantineEntry, QuarantineScope } from '../lifecycle/scopes.js'
 import { SessionStoragePolicy, type StoragePolicySnapshot } from './policy.js'
+
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ESRCH') return false
+    throw cause
+  }
+}
+
+async function acquireExclusiveLock(lockPath: string, timeoutCode: string, timeoutMs = 30_000): Promise<Awaited<ReturnType<typeof open>>> {
+  const deadline = Date.now() + timeoutMs
+  const payload = JSON.stringify({ pid: process.pid, token: `${process.pid}:${process.hrtime.bigint()}` })
+  for (;;) {
+    try {
+      const handle = await open(lockPath, 'wx', 0o600)
+      await handle.writeFile(payload)
+      return handle
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause
+      const body = await readFile(lockPath, 'utf8').catch(() => undefined)
+      let owner: { pid?: number } | undefined
+      try { owner = body ? JSON.parse(body) as { pid?: number } : undefined } catch { owner = undefined }
+      if (typeof owner?.pid === 'number' && !pidAlive(owner.pid) && body !== undefined) {
+        const current = await readFile(lockPath, 'utf8').catch(() => undefined)
+        if (current === body) { await rm(lockPath, { force: true }); continue }
+      }
+      if (Date.now() >= deadline) throw new Error(timeoutCode)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  }
+}
 
 export interface RuntimePersistenceSnapshot {
   schemaVersion: 1
@@ -115,20 +145,8 @@ export class FileRuntimeContentStore implements RuntimeResultStore, RuntimeSnaps
   }
 
   private async withLock<T>(target: string, work: () => Promise<T>): Promise<T> {
-    const lockPath = `${target}.lock`
-    const deadline = Date.now() + 30_000
-    let lock: Awaited<ReturnType<typeof open>> | undefined
-    while (lock === undefined) {
-      try { lock = await open(lockPath, 'wx', 0o600) }
-      catch (cause) {
-        if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause
-        const lockStat = await stat(lockPath).catch(() => undefined)
-        if (lockStat && Date.now() - lockStat.mtimeMs > 30_000) { await rm(lockPath, { force: true }); continue }
-        if (Date.now() >= deadline) throw new Error('RUNTIME_CONTENT_LOCK_TIMEOUT')
-        await new Promise((resolve) => setTimeout(resolve, 5))
-      }
-    }
-    try { return await work() } finally { await lock.close().catch(() => undefined); await rm(lockPath, { force: true }).catch(() => undefined) }
+    const lock = await acquireExclusiveLock(`${target}.lock`, 'RUNTIME_CONTENT_LOCK_TIMEOUT')
+    try { return await work() } finally { await lock.close().catch(() => undefined); await rm(`${target}.lock`, { force: true }).catch(() => undefined) }
   }
 }
 
@@ -342,18 +360,7 @@ export class FileRuntimeEventArchive implements RuntimeEventArchive {
 
   private async withLock<T>(work: () => Promise<T>): Promise<T> {
     const lockPath = `${this.filePath}.lock`
-    const deadline = Date.now() + 30_000
-    let lock: Awaited<ReturnType<typeof open>> | undefined
-    while (lock === undefined) {
-      try { lock = await open(lockPath, 'wx', 0o600) }
-      catch (cause) {
-        if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause
-        const lockStat = await stat(lockPath).catch(() => undefined)
-        if (lockStat && Date.now() - lockStat.mtimeMs > 30_000) { await rm(lockPath, { force: true }); continue }
-        if (Date.now() >= deadline) throw new Error('RUNTIME_EVENT_ARCHIVE_LOCK_TIMEOUT')
-        await new Promise((resolve) => setTimeout(resolve, 5))
-      }
-    }
+    const lock = await acquireExclusiveLock(lockPath, 'RUNTIME_EVENT_ARCHIVE_LOCK_TIMEOUT')
     try { return await work() } finally { await lock.close().catch(() => undefined); await rm(lockPath, { force: true }).catch(() => undefined) }
   }
 }
@@ -457,18 +464,7 @@ export class FileRuntimeFactInboxDedupeArchive implements FactInboxDedupeArchive
   }
   private async withLock<T>(work: () => Promise<T>): Promise<T> {
     const lockPath = `${this.filePath}.lock`
-    const deadline = Date.now() + 30_000
-    let lock: Awaited<ReturnType<typeof open>> | undefined
-    while (lock === undefined) {
-      try { lock = await open(lockPath, 'wx', 0o600) }
-      catch (cause) {
-        if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause
-        const lockStat = await stat(lockPath).catch(() => undefined)
-        if (lockStat && Date.now() - lockStat.mtimeMs > 30_000) { await rm(lockPath, { force: true }); continue }
-        if (Date.now() >= deadline) throw new Error('RUNTIME_FACT_INBOX_DEDUPE_LOCK_TIMEOUT')
-        await new Promise((resolve) => setTimeout(resolve, 5))
-      }
-    }
+    const lock = await acquireExclusiveLock(lockPath, 'RUNTIME_FACT_INBOX_DEDUPE_LOCK_TIMEOUT')
     try { return await work() } finally { await lock.close().catch(() => undefined); await rm(lockPath, { force: true }).catch(() => undefined) }
   }
 }
@@ -575,7 +571,10 @@ function hasDerivedReference(ref: ProvenanceRef, ownerLaneId: string, agents: Ma
     return Boolean(agent && (parsed.agentId === undefined || parsed.agentId === agent.id) && agent.globalVersions.some(([version]: [number, JsonValue]) => version === parsed.version))
   }
   const lane = lanes.get(ownerLaneId)
-  return Boolean(lane && parsed.laneId === lane.id && lane.context.version === parsed.version)
+  // A lane may retain provenance to an earlier immutable context snapshot
+  // after later commits advance its current context version. Those snapshots
+  // are persisted/pinned by the storage policy and remain valid references.
+  return Boolean(lane && parsed.laneId === lane.id && Number.isInteger(parsed.version) && parsed.version >= 0 && parsed.version <= lane.context.version)
 }
 
 function validateExternalBodyReferences(snapshot: RuntimePersistenceSnapshot): void {
@@ -685,18 +684,7 @@ export class FileRuntimePersistenceBackend implements RuntimePersistenceBackend 
     const operation = this.pending.then(async () => {
       await mkdir(dirname(this.filePath), { recursive: true })
       const lockPath = `${this.filePath}.lock`
-      let lock: Awaited<ReturnType<typeof open>> | undefined
-      const lockDeadline = Date.now() + 30_000
-      while (lock === undefined) {
-        try { lock = await open(lockPath, 'wx', 0o600) }
-        catch (cause) {
-          if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause
-          const lockStat = await stat(lockPath).catch(() => undefined)
-          if (lockStat && Date.now() - lockStat.mtimeMs > 30_000) { await rm(lockPath, { force: true }); continue }
-          if (Date.now() >= lockDeadline) throw new Error('RUNTIME_PERSISTENCE_LOCK_TIMEOUT')
-          await new Promise((resolve) => setTimeout(resolve, 5))
-        }
-      }
+      const lock = await acquireExclusiveLock(lockPath, 'RUNTIME_PERSISTENCE_LOCK_TIMEOUT')
       try {
         const current = await this.load()
         if (expectedDigest !== undefined && (current === undefined || current.integrity?.digest !== expectedDigest)) throw new Error('RUNTIME_PERSISTENCE_CONFLICT')

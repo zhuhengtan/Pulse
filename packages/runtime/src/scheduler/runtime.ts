@@ -15,7 +15,7 @@ import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeRe
 import { exportRuntimeLog, exportRuntimeLogTo, exportWarmStartSession, type RuntimeLogSink, type RuntimeSessionStore, type SessionLogExport, type SessionLogExportOptions } from '../storage/session.js'
 import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent, normalizeRuntimeEvent } from '../core/events.js'
-import { apply, type Mutation } from '../core/mutations.js'
+import { apply, forkRuntimeStateForAdmission, type Mutation } from '../core/mutations.js'
 import { ContextMerger, type MergePlan } from '../context/merger.js'
 import { appendHistory, contentHash, historyPressure, stableSerialize } from '../context/builder.js'
 import { assignRuntimeToolCallIds, InMemoryModelRegistry, ModelRouter, validateAdapterResult, validateJsonSchema, type ModelCapabilities, type ModelHostPolicy, type ModelRegistry, type ModelRouteRequirements } from '../models/router.js'
@@ -128,6 +128,12 @@ export interface RuntimeConfig {
   policyVersion?: string
   routerVersion?: string
   effectExecutor?: EffectExecutor
+  /**
+   * Let an application opt into Runtime-owned Human Effect handling while
+   * still supplying a combined executor for model and tool effects.
+   * Existing custom executors keep their historical behavior by default.
+   */
+  builtinHumanEffects?: boolean
   effectSubmissionPreparer?: (submission: EffectSubmission) => EffectSubmission
   telemetryExporter?: RuntimeTelemetryExporter
   auditLogSink?: RuntimeLogSink
@@ -485,6 +491,7 @@ export class PulseRuntime {
   private readonly executor: EffectExecutor
   private factInboxDedupeArchive: FactInboxDedupeArchive | undefined
   private readonly customExecutor: boolean
+  private readonly builtinHumanEffects: boolean
   private enqueueSeq = 1
   private readonly maxSteps: number
   private readonly maxTickMs: number
@@ -638,6 +645,7 @@ export class PulseRuntime {
     this.budget = config.budget ?? {}
     if (restored) for (const event of this.state.events) if (event.type === 'effect.execution_metadata') this.recordBudgetMetadata(event.data ?? event.payload)
     this.customExecutor = config.effectExecutor !== undefined
+    this.builtinHumanEffects = config.builtinHumanEffects === true
     this.executor = config.effectExecutor ?? this.executeRegisteredEffect.bind(this)
     if (restored) this.clock.set(this.state.now)
     if (config.maxRuntimeMs !== undefined) {
@@ -1596,7 +1604,7 @@ export class PulseRuntime {
   }
 
   private assertStorageAdmission(mutations: Mutation[]): void {
-    const candidate = structuredClone(this.state)
+    const candidate = forkRuntimeStateForAdmission(this.state, mutations)
     apply(candidate, mutations, { sessionId: this.sessionId, timestamp: candidate.now })
     const policy = this.storagePolicy.clone()
     this.syncStoragePolicy(policy, candidate)
@@ -1705,11 +1713,13 @@ export class PulseRuntime {
     // by the pin set above can disappear.
     for (const key of [...target.keys()]) if (key.startsWith('snapshot:') && !liveSnapshotKeys.has(key)) target.remove(key)
     if (transactional) policy.adopt(target)
-    for (const [id, value] of residency) {
-      const result = state.results.get(id)
-      if (result) Object.assign(result, value)
+    if (transactional) {
+      for (const [id, value] of residency) {
+        const result = state.results.get(id)
+        if (result) Object.assign(result, value)
+      }
+      if (this.sessionStore) for (const agent of state.agents.values()) this.sessionStore.put(exportWarmStartSession(state, agent.id))
     }
-    if (transactional && this.sessionStore) for (const agent of state.agents.values()) this.sessionStore.put(exportWarmStartSession(state, agent.id))
   }
 
   private hasQueuedEffects(): boolean { return [...this.state.effects.values()].some((effect) => effect.state === 'queued' && !this.executions.has(effect.id)) }
@@ -2338,7 +2348,9 @@ export class PulseRuntime {
       this.state.effects.set(effect.id, effect)
       this.tickBudget?.consume()
       const controller = new AbortController()
-      if (effect.kind === 'human' && !this.customExecutor) {
+      // Human Effects can use Runtime's pending/reply protocol when the host
+      // opts in, while legacy custom executors retain control by default.
+      if (effect.kind === 'human' && (this.builtinHumanEffects || !this.customExecutor)) {
         this.emit({ type: 'human.requested', effectId: effect.id, data: effect.input })
         if (effect.attemptTimeoutMs !== undefined) this.scheduleRuntimeDelay(effect.attemptTimeoutMs, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: null }, 'failed', { code: 'ATTEMPT_TIMEOUT', message: 'Human response timed out.' }) })
         if (effect.deadlineAt !== undefined) this.scheduleRuntimeTimer(effect.deadlineAt, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: null }, 'failed', { code: 'TIMEOUT', message: 'Human response deadline exceeded.' }) })

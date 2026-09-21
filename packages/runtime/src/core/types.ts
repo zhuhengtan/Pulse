@@ -284,19 +284,26 @@ export type ResumeInput =
  * Park a cancel proposal without dropping a wait/control_error that already occupies
  * `pendingResumeInput`. The parked proposals are promoted the next time the slot is free.
  */
+const MAX_CONTROL_PROPOSALS = 32
+
+function appendControlProposals(existing: ControlProposal[] | undefined, extra: ControlProposal[]): ControlProposal[] {
+  if ((existing?.length ?? 0) >= MAX_CONTROL_PROPOSALS) return existing ?? []
+  return [...(existing ?? []), ...extra].slice(0, MAX_CONTROL_PROPOSALS)
+}
+
 export function enqueueControlProposal(lane: LaneRecord, proposal: ControlProposal): void {
   if (lane.pendingResumeInput === undefined || lane.pendingResumeInput.type === 'control_proposal') {
     const existing = lane.pendingResumeInput?.type === 'control_proposal' ? lane.pendingResumeInput.proposals : []
-    lane.pendingResumeInput = { type: 'control_proposal', proposals: [...existing, proposal] }
+    lane.pendingResumeInput = { type: 'control_proposal', proposals: appendControlProposals(existing, [proposal]) }
     return
   }
-  lane.pendingControlProposals = [...(lane.pendingControlProposals ?? []), proposal]
+  lane.pendingControlProposals = appendControlProposals(lane.pendingControlProposals, [proposal])
 }
 
 /** Replace the resume slot. Existing control_proposal inputs are parked, then promoted if the slot ends up empty. */
 export function replaceResumeInput(lane: LaneRecord, input: ResumeInput | undefined): void {
   if (lane.pendingResumeInput?.type === 'control_proposal' && input?.type !== 'control_proposal') {
-    lane.pendingControlProposals = [...(lane.pendingControlProposals ?? []), ...lane.pendingResumeInput.proposals]
+    lane.pendingControlProposals = appendControlProposals(lane.pendingControlProposals, lane.pendingResumeInput.proposals)
   }
   if (input === undefined) delete lane.pendingResumeInput
   else lane.pendingResumeInput = input
