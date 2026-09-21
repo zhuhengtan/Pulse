@@ -97,7 +97,7 @@ describe('M1-2 scheduler and lifecycle primitives', () => {
 
   it('lets one lane wait without blocking another lane', async () => {
     const calls: string[] = []
-    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+    const runtime = new PulseRuntime({ maxTickMs: 1000, effectExecutor: async (effect) => {
       await new Promise<void>((resolve) => setTimeout(resolve, effect.key === 'slow' ? 15 : 0))
       calls.push(effect.key)
       return { value: { key: effect.key } }

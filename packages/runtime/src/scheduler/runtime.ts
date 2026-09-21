@@ -478,7 +478,7 @@ export class PulseRuntime {
       for (const wait of this.state.waits.values()) if (wait.state === 'pending') this.scheduleWaitDeadline(wait)
     }
     this.maxSteps = config.maxLaneStepsPerTick ?? 32
-    this.maxTickMs = config.maxTickMs ?? Number.POSITIVE_INFINITY
+    this.maxTickMs = config.maxTickMs ?? 5
     this.maxConsecutiveControlErrors = config.maxConsecutiveControlErrors ?? 2
     this.watchdogNoProgressThreshold = config.watchdogNoProgressThreshold ?? 3
     this.watchdogRepeatedActionThreshold = config.watchdogRepeatedActionThreshold ?? 3
@@ -980,7 +980,9 @@ export class PulseRuntime {
     this.assertRecoveryPrograms()
     this.state.now = this.clock.now()
     const tickStartedAt = performance.now()
-    while (this.factInbox.size > 0) {
+    let tickOperations = 0
+    const canStartTickOperation = (): boolean => tickOperations === 0 || performance.now() - tickStartedAt < this.maxTickMs
+    while (this.factInbox.size > 0 && canStartTickOperation()) {
       const before = this.factInbox.snapshot()
       const envelope = this.factInbox.drain(1)[0]
       if (!envelope) break
@@ -1021,16 +1023,23 @@ export class PulseRuntime {
         this.factInbox.restore(before)
         throw cause
       }
+      tickOperations++
     }
     if (this.maxRuntimeAt !== undefined) for (const agent of this.state.agents.values()) if (agent.state === 'running' && this.state.now >= this.maxRuntimeAt) this.cancelAgent(agent.id, 'TIMEOUT')
     for (const agent of this.state.agents.values()) if (agent.state === 'running' && agent.deadlineAt !== undefined && this.state.now >= agent.deadlineAt) this.cancelAgent(agent.id, 'TIMEOUT')
-    for (const timer of this.clock.timers.due(this.state.now)) timer.callback()
+    while (canStartTickOperation()) {
+      const timer = this.clock.timers.due(this.state.now, 1)[0]
+      if (!timer) break
+      timer.callback()
+      tickOperations++
+    }
     let progressed = 0
-    while (progressed < this.maxSteps && (progressed === 0 || performance.now() - tickStartedAt < this.maxTickMs)) {
+    while (progressed < this.maxSteps && canStartTickOperation()) {
       const laneId = this.ready.dequeue(this.state.now)
       if (!laneId) break
       const lane = this.state.lanes.get(laneId)
       if (!lane || lane.status !== 'ready') continue
+      tickOperations++
       const currentPressure = historyPressure(lane.context.history, this.state.historySoftTokens, this.state.historyHardTokens)
       const stepLane = structuredClone(lane)
       if (currentPressure) stepLane.historyPressure = currentPressure

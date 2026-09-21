@@ -220,6 +220,17 @@ describe('runtime control boundaries', () => {
     expect(calls).toBe(3)
   })
 
+  it('shares the soft time slice with due timers without dropping them', () => {
+    const runtime = new PulseRuntime({ maxTickMs: 0 })
+    const fired: number[] = []
+    runtime.clock.schedule(0, () => fired.push(1))
+    runtime.clock.schedule(0, () => fired.push(2))
+    runtime.tick()
+    expect(fired).toEqual([1])
+    runtime.tick()
+    expect(fired).toEqual([1, 2])
+  })
+
   it('waits for a real monotonic timer instead of fast-forwarding it', async () => {
     const clock = new MonotonicClock()
     let fired = false
