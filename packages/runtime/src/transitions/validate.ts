@@ -75,6 +75,7 @@ function validateControlActionShape(action: unknown): string | undefined {
   if (value.type === 'cancel_lane' && (!nonEmptyString(value.laneId) || !['SUPERSEDED', 'USER_REQUESTED', 'POLICY'].includes(String(value.reason)))) return 'INVALID_CANCEL_ACTION'
   if (value.type === 'propose_cancel' && (!nonEmptyString(value.laneId) || !['SUPERSEDED', 'POLICY'].includes(String(value.reason)))) return 'INVALID_CANCEL_ACTION'
   if (value.type === 'adopt_context' && !(value.version === 'latest' || (Number.isInteger(value.version) && (value.version as number) >= 0))) return 'INVALID_CONTEXT_ADOPTION'
+  if (value.type === 'complete' && value.children !== undefined && !['reject_if_active', 'cancel', 'await'].includes(String(value.children))) return 'INVALID_COMPLETE'
   if (value.type === 'downgrade_privacy') {
     if (!['human_approval', 'sanitizer'].includes(String(value.method)) || value.targetPrivacy !== 'cloud_allowed' || !nonEmptyString(value.outputRef) || !Array.isArray(value.sourceRefs) || !validProvenanceRefs(value.sourceRefs) || !isRuntimeJsonValue(value.value ?? null) || (value.summary !== undefined && !isRuntimeJsonValue(value.summary))) return 'INVALID_PRIVACY_DOWNGRADE'
     if (value.approvalRef !== undefined && !nonEmptyString(value.approvalRef)) return 'INVALID_PRIVACY_DOWNGRADE'

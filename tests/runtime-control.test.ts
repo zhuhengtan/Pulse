@@ -123,6 +123,7 @@ describe('runtime control boundaries', () => {
       { action: { type: 'cancel_lane', laneId: 'lane-1', reason: 'INVALID' }, code: 'INVALID_CANCEL_ACTION' },
       { action: { type: 'propose_cancel', laneId: '', reason: 'POLICY' }, code: 'INVALID_CANCEL_ACTION' },
       { action: { type: 'adopt_context', version: -1 }, code: 'INVALID_CONTEXT_ADOPTION' },
+      { action: { type: 'complete', result: {}, children: 'invalid' }, code: 'INVALID_COMPLETE' },
       { action: { type: 'downgrade_privacy', sourceRefs: [], outputRef: 'out', value: {}, targetPrivacy: 'cloud_allowed', method: 'unknown' }, code: 'INVALID_PRIVACY_DOWNGRADE' },
     ]
     for (const [index, candidate] of cases.entries()) {
