@@ -56,6 +56,25 @@ export interface RuntimeToolSetSnapshot { id: string; version: string; tools: Ru
 export interface RuntimeToolRegistryPolicy { allow?: string[]; deny?: string[]; workspaceRoots?: string[]; networkHosts?: string[]; allowNetwork?: boolean }
 export interface RuntimeToolAdmission { locks: ResourceLockSpec[]; sideEffectPolicy: RuntimeToolManifest['sideEffectPolicy']; defaultTimeoutMs: number; retrySafety: RuntimeToolManifest['retrySafety']; version: string }
 
+function isJsonSchema(value: unknown): boolean { return value !== null && typeof value === 'object' && !Array.isArray(value) }
+function isResourceLocks(value: unknown): value is ResourceLockSpec[] {
+  if (!Array.isArray(value)) return false
+  return value.every((lock) => {
+    if (lock === null || typeof lock !== 'object' || Array.isArray(lock)) return false
+    const record = lock as Record<string, unknown>
+    return typeof record.resource === 'string' && record.resource.length > 0 && (record.mode === 'shared' || record.mode === 'exclusive')
+  })
+}
+function isPermissions(value: unknown): boolean {
+  if (value === undefined) return true
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const permissions = value as Record<string, unknown>
+  return (permissions.workspaceRoots === undefined || (Array.isArray(permissions.workspaceRoots) && permissions.workspaceRoots.every((root) => typeof root === 'string' && root.length > 0))) && (permissions.networkHosts === undefined || (Array.isArray(permissions.networkHosts) && permissions.networkHosts.every((host) => typeof host === 'string' && host.length > 0)))
+}
+function isManifestContract(manifest: Record<string, unknown>): boolean {
+  return typeof manifest.description === 'string' && isJsonSchema(manifest.inputSchema) && isJsonSchema(manifest.outputSchema) && ['llm', 'tool', 'agent', 'none'].includes(String(manifest.concurrencyClass)) && ['none', 'read', 'write', 'external'].includes(String(manifest.sideEffectPolicy)) && ['read_only', 'idempotent', 'unsafe'].includes(String(manifest.retrySafety)) && isResourceLocks(manifest.locks) && (manifest.resources === undefined || isResourceLocks(manifest.resources)) && (manifest.tags === undefined || (Array.isArray(manifest.tags) && manifest.tags.every((tag) => typeof tag === 'string' && tag.length > 0))) && (manifest.maxResultSummaryBytes === undefined || (Number.isInteger(manifest.maxResultSummaryBytes) && (manifest.maxResultSummaryBytes as number) >= 0)) && isPermissions(manifest.permissions)
+}
+
 /**
  * Core tool catalog used by PulseRuntime. Tool SDK definitions are structurally
  * compatible, so an application may register them directly and still choose a
@@ -71,11 +90,11 @@ export class RuntimeToolRegistry {
 
   register(definition: RuntimeToolDefinition | unknown): void {
     const candidate = definition as RuntimeToolDefinition
-    const manifest = candidate?.manifest
-    if (!manifest || typeof manifest.name !== 'string' || !manifest.name || this.definitions.has(manifest.name)) throw new Error(`TOOL_ALREADY_REGISTERED:${manifest?.name ?? ''}`)
-    if (!manifest.version || !Number.isFinite(manifest.defaultTimeoutMs) || manifest.defaultTimeoutMs < 0) throw new Error(`INVALID_TOOL_MANIFEST:${manifest.name}`)
+    const manifest = candidate?.manifest as unknown as Record<string, unknown> | undefined
+    const name = typeof manifest?.name === 'string' ? manifest.name : ''
+    if (!manifest || typeof manifest.name !== 'string' || !name || this.definitions.has(name)) throw new Error(`TOOL_ALREADY_REGISTERED:${name}`)
+    if (typeof manifest.version !== 'string' || !manifest.version || typeof manifest.defaultTimeoutMs !== 'number' || !Number.isFinite(manifest.defaultTimeoutMs) || manifest.defaultTimeoutMs < 0 || !isManifestContract(manifest)) throw new Error(`INVALID_TOOL_MANIFEST:${name}`)
     if (manifest.supportsAbortSignal !== true) throw new Error(`TOOL_ABORT_SIGNAL_REQUIRED:${manifest.name}`)
-    if (manifest.permissions?.workspaceRoots?.some((root) => !root || typeof root !== 'string') || manifest.permissions?.networkHosts?.some((host) => !host || typeof host !== 'string')) throw new Error(`INVALID_TOOL_PERMISSIONS:${manifest.name}`)
     if (typeof candidate.execute !== 'function') throw new Error(`INVALID_TOOL_DEFINITION:${manifest.name}`)
     this.definitions.set(manifest.name, candidate)
   }

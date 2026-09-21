@@ -46,6 +46,25 @@ export interface ToolDiscoveryResult { manifest: ToolManifest; score: number }
 export interface ToolSetSnapshot { id: string; version: string; tools: ToolManifest[] }
 export interface ToolRegistryPolicy { allow?: string[]; deny?: string[]; workspaceRoots?: string[]; networkHosts?: string[]; allowNetwork?: boolean }
 export interface ToolAdmission { locks: ResourceClaim[]; sideEffectPolicy: ToolManifest['sideEffectPolicy']; defaultTimeoutMs: number; retrySafety: ToolManifest['retrySafety']; version: string }
+
+function isJsonSchema(value: unknown): boolean { return value !== null && typeof value === 'object' && !Array.isArray(value) }
+function isResourceClaims(value: unknown): value is ResourceClaim[] {
+  if (!Array.isArray(value)) return false
+  return value.every((claim) => {
+    if (claim === null || typeof claim !== 'object' || Array.isArray(claim)) return false
+    const record = claim as Record<string, unknown>
+    return typeof record.resource === 'string' && record.resource.length > 0 && (record.mode === 'shared' || record.mode === 'exclusive')
+  })
+}
+function isPermissions(value: unknown): boolean {
+  if (value === undefined) return true
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const permissions = value as Record<string, unknown>
+  return (permissions.workspaceRoots === undefined || (Array.isArray(permissions.workspaceRoots) && permissions.workspaceRoots.every((root) => typeof root === 'string' && root.length > 0))) && (permissions.networkHosts === undefined || (Array.isArray(permissions.networkHosts) && permissions.networkHosts.every((host) => typeof host === 'string' && host.length > 0)))
+}
+function isManifestContract(manifest: Record<string, unknown>): boolean {
+  return typeof manifest.description === 'string' && isJsonSchema(manifest.inputSchema) && isJsonSchema(manifest.outputSchema) && ['llm', 'tool', 'agent', 'none'].includes(String(manifest.concurrencyClass)) && ['none', 'read', 'write', 'external'].includes(String(manifest.sideEffectPolicy)) && ['read_only', 'idempotent', 'unsafe'].includes(String(manifest.retrySafety)) && isResourceClaims(manifest.locks) && (manifest.resources === undefined || isResourceClaims(manifest.resources)) && (manifest.tags === undefined || (Array.isArray(manifest.tags) && manifest.tags.every((tag) => typeof tag === 'string' && tag.length > 0))) && (manifest.maxResultSummaryBytes === undefined || (Number.isInteger(manifest.maxResultSummaryBytes) && (manifest.maxResultSummaryBytes as number) >= 0)) && isPermissions(manifest.permissions)
+}
 export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   manifest: ToolManifest
   resourceAdmissionMode?: 'explicit' | 'default'
@@ -81,10 +100,11 @@ export class ToolRegistry {
     this.policy = { ...(policy.allow === undefined ? {} : { allow: new Set(policy.allow) }), deny: new Set(policy.deny ?? []), ...(policy.workspaceRoots === undefined ? {} : { workspaceRoots: new Set(policy.workspaceRoots.map(normalizeWorkspaceRoot)) }), ...(policy.networkHosts === undefined ? {} : { networkHosts: new Set(policy.networkHosts.map(normalizeNetworkHost)) }), allowNetwork: policy.allowNetwork ?? true }
   }
   register<TInput, TOutput>(definition: ToolDefinition<TInput, TOutput>): void {
-    if (!definition.manifest.name || this.definitions.has(definition.manifest.name)) throw new Error(`TOOL_ALREADY_REGISTERED:${definition.manifest.name}`)
-    if (!definition.manifest.version || !Number.isFinite(definition.manifest.defaultTimeoutMs) || definition.manifest.defaultTimeoutMs < 0) throw new Error(`INVALID_TOOL_MANIFEST:${definition.manifest.name}`)
+    const manifest = definition?.manifest as unknown as Record<string, unknown> | undefined
+    const name = typeof manifest?.name === 'string' ? manifest.name : ''
+    if (!manifest?.name || this.definitions.has(name)) throw new Error(`TOOL_ALREADY_REGISTERED:${name}`)
+    if (typeof manifest.version !== 'string' || !manifest.version || typeof manifest.defaultTimeoutMs !== 'number' || !Number.isFinite(manifest.defaultTimeoutMs) || manifest.defaultTimeoutMs < 0 || !isManifestContract(manifest)) throw new Error(`INVALID_TOOL_MANIFEST:${name}`)
     if (!definition.manifest.supportsAbortSignal) throw new Error(`TOOL_ABORT_SIGNAL_REQUIRED:${definition.manifest.name}`)
-    if (definition.manifest.permissions?.workspaceRoots?.some((root) => !root || typeof root !== 'string') || definition.manifest.permissions?.networkHosts?.some((host) => !host || typeof host !== 'string')) throw new Error(`INVALID_TOOL_PERMISSIONS:${definition.manifest.name}`)
     this.definitions.set(definition.manifest.name, definition)
   }
   get(name: string): ToolDefinition<any, any> | undefined { return this.isAllowed(name) ? this.definitions.get(name) : undefined }

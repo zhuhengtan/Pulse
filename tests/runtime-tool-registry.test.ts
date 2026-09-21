@@ -23,6 +23,15 @@ describe('Runtime tool registry', () => {
     await expect(registry.execute('echo', { value: 1 }, new AbortController().signal)).rejects.toMatchObject({ code: 'INVALID_TOOL_INPUT' })
   })
 
+  it('rejects malformed manifest contracts in both Runtime and Tool SDK registries', () => {
+    const malformed = { ...echo, manifest: { ...echo.manifest, name: 'malformed', inputSchema: [], locks: [{ resource: 'workspace', mode: 'invalid' }], permissions: { workspaceRoots: 'not-an-array' } } }
+    expect(() => new RuntimeToolRegistry().register(malformed)).toThrow('INVALID_TOOL_MANIFEST:malformed')
+    expect(() => new ToolRegistry().register(malformed as never)).toThrow('INVALID_TOOL_MANIFEST:malformed')
+    const invalidCategory = { ...echo, manifest: { ...echo.manifest, name: 'invalid-category', concurrencyClass: 'unknown' } }
+    expect(() => new RuntimeToolRegistry().register(invalidCategory)).toThrow('INVALID_TOOL_MANIFEST:invalid-category')
+    expect(() => new ToolRegistry().register(invalidCategory as never)).toThrow('INVALID_TOOL_MANIFEST:invalid-category')
+  })
+
   it('filters manifest workspace and network permissions before discovery or execution', () => {
     const remote = { ...echo, manifest: { ...echo.manifest, name: 'remote-echo', permissions: { workspaceRoots: ['/workspace/project'], networkHosts: ['api.example.com'] } } }
     const denied = new RuntimeToolRegistry({ workspaceRoots: ['/workspace'], allowNetwork: false })
