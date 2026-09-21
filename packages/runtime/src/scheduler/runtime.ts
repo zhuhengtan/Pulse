@@ -8,7 +8,7 @@ import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
 import { assertProgramPure, withPureStepGuard } from '../dsl/program.js'
 import type { ProgramRef } from '../dsl/templates.js'
-import { FactInbox, ObservationInbox } from '../core/inbox.js'
+import { FactInbox, ObservationInbox, type FactInboxDedupeArchive, type FactInboxDedupeArchiveBatch } from '../core/inbox.js'
 import { observeProgress, type ProgressObservation } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
 import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, externalizeRuntimeSnapshotBodies, hydrateRuntimeResultBodies, hydrateRuntimeSnapshotBodies, importRuntimePersistence, withRuntimePersistenceIntegrity, type RuntimePersistenceBackend, type RuntimePersistenceCompatibility, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
@@ -124,6 +124,8 @@ export interface RuntimeConfig {
   auditLogPrivacy?: PrivacyLabel
   persistenceBackend?: RuntimePersistenceBackend
   sessionStore?: RuntimeSessionStore
+  /** Optional durable membership view used to safely compact FactInbox dedupe ids. */
+  factInboxDedupeArchive?: FactInboxDedupeArchive
   /** Internal restore CAS baseline; differs from the hydrated envelope digest. */
   persistenceExpectedDigest?: string
   budget?: RuntimeBudgetConfig
@@ -503,7 +505,9 @@ export class PulseRuntime {
     this.persistenceDigest = config.persistenceExpectedDigest ?? config.persistence?.integrity?.digest
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
-    this.factInbox = restored?.factInbox === undefined ? new FactInbox<RuntimeFact>() : FactInbox.fromSnapshot<RuntimeFact>(restored.factInbox as unknown as import('../core/inbox.js').FactInboxSnapshot<RuntimeFact>)
+    this.factInbox = restored?.factInbox === undefined
+      ? new FactInbox<RuntimeFact>(config.factInboxDedupeArchive === undefined ? {} : { dedupeArchive: config.factInboxDedupeArchive })
+      : FactInbox.fromSnapshot<RuntimeFact>(restored.factInbox as unknown as import('../core/inbox.js').FactInboxSnapshot<RuntimeFact>, config.factInboxDedupeArchive === undefined ? {} : { dedupeArchive: config.factInboxDedupeArchive })
     for (const program of config.programs ?? []) this.register(program)
     this.recoveryCompatibility = restored?.compatibility
     const restoredCommandIds = this.factInbox.snapshot().seen.map((eventId) => /^host-command-(\d+)$/.exec(eventId)?.[1]).filter((value): value is string => value !== undefined).map(Number)
@@ -720,6 +724,12 @@ export class PulseRuntime {
     return [...this.state.agents.values()].filter((agent) => agent.detached === true).map((agent) => ({ agentId: agent.id, rootLaneId: agent.rootLaneId, state: agent.state ?? 'created', detached: true }))
   }
   exportPersistence(): RuntimePersistenceSnapshot { return exportRuntimePersistence(this.state, this.mutationLog, this.outbox, this.quarantine, this.storagePolicy, this.factInbox.snapshot(), this.persistenceCompatibility()) }
+  createFactInboxDedupeArchiveBatch(through?: number): FactInboxDedupeArchiveBatch { return this.factInbox.createDedupeArchiveBatch(through) }
+  compactFactInboxDedupeThrough(batch: FactInboxDedupeArchiveBatch): number {
+    const compacted = this.factInbox.compactDedupeThrough(batch)
+    if (compacted > 0) this.schedulePersistence()
+    return compacted
+  }
   async persist(backend: RuntimePersistenceBackend): Promise<void> {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()

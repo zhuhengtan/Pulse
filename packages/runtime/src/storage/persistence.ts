@@ -432,7 +432,21 @@ export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceS
     if (compatibility.schemaVersion !== 1 || !compatibility.programVersions || !compatibility.toolVersions || Object.entries(compatibility.programVersions).some(([key, version]) => !key || typeof version !== 'string' || version.length === 0) || Object.entries(compatibility.toolVersions).some(([key, version]) => !key || typeof version !== 'string' || version.length === 0) || (compatibility.policyVersion !== undefined && typeof compatibility.policyVersion !== 'string') || (compatibility.routerVersion !== undefined && typeof compatibility.routerVersion !== 'string')) throw new Error('INVALID_RUNTIME_PERSISTENCE_COMPATIBILITY')
   }
   if (value?.checkpoint?.eventWatermark !== undefined && (!Number.isInteger(value.checkpoint.eventWatermark) || value.checkpoint.eventWatermark < 0)) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
-  if (value?.factInbox !== undefined) try { FactInbox.fromSnapshot(value.factInbox) } catch { throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT') }
+  if (value?.factInbox !== undefined) try {
+    const ledger = value.factInbox.dedupeLedger
+    if (ledger !== undefined && ledger.archivedThrough > 0) {
+      // Persistence validation can only validate the envelope shape here. The
+      // Runtime constructor performs the real archive identity/digest check
+      // when the host supplies its durable dedupe view.
+      const validationArchive = {
+        archiveId: ledger.archiveId ?? '',
+        watermark: ledger.archivedThrough,
+        contains: () => true,
+        digestThrough: (through: number) => through === ledger.archivedThrough ? ledger.archiveDigest ?? '' : '',
+      }
+      FactInbox.fromSnapshot(value.factInbox, { dedupeArchive: validationArchive })
+    } else FactInbox.fromSnapshot(value.factInbox)
+  } catch { throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT') }
   const state = value?.checkpoint?.state?.state ?? value?.state?.state
   if (!value || value.schemaVersion !== 1 || !value.state || !value.state.state || !value.mutationLog || !value.outbox || !Array.isArray(state?.agents) || !Array.isArray(state?.lanes) || !Array.isArray(state?.effects) || !Array.isArray(state?.waits) || !Array.isArray(state?.results) || !Array.isArray(state?.mergeProposals)) throw new Error('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
   const agents = new Map(state.agents)
