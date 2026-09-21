@@ -89,6 +89,7 @@ describe('M0 acceptance matrix', () => {
     expect(started.filter((key) => key.endsWith('-human') || key.endsWith('-timer'))).toHaveLength(4)
     releases.get('a')?.()
     await new Promise<void>((resolve) => setImmediate(resolve))
+    await new Promise<void>((resolve) => setImmediate(resolve))
     releases.get('b')?.()
     await runtime.waitForIdle()
   })

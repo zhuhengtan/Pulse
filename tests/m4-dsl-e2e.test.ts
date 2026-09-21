@@ -147,8 +147,9 @@ describe('M1-4 DSL and end-to-end workflow', () => {
     expect(first.value?.kind).toBe('gap')
     expect(first.value?.type).toBe('gap')
     await session.cancel('test')
-    expect(runtime.state.events.some((event) => event.type === 'command.enqueued' && event.data && typeof event.data === 'object' && !Array.isArray(event.data) && event.data.type === 'cancel')).toBe(true)
+    expect(runtime.factInbox.size).toBe(1)
     runtime.tick()
+    expect(runtime.state.events.some((event) => event.type === 'command.enqueued' && event.data && typeof event.data === 'object' && !Array.isArray(event.data) && event.data.type === 'cancel')).toBe(true)
     expect(runtime.factInbox.size).toBe(0)
   })
 

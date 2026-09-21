@@ -152,6 +152,7 @@ describe('Runtime tool registry', () => {
     runtime.state.lanes.get(laneId)!.unresolvedEffectIds = [effect.id]
     runtime.quarantine.add(effect.id, 0, 'in_doubt')
     await expect(runtime.reconcileRegisteredEffect(effect.id)).resolves.toMatchObject({ status: 'succeeded', output: { status: 'done' } })
+    await runtime.waitForIdle()
     expect(runtime.quarantine.unresolvedEffectIds).toEqual([])
     expect(runtime.state.effects.get(effect.id)?.outcome?.status).toBe('succeeded')
     expect([...runtime.state.results.values()].find((result) => result.effectId === effect.id)?.value).toEqual({ status: 'done' })
