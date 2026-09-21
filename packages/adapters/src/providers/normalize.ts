@@ -49,29 +49,116 @@ export async function consumeProviderSse(response: Response): Promise<ProviderSs
 }
 
 export function normalizeOpenAIResponse(response: any): LLMResult {
-  const message = response?.choices?.[0]?.message ?? {}
-  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls.map((call: any, index: number) => ({ toolCallId: `pulse-tool-${index + 1}`, name: String(call.function?.name ?? ''), input: parseJson(call.function?.arguments) })) : []
-  const finishReason = response?.choices?.[0]?.finish_reason
-  const refusal = typeof message.refusal === 'string' ? message.refusal : undefined
-  const text = String(message.content ?? '')
-  const cachedInputTokens = response?.usage?.prompt_tokens_details?.cached_tokens ?? response?.usage?.cache_read_input_tokens
-  const inputTokens = response?.usage?.prompt_tokens
-  const cost = response?.usage?.cost && typeof response.usage.cost === 'object' ? { amount: Number(response.usage.cost.amount), currency: String(response.usage.cost.currency ?? 'USD'), source: 'reported' as const, ...(response.usage.cost.pricing_version === undefined ? {} : { pricingVersion: String(response.usage.cost.pricing_version) }) } : undefined
-  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason: refusal !== undefined || finishReason === 'refusal' ? 'refusal' : finishReason === 'tool_calls' ? 'tool_calls' : finishReason === 'length' ? 'length' : finishReason === 'error' ? 'error' : 'stop', ...(response?.usage ? { usage: { ...(inputTokens === undefined ? {} : { inputTokens }), ...(response.usage.completion_tokens === undefined ? {} : { outputTokens: response.usage.completion_tokens }), ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }), ...(inputTokens !== undefined && cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens) } : {}), ...(cost === undefined ? {} : { cost }) } } : {}) }
+  const root = providerRecord(response, 'OpenAI response')
+  if (!Array.isArray(root.choices) || root.choices.length === 0) throw invalidProviderResponse('OpenAI response must contain at least one choice')
+  const choice = providerRecord(root.choices[0], 'OpenAI choice')
+  const message = providerRecord(choice.message, 'OpenAI message')
+  const toolCalls = message.tool_calls === undefined ? [] : normalizeOpenAIToolCalls(message.tool_calls)
+  const refusal = message.refusal === undefined ? undefined : requiredProviderString(message.refusal, 'OpenAI refusal')
+  const text = providerText(message.content, 'OpenAI message content')
+  const finishReason = normalizeOpenAIFinishReason(choice.finish_reason, refusal, toolCalls.length > 0)
+  const rawUsage = root.usage === undefined ? undefined : providerRecord(root.usage, 'OpenAI usage')
+  const promptDetails = rawUsage?.prompt_tokens_details === undefined ? undefined : providerRecord(rawUsage.prompt_tokens_details, 'OpenAI prompt token details')
+  const usage = normalizeUsage(rawUsage === undefined ? undefined : { ...rawUsage, cached_tokens: rawUsage.cached_tokens ?? promptDetails?.cached_tokens ?? rawUsage.cache_read_input_tokens }, { input: 'prompt_tokens', output: 'completion_tokens', cached: 'cached_tokens' }, 'OpenAI')
+  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason, ...(usage === undefined ? {} : { usage }) }
 }
 export function normalizeAnthropicResponse(response: any): LLMResult {
-  const blocks = Array.isArray(response?.content) ? response.content : []
-  const text = blocks.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('')
-  const toolCalls = blocks.filter((block: any) => block.type === 'tool_use').map((block: any, index: number) => ({ toolCallId: `pulse-tool-${index + 1}`, name: String(block.name), input: parseJson(block.input) }))
+  const root = providerRecord(response, 'Anthropic response')
+  if (!Array.isArray(root.content)) throw invalidProviderResponse('Anthropic response content must be an array')
+  const blocks = root.content
+  const text = blocks.filter((block: any) => providerRecord(block, 'Anthropic content block').type === 'text').map((block: any) => requiredProviderString(providerRecord(block, 'Anthropic text block').text, 'Anthropic text block text')).join('')
+  const toolBlocks = blocks.filter((block: any) => providerRecord(block, 'Anthropic content block').type === 'tool_use')
+  const toolCalls = toolBlocks.map((block: any, index: number) => {
+    const value = providerRecord(block, 'Anthropic tool block')
+    return { toolCallId: `pulse-tool-${index + 1}`, name: requiredProviderString(value.name, 'Anthropic tool name'), input: parseJson(value.input) }
+  })
   const refusalBlock = blocks.find((block: any) => block.type === 'refusal' && typeof block.text === 'string')
   const refusal = refusalBlock?.text as string | undefined
-  const inputTokens = response?.usage?.input_tokens
-  const cachedInputTokens = response?.usage?.cache_read_input_tokens
-  const cost = response?.usage?.cost && typeof response.usage.cost === 'object' ? { amount: Number(response.usage.cost.amount), currency: String(response.usage.cost.currency ?? 'USD'), source: 'reported' as const } : undefined
-  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason: refusal !== undefined || response?.stop_reason === 'refusal' ? 'refusal' : toolCalls.length ? 'tool_calls' : 'stop', ...(response?.usage ? { usage: { ...(inputTokens === undefined ? {} : { inputTokens }), ...(response.usage.output_tokens === undefined ? {} : { outputTokens: response.usage.output_tokens }), ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }), ...(inputTokens !== undefined && cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens) } : {}), ...(cost === undefined ? {} : { cost }) } } : {}) }
+  const finishReason = normalizeAnthropicFinishReason(root.stop_reason, refusal, toolCalls.length > 0)
+  const usage = normalizeUsage(root.usage, { input: 'input_tokens', output: 'output_tokens', cached: 'cache_read_input_tokens' }, 'Anthropic')
+  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason, ...(usage === undefined ? {} : { usage }) }
 }
+function providerRecord(value: unknown, label: string): Record<string, any> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalidProviderResponse(`${label} must be an object`)
+  return value as Record<string, any>
+}
+
+function requiredProviderString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length === 0) throw invalidProviderResponse(`${label} must be a non-empty string`)
+  return value
+}
+
+function invalidProviderResponse(detail: string): Error & { code: string; retryable: boolean } {
+  return Object.assign(new Error(`PROVIDER_RESPONSE_INVALID: ${detail}`), { code: 'PROVIDER_RESPONSE_INVALID', retryable: true })
+}
+
+function providerText(value: unknown, label: string): string {
+  if (value === undefined || value === null) return ''
+  if (typeof value === 'string') return value
+  if (Array.isArray(value) && value.every((part) => {
+    if (!part || typeof part !== 'object' || Array.isArray(part)) return false
+    const item = part as Record<string, unknown>
+    return item.type === 'text' && typeof item.text === 'string'
+  })) return value.map((part) => (part as Record<string, string>).text).join('')
+  throw invalidProviderResponse(`${label} must be a string, null, or text-part array`)
+}
+
+function providerMetric(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined
+  if (!Number.isInteger(value) || !Number.isFinite(value) || (value as number) < 0) throw invalidProviderResponse(`${label} must be a non-negative integer`)
+  return value as number
+}
+
+function normalizeUsage(raw: unknown, fields: { input: string; output: string; cached: string }, provider: string): NonNullable<LLMResult['usage']> | undefined {
+  if (raw === undefined) return undefined
+  const value = providerRecord(raw, `${provider} usage`)
+  const inputTokens = providerMetric(value[fields.input], `${provider} input tokens`)
+  const outputTokens = providerMetric(value[fields.output], `${provider} output tokens`)
+  const cachedInputTokens = providerMetric(value[fields.cached], `${provider} cached input tokens`)
+  if (inputTokens !== undefined && cachedInputTokens !== undefined && cachedInputTokens > inputTokens) throw invalidProviderResponse(`${provider} cached input tokens exceed input tokens`)
+  const cost = value.cost === undefined ? undefined : normalizeCost(value.cost, provider)
+  return { ...(inputTokens === undefined ? {} : { inputTokens }), ...(outputTokens === undefined ? {} : { outputTokens }), ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }), ...(inputTokens !== undefined && cachedInputTokens !== undefined ? { uncachedInputTokens: inputTokens - cachedInputTokens } : {}), ...(cost === undefined ? {} : { cost }) }
+}
+
+function normalizeCost(raw: unknown, provider: string): NonNullable<LLMResult['usage']>['cost'] {
+  const value = providerRecord(raw, `${provider} cost`)
+  if (typeof value.amount !== 'number' || !Number.isFinite(value.amount) || value.amount < 0) throw invalidProviderResponse(`${provider} cost amount must be a non-negative number`)
+  if (typeof value.currency !== 'string' || value.currency.length === 0) throw invalidProviderResponse(`${provider} cost currency must be a non-empty string`)
+  if (value.pricing_version !== undefined && typeof value.pricing_version !== 'string') throw invalidProviderResponse(`${provider} pricing version must be a string`)
+  return { amount: value.amount, currency: value.currency, source: 'reported', ...(value.pricing_version === undefined ? {} : { pricingVersion: value.pricing_version }) }
+}
+
+function normalizeOpenAIToolCalls(raw: unknown): Array<{ toolCallId: string; name: string; input: unknown }> {
+  if (!Array.isArray(raw)) throw invalidProviderResponse('OpenAI tool_calls must be an array')
+  return raw.map((call: unknown, index: number) => {
+    const value = providerRecord(call, 'OpenAI tool call')
+    const fn = providerRecord(value.function, 'OpenAI tool function')
+    return { toolCallId: `pulse-tool-${index + 1}`, name: requiredProviderString(fn.name, 'OpenAI tool name'), input: parseJson(fn.arguments) }
+  })
+}
+
+function normalizeOpenAIFinishReason(raw: unknown, refusal: string | undefined, hasTools: boolean): LLMResult['finishReason'] {
+  if (refusal !== undefined || raw === 'refusal') return 'refusal'
+  if (raw === undefined) return hasTools ? 'tool_calls' : 'stop'
+  if (raw === 'tool_calls') { if (!hasTools) throw invalidProviderResponse('tool_calls finish reason requires tool calls'); return 'tool_calls' }
+  if (raw === 'stop') { if (hasTools) throw invalidProviderResponse('stop finish reason cannot contain tool calls'); return 'stop' }
+  if (raw === 'length') { if (hasTools) throw invalidProviderResponse('length finish reason cannot contain tool calls'); return 'length' }
+  if (raw === 'error' || raw === 'content_filter') { if (hasTools) throw invalidProviderResponse('error finish reason cannot contain tool calls'); return 'error' }
+  throw invalidProviderResponse(`unsupported OpenAI finish reason: ${String(raw)}`)
+}
+
+function normalizeAnthropicFinishReason(raw: unknown, refusal: string | undefined, hasTools: boolean): LLMResult['finishReason'] {
+  if (refusal !== undefined || raw === 'refusal') return 'refusal'
+  if (raw === undefined) return hasTools ? 'tool_calls' : 'stop'
+  if (raw === 'tool_use') { if (!hasTools) throw invalidProviderResponse('tool_use stop reason requires tool calls'); return 'tool_calls' }
+  if (raw === 'max_tokens') { if (hasTools) throw invalidProviderResponse('max_tokens stop reason cannot contain tool calls'); return 'length' }
+  if (raw === 'end_turn' || raw === 'stop_sequence') { if (hasTools) throw invalidProviderResponse('text stop reason cannot contain tool calls'); return 'stop' }
+  throw invalidProviderResponse(`unsupported Anthropic stop reason: ${String(raw)}`)
+}
+
 function parseJson(value: unknown): unknown {
-  if (typeof value !== 'string') return value ?? {}
+  if (value === undefined || value === null || value === '') return {}
+  if (typeof value !== 'string') return value
   try { return JSON.parse(value) } catch { throw new Error('INVALID_TOOL_ARGUMENTS') }
 }
 function parseStructured(value: string): unknown | undefined { if (!value.trim()) return undefined; try { const parsed = JSON.parse(value); return parsed !== null && typeof parsed === 'object' ? parsed : undefined } catch { return undefined } }

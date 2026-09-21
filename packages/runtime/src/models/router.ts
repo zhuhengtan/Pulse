@@ -358,7 +358,7 @@ function validateUsage(usage: unknown): void {
 }
 
 export function validateAdapterResult(result: LLMResult): LLMResult {
-  if (typeof result.text !== 'string' || !Array.isArray(result.toolCalls) || !['stop', 'tool_calls', 'length', 'error', 'refusal'].includes(result.finishReason)) throw new OutputValidationError('adapter', 'INVALID_PROVIDER_RESPONSE', 'Provider response is not a normalized LLMResult')
+  if (typeof result.text !== 'string' || !Array.isArray(result.toolCalls) || !['stop', 'tool_calls', 'length', 'error', 'refusal'].includes(result.finishReason)) throw new OutputValidationError('adapter', 'PROVIDER_RESPONSE_INVALID', 'Provider response is not a normalized LLMResult')
   validateUsage(result.usage)
   if (result.toolCalls.some((call) => typeof call.toolCallId !== 'string' || typeof call.name !== 'string' || call.name.length === 0)) throw new OutputValidationError('adapter', 'INVALID_TOOL_CALL', 'Normalized tool call is missing a stable id or name')
   if (result.finishReason === 'tool_calls' && result.toolCalls.length === 0) throw new OutputValidationError('adapter', 'INVALID_TOOL_CALL_FINISH_REASON', 'tool_calls finish reason requires at least one tool call')

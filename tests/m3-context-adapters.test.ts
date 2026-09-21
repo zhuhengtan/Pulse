@@ -57,8 +57,16 @@ describe('M1-3 context, models and adapters', () => {
     await expect(import('@pulse/adapters').then(({ consumeProviderSse }) => consumeProviderSse(stream))).rejects.toThrow('PROVIDER_STREAM_INVALID_JSON')
   })
 
+  it('rejects malformed provider contracts during normalization', () => {
+    expect(() => normalizeOpenAIResponse({ choices: [{ message: { content: 'ok' }, finish_reason: 'unknown' }] })).toThrow('PROVIDER_RESPONSE_INVALID')
+    expect(() => normalizeOpenAIResponse({ choices: [{ message: { content: 'ok', tool_calls: [{ function: { name: 'read', arguments: '{}' } }] }, finish_reason: 'stop' }] })).toThrow('PROVIDER_RESPONSE_INVALID')
+    expect(() => normalizeOpenAIResponse({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: -1 } })).toThrow('PROVIDER_RESPONSE_INVALID')
+    expect(() => normalizeAnthropicResponse({ content: [{ type: 'tool_use', name: '', input: {} }], stop_reason: 'tool_use' })).toThrow('PROVIDER_RESPONSE_INVALID')
+    expect(() => normalizeAnthropicResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 3, output_tokens: 1, cost: { amount: '0.1', currency: 'USD' } } })).toThrow('PROVIDER_RESPONSE_INVALID')
+  })
+
   it('maps tool and structured-output contracts into real provider request bodies', async () => {
-    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => ({ ok: true, json: async () => ({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }] }) }) as Response)
+    const fetchMock = vi.fn(async (url: string, _init: RequestInit) => ({ ok: true, json: async () => url.includes('anthropic') ? { content: [{ type: 'text', text: '{"ok":true}' }], stop_reason: 'end_turn' } : { choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }] } }) as Response)
     vi.stubGlobal('fetch', fetchMock)
     const request = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'tools@1', instruction: 'inspect', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'system' as const, content: 'system' }, { kind: 'tools' as const, content: [{ name: 'read', description: 'Read a file', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } }] }, { kind: 'instruction' as const, content: 'inspect' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'tools@1', privacy: 'public' as const, privacyRefs: [] }
     const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] }
