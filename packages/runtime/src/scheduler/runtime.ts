@@ -18,7 +18,7 @@ import { appendRuntimeEvent } from '../core/events.js'
 import { apply, type Mutation } from '../core/mutations.js'
 import { ContextMerger, type MergePlan } from '../context/merger.js'
 import { appendHistory, contentHash, historyPressure, stableSerialize } from '../context/builder.js'
-import { assignRuntimeToolCallIds, InMemoryModelRegistry, ModelRouter, validateAdapterResult, validateJsonSchema, type ModelCapabilities, type ModelRegistry, type ModelRouteRequirements } from '../models/router.js'
+import { assignRuntimeToolCallIds, InMemoryModelRegistry, ModelRouter, validateAdapterResult, validateJsonSchema, type ModelCapabilities, type ModelHostPolicy, type ModelRegistry, type ModelRouteRequirements } from '../models/router.js'
 import { SessionStoragePolicy, type StoragePolicyConfig } from '../storage/policy.js'
 import { collectRuntimeTelemetry, type RuntimeTelemetryExporter, type RuntimeTelemetrySnapshot } from './telemetry.js'
 import { advanceArtifactId, markArtifactPersisted, pinArtifact, prepareArtifactPublication, readArtifact, unpinArtifact, type ArtifactPublication } from '../storage/artifacts.js'
@@ -77,6 +77,7 @@ export interface RuntimeConfig {
   persistence?: RuntimePersistenceSnapshot
   programs?: LaneProgram[]
   models?: ModelRegistry
+  hostPolicy?: ModelHostPolicy
   modelRouter?: ModelRouter
   tools?: RuntimeToolRegistry
   toolVersions?: Record<string, string>
@@ -276,7 +277,8 @@ export class PulseRuntime {
     this.enforcingRecoveryPrograms = restored !== undefined
     this.observationInbox = new ObservationInbox(config.maxObservationEntries ?? 4096, config.maxObservationBytes ?? 1_000_000)
     this.models = config.models ?? config.modelRouter?.registry ?? new InMemoryModelRegistry()
-    this.modelRouter = config.modelRouter ?? new ModelRouter(this.models)
+    if (config.modelRouter && config.hostPolicy?.allowCloud === false && config.modelRouter.hostPolicy.allowCloud) throw new Error('HOST_POLICY_ROUTER_MISMATCH')
+    this.modelRouter = config.modelRouter ?? new ModelRouter(this.models, config.hostPolicy)
     this.tools = config.tools ?? new RuntimeToolRegistry()
     this.toolVersions = { ...(config.toolVersions ?? {}) }
     this.policyVersion = config.policyVersion

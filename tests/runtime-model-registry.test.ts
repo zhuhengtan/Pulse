@@ -35,6 +35,13 @@ describe('Runtime model registry and task routes', () => {
     expect(router.diagnostics('reason', 'cloud_allowed')).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'cloud', accepted: false, reasons: ['HOST_CLOUD_BLOCKED'] })]))
   })
 
+  it('applies Host Policy at Runtime construction and rejects a weaker injected router', () => {
+    const runtime = new PulseRuntime({ hostPolicy: { allowCloud: false } })
+    runtime.models.register({ id: 'cloud', providerId: 'cloud', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 1 })
+    expect(runtime.modelRouter.route('reason', 'cloud_allowed')).toEqual([])
+    expect(() => new PulseRuntime({ hostPolicy: { allowCloud: false }, modelRouter: new ModelRouter({ register: () => {}, list: () => [] }) })).toThrow('HOST_POLICY_ROUTER_MISMATCH')
+  })
+
   it('treats reasoning as a minimum capability instead of an exact label', () => {
     const runtime = new PulseRuntime()
     runtime.models.register({ id: 'low', providerId: 'local', tasks: ['reason'], capabilities: { local: true, reasoning: 'low', maxContextTokens: 4096 }, priority: 3 })
