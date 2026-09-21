@@ -77,6 +77,19 @@ describe('lease-based WorkerCoordinator', () => {
     expect(coordinator.inspect()).toMatchObject([{ id: 'effect-1:effect-1-attempt-1', state: 'succeeded', attempt: 1 }])
   })
 
+  it('preserves non-retryable local Worker errors through the Runtime adapter', async () => {
+    const coordinator = new WorkerCoordinator()
+    coordinator.register('permanent-worker', async () => { throw Object.assign(new Error('permanent worker failure'), { code: 'PERMANENT_WORKER_FAILURE', retryable: false, details: { source: 'worker' } }) })
+    const runtime = new PulseRuntime({ effectExecutor: createWorkerEffectExecutor(coordinator) })
+    const program: LaneProgram = { id: 'worker-error', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'worker', kind: 'tool', concurrencyClass: 'tool', input: { request: 'run' }, retryPolicy: { maxAttempts: 3, initialBackoffMs: 1, maxBackoffMs: 1, jitter: false } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('worker-error', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('worker-error', 'finish') } }
+    const { agentId } = runtime.createAgent('worker error semantics', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(runtime.state.effects.get('effect-1')?.attempts).toHaveLength(1)
+    expect(runtime.state.effects.get('effect-1')?.outcome).toMatchObject({ error: { code: 'PERMANENT_WORKER_FAILURE', retryable: false, details: { source: 'worker' } } })
+  })
+
   it('cancels an active task and does not let the aborted handler settle it', async () => {
     const coordinator = new WorkerCoordinator()
     coordinator.register('worker-cancel', async (_payload, signal) => await new Promise<JsonValue>((resolve, reject) => {

@@ -175,7 +175,10 @@ function deferred(): Deferred {
 }
 
 function runtimeError(cause: unknown): RuntimeError {
-  if (typeof cause === 'object' && cause !== null && typeof (cause as { retryable?: unknown }).retryable === 'boolean') return { code: 'WORKER_FAILED', message: cause instanceof Error ? cause.message : String(cause), retryable: (cause as { retryable: boolean }).retryable }
+  if (typeof cause === 'object' && cause !== null) {
+    const candidate = cause as { code?: unknown; message?: unknown; retryable?: unknown; details?: unknown }
+    return { code: typeof candidate.code === 'string' ? candidate.code : 'WORKER_FAILED', message: typeof candidate.message === 'string' ? candidate.message : String(cause), ...(typeof candidate.retryable === 'boolean' ? { retryable: candidate.retryable } : {}), ...(candidate.details === undefined ? {} : { details: candidate.details as JsonValue }) }
+  }
   return { code: 'WORKER_FAILED', message: cause instanceof Error ? cause.message : String(cause) }
 }
 
@@ -367,7 +370,7 @@ export class WorkerCoordinator implements WorkerCoordinatorContract {
     this.deferreds.set(taskId, result)
     const task = this.tasks.get(taskId)
     if (task?.state === 'succeeded') result.resolve(task.result ?? null)
-    else if (task?.state === 'failed') result.reject(new Error(task.error?.message ?? 'WORKER_FAILED'))
+    else if (task?.state === 'failed') result.reject(task.error ?? { code: 'WORKER_FAILED', message: 'WORKER_FAILED' })
     else if (task?.state === 'cancelled') result.reject(new Error('WORKER_CANCELLED'))
     return result
   }
@@ -426,7 +429,7 @@ export class WorkerCoordinator implements WorkerCoordinatorContract {
     const task = this.tasks.get(taskId)
     if (!task || task.state !== 'leased' || task.leaseId !== leaseId) return false
     task.state = 'failed'; task.error = error; delete task.leaseId; delete task.workerId; delete task.leaseExpiresAt
-    this.ensureDeferred(taskId).reject(new Error(error.message))
+    this.ensureDeferred(taskId).reject(error)
     this.schedulePersistence()
     return true
   }
@@ -546,7 +549,7 @@ export class SqliteDistributedWorkerCoordinator implements WorkerCoordinatorCont
     if (this.changedRows(changed) !== 1) return false
     this.activeLeases.get(workerId)?.controller.abort()
     this.activeLeases.delete(workerId)
-    if (taskId) this.deferreds.get(taskId)?.reject(new Error(error.message))
+    if (taskId) this.deferreds.get(taskId)?.reject(error)
     this.pump()
     return true
   }
@@ -612,7 +615,7 @@ export class SqliteDistributedWorkerCoordinator implements WorkerCoordinatorCont
     this.deferreds.set(taskId, result)
     const task = taskId ? this.get(taskId) : undefined
     if (task?.state === 'succeeded') result.resolve(task.result ?? null)
-    else if (task?.state === 'failed') result.reject(new Error(task.error?.message ?? 'WORKER_FAILED'))
+    else if (task?.state === 'failed') result.reject(task.error ?? { code: 'WORKER_FAILED', message: 'WORKER_FAILED' })
     else if (task?.state === 'cancelled') result.reject(new Error('WORKER_CANCELLED'))
     else this.watch(taskId, result)
     return result
@@ -627,7 +630,7 @@ export class SqliteDistributedWorkerCoordinator implements WorkerCoordinatorCont
       if (timer) clearInterval(timer)
       this.watchers.delete(taskId)
       if (task.state === 'succeeded') result.resolve(task.result ?? null)
-      else if (task.state === 'failed') result.reject(new Error(task.error?.message ?? 'WORKER_FAILED'))
+      else if (task.state === 'failed') result.reject(task.error ?? { code: 'WORKER_FAILED', message: 'WORKER_FAILED' })
       else result.reject(new Error('WORKER_CANCELLED'))
     }, 10)
     watcher.unref()
