@@ -4,6 +4,15 @@ import { ModelRouter, PulseRuntime, type LaneProgram, type LLMRequestProjection 
 const program: LaneProgram = { id: 'runtime-model-registry', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'runtime-model-registry', programVersion: '1', step: 'start', locals: {} } }) }
 
 describe('Runtime model registry and task routes', () => {
+  it('rejects malformed and duplicate model registrations before routing', () => {
+    const runtime = new PulseRuntime()
+    expect(() => runtime.models.register({ id: 'invalid', providerId: 'provider', tasks: ['reason'], capabilities: { maxContextTokens: 0 }, priority: 1 })).toThrow('INVALID_MODEL_CANDIDATE:invalid')
+    runtime.models.register({ id: 'valid', providerId: 'provider', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 1 })
+    expect(() => runtime.models.register({ id: 'valid', providerId: 'provider', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 2 })).toThrow('DUPLICATE_MODEL_CANDIDATE:valid')
+    expect(() => runtime.modelRouter.register({ task: 'reason', candidates: ['valid', 'valid'] })).toThrow('INVALID_MODEL_ROUTE')
+    expect(() => runtime.modelRouter.register({ task: 'reason', candidates: [1 as never] })).toThrow('INVALID_MODEL_ROUTE')
+  })
+
   it('exposes the architecture registry and explicit task route API', () => {
     const runtime = new PulseRuntime()
     runtime.models.register({ id: 'cloud:primary', providerId: 'provider', tasks: ['reason'], capabilities: { maxContextTokens: 4096 }, priority: 99 })

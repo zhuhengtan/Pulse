@@ -50,9 +50,22 @@ export interface ModelRouteMetrics {
 }
 export interface AdaptiveRouteSnapshot { schemaVersion: 1; metrics: Array<[string, ModelRouteMetrics]> }
 
+function isModelCandidate(value: unknown): value is ModelCandidate {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const candidate = value as Record<string, unknown>
+  const capabilities = candidate.capabilities
+  if (!capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities)) return false
+  const modelCapabilities = capabilities as Record<string, unknown>
+  return typeof candidate.id === 'string' && candidate.id.length > 0 && typeof candidate.providerId === 'string' && candidate.providerId.length > 0 && Array.isArray(candidate.tasks) && candidate.tasks.length > 0 && candidate.tasks.every((task) => typeof task === 'string' && task.length > 0) && typeof candidate.priority === 'number' && Number.isFinite(candidate.priority) && Number.isInteger(modelCapabilities.maxContextTokens) && (modelCapabilities.maxContextTokens as number) > 0 && (modelCapabilities.maxOutputTokens === undefined || (Number.isInteger(modelCapabilities.maxOutputTokens) && (modelCapabilities.maxOutputTokens as number) > 0)) && (modelCapabilities.local === undefined || typeof modelCapabilities.local === 'boolean') && (modelCapabilities.toolCalling === undefined || typeof modelCapabilities.toolCalling === 'boolean') && (modelCapabilities.structuredOutput === undefined || typeof modelCapabilities.structuredOutput === 'boolean') && (modelCapabilities.reasoning === undefined || ['low', 'medium', 'high'].includes(String(modelCapabilities.reasoning))) && (candidate.adapter === undefined || (typeof candidate.adapter === 'object' && candidate.adapter !== null && typeof (candidate.adapter as { executeAttempt?: unknown }).executeAttempt === 'function'))
+}
+
 export class InMemoryModelRegistry implements ModelRegistry {
   private readonly candidates: ModelCandidate[] = []
-  register(candidate: ModelCandidate): void { this.candidates.push(candidate) }
+  register(candidate: ModelCandidate): void {
+    if (!isModelCandidate(candidate)) throw new Error(`INVALID_MODEL_CANDIDATE:${typeof candidate === 'object' && candidate !== null && 'id' in candidate ? String((candidate as { id?: unknown }).id) : ''}`)
+    if (this.candidates.some((existing) => existing.id === candidate.id)) throw new Error(`DUPLICATE_MODEL_CANDIDATE:${candidate.id}`)
+    this.candidates.push(candidate)
+  }
   list(): ModelCandidate[] { return [...this.candidates] }
 }
 
@@ -70,7 +83,7 @@ export class ModelRouter {
   }
 
   register(route: ModelRoute): void {
-    if (!route.task || route.candidates.length === 0 || route.candidates.some((candidate) => !candidate)) throw new Error('INVALID_MODEL_ROUTE')
+    if (!route || typeof route.task !== 'string' || !route.task || !Array.isArray(route.candidates) || route.candidates.length === 0 || route.candidates.some((candidate) => typeof candidate !== 'string' || !candidate) || new Set(route.candidates).size !== route.candidates.length) throw new Error('INVALID_MODEL_ROUTE')
     this.routes.set(route.task, [...new Set(route.candidates)])
   }
 
