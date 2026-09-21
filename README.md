@@ -169,6 +169,17 @@ ResultRef
 
 它不依赖 Provider Thread，因此可以在下一轮切换模型，也可以从 Pulse 自己保存的 Context 和 ResultStore 重建请求。
 
+## 关键执行不变量
+
+下列规则已经写进内核，而不是“以后再说”：
+
+- **Step 是同步纯函数。** 模型、工具、子 Agent、人工输入都是 Effect；`step()` 不能 `await`，也不能读 `Date.now()`。
+- **一次提交要么全部生效。** `contextDelta`、Action 和 `next` 走同一条 `validate → Mutation[] → apply`；任意一项失败都不改 Context、不创建 Effect、不移动 ResumePoint。
+- **取消沿所有权树走。** `cancel_lane` / `complete(children: 'cancel')` 覆盖目标及其全部非终态子孙。非 Owner 只能 `propose_cancel`；若 Owner 的恢复槽已被 wait / control_error 占用，提案停在 `pendingControlProposals`，不能覆盖已有 ResumeInput。
+- **副作用未知不能假装没发生。** 写入型 Tool 进入 `reconcile_required` 后，迟到的完成会结算 Outcome 并清 quarantine，业务 Lane 不因此复活。
+- **先落盘再派发。** 挂接 File/SQLite 后端时，queued Effect 必须等 persist 成功；校验失败的快照不会写入，Host 会看到 `persistence.failed` / `effect.dispatch_blocked`。
+- **存储准入是增量的。** 已写入的记录不因事后下调限额被重新拒绝；`__proto__` / `constructor` / `prototype` 不能作为 Context 路径。
+
 ## 隐私、取消与重试
 
 ### Privacy Label
@@ -197,7 +208,9 @@ public < cloud_allowed < local_only
 
 ### 取消与 Quarantine
 
-取消是结构化状态转换。Owner 可以剪枝自有后代；非 Owner 只能提交 `propose_cancel`。如果外部系统无法确认停止，Effect 会进入 QuarantineScope，业务 Agent 可以带着 `unresolvedEffectIds` 返回，而不会被永久挂起。
+取消是结构化状态转换，不是“发个 abort 就算结束”。Owner 可以剪枝自有后代整棵子树；非 Owner 只能提交 `propose_cancel`。排队中尚未拿到锁的 Effect 取消时必须释放等待，不能把锁授给已取消的幽灵请求。
+
+如果外部系统无法确认停止，Effect 进入 QuarantineScope，业务 Agent 可以带着 `unresolvedEffectIds` 返回，而不会被永久挂起。迟到的 `effect_completion` 按对账处理，不能让 quarantine 条目与 Effect 状态分叉，否则快照无法 restore。创建 Child Agent 失败只失败对应 AgentEffect，不会把父 Runtime tick 一起打崩。
 
 ## 进展监测
 
@@ -268,20 +281,18 @@ const finalOutcome = await session.outcome()
 | M0 | Lane 状态机、StepTransaction、依赖图、Scheduler、TimerWheel、取消、Quarantine、虚拟/真实单调时钟验收 |
 | M1 | 三层 Context、稳定前缀、Provider Adapter、MockAdapter、Tool SDK、LLMResult、ModelRouter、DSL、确定性 E2E |
 | M1.5 | record/leaf 级 Privacy/`derivedFrom`、Progress Watchdog、Storage pin/compact、Fork Affinity、warm start、动态 ToolSet、Host 工具 allow/deny |
-| M2 | 持久化事务/outbox、崩溃恢复、RecoverableTool 对账、HTTP/HTTPS 与 SQLite Worker 协调、自适应路由、观察导出 |
+| M2 | 本地 File/SQLite persist/checkpoint/restore、outbox、RecoverableTool 对账、HTTP/HTTPS 与 SQLite Worker 协调、自适应路由、观察导出 |
 
 M1 的真实 Provider 和网络任务通过独立 Live Smoke 验证；确定性 Gate 使用 Mock Executor、Virtual Clock 和离线 Fixtures。带有效凭证时可按需开启 `PULSE_LIVE_TOOL_SMOKE=1`、`PULSE_LIVE_STRUCTURED_SMOKE=1`、`PULSE_LIVE_CANCELLATION_SMOKE=1`，分别验收真实 tool-call、structured output 和在途取消。
 
 ## 仓库文档
 
-- [Runtime 架构设计](./pulse-runtime-architecture.md)：核心状态模型、调度、Effect、Context、隐私和验收契约。
-- [Application DSL 规范](./pulse-application-dsl-spec.md)：StepBuilder、模板、Session API 和应用层约束。
-- [MVP 开发计划](./pulse-mvp-development-plan.md)：M0/M1 里程碑、任务拆解、门禁和测试策略。
+- [Runtime 架构设计](./pulse-runtime-architecture.md)：状态模型、调度、Effect、Context、隐私、持久化边界和验收契约。DSL 用法见上文示例与 `packages/runtime/src/dsl/`。
 
 ## 当前验证边界
 
-确定性实现和本地故障恢复已经由仓库测试覆盖，但这不等于所有生产环境都已验收。当前仍需要独立环境证明的项目包括：真实 Provider 凭证下的 Live Smoke、真实远程写系统的副作用对账、生产级持久化事务与多主机 Worker 故障注入、跨进程 Detached Agent scope 迁移、细粒度宿主权限/隐私策略，以及外部指标系统接入。
+确定性实现和本地 File/SQLite 恢复已经由仓库测试覆盖，但这不等于所有生产环境都已验收。当前仍需要独立环境证明的项目包括：真实 Provider 凭证下的 Live Smoke、真实远程写系统的副作用对账、生产级持久化事务与多主机 Worker 故障注入、跨进程 Detached Agent scope 迁移、细粒度宿主权限/隐私策略，以及外部指标系统接入。
 
-最近一次允许本机 loopback 的全量门禁为 73 个测试文件、473/473 通过；`npx tsc -b --pretty false`、`npm run build` 和 deterministic benchmark 也通过。受限沙箱中运行 HTTP/HTTPS 测试会因禁止 `listen` 返回 `EPERM`，不代表 Provider 或 Worker 代码失败。
+最近一次允许本机 loopback 的全量门禁为 74 个测试文件、488/488 通过（不含 `tests/live/**`）。`npx tsc -b --pretty false` 与 `npm run build` 用于类型检查与构建。受限沙箱中运行 HTTP/HTTPS 测试会因禁止 `listen` 返回 `EPERM`，不代表 Provider 或 Worker 代码失败。
 
 Provider Thread 仍不是状态源；自动 Fork 合并、动态工具检索和自适应路由已有确定性实现，但生产样本校准与外部服务兼容性仍需单独验证。所有能力继续遵守 Lane、Step、Action、Effect 和 StepTransaction 的核心语义。

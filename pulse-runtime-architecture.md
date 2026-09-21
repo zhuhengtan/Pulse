@@ -4,6 +4,8 @@
 >
 > 修订：同日架构审查结论已全部并入本文；核心仍是类 Node.js event loop
 > （同步 Step = Macrotask，Scheduler Tick = Event Loop Turn，Effect = Async I/O）。
+> 2026-09-21 对照实现补了路径安全、取消子树、提案停放、增量存储准入、
+> persist 先校验、派发顺序、quarantine 迟到完成、子 Agent 创建隔离与持久化观测。
 >
 > 基于 Node.js + TypeScript 的单 Agent 多 Lane 事件驱动运行时。
 > Lane 依赖决定执行资格，优先级决定调度顺序，Effect 承载外部操作。
@@ -266,7 +268,7 @@ Lane 申请完成时对自有子任务的处置必须显式声明，见第 6、7
 
 ### 5.1 Pulse Session 的状态所有权
 
-Pulse Session 是 Runtime 的状态与审计容器，包含 EventLog、ResultStore、Artifact 引用及其存储、Agent/Lane 状态、Global/Lane Context 和模型 usage/cache 指标。MVP 中这些记录保存在内存并可导出；Session 不等于已实现持久化恢复。
+Pulse Session 是 Runtime 的状态与审计容器，包含 EventLog、ResultStore、Artifact 引用及其存储、Agent/Lane 状态、Global/Lane Context 和模型 usage/cache 指标。没有挂接持久化后端时，这些记录保存在内存并可导出，不等于崩溃后可继续执行。挂接 File/SQLite 后端后，Session 按第 20 节做本地 persist / checkpoint / restore；这仍不是生产级多主机恢复承诺。
 
 逻辑保留与驻内存保留是两个维度。Result、Event、Snapshot 即使已经落盘，仍可通过稳定引用继续参与恢复、重放或审计；`storageState` 只表示当前是否驻内存，`pinCount` 表示活动执行对它的保护。只有存储后端确认写入成功才能标记为 `persisted`，导出缓冲或待写 outbox 不算已持久化。
 
@@ -281,13 +283,13 @@ interface SessionStoragePolicy {
 
 `maxResultBytes`、`maxEventLogBytes`、`maxSnapshotBytes`、`maxTotalMemoryBytes` 都约束**当前驻内存**占用。它们不能通过删除活动 pin 来绕过。它们**不是**逻辑保留上限：事实事件在逻辑上永久保留，不能因为落盘或 checkpoint 就当作“没发生过”。没有持久化后端时，unpinned 观测流可以 compact，unpinned Result/Snapshot 可以丢弃正文只留索引；事实事件超内存上限则拒绝本次写入，而不是伪造 `persisted`。
 
-M2 用 checkpoint（状态快照 + 日志水位）截断已纳入快照的事实前缀；截断后的逻辑事件仍可通过归档引用审计，但不要求永远驻内存。MVP 不做 checkpoint，因此长任务的内存上限仍然生效，Host 必须把 `maxEventLogBytes` 配到可接受的会话长度。
+M2 用 checkpoint（状态快照 + 日志水位）截断已纳入快照的事实前缀；截断后的逻辑事件仍可通过归档引用审计，但不要求永远驻内存。本地 File/SQLite 后端已实现 checkpoint 与截断；没有挂接持久化后端时，长任务的内存上限仍然生效，Host 必须把 `maxEventLogBytes` 配到可接受的会话长度。生产级多主机故障注入与跨进程恢复仍需独立验收。
 
 SessionStoragePolicy 不替代 Lane/Effect 并发上限。Runtime 为活动 Lane 的固定 Snapshot、LLM Request 投影、WaitResolution、未消费输入和仍被引用的 ResultRef 建立 pin；引用增加/释放必须可追踪并幂等。未被活动引用的数据可以持久化或 compact，但逻辑引用仍有效时不能删除。
 
 达到内存水位时，Runtime 优先把 unpinned Result、观测事件和旧 Snapshot 持久化或 compact；内存只保留索引、引用关系、版本和必要 metadata。`progress`、LLM chunk 和 scheduler trace 属于可 compact 的观测流。Snapshot 至少保留最新版本和所有 Lane/活动 Request 引用的旧版本，其余旧版本落盘并保留可恢复索引。
 
-如果持久化不可用、可 compact 的 unpinned 数据已处理、所有剩余数据仍被 pin 且继续写入会超过 hard limit，Runtime 必须拒绝本次写入并返回 `SESSION_STORAGE_LIMIT_EXCEEDED`；不能淘汰活动引用、无限增长内存或静默丢失事实。存储准入属于 `validate` 阶段用预估字节数检查，拒绝时不 `apply`，因此不提交半个 Result、Event、Snapshot 或 ResumePoint。
+如果持久化不可用、可 compact 的 unpinned 数据已处理、所有剩余数据仍被 pin 且继续写入会超过 hard limit，Runtime 必须拒绝本次写入并返回 `SESSION_STORAGE_LIMIT_EXCEEDED`；不能淘汰活动引用、无限增长内存或静默丢失事实。存储准入检查的是**本次事务新增或改写的记录**，已准入记录不因 Host 事后下调限额而被重新拒绝。`SessionStoragePolicy.put` 只回滚本次触及的 key，用按 kind 维护的字节计数做 O(1) 上限判断，禁止每次 put 深拷贝整张表。已写入且内容不变的 Event / 版本化 Snapshot / Result 在后续 sync 中跳过，不再次序列化；不再被活动状态引用的 Snapshot key 可以 `remove`（仍拒绝删 pin 住的记录）。
 
 `messages[]` 是 ContextBuilder 为某次 LLMEffect 生成的投影，不是 Session 本体。`conversation_id`、`thread_id`、`previous_response_id` 不得成为恢复 Agent 状态的必要依据。
 
@@ -326,6 +328,7 @@ interface LaneRecord {
   }
   resumePoint: ResumePoint
   pendingResumeInput?: ResumeInput
+  pendingControlProposals?: ControlProposal[]  // pendingResumeInput 被 wait/control_error 占用时停放 propose_cancel
   activeWaitId?: WaitId
   readySince?: number
   enqueueSeq?: number
@@ -509,15 +512,15 @@ interface StepTransaction {
 
 每次 Step 同步返回一个 `LaneStepOutput`。Runtime 将它规范化为一个 `StepTransaction`，统一验证 `contextDelta`（路径冲突、Privacy Label、target/proposal）、隐私降级证明、`adoptCommittedContext`、全部 `actions`、`next`、当前 `laneVersion`、权限、依赖、资源/并发准入和 Policy，并拒绝重复 effect key、重复 CancelLane 目标、未知局部引用、多个终结动作、多个 Wait 来源以及冲突的 Adopt 声明。`ContextDelta` 只能描述认知状态更新，不能隐含或执行 `cancel_lane`；取消必须是显式的 `CancelLaneAction` 或经 owner 接受的 `ProposeCancelAction`。`adopt_context` 与 `adoptCommittedContext` 是唯一能切换 Lane `contextSnapshotVersion` 的控制动作。
 
-两个 `ContextOp` 冲突，当且仅当它们的 `path` 相等，或一个是另一个的前缀。`compact_history` 没有 `path`，只对 `target: 'lane'` 合法，且 `upToSeq` 不得超过本 Lane 当前 `history` 长度；`set` / `append` / `remove` 的 `path` 不得以 `['history']` 开头。`target: 'global'` 且 `proposal !== true` 的直接提交需要 policy 授权（通常仅 root）；`proposal: true` 写入 `MergeProposal` 表，由 root 的 `merge` LLMEffect 消化后再以 `target: 'global'` 提交。`adoptCommittedContext: true` 只对 `target: 'global' && proposal !== true` 合法。
+两个 `ContextOp` 冲突，当且仅当它们的 `path` 相等，或一个是另一个的前缀。`compact_history` 没有 `path`，只对 `target: 'lane'` 合法，且 `upToSeq` 不得超过本 Lane 当前 `history` 长度；`set` / `append` / `remove` 的 `path` 不得以 `['history']` 开头，也不得包含 `__proto__`、`constructor`、`prototype` 这类会触及原型链的段。validate 与 apply 都用自有属性查找（`Object.hasOwn`），不能把模型输出的 key 写进 `Object.prototype`。DSL draft proxy 对同样的 key 直接拒绝，不记入 ops。`target: 'global'` 且 `proposal !== true` 的直接提交需要 policy 授权（通常仅 root）；`proposal: true` 写入 `MergeProposal` 表，由 root 的 `merge` LLMEffect 消化后再以 `target: 'global'` 提交。`adoptCommittedContext: true` 只对 `target: 'global' && proposal !== true` 合法。
 
 `CompleteAction.children`：
 
 - `reject_if_active`（默认）：仍有活子 Lane 或非 quarantine 的自有 Effect → `control_error CHILDREN_STILL_ACTIVE`，逼 Program 显式 Join 或 cancel。
-- `cancel`：显式承认会取消自有子任务；环检测不把“owner → 子任务”当作死锁边。
+- `cancel`：显式承认会取消自有子任务及其全部非终态后代；环检测不把“owner → 子任务”当作死锁边。
 - `await`：进入 `closing`，等待子任务终态；环检测把“未结束 owner → 自有子任务”当作死锁边。
 
-`cancel_lane` 只能作用于**当前 Lane 的自有后代**。对 sibling 或非后代只能提交 `propose_cancel`：提案写入目标 owner 的下一 Step `control_proposal` 输入，由 owner 决定是否发出真正的 `cancel_lane`。policy 可另开 Host 级授权，但不作为默认路径。
+`cancel_lane` 只能作用于**当前 Lane 的自有后代**，并且是子树操作：目标 Lane 及其所有非终态子孙一起进入 `cancelling`/`cancelled`，由 Runtime 取消它们的自有 Effect。只改直接目标会留下仍在跑的孙子 Lane。对 sibling 或非后代只能提交 `propose_cancel`：提案写入目标 owner 的下一 Step `control_proposal` 输入。若 owner 的 `pendingResumeInput` 已被 wait / control_error 占用，提案停在 `pendingControlProposals`，等槽空后再提升，不能覆盖已有 ResumeInput。policy 可另开 Host 级授权，但不作为默认路径。
 
 ### 7.1 两阶段提交：validate 与 apply
 
@@ -608,20 +611,16 @@ interface WaitResolution {
   error?: RuntimeError
 }
 
+type ControlProposal = { type: 'cancel_lane'; laneId: LaneId; reason: string; fromLaneId: LaneId }
+
 type ResumeInput =
   | { type: 'wait'; resolution: WaitResolution }
   | { type: 'submitted'; targets: Record<string, TargetRef> }
   | { type: 'control_error'; error: RuntimeError; original?: ResumeInput }
-  | {
-      type: 'control_proposal'
-      proposals: Array<{
-        type: 'cancel_lane'
-        laneId: LaneId
-        reason: string
-        fromLaneId: LaneId
-      }>
-    }
+  | { type: 'control_proposal'; proposals: ControlProposal[] }
 ```
+
+`pendingResumeInput` 同时最多一份。wait / control_error 占用期间到达的提案写入 `LaneRecord.pendingControlProposals`，槽空后再提升；`replaceResumeInput` 必须先停放已有 `control_proposal`，不能丢提案。
 
 同一 Step 内刚提交的 Effect / 刚 Fork 的 Lane 用 `LocalRef` 引用，validate 阶段先分配全部 ID 再解析。重复 `key`、同一目标的重复条件、未知目标、自依赖和跨 Agent 目标在提交时拒绝。MVP 不允许隐含创建未来目标。
 
@@ -749,7 +748,7 @@ effectiveScore = max(ownScore, 所有等待本目标的消费者所传递的分�
 - 因此 urgent 的 waiting 消费者向 ready 上游传递的是其 **baseScore（加自身尚未重置的 ready 加分，通常为 0）**，即定值 30，而不是随等待时间增长的分数。其它 ready 的 normal Lane 在 aging 足够久之后可以反超这条关键路径。这是明确取舍：aging 保证有资格的低优先级工作最终获得机会；urgent 是优先偏好，不是硬实时。Host 可设 `agingCap`（默认不封顶）限制反超速度。
 - Lane 被执行后重置本次 ready 等待时间；Effect 队列年龄从本次排队开始，重试重新计算。
 - 同分按单调递增 `enqueueSeq` FIFO，不能只依赖毫秒时间戳。
-- 分数沿当前依赖链传递到上游 Lane 及其正在等待的 **queued** Effect；依赖移除后撤销继承，保留声明优先级。已 running 的 Step/Effect 不可抢占，传分不影响本次执行。
+- 分数沿当前依赖链传递到上游 Lane 及其正在等待的 **queued** Effect；依赖移除后撤销继承，保留声明优先级。已 running 的 Step/Effect 不可抢占，传分不影响本次执行。Queued Effect 的派发顺序与 ReadyQueue 一致：`effectivePriority` 高的先派发（`max(schedulePriority, inheritedFloor)` 降序，同分按 id）。
 - 锁持有者必然已经 running，**不**向持锁 Effect 传分。资源等待队列按 `effectiveScore + enqueueSeq` 排序，见第 16.1 节。
 - Child Agent 的 root Lane 在父 Lane 等待对应 AgentEffect 期间获得 `inheritedFloor = 父 Lane 当时 effectiveScore`；等待解除后撤销。这不是跨 Agent 依赖边，只是调度分数地板。
 
@@ -980,7 +979,7 @@ Handle 是进程内 SDK 便利对象；ResumePoint 只保存 ID。工具实现�
 
 只有当任务确实需要独立的 Agent 身份/系统提示、模型策略、工具权限、Context/Session 生命周期或结果边界时，才使用 `AgentEffect` 创建 Child Agent。换言之：**并行探索优先 Lane，语义隔离才使用 Child Agent。**
 
-Child Agent 与父 Agent 共享 Runtime 级 LLM/Tool 槽和 `maxTotalLanes`。父 Lane 等待 AgentEffect 时，把当时 `effectiveScore` 写入 child root Lane 的 `inheritedFloor`，等待解除后撤销，避免父被自己的子 Agent 饿死。跨 Agent 的 Wait 边仍然禁止。
+Child Agent 与父 Agent 共享 Runtime 级 LLM/Tool 槽和 `maxTotalLanes`。父 Lane 等待 AgentEffect 时，把当时 `effectiveScore` 写入 child root Lane 的 `inheritedFloor`，等待解除后撤销，避免父被自己的子 Agent 饿死。跨 Agent 的 Wait 边仍然禁止。创建 Child Agent 失败（深度超限、`maxTotalLanes`、非法输入、存储准入拒绝）只让对应 AgentEffect 以 `CHILD_AGENT_CREATE_FAILED` 或更具体的错误码失败，不能把异常冒泡成父 Runtime tick 崩溃；`childAgentId` 只在创建成功后经 Mutation 写入 Effect。
 
 ## 13. 提交、等待与批量操作
 
@@ -1072,10 +1071,10 @@ LLM
 
 如果新的结果证明某条 Lane 已经没有继续价值：
 
-- owner 使用 `pulse.cancel_lane(laneId, reason = 'SUPERSEDED')`；
+- owner 使用 `pulse.cancel_lane(laneId, reason = 'SUPERSEDED')`，取消该 Lane 及其子孙；
 - 非 owner 使用 `pulse.propose_cancel`，由 owner 的下一 Step 决定是否取消。
 
-`SUPERSEDED` 表示工作方向被新证据淘汰，不表示 Lane 自身执行错误。Runtime 仍走标准结构化取消：停止该 Lane 后续派发、Abort 自有运行中 Effect、等待资源确认释放或移交 quarantine，再进入 cancelled 终态。被剪枝 Lane 的局部上下文不会自动进入其他 Lane 或 GlobalContext。Join 默认 `settled`，因此剪枝不会自动让父 Lane 失败；若 Join 使用 `success` 且未设 `onCancelled: 'ignore'`，则按第 8 节失败。
+`SUPERSEDED` 表示工作方向被新证据淘汰，不表示 Lane 自身执行错误。Runtime 仍走标准结构化取消：沿所有权树停止后续派发、Abort 自有运行中 Effect、等待资源确认释放或移交 quarantine，再进入 cancelled 终态。被剪枝 Lane 的局部上下文不会自动进入其他 Lane 或 GlobalContext。Join 默认 `settled`，因此剪枝不会自动让父 Lane 失败；若 Join 使用 `success` 且未设 `onCancelled: 'ignore'`，则按第 8 节失败。
 
 `dependsOn` 是启动 Wait，默认失败策略为 `fail_lane`。需要自定义失败恢复时，使用显式 WaitSpec；依赖满足后，结果按 key 注入新 Lane 的第一次 Step。
 
@@ -1113,7 +1112,7 @@ A / Effect 完成
 
 Wait 的失败恢复输入还包含失败原因和未完成目标清单。消费者不能直接读取生产者正在变化的局部上下文。依赖结果不隐式写入 GlobalContext。
 
-WaitResolution 与 Lane.pendingResumeInput 在同一事务中保存，下一 Step 成功提交后才消费该输入；重放或未来恢复不能只保存 ready 状态却丢失唤醒数据。若该 Step 被拒绝，`control_error.original` 必须仍能找到这份 WaitResolution。MVP 在会话结束前保留结果；后续 ResultStore 回收必须考虑活动 Wait、未消费输入和快照的引用，不能在生产者结束时直接删除。
+WaitResolution 与 Lane.pendingResumeInput 在同一事务中保存，下一 Step 成功提交后才消费该输入；重放或未来恢复不能只保存 ready 状态却丢失唤醒数据。若该 Step 被拒绝，`control_error.original` 必须仍能找到这份 WaitResolution。`pendingResumeInput` 同时最多一份：wait / control_error 占用期间到达的 `propose_cancel` 写入 `pendingControlProposals`，槽空后再提升为 `control_proposal`，禁止覆盖已有唤醒数据。MVP 在会话结束前保留结果；后续 ResultStore 回收必须考虑活动 Wait、未消费输入、停放提案和快照的引用，不能在生产者结束时直接删除。
 
 ### 15.2 Snapshot + 局部 Delta
 
@@ -1157,7 +1156,7 @@ Adopt/Rebase 只切换读取基线，不等于把 Lane 的未合并局部 ops �
 
 ### 15.4 显式合并与外部副作用
 
-root Lane 在 Join/Wait 后综合结果，消化 `MergeProposal`，由 ContextMerger 校验并串行提交新 GlobalContext 版本；同路径冲突返回冲突信息，不采用静默的 last-write-wins。
+root Lane 在 Join/Wait 后综合结果，消化 `MergeProposal`，由 ContextMerger 校验并串行提交新 GlobalContext 版本；同路径冲突返回冲突信息，不采用静默的 last-write-wins。一次 merge 若连续应用多个提案，每个产生内容变化的版本号都必须写入 `globalVersions`（不能只保留最终版本），否则 `adopt_context(中间版本)` 会得到 `UNKNOWN_CONTEXT_VERSION`。
 
 MVP 可以用 LLM 生成综合结论，由 Runtime 提交受限的上下文更新。LLM 总结不等于解决文件或数据库写冲突。文件补丁应包含目标基线 hash，并通过受锁保护的写入 Tool 验证、应用；工具写入是 Effect，必须受权限与取消规则约束。
 
@@ -1357,7 +1356,9 @@ MVP 使用 workspace 粒度：读文件、搜索源码持有 workspace shared �
 
 这些锁只协调本 Runtime 管理的工作，不能阻止编辑器或其他进程修改文件；写入前的基线验证仍然必要。多个 Runtime 共享同一 workspace 的跨进程锁不属于 MVP 保证。
 
-一次派发原子取得所有资源锁和并发额度，任一不可用就全部不占用。工具执行过程中禁止临时再申请 Runtime 锁；需要新的锁集合时结束本次 Effect，重新提交。这样避免持有部分锁等待其他锁。
+一次派发原子取得所有资源锁和并发额度，任一不可用就全部不占用。排队等待锁的 Effect 必须登记请求 id；取消、失败、超时或 quarantine 时无条件 `cancelWait` 并释放已授予的锁。不能因为该 Effect 从未进入 `lockReleases`（仍在排队）就跳过清理，否则锁稍后会授予已取消的幽灵请求并永久占用资源。
+
+工具执行过程中禁止临时再申请 Runtime 锁；需要新的锁集合时结束本次 Effect，重新提交。这样避免持有部分锁等待其他锁。
 
 重试退避期间不持锁、不占并发槽。运行或取消收尾期间，具有未确认副作用的 Attempt 一直保留相关锁和额度，直到确认执行停止并完成对账，或移交 quarantine 后由 QuarantineScope 继续持有；不能只收到 cancel request 就提前释放。纯 LLM 或明确 `sideEffectState: 'none'` 的计算在本地连接关闭后可以释放本地 LLM/provider/model 槽，即使 Attempt 的远端执行仍为 `remote_unknown`。
 
@@ -1390,9 +1391,9 @@ cancel command → FactInbox
 
 AbortController 通过 signal 通知协作方取消；Runtime 仍必须等待 Executor 的实际停止确认。[Node.js AbortController 文档](https://nodejs.org/api/globals.html#class-abortcontroller)
 
-取消通过所有权树传播，不通过依赖图传播。B 等待 A 时取消 B，只撤销 B 的等待；如果 A 属于其他 scope 或被多个消费者使用，不因此取消 A。sibling 不能直接 `cancel_lane` 对方。
+取消通过所有权树传播，不通过依赖图传播：`cancel_lane` / `complete(children: 'cancel')` 递归覆盖目标子树。B 等待 A 时取消 B，只撤销 B 的等待；如果 A 属于其他 scope 或被多个消费者使用，不因此取消 A。sibling 不能直接 `cancel_lane` 对方。
 
-Runtime 单写者以事件接受顺序处理完成/取消竞争：已提交的终态保持不变；若先接受取消请求但 Executor 随后确认已产生成功结果，Effect 可记录成功与 `cancelTooLate`，取消中的 Lane 仍不恢复业务执行。不能声称成功副作用已经被撤销。
+Runtime 单写者以事件接受顺序处理完成/取消竞争：已提交的终态保持不变。若 Effect 已在 QuarantineScope（`reconcile_required`）之后收到迟到的 `effect_completion`，按对账处理：结算 Outcome、清除 quarantine 条目和 owner 的 `unresolvedEffectIds`，不能把副作用结果丢在半空使快照无法恢复。persist / checkpoint 在落盘前必须通过 `validateRuntimePersistenceSnapshot`；校验失败拒绝写入，不能留下下次 restore 直接失败的文件。若取消请求先被接受但 Executor 随后确认已产生成功结果，Effect 可记录成功与 `cancelTooLate`，取消中的 Lane 仍不恢复业务执行。不能声称成功副作用已经被撤销。
 
 ### 17.2 Timeout 分三层
 
@@ -1458,7 +1459,7 @@ Lane/Agent 收尾到期则移交 QuarantineScope，不挂死 run()
 
 Detached 表示转移到 Runtime 的 background scope，不表示无人管理。脱离父 Lane 的取消传播，但仍受 Runtime shutdown、权限、运行限制和错误记录约束。
 
-MVP **不暴露** detached API。QuarantineScope 是内部实现：只收容 `reconcile_required` 且收尾到期的 Effect，继续持有冲突资源直到对账或 Host 放弃。`inspect()` 必须列出 quarantine 清单；Host 可触发 `reconcile` 或 `abandon`（放弃时记录 `RESOURCE_ABANDONED`，不假装副作用未发生）。后续若增加公开 detached API，必须同时实现 background scope 的观测、取消和退出策略。
+MVP **不暴露** detached API。QuarantineScope 是内部实现：只收容 `reconcile_required` 且收尾到期的 Effect，继续持有冲突资源直到对账或 Host 放弃。`inspect()` 必须列出 quarantine 清单；Host 可触发 `reconcile` 或 `abandon`（放弃时记录 `RESOURCE_ABANDONED`，不假装副作用未发生）。迟到的成功/失败完成走同一条 reconcile 路径，不能让 quarantine 条目与 Effect 状态分叉。后续若增加公开 detached API，必须同时实现 background scope 的观测、取消和退出策略。
 
 ### 17.5 Runtime 退出
 
@@ -1525,12 +1526,14 @@ step.committed / step.rejected
 progress.fingerprinted / no_progress_detected / intervention_applied
 
 effect.queued / attempt_started / attempt_failed / retry_scheduled
-effect.dispatch_failed / cancel_requested / reconcile_required
+effect.dispatch_failed / dispatch_blocked / cancel_requested / reconcile_required
 effect.quarantined / succeeded / failed / cancelled
+effect.lock_blocked
 attempt.locally_closed / attempt.remote_unknown / attempt.settled
 attempt.late_emit
+persistence.failed / persistence.recovered
 result.published
-context.committed / adopted / rebase_conflict
+context.committed / adopted / rebase_conflict / merge_committed
 merge.proposal_recorded
 privacy.label_propagated / cloud_blocked / downgrade_committed / violation
 llm.request_prepared / route_selected / route_rejected / fallback_scheduled
@@ -1554,15 +1557,27 @@ LLM 完成统一使用 effect.succeeded / failed / cancelled，不再引入独�
 
 ## 20. 持久化、重放与恢复边界
 
-### 20.1 MVP：可序列化与观测
+### 20.1 可序列化与观测
 
-MVP 提供内存 EventLog、可导出的会话记录、不可变结果与纯状态转换测试，同时按 `SessionStoragePolicy` 执行驻内存 hard limit、pin 和显式超限失败。导出记录可用于分析和测试重放，不保证进程崩溃后继续执行，也不承诺记录在崩溃时完整落盘；没有持久化后端时，unpinned 数据只能 compact，不能伪称为 `persisted`。
+没有持久化后端时，Runtime 提供内存 EventLog、可导出的会话记录、不可变结果与纯状态转换测试，同时按 `SessionStoragePolicy` 执行驻内存 hard limit、pin 和显式超限失败。导出记录可用于分析和测试重放，不保证进程崩溃后继续执行，也不承诺记录在崩溃时完整落盘；unpinned 数据只能 compact，不能伪称为 `persisted`。
 
 重放只 apply 已记录的 Mutation / 事实事件。因此 `step()` 必须是纯函数；测试用 RuntimeClock 与注入的随机源。重放**不**重新调用 `step()` 去“算出同样的下一步”，而是直接应用当时提交的 Mutation。若要用 Program 做回归，必须用同一 `now` 与同一 ResumeInput 再跑一遍纯函数并比对 Mutation。
 
-### 20.2 后续：可靠恢复
+### 20.2 本地 persist / checkpoint / restore
 
-要声明支持恢复，至少需要：
+挂接 File/SQLite 后端后，Runtime 实现第 20.3 清单中可在单进程落地的部分：状态快照、Mutation 日志水位、outbox、quarantine、FactInbox durable dedupe、事件归档与 restore。下列规则已经生效，不能写成“以后再补”：
+
+1. **先校验再落盘。** `persist` / `checkpoint` 在写后端前必须通过 `validateRuntimePersistenceSnapshot`。校验失败拒绝本次写入并记 `persistence.failed`，不能留下下次 restore 直接失败的文件。
+2. **先持久化再派发。** 有持久化后端时，queued Effect 必须等本次 flush 成功后再进入 Executor；flush 失败记 `effect.dispatch_blocked { reason: 'PERSISTENCE_FAILED' }` 并退避重试，不能静默卡住队列。
+3. **restore 拒绝损坏快照。** 构造 Runtime 时导入快照同样走校验；损坏、不兼容或引用残缺的快照不得半加载。
+4. **checkpoint 后才能截断。** 事实日志前缀与 Mutation 水位只在 checkpoint 成功后截断；截断不改变已纳入快照的逻辑历史。
+5. **失败可观测。** 后端写入失败记 `persistence.failed`（含 attempt 与错误信息），恢复后记 `persistence.recovered`；状态保持 dirty 并指数退避，不热循环打满失败后端。
+
+这仍不等于生产级可靠恢复：跨主机 Worker 故障注入、远程写系统对账、以及“先写日志再调用工具”之外的完整 outbox 交付语义，仍按第 20.3 验收。
+
+### 20.3 声明生产级恢复前仍需满足
+
+要声明支持生产级恢复，至少需要：
 
 1. 持久化事务保存 Lane、Wait、Effect、ResultRef、`laneVersion`、Mutation 日志和事件序号。
 2. 持久化 Result、Event、Snapshot 的 `storageState`、大小和 pin 来源；恢复后重建 pinCount，不能把落盘对象误当成可淘汰对象。
@@ -1572,7 +1587,7 @@ MVP 提供内存 EventLog、可导出的会话记录、不可变结果与纯状�
 6. 重建 WaitingIndex、ReadyQueue、TimerWheel、锁与并发占用；不恢复失效的进程内 Handle。
 7. 保存绝对 deadline；本进程耗时使用单调时钟，重启后重新评估 deadline。ready 等待补偿保存累计值，不能持久化进程内单调时间戳直接复用。
 8. 程序/工具版本不兼容时停止恢复并要求迁移，不能用新代码默默解释旧 ResumePoint。
-9. checkpoint 之后才能截断事实日志前缀；截断不改变已纳入快照的逻辑历史。
+9. checkpoint 之后才能截断事实日志前缀；截断不改变已纳入快照的逻辑历史。本地 File/SQLite 路径已实现，生产声明还需跨进程与故障注入证明。
 
 **重放只应用已记录事实，不重新调用 LLM 或工具。** 从暂停点继续执行属于恢复；恢复后的外部结果仍可能不同。
 
@@ -2163,9 +2178,9 @@ M0 是内核里程碑，不能宣称已经交付完整 Agent Runtime。
 
 ### M2：可靠恢复与扩展
 
-通过持久化事务/outbox/对账、Mutation 日志、storageState/pin 重建和 checkpoint 截断验证后再宣布 crash recovery。随后按实际需求增加高级 Join、公开 detached/background scope、更细资源锁、叶子级 taint、多 provider 自适应限流、基于质量/延迟/价格/缓存的动态路由、Provider 会话优化（映射 Lane `history`）、Admission 自动折叠亲和组（`forkAffinity: 'coalesce'`，需先解决 Join 成员 key 与单 Lane Outcome 的对应）、基于相关性的 warm start 自动筛选、Host 级费用/调用限制和动态工具检索，不预先把这些能力塞入 M1。M1 的静态并发上限与确定性路由不依赖这些扩展。
+本地 File/SQLite 路径已实现持久化事务、outbox、Mutation 日志、storageState/pin 重建、checkpoint 截断、FactInbox durable dedupe 和 restore 校验（见第 20.2 节）。生产级 crash recovery 仍需跨主机故障注入与远程写系统对账证明后再宣布。随后按实际需求增加公开 detached/background scope、更细资源锁、叶子级 taint、多 provider 自适应限流、基于质量/延迟/价格/缓存的动态路由、Provider 会话优化（映射 Lane `history`）、Admission 自动折叠亲和组（`forkAffinity: 'coalesce'`，需先解决 Join 成员 key 与单 Lane Outcome 的对应）、基于相关性的 warm start 自动筛选、Host 级费用/调用限制，不预先把这些能力塞进更早里程碑。M1 的静态并发上限与确定性路由不依赖这些扩展。
 
-MVP 不包含：可靠崩溃恢复、持久数据库、分布式 Worker、流式部分参数执行、软依赖、any/quorum Join、对外 Detached API、自动推测执行、动态工具检索、自动 Context 压缩、学习型/自适应模型路由、Provider Thread 优化、Fork 自动折叠、隐式跨 Session 继承、跨 Wait 的通用事件合并队列、Memory/MCP/Skill 平台和 Web UI。显式 summarize Effect 与显式 `compact_history` 属于普通业务流程，不等于自动压缩平台。HumanEffect 与 AgentEffect 属于核心 Effect 契约；第一版可以只提供最小 Host API，不要求审批 UI 或复杂 Multi-Agent 编排产品。
+仓库本地主链不覆盖：生产级多主机崩溃恢复、流式部分参数执行、软依赖以外尚未验收的 Join 变体、对外 Detached API、自动推测执行、自动 Context 压缩、学习型模型路由、Provider Thread 优化、Fork 自动折叠、隐式跨 Session 继承、跨 Wait 的通用事件合并队列、Memory/MCP/Skill 平台和 Web UI。显式 summarize Effect 与显式 `compact_history` 属于普通业务流程，不等于自动压缩平台。HumanEffect 与 AgentEffect 属于核心 Effect 契约；第一版可以只提供最小 Host API，不要求审批 UI 或复杂 Multi-Agent 编排产品。
 
 M1 至少接通一个真实模型 Adapter，并用可控模型替身验证多候选选择、隐私拒绝和 fallback；若宣称本地/云端协同已可用，必须另有对应真实 Adapter 的集成验证，不能仅凭统一接口或配置示例宣称完成。
 
@@ -2199,8 +2214,12 @@ M1 至少接通一个真实模型 Adapter，并用可控模型替身验证多候
 | 并发与背压（M0） | 任意时刻不超过槽位上限，队列满时整批拒绝，无空转调度 |
 | Human/Timer 不占槽（M0） | 多个 HumanEffect 同时 waiting 不占用 `maxRunningTools` / `maxQueuedEffects` |
 | 取消传播（M0） | 自有子任务被取消，共享依赖不被误取消，资源确认停止或 quarantine 后才释放给业务 Lane |
+| 取消子树（M0） | `cancel_lane` / `complete(children: 'cancel')` 覆盖目标及其全部非终态子孙，不留下仍在跑的孙子 Lane |
+| 锁等待清理（M0） | 仍在排队、尚未进入 `lockReleases` 的 Effect 被取消/失败时必须 `cancelWait`；不能把锁授予已取消请求 |
+| 提案停放（M0） | owner 的 `pendingResumeInput` 被 wait/control_error 占用时，`propose_cancel` 进入 `pendingControlProposals`，不覆盖已有 ResumeInput |
 | sibling 不能互砍（M0） | 非 owner 的 `cancel_lane` 被拒绝；`propose_cancel` 到达 owner 的 `control_proposal` |
 | 完成/取消竞争（M0） | 结果只提交一次，迟到成功不能恢复 cancelling Lane |
+| Quarantine 迟到完成（M0） | `reconcile_required` 之后到达的 `effect_completion` 结算 Outcome、清除 quarantine 与 `unresolvedEffectIds`，快照仍可 restore |
 | 执行/副作用状态（M0） | Attempt 分别记录 `executionState` 与 `sideEffectState`；纯 LLM 的 `remote_unknown + none` 可释放模型槽，写副作用未知进入 `reconcile_required`/`in_doubt` |
 | cleanup 未确认（M0） | 副作用未知时保留资源隔离，不自动重复写入；纯计算远端未知不误占用 LLM 槽 |
 | Quarantine 出口（M0） | `cancelGraceMs` 后 Lane/Agent 进入终态并带 `unresolvedEffectIds`；`run()` 返回；inspect 可见 quarantine |
@@ -2223,6 +2242,9 @@ M1 至少接通一个真实模型 Adapter，并用可控模型替身验证多候
 | Storage Pin（M1.5） | 活动 Lane、LLM Request、Wait、未消费输入和 ResultRef 引用对象的 `pinCount` 正确增减；被 pin 对象不能被 compact/淘汰 |
 | Storage Pressure（M1.5） | 达到内存水位时优先持久化或 compact unpinned Result/观测事件/Snapshot，内存保留索引与 metadata |
 | Storage Hard Limit（M1.5） | 持久化不可用且所有可用数据均被 pin 时，超过 hard limit 返回 `SESSION_STORAGE_LIMIT_EXCEEDED`，不提交半个事务、不无限增长、不静默淘汰活动引用 |
+| Storage 增量准入（M1.5） | `put` 只评估本次新增/改写记录；已准入快照不因事后下调限额被重新拒绝；禁止每次 put 深拷贝整张表 |
+| Context 路径安全（M1） | `__proto__` / `constructor` / `prototype` 路径被 validate、apply 与 DSL proxy 拒绝，不能污染 `Object.prototype` |
+| Merge 中间版本（M1） | 连续 merge 每个产生内容变化的 Global 版本都可 `adopt_context`，不能只保留最终版本 |
 | Event Retention（M1.5） | 事实事件逻辑保留；progress、LLM chunk、scheduler trace 可 compact，且 compact 不改变状态重放所需事实 |
 | Snapshot Retention（M1.5） | 保留最新 Snapshot 与被 Lane/活动 Request 引用的旧版本，其余旧版本落盘并保留索引；Adopt/Rebase 引用不会因内存回收失效 |
 | Progress Fingerprint（M1.5） | 每轮生成稳定指纹，含 `resumeStep`/`localsHash`；随机 ID、timestamp、telemetry 和 Provider ID 不造成假进展；纯逻辑步进不算无进展 |
@@ -2245,7 +2267,7 @@ M1 至少接通一个真实模型 Adapter，并用可控模型替身验证多候
 | Result 消化（M1） | LLM 消化 ResultRef 后才提交 Finding/ContextDelta，原始大输出不自动写入 GlobalContext |
 | Tool 回报（M0） | return/ToolError/emit/AbortSignal 分别对应成功/失败/中间回报/取消控制；终态后 emit 为 no-op |
 | HumanEffect（M0） | 用户响应作为完成事件恢复等待 Lane，不需要特殊同步阻塞路径 |
-| AgentEffect（M0/M1） | Child Agent 与主 Agent 使用同一执行模型，深度限制生效；父等待期间 child 获得 inheritedFloor |
+| AgentEffect（M0/M1） | Child Agent 与主 Agent 使用同一执行模型，深度限制生效；父等待期间 child 获得 inheritedFloor；创建失败只失败该 Effect，不拖垮父 tick |
 | Session 状态所有权（M1） | 禁用 Provider Thread 后仍能构建完整请求；messages 由 Pulse 状态投影，不成为第二状态源 |
 | 三层 Context 隔离（M1） | Lane A 的未合并历史不进入 B；Global 更新不暗改已有 Lane 快照；Request 不整体写回 Context |
 | Result Coalescing（M1） | all Wait 的多个结果只恢复一次，可进入一个 LLMEffect；未满足依赖不提前唤醒 |
@@ -2350,7 +2372,7 @@ Scheduler Tick
 6. HumanEffect、AgentEffect、LLMEffect、ToolEffect、TimerEffect 使用同一 Effect/Event 生命周期；Human/Timer 不占执行槽。并行探索优先 Lane，真正语义隔离才创建 Child Agent。
 7. 原始结果先进入 ResultStore 和调度队列，Scheduler 决定消费 Lane 的执行时机；LLM 消化结果后才提交 Finding/ContextDelta。
 8. 取消、重试、timeout 以实际执行为准；收尾到期的未知副作用进入 QuarantineScope，不挂死 `run()`。无价值 Lane 可由 owner 以 SUPERSEDED 剪枝。
-9. 序列化模型为恢复提供基础；`Mutation[]` 是事务与未来持久化日志。持久化、幂等派发和对账完成前不承诺可靠恢复。
+9. 序列化模型为恢复提供基础；`Mutation[]` 是事务与持久化日志。本地 File/SQLite persist/checkpoint 已落地且必须先校验再落盘、先持久化再派发；跨主机故障注入与远程副作用对账完成前仍不承诺生产级恢复。
 10. Pulse Session 是状态真源；Global Context、Lane Context 和临时 Request Context 分层，Provider Conversation 不能替代会话状态。
 11. ContextBuilder 基于固定版本与显式引用构建请求，稳定前缀服务于缓存优化；结果在提交请求前合并，提交后不因排队或重试改写输入。
 12. 模型选择绑定每次 LLMEffect；ModelRouter 过滤能力、隐私与窗口并给出候选，Scheduler 统一取得资源，ModelEffectExecutor 只执行已批准的 Attempt。
@@ -2365,4 +2387,4 @@ Scheduler Tick
 21. Host 命令与完成事件走 FactInbox；TimerWheel 统一到期；`hasRunnableWork()` 决定是否 `setImmediate`。这就是 Pulse 对 Node.js event loop 的实现映射。
 22. Context Affinity 分三层：Lane `history` append-only 进稳定前缀，只能显式 `compact_history`；Fork 亲和由 Admission 建议、Program 决定，Runtime 不改写 Fork 形状；跨 Session 只允许 `createAgent` 时显式 `warmStart`，默认只带事实。三层都不改变快照、隐私和事务规则，取舍按第 27 节测量。
 
-第一轮编码从 M0 开始，以状态不变量和验收场景驱动实现，再接真实模型与工具。当前文件交付的是架构与验收契约，不代表运行时已完成。
+仓库内可本地落地的 M0/M1/M1.5/M2 主链已按本文不变量实现；本文仍是验收契约。真实 Provider、远程写系统对账和生产级多主机恢复需要独立环境证明，不能由本地确定性测试代替。
