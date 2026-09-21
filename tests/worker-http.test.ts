@@ -192,6 +192,20 @@ describe('HTTP Worker transport', () => {
     }
   })
 
+  it('preserves structured failure semantics for direct HttpWorkerClient callers', async () => {
+    const coordinator = new Coordinator()
+    const server = await startWorkerCoordinatorServer(coordinator)
+    const workerClient = new HttpWorkerClient({ baseUrl: server.url, workerId: 'direct-error-worker', pollMs: 1 })
+    const worker = await startHttpWorker(workerClient, async () => { throw Object.assign(new Error('direct failure'), { code: 'DIRECT_WORKER_FAILURE', retryable: false, details: { source: 'direct-client' } }) })
+    const client = new HttpWorkerClient({ baseUrl: server.url, workerId: 'direct-error-host', pollMs: 1 })
+    try {
+      await expect(client.submit({ request: 'direct' }, { taskId: 'direct-error-task' })).rejects.toMatchObject({ code: 'DIRECT_WORKER_FAILURE', message: 'direct failure', retryable: false, details: { source: 'direct-client' } })
+    } finally {
+      await worker.stop()
+      await server.close()
+    }
+  })
+
   it('reclaims an expired remote lease without an explicit host-side recovery call', async () => {
     const coordinator = new Coordinator()
     const server = await startWorkerCoordinatorServer(coordinator, { recoveryIntervalMs: 2 })

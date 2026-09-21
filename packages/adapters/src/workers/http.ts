@@ -63,6 +63,15 @@ function workerHttpError(code: string, status?: number): Error & { code: string;
   return Object.assign(new Error(code), { code, retryable })
 }
 
+function workerControlError(code: string, retryable = false, details?: JsonValue): Error & { code: string; retryable: boolean; details?: JsonValue } {
+  return Object.assign(new Error(code), { code, retryable, ...(details === undefined ? {} : { details }) })
+}
+
+function workerTaskError(error: RuntimeError | undefined): Error & { code: string; retryable?: boolean; details?: JsonValue } {
+  const code = error?.code ?? 'WORKER_FAILED'
+  return Object.assign(new Error(error?.message ?? code), { code, ...(error?.retryable === undefined ? {} : { retryable: error.retryable }), ...(error?.details === undefined ? {} : { details: error.details }) })
+}
+
 function workerRuntimeError(cause: unknown): RuntimeError {
   if (cause && typeof cause === 'object') {
     const candidate = cause as { code?: unknown; message?: unknown; retryable?: unknown; details?: unknown }
@@ -264,18 +273,18 @@ export class HttpWorkerClient {
   async submit(payload: JsonValue, options: Omit<WorkerSubmitOptions, 'signal'> & { signal?: AbortSignal } = {}): Promise<JsonValue> {
     const taskId = options.taskId ?? `http-worker-task-${this.sequence++}`
     await this.request('/tasks/submit', { taskId, payload, ...(options.idempotencyKey === undefined ? {} : { idempotencyKey: options.idempotencyKey }), ...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }) })
-    if (options.signal?.aborted) { await this.cancel(taskId); throw new Error('WORKER_CANCELLED') }
+    if (options.signal?.aborted) { await this.cancel(taskId); throw workerControlError('WORKER_CANCELLED') }
     let abort: (() => void) | undefined
     const cancellation = options.signal === undefined ? undefined : new Promise<never>((_, reject) => {
-      abort = () => { void this.cancel(taskId).catch(() => undefined); reject(new Error('WORKER_CANCELLED')) }
+      abort = () => { void this.cancel(taskId).catch(() => undefined); reject(workerControlError('WORKER_CANCELLED')) }
       options.signal!.addEventListener('abort', abort, { once: true })
     })
     const poll = async (): Promise<JsonValue> => {
       while (true) {
         const task = await this.get(taskId)
         if (task?.state === 'succeeded') return task.result ?? null
-        if (task?.state === 'failed') throw new Error(task.error?.message ?? 'WORKER_FAILED')
-        if (task?.state === 'cancelled') throw new Error('WORKER_CANCELLED')
+        if (task?.state === 'failed') throw workerTaskError(task.error)
+        if (task?.state === 'cancelled') throw workerControlError('WORKER_CANCELLED')
         await new Promise((resolve) => setTimeout(resolve, this.pollMs))
       }
     }
