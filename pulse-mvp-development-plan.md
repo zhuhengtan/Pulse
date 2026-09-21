@@ -754,6 +754,8 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `0707054`：恢复构造也执行 `hostPolicy`、`storagePolicy` 等配置校验，避免已恢复快照静默覆盖非法宿主配置。
 - `e9b11fd`：Session 恢复快照校验调度上限、history 限制、Infinity 编码、ID 游标和虚拟时间，阻止非法状态进入 Scheduler。
 - `4b8c5f9`：Warm Start SessionStore 校验 Global 版本/Privacy、ResultRef、Result provenance 和驻留元数据的一致性。
+- `51e7bad`：补齐架构宿主查询出口 `runtime.effects.inspect(effectId)` 与 `runtime.results.get(resultRef)`，返回脱离内部状态的快照，并验证宿主修改不会反向污染 Runtime。
+- 当前确定性门禁：`npm test`，68 个测试文件、421 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
