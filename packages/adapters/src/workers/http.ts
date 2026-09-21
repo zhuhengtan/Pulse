@@ -229,9 +229,8 @@ export class HttpWorkerClient {
       return value
     } catch (cause) {
       if (controller.signal.aborted) throw workerHttpError('WORKER_HTTP_TIMEOUT')
-      if (cause instanceof Error && 'code' in cause && typeof (cause as { code?: unknown }).code === 'string') throw cause
+      if (cause instanceof Error && 'code' in cause && typeof (cause as { code?: unknown }).code === 'string' && 'retryable' in cause && typeof (cause as { retryable?: unknown }).retryable === 'boolean') throw cause
       throw Object.assign(workerHttpError('WORKER_HTTP_NETWORK_ERROR'), { cause })
-      throw cause
     } finally { clearTimeout(timeout) }
   }
 

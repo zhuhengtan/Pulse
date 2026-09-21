@@ -105,6 +105,12 @@ describe('HTTP Worker transport', () => {
     await expect(client.register()).rejects.toThrow('WORKER_HTTP_TIMEOUT')
   })
 
+  it('normalizes native coded network failures into retryable Worker errors', async () => {
+    const codedFetch: typeof globalThis.fetch = async () => { throw Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' }) }
+    const client = new HttpWorkerClient({ baseUrl: 'http://refused.invalid', workerId: 'refused', fetch: codedFetch })
+    await expect(client.register()).rejects.toMatchObject({ code: 'WORKER_HTTP_NETWORK_ERROR', retryable: true })
+  })
+
   it('fails closed on malformed lease and task responses', async () => {
     const malformedFetch: typeof globalThis.fetch = async (input) => {
       const path = new URL(String(input)).pathname
