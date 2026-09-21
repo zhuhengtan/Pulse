@@ -69,4 +69,17 @@ describe('Runtime tool registry', () => {
     expect(runtime.state.effects.get('effect-2')?.input).toMatchObject({ toolSetId: expect.stringMatching(/^dynamic@/), tools: { tools: [{ name: 'echo' }] } })
     expect(runtime.state.agents.get(agentId)?.state).toBe('running')
   })
+
+  it('executes a registered Runtime Tool through the default Runtime executor', async () => {
+    const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
+    runtime.tools.register(echo)
+    const program = { id: 'runtime-tool-default-executor', version: '1', step: ({ lane }: any) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects' as const, effects: [{ key: 'echo', kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { name: 'echo', arguments: { value: 'from-runtime' } } }], wait: { onUnsatisfied: 'resume_with_error' as const } }], next: { programId: 'runtime-tool-default-executor', programVersion: '1', step: 'finish', locals: {} } }
+      : { actions: [{ type: 'complete' as const, result: { done: true } }], next: { programId: 'runtime-tool-default-executor', programVersion: '1', step: 'finish', locals: {} } } }
+    const { agentId } = runtime.createAgent('execute registered tool', program)
+    await runtime.start(agentId).outcome()
+    const toolResult = [...runtime.state.results.values()].find((result) => result.effectId === 'effect-1')
+    expect(toolResult?.value).toEqual({ value: 'from-runtime' })
+    expect(runtime.state.effects.get('effect-1')?.outcome?.status).toBe('succeeded')
+  })
 })

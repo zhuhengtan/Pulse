@@ -664,6 +664,31 @@ export class PulseRuntime {
   }
 
   private async executeRegisteredEffect(effect: Readonly<EffectRecord>, signal: AbortSignal, emitObservation?: EffectObservationEmitter): Promise<EffectExecution> {
+    if (effect.kind === 'tool') {
+      const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+      const name = input.name
+      if (typeof name !== 'string' || this.tools.get(name) === undefined) return { value: null }
+      const observations: EffectObservation[] = []
+      const emit = (event: { type: 'progress' | 'warning' | 'diagnostic'; data: JsonValue }): void => {
+        if (signal.aborted) return
+        const observation = { type: event.type, data: event.data } satisfies EffectObservation
+        if (emitObservation) emitObservation(observation)
+        else observations.push(observation)
+      }
+      const context = { toolCallId: effect.toolCallId ?? '', effectId: effect.id, attemptId: effect.attemptId, ...(effect.idempotencyKey === undefined ? {} : { idempotencyKey: effect.idempotencyKey }), agentId: effect.agentId, laneId: effect.ownerLaneId, signal, emit }
+      const definition = this.tools.get(name)!
+      const argumentsValue = input.arguments ?? {}
+      let executionRef: JsonValue | undefined
+      try {
+        executionRef = this.tools.executionRef(name, argumentsValue, context)
+        const detailed = await this.tools.executeDetailed(name, argumentsValue, context)
+        return { value: asJsonValue(detailed.output), ...(detailed.normalized === undefined ? {} : { normalized: asJsonValue(detailed.normalized) }), ...(detailed.summary === undefined ? {} : { summary: asJsonValue(detailed.summary) }), sideEffectState: isSideEffectful(definition.manifest.sideEffectPolicy) ? 'applied' : 'none', executionState: 'succeeded', status: 'succeeded', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length }, ...(observations.length ? { observations } : {}) }
+      } catch (cause) {
+        if (signal.aborted && isSideEffectful(definition.manifest.sideEffectPolicy)) return { value: null, executionState: 'remote_unknown', sideEffectState: 'unknown', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: definition.manifest.version, reconcileRequired: true }, ...(cause instanceof Error ? { error: { code: 'TOOL_CANCELLED_UNKNOWN', message: cause.message } } : {}) }
+        const error = runtimeErrorFromCause(cause, 'TOOL_EXECUTION_FAILED')
+        return { value: null, status: signal.aborted ? 'cancelled' : 'failed', executionState: 'failed', sideEffectState: 'none', ...(executionRef === undefined ? {} : { executionRef }), ...(cause instanceof Error ? { error } : {}), ...(observations.length ? { observations } : {}) }
+      }
+    }
     if (effect.kind !== 'llm') return { value: null }
     const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
     const task = input.task
@@ -952,13 +977,14 @@ export class PulseRuntime {
     for (let tick = 0; tick < agentOrMaxTicks; tick++) {
       const work = this.tick()
       await this.flushPersistence()
+      if (this.executions.size) await new Promise<void>((resolve) => setImmediate(resolve))
       this.refreshWaits()
       if (this.ready.size === 0 && this.executions.size === 0) {
         if (this.preparingLLMs.size) { await Promise.resolve(); continue }
         if (this.factInbox.size > 0) continue
         if (this.hasPendingHostInteraction()) { await this.waitForFact(); continue }
         const nextAt = this.clock.timers.nextAt()
-        if (nextAt !== undefined && nextAt > this.clock.now()) { if (this.clock.waitUntil) await this.clock.waitUntil(nextAt); else this.clock.set(nextAt); continue }
+        if (nextAt !== undefined) { if (nextAt > this.clock.now()) { if (this.clock.waitUntil) await this.clock.waitUntil(nextAt); else this.clock.set(nextAt) }; continue }
         break
       }
       if (work === 0 && this.executions.size) {
@@ -988,6 +1014,7 @@ export class PulseRuntime {
     for (let tick = 0; tick < maxTicks; tick++) {
       const work = this.tick()
       await this.flushPersistence()
+      if (this.executions.size) await new Promise<void>((resolve) => setImmediate(resolve))
       this.refreshWaits()
       const root = this.state.lanes.get(agent.rootLaneId)
       if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status)) {
@@ -1002,7 +1029,7 @@ export class PulseRuntime {
         if (this.factInbox.size > 0) continue
         if (this.hasPendingHostInteraction(agentId)) { await this.waitForFact(); continue }
         const nextAt = this.clock.timers.nextAt()
-        if (nextAt !== undefined && nextAt > this.clock.now()) { if (this.clock.waitUntil) await this.clock.waitUntil(nextAt); else this.clock.set(nextAt); continue }
+        if (nextAt !== undefined) { if (nextAt > this.clock.now()) { if (this.clock.waitUntil) await this.clock.waitUntil(nextAt); else this.clock.set(nextAt) }; continue }
         break
       }
       if (work === 0 && this.executions.size) {
