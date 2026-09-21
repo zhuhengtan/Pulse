@@ -1377,9 +1377,12 @@ export class PulseRuntime {
     this.shuttingDown = true
     for (const agent of this.state.agents.values()) if (agent.state === 'running' || agent.state === 'cancelling') this.cancelAgent(agent.id, 'USER_REQUESTED')
     const deadline = Date.now() + Math.max(0, timeoutMs)
-    while ((this.ready.size || this.executions.size || this.hasQueuedEffects()) && Date.now() < deadline) {
+    while ((this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size) && Date.now() < deadline) {
       this.tick()
       if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise).concat([new Promise<void>((resolve) => setTimeout(resolve, Math.min(10, Math.max(0, deadline - Date.now()))))]))
+      else if (this.factInbox.size) await new Promise<void>((resolve) => setImmediate(resolve))
+      else if (this.preparingLLMs.size) await Promise.race([this.waitForFact(), new Promise<void>((resolve) => setTimeout(resolve, Math.min(10, Math.max(0, deadline - Date.now()))))])
+      else if (this.hasQueuedEffects()) await new Promise<void>((resolve) => setImmediate(resolve))
     }
     await this.flushPersistence()
     const unresolved = [...this.state.effects.values()].filter((effect) => !effect.outcome && effect.state !== 'cancelled').map((effect) => effect.id)

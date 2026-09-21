@@ -75,6 +75,15 @@ describe('observation inbox and shutdown', () => {
     expect(() => runtime.createAgent('after shutdown', program)).toThrow('RUNTIME_SHUTTING_DOWN')
   })
 
+  it('drains already queued Host Facts before shutdown returns', async () => {
+    const runtime = new PulseRuntime()
+    runtime.enqueueHostCommand({ type: 'cancel', agentId: 'missing-agent', reason: 'USER_REQUESTED' })
+    expect(runtime.factInbox.size).toBe(1)
+    await runtime.shutdown()
+    expect(runtime.factInbox.size).toBe(0)
+    expect(runtime.state.events.some((event) => event.type === 'command.applied')).toBe(true)
+  })
+
   it('exports telemetry through an atomic append-only host boundary', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-telemetry-'))
     try {
