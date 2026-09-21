@@ -12,6 +12,7 @@ import { FactInbox, ObservationInbox } from '../core/inbox.js'
 import { observeProgress, type ProgressObservation } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
 import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, externalizeRuntimeSnapshotBodies, hydrateRuntimeResultBodies, hydrateRuntimeSnapshotBodies, importRuntimePersistence, withRuntimePersistenceIntegrity, type RuntimePersistenceBackend, type RuntimePersistenceCompatibility, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
+import { exportWarmStartSession, type RuntimeSessionStore } from '../storage/session.js'
 import { ResourceLockManager } from './locks.js'
 import { appendRuntimeEvent } from '../core/events.js'
 import { apply, type Mutation } from '../core/mutations.js'
@@ -85,6 +86,7 @@ export interface RuntimeConfig {
   effectSubmissionPreparer?: (submission: EffectSubmission) => EffectSubmission
   telemetryExporter?: RuntimeTelemetryExporter
   persistenceBackend?: RuntimePersistenceBackend
+  sessionStore?: RuntimeSessionStore
   /** Internal restore CAS baseline; differs from the hydrated envelope digest. */
   persistenceExpectedDigest?: string
   budget?: RuntimeBudgetConfig
@@ -212,6 +214,7 @@ export class PulseRuntime {
   private shuttingDown = false
   private readonly telemetryExporter: RuntimeTelemetryExporter | undefined
   private readonly persistenceBackend: RuntimePersistenceBackend | undefined
+  private readonly sessionStore: RuntimeSessionStore | undefined
   private readonly enforcingRecoveryPrograms: boolean
   private readonly toolVersions: Readonly<Record<string, string>>
   private readonly recoveryCompatibility: RuntimePersistenceCompatibility | undefined
@@ -334,6 +337,7 @@ export class PulseRuntime {
     this.effectSubmissionPreparer = config.effectSubmissionPreparer ?? ((submission) => this.prepareRegisteredToolSubmission(submission))
     this.telemetryExporter = config.telemetryExporter
     this.persistenceBackend = config.persistenceBackend
+    this.sessionStore = config.sessionStore
     this.budget = config.budget ?? {}
     if (restored) for (const event of this.state.events) if (event.type === 'effect.execution_metadata') this.recordBudgetMetadata(event.data ?? event.payload)
     this.customExecutor = config.effectExecutor !== undefined
@@ -366,21 +370,31 @@ export class PulseRuntime {
     let initialGlobal: JsonValue | undefined
     let initialGlobalPrivacy: PrivacyMetadata | undefined
     let warmStartResultRefs: string[] = []
+    let warmStartResults: import('../core/types.js').ResultRecord[] = []
     if (warmStart) {
       const sourceSessionId = warmStart.sessionId ?? warmStart.agentId
       if (!sourceSessionId) throw new Error('WARM_START_SESSION_REQUIRED')
       const source = this.state.agents.get(sourceSessionId)
-      if (!source) throw new Error(`WARM_START_SOURCE_NOT_FOUND:${sourceSessionId}`)
-      const version = warmStart.globalVersion === 'latest' || warmStart.globalVersion === 'final' || warmStart.globalVersion === undefined ? source.latestGlobalVersion : warmStart.globalVersion
-      const value = source.globalVersions.get(version)
+      const stored = source === undefined ? this.sessionStore?.get(sourceSessionId) : undefined
+      if (!source && !stored) throw new Error(`WARM_START_SOURCE_NOT_FOUND:${sourceSessionId}`)
+      const sourceLatestVersion = source?.latestGlobalVersion ?? stored!.agent.latestGlobalVersion
+      const version = warmStart.globalVersion === 'latest' || warmStart.globalVersion === 'final' || warmStart.globalVersion === undefined ? sourceLatestVersion : warmStart.globalVersion
+      const value = source?.globalVersions.get(version) ?? stored!.agent.globalVersions.find(([candidate]) => candidate === version)?.[1]
       if (value === undefined) throw new Error(`WARM_START_VERSION_NOT_FOUND:${version}`)
       initialGlobal = warmStartGlobal(value, warmStart.include ?? 'facts', warmStart.relevanceRefs)
-      initialGlobalPrivacy = source.globalPrivacy?.get(version) === undefined ? undefined : structuredClone(source.globalPrivacy.get(version))
+      initialGlobalPrivacy = source?.globalPrivacy?.get(version) === undefined
+        ? stored?.agent.globalPrivacy?.find(([candidate]) => candidate === version)?.[1]
+        : structuredClone(source.globalPrivacy.get(version))
       warmStartResultRefs = [...new Set(warmStart.relevanceRefs ?? [])]
-      const sourceRoot = this.state.lanes.get(source.rootLaneId)
+      const visibleResultRefs = source?.rootLaneId === undefined ? new Set(stored!.visibleResultRefs) : this.state.lanes.get(source.rootLaneId)?.visibleResultRefs ?? new Set<string>()
+      const storedResults = new Map(stored?.results ?? [])
       for (const ref of warmStartResultRefs) {
-        if (!this.state.results.has(ref)) throw new Error(`WARM_START_RESULT_NOT_FOUND:${ref}`)
-        if (sourceRoot?.visibleResultRefs !== undefined && !sourceRoot.visibleResultRefs.has(ref)) throw new Error(`WARM_START_RESULT_NOT_VISIBLE:${ref}`)
+        if (!visibleResultRefs.has(ref)) throw new Error(`WARM_START_RESULT_NOT_VISIBLE:${ref}`)
+        if (!this.state.results.has(ref)) {
+          const result = storedResults.get(ref)
+          if (!result) throw new Error(`WARM_START_RESULT_NOT_FOUND:${ref}`)
+          warmStartResults.push(structuredClone(result))
+        }
       }
     }
     if (programRef === undefined) this.register(rootProgram)
@@ -396,10 +410,17 @@ export class PulseRuntime {
     if (rootProgram.seriesKeys?.length && programRef === undefined) root.resume.locals = { $sdk: { series: { keys: [...rootProgram.seriesKeys], index: 0 } } }
     root.enqueueSeq = this.enqueueSeq++
     agent.state = 'running'
+    const importedResultIds = new Set(warmStartResults.map((result) => result.id))
+    const nextIdsWithWarmStart = { ...nextIds }
+    for (const ref of importedResultIds) {
+      const match = /^result-(\d+)$/.exec(ref)
+      if (match) nextIdsWithWarmStart.result = Math.max(nextIdsWithWarmStart.result, Number(match[1]) + 1)
+    }
     const mutations: Mutation[] = [
       { op: 'setAgent', agentId: agent.id, record: agent },
       { op: 'setLane', laneId: root.id, record: root },
-      { op: 'setNextIds', nextIds },
+      ...warmStartResults.map((result) => ({ op: 'publishResult' as const, record: result })),
+      { op: 'setNextIds', nextIds: nextIdsWithWarmStart },
     ]
     this.assertStorageAdmission(mutations)
     commitMutationTransaction(this.state, this.mutationLog, `agent:${agent.id}:created`, mutations, this.state.now, this.sessionId)
@@ -1120,6 +1141,7 @@ export class PulseRuntime {
         if (result) Object.assign(result, value)
       }
     }
+    if (transactional && this.sessionStore) for (const agent of state.agents.values()) this.sessionStore.put(exportWarmStartSession(state, agent.id))
   }
 
   private hasPendingHostInteraction(agentId?: string): boolean { return [...this.state.effects.values()].some((effect) => effect.kind === 'human' && !effect.outcome && (agentId === undefined || effect.agentId === agentId)) }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime } from '@pulse/runtime'
+import { InMemoryRuntimeSessionStore, PulseRuntime, exportWarmStartSession } from '@pulse/runtime'
 import type { LaneProgram } from '@pulse/runtime'
 
 describe('explicit warm start', () => {
@@ -52,5 +52,27 @@ describe('explicit warm start', () => {
     expect(runtime.state.lanes.get(child.laneId)?.visibleResultRefs).toEqual(new Set(['finding-a']))
     const findings = runtime.createAgent({ goal: 'selected findings', program, warmStart: { agentId: source.agentId, globalVersion: 1, include: 'facts_and_findings', relevanceRefs: ['finding-b'] } })
     expect(runtime.state.agents.get(findings.agentId)?.globalVersions.get(0)).toEqual({ facts: ['known'], findings: [{ ref: 'finding-b' }] })
+  })
+
+  it('warm-starts across Runtime instances through a SessionStore and copies selected ResultRefs', () => {
+    const store = new InMemoryRuntimeSessionStore()
+    const source = new PulseRuntime({ sessionStore: store })
+    const program: LaneProgram = { id: 'cross-runtime-warm-start', version: '1', step: () => ({ actions: [{ type: 'complete', result: {} }], next: { programId: 'cross-runtime-warm-start', programVersion: '1', step: 'done', locals: {} } }) }
+    const created = source.createAgent('source', program)
+    source.state.agents.get(created.agentId)!.globalVersions.set(1, { facts: { answer: 42 }, findings: [{ ref: 'result-1', statement: 'keep me' }] })
+    source.state.agents.get(created.agentId)!.globalPrivacy!.set(1, { privacy: 'local_only' })
+    source.state.agents.get(created.agentId)!.latestGlobalVersion = 1
+    source.state.results.set('result-1', { id: 'result-1', value: { statement: 'keep me' }, privacy: 'local_only', derivedFrom: [] })
+    source.state.lanes.get(created.laneId)!.visibleResultRefs!.add('result-1')
+    store.put(exportWarmStartSession(source.state, created.agentId))
+
+    const target = new PulseRuntime({ sessionStore: store })
+    const copied = target.createAgent({ goal: 'target', program, warmStart: { sessionId: created.agentId, globalVersion: 1, include: 'facts_and_findings', relevanceRefs: ['result-1'] } })
+    const agent = target.state.agents.get(copied.agentId)!
+    expect(agent.globalVersions.get(0)).toEqual({ facts: { answer: 42 }, findings: [{ ref: 'result-1', statement: 'keep me' }] })
+    expect(agent.globalPrivacy?.get(0)).toEqual({ privacy: 'local_only' })
+    expect(target.state.results.get('result-1')).toMatchObject({ value: { statement: 'keep me' }, privacy: 'local_only' })
+    expect(target.state.lanes.get(copied.laneId)?.visibleResultRefs).toEqual(new Set(['result-1']))
+    expect(target.state.nextIds.result).toBeGreaterThanOrEqual(2)
   })
 })

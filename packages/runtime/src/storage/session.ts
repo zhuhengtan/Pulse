@@ -29,6 +29,30 @@ export interface SessionSnapshot {
   }
 }
 
+export interface RuntimeWarmStartSnapshot {
+  schemaVersion: 1
+  sessionId: string
+  agent: {
+    rootLaneId: string
+    latestGlobalVersion: number
+    globalVersions: Array<[number, JsonValue]>
+    globalPrivacy?: Array<[number, PrivacyMetadata]>
+  }
+  visibleResultRefs: string[]
+  results: Array<[string, ResultRecord]>
+}
+
+export interface RuntimeSessionStore {
+  get(sessionId: string): RuntimeWarmStartSnapshot | undefined
+  put(snapshot: RuntimeWarmStartSnapshot): void
+}
+
+export class InMemoryRuntimeSessionStore implements RuntimeSessionStore {
+  private readonly snapshots = new Map<string, RuntimeWarmStartSnapshot>()
+  get(sessionId: string): RuntimeWarmStartSnapshot | undefined { const snapshot = this.snapshots.get(sessionId); return snapshot === undefined ? undefined : structuredClone(snapshot) }
+  put(snapshot: RuntimeWarmStartSnapshot): void { this.snapshots.set(snapshot.sessionId, structuredClone(snapshot)) }
+}
+
 export interface SessionLogExportOptions { maxPrivacy?: PrivacyLabel }
 export type SessionLogResult = Omit<ResultRecord, 'value' | 'summary'> & { value?: JsonValue; summary?: JsonValue; redacted?: boolean }
 export type SessionLogArtifact = Omit<ArtifactRecord, 'contentBase64'> & { contentBase64?: string; redacted?: boolean }
@@ -72,6 +96,27 @@ export function exportRuntimeState(state: RuntimeState): SessionSnapshot {
       maxResultSummaryBytes: state.maxResultSummaryBytes,
       trustedSanitizerIds: [...state.trustedSanitizerIds].sort(),
     },
+  }
+}
+
+export function exportWarmStartSession(state: RuntimeState, sessionId: string): RuntimeWarmStartSnapshot {
+  const agent = state.agents.get(sessionId)
+  if (!agent) throw new Error(`WARM_START_SOURCE_NOT_FOUND:${sessionId}`)
+  const root = state.lanes.get(agent.rootLaneId)
+  const laneIds = new Set([...state.lanes.values()].filter((lane) => lane.agentId === sessionId).map((lane) => lane.id))
+  const effectIds = new Set([...state.effects.values()].filter((effect) => effect.agentId === sessionId).map((effect) => effect.id))
+  const results = [...state.results.entries()].filter(([ref, result]) => (root?.visibleResultRefs?.has(ref) ?? false) || (result.effectId !== undefined && effectIds.has(result.effectId)) || (result.producer?.kind === 'lane' && laneIds.has(result.producer.id)) || (result.producer?.kind === 'effect' && effectIds.has(result.producer.id))).map(([ref, result]) => [ref, structuredClone(result)] as [string, ResultRecord])
+  return {
+    schemaVersion: 1,
+    sessionId,
+    agent: {
+      rootLaneId: agent.rootLaneId,
+      latestGlobalVersion: agent.latestGlobalVersion,
+      globalVersions: [...agent.globalVersions.entries()].map(([version, value]) => [version, structuredClone(value)] as [number, JsonValue]),
+      ...(agent.globalPrivacy === undefined ? {} : { globalPrivacy: [...agent.globalPrivacy.entries()].map(([version, value]) => [version, structuredClone(value)] as [number, PrivacyMetadata]) }),
+    },
+    visibleResultRefs: [...(root?.visibleResultRefs ?? [])],
+    results,
   }
 }
 
