@@ -669,4 +669,23 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.effects.get('effect-2')?.outcome?.error?.code).toBe('BUDGET_EXCEEDED')
     expect(runtime.budgetUsage().attempts).toBe(1)
   })
+
+  it('routes executor completion through FactInbox and the next Runtime tick', async () => {
+    let resolveExecution!: (execution: { value: null; artifact: { mediaType: string; content: Uint8Array } }) => void
+    const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise((resolve) => { resolveExecution = resolve }) })
+    const program: LaneProgram = { id: 'completion-fact', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('completion-fact', 'finish') }
+      : { actions: [{ type: 'complete', result: { done: true } }], next: point('completion-fact', 'finish') } }
+    runtime.createAgent('completion fact', program)
+    runtime.tick()
+    const effect = runtime.state.effects.get('effect-1')!
+    resolveExecution({ value: null, artifact: { mediaType: 'text/plain', content: new Uint8Array([80, 117, 108, 115, 101]) } })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(effect.outcome).toBeUndefined()
+    expect(runtime.factInbox.snapshot().queue).toMatchObject([{ fact: { type: 'effect_completion', effectId: 'effect-1', attemptId: 'effect-1-attempt-1' } }])
+    runtime.tick()
+    expect(runtime.state.effects.get('effect-1')?.outcome?.status).toBe('succeeded')
+    expect(runtime.state.artifacts.get('artifact-1')?.mediaType).toBe('text/plain')
+  })
 })

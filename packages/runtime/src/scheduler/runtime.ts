@@ -50,6 +50,19 @@ export type HostCommand =
   | { type: 'cancel_effect'; agentId: string; effectId: string; reason: string }
   | { type: 'set_lane_priority'; laneId: string; priority: number }
 
+interface EffectCompletionFact {
+  [key: string]: JsonValue
+  type: 'effect_completion'
+  effectId: string
+  attemptId: string
+  execution: JsonValue
+  status: 'succeeded' | 'failed' | 'cancelled'
+  error?: JsonValue
+  dispatchError?: JsonValue
+}
+
+type RuntimeFact = HostCommand | EffectCompletionFact
+
 export interface RuntimeConfig {
   maxLaneStepsPerTick?: number
   maxTickMs?: number
@@ -109,6 +122,33 @@ export interface AgentLimits { id?: string; timeoutMs?: number; maxActiveLanes?:
 export interface AgentCreateRequest { goal: string; program: LaneProgram | ProgramRef; agentId?: string; priority?: number | AgentPriority; policy?: AgentPolicyRef; policyId?: string; limits?: AgentLimits; limitsId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string; inheritedFloor?: number }
 export interface BackgroundAgentInfo { agentId: string; rootLaneId: string; state: NonNullable<import('../core/types.js').AgentRecord['state']>; detached: true }
 export interface AgentHandle { id: string; agentId: string; laneId: string }
+
+function encodeEffectExecution(execution: EffectExecution): JsonValue {
+  const encoded = structuredClone(execution) as unknown as Record<string, unknown>
+  const artifact = execution.artifact
+  if (artifact !== undefined) {
+    encoded.artifact = {
+      ...artifact,
+      content: typeof artifact.content === 'string' ? artifact.content : { encoding: 'base64', value: Buffer.from(artifact.content).toString('base64') }
+    }
+  }
+  return encoded as JsonValue
+}
+
+function decodeEffectExecution(value: JsonValue): EffectExecution {
+  const execution = structuredClone(value) as Record<string, unknown>
+  const artifact = execution.artifact
+  if (artifact && typeof artifact === 'object' && !Array.isArray(artifact)) {
+    const content = (artifact as Record<string, unknown>).content
+    if (content && typeof content === 'object' && !Array.isArray(content) && (content as Record<string, unknown>).encoding === 'base64' && typeof (content as Record<string, unknown>).value === 'string') {
+      const base64 = (content as Record<string, unknown>).value
+      if (typeof base64 === 'string') {
+        ;(execution.artifact as Record<string, unknown>).content = Buffer.from(base64, 'base64')
+      }
+    }
+  }
+  return execution as unknown as EffectExecution
+}
 
 function resultMetadata(value: JsonValue): { sizeBytes: number; contentHash: string } { return { sizeBytes: Buffer.byteLength(stableSerialize(value), 'utf8'), contentHash: contentHash(value) } }
 
@@ -380,7 +420,7 @@ export class PulseRuntime {
   readonly priorityInheritance = new PriorityInheritance()
   readonly resourceLocks: ResourceLockManager
   readonly storagePolicy: SessionStoragePolicy
-  readonly factInbox: FactInbox<HostCommand>
+  readonly factInbox: FactInbox<RuntimeFact>
   readonly observationInbox: ObservationInbox
   readonly programs = new ProgramRegistry()
   readonly models: ModelRegistry
@@ -407,6 +447,9 @@ export class PulseRuntime {
   private readonly sessionId: string
   private hostCommandSeq = 1
   private factWaiters: Array<() => void> = []
+  private wakeScheduled = false
+  private inDrain = false
+  private wakeError: unknown
 
   static async restore(backend: RuntimePersistenceBackend, config: Omit<RuntimeConfig, 'persistence'> = {}): Promise<PulseRuntime> {
     const loaded = await backend.load()
@@ -438,7 +481,7 @@ export class PulseRuntime {
     this.persistenceDigest = config.persistenceExpectedDigest ?? config.persistence?.integrity?.digest
     this.mutationLog = restored?.mutationLog ?? new MutationLog()
     this.outbox = restored?.outbox ?? new EffectOutbox()
-    this.factInbox = restored?.factInbox === undefined ? new FactInbox<HostCommand>() : FactInbox.fromSnapshot<HostCommand>(restored.factInbox as unknown as import('../core/inbox.js').FactInboxSnapshot<HostCommand>)
+    this.factInbox = restored?.factInbox === undefined ? new FactInbox<RuntimeFact>() : FactInbox.fromSnapshot<RuntimeFact>(restored.factInbox as unknown as import('../core/inbox.js').FactInboxSnapshot<RuntimeFact>)
     for (const program of config.programs ?? []) this.register(program)
     this.recoveryCompatibility = restored?.compatibility
     const restoredCommandIds = this.factInbox.snapshot().seen.map((eventId) => /^host-command-(\d+)$/.exec(eventId)?.[1]).filter((value): value is string => value !== undefined).map(Number)
@@ -915,7 +958,7 @@ export class PulseRuntime {
   enqueueHostCommand(command: HostCommand): void {
     validateHostCommand(command)
     const eventId = `host-command-${this.hostCommandSeq}`
-    const candidateInbox = FactInbox.fromSnapshot(this.factInbox.snapshot())
+    const candidateInbox = FactInbox.fromSnapshot<RuntimeFact>(this.factInbox.snapshot())
     if (!candidateInbox.enqueue(command, eventId)) return
     const candidatePolicy = this.storagePolicy.clone()
     this.syncStoragePolicy(candidatePolicy, this.state, candidateInbox)
@@ -924,7 +967,33 @@ export class PulseRuntime {
     this.hostCommandSeq++
     this.syncStoragePolicy()
     this.schedulePersistence()
+    this.scheduleWake()
     for (const resolve of this.factWaiters.splice(0)) resolve()
+  }
+
+  private enqueueEffectCompletion(effectId: string, attemptId: string, execution: EffectExecution, status: EffectCompletionFact['status'] = 'succeeded', error?: RuntimeError, dispatchError?: RuntimeError): void {
+    const fact: EffectCompletionFact = { type: 'effect_completion', effectId, attemptId, execution: encodeEffectExecution(execution), status, ...(error === undefined ? {} : { error: error as unknown as JsonValue }), ...(dispatchError === undefined ? {} : { dispatchError: dispatchError as unknown as JsonValue }) }
+    const eventId = `effect-completion:${effectId}:${attemptId}`
+    if (!this.factInbox.enqueue(fact, eventId)) return
+    this.schedulePersistence()
+    this.scheduleWake()
+    for (const resolve of this.factWaiters.splice(0)) resolve()
+  }
+
+  private scheduleWake(): void {
+    if (this.wakeScheduled || this.inDrain) return
+    this.wakeScheduled = true
+    queueMicrotask(() => {
+      this.wakeScheduled = false
+      if (this.inDrain || this.factInbox.size === 0) return
+      this.inDrain = true
+      try { this.tick() } catch (cause) {
+        this.wakeError = cause
+      } finally {
+        this.inDrain = false
+        if (this.factInbox.size > 0 && this.wakeError === undefined) this.scheduleWake()
+      }
+    })
   }
 
   enqueueLane(laneId: string): void { const lane = this.state.lanes.get(laneId); if (lane && lane.status === 'ready') { lane.enqueueSeq = this.enqueueSeq++; lane.readySince = this.state.now; this.ready.enqueue(readyItemFromLane(lane)) } }
@@ -985,6 +1054,7 @@ export class PulseRuntime {
   }
 
   tick(): number {
+    this.wakeError = undefined
     this.assertRecoveryPrograms()
     this.state.now = this.clock.now()
     const tickStartedAt = performance.now()
@@ -996,8 +1066,24 @@ export class PulseRuntime {
       if (!envelope) break
       try {
         let commandApplied = false
-        if (!this.state.events.some((event) => event.id === envelope.eventId && event.type === 'command.enqueued')) this.emit({ id: envelope.eventId, type: 'command.enqueued', data: envelope.fact as unknown as JsonValue })
-      if (envelope.fact.type === 'reply') {
+      if (!this.state.events.some((event) => event.id === envelope.eventId && event.type === 'command.enqueued')) {
+        const enqueuedEvent = { id: envelope.eventId, type: 'command.enqueued' as const, data: envelope.fact as unknown as JsonValue }
+        if (envelope.fact.type === 'effect_completion') this.tryEmit(enqueuedEvent)
+        else this.emit(enqueuedEvent)
+      }
+      if (envelope.fact.type === 'effect_completion') {
+        if (envelope.fact.dispatchError !== undefined) this.tryEmit({ type: 'effect.dispatch_failed', effectId: envelope.fact.effectId, data: envelope.fact.dispatchError })
+        const effect = this.state.effects.get(envelope.fact.effectId)
+        if (!effect || effect.attemptId !== envelope.fact.attemptId) {
+          this.tryEmit({ type: 'attempt.late_emit', effectId: envelope.fact.effectId, attemptId: envelope.fact.attemptId, data: { kind: 'completion', status: effect?.outcome?.status ?? effect?.state ?? 'missing' } })
+          this.executions.delete(envelope.fact.effectId)
+          this.refreshWaits()
+        } else {
+          commandApplied = this.completeEffect(envelope.fact.effectId, decodeEffectExecution(envelope.fact.execution), envelope.fact.status, envelope.fact.error as unknown as RuntimeError | undefined)
+          this.executions.delete(envelope.fact.effectId)
+          this.refreshWaits()
+        }
+      } else if (envelope.fact.type === 'reply') {
         const effect = this.state.effects.get(envelope.fact.effectId)
         if (effect?.agentId === envelope.fact.agentId && effect.kind === 'human' && !effect.outcome) commandApplied = this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value }, 'succeeded', undefined, [{ op: 'appendEvent', event: { type: 'command.applied', data: { eventId: envelope.eventId } } }])
         else { this.rejectHostCommand(envelope.eventId, effect?.agentId !== envelope.fact.agentId ? 'EFFECT_NOT_OWNED' : 'EFFECT_NOT_REPLYABLE'); commandApplied = true }
@@ -1026,7 +1112,7 @@ export class PulseRuntime {
           commandApplied = true
         }
       }
-      if (!commandApplied) this.emit({ type: 'command.applied', data: { eventId: envelope.eventId } })
+      if (!commandApplied && envelope.fact.type !== 'effect_completion') this.emit({ type: 'command.applied', data: { eventId: envelope.eventId } })
       } catch (cause) {
         this.factInbox.restore(before)
         throw cause
@@ -1970,7 +2056,13 @@ export class PulseRuntime {
         }
         this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now })
       }
-      const promise = this.executor(effect, controller.signal, emitObservation).then((execution) => { this.completeEffect(effect.id, execution) }).catch((cause) => { const runtimeError = runtimeErrorFromCause(cause); this.tryEmit({ type: 'effect.dispatch_failed', effectId: effect.id, data: runtimeError as unknown as JsonValue }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', runtimeError) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
+      const attemptId = effect.attemptId
+      const promise = this.executor(effect, controller.signal, emitObservation).then((execution) => {
+        this.enqueueEffectCompletion(effect.id, attemptId, execution)
+      }).catch((cause) => {
+        const runtimeError = runtimeErrorFromCause(cause)
+        this.enqueueEffectCompletion(effect.id, attemptId, { value: null, sideEffectState: 'none' }, 'failed', runtimeError, runtimeError)
+      }).finally(() => { this.refreshWaits() })
       executionRecord.promise = promise
       if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.scheduleRuntimeDelay(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
       if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.scheduleRuntimeTimer(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))

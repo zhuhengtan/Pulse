@@ -177,7 +177,7 @@ describe('M1-2 scheduler and lifecycle primitives', () => {
 
   it('awaits active children through an implicit closing edge before succeeding', async () => {
     let release: (() => void) | undefined
-    const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise((resolve) => { release = () => resolve({ value: null }) }) })
+    const runtime = new PulseRuntime({ maxTickMs: 1000, effectExecutor: async () => await new Promise((resolve) => { release = () => resolve({ value: null }) }) })
     const childPoint = (step: string) => ({ programId: 'closing', programVersion: '1', step, locals: {} })
     const program = { id: 'closing', version: '1', step: ({ lane }: { lane: any }) => {
       if (lane.goal === 'parent' && lane.resume.step === 'start') return { actions: [{ type: 'fork', lanes: [{ key: 'child', goal: 'child', priority: 10, program: childPoint('child') }] }], next: childPoint('close') }
