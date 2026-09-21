@@ -8,7 +8,8 @@ export class AnthropicAdapter implements ProviderAdapter {
     const system = params.request.blocks.filter((block) => block.kind === 'system' || block.kind === 'policy' || block.kind === 'tools').map((block) => typeof block.content === 'string' ? block.content : JSON.stringify(block.content)).join('\n')
     const messages = [{ role: 'user', content: params.request.blocks.filter((block) => !['system', 'policy', 'tools'].includes(block.kind)).map((block) => ({ type: 'text', text: typeof block.content === 'string' ? block.content : JSON.stringify(block.content) })) }]
     const streaming = params.onObservation !== undefined
-    const body = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096, ...(system ? { system } : {}), messages, ...(toolDefinitions(params.request).length ? { tools: toolDefinitions(params.request) } : {}), ...(params.outputSchema === undefined ? {} : { output_format: { type: 'json_schema', schema: params.outputSchema } }), ...(streaming ? { stream: true } : {}) }
+    const tools = toolDefinitions(params.request)
+    const body = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096, ...(system ? { system } : {}), messages, ...(tools.length ? { tools, ...(this.config.toolChoice === undefined ? {} : { tool_choice: anthropicToolChoice(this.config.toolChoice) }) } : {}), ...(params.outputSchema === undefined ? {} : { output_format: { type: 'json_schema', schema: params.outputSchema } }), ...(streaming ? { stream: true } : {}) }
     const response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
     if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`)
     if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeAnthropicResponse(await response.json())
@@ -49,4 +50,11 @@ function toolDefinitions(request: LLMRequestProjection): Array<{ name: string; d
   const content = block?.content
   const values: JsonValue[] = Array.isArray(content) ? content : content && typeof content === 'object' && !Array.isArray(content) && Array.isArray((content as Record<string, JsonValue>).tools) ? (content as Record<string, JsonValue>).tools as JsonValue[] : []
   return values.filter((value): value is Record<string, JsonValue> => typeof value === 'object' && value !== null && !Array.isArray(value) && typeof value.name === 'string').map((value) => ({ name: value.name as string, ...(typeof value.description === 'string' ? { description: value.description } : {}), input_schema: (value.inputSchema ?? value.parameters ?? {}) as JsonValue }))
+}
+
+function anthropicToolChoice(choice: NonNullable<ProviderPresetConfig['toolChoice']>): Record<string, string> | undefined {
+  if (choice === 'auto') return { type: 'auto' }
+  if (choice === 'required') return { type: 'any' }
+  if (choice === 'none') return undefined
+  return { type: 'tool', name: choice.function.name }
 }
