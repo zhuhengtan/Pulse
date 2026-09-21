@@ -3,7 +3,7 @@ import { buildAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock, type RuntimeClock } from './index.js'
 import type { ArtifactRecord, EffectRecord, EffectSubmission, EffectState, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, RuntimeEventInput, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyLabel, PrivacyTaint, PrivacyMetadata, ProvenanceRef, ResumePoint, ResultRecord } from '../core/types.js'
-import { createRuntimeState, effectivePrivacy, isSideEffectful, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, provenanceRefId, provenanceRefKind, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
+import { createRuntimeState, effectivePrivacy, isSideEffectful, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, provenanceRefId, provenanceRefKind, replaceResumeInput, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
 import { assertProgramPure, withPureStepGuard } from '../dsl/program.js'
@@ -11,10 +11,10 @@ import type { ProgramRef } from '../dsl/templates.js'
 import { FactInbox, ObservationInbox, type FactInboxDedupeArchive, type FactInboxDedupeArchiveBatch, type FactInboxDedupeArchiveWriter } from '../core/inbox.js'
 import { observeProgress, type ProgressObservation } from '../lifecycle/watchdog.js'
 import { EffectOutbox } from '../storage/outbox.js'
-import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, externalizeRuntimeSnapshotBodies, hydrateRuntimeResultBodies, hydrateRuntimeSnapshotBodies, importRuntimePersistence, withRuntimePersistenceIntegrity, type RuntimePersistenceBackend, type RuntimePersistenceCompatibility, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
+import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, externalizeRuntimeSnapshotBodies, hydrateRuntimeResultBodies, hydrateRuntimeSnapshotBodies, importRuntimePersistence, validateRuntimePersistenceSnapshot, withRuntimePersistenceIntegrity, type RuntimePersistenceBackend, type RuntimePersistenceCompatibility, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
 import { exportRuntimeLog, exportRuntimeLogTo, exportWarmStartSession, type RuntimeLogSink, type RuntimeSessionStore, type SessionLogExport, type SessionLogExportOptions } from '../storage/session.js'
 import { ResourceLockManager } from './locks.js'
-import { appendRuntimeEvent } from '../core/events.js'
+import { appendRuntimeEvent, normalizeRuntimeEvent } from '../core/events.js'
 import { apply, type Mutation } from '../core/mutations.js'
 import { ContextMerger, type MergePlan } from '../context/merger.js'
 import { appendHistory, contentHash, historyPressure, stableSerialize } from '../context/builder.js'
@@ -477,6 +477,11 @@ export class PulseRuntime {
   private readonly waitDeadlineTimers = new Map<string, string>()
   private readonly lockBlocked = new Set<string>()
   private readonly grantedLockReleases = new Map<string, () => void>()
+  /** Every lock request id an Effect ever issued (across attempts), keyed by Effect id, so terminal cleanup never misses a queued request. */
+  private readonly lockRequests = new Map<string, Map<string, string>>()
+  /** Consecutive background persistence failures; reset on the next successful write. */
+  private persistenceFailures = 0
+  private persistenceBackoff = false
   private readonly executor: EffectExecutor
   private factInboxDedupeArchive: FactInboxDedupeArchive | undefined
   private readonly customExecutor: boolean
@@ -804,6 +809,8 @@ export class PulseRuntime {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
     const exported = exportRuntimePersistence(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, this.factInbox.snapshot(), this.persistenceCompatibility())
+    // Never write a snapshot that the constructor would refuse to load; failing here is recoverable, a poisoned store is not.
+    validateRuntimePersistenceSnapshot(exported)
     const withResults = backend.resultStore === undefined ? exported : await externalizeRuntimeResultBodies(exported, backend.resultStore)
     const snapshot = backend.snapshotStore === undefined ? withResults : await externalizeRuntimeSnapshotBodies(withResults, backend.snapshotStore)
     await backend.save(snapshot, backend === this.persistenceBackend ? this.persistenceDigest : undefined)
@@ -814,6 +821,8 @@ export class PulseRuntime {
   }
   async flushPersistence(): Promise<void> {
     if (!this.persistenceBackend) return
+    // An explicit flush is a request to try now, even while background retries are backing off.
+    this.persistenceBackoff = false
     this.schedulePersistence()
     while (true) {
       await this.persistencePending
@@ -851,6 +860,7 @@ export class PulseRuntime {
     }
     const exported = exportRuntimeCheckpoint(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark }, this.factInbox.snapshot(), this.persistenceCompatibility())
     const archived = backend.eventArchive === undefined || eventWatermark === undefined ? exported : withRuntimePersistenceIntegrity({ ...exported, eventArchive: { through: eventWatermark } })
+    validateRuntimePersistenceSnapshot(archived)
     const withResults = backend.resultStore === undefined ? archived : await externalizeRuntimeResultBodies(archived, backend.resultStore)
     const snapshot = backend.snapshotStore === undefined ? withResults : await externalizeRuntimeSnapshotBodies(withResults, backend.snapshotStore)
     await backend.save(snapshot, backend === this.persistenceBackend ? this.persistenceDigest : undefined)
@@ -876,10 +886,10 @@ export class PulseRuntime {
   }
 
   private emit(event: import('../core/types.js').RuntimeEventInput): import('../core/types.js').RuntimeEvent {
-    const candidate = structuredClone(this.state)
-    appendRuntimeEvent(candidate, event, { sessionId: this.sessionId, timestamp: candidate.now })
-    const policy = this.storagePolicy.clone()
-    this.syncStoragePolicy(policy, candidate)
+    // Admission for a lone event only needs the event itself: preview its normalized
+    // form and check it against a policy copy, instead of deep-cloning the whole state.
+    const preview = normalizeRuntimeEvent(event, this.state.nextIds.event, { sessionId: this.sessionId, timestamp: this.state.now })
+    this.storagePolicy.clone().put('event', `event:${preview.id}`, preview as unknown as JsonValue)
     const emitted = appendRuntimeEvent(this.state, event, { sessionId: this.sessionId, timestamp: this.state.now })
     this.syncStoragePolicy()
     return emitted
@@ -1430,7 +1440,7 @@ export class PulseRuntime {
           if (mutation.op !== 'setLane' || mutation.laneId !== lane.id) return mutation
           const nextLane = structuredClone(mutation.record)
           delete nextLane.consecutiveControlErrors
-          delete nextLane.pendingResumeInput
+          replaceResumeInput(nextLane, undefined)
           nextLane.progressWatchdog = watchdog.state
           return { ...mutation, record: nextLane }
         })
@@ -1595,16 +1605,29 @@ export class PulseRuntime {
   private schedulePersistence(): void {
     if (!this.persistenceBackend) return
     this.persistenceDirty = true
-    if (this.persistenceScheduled) return
+    if (this.persistenceScheduled || this.persistenceBackoff) return
     this.persistenceScheduled = true
     this.persistencePending = this.persistencePending.catch(() => undefined).then(async () => {
       while (this.persistenceDirty) {
         this.persistenceDirty = false
-        await this.persist(this.persistenceBackend!)
+        try {
+          await this.persist(this.persistenceBackend!)
+          if (this.persistenceFailures > 0) { this.persistenceFailures = 0; this.tryEmit({ type: 'persistence.recovered' }) }
+        } catch (cause) {
+          // Surface the failure instead of dropping it: hosts observe `persistence.failed`,
+          // awaiting `flushPersistence()` callers see the rejection, and the state stays
+          // dirty so a backoff timer retries instead of hot-looping against a dead backend.
+          this.persistenceFailures += 1
+          this.persistenceDirty = true
+          this.persistenceBackoff = true
+          this.tryEmit({ type: 'persistence.failed', data: { attempt: this.persistenceFailures, error: cause instanceof Error ? cause.message : String(cause) } })
+          this.scheduleRuntimeDelay(Math.min(30_000, 250 * 2 ** Math.min(7, this.persistenceFailures - 1)), () => { this.persistenceBackoff = false; if (this.persistenceDirty) this.schedulePersistence() })
+          throw cause
+        }
       }
     }).finally(() => {
       this.persistenceScheduled = false
-      if (this.persistenceDirty) this.schedulePersistence()
+      if (this.persistenceDirty && !this.persistenceBackoff) this.schedulePersistence()
     })
   }
 
@@ -1618,20 +1641,32 @@ export class PulseRuntime {
     for (const artifact of this.state.artifacts.values()) artifact.storageState = 'persisted'
   }
 
+  /**
+   * Reconcile the storage policy with the (candidate) runtime state.
+   *
+   * Cost model: keys whose content is immutable once written (events, versioned
+   * Lane/global snapshots, LLM request snapshots, resume inputs, fact envelopes,
+   * published results) are only serialized and hashed on first sight; later
+   * syncs skip them with a map lookup. Only genuinely mutable records (waits,
+   * artifacts) are re-put every time. Pins are recomputed from scratch, which is
+   * a set-diff over keys, not over bodies.
+   */
   private syncStoragePolicy(policy = this.storagePolicy, state = this.state, factInbox = this.factInbox): void {
     const transactional = policy === this.storagePolicy
     const target = transactional ? policy.clone() : policy
     const residency = new Map<string, { storageState: 'memory' | 'persisted'; pinCount: number }>()
     const pinKeys = new Set<string>()
+    const activeGlobalVersions = new Set<string>()
     for (const lane of state.lanes.values()) {
       const active = !['succeeded', 'failed', 'cancelled'].includes(lane.status)
       if (active) pinKeys.add(`snapshot:lane:${lane.id}:${lane.context.version}`)
       if (active) for (const ref of lane.visibleResultRefs ?? []) pinKeys.add(`result:${ref}`)
+      if (active && lane.contextSnapshotVersion !== undefined) activeGlobalVersions.add(`${lane.agentId}:${lane.contextSnapshotVersion}`)
       for (const record of lane.context.history) for (const ref of record.resultRefs) pinKeys.add(`result:${ref}`)
       if (lane.activeWaitId) pinKeys.add(`snapshot:wait:${lane.activeWaitId}`)
       if (lane.pendingResumeInput) pinKeys.add(`snapshot:resume:${lane.id}:${lane.version}`)
     }
-    for (const agent of state.agents.values()) for (const [version] of agent.globalVersions) if ([...state.lanes.values()].some((lane) => lane.agentId === agent.id && !['succeeded', 'failed', 'cancelled'].includes(lane.status) && lane.contextSnapshotVersion === version)) pinKeys.add(`snapshot:global:${agent.id}:${version}`)
+    for (const agent of state.agents.values()) for (const [version] of agent.globalVersions) if (activeGlobalVersions.has(`${agent.id}:${version}`)) pinKeys.add(`snapshot:global:${agent.id}:${version}`)
     for (const wait of state.waits.values()) if (wait.state === 'pending') pinKeys.add(`snapshot:wait:${wait.id}`)
     for (const artifact of state.artifacts.values()) {
       if (artifact.pinCount > 0) pinKeys.add(`artifact:${artifact.ref}`)
@@ -1640,52 +1675,39 @@ export class PulseRuntime {
       if (!effect.outcome && effect.kind === 'llm') pinKeys.add(`snapshot:request:${effect.id}:${effect.attemptId}`)
       if (!effect.outcome) for (const ref of effect.derivedFrom ?? []) pinKeys.add(`${provenanceRefKind(ref) === 'artifact' ? 'artifact' : 'result'}:${provenanceRefId(ref)}`)
     }
-    for (const envelope of factInbox.snapshot().queue) pinKeys.add(`snapshot:fact:${envelope.eventId}`)
+    const factQueue = factInbox.snapshot().queue
+    for (const envelope of factQueue) pinKeys.add(`snapshot:fact:${envelope.eventId}`)
     target.replacePinSource('runtime', pinKeys)
-    for (const lane of state.lanes.values()) {
-      const snapshotKey = `snapshot:lane:${lane.id}:${lane.context.version}`
-      target.put('snapshot', snapshotKey, { laneId: lane.id, version: lane.context.version, context: lane.context, resume: lane.resume } as unknown as JsonValue)
-    }
-    for (const agent of state.agents.values()) {
-      for (const [version, value] of agent.globalVersions) {
-        const key = `snapshot:global:${agent.id}:${version}`
-        target.put('snapshot', key, { agentId: agent.id, version, value } as unknown as JsonValue)
-      }
-    }
-    for (const wait of state.waits.values()) {
-      const key = `snapshot:wait:${wait.id}`
-      target.put('snapshot', key, wait as unknown as JsonValue)
-    }
-    for (const effect of state.effects.values()) {
-      if (!effect.outcome && effect.kind === 'llm') {
-        const key = `snapshot:request:${effect.id}:${effect.attemptId}`
-        target.put('snapshot', key, { effectId: effect.id, attemptId: effect.attemptId, input: effect.input } as unknown as JsonValue)
-      }
-    }
+    const liveSnapshotKeys = new Set<string>()
+    const putOnce = (kind: import('../storage/policy.js').StorageKind, key: string, value: () => JsonValue): void => { if (kind === 'snapshot') liveSnapshotKeys.add(key); if (!target.has(key)) target.put(kind, key, value()) }
+    for (const lane of state.lanes.values()) putOnce('snapshot', `snapshot:lane:${lane.id}:${lane.context.version}`, () => ({ laneId: lane.id, version: lane.context.version, context: lane.context, resume: lane.resume } as unknown as JsonValue))
+    for (const agent of state.agents.values()) for (const [version, value] of agent.globalVersions) putOnce('snapshot', `snapshot:global:${agent.id}:${version}`, () => ({ agentId: agent.id, version, value } as unknown as JsonValue))
+    for (const wait of state.waits.values()) { const key = `snapshot:wait:${wait.id}`; liveSnapshotKeys.add(key); target.put('snapshot', key, wait as unknown as JsonValue) }
+    for (const effect of state.effects.values()) if (!effect.outcome && effect.kind === 'llm') putOnce('snapshot', `snapshot:request:${effect.id}:${effect.attemptId}`, () => ({ effectId: effect.id, attemptId: effect.attemptId, input: effect.input } as unknown as JsonValue))
     for (const result of state.results.values()) {
-      const policyValue = structuredClone(result) as import('../core/types.js').ResultRecord
-      delete policyValue.storageState
-      delete policyValue.pinCount
-      const stored = target.put('result', `result:${result.id}`, policyValue as unknown as JsonValue)
+      const key = `result:${result.id}`
+      putOnce('result', key, () => {
+        const policyValue = structuredClone(result) as import('../core/types.js').ResultRecord
+        delete policyValue.storageState
+        delete policyValue.pinCount
+        return policyValue as unknown as JsonValue
+      })
+      const stored = target.record(key)!
       residency.set(result.id, { storageState: stored.storageState === 'memory' ? 'memory' : 'persisted', pinCount: stored.pinCount })
     }
     for (const artifact of state.artifacts.values()) target.put('artifact', `artifact:${artifact.ref}`, artifact as unknown as JsonValue)
-    for (const event of state.events) target.put('event', `event:${event.id}`, event as unknown as JsonValue)
-    for (const lane of state.lanes.values()) if (lane.pendingResumeInput) target.put('snapshot', `snapshot:resume:${lane.id}:${lane.version}`, lane.pendingResumeInput as unknown as JsonValue)
-    const factKeys = new Set(factInbox.snapshot().queue.map((envelope) => `snapshot:fact:${envelope.eventId}`))
-    for (const envelope of factInbox.snapshot().queue) target.put('snapshot', `snapshot:fact:${envelope.eventId}`, envelope as unknown as JsonValue)
-    for (const record of target.inspect()) if (record.key.startsWith('snapshot:fact:') && !factKeys.has(record.key)) target.remove(record.key)
-    if (transactional) {
-      policy.replaceSnapshot(target.snapshot())
-      for (const [id, value] of residency) {
-        const result = state.results.get(id)
-        if (result) Object.assign(result, value)
-      }
-    } else {
-      for (const [id, value] of residency) {
-        const result = state.results.get(id)
-        if (result) Object.assign(result, value)
-      }
+    for (const event of state.events) putOnce('event', `event:${event.id}`, () => event as unknown as JsonValue)
+    for (const lane of state.lanes.values()) if (lane.pendingResumeInput) putOnce('snapshot', `snapshot:resume:${lane.id}:${lane.version}`, () => lane.pendingResumeInput as unknown as JsonValue)
+    for (const envelope of factQueue) putOnce('snapshot', `snapshot:fact:${envelope.eventId}`, () => envelope as unknown as JsonValue)
+    // Snapshots that no live state refers to any more (superseded Lane versions, consumed
+    // resume inputs, settled request/wait/fact snapshots) are dropped so the record table
+    // does not grow without bound. `remove` refuses pinned records, so nothing referenced
+    // by the pin set above can disappear.
+    for (const key of [...target.keys()]) if (key.startsWith('snapshot:') && !liveSnapshotKeys.has(key)) target.remove(key)
+    if (transactional) policy.adopt(target)
+    for (const [id, value] of residency) {
+      const result = state.results.get(id)
+      if (result) Object.assign(result, value)
     }
     if (transactional && this.sessionStore) for (const agent of state.agents.values()) this.sessionStore.put(exportWarmStartSession(state, agent.id))
   }
@@ -1736,6 +1758,11 @@ export class PulseRuntime {
     const storedEffect = this.state.effects.get(effectId)
     if (!storedEffect) return false
     if (storedEffect.outcome) { this.tryEmit({ type: 'attempt.late_emit', effectId, data: { status: storedEffect.outcome.status } }); return false }
+    // A completion for an Effect that already sits in QuarantineScope is a reconciliation:
+    // it must clear the quarantine entry and the owner Lane's `unresolvedEffectIds`,
+    // otherwise the persisted snapshot becomes invalid (quarantine entry without a
+    // `reconcile_required` Effect) and the session cannot be restored.
+    const wasQuarantined = storedEffect.state === 'reconcile_required'
     const effect = structuredClone(storedEffect)
     const running = this.executions.get(effectId)
     if (running) { running.controller.abort(); this.executions.delete(effectId) }
@@ -1769,7 +1796,8 @@ export class PulseRuntime {
     const effectiveStatus = effect.cancelRequested && (effectiveExecution.status ?? status) === 'succeeded' ? 'cancelled' : (effectiveExecution.status ?? status)
     effect.state = effectiveStatus
     effect.executionState = effectiveStatus === 'succeeded' ? 'succeeded' : effectiveStatus === 'cancelled' ? 'failed' : 'failed'
-    effect.sideEffectState = effectiveExecution.sideEffectState ?? 'none'
+    // An in-doubt side effect stays `unknown` unless the completion explicitly reports what happened.
+    effect.sideEffectState = effectiveExecution.sideEffectState ?? (wasQuarantined && effect.sideEffectState === 'unknown' ? 'unknown' : 'none')
     if (effectiveExecution.executionRef !== undefined) effect.executionRef = structuredClone(effectiveExecution.executionRef)
     const attempt = effect.attempts?.at(-1)
     if (attempt) { attempt.executionState = effect.executionState; attempt.sideEffectState = effect.sideEffectState; if (effectiveExecution.executionRef !== undefined) attempt.sideEffectRef = structuredClone(effectiveExecution.executionRef); attempt.settledAt = this.state.now; if (outputError) attempt.error = outputError }
@@ -1828,6 +1856,11 @@ export class PulseRuntime {
         journalLane.visibleResultRefs!.add(result.id)
       }
     }
+    if (wasQuarantined && ownerLane?.unresolvedEffectIds?.includes(effectId)) {
+      journalLane ??= structuredClone(ownerLane)
+      journalLane.unresolvedEffectIds = journalLane.unresolvedEffectIds!.filter((id) => id !== effectId)
+      if (journalLane.unresolvedEffectIds.length === 0) delete journalLane.unresolvedEffectIds
+    }
     let correlation: ToolCallCorrelation | undefined
     if (effect.kind === 'tool' && effect.toolCallId && result) {
       const existing = this.state.toolCallCorrelations.get(effect.toolCallId)
@@ -1864,6 +1897,7 @@ export class PulseRuntime {
       commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${settledAttemptId}:storage-rejected`, failureMutations, this.state.now, this.sessionId)
       Object.assign(storedEffect, effect)
       this.state.effects.set(effectId, storedEffect)
+      if (wasQuarantined) this.quarantine.reconcile(effectId)
       this.releaseEffectLocks(effectId)
       this.outbox.ack(`${effect.id}:${effect.attemptId}`)
       this.syncStoragePolicy()
@@ -1879,7 +1913,8 @@ export class PulseRuntime {
     commitMutationTransaction(this.state, this.mutationLog, settlementTransactionId, settlementMutations, this.state.now, this.sessionId)
     Object.assign(storedEffect, effect)
     this.state.effects.set(effectId, storedEffect)
-    if (journalLane) { const liveLane = this.state.lanes.get(journalLane.id); if (liveLane) { Object.assign(liveLane, journalLane); this.state.lanes.set(journalLane.id, liveLane) } }
+    if (wasQuarantined) this.quarantine.reconcile(effectId)
+    if (journalLane) { const liveLane = this.state.lanes.get(journalLane.id); if (liveLane) { if (journalLane.unresolvedEffectIds === undefined) delete liveLane.unresolvedEffectIds; Object.assign(liveLane, journalLane); this.state.lanes.set(journalLane.id, liveLane) } }
     this.recordBudgetMetadata(execution.metadata)
     this.syncStoragePolicy()
     this.refreshWaits()
@@ -2265,8 +2300,11 @@ export class PulseRuntime {
         this.dispatchPersistencePending = false
         this.dispatchPersistenceReady = true
         this.scheduleWake(true)
-      }).catch(() => {
+      }).catch((cause: unknown) => {
+        // Dispatch is gated on durability; a failed flush must not silently stall the queue.
         this.dispatchPersistencePending = false
+        this.tryEmit({ type: 'effect.dispatch_blocked', data: { reason: 'PERSISTENCE_FAILED', error: cause instanceof Error ? cause.message : String(cause) } })
+        this.scheduleRuntimeDelay(Math.min(30_000, 250 * 2 ** Math.min(10, this.persistenceFailures)), () => this.scheduleWake(true))
       })
       return
     }
@@ -2274,7 +2312,9 @@ export class PulseRuntime {
   }
 
   private dispatchQueuedEffectsNow(): void {
-    const queued = [...this.state.effects.values()].filter((effect) => effect.state === 'queued' && !this.executions.has(effect.id)).sort((a, b) => (Math.max(a.schedulePriority ?? 0, a.inheritedFloor ?? Number.NEGATIVE_INFINITY) - Math.max(b.schedulePriority ?? 0, b.inheritedFloor ?? Number.NEGATIVE_INFINITY)) || a.id.localeCompare(b.id))
+    // Higher effective priority (max of own priority and inherited floor) dispatches first, matching ReadyQueue semantics.
+    const effectivePriority = (effect: EffectRecord): number => Math.max(effect.schedulePriority ?? 0, effect.inheritedFloor ?? Number.NEGATIVE_INFINITY)
+    const queued = [...this.state.effects.values()].filter((effect) => effect.state === 'queued' && !this.executions.has(effect.id)).sort((a, b) => (effectivePriority(b) - effectivePriority(a)) || a.id.localeCompare(b.id))
     for (const effect of queued) {
       if (this.tickBudget && !this.tickBudget.canStart()) break
       if (effect.state !== 'queued' || this.executions.has(effect.id)) continue
@@ -2328,9 +2368,19 @@ export class PulseRuntime {
         if ((parent?.depth ?? 0) >= this.maxAgentDepth) { this.completeEffect(effect.id, { value: null }, 'failed', { code: 'MAX_AGENT_DEPTH', message: 'Child Agent depth limit exceeded.' }); continue }
         const parentLane = this.state.lanes.get(effect.ownerLaneId)
         const parentScore = parentLane === undefined ? 0 : this.ready.snapshot(this.state.now).find((item) => item.laneId === parentLane.id)?.effectivePriority ?? parentLane.priority
-        const child = this.createAgent({ goal, program: childProgram, parentAgentId: effect.agentId, inheritedFloor: parentScore })
-        effect.childAgentId = child.agentId
-        this.emit({ type: 'agent.effect_started', effectId: effect.id, data: child.agentId })
+        try {
+          const child = this.createAgent({ goal, program: childProgram, parentAgentId: effect.agentId, inheritedFloor: parentScore })
+          const linked = structuredClone(effect)
+          linked.childAgentId = child.agentId
+          const linkMutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: linked }]
+          this.assertStorageAdmission(linkMutations)
+          commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${effect.attemptId}:child-agent`, linkMutations, this.state.now, this.sessionId)
+          Object.assign(effect, linked)
+          this.state.effects.set(effect.id, effect)
+          this.emit({ type: 'agent.effect_started', effectId: effect.id, data: child.agentId })
+        } catch (cause) {
+          this.completeEffect(effect.id, { value: null, executionState: 'failed', sideEffectState: 'none' }, 'failed', runtimeErrorFromCause(cause, 'CHILD_AGENT_CREATE_FAILED'))
+        }
         continue
       }
       const emitObservation: EffectObservationEmitter = (observation) => {
@@ -2391,7 +2441,8 @@ export class PulseRuntime {
 
   private requestEffectCancellation(effectId: string, reason: string, graceMs: number, additionalMutations: Mutation[] = []): boolean {
     const effect = this.state.effects.get(effectId)
-    if (!effect || effect.outcome) return false
+    // `reconcile_required` is owned by QuarantineScope: only the host may settle it (reconcile/abandon).
+    if (!effect || effect.outcome || effect.state === 'reconcile_required') return false
     const cancelEvent: import('../core/types.js').RuntimeEventInput = { type: 'effect.cancel_requested', effectId, data: { reason } }
     if (this.executions.has(effectId) && graceMs === 0) {
       return this.quarantineEffect(effectId, reason, 0, cancelEvent, additionalMutations)
@@ -2445,9 +2496,11 @@ export class PulseRuntime {
 
   private propagateCancelledLanes(): void {
     for (const lane of this.state.lanes.values()) if (lane.status === 'cancelled' || lane.status === 'cancelling') for (const effectId of lane.ownedEffectIds) {
-      if (this.tickBudget && !this.tickBudget.canStart()) return
       const effect = this.state.effects.get(effectId)
-      const childAgent = effect?.childAgentId === undefined ? undefined : this.state.agents.get(effect.childAgentId)
+      // Settled, quarantined or already-cancelling Effects need no work; skip them before touching the tick budget.
+      if (!effect || effect.outcome || effect.state === 'reconcile_required' || effect.cancelRequested !== undefined) continue
+      if (this.tickBudget && !this.tickBudget.canStart()) return
+      const childAgent = effect.childAgentId === undefined ? undefined : this.state.agents.get(effect.childAgentId)
       if (childAgent?.detached === true) continue
       this.requestEffectCancellation(effectId, 'LANE_CANCELLED', effect?.cancelGraceMs ?? 0)
       this.tickBudget?.consume()
@@ -2491,6 +2544,9 @@ export class PulseRuntime {
     const releases: Array<() => void> = []
     for (const [index, spec] of specs.entries()) {
       const requestId = `${effect.id}:${effect.attemptId}:${index}`
+      const issued = this.lockRequests.get(effect.id) ?? new Map<string, string>()
+      issued.set(requestId, spec.resource)
+      this.lockRequests.set(effect.id, issued)
       let release = this.grantedLockReleases.get(requestId)
       if (release !== undefined) this.grantedLockReleases.delete(requestId)
       else release = this.resourceLocks.tryAcquire(spec.resource, spec.mode, requestId)
@@ -2515,17 +2571,27 @@ export class PulseRuntime {
     return true
   }
 
+  /**
+   * Release everything an Effect may hold on the lock manager: granted locks,
+   * grants that arrived asynchronously, and requests still waiting in a queue.
+   * This must run unconditionally on every terminal path. An Effect that was
+   * cancelled while still *waiting* for a lock never had an entry in
+   * `lockReleases`; skipping the cleanup in that case leaves a ghost request
+   * that later receives the grant and holds the resource forever.
+   */
   private releaseEffectLocks(effectId: string): void {
     const releases = this.lockReleases.get(effectId)
-    if (!releases) return
     this.lockReleases.delete(effectId)
-    for (const release of releases.reverse()) release()
+    this.lockBlocked.delete(effectId)
+    if (releases) for (const release of releases.reverse()) release()
     const effect = this.state.effects.get(effectId)
-    for (const [index, spec] of [...(effect?.locks ?? [])].sort((a, b) => a.resource.localeCompare(b.resource) || a.mode.localeCompare(b.mode)).entries()) {
-      const requestId = `${effectId}:${effect?.attemptId ?? ''}:${index}`
+    const issued = new Map(this.lockRequests.get(effectId) ?? [])
+    this.lockRequests.delete(effectId)
+    for (const [index, spec] of [...(effect?.locks ?? [])].sort((a, b) => a.resource.localeCompare(b.resource) || a.mode.localeCompare(b.mode)).entries()) issued.set(`${effectId}:${effect?.attemptId ?? ''}:${index}`, spec.resource)
+    for (const [requestId, resource] of issued) {
       const granted = this.grantedLockReleases.get(requestId)
       if (granted !== undefined) { this.grantedLockReleases.delete(requestId); granted() }
-      this.resourceLocks.cancelWait(spec.resource, requestId)
+      this.resourceLocks.cancelWait(resource, requestId)
     }
   }
 
@@ -2548,7 +2614,7 @@ export class PulseRuntime {
 
   private commitLaneControlInput(lane: LaneRecord, input: ResumeInput, event: import('../core/types.js').RuntimeEventInput, patch: Partial<LaneRecord> = {}): boolean {
     const nextLane = structuredClone(lane)
-    nextLane.pendingResumeInput = structuredClone(input)
+    replaceResumeInput(nextLane, structuredClone(input))
     Object.assign(nextLane, structuredClone(patch))
     nextLane.version = lane.version + 1
     const mutations: Mutation[] = [{ op: 'setLane', laneId: lane.id, record: nextLane }, { op: 'appendEvent', event }]
@@ -2667,7 +2733,7 @@ export class PulseRuntime {
             nextLane.status = cancelled ? 'cancelled' : 'ready'
             if (cancelled) nextLane.cancelReason = nextLane.cancelReason ?? 'USER_REQUESTED'
             delete nextLane.activeWaitId
-            if (!cancelled) nextLane.pendingResumeInput = { type: 'wait', resolution }
+            if (!cancelled) replaceResumeInput(nextLane, { type: 'wait', resolution })
           }
           commitResolution(nextWait, nextLane, nextLane?.status === 'cancelled' ? [{ op: 'appendEvent', event: { type: 'lane.cancelled', laneId: nextLane.id, data: nextLane.cancelReason ?? 'USER_REQUESTED' } }] : [])
         } else if (modeSatisfied || (!pending && !unsatisfied && wait.spec.mode === 'all')) {
@@ -2711,7 +2777,7 @@ export class PulseRuntime {
                 commitResolution(nextWait, nextLane, [{ op: 'appendEvent', event: { type: 'lane.cancelled', laneId: nextLane.id, data: nextLane.cancelReason } }])
               } else {
                 nextLane.status = 'ready'
-                nextLane.pendingResumeInput = { type: 'wait', resolution }
+                replaceResumeInput(nextLane, { type: 'wait', resolution })
                 commitResolution(nextWait, nextLane)
               }
             }
@@ -2766,7 +2832,7 @@ export class PulseRuntime {
         events.push({ type: 'lane.failed', laneId: candidateLane.id, data: error as unknown as JsonValue })
       } else {
         candidateLane.status = 'ready'
-        candidateLane.pendingResumeInput = { type: 'wait', resolution }
+        replaceResumeInput(candidateLane, { type: 'wait', resolution })
       }
     }
     events.push({ type: 'wait.deadline_exceeded', laneId: wait.laneId, data: { waitId: wait.id, deadlineAt: wait.spec.deadlineAt ?? this.state.now } })

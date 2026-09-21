@@ -111,6 +111,8 @@ export interface LaneRecord {
   resume: ResumePoint
   series?: SeriesLaneSpec
   pendingResumeInput?: ResumeInput
+  /** Control proposals that arrived while another ResumeInput occupied the slot. */
+  pendingControlProposals?: ControlProposal[]
   contextSnapshotVersion: ContextVersion
   context: LaneContext
   visibleResultRefs?: Set<ResultRef>
@@ -271,11 +273,38 @@ export interface WaitResolution {
   error?: RuntimeError
 }
 
+export type ControlProposal = { type: 'cancel_lane'; laneId: LaneId; reason: string; fromLaneId: LaneId }
 export type ResumeInput =
   | { type: 'wait'; resolution: WaitResolution }
   | { type: 'submitted'; targets: Record<string, TargetRef> }
   | { type: 'control_error'; error: RuntimeError; original?: ResumeInput }
-  | { type: 'control_proposal'; proposals: Array<{ type: 'cancel_lane'; laneId: LaneId; reason: string; fromLaneId: LaneId }> }
+  | { type: 'control_proposal'; proposals: ControlProposal[] }
+
+/**
+ * Park a cancel proposal without dropping a wait/control_error that already occupies
+ * `pendingResumeInput`. The parked proposals are promoted the next time the slot is free.
+ */
+export function enqueueControlProposal(lane: LaneRecord, proposal: ControlProposal): void {
+  if (lane.pendingResumeInput === undefined || lane.pendingResumeInput.type === 'control_proposal') {
+    const existing = lane.pendingResumeInput?.type === 'control_proposal' ? lane.pendingResumeInput.proposals : []
+    lane.pendingResumeInput = { type: 'control_proposal', proposals: [...existing, proposal] }
+    return
+  }
+  lane.pendingControlProposals = [...(lane.pendingControlProposals ?? []), proposal]
+}
+
+/** Replace the resume slot. Existing control_proposal inputs are parked, then promoted if the slot ends up empty. */
+export function replaceResumeInput(lane: LaneRecord, input: ResumeInput | undefined): void {
+  if (lane.pendingResumeInput?.type === 'control_proposal' && input?.type !== 'control_proposal') {
+    lane.pendingControlProposals = [...(lane.pendingControlProposals ?? []), ...lane.pendingResumeInput.proposals]
+  }
+  if (input === undefined) delete lane.pendingResumeInput
+  else lane.pendingResumeInput = input
+  if (lane.pendingResumeInput === undefined && (lane.pendingControlProposals?.length ?? 0) > 0) {
+    lane.pendingResumeInput = { type: 'control_proposal', proposals: lane.pendingControlProposals! }
+    delete lane.pendingControlProposals
+  }
+}
 
 export interface EffectSubmission {
   key: string

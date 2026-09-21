@@ -2,15 +2,15 @@ import { error } from '../core/errors.js'
 import { apply } from '../core/mutations.js'
 import { DependencyGraph } from '../dependencies/graph.js'
 import type { ValidationResult, Mutation } from '../core/mutations.js'
-import { effectivePrivacy, privacyMetadataForDerivedRef, privacyRank, privacyTaintPrivacy, provenanceRefId, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
+import { effectivePrivacy, enqueueControlProposal, privacyMetadataForDerivedRef, privacyRank, privacyTaintPrivacy, provenanceRefId, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import type { RuntimeState, LaneStepOutput, RuntimeAction, SubmitEffectsAction, WaitSpec, TargetRef, LocalRef, LaneRecord, EffectRecord, WaitRecord, ContextDelta, JsonValue, ResumePoint, Outcome, DependencySpec, ForkAction, PrivacyLabel, HistoryRecord, ForkLaneSpec, PrivacyMetadata, PrivacyTaint, ProvenanceRef } from '../core/types.js'
 import { appendRuntimeEvent } from '../core/events.js'
-import { ContextBuilder, contentHash, estimateHistoryTokens, historyPressure, stableSerialize } from '../context/builder.js'
+import { ContextBuilder, contentHash, estimateHistoryTokens, hasUnsafePathSegment, historyPressure, ownChild, stableSerialize } from '../context/builder.js'
 
 const isLocal = (value: TargetRef | LocalRef): value is LocalRef => 'local' in value
 const clone = <T>(value: T): T => structuredClone(value)
 const resultMetadata = (value: JsonValue): { sizeBytes: number; contentHash: string } => ({ sizeBytes: Buffer.byteLength(stableSerialize(value), 'utf8'), contentHash: contentHash(value) })
-const laneCopy = (lane: LaneRecord): LaneRecord => ({ ...lane, resume: clone(lane.resume), context: clone(lane.context), ...(lane.visibleResultRefs === undefined ? {} : { visibleResultRefs: new Set(lane.visibleResultRefs) }), children: new Set(lane.children), ownedEffectIds: new Set(lane.ownedEffectIds), ...(lane.pendingResumeInput === undefined ? {} : { pendingResumeInput: clone(lane.pendingResumeInput) }), ...(lane.pendingOutcome === undefined ? {} : { pendingOutcome: clone(lane.pendingOutcome) }) })
+const laneCopy = (lane: LaneRecord): LaneRecord => ({ ...lane, resume: clone(lane.resume), context: clone(lane.context), ...(lane.visibleResultRefs === undefined ? {} : { visibleResultRefs: new Set(lane.visibleResultRefs) }), children: new Set(lane.children), ownedEffectIds: new Set(lane.ownedEffectIds), ...(lane.pendingResumeInput === undefined ? {} : { pendingResumeInput: clone(lane.pendingResumeInput) }), ...(lane.pendingControlProposals === undefined ? {} : { pendingControlProposals: clone(lane.pendingControlProposals) }), ...(lane.pendingOutcome === undefined ? {} : { pendingOutcome: clone(lane.pendingOutcome) }) })
 function isRuntimeJsonValue(value: unknown, seen = new Set<object>()): value is JsonValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
   if (typeof value === 'number') return Number.isFinite(value)
@@ -64,7 +64,7 @@ function validateContextDeltaShape(value: unknown): string | undefined {
       if (op.path !== undefined) return 'INVALID_CONTEXT_OP'
       continue
     }
-    if (!Array.isArray(op.path) || op.path.length === 0 || op.path.some((part) => !nonEmptyString(part))) return 'INVALID_CONTEXT_PATH'
+    if (!Array.isArray(op.path) || op.path.length === 0 || op.path.some((part) => !nonEmptyString(part)) || hasUnsafePathSegment(op.path)) return 'INVALID_CONTEXT_PATH'
   }
   return undefined
 }
@@ -133,6 +133,40 @@ function descendants(state: RuntimeState, ownerId: string, targetId: string): bo
     current = state.lanes.get(current.ownerLaneId)
   }
   return false
+}
+
+const LANE_TERMINAL_STATUSES: ReadonlySet<string> = new Set(['succeeded', 'failed', 'cancelled'])
+
+/**
+ * Cancel a Lane together with every non-terminal descendant. Cancellation is a
+ * subtree operation: without the cascade a grandchild keeps running and holding
+ * its Effects/locks after its parent has been marked cancelled. Lanes that are
+ * already closing with a result keep it (`cancelling` + `pendingOutcome`); all
+ * others move straight to `cancelled` and the Runtime cancels their owned
+ * Effects via `propagateCancelledLanes`. Returns the ids that were cancelled.
+ */
+function cancelLaneSubtree(state: RuntimeState, rootId: string, reason: string, mutations: Mutation[], touched: Set<string>): string[] {
+  const cancelled: string[] = []
+  const queue = [rootId]
+  while (queue.length) {
+    const laneId = queue.shift()!
+    if (touched.has(laneId)) continue
+    touched.add(laneId)
+    const target = state.lanes.get(laneId)
+    if (!target) continue
+    for (const childId of target.children) queue.push(childId)
+    if (LANE_TERMINAL_STATUSES.has(target.status)) continue
+    const copy = laneCopy(target)
+    const preserveOutcome = (target.status === 'closing' || target.status === 'waiting') && target.closingResult !== undefined
+    if (preserveOutcome) copy.pendingOutcome = { status: 'succeeded', result: clone(target.closingResult!.value) }
+    copy.status = preserveOutcome ? 'cancelling' : 'cancelled'
+    copy.cancelReason = reason
+    copy.version = target.version + 1
+    mutations.push({ op: 'setLane', laneId: target.id, record: copy })
+    mutations.push({ op: 'appendEvent', event: { type: preserveOutcome ? 'lane.cancelling' : 'lane.cancelled', laneId: target.id, data: reason } })
+    cancelled.push(target.id)
+  }
+  return cancelled
 }
 
 function resolveTarget(value: TargetRef | LocalRef, locals: Map<string, TargetRef>): TargetRef | undefined {
@@ -355,7 +389,7 @@ function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: Context
       history = [{ seq: upToSeq, instruction: '[history compacted]', resultRefs: op.summaryRef === undefined ? [] : [op.summaryRef], output: clone(summary), privacy: summaryPrivacy, ...(summaryTaints.length ? { privacyTaints: summaryTaints } : {}) }, ...history.filter((record) => record.seq > upToSeq)]
       continue
     }
-    if (!op.path || op.path.length === 0) return { nextVersion: base, error: 'INVALID_CONTEXT_PATH' }
+    if (!op.path || op.path.length === 0 || hasUnsafePathSegment(op.path)) return { nextVersion: base, error: 'INVALID_CONTEXT_PATH' }
     if (op.path?.[0] === 'history') return { nextVersion: base, error: 'HISTORY_IS_APPEND_ONLY' }
     for (const existing of paths) {
       if (op.path && (existing.every((value, index) => op.path?.[index] === value) || op.path.every((value, index) => existing[index] === value))) return { nextVersion: base, error: 'CONTEXT_PATH_CONFLICT' }
@@ -369,7 +403,7 @@ function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: Context
     const path = op.path!
     let cursor = result as Record<string, JsonValue>
     for (const part of path.slice(0, -1)) {
-      const child = cursor[part]
+      const child = ownChild(cursor, part)
       if (!child || typeof child !== 'object' || Array.isArray(child)) cursor[part] = {}
       cursor = cursor[part] as Record<string, JsonValue>
     }
@@ -377,7 +411,7 @@ function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: Context
     if (op.op === 'set') cursor[key] = clone(op.value ?? null)
     else if (op.op === 'remove') delete cursor[key]
     else if (op.op === 'append') {
-      const existing = cursor[key]
+      const existing = ownChild(cursor, key)
       if (!Array.isArray(existing)) return { nextVersion: base, error: 'APPEND_TARGET_NOT_ARRAY' }
       existing.push(clone(op.value ?? null))
     }
@@ -493,6 +527,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   const existingToolCallIds = new Set([...state.effects.values()].filter((effect) => effect.agentId === lane.agentId && effect.toolCallId !== undefined).map((effect) => effect.toolCallId!).concat([...state.toolCallCorrelations.keys()]))
   const seenToolCallIds = new Set<string>()
   const seenCancelTargets = new Set<string>()
+  const cancelledSubtreeLanes = new Set<string>()
 
   if (output.contextDelta !== undefined) {
     const deltaShapeError = validateContextDeltaShape(output.contextDelta)
@@ -641,15 +676,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       if (seenCancelTargets.has(action.laneId)) return { rejection: error('DUPLICATE_CANCEL_TARGET', action.laneId) }
       seenCancelTargets.add(action.laneId)
       if (action.laneId === lane.id || !descendants(state, lane.id, action.laneId)) return { rejection: error('CANCEL_NOT_OWNER', 'a Lane can only cancel its own descendants') }
-      const target = state.lanes.get(action.laneId)!
-      const targetCopy = laneCopy(target)
-      const preserveOutcome = (target.status === 'closing' || target.status === 'waiting') && target.closingResult !== undefined
-      if (preserveOutcome) targetCopy.pendingOutcome = { status: 'succeeded', result: clone(target.closingResult!.value) }
-      targetCopy.status = preserveOutcome ? 'cancelling' : 'cancelled'
-      targetCopy.cancelReason = action.reason
-      targetCopy.version = target.version + 1
-      mutations.push({ op: 'setLane', laneId: target.id, record: targetCopy })
-      if (preserveOutcome) mutations.push({ op: 'appendEvent', event: { type: 'lane.cancelling', laneId: target.id, data: action.reason } })
+      cancelLaneSubtree(state, action.laneId, action.reason, mutations, cancelledSubtreeLanes)
     } else if (action.type === 'propose_cancel') {
       if (seenCancelTargets.has(action.laneId)) return { rejection: error('DUPLICATE_CANCEL_TARGET', action.laneId) }
       seenCancelTargets.add(action.laneId)
@@ -657,9 +684,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       if (!target) return { rejection: error('UNKNOWN_LANE', action.laneId) }
       if (target.ownerLaneId && target.ownerLaneId !== lane.id) {
         const owner = laneCopy(state.lanes.get(target.ownerLaneId)!)
-        const proposal = { type: 'cancel_lane' as const, laneId: target.id, reason: action.reason, fromLaneId: lane.id }
-        const existing = owner.pendingResumeInput?.type === 'control_proposal' ? owner.pendingResumeInput.proposals : []
-        owner.pendingResumeInput = { type: 'control_proposal', proposals: [...existing, proposal] }
+        enqueueControlProposal(owner, { type: 'cancel_lane', laneId: target.id, reason: action.reason, fromLaneId: lane.id })
         mutations.push({ op: 'setLane', laneId: owner.id, record: { ...owner, version: owner.version + 1 } })
       }
     } else if (action.type === 'adopt_context') {
@@ -730,21 +755,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         mutations.push({ op: 'appendEvent', event: { type: 'lane.closing', laneId: lane.id } })
         return { mutations }
       }
-      if (activeChildren && action.children === 'cancel') {
-        for (const childId of lane.children) {
-          const child = state.lanes.get(childId)
-          if (child && !['succeeded', 'failed', 'cancelled'].includes(child.status)) {
-            const childCopy = laneCopy(child)
-            const preserveOutcome = (child.status === 'closing' || child.status === 'waiting') && child.closingResult !== undefined
-            if (preserveOutcome) childCopy.pendingOutcome = { status: 'succeeded', result: clone(child.closingResult!.value) }
-            childCopy.status = preserveOutcome ? 'cancelling' : 'cancelled'
-            childCopy.cancelReason = 'POLICY'
-            childCopy.version = child.version + 1
-            mutations.push({ op: 'setLane', laneId: child.id, record: childCopy })
-            if (preserveOutcome) mutations.push({ op: 'appendEvent', event: { type: 'lane.cancelling', laneId: child.id, data: 'POLICY' } })
-          }
-        }
-      }
+      if (activeChildren && action.children === 'cancel') for (const childId of lane.children) cancelLaneSubtree(state, childId, 'POLICY', mutations, cancelledSubtreeLanes)
       const resultId = `result-${resultCounter++}`
       mutations.push({ op: 'publishResult', record: { id: resultId, producer: { kind: 'lane', id: lane.id }, value: clone(action.result), ...resultMetadata(action.result), storageState: 'memory', pinCount: 0, privacy, ...(propagatedTaints.length ? { privacyTaints: propagatedTaints } : {}), derivedFrom: [...(action.derivedFrom ?? [])] } })
       if (workingLane.visibleResultRefs) workingLane.visibleResultRefs.add(resultId)

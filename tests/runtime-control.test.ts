@@ -600,13 +600,19 @@ describe('runtime control boundaries', () => {
     expect(committedLane && committedLane.op === 'setLane' ? committedLane.record.pendingResumeInput : undefined).toBeUndefined()
   })
 
-  it('does not hide Agent terminal-state storage rejection behind a Lane outcome', async () => {
-    const runtime = new PulseRuntime()
+  it('does not retroactively reject an Agent terminal write after shrinking snapshot limits', async () => {
+    const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
     const program: LaneProgram = { id: 'agent-state-storage-rejection', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: point('agent-state-storage-rejection', 'done') }) }
-    const { agentId } = runtime.createAgent('agent state storage rejection', program)
-    ;(runtime.storagePolicy as any).limits.maxSnapshotBytes = 1
-    await expect(runtime.start(agentId).outcome()).rejects.toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    const { agentId, laneId } = runtime.createAgent('agent state storage rejection', program)
+    runtime.tick()
+    expect(runtime.state.lanes.get(laneId)?.status).toBe('succeeded')
     expect(runtime.state.agents.get(agentId)?.state).toBe('running')
+    // Already-admitted snapshot records are not re-validated. Shrinking the
+    // snapshot budget after the Lane has finished must not reject the Agent
+    // terminal write, because that write does not introduce a new snapshot.
+    ;(runtime.storagePolicy as any).limits.maxSnapshotBytes = 1
+    await expect(runtime.start(agentId).outcome()).resolves.toMatchObject({ status: 'succeeded' })
+    expect(runtime.state.agents.get(agentId)?.state).toBe('succeeded')
   })
 
   it('retains a Host Fact when its transaction is rejected by storage admission', () => {
