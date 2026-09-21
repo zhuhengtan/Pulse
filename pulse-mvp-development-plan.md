@@ -766,7 +766,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 
 | 验收项 | 当前状态 | 缺口 |
 | --- | --- | --- |
-| 真实 Provider Live Smoke | 已执行但被鉴权阻塞 | 请求已到真实 HTTP endpoint，当前返回 `PROVIDER_HTTP_401`；需要有效凭证验证 token、取消、structured output 和 tool-call 往返；structured 可用 `PULSE_LIVE_STRUCTURED_SMOKE=1`，tool-call 可用 `PULSE_LIVE_TOOL_SMOKE=1`，取消可用 `PULSE_LIVE_CANCELLATION_SMOKE=1` |
+| 真实 Provider Live Smoke | 已执行但尚未通过 | 一次尝试已到真实 HTTP endpoint 并返回 `PROVIDER_HTTP_401`；按当前环境重新尝试时又在 DNS 阶段收到 `ENOTFOUND api.openai.com`。仍需可用网络与有效凭证验证 token、取消、structured output 和 tool-call 往返；structured 可用 `PULSE_LIVE_STRUCTURED_SMOKE=1`，tool-call 可用 `PULSE_LIVE_TOOL_SMOKE=1`，取消可用 `PULSE_LIVE_CANCELLATION_SMOKE=1` |
 | Runtime Storage pin/retention | 确定性代码、文件后端和 SQLite 事务后端已覆盖，生命周期自动落盘、完整性和 CAS、ResultStore/SnapshotStore 读穿已接入 | 自动 pin、hard-limit 预检、compact、backend 确认后的 `persisted` 标记、restore、完整性校验、共享快照 CAS、Result/Context Snapshot 正文外部化、外置索引 fail-closed，以及 Runtime `run()`/`shutdown()`/异步 Effect 结算自动持久化已有测试；多进程生产部署与外部数据库运维仍需验证 |
 | 隐私日志导出 | `exportRuntimeLog()` 已按 `public` / `cloud_allowed` / `local_only` ceiling 裁剪 Result、Artifact 和无法确认来源的事件 payload；`exportRuntimeLogTo()` 已提供 fsync JSONL 与 HTTP sink；Runtime 已支持 `auditLogSink`/`auditLogPrivacy` 配置 | 已有确定性导出、JSONL 落盘、HTTP 请求/失败和 Runtime 配置出口测试；外部审计系统的字段策略、密钥管理和生产脱敏规则仍需宿主配置 |
 | 崩溃恢复与副作用对账 | 进程级重启和本地真实写入对账已验证；Runtime Registry 已可直接调用注册 Tool 的 `executionRef/reconcile`，远程副作用仍待验证 | 已补子进程 `SIGKILL` 后恢复、启动 quarantine、资源锁隔离、注册 Tool 直接对账，以及 `executionRef` 从 Tool 到 Runtime 的持久化链；仍缺真实远程写系统 reconcile 和生产环境的持久化事务边界证明 |
