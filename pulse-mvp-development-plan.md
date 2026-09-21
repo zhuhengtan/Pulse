@@ -768,7 +768,8 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `602a6c8`：CompleteAction 的 `children` 选项在 Runtime 边界执行枚举校验，未知收尾策略不再静默按默认分支处理。
 - `336d2cc`：Program Registry 注册前校验 Program 的标识、Step/ErrorBoundary、Entry、Series 配置形状；畸形 Program 明确以 `INVALID_PROGRAM` 拒绝，循环注册仍保持原子性。
 - `92f0eaf`：Agent 创建入口校验 goal、LaneProgram/ProgramRef、priority、policy/limits 和 warmStart 合同，非法请求在 Agent/Lane 写入前 fail-closed。
-- 当前确定性门禁：`npm test`，68 个测试文件、431 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
+- `78b72a4`：HTTP Worker transport 对 lease/task 响应执行 fail-closed 合同校验，`claim/get/renew` 不再把 `null`、缺字段或非有限 lease 时间伪装成合法状态；服务端非法 lease/idempotency 参数明确拒绝。
+- 当前确定性门禁：`npm test`，68 个测试文件、432 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
