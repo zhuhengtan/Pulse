@@ -95,6 +95,19 @@ describe('HTTP Worker transport', () => {
     await expect(client.register()).rejects.toThrow('WORKER_HTTP_TIMEOUT')
   })
 
+  it('fails closed on malformed lease and task responses', async () => {
+    const malformedFetch: typeof globalThis.fetch = async (input) => {
+      const path = new URL(String(input)).pathname
+      const body = path === '/tasks/claim'
+        ? JSON.stringify({ workerId: 'worker', leaseId: 'lease', task: { id: 'task', state: 'leased', attempt: 1 } })
+        : JSON.stringify({ leaseExpiresAt: 'later' })
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    const client = new HttpWorkerClient({ baseUrl: 'http://malformed.invalid', workerId: 'worker', fetch: malformedFetch })
+    await expect(client.claim()).rejects.toThrow('WORKER_HTTP_INVALID_LEASE')
+    await expect(client.renew('lease')).rejects.toThrow('WORKER_HTTP_INVALID_LEASE')
+  })
+
   it('routes an ambiguous remote write into reconciliation instead of retrying blindly', async () => {
     const coordinator = new Coordinator()
     const server = await startWorkerCoordinatorServer(coordinator)

@@ -25,6 +25,32 @@ async function readBody(request: IncomingMessage): Promise<JsonValue> {
 
 function responseBody(value: JsonValue): string { return JSON.stringify(value) }
 
+function requiredString(value: unknown, code: string): string {
+  if (typeof value !== 'string' || value.length === 0) throw new Error(code)
+  return value
+}
+
+function validWorkerTask(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const task = value as Record<string, unknown>
+  if (!requiredField(task.id) || !['queued', 'leased', 'succeeded', 'failed', 'cancelled'].includes(String(task.state)) || !Number.isInteger(task.attempt) || (task.attempt as number) < 0 || task.payload === undefined) return false
+  if (task.leaseId !== undefined && !requiredField(task.leaseId)) return false
+  if (task.workerId !== undefined && !requiredField(task.workerId)) return false
+  if (task.leaseExpiresAt !== undefined && (typeof task.leaseExpiresAt !== 'number' || !Number.isFinite(task.leaseExpiresAt))) return false
+  if (task.leaseMs !== undefined && (typeof task.leaseMs !== 'number' || !Number.isFinite(task.leaseMs) || task.leaseMs <= 0)) return false
+  if (task.idempotencyKey !== undefined && !requiredField(task.idempotencyKey)) return false
+  if (task.error !== undefined && (!task.error || typeof task.error !== 'object' || Array.isArray(task.error) || !requiredField((task.error as Record<string, unknown>).code) || typeof (task.error as Record<string, unknown>).message !== 'string')) return false
+  return true
+}
+
+function requiredField(value: unknown): value is string { return typeof value === 'string' && value.length > 0 }
+
+function validWorkerLease(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const lease = value as Record<string, unknown>
+  return requiredField(lease.workerId) && requiredField(lease.leaseId) && validWorkerTask(lease.task as JsonValue)
+}
+
 function send(response: import('node:http').ServerResponse, status: number, value: JsonValue): void {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   response.end(responseBody(value))
@@ -89,62 +115,59 @@ export async function startWorkerCoordinatorServer(coordinator: WorkerCoordinato
       if (method !== 'POST') { send(response, 405, { error: 'WORKER_HTTP_METHOD_NOT_ALLOWED' }); return }
       const body = object(await readBody(request))
       if (path === '/workers/register') {
-        const workerId = body.workerId
-        if (typeof workerId !== 'string') throw new Error('INVALID_WORKER_ID')
+        const workerId = requiredString(body.workerId, 'INVALID_WORKER_ID')
         const unregister = coordinator.registerRemote(workerId)
         registrations.set(workerId, unregister)
         send(response, 200, { workerId, registered: true }); return
       }
       if (path === '/workers/unregister') {
-        const workerId = body.workerId
-        if (typeof workerId !== 'string') throw new Error('INVALID_WORKER_ID')
+        const workerId = requiredString(body.workerId, 'INVALID_WORKER_ID')
         registrations.get(workerId)?.()
         registrations.delete(workerId)
         send(response, 200, { workerId, registered: false }); return
       }
       if (path === '/tasks/submit') {
-        const taskId = body.taskId
-        if (typeof taskId !== 'string') throw new Error('WORKER_HTTP_TASK_ID_REQUIRED')
+        const taskId = requiredString(body.taskId, 'WORKER_HTTP_TASK_ID_REQUIRED')
         if (!('payload' in body)) throw new Error('WORKER_HTTP_PAYLOAD_REQUIRED')
-        const options: WorkerSubmitOptions = { taskId, ...(typeof body.idempotencyKey === 'string' ? { idempotencyKey: body.idempotencyKey } : {}), ...(typeof body.leaseMs === 'number' ? { leaseMs: body.leaseMs } : {}) }
+        if (body.idempotencyKey !== undefined && !requiredField(body.idempotencyKey)) throw new Error('INVALID_WORKER_IDEMPOTENCY_KEY')
+        if (body.leaseMs !== undefined && (typeof body.leaseMs !== 'number' || !Number.isFinite(body.leaseMs) || body.leaseMs <= 0)) throw new Error('INVALID_WORKER_LEASE')
+        const options: WorkerSubmitOptions = { taskId, ...(body.idempotencyKey === undefined ? {} : { idempotencyKey: body.idempotencyKey }), ...(body.leaseMs === undefined ? {} : { leaseMs: body.leaseMs }) }
         const pending = coordinator.submit(body.payload!, options)
         void pending.catch(() => undefined)
         send(response, 200, { taskId }); return
       }
       if (path === '/tasks/get') {
-        const taskId = body.taskId
-        if (typeof taskId !== 'string') throw new Error('WORKER_HTTP_TASK_ID_REQUIRED')
+        const taskId = requiredString(body.taskId, 'WORKER_HTTP_TASK_ID_REQUIRED')
         send(response, 200, (coordinator.get(taskId) ?? null) as unknown as JsonValue); return
       }
       if (path === '/tasks/claim') {
-        const workerId = body.workerId
-        if (typeof workerId !== 'string') throw new Error('INVALID_WORKER_ID')
+        const workerId = requiredString(body.workerId, 'INVALID_WORKER_ID')
         send(response, 200, (coordinator.claim(workerId) ?? null) as unknown as JsonValue); return
       }
       if (path === '/tasks/renew') {
         const workerId = body.workerId; const leaseId = body.leaseId
-        if (typeof workerId !== 'string' || typeof leaseId !== 'string') throw new Error('INVALID_WORKER_LEASE')
-        const expiresAt = coordinator.renewLease(workerId, leaseId, Date.now(), typeof body.leaseMs === 'number' ? body.leaseMs : undefined)
+        if (!requiredField(workerId) || !requiredField(leaseId)) throw new Error('INVALID_WORKER_LEASE')
+        if (body.leaseMs !== undefined && (typeof body.leaseMs !== 'number' || !Number.isFinite(body.leaseMs) || body.leaseMs <= 0)) throw new Error('INVALID_WORKER_LEASE')
+        const expiresAt = coordinator.renewLease(workerId, leaseId, Date.now(), body.leaseMs === undefined ? undefined : body.leaseMs)
         if (expiresAt === undefined) { send(response, 409, { error: 'WORKER_LEASE_NOT_FOUND' }); return }
         send(response, 200, { leaseExpiresAt: expiresAt }); return
       }
       if (path === '/tasks/complete') {
         const workerId = body.workerId; const leaseId = body.leaseId
-        if (typeof workerId !== 'string' || typeof leaseId !== 'string' || !('value' in body)) throw new Error('INVALID_WORKER_COMPLETION')
+        if (!requiredField(workerId) || !requiredField(leaseId) || !('value' in body)) throw new Error('INVALID_WORKER_COMPLETION')
         if (!coordinator.completeRemote(workerId, leaseId, body.value!)) { send(response, 409, { error: 'WORKER_LEASE_NOT_FOUND' }); return }
         send(response, 200, { completed: true }); return
       }
       if (path === '/tasks/fail') {
         const workerId = body.workerId; const leaseId = body.leaseId
-        if (typeof workerId !== 'string' || typeof leaseId !== 'string') throw new Error('INVALID_WORKER_COMPLETION')
+        if (!requiredField(workerId) || !requiredField(leaseId)) throw new Error('INVALID_WORKER_COMPLETION')
         const rawError = object(body.error)
         const error: RuntimeError = { code: typeof rawError.code === 'string' ? rawError.code : 'WORKER_FAILED', message: typeof rawError.message === 'string' ? rawError.message : 'Worker failed.', ...(typeof rawError.retryable === 'boolean' ? { retryable: rawError.retryable } : {}), ...(rawError.details === undefined ? {} : { details: rawError.details }) }
         if (!coordinator.failRemote(workerId, leaseId, error)) { send(response, 409, { error: 'WORKER_LEASE_NOT_FOUND' }); return }
         send(response, 200, { failed: true }); return
       }
       if (path === '/tasks/cancel') {
-        const taskId = body.taskId
-        if (typeof taskId !== 'string') throw new Error('WORKER_HTTP_TASK_ID_REQUIRED')
+        const taskId = requiredString(body.taskId, 'WORKER_HTTP_TASK_ID_REQUIRED')
         send(response, 200, { cancelled: coordinator.cancel(taskId) }); return
       }
       send(response, 404, { error: 'WORKER_HTTP_NOT_FOUND' })
@@ -204,12 +227,30 @@ export class HttpWorkerClient {
 
   async register(): Promise<void> { await this.request('/workers/register', { workerId: this.workerId }); }
   async unregister(): Promise<void> { await this.request('/workers/unregister', { workerId: this.workerId }); }
-  async claim(): Promise<WorkerLease | undefined> { return await this.request('/tasks/claim', { workerId: this.workerId }) as unknown as WorkerLease | undefined }
-  async renew(leaseId: string, leaseMs?: number): Promise<number> { const result = await this.request('/tasks/renew', { workerId: this.workerId, leaseId, ...(leaseMs === undefined ? {} : { leaseMs }) }); return Number(object(result).leaseExpiresAt) }
+  async claim(): Promise<WorkerLease | undefined> {
+    const result = await this.request('/tasks/claim', { workerId: this.workerId })
+    if (result === null) return undefined
+    if (!validWorkerLease(result)) throw new Error('WORKER_HTTP_INVALID_LEASE')
+    return result as unknown as WorkerLease
+  }
+  async renew(leaseId: string, leaseMs?: number): Promise<number> {
+    requiredString(leaseId, 'INVALID_WORKER_LEASE')
+    if (leaseMs !== undefined && (!Number.isFinite(leaseMs) || leaseMs <= 0)) throw new Error('INVALID_WORKER_LEASE')
+    const result = await this.request('/tasks/renew', { workerId: this.workerId, leaseId, ...(leaseMs === undefined ? {} : { leaseMs }) })
+    const expiresAt = object(result).leaseExpiresAt
+    if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) throw new Error('WORKER_HTTP_INVALID_LEASE')
+    return expiresAt
+  }
   async complete(leaseId: string, value: JsonValue): Promise<void> { await this.request('/tasks/complete', { workerId: this.workerId, leaseId, value }); }
   async fail(leaseId: string, error: RuntimeError): Promise<void> { await this.request('/tasks/fail', { workerId: this.workerId, leaseId, error: error as unknown as JsonValue }); }
   async cancel(taskId: string): Promise<boolean> { return Boolean(object(await this.request('/tasks/cancel', { taskId })).cancelled) }
-  async get(taskId: string): Promise<WorkerTaskRecord | undefined> { return await this.request('/tasks/get', { taskId }) as unknown as WorkerTaskRecord | undefined }
+  async get(taskId: string): Promise<WorkerTaskRecord | undefined> {
+    requiredString(taskId, 'WORKER_HTTP_TASK_ID_REQUIRED')
+    const result = await this.request('/tasks/get', { taskId })
+    if (result === null) return undefined
+    if (!validWorkerTask(result)) throw new Error('WORKER_HTTP_INVALID_TASK')
+    return result as unknown as WorkerTaskRecord
+  }
 
   async submit(payload: JsonValue, options: Omit<WorkerSubmitOptions, 'signal'> & { signal?: AbortSignal } = {}): Promise<JsonValue> {
     const taskId = options.taskId ?? `http-worker-task-${this.sequence++}`
