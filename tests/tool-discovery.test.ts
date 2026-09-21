@@ -14,4 +14,11 @@ describe('explicit dynamic tool discovery', () => {
     expect(registry.discover({ text: 'file', limit: 2 }).map((item) => item.manifest.name)).toEqual(['read_file', 'write_file'])
     expect(registry.list().find((manifest) => manifest.name === 'read_file')?.tags).toEqual(['filesystem', 'readonly'])
   })
+
+  it('rejects malformed discovery queries before catalog evaluation', () => {
+    const registry = new ToolRegistry()
+    expect(() => registry.discover({ text: 1 as never })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false }))
+    expect(() => registry.discover({ tags: ['ok', 1 as never] })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false }))
+    expect(() => registry.compileToolSet('invalid', { limit: -1 })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false }))
+  })
 })

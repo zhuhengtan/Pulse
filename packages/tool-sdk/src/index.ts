@@ -92,6 +92,15 @@ function isManifestContract(manifest: Record<string, unknown>): boolean {
 function summaryWithinBudget(value: unknown, maxBytes: number): boolean {
   try { return Buffer.byteLength(JSON.stringify(value), 'utf8') <= maxBytes } catch { return false }
 }
+function validateDiscoveryQuery(query: unknown): asserts query is ToolDiscoveryQuery {
+  if (query === null || typeof query !== 'object' || Array.isArray(query)) throw Object.assign(new Error('Invalid tool discovery query.'), { code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false })
+  const value = query as Record<string, unknown>
+  if (value.text !== undefined && typeof value.text !== 'string') throw Object.assign(new Error('Invalid tool discovery query text.'), { code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false })
+  if (value.tags !== undefined && (!Array.isArray(value.tags) || value.tags.some((tag) => typeof tag !== 'string'))) throw Object.assign(new Error('Invalid tool discovery query tags.'), { code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false })
+  if (value.sideEffectPolicy !== undefined && !['none', 'read', 'write', 'external'].includes(String(value.sideEffectPolicy))) throw Object.assign(new Error('Invalid tool discovery side-effect policy.'), { code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false })
+  if (value.concurrencyClass !== undefined && !['llm', 'tool', 'agent', 'none'].includes(String(value.concurrencyClass))) throw Object.assign(new Error('Invalid tool discovery concurrency class.'), { code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false })
+  if (value.limit !== undefined && (!Number.isInteger(value.limit) || (value.limit as number) < 0)) throw Object.assign(new Error('Invalid tool discovery limit.'), { code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false })
+}
 export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   manifest: ToolManifest
   resourceAdmissionMode?: 'explicit' | 'default'
@@ -161,6 +170,7 @@ export class ToolRegistry {
   }
   list(): ToolManifest[] { return [...this.definitions.values()].filter((definition) => this.isAllowed(definition.manifest.name)).map((definition) => structuredClone(definition.manifest)) }
   discover(query: ToolDiscoveryQuery = {}): ToolDiscoveryResult[] {
+    validateDiscoveryQuery(query)
     const terms = (query.text ?? '').toLocaleLowerCase().split(/[^a-z0-9_:-]+/).filter(Boolean)
     const requestedTags = new Set((query.tags ?? []).map((tag) => tag.toLocaleLowerCase()))
     const results = this.list().flatMap((manifest) => {

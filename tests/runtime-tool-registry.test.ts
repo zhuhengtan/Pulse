@@ -23,6 +23,13 @@ describe('Runtime tool registry', () => {
     await expect(registry.execute('echo', { value: 1 }, new AbortController().signal)).rejects.toMatchObject({ code: 'INVALID_TOOL_INPUT' })
   })
 
+  it('rejects malformed discovery queries before catalog evaluation', () => {
+    const registry = new RuntimeToolRegistry()
+    registry.register(echo)
+    expect(() => registry.discover({ text: 1 as never })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false }))
+    expect(() => registry.compileToolSet('invalid', { limit: -1 })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false }))
+  })
+
   it('rejects malformed manifest contracts in both Runtime and Tool SDK registries', () => {
     const malformed = { ...echo, manifest: { ...echo.manifest, name: 'malformed', inputSchema: [], locks: [{ resource: 'workspace', mode: 'invalid' }], permissions: { workspaceRoots: 'not-an-array' } } }
     expect(() => new RuntimeToolRegistry().register(malformed)).toThrow('INVALID_TOOL_MANIFEST:malformed')
