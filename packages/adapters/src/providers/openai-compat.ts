@@ -1,5 +1,5 @@
 import type { JsonValue, LLMRequestProjection } from '@pulse/runtime'
-import { consumeProviderSse, normalizeOpenAIResponse } from './normalize.js'
+import { consumeProviderSse, normalizeOpenAIResponse, providerHttpError } from './normalize.js'
 import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
 export class OpenAICompatibleAdapter implements ProviderAdapter {
   readonly name = 'OpenAI Compatible'
@@ -11,7 +11,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const body: Record<string, unknown> = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), ...((params.maxOutputTokens ?? this.config.maxOutputTokens) === undefined ? {} : { max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens }), messages: toMessages(params.request), ...(tools.length ? { tools, ...(this.config.toolChoice === undefined ? {} : { tool_choice: this.config.toolChoice }) } : {}), ...(params.outputSchema === undefined ? {} : { response_format: { type: 'json_schema', json_schema: { name: 'pulse_output', strict: true, schema: params.outputSchema } } }), ...(streaming ? { stream: true, stream_options: { include_usage: true } } : {}) }
     try {
       const response = await fetch(`${this.baseURL.replace(/\/$/, '')}/chat/completions`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}), ...(this.config.extraHeaders ?? {}) }, body: JSON.stringify(body) })
-      if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`)
+      if (!response.ok) throw providerHttpError(response.status)
       if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeOpenAIResponse(await response.json())
       const events = await consumeProviderSse(response)
       const content: string[] = []

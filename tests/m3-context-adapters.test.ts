@@ -80,6 +80,17 @@ describe('M1-3 context, models and adapters', () => {
     vi.unstubAllGlobals()
   })
 
+  it('classifies Provider HTTP failures so authentication does not become retryable fallback', async () => {
+    const request = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'http-error@1', instruction: 'error', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'instruction' as const, content: 'error' }], prefixHash: 'http-error-prefix', projectionHash: 'http-error-projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'http-error@1', privacy: 'public' as const, privacyRefs: [] }
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 401, headers: new Headers(), json: async () => ({}) }) as Response)
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(new OpenAICompatibleAdapter('openai-auth-error', { provider: 'openai' }).executeAttempt({ request, signal: new AbortController().signal })).rejects.toMatchObject({ code: 'PROVIDER_HTTP_401', retryable: false })
+    await expect(new AnthropicAdapter('anthropic-auth-error', { provider: 'anthropic' }).executeAttempt({ request, signal: new AbortController().signal })).rejects.toMatchObject({ code: 'PROVIDER_HTTP_401', retryable: false })
+    fetchMock.mockResolvedValue({ ok: false, status: 503, headers: new Headers(), json: async () => ({}) } as Response)
+    await expect(new OpenAICompatibleAdapter('openai-server-error', { provider: 'openai' }).executeAttempt({ request, signal: new AbortController().signal })).rejects.toMatchObject({ code: 'PROVIDER_HTTP_503', retryable: true })
+    vi.unstubAllGlobals()
+  })
+
   it('normalizes provider fetch cancellation into a non-retryable adapter error', async () => {
     const controller = new AbortController()
     controller.abort()

@@ -90,6 +90,21 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     expect(telemetry.llm.usage).toMatchObject({ inputTokens: 12, outputTokens: 3, cachedInputTokens: 5, uncachedInputTokens: 7 })
   })
 
+  it('does not turn a non-retryable Provider error into a fallback attempt', async () => {
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'auth-first', providerId: 'auth-provider', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 2 })
+    registry.register({ id: 'backup', providerId: 'backup-provider', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 1 })
+    const calls: string[] = []
+    const providers = new Map<string, ProviderAdapter>([
+      ['auth-provider', { id: 'auth-provider', name: 'auth', executeAttempt: async () => { calls.push('auth'); throw Object.assign(new Error('invalid key'), { code: 'PROVIDER_HTTP_401', retryable: false }) } }],
+      ['backup-provider', { id: 'backup-provider', name: 'backup', executeAttempt: async () => { calls.push('backup'); return { text: 'should not run', toolCalls: [], finishReason: 'stop' } } }],
+    ])
+    const executor = createModelEffectExecutor({ router: new ModelRouter(registry), providers })
+    const effect = { id: 'effect-auth', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', request: projection }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as EffectRecord
+    await expect(executor(effect, new AbortController().signal)).resolves.toMatchObject({ status: 'failed', error: { code: 'PROVIDER_HTTP_401', retryable: false } })
+    expect(calls).toEqual(['auth'])
+  })
+
   it('passes a Provider structured payload to the DSL schema decoder', async () => {
     const registry = new InMemoryModelRegistry()
     registry.register({ id: 'structured', providerId: 'structured-provider', tasks: ['plan'], capabilities: { local: true, structuredOutput: true, maxContextTokens: 4096 }, priority: 1 })

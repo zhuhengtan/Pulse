@@ -1,5 +1,5 @@
 import type { JsonValue, LLMRequestProjection } from '@pulse/runtime'
-import { consumeProviderSse, normalizeAnthropicResponse } from './normalize.js'
+import { consumeProviderSse, normalizeAnthropicResponse, providerHttpError } from './normalize.js'
 import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'Anthropic Messages'
@@ -12,7 +12,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const body = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096, ...(system ? { system } : {}), messages, ...(tools.length ? { tools, ...(this.config.toolChoice === undefined ? {} : { tool_choice: anthropicToolChoice(this.config.toolChoice) }) } : {}), ...(params.outputSchema === undefined ? {} : { output_format: { type: 'json_schema', schema: params.outputSchema } }), ...(streaming ? { stream: true } : {}) }
     try {
       const response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
-      if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`)
+      if (!response.ok) throw providerHttpError(response.status)
       if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeAnthropicResponse(await response.json())
       const events = await consumeProviderSse(response)
       const blocks: Array<Record<string, unknown>> = []

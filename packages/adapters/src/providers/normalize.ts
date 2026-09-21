@@ -2,6 +2,11 @@ import type { LLMResult } from '@pulse/runtime'
 
 export interface ProviderSseEvent { event?: string; data: any }
 
+export function providerHttpError(status: number): Error & { code: string; retryable: boolean } {
+  const retryable = status === 408 || status === 425 || status === 429 || status >= 500
+  return Object.assign(new Error(`PROVIDER_HTTP_${status}`), { code: `PROVIDER_HTTP_${status}`, retryable })
+}
+
 /** Read provider SSE frames without treating incomplete tool arguments as executable input. */
 export async function consumeProviderSse(response: Response): Promise<ProviderSseEvent[]> {
   if (!response.body) throw new Error('PROVIDER_STREAM_BODY_MISSING')

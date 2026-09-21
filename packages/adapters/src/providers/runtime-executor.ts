@@ -129,7 +129,8 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
       } catch (cause) {
         recordFeedback('failed', 0)
         if (signal.aborted) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause })
-        throw modelFallbackError({ retryable: true, localClosed: true, sideEffectState: 'none', cause })
+        const retryable = cause && typeof cause === 'object' && 'retryable' in cause && typeof (cause as { retryable?: unknown }).retryable === 'boolean' ? (cause as { retryable: boolean }).retryable : true
+        throw modelFallbackError({ retryable, localClosed: true, sideEffectState: 'none', cause })
       } finally { for (const release of releases.reverse()) release() }
     }, 1).then((value) => {
       const providerAttempt = value.attempts.at(-1)
