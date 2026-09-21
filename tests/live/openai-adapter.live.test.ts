@@ -5,6 +5,7 @@ import type { LLMRequestProjection } from '@pulse/runtime'
 const apiKey = process.env.OPENAI_API_KEY
 const toolSmoke = process.env.PULSE_LIVE_TOOL_SMOKE === '1'
 const structuredSmoke = process.env.PULSE_LIVE_STRUCTURED_SMOKE === '1'
+const cancellationSmoke = process.env.PULSE_LIVE_CANCELLATION_SMOKE === '1'
 
 describe.skipIf(!apiKey)('live OpenAI-compatible adapter', () => {
   it('performs one minimal request and normalizes the response', async () => {
@@ -74,5 +75,27 @@ describe.skipIf(!apiKey)('live OpenAI-compatible adapter', () => {
     const result = await adapter.executeAttempt({ request, signal: new AbortController().signal, outputSchema })
     expect(result.structured).toEqual({ ok: true })
     expect(result.finishReason).toBe('stop')
+  }, 30_000)
+
+  it.skipIf(!cancellationSmoke)('cancels an in-flight real provider request', async () => {
+    const adapter = new OpenAICompatibleAdapter('openai-live-cancel', {
+      provider: 'openai',
+      apiKey,
+      defaultModel: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
+      baseURL: process.env.OPENAI_BASE_URL,
+      maxOutputTokens: 256,
+    })
+    const controller = new AbortController()
+    const request: LLMRequestProjection = {
+      contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'live-cancellation-smoke', instruction: 'Generate a long, detailed response about distributed systems.', privacy: 'public', privacyRefs: [] },
+      blocks: [
+        { kind: 'system', content: 'You are a live cancellation smoke-test. Produce enough output for cancellation to be observable.' },
+        { kind: 'instruction', content: 'Generate a long, detailed response about distributed systems.' },
+      ],
+      prefixHash: 'live-cancellation-prefix', projectionHash: 'live-cancellation-projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'live-cancellation-smoke', privacy: 'public', privacyRefs: [],
+    }
+    const pending = adapter.executeAttempt({ request, signal: controller.signal })
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ code: 'PROVIDER_REQUEST_CANCELLED', retryable: false })
   }, 30_000)
 })
