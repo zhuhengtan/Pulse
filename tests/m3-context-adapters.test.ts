@@ -229,6 +229,21 @@ describe('M1-3 context, models and adapters', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('classifies filesystem and shell validation failures as non-retryable', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulse-tool-errors-'))
+    try {
+      const filesystem = new FilesystemTool(root)
+      await expect(filesystem.read('../outside.txt')).rejects.toMatchObject({ code: 'PATH_OUTSIDE_SANDBOX', retryable: false })
+      await expect(filesystem.writeIfUnchanged('file.txt', 'content', 'invalid')).rejects.toMatchObject({ code: 'INVALID_FILE_BASELINE_HASH', retryable: false })
+      const controller = new AbortController()
+      controller.abort()
+      await expect(filesystem.read('file.txt', controller.signal)).rejects.toMatchObject({ code: 'ABORTED', retryable: false })
+      await expect(runShell(process.execPath, [], { maxOutputBytes: -1 })).rejects.toMatchObject({ code: 'INVALID_SHELL_OUTPUT_LIMIT', retryable: false })
+      await expect(runShell(process.execPath, [], { timeoutMs: -1 })).rejects.toMatchObject({ code: 'INVALID_SHELL_TIMEOUT', retryable: false })
+      await expect(runShell('__pulse_missing_command__')).rejects.toMatchObject({ code: 'ENOENT', retryable: false })
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('rejects sandbox symlink escapes for reads, listings, hashes, and writes', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-symlink-root-'))
     const outside = await mkdtemp(join(tmpdir(), 'pulse-symlink-outside-'))
