@@ -760,7 +760,8 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `573553d`：Wait 提交在创建依赖映射前校验 spec、dependency target/condition、模式、取消策略、原因和 deadline；畸形 Wait 统一转为结构化 `control_error`，不在校验阶段抛异常。
 - `1dbf55b`：Fork 提交在 coalesce、创建 child lane 和构造 join 前校验 lanes、program/resume、资源、上下文版本、输入引用、依赖、series 与 join 合同；畸形 Fork 不再抛异常或创建部分 child lane。
 - `4154d43`：Step 输出入口校验 actions/RuntimeAction 类型、ResumePoint、ContextDelta、terminal result/error 和 privacy downgrade 的 JSON/provenance 合同；未知或畸形动作统一拒绝，不再由校验阶段异常穿透。
-- 当前确定性门禁：`npm test`，68 个测试文件、426 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
+- `87d73a9`：Host Fact 入队前校验 reply/cancel/cancel_effect/set_lane_priority 的身份、原因、优先级和 JSON payload；非法宿主输入不再进入 FactInbox。
+- 当前确定性门禁：`npm test`，68 个测试文件、427 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
