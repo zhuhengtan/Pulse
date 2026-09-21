@@ -770,6 +770,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `92f0eaf`：Agent 创建入口校验 goal、LaneProgram/ProgramRef、priority、policy/limits 和 warmStart 合同，非法请求在 Agent/Lane 写入前 fail-closed。
 - `78b72a4`：HTTP Worker transport 对 lease/task 响应执行 fail-closed 合同校验，`claim/get/renew` 不再把 `null`、缺字段或非有限 lease 时间伪装成合法状态；服务端非法 lease/idempotency 参数明确拒绝。
 - `b054e7d`：Provider Adapter 在归一化边界拒绝未知 finish reason、工具调用与 finish reason 冲突、非法 token/cache/cost 和错误响应形状；Runtime 校验码统一为架构约定的 `PROVIDER_RESPONSE_INVALID`。
+- `0aa8f26`：Provider SSE 畸形 JSON、缺失流体和工具参数解析失败统一携带 `PROVIDER_RESPONSE_INVALID`，保留原始错误语义用于诊断。
 - 当前确定性门禁：`npm test`，68 个测试文件、433 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
