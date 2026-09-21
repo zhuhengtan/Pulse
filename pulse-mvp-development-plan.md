@@ -134,6 +134,7 @@
 | Runtime 生命周期自动持久化 | 配置 `persistenceBackend` 后，Tick/异步 Effect 结算、取消与对账自动排队保存；`run()`、`shutdown()` 等待 durable save；显式 `flushPersistence()` 支持宿主主动冲刷 | `tests/storage-outbox.test.ts` | `7a2ed52`、`3bb7ac0` |
 | 运行观测 | 只读 telemetry 聚合与实时 ObservationInbox 镜像 | `tests/provider-host.test.ts`、`tests/tool-host.test.ts` | `e68cae0`、`8e14534` |
 | 输出预算与可恢复 Tool | `maxOutputTokens` 参与窗口预留、候选准入和 Provider 请求；structured schema 与最终 `outputSchema` 契约校验；保存 executionRef 并提供 RecoverableTool 对账入口；`external` side-effect policy 在取消/恢复/Worker unknown 路径保持 remote-unknown | `tests/provider-host.test.ts`、`tests/tool-host.test.ts`、`tests/m3-context-adapters.test.ts`、`tests/tool-context.test.ts` | `d451014`、`b4461a8`、`83ebe38`、`d0f03ad` |
+| Tool 对账结果契约 | Runtime Registry 与 Tool SDK 对 `reconcile()` 的状态、错误结构和 succeeded 输出统一做 Manifest schema 校验；异常结果 fail-closed，不发布伪造 Result | `tests/runtime-tool-registry.test.ts` | `137bb76` |
 | 高级 Wait 与 Tool 准入 | Wait 支持 `any/quorum`、独立 deadline 和恢复重建；Tool Manifest 可在提交前注入可信锁、副作用策略与默认超时 | `tests/advanced-join.test.ts`、`tests/tool-host.test.ts` | `af1ff6f`、`f523c71`、`a95d4f5` |
 | Detached/background scope | Child Agent 可显式转入后台 scope；父取消不传播到 detached child，仍受 Runtime shutdown 约束，并支持查询与 attach | `tests/agent-effect.test.ts` | `e3ef1ce` |
 | Step 同步边界 | 运行时对未类型化的 Promise Step fail-closed，拒绝跨越同步 Step/异步 Effect 边界，不让 Tick 因非法返回结构崩溃 | `tests/runtime-control.test.ts` | `396499f` |
@@ -212,7 +213,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、395/395 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、模型 fallback 的 `maxAttempts` 上限、Session `warmStart.sessionId`、跨 Runtime Session Store warm start、文件/SQLite Session Store durable 恢复与 revision CAS、Persistence Backend 自动绑定 Session Store、目标 Host Policy 的云端候选重算及 Runtime 配置 fail-closed、Manifest workspace/network 权限与动态 ToolSet fail-closed、权限路径/主机规范化、external side-effect policy 的远程未知/取消/恢复处理、逻辑 ToolCall ID 稳定化、Action Decoder 工具隐私/来源传播、隐私感知日志导出、File/HTTP 审计日志 sink、Runtime `auditLogSink`/`auditLogPrivacy` 配置出口、注册 Tool 的默认 Runtime Executor 闭环、注册 external Tool 的 executionRef/reconcile 对账、当前时刻 due timer 处理、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Watchdog 二级策略变更与推理能力提升、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、396/396 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、模型 fallback 的 `maxAttempts` 上限、Session `warmStart.sessionId`、跨 Runtime Session Store warm start、文件/SQLite Session Store durable 恢复与 revision CAS、Persistence Backend 自动绑定 Session Store、目标 Host Policy 的云端候选重算及 Runtime 配置 fail-closed、Manifest workspace/network 权限与动态 ToolSet fail-closed、权限路径/主机规范化、external side-effect policy 的远程未知/取消/恢复处理、逻辑 ToolCall ID 稳定化、Action Decoder 工具隐私/来源传播、隐私感知日志导出、File/HTTP 审计日志 sink、Runtime `auditLogSink`/`auditLogPrivacy` 配置出口、注册 Tool 的默认 Runtime Executor 闭环、注册 external Tool 的 executionRef/reconcile 对账与结果 schema fail-closed、当前时刻 due timer 处理、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Watchdog 二级策略变更与推理能力提升、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -595,6 +596,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - 本轮恢复 Effect 事务提交：恢复阶段对 running Effect 的 requeue/reconcile_required 修正写入 MutationLog，并继续恢复 Quarantine。
 - 本轮 Effect dispatch 事务提交：Effect 只有在 `running + Attempt` 通过 storage admission 并写入 MutationLog 后才进入 Executor。
 - 本轮 Remote Unknown 重试准入提交：可重试 Remote Unknown 不再先改 live Effect，retry admission 失败时保留原 Attempt 状态。
+- 本轮 Tool 对账结果契约提交：Runtime Registry 与 Tool SDK 对直接注册 Tool 的 `reconcile()` 结果做状态、错误和输出 schema 校验；不合规的远程结果停在未知状态，不进入成功结算。
 - 本轮 Effect 正常结算事务提交：正常结算不再分散写入 Effect/Result/Artifact/Lane/Event，统一由 settlement MutationLog 事务提交。
 - 本轮 Effect 结算拒绝事务提交：结算产物超限时通过 storage-rejected MutationLog 事务提交失败 Effect，事件无法容纳时保留无事件失败终态。
 - 本轮取消准入提交：取消父/子 Agent 前统一预检 Lane、Effect、Agent 事件，存储准入失败时不修改任何取消状态。
@@ -715,7 +717,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，68 个测试文件、395 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，68 个测试文件、396 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
