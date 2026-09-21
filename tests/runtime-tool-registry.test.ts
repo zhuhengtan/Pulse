@@ -103,6 +103,21 @@ describe('Runtime tool registry', () => {
     expect(runtime.state.effects.get('effect-1')?.outcome?.status).toBe('succeeded')
   })
 
+  it('publishes non-JSON output from a Runtime Tool as an ArtifactRef', async () => {
+    const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
+    runtime.tools.register({ manifest: { name: 'runtime-binary', version: '1', description: 'returns binary output', inputSchema: { type: 'object' }, outputSchema: {}, concurrencyClass: 'tool', locks: [], supportsAbortSignal: true, sideEffectPolicy: 'none', retrySafety: 'read_only', defaultTimeoutMs: 1000 }, execute: () => new Uint8Array([3, 4, 5]) })
+    const program = { id: 'runtime-binary', version: '1', step: ({ lane }: any) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects' as const, effects: [{ key: 'binary', kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { name: 'runtime-binary', arguments: {} } }], wait: { onUnsatisfied: 'resume_with_error' as const } }], next: { programId: 'runtime-binary', programVersion: '1', step: 'finish', locals: {} } }
+      : { actions: [{ type: 'complete' as const, result: { done: true } }], next: { programId: 'runtime-binary', programVersion: '1', step: 'finish', locals: {} } } }
+    const { agentId } = runtime.createAgent('runtime binary output', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    const result = [...runtime.state.results.values()].find((item) => item.effectId === 'effect-1')
+    const artifactRef = result?.value && typeof result.value === 'object' && !Array.isArray(result.value) ? result.value.artifactRef : undefined
+    expect(typeof artifactRef).toBe('string')
+    expect(runtime.state.artifacts.get(artifactRef as string)).toMatchObject({ mediaType: 'application/octet-stream', sizeBytes: 3 })
+    expect([...runtime.readArtifact(artifactRef as string)]).toEqual([3, 4, 5])
+  })
+
   it('reconciles a quarantined registered external Tool through its executionRef', async () => {
     const recoverable = defineTool({
       name: 'recoverable', description: 'reconcile an external job', input: z.object({}), output: z.object({ status: z.string() }), sideEffectPolicy: 'external',
