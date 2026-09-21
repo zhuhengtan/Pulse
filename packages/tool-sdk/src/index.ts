@@ -169,9 +169,9 @@ export class ToolRegistry {
     const output = await definition.execute(parsedInput, toolContext)
     if (!matchesJsonSchema(output, definition.manifest.outputSchema)) throw new ToolError('TOOL_OUTPUT_SCHEMA_VIOLATION', `Output does not match the manifest for tool ${name}.`, { retryable: false })
     const summary = definition.summarize?.(output)
-    if (summary !== undefined && Buffer.byteLength(JSON.stringify(summary), 'utf8') > (definition.manifest.maxResultSummaryBytes ?? 4096)) throw new Error('TOOL_SUMMARY_TOO_LARGE')
+    const summaryAllowed = summary === undefined || Buffer.byteLength(JSON.stringify(summary), 'utf8') <= (definition.manifest.maxResultSummaryBytes ?? 4096)
     const normalized = definition.normalize?.(output)
-    return { output, ...(normalized === undefined ? {} : { normalized }), ...(summary === undefined ? {} : { summary }), manifest: structuredClone(definition.manifest) }
+    return { output, ...(normalized === undefined ? {} : { normalized }), ...(summaryAllowed && summary !== undefined ? { summary } : {}), manifest: structuredClone(definition.manifest) }
   }
   async reconcileDetailed(name: string, executionRef: JsonValue, context: ReconcileContext): Promise<ReconcileResult<unknown>> {
     const definition = this.require(name)

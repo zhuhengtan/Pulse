@@ -42,12 +42,14 @@ describe('Tool SDK to Runtime Effect host', () => {
     expect([...runtime.readArtifact(artifactRef as string)]).toEqual([0, 1, 2, 255])
   })
 
-  it('enforces the Tool manifest summary byte budget', async () => {
+  it('drops an oversized Tool summary while retaining the successful output', async () => {
     const registry = new ToolRegistry()
     registry.register(defineTool({ name: 'bounded-summary', description: 'bounded summary', input: z.object({}), output: z.object({ ok: z.boolean() }), maxResultSummaryBytes: 8, summarize: () => ({ text: '你好你好' }), execute: () => ({ ok: true }) }))
     const executor = createToolEffectExecutor(registry)
     const effect = { id: 'effect-summary', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'bounded-summary', kind: 'tool', concurrencyClass: 'tool', input: { name: 'bounded-summary', arguments: {} }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as EffectRecord
-    await expect(executor(effect, new AbortController().signal)).rejects.toThrow('TOOL_SUMMARY_TOO_LARGE')
+    await expect(executor(effect, new AbortController().signal)).resolves.toMatchObject({ value: { ok: true }, executionState: 'succeeded' })
+    await expect(registry.executeDetailed('bounded-summary', {}, new AbortController().signal)).resolves.toMatchObject({ output: { ok: true } })
+    await expect(registry.executeDetailed('bounded-summary', {}, new AbortController().signal)).resolves.not.toHaveProperty('summary')
   })
 
   it('executes a registered typed tool and preserves tool correlation', async () => {

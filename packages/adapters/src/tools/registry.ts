@@ -70,7 +70,6 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
       throw error
     }
     const summary = detailed.summary === undefined ? undefined : toJson(detailed.summary)
-    if (summary !== undefined && Buffer.byteLength(JSON.stringify(summary), 'utf8') > (detailed.manifest.maxResultSummaryBytes ?? 4096)) throw new Error('TOOL_SUMMARY_TOO_LARGE')
     let value: JsonValue
     let artifact: EffectArtifactOutput | undefined
     try { value = toJson(detailed.output) } catch { value = null; artifact = artifactOutput(detailed.output) }

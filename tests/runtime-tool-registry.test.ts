@@ -68,6 +68,14 @@ describe('Runtime tool registry', () => {
     await expect(executor(effect, new AbortController().signal)).resolves.toMatchObject({ value: { value: 'ok' }, executionState: 'succeeded' })
   })
 
+  it('drops an oversized summary without failing the Runtime Tool', async () => {
+    const registry = new RuntimeToolRegistry()
+    registry.register({ ...echo, manifest: { ...echo.manifest, name: 'bounded-runtime-summary', maxResultSummaryBytes: 4 }, summarize: () => ({ text: 'too large' }) })
+    const result = await registry.executeDetailed('bounded-runtime-summary', { value: 'ok' }, new AbortController().signal)
+    expect(result.output).toEqual({ value: 'ok' })
+    expect(result.summary).toBeUndefined()
+  })
+
   it('automatically prepares tool admission and dynamic tool sets before commit', () => {
     const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
     runtime.tools.register(echo)
