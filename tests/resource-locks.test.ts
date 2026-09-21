@@ -6,7 +6,7 @@ const point = (id: string, step: string) => ({ programId: id, programVersion: '1
 
 describe('Effect resource lock admission', () => {
   it('serializes exclusive Effects sharing a resource even when class capacity allows both', () => {
-    const runtime = new PulseRuntime({ maxRunning: { tool: 2 }, effectExecutor: async () => await new Promise(() => undefined) })
+    const runtime = new PulseRuntime({ maxTickMs: 1000, maxRunning: { tool: 2 }, effectExecutor: async () => await new Promise(() => undefined) })
     const program: LaneProgram = { id: 'locks', version: '1', step: ({ lane }) => lane.resume.step === 'start'
       ? { actions: [{ type: 'submit_effects', effects: [
         { key: 'first', kind: 'tool', concurrencyClass: 'tool', input: {}, locks: [{ resource: 'db:account', mode: 'exclusive' }] },

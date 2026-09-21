@@ -331,6 +331,7 @@ describe('effect outbox and runtime persistence envelope', () => {
       runtime.createAgent('async persistence', program)
       runtime.tick()
       await runtime.flushPersistence()
+      await Promise.resolve()
       const savesBeforeSettlement = saves
       settle()
       await effectExecutionDone

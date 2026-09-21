@@ -411,6 +411,7 @@ export class PulseRuntime {
   private persistenceScheduled = false
   private persistenceDirty = false
   private dispatchPersistencePending = false
+  private dispatchPersistenceReady = false
   private readonly executionYieldPending = new Set<string>()
   readonly mutationLog: MutationLog
   readonly outbox: EffectOutbox
@@ -450,6 +451,7 @@ export class PulseRuntime {
   private wakeScheduled = false
   private inDrain = false
   private wakeError: unknown
+  private tickDispatchBudget: { canStart: () => boolean; consume: () => void } | undefined
 
   static async restore(backend: RuntimePersistenceBackend, config: Omit<RuntimeConfig, 'persistence'> = {}): Promise<PulseRuntime> {
     const loaded = await backend.load()
@@ -980,12 +982,13 @@ export class PulseRuntime {
     for (const resolve of this.factWaiters.splice(0)) resolve()
   }
 
-  private scheduleWake(): void {
+  private scheduleWake(force = false): void {
     if (this.wakeScheduled || this.inDrain) return
+    if (!force && this.factInbox.size === 0) return
     this.wakeScheduled = true
     queueMicrotask(() => {
       this.wakeScheduled = false
-      if (this.inDrain || this.factInbox.size === 0) return
+      if (this.inDrain || (!force && this.factInbox.size === 0)) return
       this.inDrain = true
       try { this.tick() } catch (cause) {
         this.wakeError = cause
@@ -1060,6 +1063,7 @@ export class PulseRuntime {
     const tickStartedAt = performance.now()
     let tickOperations = 0
     const canStartTickOperation = (): boolean => tickOperations === 0 || performance.now() - tickStartedAt < this.maxTickMs
+    this.tickDispatchBudget = { canStart: canStartTickOperation, consume: () => { tickOperations++ } }
     while (this.factInbox.size > 0 && canStartTickOperation()) {
       const before = this.factInbox.snapshot()
       const envelope = this.factInbox.drain(1)[0]
@@ -1222,10 +1226,12 @@ export class PulseRuntime {
       this.dispatchQueuedEffects()
       progressed++
     }
+    this.dispatchQueuedEffects()
     this.completeFinishedChildAgents()
     this.finalizeCancellations()
     this.syncStoragePolicy()
     this.schedulePersistence()
+    this.tickDispatchBudget = undefined
     return progressed
   }
 
@@ -1239,7 +1245,7 @@ export class PulseRuntime {
       await this.flushPersistence()
       if (this.executionYieldPending.size) { this.executionYieldPending.clear(); await new Promise<void>((resolve) => setImmediate(resolve)) }
       this.refreshWaits()
-      if (this.ready.size === 0 && this.executions.size === 0) {
+      if (this.ready.size === 0 && this.executions.size === 0 && !this.hasQueuedEffects()) {
         if (this.preparingLLMs.size) { await Promise.resolve(); continue }
         if (this.factInbox.size > 0) continue
         if (this.hasPendingHostInteraction()) { await this.waitForFact(); continue }
@@ -1256,7 +1262,7 @@ export class PulseRuntime {
         }
         await Promise.race([...this.executions.values()].map((execution) => execution.promise))
       }
-      else if (work === 0 && this.factInbox.size === 0 && this.hasPendingHostInteraction()) await this.waitForFact()
+      else if (work === 0 && this.factInbox.size === 0 && this.hasPendingHostInteraction() && !this.hasQueuedEffects()) await this.waitForFact()
       else if (work === 0) await new Promise<void>((resolve) => setImmediate(resolve))
     }
     const root = [...this.state.lanes.values()].find((lane) => lane.ownerLaneId === undefined)
@@ -1284,7 +1290,7 @@ export class PulseRuntime {
         await this.flushPersistence()
         return runOutcome(root, this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)))
       }
-      if (this.ready.size === 0 && this.executions.size === 0) {
+      if (this.ready.size === 0 && this.executions.size === 0 && !this.hasQueuedEffects()) {
         if (this.preparingLLMs.size) { await Promise.resolve(); continue }
         if (this.factInbox.size > 0) continue
         if (this.hasPendingHostInteraction(agentId)) { await this.waitForFact(); continue }
@@ -1302,7 +1308,7 @@ export class PulseRuntime {
         }
         if (executions.length) await Promise.race(executions)
         else await Promise.resolve()
-      } else if (work === 0 && this.factInbox.size === 0 && this.hasPendingHostInteraction(agentId)) await this.waitForFact()
+      } else if (work === 0 && this.factInbox.size === 0 && this.hasPendingHostInteraction(agentId) && !this.hasQueuedEffects()) await this.waitForFact()
       else if (work === 0) await new Promise<void>((resolve) => setImmediate(resolve))
     }
     const root = this.state.lanes.get(agent.rootLaneId)
@@ -1311,13 +1317,13 @@ export class PulseRuntime {
     return runOutcome(root, this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)))
   }
 
-  async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await Promise.resolve() } }
+  async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects()) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await Promise.resolve(); else if (this.hasQueuedEffects()) await new Promise<void>((resolve) => setImmediate(resolve)) } }
 
   async shutdown(timeoutMs = 5_000): Promise<{ status: 'stopped' | 'timed_out'; unresolvedEffectIds: string[]; quarantine: string[] }> {
     this.shuttingDown = true
     for (const agent of this.state.agents.values()) if (agent.state === 'running' || agent.state === 'cancelling') this.cancelAgent(agent.id, 'USER_REQUESTED')
     const deadline = Date.now() + Math.max(0, timeoutMs)
-    while ((this.ready.size || this.executions.size) && Date.now() < deadline) {
+    while ((this.ready.size || this.executions.size || this.hasQueuedEffects()) && Date.now() < deadline) {
       this.tick()
       if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise).concat([new Promise<void>((resolve) => setTimeout(resolve, Math.min(10, Math.max(0, deadline - Date.now()))))]))
     }
@@ -1446,6 +1452,7 @@ export class PulseRuntime {
     if (transactional && this.sessionStore) for (const agent of state.agents.values()) this.sessionStore.put(exportWarmStartSession(state, agent.id))
   }
 
+  private hasQueuedEffects(): boolean { return [...this.state.effects.values()].some((effect) => effect.state === 'queued' && !this.executions.has(effect.id)) }
   private hasPendingHostInteraction(agentId?: string): boolean { return [...this.state.effects.values()].some((effect) => effect.kind === 'human' && !effect.outcome && (agentId === undefined || effect.agentId === agentId)) }
   private waitForFact(): Promise<void> { return new Promise((resolve) => this.factWaiters.push(resolve)) }
   private completeFinishedChildAgents(): void {
@@ -1974,13 +1981,20 @@ export class PulseRuntime {
   }
 
   private dispatchQueuedEffects(): void {
+    if (![...this.state.effects.values()].some((effect) => effect.state === 'queued' && !this.executions.has(effect.id))) return
     if (this.persistenceBackend) {
+      if (this.dispatchPersistenceReady) {
+        this.dispatchPersistenceReady = false
+        this.dispatchQueuedEffectsNow()
+        return
+      }
       this.schedulePersistence()
       if (this.dispatchPersistencePending) return
       this.dispatchPersistencePending = true
       void this.flushPersistence().then(() => {
         this.dispatchPersistencePending = false
-        this.dispatchQueuedEffectsNow()
+        this.dispatchPersistenceReady = true
+        this.scheduleWake(true)
       }).catch(() => {
         this.dispatchPersistencePending = false
       })
@@ -1992,6 +2006,7 @@ export class PulseRuntime {
   private dispatchQueuedEffectsNow(): void {
     const queued = [...this.state.effects.values()].filter((effect) => effect.state === 'queued' && !this.executions.has(effect.id)).sort((a, b) => (Math.max(a.schedulePriority ?? 0, a.inheritedFloor ?? Number.NEGATIVE_INFINITY) - Math.max(b.schedulePriority ?? 0, b.inheritedFloor ?? Number.NEGATIVE_INFINITY)) || a.id.localeCompare(b.id))
     for (const effect of queued) {
+      if (this.tickDispatchBudget && !this.tickDispatchBudget.canStart()) break
       if (effect.state !== 'queued' || this.executions.has(effect.id)) continue
       if (effect.kind === 'llm' && !this.prepareLLMEffect(effect)) continue
       if (effect.concurrencyClass !== 'none' && this.runningCount(effect.concurrencyClass) >= this.state.maxRunning[effect.concurrencyClass]) continue
@@ -2011,6 +2026,7 @@ export class PulseRuntime {
       commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${effect.attemptId}:dispatched`, dispatchMutations, this.state.now, this.sessionId)
       Object.assign(effect, running)
       this.state.effects.set(effect.id, effect)
+      this.tickDispatchBudget?.consume()
       const controller = new AbortController()
       if (effect.kind === 'human' && !this.customExecutor) {
         this.emit({ type: 'human.requested', effectId: effect.id, data: effect.input })

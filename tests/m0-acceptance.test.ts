@@ -81,7 +81,7 @@ describe('M0 acceptance matrix', () => {
   it('never exceeds running slots, while Human and Timer effects bypass execution slots', async () => {
     const started: string[] = []
     const releases = new Map<string, () => void>()
-    const runtime = new PulseRuntime({ maxRunning: { tool: 1, llm: 1, agent: 1 }, effectExecutor: async (effect) => { started.push(effect.key); if (effect.concurrencyClass === 'tool') await new Promise<void>((resolve) => releases.set(effect.key, resolve)); return { value: { key: effect.key } } } })
+    const runtime = new PulseRuntime({ maxTickMs: 1000, maxRunning: { tool: 1, llm: 1, agent: 1 }, effectExecutor: async (effect) => { started.push(effect.key); if (effect.concurrencyClass === 'tool') await new Promise<void>((resolve) => releases.set(effect.key, resolve)); return { value: { key: effect.key } } } })
     const program: LaneProgram = { id: 'slot', version: '1', step: ({ lane }) => lane.resume.step === 'start' ? { actions: [{ type: 'submit_effects', effects: [{ key: lane.goal, kind: 'tool', concurrencyClass: 'tool', input: {} }, { key: `${lane.goal}-human`, kind: 'human', concurrencyClass: 'none', input: {} }, { key: `${lane.goal}-timer`, kind: 'timer', concurrencyClass: 'none', input: {} }] }], next: point('done', 'slot') } : { actions: [{ type: 'complete', result: { done: true } }], next: point('done', 'slot') } }
     runtime.createAgent('a', program); runtime.createAgent('b', program)
     runtime.tick()

@@ -688,4 +688,17 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.effects.get('effect-1')?.outcome?.status).toBe('succeeded')
     expect(runtime.state.artifacts.get('artifact-1')?.mediaType).toBe('text/plain')
   })
+
+  it('bounds queued Effect dispatch with the shared Tick time slice', () => {
+    const calls: string[] = []
+    const runtime = new PulseRuntime({ maxTickMs: 0, effectExecutor: async (effect) => { calls.push(effect.key); return { value: { key: effect.key } } } })
+    const program: LaneProgram = { id: 'dispatch-budget', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'first', kind: 'tool', concurrencyClass: 'tool', input: {} }, { key: 'second', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('dispatch-budget', 'done') }) }
+    runtime.createAgent('dispatch budget', program)
+    runtime.tick()
+    expect(calls).toEqual([])
+    runtime.tick()
+    expect(calls).toEqual(['first'])
+    expect(runtime.state.effects.get('effect-1')?.state).toBe('running')
+    expect(runtime.state.effects.get('effect-2')?.state).toBe('queued')
+  })
 })
