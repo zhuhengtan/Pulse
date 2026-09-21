@@ -1372,13 +1372,13 @@ export class PulseRuntime {
     return runOutcome(root, this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)))
   }
 
-  async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup()) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await Promise.resolve(); else if (this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup()) await new Promise<void>((resolve) => setImmediate(resolve)) } await this.flushPersistence() }
+  async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup() || this.hasDueTimer()) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await Promise.resolve(); else if (this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup() || this.hasDueTimer()) await new Promise<void>((resolve) => setImmediate(resolve)) } await this.flushPersistence() }
 
   async shutdown(timeoutMs = 5_000): Promise<{ status: 'stopped' | 'timed_out'; unresolvedEffectIds: string[]; quarantine: string[] }> {
     this.shuttingDown = true
     for (const agent of this.state.agents.values()) if (agent.state === 'running' || agent.state === 'cancelling') this.cancelAgent(agent.id, 'USER_REQUESTED')
     const deadline = Date.now() + Math.max(0, timeoutMs)
-    while ((this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup()) && Date.now() < deadline) {
+    while ((this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup() || this.hasDueTimer()) && Date.now() < deadline) {
       this.tick()
       if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise).concat([new Promise<void>((resolve) => setTimeout(resolve, Math.min(10, Math.max(0, deadline - Date.now()))))]))
       else if (this.factInbox.size) await new Promise<void>((resolve) => setImmediate(resolve))
@@ -1511,6 +1511,10 @@ export class PulseRuntime {
   }
 
   private hasQueuedEffects(): boolean { return [...this.state.effects.values()].some((effect) => effect.state === 'queued' && !this.executions.has(effect.id)) }
+  private hasDueTimer(): boolean {
+    const nextAt = this.clock.timers.nextAt()
+    return nextAt !== undefined && nextAt <= this.clock.now()
+  }
   private hasPendingTickCleanup(): boolean {
     if ([...this.state.lanes.values()].some((lane) => lane.status === 'cancelling')) return true
     for (const agent of this.state.agents.values()) {
