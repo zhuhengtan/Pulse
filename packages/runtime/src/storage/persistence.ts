@@ -6,7 +6,7 @@ import { parseContextSnapshotRef, provenanceRefId, provenanceRefKind } from '../
 import type { DataRef, JsonValue, ProvenanceRef, ResultRecord, RuntimeEvent, RuntimeState } from '../core/types.js'
 import { stableSerialize } from '../context/builder.js'
 import { FactInbox, type FactInboxSnapshot } from '../core/inbox.js'
-import { exportRuntimeState, importRuntimeState, type SessionSnapshot } from './session.js'
+import { exportRuntimeState, FileRuntimeSessionStore, importRuntimeState, SqliteRuntimeSessionStore, type RuntimeSessionStore, type SessionSnapshot } from './session.js'
 import { EffectOutbox, type OutboxSnapshot } from './outbox.js'
 import { MutationLog, type MutationLogSnapshot } from './mutation-log.js'
 import type { QuarantineEntry, QuarantineScope } from '../lifecycle/scopes.js'
@@ -360,6 +360,7 @@ export class FileRuntimeEventArchive implements RuntimeEventArchive {
 export interface RuntimePersistenceBackend {
   load(): Promise<RuntimePersistenceSnapshot | undefined>
   save(snapshot: RuntimePersistenceSnapshot, expectedDigest?: string): Promise<void>
+  sessionStore?: RuntimeSessionStore
   resultStore?: RuntimeResultStore
   snapshotStore?: RuntimeSnapshotStore
   eventArchive?: RuntimeEventArchive
@@ -479,7 +480,8 @@ export function validateRuntimePersistenceSnapshot(snapshot: RuntimePersistenceS
 
 export class FileRuntimePersistenceBackend implements RuntimePersistenceBackend {
   private pending: Promise<void> = Promise.resolve()
-  constructor(readonly filePath: string) {}
+  readonly sessionStore: FileRuntimeSessionStore
+  constructor(readonly filePath: string) { this.sessionStore = new FileRuntimeSessionStore(`${filePath}.sessions.json`) }
   async load(): Promise<RuntimePersistenceSnapshot | undefined> {
     try { return JSON.parse(await readFile(this.filePath, 'utf8')) as RuntimePersistenceSnapshot }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
@@ -552,11 +554,13 @@ export class SqliteRuntimePersistenceBackend implements RuntimePersistenceBacken
   readonly resultStore: SqliteRuntimeContentStore
   readonly snapshotStore: SqliteRuntimeContentStore
   readonly eventArchive: SqliteRuntimeEventArchive
+  readonly sessionStore: SqliteRuntimeSessionStore
 
   constructor(readonly filePath: string) {
     this.resultStore = new SqliteRuntimeContentStore(filePath, 'result')
     this.snapshotStore = new SqliteRuntimeContentStore(filePath, 'snapshot')
     this.eventArchive = new SqliteRuntimeEventArchive(filePath)
+    this.sessionStore = new SqliteRuntimeSessionStore(filePath)
   }
 
   async load(): Promise<RuntimePersistenceSnapshot | undefined> {
@@ -594,6 +598,7 @@ export class SqliteRuntimePersistenceBackend implements RuntimePersistenceBacken
       this.database = undefined
     })
     await Promise.all([this.resultStore.close(), this.snapshotStore.close(), this.eventArchive.close()])
+    this.sessionStore.close()
   }
 
   private open(): SqliteDatabase {

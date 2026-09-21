@@ -269,7 +269,8 @@ export class PulseRuntime {
     const withSnapshots = loaded === undefined || backend.snapshotStore === undefined ? loaded : await hydrateRuntimeSnapshotBodies(loaded, backend.snapshotStore)
     const snapshot = withSnapshots === undefined || backend.resultStore === undefined ? withSnapshots : await hydrateRuntimeResultBodies(withSnapshots, backend.resultStore)
     if (snapshot?.resultBodies === 'external' && backend.resultStore === undefined) throw new Error('RUNTIME_RESULT_STORE_REQUIRED')
-    return new PulseRuntime(snapshot === undefined ? config : { ...config, persistence: snapshot, ...(config.persistenceBackend === undefined || loaded?.integrity?.digest === undefined ? {} : { persistenceExpectedDigest: loaded.integrity.digest }) })
+    const restoredConfig = snapshot === undefined ? config : { ...config, persistence: snapshot, ...(config.persistenceBackend === undefined || loaded?.integrity?.digest === undefined ? {} : { persistenceExpectedDigest: loaded.integrity.digest }) }
+    return new PulseRuntime(restoredConfig.sessionStore === undefined && backend.sessionStore === undefined ? restoredConfig : { ...restoredConfig, ...(restoredConfig.sessionStore === undefined ? { sessionStore: backend.sessionStore } : {}) })
   }
 
   constructor(config: RuntimeConfig = {}) {
@@ -339,7 +340,7 @@ export class PulseRuntime {
     this.effectSubmissionPreparer = config.effectSubmissionPreparer ?? ((submission) => this.prepareRegisteredToolSubmission(submission))
     this.telemetryExporter = config.telemetryExporter
     this.persistenceBackend = config.persistenceBackend
-    this.sessionStore = config.sessionStore
+    this.sessionStore = config.sessionStore ?? config.persistenceBackend?.sessionStore
     this.budget = config.budget ?? {}
     if (restored) for (const event of this.state.events) if (event.type === 'effect.execution_metadata') this.recordBudgetMetadata(event.data ?? event.payload)
     this.customExecutor = config.effectExecutor !== undefined

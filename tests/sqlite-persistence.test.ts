@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { PulseRuntime } from '@pulse/runtime'
+import { PulseRuntime, exportWarmStartSession } from '@pulse/runtime'
 import { SqliteRuntimePersistenceBackend, withRuntimePersistenceIntegrity } from '@pulse/runtime'
 import type { LaneProgram, RuntimePersistenceSnapshot } from '@pulse/runtime'
 
@@ -70,6 +70,24 @@ describe('SQLite runtime persistence backend', () => {
     expect(await backend.eventArchive.read(1)).not.toHaveLength(0)
     const restored = await PulseRuntime.restore(backend, { persistenceBackend: backend, programs: [program] })
     expect([...restored.state.results.values()].some((result) => result.value && typeof result.value === 'object' && !Array.isArray(result.value) && result.value.durable === true)).toBe(true)
+    await backend.close()
+  })
+
+  it('automatically binds the durable Session Store to Runtime construction and restore', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-sqlite-session-binding-'))
+    directories.push(directory)
+    const backend = new SqliteRuntimePersistenceBackend(join(directory, 'pulse.db'))
+    const program: LaneProgram = { id: 'sqlite-session-binding', version: '1', step: () => ({ actions: [{ type: 'complete', result: {} }], next: point('sqlite-session-binding', 'done') }) }
+    const source = new PulseRuntime({ persistenceBackend: backend })
+    const created = source.createAgent('session source', program)
+    source.state.agents.get(created.agentId)!.globalVersions.set(1, { facts: { durable: true } })
+    source.state.agents.get(created.agentId)!.latestGlobalVersion = 1
+    backend.sessionStore.put(exportWarmStartSession(source.state, created.agentId))
+    await source.flushPersistence()
+
+    const target = new PulseRuntime({ sessionStore: backend.sessionStore })
+    const copied = target.createAgent({ goal: 'session target', program, warmStart: { sessionId: created.agentId, globalVersion: 1 } })
+    expect(target.state.agents.get(copied.agentId)?.globalVersions.get(0)).toEqual({ facts: { durable: true } })
     await backend.close()
   })
 })
