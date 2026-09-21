@@ -82,8 +82,45 @@ export class InMemoryRuntimeSessionStore implements RuntimeSessionStore {
 interface FileRuntimeSessionEntry extends RuntimeSessionRevision { sessionId: string }
 interface FileRuntimeSessionEnvelope { schemaVersion: 1; sessions: FileRuntimeSessionEntry[] }
 
+function validProvenance(value: unknown): boolean {
+  if (typeof value === 'string') return value.length > 0
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const ref = value as Record<string, unknown>
+  return (ref.kind === 'result' || ref.kind === 'artifact') && typeof ref.ref === 'string' && ref.ref.length > 0
+}
+
+function validPrivacyMetadata(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const metadata = value as Record<string, unknown>
+  if (!['public', 'cloud_allowed', 'local_only'].includes(String(metadata.privacy))) return false
+  const taints = metadata.privacyTaints
+  return taints === undefined || (Array.isArray(taints) && taints.every((taint) => taint && typeof taint === 'object' && Array.isArray((taint as Record<string, unknown>).path) && ((taint as Record<string, unknown>).path as unknown[]).length > 0 && ((taint as Record<string, unknown>).path as unknown[]).every((part) => typeof part === 'string' && part.length > 0) && ['public', 'cloud_allowed', 'local_only'].includes(String((taint as Record<string, unknown>).privacy))))
+}
+
 function validateWarmStartSnapshot(snapshot: RuntimeWarmStartSnapshot): void {
-  if (!snapshot || snapshot.schemaVersion !== 1 || typeof snapshot.sessionId !== 'string' || snapshot.sessionId.length === 0 || !snapshot.agent || !Number.isInteger(snapshot.agent.latestGlobalVersion) || !Array.isArray(snapshot.agent.globalVersions) || !Array.isArray(snapshot.visibleResultRefs) || !Array.isArray(snapshot.results)) throw new Error('INVALID_RUNTIME_SESSION_SNAPSHOT')
+  if (!snapshot || snapshot.schemaVersion !== 1 || typeof snapshot.sessionId !== 'string' || snapshot.sessionId.length === 0 || !snapshot.agent || typeof snapshot.agent.rootLaneId !== 'string' || snapshot.agent.rootLaneId.length === 0 || !Number.isInteger(snapshot.agent.latestGlobalVersion) || snapshot.agent.latestGlobalVersion < 0 || !Array.isArray(snapshot.agent.globalVersions) || !Array.isArray(snapshot.visibleResultRefs) || !Array.isArray(snapshot.results)) throw new Error('INVALID_RUNTIME_SESSION_SNAPSHOT')
+  const versions = new Set<number>()
+  for (const entry of snapshot.agent.globalVersions) {
+    if (!Array.isArray(entry) || entry.length !== 2 || !Number.isInteger(entry[0]) || entry[0] < 0 || versions.has(entry[0]) || entry[1] === undefined) throw new Error('INVALID_RUNTIME_SESSION_SNAPSHOT')
+    versions.add(entry[0])
+  }
+  if (!versions.has(snapshot.agent.latestGlobalVersion)) throw new Error('INVALID_RUNTIME_SESSION_SNAPSHOT')
+  if (snapshot.agent.globalPrivacy !== undefined) {
+    const privacyVersions = new Set<number>()
+    for (const entry of snapshot.agent.globalPrivacy) {
+      if (!Array.isArray(entry) || entry.length !== 2 || !Number.isInteger(entry[0]) || entry[0] < 0 || privacyVersions.has(entry[0]) || !versions.has(entry[0]) || !validPrivacyMetadata(entry[1])) throw new Error('INVALID_RUNTIME_SESSION_SNAPSHOT')
+      privacyVersions.add(entry[0])
+    }
+  }
+  if (new Set(snapshot.visibleResultRefs).size !== snapshot.visibleResultRefs.length || snapshot.visibleResultRefs.some((ref) => typeof ref !== 'string' || ref.length === 0)) throw new Error('INVALID_RUNTIME_SESSION_SNAPSHOT')
+  const resultRefs = new Set<string>()
+  for (const entry of snapshot.results) {
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || entry[0].length === 0 || resultRefs.has(entry[0])) throw new Error('INVALID_RUNTIME_SESSION_SNAPSHOT')
+    const result = entry[1]
+    if (!result || result.id !== entry[0] || !validPrivacyMetadata(result) || !Array.isArray(result.derivedFrom) || result.derivedFrom.some((ref) => !validProvenance(ref)) || (result.pinCount !== undefined && (!Number.isInteger(result.pinCount) || result.pinCount < 0)) || (result.sizeBytes !== undefined && (!Number.isInteger(result.sizeBytes) || result.sizeBytes < 0)) || (result.storageState !== undefined && !['memory', 'persisted'].includes(result.storageState))) throw new Error('INVALID_RUNTIME_SESSION_SNAPSHOT')
+    resultRefs.add(entry[0])
+  }
+  if (snapshot.visibleResultRefs.some((ref) => !resultRefs.has(ref))) throw new Error('INVALID_RUNTIME_SESSION_SNAPSHOT')
 }
 
 function emptyRuntimeSessionEnvelope(): FileRuntimeSessionEnvelope { return { schemaVersion: 1, sessions: [] } }

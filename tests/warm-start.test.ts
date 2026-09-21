@@ -39,6 +39,11 @@ describe('explicit warm start', () => {
     expect(() => runtime.createAgent({ goal: 'missing', program, warmStart: { agentId: 'agent-missing' } })).toThrow('WARM_START_SOURCE_NOT_FOUND')
   })
 
+  it('rejects malformed warm-start references before storing them', () => {
+    const snapshot = { schemaVersion: 1 as const, sessionId: 'session', agent: { rootLaneId: 'lane-1', latestGlobalVersion: 0, globalVersions: [[0, {}] as [number, any]] }, visibleResultRefs: ['missing'], results: [] }
+    expect(() => new InMemoryRuntimeSessionStore().put(snapshot)).toThrow('INVALID_RUNTIME_SESSION_SNAPSHOT')
+  })
+
   it('filters findings by include mode and explicitly carries selected ResultRefs', () => {
     const runtime = new PulseRuntime()
     const program: LaneProgram = { id: 'warm-filter', version: '1', step: () => ({ actions: [{ type: 'complete', result: {} }], next: { programId: 'warm-filter', programVersion: '1', step: 'done', locals: {} } }) }
@@ -98,7 +103,9 @@ describe('explicit warm start', () => {
 
       const current = targetStore.getWithRevision(created.agentId)!
       const stale = structuredClone(current.snapshot)
+      stale.agent.latestGlobalVersion = 1
       stale.agent.globalVersions = [[1, { facts: { stale: true } }]]
+      delete stale.agent.globalPrivacy
       expect(sourceStore.putIfRevision(stale, current.revision)).toBe(current.revision + 1)
       await expect(Promise.resolve().then(() => targetStore.putIfRevision(current.snapshot, current.revision))).rejects.toThrow('RUNTIME_SESSION_STORE_CONFLICT')
     } finally { await rm(directory, { recursive: true, force: true }) }
@@ -114,6 +121,7 @@ describe('explicit warm start', () => {
       const second = new SqliteRuntimeSessionStore(filePath)
       expect(second.getWithRevision('session-sqlite')).toMatchObject({ revision: 1, snapshot })
       const next = structuredClone(snapshot)
+      next.agent.latestGlobalVersion = 1
       next.agent.globalVersions = [[1, { facts: ['y'] }]]
       expect(second.putIfRevision(next, 1)).toBe(2)
       expect(() => first.putIfRevision(snapshot, 1)).toThrow('RUNTIME_SESSION_STORE_CONFLICT')
