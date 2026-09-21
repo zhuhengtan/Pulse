@@ -820,6 +820,32 @@ interface SchedulerConfig {
 
 `maxTickMs` 不能打断一个已经开始的同步 Step。CPU 密集工作必须进入 Worker/子进程 Executor；工具的 async 函数在第一次 await 前同样不能执行长时间同步计算。
 
+### 11.1 SchedulerDecisionModel：可选的注意力分配建议
+
+ReadyQueue 的资格判断和资源安全始终由确定性的 SchedulerKernel 负责。Kernel 先完成依赖、生命周期、取消、资源锁、并发槽和 Effect 状态检查，只把当前合法的 Ready Lane 快照交给可选的 `SchedulerDecisionModel`。该模型可以是规则排序器、专用 ranker、本地小模型或云端模型，但它只能返回候选 Lane 的顺序建议，不能修改 Lane、跳过准入、取消工作或直接派发 Effect。
+
+建议调用属于异步控制面：请求带有 `candidateEpoch`、候选投影和超时；结果必须重新进入 FactInbox，由 Kernel 在下一个 Tick 中校验。候选集发生变化、模型超时/失败、返回未知 Lane、超过最大重排距离或触发确定性公平保底时，直接使用原有 `effective priority + aging + FIFO` 顺序。模型请求不占业务 Effect 的执行槽，也不改变 `LaneProgram.step()` 的同步、纯函数、IO-free 契约。
+
+Runtime 配置保持 Agent 执行模型与调度建议模型分离：
+
+```ts
+interface SchedulerDecisionModel {
+  readonly id: string
+  decide(request: SchedulerDecisionRequest, signal: AbortSignal): Promise<SchedulerDecision>
+}
+
+new PulseRuntime({
+  schedulerDecision: {
+    model,
+    minCandidates: 3,
+    maxReorderDistance: 1,
+    deterministicReserveEvery: 4,
+  },
+})
+```
+
+默认不把 Lane Goal 发送给模型；只有 Host 显式设置 `includeGoals: true` 才会加入候选投影。该能力是优化调度顺序，不是 Runtime 正确性依赖，因此没有模型时 Pulse 的行为与原确定性 Scheduler 完全一致。
+
 ## 12. Effect 与 Attempt
 
 所有需要离开同步 Lane Step 的外部等待统一为 Effect。第一类 Effect 包括 `LLMEffect`、`ToolEffect`、`HumanEffect`、`AgentEffect` 和 `TimerEffect`；HTTP、文件等通常通过 ToolEffect 封装，也可以由专用 Executor 扩展。

@@ -19,6 +19,11 @@ export class ReadyQueue {
     this.items.delete(best.laneId)
     return best.laneId
   }
+  dequeueSpecific(laneId: string): string | undefined {
+    if (!this.items.has(laneId)) return undefined
+    this.items.delete(laneId)
+    return laneId
+  }
   snapshot(now: number): Array<ReadyItem & { effectivePriority: number }> { return [...this.items.values()].map((item) => ({ ...item, effectivePriority: this.score(item, now) })).sort((a, b) => b.effectivePriority - a.effectivePriority || a.enqueueSeq - b.enqueueSeq) }
 }
 

@@ -77,6 +77,63 @@ describe('M1-2 scheduler and lifecycle primitives', () => {
     expect(queue.dequeue(30)).toBe('old-low')
   })
 
+  it('supports an advisory decision model without changing deterministic queue semantics', async () => {
+    const requests: string[][] = []
+    const model = {
+      id: 'test-ranker',
+      decide: async (request: import('@pulse/runtime').SchedulerDecisionRequest) => {
+        requests.push(request.candidates.map((candidate) => candidate.laneId))
+        return { decisionId: request.decisionId, candidateEpoch: request.candidateEpoch, orderedLaneIds: [...request.candidates].reverse().map((candidate) => candidate.laneId), modelId: 'test-ranker' }
+      },
+    }
+    const executionOrder: string[] = []
+    const program = { id: 'decision-model', version: '1', step: ({ lane }: { lane: { goal: string } }) => {
+      executionOrder.push(lane.goal)
+      return { actions: [{ type: 'complete', result: lane.goal }], next: point('done', 'decision-model') }
+    } }
+    const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1, schedulerDecision: { model, includeGoals: true, maxReorderDistance: 1 } })
+    runtime.createAgent('A', program)
+    runtime.createAgent('B', program)
+    runtime.createAgent('C', program)
+
+    expect(runtime.tick()).toBe(1)
+    expect(executionOrder).toEqual(['A'])
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(requests).toHaveLength(1)
+    expect(runtime.factInbox.size).toBe(1)
+    runtime.tick()
+
+    expect(executionOrder).toEqual(['A', 'C'])
+    expect(runtime.state.events.some((event) => event.type === 'scheduler.decision.accepted')).toBe(true)
+    expect(requests[0]).toHaveLength(3)
+  })
+
+  it('rejects scheduler suggestions after the ready candidate epoch changes', async () => {
+    let resolveDecision: ((value: import('@pulse/runtime').SchedulerDecision) => void) | undefined
+    const model = {
+      id: 'stale-ranker',
+      decide: (request: import('@pulse/runtime').SchedulerDecisionRequest) => new Promise<import('@pulse/runtime').SchedulerDecision>((resolve) => {
+        resolveDecision = () => resolve({ decisionId: request.decisionId, candidateEpoch: request.candidateEpoch, orderedLaneIds: [...request.candidates].reverse().map((candidate) => candidate.laneId), modelId: 'stale-ranker' })
+      }),
+    }
+    const order: string[] = []
+    const program = { id: 'stale-decision', version: '1', step: ({ lane }: { lane: { goal: string } }) => {
+      order.push(lane.goal)
+      return { actions: [{ type: 'complete', result: lane.goal }], next: point('done', 'stale-decision') }
+    } }
+    const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1, schedulerDecision: { model, maxReorderDistance: 2 } })
+    runtime.createAgent('A', program)
+    runtime.createAgent('B', program)
+    runtime.createAgent('C', program)
+    runtime.tick()
+    runtime.createAgent('D', program)
+    resolveDecision?.()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    runtime.tick()
+    expect(order).toEqual(['A', 'B'])
+    expect(runtime.state.events.some((event) => event.type === 'scheduler.decision.accepted')).toBe(false)
+  })
+
   it('prevents a queued writer from being starved by later readers', async () => {
     const locks = new ResourceLockManager()
     const releaseRead = await locks.acquire('workspace', 'shared', 'r1')

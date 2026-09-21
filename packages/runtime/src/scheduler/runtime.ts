@@ -25,6 +25,7 @@ import { advanceArtifactId, markArtifactPersisted, pinArtifact, prepareArtifactP
 import { prepareFindingPublication, type FindingPublication } from '../storage/findings.js'
 import { runtimeErrorFromCause } from '../core/errors.js'
 import { RuntimeToolRegistry } from '../tools/registry.js'
+import { SchedulerDecisionCoordinator, schedulerDecisionCandidateFromLane, type SchedulerDecision, type SchedulerDecisionConfig, type SchedulerDecisionRequest } from './decision.js'
 
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; now: number; observe?: (event: { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }) => void }
 export interface LaneProgram {
@@ -80,7 +81,16 @@ interface EffectReconcileFact {
   error?: JsonValue
 }
 
-type RuntimeFact = HostCommand | EffectCompletionFact | LLMPreparationFact | EffectReconcileFact
+interface SchedulerDecisionFact {
+  [key: string]: JsonValue
+  type: 'scheduler_decision'
+  decisionId: string
+  candidateEpoch: number
+  orderedLaneIds: string[]
+  modelId: string
+}
+
+type RuntimeFact = HostCommand | EffectCompletionFact | LLMPreparationFact | EffectReconcileFact | SchedulerDecisionFact
 
 export interface RuntimeConfig {
   maxLaneStepsPerTick?: number
@@ -129,6 +139,7 @@ export interface RuntimeConfig {
   /** Internal restore CAS baseline; differs from the hydrated envelope digest. */
   persistenceExpectedDigest?: string
   budget?: RuntimeBudgetConfig
+  schedulerDecision?: SchedulerDecisionConfig
 }
 
 export interface RuntimeBudgetConfig { maxTotalAttempts?: number; maxLLMAttempts?: number; maxToolAttempts?: number; maxCostByCurrency?: Record<string, number> }
@@ -298,6 +309,19 @@ function validateRuntimeConfig(config: RuntimeConfig): void {
   if (config.routerVersion !== undefined && (typeof config.routerVersion !== 'string' || config.routerVersion.length === 0)) invalidConfig('routerVersion')
   if (config.persistenceExpectedDigest !== undefined && (typeof config.persistenceExpectedDigest !== 'string' || !/^[a-f0-9]{64}$/.test(config.persistenceExpectedDigest))) invalidConfig('persistenceExpectedDigest')
   if (config.auditLogPrivacy !== undefined && !['public', 'cloud_allowed', 'local_only'].includes(config.auditLogPrivacy)) invalidConfig('auditLogPrivacy')
+  if (config.schedulerDecision !== undefined) {
+    const decision = config.schedulerDecision
+    if (decision === null || typeof decision !== 'object' || Array.isArray(decision)) invalidConfig('schedulerDecision')
+    if (decision.model !== undefined && (!decision.model || typeof decision.model !== 'object' || typeof decision.model.id !== 'string' || decision.model.id.length === 0 || typeof decision.model.decide !== 'function')) invalidConfig('schedulerDecision.model')
+    if (decision.minCandidates !== undefined && (!Number.isInteger(decision.minCandidates) || decision.minCandidates < 2)) invalidConfig('schedulerDecision.minCandidates')
+    if (decision.candidateLimit !== undefined && (!Number.isInteger(decision.candidateLimit) || decision.candidateLimit < 1)) invalidConfig('schedulerDecision.candidateLimit')
+    if ((decision.candidateLimit ?? 8) < (decision.minCandidates ?? 3)) invalidConfig('schedulerDecision.candidateLimit')
+    if (decision.decisionTimeoutMs !== undefined && (!Number.isFinite(decision.decisionTimeoutMs) || decision.decisionTimeoutMs <= 0)) invalidConfig('schedulerDecision.decisionTimeoutMs')
+    if (decision.maxOutstandingDecisions !== undefined && (!Number.isInteger(decision.maxOutstandingDecisions) || decision.maxOutstandingDecisions < 1)) invalidConfig('schedulerDecision.maxOutstandingDecisions')
+    if (decision.maxReorderDistance !== undefined && (!Number.isInteger(decision.maxReorderDistance) || decision.maxReorderDistance < 0)) invalidConfig('schedulerDecision.maxReorderDistance')
+    if (decision.deterministicReserveEvery !== undefined && (!Number.isInteger(decision.deterministicReserveEvery) || decision.deterministicReserveEvery < 1)) invalidConfig('schedulerDecision.deterministicReserveEvery')
+    if (decision.includeGoals !== undefined && typeof decision.includeGoals !== 'boolean') invalidConfig('schedulerDecision.includeGoals')
+  }
   if (config.hostPolicy !== undefined && (config.hostPolicy === null || typeof config.hostPolicy !== 'object' || Array.isArray(config.hostPolicy))) invalidConfig('hostPolicy')
   if (config.hostPolicy?.allowCloud !== undefined && typeof config.hostPolicy.allowCloud !== 'boolean') invalidConfig('hostPolicy.allowCloud')
   if (config.storagePolicy !== undefined) try { new SessionStoragePolicy(config.storagePolicy) } catch { invalidConfig('storagePolicy') }
@@ -467,6 +491,26 @@ export class PulseRuntime {
   private readonly maxPreparingLLMs: number
   private readonly maxPreparedLLMs: number
   private readonly effectSubmissionPreparer: ((submission: EffectSubmission) => EffectSubmission) | undefined
+  private readonly schedulerDecisionCoordinator: SchedulerDecisionCoordinator | undefined
+  private readonly schedulerDecisionConfig: {
+    model?: SchedulerDecisionConfig['model']
+    minCandidates: number
+    candidateLimit: number
+    decisionTimeoutMs: number
+    maxOutstandingDecisions: number
+    maxReorderDistance: number
+    deterministicReserveEvery: number
+    includeGoals: boolean
+  }
+  private readonly schedulerDecisionModelId: string | undefined
+  private readonly schedulerDecisionMaxReorderDistance: number
+  private readonly schedulerDecisionReserveEvery: number
+  private readonly schedulerDecisionIncludeGoals: boolean
+  private schedulerDecisionEpoch = 0
+  private schedulerDecisionRequestSeq = 1
+  private schedulerDecisionDispatches = 0
+  private schedulerDecisionCache: { decision: SchedulerDecision; epoch: number } | undefined
+  private readonly schedulerDecisionRequests = new Map<string, { epoch: number; candidateIds: Set<string> }>()
   private readonly preparingLLMs = new Set<string>()
   private readonly sessionId: string
   private hostCommandSeq = 1
@@ -529,7 +573,7 @@ export class PulseRuntime {
     this.ready = new ReadyQueue(config.agingIntervalMs ?? 1000, config.agingCap ?? Number.POSITIVE_INFINITY)
     if (restored) {
       this.clock.set(this.state.now)
-      for (const lane of this.state.lanes.values()) if (lane.status === 'ready') this.ready.enqueue(readyItemFromLane(lane))
+      for (const lane of this.state.lanes.values()) if (lane.status === 'ready') this.enqueueReadyItem(readyItemFromLane(lane))
       for (const effect of this.state.effects.values()) {
         const outboxEntry = this.outbox.get(`${effect.id}:${effect.attemptId}`)
         if (effect.state === 'running' && (outboxEntry === undefined || outboxEntry.state === 'pending')) {
@@ -561,6 +605,26 @@ export class PulseRuntime {
     this.maxPreparingLLMs = config.maxPreparingLLMs ?? 2
     this.maxPreparedLLMs = config.maxPreparedLLMs ?? 8
     this.effectSubmissionPreparer = config.effectSubmissionPreparer ?? ((submission) => this.prepareRegisteredToolSubmission(submission))
+    const schedulerDecision = config.schedulerDecision ?? {}
+    this.schedulerDecisionConfig = {
+      model: schedulerDecision.model,
+      minCandidates: schedulerDecision.minCandidates ?? 3,
+      candidateLimit: schedulerDecision.candidateLimit ?? 8,
+      decisionTimeoutMs: schedulerDecision.decisionTimeoutMs ?? 25,
+      maxOutstandingDecisions: schedulerDecision.maxOutstandingDecisions ?? 1,
+      maxReorderDistance: schedulerDecision.maxReorderDistance ?? 1,
+      deterministicReserveEvery: schedulerDecision.deterministicReserveEvery ?? 4,
+      includeGoals: schedulerDecision.includeGoals ?? false,
+    }
+    this.schedulerDecisionModelId = schedulerDecision.model?.id
+    this.schedulerDecisionMaxReorderDistance = this.schedulerDecisionConfig.maxReorderDistance
+    this.schedulerDecisionReserveEvery = this.schedulerDecisionConfig.deterministicReserveEvery
+    this.schedulerDecisionIncludeGoals = this.schedulerDecisionConfig.includeGoals
+    this.schedulerDecisionCoordinator = schedulerDecision.model === undefined ? undefined : new SchedulerDecisionCoordinator({
+      model: schedulerDecision.model,
+      timeoutMs: this.schedulerDecisionConfig.decisionTimeoutMs,
+      maxOutstanding: this.schedulerDecisionConfig.maxOutstandingDecisions,
+    })
     this.telemetryExporter = config.telemetryExporter
     this.auditLogSink = config.auditLogSink
     this.auditLogPrivacy = config.auditLogPrivacy
@@ -661,7 +725,7 @@ export class PulseRuntime {
     this.assertStorageAdmission(mutations)
     commitMutationTransaction(this.state, this.mutationLog, `agent:${agent.id}:created`, mutations, this.state.now, this.sessionId)
     const committedRoot = this.state.lanes.get(root.id)!
-    this.ready.enqueue(readyItemFromLane(committedRoot))
+    this.enqueueReadyItem(readyItemFromLane(committedRoot))
     this.syncStoragePolicy()
     this.schedulePersistence()
     return { id: agent.id, agentId: agent.id, laneId: root.id }
@@ -1066,7 +1130,83 @@ export class PulseRuntime {
     })
   }
 
-  enqueueLane(laneId: string): void { const lane = this.state.lanes.get(laneId); if (lane && lane.status === 'ready') { lane.enqueueSeq = this.enqueueSeq++; lane.readySince = this.state.now; this.ready.enqueue(readyItemFromLane(lane)) } }
+  private enqueueReadyItem(item: import('./ready-queue.js').ReadyItem): void { this.ready.enqueue(item); this.schedulerDecisionEpoch++ }
+
+  enqueueLane(laneId: string): void { const lane = this.state.lanes.get(laneId); if (lane && lane.status === 'ready') { lane.enqueueSeq = this.enqueueSeq++; lane.readySince = this.state.now; this.enqueueReadyItem(readyItemFromLane(lane)) } }
+
+  private requestSchedulerDecision(now: number, availableSlots: number, snapshot: ReturnType<ReadyQueue['snapshot']>): void {
+    const coordinator = this.schedulerDecisionCoordinator
+    if (!coordinator || snapshot.length < this.schedulerDecisionConfig.minCandidates) return
+    const candidates = snapshot.slice(0, this.schedulerDecisionConfig.candidateLimit).flatMap((item) => {
+      const lane = this.state.lanes.get(item.laneId)
+      return lane === undefined || lane.status !== 'ready' ? [] : [schedulerDecisionCandidateFromLane(lane, item.effectivePriority, now, this.schedulerDecisionIncludeGoals, item.inheritedFloor)]
+    })
+    if (candidates.length < this.schedulerDecisionConfig.minCandidates) return
+    const decisionId = `scheduler-decision-${this.sessionId}-${this.schedulerDecisionRequestSeq++}`
+    const request: SchedulerDecisionRequest = {
+      schemaVersion: 1,
+      decisionId,
+      candidateEpoch: this.schedulerDecisionEpoch,
+      now,
+      availableSlots,
+      candidates,
+    }
+    this.schedulerDecisionRequests.set(decisionId, { epoch: request.candidateEpoch, candidateIds: new Set(candidates.map((candidate) => candidate.laneId)) })
+    if (!coordinator.request(request, (decision) => {
+      if (decision.decisionId !== request.decisionId || decision.candidateEpoch !== request.candidateEpoch || decision.modelId !== this.schedulerDecisionModelId) {
+        this.schedulerDecisionRequests.delete(request.decisionId)
+        return
+      }
+      try {
+        const accepted = this.enqueueFact({ type: 'scheduler_decision', decisionId: decision.decisionId, candidateEpoch: decision.candidateEpoch, orderedLaneIds: [...decision.orderedLaneIds], modelId: decision.modelId }, `scheduler-decision:${decision.decisionId}`)
+        if (!accepted) this.schedulerDecisionRequests.delete(decision.decisionId)
+      } catch {
+        this.schedulerDecisionRequests.delete(decision.decisionId)
+      }
+    }, () => this.schedulerDecisionRequests.delete(decisionId))) this.schedulerDecisionRequests.delete(decisionId)
+  }
+
+  private applySchedulerDecision(fact: SchedulerDecisionFact): boolean {
+    const request = this.schedulerDecisionRequests.get(fact.decisionId)
+    this.schedulerDecisionRequests.delete(fact.decisionId)
+    if (this.schedulerDecisionModelId === undefined || fact.modelId !== this.schedulerDecisionModelId || fact.candidateEpoch !== this.schedulerDecisionEpoch) return false
+    if (!Array.isArray(fact.orderedLaneIds) || fact.orderedLaneIds.length === 0 || fact.orderedLaneIds.some((laneId) => typeof laneId !== 'string') || new Set(fact.orderedLaneIds).size !== fact.orderedLaneIds.length) return false
+    const currentReady = new Set(this.ready.snapshot(this.state.now).map((item) => item.laneId))
+    const known = request?.candidateIds ?? currentReady
+    if (fact.orderedLaneIds.some((laneId) => !known.has(laneId))) return false
+    const orderedLaneIds = fact.orderedLaneIds.filter((laneId) => currentReady.has(laneId))
+    if (orderedLaneIds.length === 0) return false
+    this.schedulerDecisionCache = { epoch: fact.candidateEpoch, decision: { decisionId: fact.decisionId, candidateEpoch: fact.candidateEpoch, orderedLaneIds, modelId: fact.modelId } }
+    this.tryEmit({ type: 'scheduler.decision.accepted', data: { decisionId: fact.decisionId, modelId: fact.modelId, candidateEpoch: fact.candidateEpoch, orderedLaneIds } })
+    return true
+  }
+
+  private selectReadyLane(now: number, availableSlots: number): string | undefined {
+    const snapshot = this.ready.snapshot(now)
+    if (snapshot.length === 0) return undefined
+    let selected: string | undefined
+    const cached = this.schedulerDecisionCache
+    const reserveDeterministic = (this.schedulerDecisionDispatches + 1) % this.schedulerDecisionReserveEvery === 0
+    if (cached !== undefined && cached.epoch === this.schedulerDecisionEpoch && !reserveDeterministic) {
+      const current = new Set(snapshot.map((item) => item.laneId))
+      const next = cached.decision.orderedLaneIds.filter((laneId) => current.has(laneId))
+      const candidate = next[0]
+      const deterministicIndex = candidate === undefined ? -1 : snapshot.findIndex((item) => item.laneId === candidate)
+      if (candidate !== undefined && deterministicIndex >= 0 && deterministicIndex <= this.schedulerDecisionMaxReorderDistance) {
+        selected = candidate
+        this.schedulerDecisionCache = next.length > 1 ? { ...cached, decision: { ...cached.decision, orderedLaneIds: next.slice(1) } } : undefined
+      } else if (candidate === undefined) this.schedulerDecisionCache = undefined
+    }
+    if (selected === undefined) {
+      if (cached !== undefined && cached.epoch !== this.schedulerDecisionEpoch) this.schedulerDecisionCache = undefined
+      if (this.schedulerDecisionCache === undefined) this.requestSchedulerDecision(now, availableSlots, snapshot)
+      selected = this.ready.dequeue(now)
+    } else {
+      selected = this.ready.dequeueSpecific(selected)
+    }
+    if (selected !== undefined) this.schedulerDecisionDispatches++
+    return selected
+  }
 
   private scheduleRuntimeTimer(at: number, callback: () => void): string {
     return this.clock.timers.schedule(at, callback)
@@ -1138,7 +1278,7 @@ export class PulseRuntime {
       if (!envelope) break
       try {
         let commandApplied = false
-      if (envelope.fact.type !== 'llm_preparation' && !this.state.events.some((event) => event.id === envelope.eventId && event.type === 'command.enqueued')) {
+      if (envelope.fact.type !== 'llm_preparation' && envelope.fact.type !== 'scheduler_decision' && !this.state.events.some((event) => event.id === envelope.eventId && event.type === 'command.enqueued')) {
         const enqueuedEvent = { id: envelope.eventId, type: 'command.enqueued' as const, data: envelope.fact as unknown as JsonValue }
         if (envelope.fact.type === 'effect_completion') this.tryEmit(enqueuedEvent)
         else this.emit(enqueuedEvent)
@@ -1157,6 +1297,8 @@ export class PulseRuntime {
           this.state.effects.set(effect.id, effect)
           commandApplied = true
         }
+      } else if (envelope.fact.type === 'scheduler_decision') {
+        commandApplied = this.applySchedulerDecision(envelope.fact)
       } else if (envelope.fact.type === 'effect_completion') {
         if (envelope.fact.dispatchError !== undefined) this.tryEmit({ type: 'effect.dispatch_failed', effectId: envelope.fact.effectId, data: envelope.fact.dispatchError })
         const effect = this.state.effects.get(envelope.fact.effectId)
@@ -1202,11 +1344,11 @@ export class PulseRuntime {
           commitMutationTransaction(this.state, this.mutationLog, `host-command:${envelope.eventId}`, mutations, this.state.now, this.sessionId)
           Object.assign(lane, nextLane)
           this.state.lanes.set(lane.id, lane)
-          if (lane.status === 'ready') this.ready.enqueue(readyItemFromLane(lane))
+          if (lane.status === 'ready') this.enqueueReadyItem(readyItemFromLane(lane))
           commandApplied = true
         }
       }
-      if (!commandApplied && envelope.fact.type !== 'effect_completion') this.emit({ type: 'command.applied', data: { eventId: envelope.eventId } })
+      if (!commandApplied && envelope.fact.type !== 'effect_completion' && envelope.fact.type !== 'scheduler_decision') this.emit({ type: 'command.applied', data: { eventId: envelope.eventId } })
       } catch (cause) {
         this.factInbox.restore(before)
         throw cause
@@ -1223,7 +1365,7 @@ export class PulseRuntime {
     }
     let progressed = 0
     while (progressed < this.maxSteps && canStartTickOperation()) {
-      const laneId = this.ready.dequeue(this.state.now)
+      const laneId = this.selectReadyLane(this.state.now, this.maxSteps - progressed)
       if (!laneId) break
       const lane = this.state.lanes.get(laneId)
       if (!lane || lane.status !== 'ready') continue
@@ -1411,6 +1553,9 @@ export class PulseRuntime {
 
   async shutdown(timeoutMs = 5_000): Promise<{ status: 'stopped' | 'timed_out'; unresolvedEffectIds: string[]; quarantine: string[] }> {
     this.shuttingDown = true
+    this.schedulerDecisionCoordinator?.cancel()
+    this.schedulerDecisionRequests.clear()
+    this.schedulerDecisionCache = undefined
     for (const agent of this.state.agents.values()) if (agent.state === 'running' || agent.state === 'cancelling') this.cancelAgent(agent.id, 'USER_REQUESTED')
     const deadline = Date.now() + Math.max(0, timeoutMs)
     while ((this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup() || this.hasDueTimer()) && Date.now() < deadline) {
@@ -2660,7 +2805,7 @@ export class PulseRuntime {
         const target = dependency.target as TargetRef
         if (target.kind === 'lane') {
           const lane = this.state.lanes.get(target.id)
-          if (lane && lane.status === 'ready') { this.priorityInheritance.raise(lane.id, consumer.id, consumer.priority); const inheritedFloor = this.priorityInheritance.floor(lane.id); this.ready.enqueue({ ...readyItemFromLane(lane), ...(inheritedFloor === undefined ? {} : { inheritedFloor }) }) }
+          if (lane && lane.status === 'ready') { this.priorityInheritance.raise(lane.id, consumer.id, consumer.priority); const inheritedFloor = this.priorityInheritance.floor(lane.id); this.enqueueReadyItem({ ...readyItemFromLane(lane), ...(inheritedFloor === undefined ? {} : { inheritedFloor }) }) }
         } else {
           const effect = this.state.effects.get(target.id)
           if (effect && effect.state === 'queued') {
@@ -2671,7 +2816,7 @@ export class PulseRuntime {
             if (effect.childAgentId) {
               const childRoot = this.state.agents.get(effect.childAgentId)?.rootLaneId
               const childLane = childRoot === undefined ? undefined : this.state.lanes.get(childRoot)
-              if (childLane && childLane.status === 'ready') { if (inheritedFloor === undefined) delete childLane.inheritedFloor; else childLane.inheritedFloor = inheritedFloor; this.ready.enqueue(readyItemFromLane(childLane)) }
+              if (childLane && childLane.status === 'ready') { if (inheritedFloor === undefined) delete childLane.inheritedFloor; else childLane.inheritedFloor = inheritedFloor; this.enqueueReadyItem(readyItemFromLane(childLane)) }
             }
           }
         }

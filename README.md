@@ -4,6 +4,8 @@ Pulse 是一个面向多步骤 Agent 应用的可恢复运行时。它把 Agent 
 
 Pulse 关注的是执行语义：状态如何提交、并发如何调度、结果如何传递、取消和重试是否安全，以及模型换 Provider 后上下文是否仍然可重建。模型 Provider、工具和宿主 UI 都是可替换的适配层。
 
+Scheduler 默认使用确定性的 Priority + Aging。需要语义化注意力分配时，可通过 `schedulerDecision.model` 注入独立的 `SchedulerDecisionModel`；它只对合法 Ready Lane 提供异步排序建议，所有建议都要经过 FactInbox、候选 epoch、重排边界和确定性公平保底校验，不具备 Runtime 控制权。
+
 > 当前仓库已实现架构文档中可在本地落地的 M0/M1/M1.5/M2 主链，包括确定性调度、DSL、Provider/Tool Host、File/SQLite 持久化、checkpoint、Worker 和 FactInbox durable dedupe。真实 Provider、远程副作用和生产运维仍需独立环境验收。
 
 ## 为什么需要 Pulse
