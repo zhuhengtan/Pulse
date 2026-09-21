@@ -44,7 +44,6 @@ describe('advanced any/quorum waits', () => {
     runtime.tick()
     expect(runtime.state.lanes.get(laneId)?.status).toBe('waiting')
     runtime.clock.advance(5)
-    expect(runtime.state.lanes.get(laneId)?.status).toBe('ready')
     runtime.tick()
     expect(runtime.state.lanes.get(laneId)?.status).toBe('succeeded')
     expect([...runtime.state.results.values()].some((result) => JSON.stringify(result.value).includes('timedOut'))).toBe(true)

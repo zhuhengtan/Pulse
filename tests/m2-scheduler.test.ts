@@ -12,8 +12,10 @@ describe('M1-2 scheduler and lifecycle primitives', () => {
     clock.advance(9)
     expect(calls).toEqual([])
     clock.advance(1)
+    clock.timers.due(clock.now()).forEach((entry) => entry.callback())
     expect(calls).toEqual(['early'])
     clock.advance(10)
+    clock.timers.due(clock.now()).forEach((entry) => entry.callback())
     expect(calls).toEqual(['early', 'late'])
   })
 
@@ -218,6 +220,7 @@ describe('M1-2 scheduler and lifecycle primitives', () => {
     expect(effect.id).toBe(id)
     expect(effect.attemptNo).toBe(2)
     runtime.clock.advance(10)
+    runtime.tick()
     await runtime.waitForIdle()
     expect(attempts).toBe(2)
   })

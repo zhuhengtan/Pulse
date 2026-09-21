@@ -29,10 +29,9 @@ export class VirtualClock implements RuntimeClock {
   readonly timers = new TimerWheel()
   private current = 0
   now(): number { return this.current }
-  set(now: number): void { if (now < this.current) throw new Error('VirtualClock cannot move backwards'); this.current = now; this.flush() }
-  advance(ms: number): void { if (ms < 0) throw new Error('VirtualClock cannot move backwards'); this.current += ms; this.flush() }
+  set(now: number): void { if (now < this.current) throw new Error('VirtualClock cannot move backwards'); this.current = now }
+  advance(ms: number): void { if (ms < 0) throw new Error('VirtualClock cannot move backwards'); this.current += ms }
   schedule(delayMs: number, callback: () => void): string { return this.timers.schedule(this.current + delayMs, callback) }
-  private flush(): void { for (const entry of this.timers.due(this.current)) entry.callback() }
 }
 
 /** Monotonic host clock for production runtimes; timers never fast-forward. */
@@ -50,14 +49,12 @@ export class MonotonicClock implements RuntimeClock {
 
   now(): number {
     this.current = Math.max(this.current, this.epoch + performance.now() - this.startedAt)
-    this.flush()
     return this.current
   }
 
   set(now: number): void {
     if (!Number.isFinite(now) || now < this.current) return
     this.current = now
-    this.flush()
   }
 
   advance(ms: number): void {
@@ -76,8 +73,5 @@ export class MonotonicClock implements RuntimeClock {
       const remaining = at - this.current
       await new Promise<void>((resolve) => setTimeout(resolve, Math.max(1, remaining)))
     }
-    this.now()
   }
-
-  private flush(): void { for (const entry of this.timers.due(this.current)) entry.callback() }
 }

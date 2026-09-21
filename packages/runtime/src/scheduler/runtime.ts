@@ -467,7 +467,7 @@ export class PulseRuntime {
         }
         if (effect.state === 'retry_wait' && effect.retryAt !== undefined) {
           const attemptId = effect.attemptId
-          this.clock.timers.schedule(effect.retryAt, () => this.readyRetryEffect(effect.id, attemptId))
+          this.scheduleRuntimeTimer(effect.retryAt, () => this.readyRetryEffect(effect.id, attemptId))
         }
       }
       for (const effect of [...this.state.effects.values()].sort((left, right) => left.id.localeCompare(right.id))) if (effect.state === 'reconcile_required' && effect.sideEffectState === 'unknown') {
@@ -928,6 +928,14 @@ export class PulseRuntime {
   }
 
   enqueueLane(laneId: string): void { const lane = this.state.lanes.get(laneId); if (lane && lane.status === 'ready') { lane.enqueueSeq = this.enqueueSeq++; lane.readySince = this.state.now; this.ready.enqueue(readyItemFromLane(lane)) } }
+
+  private scheduleRuntimeTimer(at: number, callback: () => void): string {
+    return this.clock.timers.schedule(at, callback)
+  }
+
+  private scheduleRuntimeDelay(delayMs: number, callback: () => void): string {
+    return this.scheduleRuntimeTimer(this.clock.now() + delayMs, callback)
+  }
 
   private seriesStep(program: LaneProgram, context: LaneStepContext, series?: SeriesLaneSpec): LaneStepOutput {
     const locals = context.lane.resume.locals && typeof context.lane.resume.locals === 'object' && !Array.isArray(context.lane.resume.locals) ? context.lane.resume.locals as Record<string, JsonValue> : {}
@@ -1875,7 +1883,7 @@ export class PulseRuntime {
     commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${previousAttemptId}:retry-scheduled`, [{ op: 'setEffect', effectId: effect.id, record: candidate }, { op: 'appendEvent', event: retryEvent }], this.state.now, this.sessionId)
     Object.assign(effect, candidate)
     this.state.effects.set(effect.id, effect)
-    this.clock.timers.schedule(candidate.retryAt, () => this.readyRetryEffect(effect.id, candidate.attemptId))
+    this.scheduleRuntimeTimer(candidate.retryAt, () => this.readyRetryEffect(effect.id, candidate.attemptId))
     return true
   }
 
@@ -1920,8 +1928,8 @@ export class PulseRuntime {
       const controller = new AbortController()
       if (effect.kind === 'human' && !this.customExecutor) {
         this.emit({ type: 'human.requested', effectId: effect.id, data: effect.input })
-        if (effect.attemptTimeoutMs !== undefined) this.clock.schedule(effect.attemptTimeoutMs, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: null }, 'failed', { code: 'ATTEMPT_TIMEOUT', message: 'Human response timed out.' }) })
-        if (effect.deadlineAt !== undefined) this.clock.timers.schedule(effect.deadlineAt, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: null }, 'failed', { code: 'TIMEOUT', message: 'Human response deadline exceeded.' }) })
+        if (effect.attemptTimeoutMs !== undefined) this.scheduleRuntimeDelay(effect.attemptTimeoutMs, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: null }, 'failed', { code: 'ATTEMPT_TIMEOUT', message: 'Human response timed out.' }) })
+        if (effect.deadlineAt !== undefined) this.scheduleRuntimeTimer(effect.deadlineAt, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: null }, 'failed', { code: 'TIMEOUT', message: 'Human response deadline exceeded.' }) })
         continue
       }
       const executionRecord: { controller: AbortController; promise: Promise<void>; timeoutTimer?: string; deadlineTimer?: string; cancelTimer?: string } = { controller, promise: Promise.resolve() }
@@ -1932,9 +1940,9 @@ export class PulseRuntime {
         let resolveTimer!: () => void
         executionRecord.promise = new Promise<void>((resolve) => { resolveTimer = resolve })
         this.executions.set(effect.id, executionRecord)
-        this.clock.schedule(delayMs, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: { firedAt: this.clock.now() } }); resolveTimer() })
-        if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.clock.schedule(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
-        if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.clock.timers.schedule(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))
+        this.scheduleRuntimeDelay(delayMs, () => { if (!effect.outcome) this.completeEffect(effect.id, { value: { firedAt: this.clock.now() } }); resolveTimer() })
+        if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.scheduleRuntimeDelay(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
+        if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.scheduleRuntimeTimer(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))
         continue
       }
       if (effect.kind === 'agent' && !this.customExecutor) {
@@ -1964,8 +1972,8 @@ export class PulseRuntime {
       }
       const promise = this.executor(effect, controller.signal, emitObservation).then((execution) => { this.completeEffect(effect.id, execution) }).catch((cause) => { const runtimeError = runtimeErrorFromCause(cause); this.tryEmit({ type: 'effect.dispatch_failed', effectId: effect.id, data: runtimeError as unknown as JsonValue }); this.completeEffect(effect.id, { value: null, sideEffectState: 'none' }, 'failed', runtimeError) }).finally(() => { this.executions.delete(effect.id); this.refreshWaits() })
       executionRecord.promise = promise
-      if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.clock.schedule(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
-      if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.clock.timers.schedule(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))
+      if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.scheduleRuntimeDelay(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
+      if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.scheduleRuntimeTimer(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))
       this.executions.set(effect.id, executionRecord)
       if (effect.kind === 'tool') {
         const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
@@ -2028,7 +2036,7 @@ export class PulseRuntime {
     if (!this.executions.has(effectId)) return this.completeEffect(effectId, { value: null }, 'cancelled', { code: 'CANCELLED', message: reason }, additionalMutations)
     this.executions.get(effectId)!.controller.abort()
     if (graceMs === 0) this.quarantineEffect(effectId, reason, 0)
-    else this.executions.get(effectId)!.cancelTimer = this.clock.schedule(graceMs, () => this.quarantineEffect(effectId, reason, 0))
+    else this.executions.get(effectId)!.cancelTimer = this.scheduleRuntimeDelay(graceMs, () => this.quarantineEffect(effectId, reason, 0))
     return this.executions.has(effectId) && graceMs > 0
   }
 
@@ -2325,7 +2333,7 @@ export class PulseRuntime {
 
   private scheduleWaitDeadline(wait: import('../core/types.js').WaitRecord): void {
     if (wait.state !== 'pending' || wait.spec.deadlineAt === undefined || this.waitDeadlineTimers.has(wait.id)) return
-    const timerId = this.clock.timers.schedule(wait.spec.deadlineAt, () => this.expireWait(wait.id))
+    const timerId = this.scheduleRuntimeTimer(wait.spec.deadlineAt, () => this.expireWait(wait.id))
     this.waitDeadlineTimers.set(wait.id, timerId)
   }
 
@@ -2372,7 +2380,7 @@ export class PulseRuntime {
     if (candidateLane) mutations.push({ op: 'setLane', laneId: candidateLane.id, record: candidateLane })
     for (const event of events) mutations.push({ op: 'appendEvent', event })
     try { this.assertStorageAdmission(mutations) } catch (cause) {
-      const timerId = this.clock.timers.schedule(this.clock.now(), () => this.expireWait(waitId))
+      const timerId = this.scheduleRuntimeTimer(this.clock.now(), () => this.expireWait(waitId))
       this.waitDeadlineTimers.set(waitId, timerId)
       throw cause
     }

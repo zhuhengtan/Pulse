@@ -225,6 +225,8 @@ describe('runtime control boundaries', () => {
     const fired: number[] = []
     runtime.clock.schedule(0, () => fired.push(1))
     runtime.clock.schedule(0, () => fired.push(2))
+    runtime.clock.advance(0)
+    expect(fired).toEqual([])
     runtime.tick()
     expect(fired).toEqual([1])
     runtime.tick()
@@ -237,6 +239,7 @@ describe('runtime control boundaries', () => {
     clock.schedule(10, () => { fired = true })
     const deadline = clock.timers.nextAt()!
     await clock.waitUntil!(deadline)
+    clock.timers.due(clock.now()).forEach((entry) => entry.callback())
     expect(fired).toBe(true)
     expect(clock.now()).toBeGreaterThanOrEqual(deadline)
   })
@@ -321,6 +324,7 @@ describe('runtime control boundaries', () => {
     const { agentId, laneId } = runtime.createAgent('timeout', program)
     runtime.tick()
     runtime.clock.advance(5)
+    runtime.tick()
     expect(runtime.state.effects.get('effect-1')?.outcome?.status).toBe('cancelled')
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
     expect(runtime.state.lanes.get(laneId)?.status).toBe('succeeded')
@@ -335,6 +339,7 @@ describe('runtime control boundaries', () => {
     runtime.tick()
     runtime.cancelAgent(agentId)
     runtime.clock.advance(10)
+    runtime.tick()
     const outcome = await runtime.start(agentId).outcome()
     expect(outcome.status).toBe('cancelled')
     expect(runtime.mutationLog.entries.some((entry) =>
@@ -462,7 +467,8 @@ describe('runtime control boundaries', () => {
     const waitId = runtime.state.lanes.get('lane-1')?.activeWaitId
     expect(waitId).toBeDefined()
     ;(runtime.storagePolicy as any).limits.maxEventLogBytes = 1
-    expect(() => runtime.clock.advance(0)).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    runtime.clock.advance(0)
+    expect(() => runtime.tick()).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
     expect(runtime.state.waits.get(waitId as string)?.state).toBe('pending')
     expect(runtime.state.lanes.get('lane-1')?.status).toBe('waiting')
   })
@@ -511,6 +517,7 @@ describe('runtime control boundaries', () => {
     runtime.tick()
     runtime.cancelAgent(agentId)
     runtime.clock.advance(1)
+    runtime.tick()
     runtime.abandonEffect('effect-1')
     expect(runtime.quarantine.unresolvedEffectIds).toEqual([])
     expect(runtime.state.effects.get('effect-1')?.outcome?.error?.code).toBe('RESOURCE_ABANDONED')

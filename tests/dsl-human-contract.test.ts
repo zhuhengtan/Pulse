@@ -58,6 +58,7 @@ describe('DSL Human and instruction contracts', () => {
     const { agentId } = runtime.createAgent('human timeout', program)
     runtime.tick()
     runtime.clock.advance(5)
+    runtime.tick()
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
     expect(timedOut).toBe(true)
   })
