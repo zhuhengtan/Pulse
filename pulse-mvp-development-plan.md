@@ -145,7 +145,7 @@
 | Detached/background scope | Child Agent 可显式转入后台 scope；父取消不传播到 detached child，仍受 Runtime shutdown 约束，并支持查询与 attach | `tests/agent-effect.test.ts` | `e3ef1ce` |
 | Step 同步边界 | 运行时对未类型化的 Promise Step fail-closed，拒绝跨越同步 Step/异步 Effect 边界，不让 Tick 因非法返回结构崩溃 | `tests/runtime-control.test.ts` | `396499f` |
 | Host 调用预算 | Runtime 在派发前执行总 Attempt/LLM/Tool 次数准入，达到上限时原子失败排队 Effect；已结算 Provider cost 按 currency 累计并可从事件恢复 | `tests/runtime-control.test.ts` | `51cf23d` |
-| 动态工具检索与 Context 接入 | Tool Registry 支持 tags、文本相关性、side-effect/concurrency 过滤和稳定排序；查询结果编译为带稳定版本的 ToolSet 并写入下一次 LLM Context | `tests/tool-discovery.test.ts`、`tests/tool-host.test.ts` | `88970c4`、`480a81a` |
+| 动态工具检索与 Context 接入 | Tool Registry 支持 tags、文本相关性、side-effect/concurrency 过滤和稳定排序；查询结果编译为带稳定版本的 ToolSet 并写入下一次 LLM Context；Runtime 与 Tool SDK 对查询字段做 fail-closed 合同校验 | `tests/tool-discovery.test.ts`、`tests/tool-host.test.ts`、`tests/runtime-tool-registry.test.ts` | `88970c4`、`480a81a`、`d362201` |
 | Checkpoint 事实事件截断 | Checkpoint 保存状态与日志水位后截断已纳入快照的事实事件；恢复后的 Session 通过 `gap` 要求 Host 重同步，并对事件水位 fail-closed 校验 | `tests/storage-outbox.test.ts`、`tests/m4-dsl-e2e.test.ts` | `2ea2a6b`、`e86093a` |
 | Worker 执行边界 | `WorkerCoordinator` 提供 Worker 注册、lease、幂等键、取消、过期回收、snapshot/restore 和 Runtime `EffectExecutor` 适配；adapters 提供带 Bearer 鉴权的 HTTP claim/renew/complete/fail 与 polling Worker | `tests/worker-coordinator.test.ts`、`tests/worker-http.test.ts` | `d221466`、`2250df2`、`685be10`、`47791bd` |
 | SQLite Worker 持久化 | Worker Coordinator 提供 SQLite snapshot backend；WAL/FULL synchronous、lease 状态恢复和 digest CAS 可供多进程共享持久化使用 | `tests/sqlite-worker-persistence.test.ts` | `7453d01` |
@@ -220,7 +220,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、407/407 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、模型 fallback 的 `maxAttempts` 上限、Provider HTTP retryability、Tool summary 超限/不可序列化回退、Session `warmStart.sessionId`、跨 Runtime Session Store warm start、文件/SQLite Session Store durable 恢复与 revision CAS、Persistence Backend 自动绑定 Session Store、目标 Host Policy 的云端候选重算及 Runtime 配置 fail-closed、Manifest workspace/network 权限与动态 ToolSet fail-closed、权限路径/主机规范化、Tool Manifest malformed contract fail-closed、external side-effect policy 的远程未知/取消/恢复处理、逻辑 ToolCall ID 稳定化、Action Decoder 工具隐私/来源传播、隐私感知日志导出、File/HTTP 审计日志 sink、Runtime `auditLogSink`/`auditLogPrivacy` 配置出口、注册 Tool 的默认 Runtime Executor 闭环、注册 external Tool 的 executionRef/reconcile 对账与结果 schema fail-closed、Runtime 默认 Tool 的非 JSON Artifact 发布、executionRef 输入准入、当前时刻 due timer 处理、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Provider fetch/SSE cancellation 契约、Watchdog 二级策略变更与推理能力提升、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、409/409 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、模型 fallback 的 `maxAttempts` 上限、Provider HTTP retryability、Tool summary 超限/不可序列化回退、Session `warmStart.sessionId`、跨 Runtime Session Store warm start、文件/SQLite Session Store durable 恢复与 revision CAS、Persistence Backend 自动绑定 Session Store、目标 Host Policy 的云端候选重算及 Runtime 配置 fail-closed、Manifest workspace/network 权限与动态 ToolSet fail-closed、权限路径/主机规范化、Tool Manifest malformed contract fail-closed、external side-effect policy 的远程未知/取消/恢复处理、逻辑 ToolCall ID 稳定化、Action Decoder 工具隐私/来源传播、隐私感知日志导出、File/HTTP 审计日志 sink、Runtime `auditLogSink`/`auditLogPrivacy` 配置出口、注册 Tool 的默认 Runtime Executor 闭环、注册 external Tool 的 executionRef/reconcile 对账与结果 schema fail-closed、Runtime 默认 Tool 的非 JSON Artifact 发布、executionRef 输入准入、动态 ToolSet 查询合同、当前时刻 due timer 处理、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Provider fetch/SSE cancellation 契约、Watchdog 二级策略变更与推理能力提升、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -731,7 +731,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，68 个测试文件、407 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，68 个测试文件、409 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 - `36ba7a2`：Tool SDK、Runtime Tool Registry 和标准 Tool Adapter 对超限结构化摘要统一回退为“保留主结果、丢弃 summary”，并补充两条执行链回归；完整确定性门禁更新为 68 个测试文件、402/402 通过。
 - `d9086ee`：Tool SDK 与 Runtime Tool Registry 对受支持 JSON Schema 合同递归校验，拒绝未知 type、畸形组合/属性/约束；Runtime JSON Schema 执行器同步拒绝未知 type，避免 Registry 与 Runtime 校验语义分叉。
 - `4f40007`：HTTP Worker 保留 Handler 的结构化错误 code/retryable/details；远程任务进入 `failed` 状态时显式按失败结算，避免错误任务被 Runtime 默认结算为成功并继续等待/完成。
@@ -739,6 +739,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `bbe5506`：Runtime 默认 Tool Executor 对非 JSON 输出采用严格 JSON 检查并转为 Artifact，补齐 `runtime.tools` 路径与标准 Tool Adapter 的结果语义。
 - `16aa708`：Runtime Tool Registry 与 Tool SDK 在生成 `executionRef` 前统一执行输入 schema 校验，防止非法参数先进入远程副作用身份/对账引用计算。
 - `bb3220c`：摘要预算判断改为 fail-safe；循环或不可序列化的 `summarize()` 输出也只丢弃 summary，不影响 Tool 主结果结算。
+- `d362201`：Runtime Tool Registry 与 Tool SDK 对动态 ToolSet 的 text/tags/side-effect/concurrency/limit 查询统一做输入合同校验，非法查询在目录评估前以 `INVALID_TOOL_DISCOVERY_QUERY` fail-closed。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
