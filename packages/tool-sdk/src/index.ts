@@ -226,7 +226,7 @@ export class ToolRegistry {
   }
   resolveResources(name: string, input: unknown): ResourceClaim[] {
     const definition = this.require(name)
-    if (definition.resolveResources) return definition.resolveResources(input)
+    if (definition.resolveResources) return definition.resolveResources(this.validateInput(name, input))
     if (definition.manifest.resources !== undefined) return definition.manifest.resources
     if (definition.manifest.locks.length > 0 || definition.resourceAdmissionMode === 'explicit') return definition.manifest.locks
     if (definition.manifest.sideEffectPolicy === 'write') return [{ resource: 'workspace', mode: 'exclusive' }]

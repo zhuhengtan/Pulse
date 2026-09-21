@@ -197,6 +197,7 @@ describe('Tool SDK to Runtime Effect host', () => {
       manifest: { name: 'ref-input', version: '1', description: 'validated execution reference', inputSchema: { type: 'object', required: ['value'], properties: { value: { type: 'string' } }, additionalProperties: false }, outputSchema: {}, concurrencyClass: 'tool' as const, locks: [], supportsAbortSignal: true, sideEffectPolicy: 'external' as const, retrySafety: 'unsafe' as const, defaultTimeoutMs: 1000,
       },
       executionRef: (input: { value: string }) => `ref:${input.value}`,
+      resolveResources: (input: { value: string }) => [{ resource: `value:${input.value}`, mode: 'shared' as const }],
       execute: () => ({ ok: true }),
     }
     const context = { toolCallId: '', effectId: '', attemptId: '', agentId: '', laneId: '', signal: new AbortController().signal, emit: () => {} }
@@ -206,6 +207,9 @@ describe('Tool SDK to Runtime Effect host', () => {
     const sdkRegistry = new ToolRegistry()
     sdkRegistry.register(definition as never)
     expect(() => sdkRegistry.executionRef('ref-input', { value: 1 }, context)).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_INPUT' }))
+    expect(() => runtimeRegistry.resolveResources('ref-input', { value: 1 })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_INPUT' }))
+    expect(() => sdkRegistry.resolveResources('ref-input', { value: 1 })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_INPUT' }))
+    expect(sdkRegistry.resolveResources('ref-input', { value: 'ok' })).toEqual([{ resource: 'value:ok', mode: 'shared' }])
   })
 
   it('compiles dynamic tool discovery into a versioned Context ToolSet', async () => {
