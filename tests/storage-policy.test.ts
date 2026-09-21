@@ -61,14 +61,19 @@ describe('session storage policy', () => {
     const runtime = new PulseRuntime()
     runtime.createAgent('transactional rebuild', program)
     runtime.tick()
+    runtime.createAgent('second agent', program)
     const before = runtime.storagePolicy.snapshot()
     const eventBytes = before.records.filter((record) => record.kind === 'event').reduce((total, record) => total + record.bytes, 0)
     expect(eventBytes).toBeGreaterThan(0)
     ;(runtime.storagePolicy as any).limits.maxEventLogBytes = eventBytes - 1
-    expect(() => runtime.tick()).toThrow('SESSION_STORAGE_LIMIT_EXCEEDED')
+    // Already-admitted records are not re-validated against the limit. The next step cannot
+    // admit its events, so the Lane fails with SESSION_STORAGE_LIMIT_EXCEEDED while the
+    // event log itself stays exactly as it was: nothing is half-applied.
+    runtime.tick()
     const after = runtime.storagePolicy.snapshot()
-    expect(after.records).toEqual(before.records)
-    expect(after.pinSources).toEqual(before.pinSources)
+    expect(after.records.filter((record) => record.kind === 'event')).toEqual(before.records.filter((record) => record.kind === 'event'))
+    expect(runtime.state.events.length).toBe(before.records.filter((record) => record.kind === 'event').length)
+    expect([...runtime.state.lanes.values()].find((lane) => lane.agentId === 'agent-2')?.failure?.error.code).toBe('SESSION_STORAGE_LIMIT_EXCEEDED')
   })
 
   it('automatically pins active lane snapshots and LLM requests', async () => {
