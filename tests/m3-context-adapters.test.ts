@@ -3,9 +3,9 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { ContextBuilder, InMemoryModelRegistry, ModelFallbackController, ModelRouter, OutputValidationError, PulseRuntime, appendHistory, createAgent, createRuntimeState, modelFallbackError, stableSerialize, validateActionToolCalls, validateAdapterResult, validateStructuredOutput, MemoryStorage } from '@pulse/runtime'
-import { AnthropicAdapter, createModelEffectExecutor, FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, OpenAICompatibleAdapter, runShell } from '@pulse/adapters'
-import { defineTool } from '@pulse/tool-sdk'
+import { ContextBuilder, InMemoryModelRegistry, ModelFallbackController, ModelRouter, OutputValidationError, PulseRuntime, appendHistory, createAgent, createRuntimeState, modelFallbackError, stableSerialize, validateActionToolCalls, validateAdapterResult, validateStructuredOutput, MemoryStorage } from '@hunterzhu/pulse-runtime'
+import { AnthropicAdapter, createModelEffectExecutor, FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, OpenAICompatibleAdapter, runShell } from '@hunterzhu/pulse-adapters'
+import { defineTool } from '@hunterzhu/pulse-tool-sdk'
 
 const resume = { programId: 'context', programVersion: '1', step: 'start', locals: {} }
 
@@ -54,7 +54,7 @@ describe('M1-3 context, models and adapters', () => {
     expect(() => normalizeOpenAIResponse({ choices: [{ message: { content: '', tool_calls: [{ function: { name: 'read', arguments: '{bad' } }] }, finish_reason: 'tool_calls' }] })).toThrow('INVALID_TOOL_ARGUMENTS')
     expect(() => normalizeAnthropicResponse({ content: [{ type: 'tool_use', name: 'read', input: '{bad' }] })).toThrow('INVALID_TOOL_ARGUMENTS')
     const stream = new Response('data: {bad\n\n', { headers: { 'content-type': 'text/event-stream' } })
-    await expect(import('@pulse/adapters').then(({ consumeProviderSse }) => consumeProviderSse(stream))).rejects.toThrow('PROVIDER_STREAM_INVALID_JSON')
+    await expect(import('@hunterzhu/pulse-adapters').then(({ consumeProviderSse }) => consumeProviderSse(stream))).rejects.toThrow('PROVIDER_STREAM_INVALID_JSON')
   })
 
   it('rejects malformed provider contracts during normalization', () => {
@@ -187,7 +187,7 @@ describe('M1-3 context, models and adapters', () => {
   it('rejects cyclic and non-JSON provider output before publishing a value', async () => {
     const registry = new InMemoryModelRegistry()
     registry.register({ id: 'unsafe', providerId: 'unsafe-provider', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 1 })
-    const projection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'tools@1', instruction: 'reason', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'instruction' as const, content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'tools@1', privacy: 'public' as const, privacyRefs: [] } as import('@pulse/runtime').LLMRequestProjection
+    const projection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'tools@1', instruction: 'reason', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'instruction' as const, content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'tools@1', privacy: 'public' as const, privacyRefs: [] } as import('@hunterzhu/pulse-runtime').LLMRequestProjection
     const cyclic: Record<string, unknown> = {}
     cyclic.self = cyclic
     const providers = new Map<string, ProviderAdapter>([['unsafe-provider', { id: 'unsafe-provider', name: 'unsafe', executeAttempt: async () => ({ text: '', structured: cyclic, toolCalls: [], finishReason: 'stop' }) }]])

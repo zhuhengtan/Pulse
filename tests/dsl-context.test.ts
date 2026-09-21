@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, createDraftProxy, defineLaneProgram } from '@pulse/runtime'
+import { PulseRuntime, createDraftProxy, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 import { z } from 'zod'
 
 describe('DSL StepContext', () => {

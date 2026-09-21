@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, VirtualClock } from '@pulse/runtime'
+import { PulseRuntime, VirtualClock } from '@hunterzhu/pulse-runtime'
 
 describe('Runtime idle boundaries', () => {
   it('waitForIdle drains timers that are already due', async () => {

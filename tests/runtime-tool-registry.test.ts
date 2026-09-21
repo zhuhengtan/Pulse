@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { defineTool, ToolRegistry } from '@pulse/tool-sdk'
-import { RuntimeToolRegistry, PulseRuntime } from '@pulse/runtime'
-import { createToolEffectExecutor } from '@pulse/adapters'
-import type { EffectRecord } from '@pulse/runtime'
+import { defineTool, ToolRegistry } from '@hunterzhu/pulse-tool-sdk'
+import { RuntimeToolRegistry, PulseRuntime } from '@hunterzhu/pulse-runtime'
+import { createToolEffectExecutor } from '@hunterzhu/pulse-adapters'
+import type { EffectRecord } from '@hunterzhu/pulse-runtime'
 import { z } from 'zod'
 
 const echo = defineTool({ name: 'echo', description: 'echo input', input: z.object({ value: z.string() }), output: z.object({ value: z.string() }), execute: (input) => input })

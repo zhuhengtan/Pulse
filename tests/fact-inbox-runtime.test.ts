@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { FactInbox, PulseRuntime, factInboxDedupeDigest, type FactInboxDedupeArchive, type FactInboxDedupeArchiveBatch } from '@pulse/runtime'
+import { FactInbox, PulseRuntime, factInboxDedupeDigest, type FactInboxDedupeArchive, type FactInboxDedupeArchiveBatch } from '@hunterzhu/pulse-runtime'
 
 class MemoryDedupeArchive implements FactInboxDedupeArchive {
   readonly archiveId = 'runtime-memory-dedupe-v1'

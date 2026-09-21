@@ -2,8 +2,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
-import { SqliteRuntimeContentStore, SqliteRuntimeEventArchive } from '@pulse/runtime'
-import type { RuntimeEvent } from '@pulse/runtime'
+import { SqliteRuntimeContentStore, SqliteRuntimeEventArchive } from '@hunterzhu/pulse-runtime'
+import type { RuntimeEvent } from '@hunterzhu/pulse-runtime'
 
 describe('SQLite runtime content and event stores', () => {
   it('shares result/snapshot bodies between instances with idempotent conflict checks', async () => {

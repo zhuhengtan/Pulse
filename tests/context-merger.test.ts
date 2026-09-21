@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ContextMerger, apply, createAgent, createRuntimeState, validateStep } from '@pulse/runtime'
+import { ContextMerger, apply, createAgent, createRuntimeState, validateStep } from '@hunterzhu/pulse-runtime'
 
 const point = (step: string) => ({ programId: 'merge', programVersion: '1', step, locals: {} })
 

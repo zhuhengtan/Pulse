@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, apply, createAgent, createRuntimeState, validateStep } from '@pulse/runtime'
-import type { LaneProgram, LaneStepOutput, RuntimeState } from '@pulse/runtime'
+import { PulseRuntime, apply, createAgent, createRuntimeState, validateStep } from '@hunterzhu/pulse-runtime'
+import type { LaneProgram, LaneStepOutput, RuntimeState } from '@hunterzhu/pulse-runtime'
 
 const point = (step: string, programId = 'm0') => ({ programId, programVersion: '1', step, locals: {} })
 const submit = (key: string, kind: 'tool' | 'human' | 'timer' = 'tool', concurrencyClass: 'tool' | 'none' = kind === 'tool' ? 'tool' : 'none') => ({ type: 'submit_effects' as const, effects: [{ key, kind, concurrencyClass, input: {} }], wait: { onUnsatisfied: 'resume_with_error' as const } })

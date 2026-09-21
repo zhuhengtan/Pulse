@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createAgent, createRuntimeState, exportRuntimePersistence, importRuntimeState, publishArtifact, publishFinding, validateRuntimePersistenceSnapshot, PulseRuntime } from '@pulse/runtime'
+import { createAgent, createRuntimeState, exportRuntimePersistence, importRuntimeState, publishArtifact, publishFinding, validateRuntimePersistenceSnapshot, PulseRuntime } from '@hunterzhu/pulse-runtime'
 
 describe('Finding evidence records', () => {
   it('publishes a privacy-inheriting finding with typed evidence refs', () => {

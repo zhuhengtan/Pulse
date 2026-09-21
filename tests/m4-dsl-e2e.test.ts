@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { PulseRuntime, assertProgramPure, defineLaneProgram } from '@pulse/runtime'
+import { PulseRuntime, assertProgramPure, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 import { createLoginTroubleshootingRuntime } from '../examples/login-troubleshooting/index.js'
 
 describe('M1-4 DSL and end-to-end workflow', () => {

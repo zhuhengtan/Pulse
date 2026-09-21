@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { FileRuntimePersistenceBackend, PulseRuntime, SqliteRuntimePersistenceBackend } from '@pulse/runtime'
+import { FileRuntimePersistenceBackend, PulseRuntime, SqliteRuntimePersistenceBackend } from '@hunterzhu/pulse-runtime'
 
 const fact = { type: 'cancel' as const, agentId: 'agent-1', reason: 'test' }
 

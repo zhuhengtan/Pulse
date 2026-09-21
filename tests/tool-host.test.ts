@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { createToolEffectExecutor, createToolEffectSubmissionPreparer, reconcileToolEffect } from '@pulse/adapters'
-import { defineTool, ToolError, ToolRegistry } from '@pulse/tool-sdk'
-import { PulseRuntime } from '@pulse/runtime'
-import type { EffectRecord, LaneProgram } from '@pulse/runtime'
+import { createToolEffectExecutor, createToolEffectSubmissionPreparer, reconcileToolEffect } from '@hunterzhu/pulse-adapters'
+import { defineTool, ToolError, ToolRegistry } from '@hunterzhu/pulse-tool-sdk'
+import { PulseRuntime } from '@hunterzhu/pulse-runtime'
+import type { EffectRecord, LaneProgram } from '@hunterzhu/pulse-runtime'
 import { z } from 'zod'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -83,7 +83,7 @@ describe('Tool SDK to Runtime Effect host', () => {
       : { actions: [{ type: 'complete', result: { ok: true } }], next: point('live-observation', 'finish') } }
     const { agentId } = runtime.createAgent('live observation', program)
     const session = runtime.start(agentId)
-    let liveObservation: import('@pulse/runtime').SessionEvent | undefined
+    let liveObservation: import('@hunterzhu/pulse-runtime').SessionEvent | undefined
     for await (const event of session.stream()) {
       if (event.kind === 'observation') {
         liveObservation = event
@@ -115,7 +115,7 @@ describe('Tool SDK to Runtime Effect host', () => {
     registry.register(defineTool({ name: 'write-job', description: 'remote write', input: z.object({}), output: z.object({ ok: z.boolean() }), sideEffectPolicy: 'write', execute: async (_input, context) => { await new Promise<void>((_resolve, reject) => { context.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }) }); return { ok: true } } }))
     const controller = new AbortController()
     const executor = createToolEffectExecutor(registry)
-    const effect = { id: 'effect-2', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'write-job', kind: 'tool', concurrencyClass: 'tool', input: { name: 'write-job', arguments: {} }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as import('@pulse/runtime').EffectRecord
+    const effect = { id: 'effect-2', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'write-job', kind: 'tool', concurrencyClass: 'tool', input: { name: 'write-job', arguments: {} }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as import('@hunterzhu/pulse-runtime').EffectRecord
     const pending = executor(effect, controller.signal)
     controller.abort()
     await expect(pending).resolves.toMatchObject({ executionState: 'remote_unknown', sideEffectState: 'unknown' })
@@ -251,7 +251,7 @@ describe('Tool SDK to Runtime Effect host', () => {
     const registry = new ToolRegistry()
     registry.register(defineTool({ name: 'read-file', description: 'read a file', tags: ['filesystem', 'read'], input: z.object({ path: z.string() }), output: z.object({ text: z.string() }), execute: () => ({ text: '' }) }))
     registry.register(defineTool({ name: 'write-file', description: 'write a file', tags: ['filesystem', 'write'], input: z.object({ path: z.string() }), output: z.object({ ok: z.boolean() }), execute: () => ({ ok: true }) }))
-    let captured: import('@pulse/runtime').EffectRecord | undefined
+    let captured: import('@hunterzhu/pulse-runtime').EffectRecord | undefined
     const runtime = new PulseRuntime({
       effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry),
       effectExecutor: async (effect) => { captured = structuredClone(effect); return { value: { ok: true } } },
@@ -261,11 +261,11 @@ describe('Tool SDK to Runtime Effect host', () => {
       : { actions: [{ type: 'complete', result: { ok: true } }], next: point('dynamic-tools', 'finish') } }
     const { agentId } = runtime.createAgent('dynamic tools', program)
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
-    const input = captured?.input as Record<string, import('@pulse/runtime').JsonValue>
+    const input = captured?.input as Record<string, import('@hunterzhu/pulse-runtime').JsonValue>
     expect(input.toolSetId).toMatch(/^dynamic@[0-9a-f]{16}$/)
     expect(input.tools).toEqual({ tools: [{ name: 'read-file', description: 'read a file', inputSchema: expect.any(Object) }] })
-    const request = input.request as Record<string, import('@pulse/runtime').JsonValue>
-    expect((request.blocks as Array<{ kind: string; content: import('@pulse/runtime').JsonValue }>).find((block) => block.kind === 'tools')?.content).toEqual(input.tools)
+    const request = input.request as Record<string, import('@hunterzhu/pulse-runtime').JsonValue>
+    expect((request.blocks as Array<{ kind: string; content: import('@hunterzhu/pulse-runtime').JsonValue }>).find((block) => block.kind === 'tools')?.content).toEqual(input.tools)
   })
 
   it('lets Runtime reconcile a quarantined effect and publish its terminal outcome', async () => {

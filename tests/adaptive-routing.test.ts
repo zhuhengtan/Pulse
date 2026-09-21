@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { createModelEffectExecutor, type ProviderAdapter } from '@pulse/adapters'
-import { AdaptiveModelRouter, InMemoryModelRegistry, type EffectRecord, type LLMRequestProjection } from '@pulse/runtime'
+import { createModelEffectExecutor, type ProviderAdapter } from '@hunterzhu/pulse-adapters'
+import { AdaptiveModelRouter, InMemoryModelRegistry, type EffectRecord, type LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 
 const projection: LLMRequestProjection = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'default', instruction: 'reason', privacy: 'public', privacyRefs: [] }, blocks: [{ kind: 'instruction', content: 'reason' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'default', privacy: 'public', privacyRefs: [] }
 

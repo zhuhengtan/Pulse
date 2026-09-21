@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, createAgent, createRuntimeState, validateStep } from '@pulse/runtime'
-import type { EffectRecord, LaneProgram } from '@pulse/runtime'
+import { PulseRuntime, createAgent, createRuntimeState, validateStep } from '@hunterzhu/pulse-runtime'
+import type { EffectRecord, LaneProgram } from '@hunterzhu/pulse-runtime'
 
 const point = (step: string, programId = 'join') => ({ programId, programVersion: '1', step, locals: {} })
 

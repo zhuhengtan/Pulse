@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { apply, createAgent, createRuntimeState, validateStep, DependencyGraph, detectDependencyCycle } from '@pulse/runtime'
-import type { LaneStepOutput, TargetRef } from '@pulse/runtime'
+import { apply, createAgent, createRuntimeState, validateStep, DependencyGraph, detectDependencyCycle } from '@hunterzhu/pulse-runtime'
+import type { LaneStepOutput, TargetRef } from '@hunterzhu/pulse-runtime'
 
 const resume = (step = 'next') => ({ programId: 'test', programVersion: '1', step, locals: {} })
 function setup() {

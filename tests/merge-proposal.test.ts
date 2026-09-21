@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, defineLaneProgram } from '@pulse/runtime'
+import { PulseRuntime, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 import { z } from 'zod'
 
 describe('MergeProposal isolation', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defineTool, ToolRegistry } from '@pulse/tool-sdk'
+import { defineTool, ToolRegistry } from '@hunterzhu/pulse-tool-sdk'
 import { z } from 'zod'
 
 describe('ToolContext and manifest contract', () => {

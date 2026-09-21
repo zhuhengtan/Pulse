@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { createAgent, createRuntimeState, exportRuntimeLog, exportRuntimeLogTo, exportRuntimeState, FileRuntimeLogSink, HttpRuntimeLogSink, importRuntimeState, PulseRuntime, serializeRuntimeState } from '@pulse/runtime'
+import { createAgent, createRuntimeState, exportRuntimeLog, exportRuntimeLogTo, exportRuntimeState, FileRuntimeLogSink, HttpRuntimeLogSink, importRuntimeState, PulseRuntime, serializeRuntimeState } from '@hunterzhu/pulse-runtime'
 
 describe('session serialization boundary', () => {
   it('round-trips Runtime state without losing Maps, Sets, references, events, or Infinity limits', () => {

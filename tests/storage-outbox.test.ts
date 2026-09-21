@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EffectOutbox, FileRuntimeContentStore, FileRuntimeEventArchive, FileRuntimePersistenceBackend, PulseRuntime, createRuntimeState, exportRuntimePersistence, importRuntimePersistence, MutationLog, serializeRuntimePersistence } from '@pulse/runtime'
+import { EffectOutbox, FileRuntimeContentStore, FileRuntimeEventArchive, FileRuntimePersistenceBackend, PulseRuntime, createRuntimeState, exportRuntimePersistence, importRuntimePersistence, MutationLog, serializeRuntimePersistence } from '@hunterzhu/pulse-runtime'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -288,11 +288,11 @@ describe('effect outbox and runtime persistence envelope', () => {
 
   it('durably records a pending outbox entry before dispatching an Effect', async () => {
     let release!: () => void
-    let persistedPending: import('@pulse/runtime').RuntimePersistenceSnapshot | undefined
+    let persistedPending: import('@hunterzhu/pulse-runtime').RuntimePersistenceSnapshot | undefined
     let started = false
     const backend = {
       load: async () => undefined,
-      save: async (snapshot: import('@pulse/runtime').RuntimePersistenceSnapshot) => {
+      save: async (snapshot: import('@hunterzhu/pulse-runtime').RuntimePersistenceSnapshot) => {
         if (snapshot.outbox.entries.length > 0 && persistedPending === undefined) {
           persistedPending = snapshot
           await new Promise<void>((resolve) => { release = resolve })

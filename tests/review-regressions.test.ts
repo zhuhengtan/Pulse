@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { ContextMerger, PulseRuntime, apply, createAgent, createRuntimeState, importRuntimePersistence, validateStep } from '@pulse/runtime'
+import { ContextMerger, PulseRuntime, apply, createAgent, createRuntimeState, importRuntimePersistence, validateStep } from '@hunterzhu/pulse-runtime'
 import { createDraftProxy } from '../packages/runtime/src/dsl/context-proxy.js'
-import type { LaneProgram } from '@pulse/runtime'
+import type { LaneProgram } from '@hunterzhu/pulse-runtime'
 
 // Regression coverage for the issues confirmed during the runtime code review.
 // Each block names the failure mode it guards against.

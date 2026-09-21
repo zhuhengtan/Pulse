@@ -2,9 +2,9 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { PulseRuntime, exportWarmStartSession } from '@pulse/runtime'
-import { SqliteRuntimePersistenceBackend, withRuntimePersistenceIntegrity } from '@pulse/runtime'
-import type { LaneProgram, RuntimePersistenceSnapshot } from '@pulse/runtime'
+import { PulseRuntime, exportWarmStartSession } from '@hunterzhu/pulse-runtime'
+import { SqliteRuntimePersistenceBackend, withRuntimePersistenceIntegrity } from '@hunterzhu/pulse-runtime'
+import type { LaneProgram, RuntimePersistenceSnapshot } from '@hunterzhu/pulse-runtime'
 
 const point = (id: string, step: string) => ({ programId: id, programVersion: '1', step, locals: {} })
 

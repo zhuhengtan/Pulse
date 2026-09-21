@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { PulseRuntime, createAgent, createRuntimeState, defineLaneProgram } from '@pulse/runtime'
+import { PulseRuntime, createAgent, createRuntimeState, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 
 const point = (programId: string, step: string) => ({ programId, programVersion: '1', step, locals: {} })
 

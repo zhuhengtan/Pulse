@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { FileRuntimeSessionStore, InMemoryRuntimeSessionStore, PulseRuntime, SqliteRuntimeSessionStore, exportWarmStartSession } from '@pulse/runtime'
-import type { LaneProgram } from '@pulse/runtime'
+import { FileRuntimeSessionStore, InMemoryRuntimeSessionStore, PulseRuntime, SqliteRuntimeSessionStore, exportWarmStartSession } from '@hunterzhu/pulse-runtime'
+import type { LaneProgram } from '@hunterzhu/pulse-runtime'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

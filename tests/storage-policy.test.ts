@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, SessionStoragePolicy } from '@pulse/runtime'
-import type { LaneProgram } from '@pulse/runtime'
+import { PulseRuntime, SessionStoragePolicy } from '@hunterzhu/pulse-runtime'
+import type { LaneProgram } from '@hunterzhu/pulse-runtime'
 
 describe('session storage policy', () => {
   it('pins active records and compacts unpinned result data under pressure', () => {

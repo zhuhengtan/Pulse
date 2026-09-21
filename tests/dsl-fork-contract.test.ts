@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, defineLaneProgram } from '@pulse/runtime'
+import { PulseRuntime, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 
 describe('DSL Fork contract', () => {
   it('accepts the specification join object and sibling dependencies', async () => {

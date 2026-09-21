@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, type LaneProgram } from '@pulse/runtime'
+import { PulseRuntime, type LaneProgram } from '@hunterzhu/pulse-runtime'
 
 const program: LaneProgram = { id: 'agent-contract', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'agent-contract', programVersion: '1', step: 'start', locals: {} } }) }
 

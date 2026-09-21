@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { PulseRuntime, defineLaneProgram } from '@pulse/runtime'
+import { PulseRuntime, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 
 const LoginState = z.object({
   plan: z.object({ analyzeGoal: z.string(), testsGoal: z.string(), fixGoal: z.string() }).optional(),

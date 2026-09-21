@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createAgent, createRuntimeState, defineLaneProgram, validateStep, PulseRuntime } from '@pulse/runtime'
+import { createAgent, createRuntimeState, defineLaneProgram, validateStep, PulseRuntime } from '@hunterzhu/pulse-runtime'
 
 const point = (step: string) => ({ programId: 'affinity', programVersion: '1', step, locals: {} })
 

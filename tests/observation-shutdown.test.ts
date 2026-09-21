@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { FileRuntimeTelemetryExporter, HttpRuntimeTelemetryExporter, ObservationInbox, PulseRuntime, RuntimeTelemetryAggregator, defineLaneProgram } from '@pulse/runtime'
+import { FileRuntimeTelemetryExporter, HttpRuntimeTelemetryExporter, ObservationInbox, PulseRuntime, RuntimeTelemetryAggregator, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

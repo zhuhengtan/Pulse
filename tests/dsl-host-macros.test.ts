@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { PulseRuntime, defineLaneProgram, definePlanAndExecuteLane, defineReActLane, defineScatterGatherLane } from '@pulse/runtime'
+import { PulseRuntime, defineLaneProgram, definePlanAndExecuteLane, defineReActLane, defineScatterGatherLane } from '@hunterzhu/pulse-runtime'
 
 describe('DSL Human/Timer host macros', () => {
   it('compiles addTimerStep into a timer wait and resumes on fire', async () => {

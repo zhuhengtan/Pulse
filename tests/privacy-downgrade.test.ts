@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, createAgent, createRuntimeState, importRuntimeState, serializeRuntimeState, validateStep } from '@pulse/runtime'
+import { apply, createAgent, createRuntimeState, importRuntimeState, serializeRuntimeState, validateStep } from '@hunterzhu/pulse-runtime'
 
 const point = (step: string) => ({ programId: 'privacy-downgrade', programVersion: '1', step, locals: {} })
 

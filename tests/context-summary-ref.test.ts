@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createAgent, createRuntimeState, validateStep } from '@pulse/runtime'
+import { createAgent, createRuntimeState, validateStep } from '@hunterzhu/pulse-runtime'
 
 const next = { programId: 'summary', programVersion: '1', step: 'next', locals: {} }
 

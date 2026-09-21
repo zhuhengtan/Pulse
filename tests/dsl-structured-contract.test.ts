@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { PulseRuntime, defineLaneProgram } from '@pulse/runtime'
+import { PulseRuntime, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 
 describe('structured LLM DSL contract', () => {
   it('keeps the original inputs and execution policies during bounded self-correction', async () => {

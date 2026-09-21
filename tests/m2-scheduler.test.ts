@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CancellationScope, HostCommandQueue, PulseRuntime, QuarantineScope, ReadyQueue, ResourceLockManager, VirtualClock } from '@pulse/runtime'
+import { CancellationScope, HostCommandQueue, PulseRuntime, QuarantineScope, ReadyQueue, ResourceLockManager, VirtualClock } from '@hunterzhu/pulse-runtime'
 
 const point = (step: string, programId = 'scheduler-test') => ({ programId, programVersion: '1', step, locals: {} })
 
@@ -81,7 +81,7 @@ describe('M1-2 scheduler and lifecycle primitives', () => {
     const requests: string[][] = []
     const model = {
       id: 'test-ranker',
-      decide: async (request: import('@pulse/runtime').SchedulerDecisionRequest) => {
+      decide: async (request: import('@hunterzhu/pulse-runtime').SchedulerDecisionRequest) => {
         requests.push(request.candidates.map((candidate) => candidate.laneId))
         return { decisionId: request.decisionId, candidateEpoch: request.candidateEpoch, orderedLaneIds: [...request.candidates].reverse().map((candidate) => candidate.laneId), modelId: 'test-ranker' }
       },
@@ -109,10 +109,10 @@ describe('M1-2 scheduler and lifecycle primitives', () => {
   })
 
   it('rejects scheduler suggestions after the ready candidate epoch changes', async () => {
-    let resolveDecision: ((value: import('@pulse/runtime').SchedulerDecision) => void) | undefined
+    let resolveDecision: ((value: import('@hunterzhu/pulse-runtime').SchedulerDecision) => void) | undefined
     const model = {
       id: 'stale-ranker',
-      decide: (request: import('@pulse/runtime').SchedulerDecisionRequest) => new Promise<import('@pulse/runtime').SchedulerDecision>((resolve) => {
+      decide: (request: import('@hunterzhu/pulse-runtime').SchedulerDecisionRequest) => new Promise<import('@hunterzhu/pulse-runtime').SchedulerDecision>((resolve) => {
         resolveDecision = () => resolve({ decisionId: request.decisionId, candidateEpoch: request.candidateEpoch, orderedLaneIds: [...request.candidates].reverse().map((candidate) => candidate.laneId), modelId: 'stale-ranker' })
       }),
     }

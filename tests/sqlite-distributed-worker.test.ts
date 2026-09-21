@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
-import { SqliteDistributedWorkerCoordinator } from '@pulse/runtime'
+import { SqliteDistributedWorkerCoordinator } from '@hunterzhu/pulse-runtime'
 
 describe('SqliteDistributedWorkerCoordinator', () => {
   it('atomically claims one queued task across independent coordinator instances', async () => {

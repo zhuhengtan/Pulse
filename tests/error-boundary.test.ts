@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, defineLaneProgram } from '@pulse/runtime'
+import { PulseRuntime, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 
 describe('DSL error boundary', () => {
   it('turns a synchronous Step failure into an explicit boundary transition', async () => {

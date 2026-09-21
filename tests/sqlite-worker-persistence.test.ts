@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { SqliteWorkerPersistenceBackend, WorkerCoordinator } from '@pulse/runtime'
+import { SqliteWorkerPersistenceBackend, WorkerCoordinator } from '@hunterzhu/pulse-runtime'
 
 describe('SQLite worker persistence backend', () => {
   const directories: string[] = []

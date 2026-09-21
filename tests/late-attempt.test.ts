@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime } from '@pulse/runtime'
-import type { EffectObservationEmitter, LaneProgram } from '@pulse/runtime'
+import { PulseRuntime } from '@hunterzhu/pulse-runtime'
+import type { EffectObservationEmitter, LaneProgram } from '@hunterzhu/pulse-runtime'
 
 const point = (id: string, step: string) => ({ programId: id, programVersion: '1', step, locals: {} })
 

@@ -24,15 +24,36 @@ importers:
 
   packages/adapters:
     dependencies:
-      '@pulse/runtime':
+      '@hunterzhu/pulse-runtime':
         specifier: workspace:*
         version: link:../runtime
-      '@pulse/tool-sdk':
+      '@hunterzhu/pulse-tool-sdk':
         specifier: workspace:*
         version: link:../tool-sdk
 
+  packages/cli:
+    dependencies:
+      '@hunterzhu/pulse-server':
+        specifier: workspace:*
+        version: link:../server
+
   packages/runtime:
     dependencies:
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+
+  packages/server:
+    dependencies:
+      '@hunterzhu/pulse-adapters':
+        specifier: workspace:*
+        version: link:../adapters
+      '@hunterzhu/pulse-runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@hunterzhu/pulse-tool-sdk':
+        specifier: workspace:*
+        version: link:../tool-sdk
       zod:
         specifier: ^3.24.1
         version: 3.25.76

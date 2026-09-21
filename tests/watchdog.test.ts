@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { createAgent, createRuntimeState, observeProgress, progressFingerprint, PulseRuntime } from '@pulse/runtime'
-import type { LaneProgram } from '@pulse/runtime'
+import { createAgent, createRuntimeState, observeProgress, progressFingerprint, PulseRuntime } from '@hunterzhu/pulse-runtime'
+import type { LaneProgram } from '@hunterzhu/pulse-runtime'
 
 describe('progress watchdog', () => {
   it('ignores SDK bookkeeping while fingerprinting Lane progress', () => {

@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { createModelEffectExecutor, type ProviderAdapter } from '@pulse/adapters'
-import { ModelRouter, InMemoryModelRegistry, modelFallbackError, estimateProjectionTokens, type LLMRequestProjection, validateAdapterResult, validateJsonSchema } from '@pulse/runtime'
-import { PulseRuntime } from '@pulse/runtime'
-import type { EffectRecord, LaneProgram } from '@pulse/runtime'
-import { defineLaneProgram } from '@pulse/runtime'
+import { createModelEffectExecutor, type ProviderAdapter } from '@hunterzhu/pulse-adapters'
+import { ModelRouter, InMemoryModelRegistry, modelFallbackError, estimateProjectionTokens, type LLMRequestProjection, validateAdapterResult, validateJsonSchema } from '@hunterzhu/pulse-runtime'
+import { PulseRuntime } from '@hunterzhu/pulse-runtime'
+import type { EffectRecord, LaneProgram } from '@hunterzhu/pulse-runtime'
+import { defineLaneProgram } from '@hunterzhu/pulse-runtime'
 import { z } from 'zod'
 
 const point = (id: string, step: string) => ({ programId: id, programVersion: '1', step, locals: {} })

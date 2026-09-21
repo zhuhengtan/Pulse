@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { createWorkerEffectExecutor, FileWorkerPersistenceBackend, PulseRuntime, WorkerCoordinator } from '@pulse/runtime'
-import type { JsonValue, LaneProgram } from '@pulse/runtime'
+import { createWorkerEffectExecutor, FileWorkerPersistenceBackend, PulseRuntime, WorkerCoordinator } from '@hunterzhu/pulse-runtime'
+import type { JsonValue, LaneProgram } from '@hunterzhu/pulse-runtime'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { once } from 'node:events'
-import { OpenAICompatibleAdapter } from '@pulse/adapters'
-import { PulseRuntime, type LaneProgram, type LLMRequestProjection } from '@pulse/runtime'
+import { OpenAICompatibleAdapter } from '@hunterzhu/pulse-adapters'
+import { PulseRuntime, type LaneProgram, type LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 
 const request: LLMRequestProjection = {
   contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'http@1', instruction: 'Reply with OK.', privacy: 'public', privacyRefs: [] },

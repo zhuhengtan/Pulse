@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, createAgent, createRuntimeState, decodeLLMActions, OutputValidationError, validateStep } from '@pulse/runtime'
+import { apply, createAgent, createRuntimeState, decodeLLMActions, OutputValidationError, validateStep } from '@hunterzhu/pulse-runtime'
 
 describe('LLM action decoder', () => {
   it('converts allowed tool calls into one Runtime submit action', () => {

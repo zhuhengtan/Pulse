@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { apply, createAgent, createRuntimeState, serializeRuntimeState, validateStep } from '@pulse/runtime'
-import type { LaneStepOutput, RuntimeError } from '@pulse/runtime'
+import { apply, createAgent, createRuntimeState, serializeRuntimeState, validateStep } from '@hunterzhu/pulse-runtime'
+import type { LaneStepOutput, RuntimeError } from '@hunterzhu/pulse-runtime'
 
 const resume = (step = 'next') => ({ programId: 'property', programVersion: '1', step, locals: {} })
 

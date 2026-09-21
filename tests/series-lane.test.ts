@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, defineLaneProgram, defineSeriesLane } from '@pulse/runtime'
+import { PulseRuntime, defineLaneProgram, defineSeriesLane } from '@hunterzhu/pulse-runtime'
 
 describe('series lane template', () => {
   it('runs all members sequentially on one Lane and aggregates outcomes', async () => {

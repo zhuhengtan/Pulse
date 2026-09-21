@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, validateRuntimePersistenceSnapshot } from '@pulse/runtime'
-import type { LaneProgram } from '@pulse/runtime'
+import { PulseRuntime, validateRuntimePersistenceSnapshot } from '@hunterzhu/pulse-runtime'
+import type { LaneProgram } from '@hunterzhu/pulse-runtime'
 
 describe('runtime persistence compatibility', () => {
   it('persists program, tool, policy and router versions and rejects incompatible restore hosts', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, createAgent, createRuntimeState, validateStep } from '@pulse/runtime'
+import { apply, createAgent, createRuntimeState, validateStep } from '@hunterzhu/pulse-runtime'
 
 describe('atomic context history compaction', () => {
   it('replaces an old history prefix with one auditable summary record', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, commitMutationTransaction, createAgent, createRuntimeState, MutationLog, prepareArtifactPublication, prepareFindingPublication } from '@pulse/runtime'
+import { apply, commitMutationTransaction, createAgent, createRuntimeState, MutationLog, prepareArtifactPublication, prepareFindingPublication } from '@hunterzhu/pulse-runtime'
 
 describe('mutation log and replay', () => {
   it('records idempotent transactions and replays Map/Set-bearing mutations', () => {

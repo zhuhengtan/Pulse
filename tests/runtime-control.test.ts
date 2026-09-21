@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { MonotonicClock, PulseRuntime, VirtualClock } from '@pulse/runtime'
-import type { EffectRecord, LaneProgram } from '@pulse/runtime'
+import { MonotonicClock, PulseRuntime, VirtualClock } from '@hunterzhu/pulse-runtime'
+import type { EffectRecord, LaneProgram } from '@hunterzhu/pulse-runtime'
 
 const point = (programId: string, step: string) => ({ programId, programVersion: '1', step, locals: {} })
 

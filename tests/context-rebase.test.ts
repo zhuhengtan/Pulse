@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { rebaseContextDelta } from '@pulse/runtime'
+import { rebaseContextDelta } from '@hunterzhu/pulse-runtime'
 
 describe('explicit ContextDelta rebase', () => {
   it('rebases disjoint writes onto the latest version', () => {

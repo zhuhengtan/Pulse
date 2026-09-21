@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime } from '@pulse/runtime'
+import { PulseRuntime } from '@hunterzhu/pulse-runtime'
 
 describe('LLM Effect history settlement', () => {
   it('archives the fixed request inputs and validated output in the owner Lane', async () => {

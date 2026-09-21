@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ModelRouter, PulseRuntime, type LaneProgram, type LLMRequestProjection } from '@pulse/runtime'
+import { ModelRouter, PulseRuntime, type LaneProgram, type LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 
 const program: LaneProgram = { id: 'runtime-model-registry', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: { programId: 'runtime-model-registry', programVersion: '1', step: 'start', locals: {} } }) }
 

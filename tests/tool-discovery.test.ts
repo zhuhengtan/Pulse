@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ToolRegistry, defineTool } from '@pulse/tool-sdk'
+import { ToolRegistry, defineTool } from '@hunterzhu/pulse-tool-sdk'
 import { z } from 'zod'
 
 describe('explicit dynamic tool discovery', () => {

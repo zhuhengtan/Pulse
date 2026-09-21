@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { OpenAICompatibleAdapter } from '@pulse/adapters'
-import type { LLMRequestProjection } from '@pulse/runtime'
+import { OpenAICompatibleAdapter } from '@hunterzhu/pulse-adapters'
+import type { LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 
 const apiKey = process.env.OPENAI_API_KEY
 const toolSmoke = process.env.PULSE_LIVE_TOOL_SMOKE === '1'

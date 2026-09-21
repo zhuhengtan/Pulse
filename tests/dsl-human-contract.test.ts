@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, VirtualClock, defineLaneProgram } from '@pulse/runtime'
+import { PulseRuntime, VirtualClock, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 import { z } from 'zod'
 
 describe('DSL Human and instruction contracts', () => {

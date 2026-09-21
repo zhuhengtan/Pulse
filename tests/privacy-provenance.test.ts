@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, ContextBuilder, createAgent, createRuntimeState, defineLaneProgram, exportRuntimeState, importRuntimeState, InMemoryModelRegistry, ModelRouter, PulseRuntime, validateStep } from '@pulse/runtime'
+import { apply, ContextBuilder, createAgent, createRuntimeState, defineLaneProgram, exportRuntimeState, importRuntimeState, InMemoryModelRegistry, ModelRouter, PulseRuntime, validateStep } from '@hunterzhu/pulse-runtime'
 
 describe('result privacy provenance', () => {
   it('recomputes the strictest source label and preserves derivedFrom', () => {

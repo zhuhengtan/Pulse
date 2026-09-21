@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, createAgent, createRuntimeState, defineLaneProgram, validateStep } from '@pulse/runtime'
+import { apply, createAgent, createRuntimeState, defineLaneProgram, validateStep } from '@hunterzhu/pulse-runtime'
 
 const point = (step: string) => ({ programId: 'history', programVersion: '1', step, locals: {} })
 

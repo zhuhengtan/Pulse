@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, defineLaneProgram } from '@pulse/runtime'
+import { PulseRuntime, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 
 describe('DSL dynamic wait contract', () => {
   it('resolves callback-based targets and exposes the WaitResolution', async () => {

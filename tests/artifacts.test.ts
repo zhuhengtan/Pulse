@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, ContextBuilder, createAgent, createRuntimeState, exportRuntimeState, importRuntimeState, publishArtifact, readArtifact, validateStep, PulseRuntime } from '@pulse/runtime'
+import { apply, ContextBuilder, createAgent, createRuntimeState, exportRuntimeState, importRuntimeState, publishArtifact, readArtifact, validateStep, PulseRuntime } from '@hunterzhu/pulse-runtime'
 
 describe('Artifact store', () => {
   it('publishes immutable content with hash, pinning and session round-trip', () => {
