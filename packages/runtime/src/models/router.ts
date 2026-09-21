@@ -18,6 +18,7 @@ export interface ModelCandidate { id: string; providerId: string; tasks: string[
 export interface ModelRouteDiagnostic { id: string; providerId: string; accepted: boolean; reasons: string[] }
 export interface ModelRegistry { register(candidate: ModelCandidate): void; list(): ModelCandidate[] }
 export interface ModelRoute { task: string; candidates: string[] }
+export interface ModelHostPolicy { allowCloud?: boolean }
 export interface ModelRouteFeedback {
   modelId: string
   providerId?: string
@@ -62,8 +63,11 @@ export function estimateProjectionTokens(projection: LLMRequestProjection): numb
 
 export class ModelRouter {
   private readonly routes = new Map<string, string[]>()
+  readonly hostPolicy: Required<ModelHostPolicy>
 
-  constructor(public readonly registry: ModelRegistry) {}
+  constructor(public readonly registry: ModelRegistry, hostPolicy: ModelHostPolicy = {}) {
+    this.hostPolicy = { allowCloud: hostPolicy.allowCloud ?? true }
+  }
 
   register(route: ModelRoute): void {
     if (!route.task || route.candidates.length === 0 || route.candidates.some((candidate) => !candidate)) throw new Error('INVALID_MODEL_ROUTE')
@@ -96,6 +100,7 @@ export class ModelRouter {
       if (preferred !== undefined && !preferred.includes(candidate.id)) reasons.push('TASK_ROUTE_EXCLUDED')
       if (!candidate.tasks.includes(task)) reasons.push('TASK_NOT_SUPPORTED')
       if (privacy === 'local_only' && candidate.capabilities.local !== true) reasons.push('PRIVACY_CLOUD_BLOCKED')
+      else if (!this.hostPolicy.allowCloud && candidate.capabilities.local !== true) reasons.push('HOST_CLOUD_BLOCKED')
       for (const [key, value] of Object.entries(requirements)) {
         if (key === 'maxOutputTokens' || key === 'contextSize') continue
         if (key === 'reasoning') {
@@ -119,8 +124,8 @@ export class AdaptiveModelRouter extends ModelRouter {
   private readonly feedback = new Map<string, ModelRouteMetrics>()
   private readonly policy: Required<AdaptiveRoutePolicy>
 
-  constructor(registry: ModelRegistry, policy: AdaptiveRoutePolicy = {}) {
-    super(registry)
+  constructor(registry: ModelRegistry, policy: AdaptiveRoutePolicy = {}, hostPolicy: ModelHostPolicy = {}) {
+    super(registry, hostPolicy)
     this.policy = {
       priorityWeight: policy.priorityWeight ?? 1,
       qualityWeight: policy.qualityWeight ?? 4,
