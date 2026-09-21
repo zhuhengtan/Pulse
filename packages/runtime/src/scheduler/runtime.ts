@@ -182,7 +182,9 @@ function validateRuntimeConfig(config: RuntimeConfig): void {
   if (config.routerVersion !== undefined && (typeof config.routerVersion !== 'string' || config.routerVersion.length === 0)) invalidConfig('routerVersion')
   if (config.persistenceExpectedDigest !== undefined && (typeof config.persistenceExpectedDigest !== 'string' || !/^[a-f0-9]{64}$/.test(config.persistenceExpectedDigest))) invalidConfig('persistenceExpectedDigest')
   if (config.auditLogPrivacy !== undefined && !['public', 'cloud_allowed', 'local_only'].includes(config.auditLogPrivacy)) invalidConfig('auditLogPrivacy')
+  if (config.hostPolicy !== undefined && (config.hostPolicy === null || typeof config.hostPolicy !== 'object' || Array.isArray(config.hostPolicy))) invalidConfig('hostPolicy')
   if (config.hostPolicy?.allowCloud !== undefined && typeof config.hostPolicy.allowCloud !== 'boolean') invalidConfig('hostPolicy.allowCloud')
+  if (config.storagePolicy !== undefined) try { new SessionStoragePolicy(config.storagePolicy) } catch { invalidConfig('storagePolicy') }
   if (config.budget !== undefined) {
     optionalNonNegativeInteger(config.budget.maxTotalAttempts, 'budget.maxTotalAttempts')
     optionalNonNegativeInteger(config.budget.maxLLMAttempts, 'budget.maxLLMAttempts')

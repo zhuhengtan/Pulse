@@ -17,6 +17,9 @@ describe('runtime control boundaries', () => {
     expect(() => new PulseRuntime({ toolVersions: { read: '' } })).toThrow('INVALID_RUNTIME_CONFIG:toolVersions')
     expect(() => new PulseRuntime({ policyVersion: '' })).toThrow('INVALID_RUNTIME_CONFIG:policyVersion')
     expect(() => new PulseRuntime({ persistenceExpectedDigest: 'stale' })).toThrow('INVALID_RUNTIME_CONFIG:persistenceExpectedDigest')
+    expect(() => new PulseRuntime({ hostPolicy: null as never })).toThrow('INVALID_RUNTIME_CONFIG:hostPolicy')
+    const snapshot = new PulseRuntime().exportPersistence()
+    expect(() => new PulseRuntime({ persistence: snapshot, storagePolicy: { maxEventLogBytes: -1 } })).toThrow('INVALID_RUNTIME_CONFIG:storagePolicy')
     expect(() => new PulseRuntime({ maxObservationBytes: 0 })).not.toThrow()
   })
 
