@@ -740,6 +740,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `16aa708`：Runtime Tool Registry 与 Tool SDK 在生成 `executionRef` 前统一执行输入 schema 校验，防止非法参数先进入远程副作用身份/对账引用计算。
 - `bb3220c`：摘要预算判断改为 fail-safe；循环或不可序列化的 `summarize()` 输出也只丢弃 summary，不影响 Tool 主结果结算。
 - `d362201`：Runtime Tool Registry 与 Tool SDK 对动态 ToolSet 的 text/tags/side-effect/concurrency/limit 查询统一做输入合同校验，非法查询在目录评估前以 `INVALID_TOOL_DISCOVERY_QUERY` fail-closed。
+- `c064683`：Tool SDK 的低层 `resolveResources()` 与 Runtime 保持一致，先执行输入 schema 校验再计算资源锁，避免非法参数影响副作用准入。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
