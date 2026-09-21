@@ -24,6 +24,25 @@ describe('Effect resource lock admission', () => {
     expect(runtime.resourceLocks.isHeld('db:account', 'exclusive')).toBe(true)
   })
 
+  it('keeps a later shared Effect behind a queued writer', () => {
+    const runtime = new PulseRuntime({ maxTickMs: 1000, maxRunning: { tool: 3 }, effectExecutor: async () => await new Promise(() => undefined) })
+    const program: LaneProgram = { id: 'lock-fairness', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [
+      { key: 'reader-1', kind: 'tool', concurrencyClass: 'tool', input: {}, locks: [{ resource: 'workspace', mode: 'shared' }] },
+      { key: 'writer', kind: 'tool', concurrencyClass: 'tool', input: {}, locks: [{ resource: 'workspace', mode: 'exclusive' }] },
+      { key: 'reader-2', kind: 'tool', concurrencyClass: 'tool', input: {}, locks: [{ resource: 'workspace', mode: 'shared' }] },
+    ] }], next: point('lock-fairness', 'done') }) }
+    runtime.createAgent('lock fairness', program)
+    runtime.tick()
+    expect(runtime.state.effects.get('effect-1')?.state).toBe('running')
+    expect(runtime.state.effects.get('effect-2')?.state).toBe('queued')
+    expect(runtime.state.effects.get('effect-3')?.state).toBe('queued')
+    runtime.completeEffect('effect-1', { value: { done: 1 } })
+    expect(runtime.state.effects.get('effect-2')?.state).toBe('running')
+    expect(runtime.state.effects.get('effect-3')?.state).toBe('queued')
+    runtime.completeEffect('effect-2', { value: { done: 2 } })
+    expect(runtime.state.effects.get('effect-3')?.state).toBe('running')
+  })
+
   it('rejects duplicate resource declarations inside one Effect transaction', () => {
     const runtime = new PulseRuntime()
     const program: LaneProgram = { id: 'duplicate-locks', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'bad', kind: 'tool', concurrencyClass: 'tool', input: {}, locks: [{ resource: 'same', mode: 'shared' }, { resource: 'same', mode: 'exclusive' }] }] }], next: point('duplicate-locks', 'done') }) }

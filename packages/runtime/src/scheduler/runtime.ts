@@ -450,6 +450,7 @@ export class PulseRuntime {
   private readonly lockReleases = new Map<string, Array<() => void>>()
   private readonly waitDeadlineTimers = new Map<string, string>()
   private readonly lockBlocked = new Set<string>()
+  private readonly grantedLockReleases = new Map<string, () => void>()
   private readonly executor: EffectExecutor
   private readonly customExecutor: boolean
   private enqueueSeq = 1
@@ -2271,9 +2272,18 @@ export class PulseRuntime {
     const specs = [...(effect.locks ?? [])].sort((a, b) => a.resource.localeCompare(b.resource) || a.mode.localeCompare(b.mode))
     const releases: Array<() => void> = []
     for (const [index, spec] of specs.entries()) {
-      const release = this.resourceLocks.tryAcquire(spec.resource, spec.mode, `${effect.id}:${effect.attemptId}:${index}`)
+      const requestId = `${effect.id}:${effect.attemptId}:${index}`
+      let release = this.grantedLockReleases.get(requestId)
+      if (release !== undefined) this.grantedLockReleases.delete(requestId)
+      else release = this.resourceLocks.tryAcquire(spec.resource, spec.mode, requestId)
       if (!release) {
         for (const held of releases.reverse()) held()
+        this.resourceLocks.wait(spec.resource, spec.mode, requestId, (granted) => {
+          const existing = this.grantedLockReleases.get(requestId)
+          existing?.()
+          this.grantedLockReleases.set(requestId, granted)
+          this.scheduleWake(true)
+        })
         if (!this.lockBlocked.has(effect.id)) {
           this.lockBlocked.add(effect.id)
           this.emit({ type: 'effect.lock_blocked', effectId: effect.id, data: { resource: spec.resource, mode: spec.mode } })
@@ -2292,6 +2302,13 @@ export class PulseRuntime {
     if (!releases) return
     this.lockReleases.delete(effectId)
     for (const release of releases.reverse()) release()
+    const effect = this.state.effects.get(effectId)
+    for (const [index, spec] of [...(effect?.locks ?? [])].sort((a, b) => a.resource.localeCompare(b.resource) || a.mode.localeCompare(b.mode)).entries()) {
+      const requestId = `${effectId}:${effect?.attemptId ?? ''}:${index}`
+      const granted = this.grantedLockReleases.get(requestId)
+      if (granted !== undefined) { this.grantedLockReleases.delete(requestId); granted() }
+      this.resourceLocks.cancelWait(spec.resource, requestId)
+    }
   }
 
   private enqueueNewReadyLanes(): void {

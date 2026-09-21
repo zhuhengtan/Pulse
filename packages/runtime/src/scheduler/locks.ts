@@ -31,6 +31,25 @@ export class ResourceLockManager {
     return () => this.release(resource, requestId)
   }
 
+  wait(resource: string, mode: LockMode, requestId: string, onGrant: (release: () => void) => void): void {
+    const holders = this.holders.get(resource) ?? new Map<string, LockMode>()
+    if (holders.has(requestId)) { onGrant(() => this.release(resource, requestId)); return }
+    const queue = this.queues.get(resource) ?? []
+    if (queue.some((request) => request.id === requestId)) return
+    const request: Request = { id: requestId, mode, seq: ++this.seq, ...(mode === 'exclusive' ? { aheadSharedIds: queue.filter((queued) => queued.mode === 'shared').map((queued) => queued.id) } : {}), resolve: onGrant, reject: () => undefined }
+    queue.push(request)
+    this.queues.set(resource, queue)
+    this.drain(resource)
+  }
+
+  cancelWait(resource: string, requestId: string): void {
+    const queue = this.queues.get(resource)
+    if (!queue) return
+    const index = queue.findIndex((request) => request.id === requestId)
+    if (index >= 0) queue.splice(index, 1)
+    if (queue.length === 0) this.queues.delete(resource)
+  }
+
   restoreHeld(resource: string, mode: LockMode, requestId: string): () => void {
     if (!requestId || this.holders.get(resource)?.has(requestId)) throw new Error('INVALID_LOCK_RESTORE')
     const holders = this.holders.get(resource) ?? new Map<string, LockMode>()
