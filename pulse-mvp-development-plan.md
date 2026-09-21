@@ -72,7 +72,7 @@
 | Action Decoder privacy/provenance | LLM 工具调用解码为 ToolEffect 时，从调用方或 `LLMResult` 继承 `privacy` 与支持结果/产物的 `derivedFrom`，同时写入 Effect 和 ToolEffectInput，避免模型参数中的敏感来源绕过 Runtime 隐私传播 | `tests/action-decoder.test.ts` | `18fb787`、`711c0be`、`959f658` |
 | DSL ReAct tool provenance | 内置 ReAct 宏的平行工具解码路径同样从 LLM ResultRef 继承 `privacy` 与 `derivedFrom`，并写入 ToolEffect 与 ToolEffectInput | `tests/dsl-host-macros.test.ts` | `a524e72` |
 | Runtime Tool Registry | 对外提供 `runtime.tools.register()`、目录检索、稳定 ToolSet、allow/deny、schema admission、资源/副作用准入；默认 Runtime Executor 已可直接执行已注册 Tool，并通过 `reconcileRegisteredEffect()` 使用 `executionRef/reconcile` 完成 quarantine 对账；标准 Tool Effect Adapter 仍可消费该目录 | `tests/runtime-tool-registry.test.ts`、`tests/tool-host.test.ts`、`tests/tool-discovery.test.ts` | `2c0da03`、`8e72845`、`1a2dee1` |
-| Tool Manifest fail-closed | Runtime Tool Registry 与 Tool SDK 注册时共同校验 JSON Schema、并发类别、副作用策略、重试安全级别、资源锁、权限数组和摘要上限；非法 manifest 在注册阶段拒绝，不延迟到执行阶段 | `tests/runtime-tool-registry.test.ts` | `57ef9b4` |
+| Tool Manifest fail-closed | Runtime Tool Registry 与 Tool SDK 注册时共同校验受支持的 JSON Schema 合同、并发类别、副作用策略、重试安全级别、资源锁、权限数组和摘要上限；Runtime 校验器对未知 schema type 也 fail-closed，非法 manifest 在注册阶段拒绝，不延迟到执行阶段 | `tests/runtime-tool-registry.test.ts` | `57ef9b4`、`d9086ee` |
 | Agent create policy / limits | `createAgent` 支持优先级、策略/限制引用与 `maxActiveLanes`；Agent 超时按注入 RuntimeClock 触发 `TIMEOUT`，配置和引用随 Agent 记录持久化 | `tests/agent-create-contract.test.ts`、`tests/agent-creation.test.ts` | `b2de59b` |
 | 开发模式纯 Step 守卫 | Runtime 调用 Step 与 ErrorBoundary 时，在非 production 环境阻断动态 `console.*`、`Date.now`、`Math.random`、`fetch`、`process` 访问，统一报告 `PURE_STEP_VIOLATION`；生产环境不注入守卫 | `tests/pure-step-guard.test.ts` | `0ce2a6e` |
 | 完整 Agent Outcome Host API | `runtime.run()` / `runAgent()` 直接返回根 Lane 的 `resultRef`、失败/取消信息与按 Agent 过滤的 `unresolvedEffectIds`，空转未终态也返回结构化 `RUNTIME_IDLE_BLOCKED` | `tests/agent-creation.test.ts`、`tests/dsl-program-registry.test.ts` | `01b72c2` |
@@ -733,6 +733,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
 - 当前确定性门禁：`npm test`，68 个测试文件、402 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 - `36ba7a2`：Tool SDK、Runtime Tool Registry 和标准 Tool Adapter 对超限结构化摘要统一回退为“保留主结果、丢弃 summary”，并补充两条执行链回归；完整确定性门禁更新为 68 个测试文件、402/402 通过。
+- `d9086ee`：Tool SDK 与 Runtime Tool Registry 对受支持 JSON Schema 合同递归校验，拒绝未知 type、畸形组合/属性/约束；Runtime JSON Schema 执行器同步拒绝未知 type，避免 Registry 与 Runtime 校验语义分叉。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
