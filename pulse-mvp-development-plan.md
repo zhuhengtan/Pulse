@@ -765,6 +765,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `00fbec4`：Fork child 的 `dependsOn` 在创建 Lane 前复用 Wait admission，统一拒绝重复 dependency key/target 与 self-dependency，避免异常依赖在 child lane 已写入后才暴露。
 - `cb21061`：StepTransaction 对 cancel/propose_cancel、adopt_context、downgrade_privacy 和 ContextDelta 操作项执行运行时形状校验，畸形对象在分支逻辑前 fail-closed。
 - `bd2ba2f`：Step 输出对 `contextDelta: null` 和非布尔 `adoptCommittedContext` 等可选字段执行存在性/类型校验，避免畸形输出被当作字段缺省。
+- `602a6c8`：CompleteAction 的 `children` 选项在 Runtime 边界执行枚举校验，未知收尾策略不再静默按默认分支处理。
 - 当前确定性门禁：`npm test`，68 个测试文件、429 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
