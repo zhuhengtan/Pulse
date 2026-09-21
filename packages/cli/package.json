@@ -1,6 +1,7 @@
 {
   "name": "@hunterzhu/pulse-cli",
   "version": "0.1.0",
+  "repository": { "type": "git", "url": "https://github.com/zhuhengtan/Pulse" },
   "type": "module",
   "bin": { "pulse": "dist/bin.js" },
   "main": "dist/bin.js",
