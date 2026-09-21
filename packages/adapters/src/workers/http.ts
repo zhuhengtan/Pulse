@@ -58,6 +58,11 @@ function send(response: import('node:http').ServerResponse, status: number, valu
 
 function errorMessage(cause: unknown): string { return cause instanceof Error ? cause.message : String(cause) }
 
+function workerHttpError(code: string, status?: number): Error & { code: string; retryable: boolean } {
+  const retryable = status === undefined ? true : status === 408 || status === 425 || status === 429 || status >= 500
+  return Object.assign(new Error(code), { code, retryable })
+}
+
 function workerRuntimeError(cause: unknown): RuntimeError {
   if (cause && typeof cause === 'object') {
     const candidate = cause as { code?: unknown; message?: unknown; retryable?: unknown; details?: unknown }
@@ -216,11 +221,16 @@ export class HttpWorkerClient {
       const response = await this.fetcher(`${this.baseUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(this.authToken === undefined ? {} : { authorization: `Bearer ${this.authToken}` }) }, body: JSON.stringify(body), signal: controller.signal })
       const text = await response.text()
       let value: JsonValue = null
-      try { value = text.length === 0 ? null : JSON.parse(text) as JsonValue } catch { throw new Error('WORKER_HTTP_INVALID_RESPONSE') }
-      if (!response.ok) throw new Error(object(value).error && typeof object(value).error === 'string' ? object(value).error as string : `WORKER_HTTP_${response.status}`)
+      try { value = text.length === 0 ? null : JSON.parse(text) as JsonValue } catch { throw workerHttpError('WORKER_HTTP_INVALID_RESPONSE', 502) }
+      if (!response.ok) {
+        const code = object(value).error && typeof object(value).error === 'string' ? object(value).error as string : `WORKER_HTTP_${response.status}`
+        throw workerHttpError(code, response.status)
+      }
       return value
     } catch (cause) {
-      if (controller.signal.aborted) throw new Error('WORKER_HTTP_TIMEOUT')
+      if (controller.signal.aborted) throw workerHttpError('WORKER_HTTP_TIMEOUT')
+      if (cause instanceof Error && 'code' in cause && typeof (cause as { code?: unknown }).code === 'string') throw cause
+      throw Object.assign(workerHttpError('WORKER_HTTP_NETWORK_ERROR'), { cause })
       throw cause
     } finally { clearTimeout(timeout) }
   }
@@ -320,7 +330,7 @@ export function createHttpWorkerEffectExecutor(client: HttpWorkerClient, options
       return { value, executionState: 'succeeded', sideEffectState, executionRef }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)
-      if (message === 'WORKER_CANCELLED' || message === 'WORKER_FAILED' || /^WORKER_HTTP_4\d\d$/.test(message)) throw cause
+      if (message === 'WORKER_CANCELLED' || message === 'WORKER_FAILED' || /^WORKER_HTTP_4\d\d$/.test(message) || (cause && typeof cause === 'object' && 'retryable' in cause && (cause as { retryable?: unknown }).retryable === false)) throw cause
       const task = await client.get(taskId).catch(() => undefined)
       if (task?.state === 'succeeded') return { value: task.result ?? null, executionState: 'succeeded', sideEffectState, executionRef }
       if (task?.state === 'failed') return { value: null, status: 'failed', executionState: 'failed', sideEffectState: 'none', executionRef, error: task.error ?? { code: 'WORKER_FAILED', message: 'Remote Worker task failed.' } }

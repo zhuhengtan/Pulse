@@ -42,6 +42,16 @@ describe('HTTP Worker transport', () => {
     } finally { await server.close() }
   })
 
+  it('preserves non-retryable HTTP errors through the Worker Effect adapter', async () => {
+    const coordinator = new Coordinator()
+    const server = await startWorkerCoordinatorServer(coordinator, { authToken: 'worker-token' })
+    const client = new HttpWorkerClient({ baseUrl: server.url, workerId: 'wrong-token-worker', authToken: 'wrong-token' })
+    const effect = { id: 'worker-http-auth-effect', attemptId: 'worker-http-auth-attempt', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'remote', kind: 'tool', concurrencyClass: 'tool', input: {}, state: 'running', executionState: 'running', sideEffectState: 'none', sideEffectPolicy: 'none' } as EffectRecord
+    try {
+      await expect((createHttpWorkerEffectExecutor(client))(effect, new AbortController().signal)).rejects.toMatchObject({ code: 'WORKER_HTTP_UNAUTHORIZED', retryable: false })
+    } finally { await server.close() }
+  })
+
   it('supports overlapping token rotation without restarting the coordinator', async () => {
     const coordinator = new Coordinator()
     let acceptedTokens: readonly string[] = ['old-worker-token']
