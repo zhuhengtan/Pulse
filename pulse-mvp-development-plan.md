@@ -755,7 +755,8 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `e9b11fd`：Session 恢复快照校验调度上限、history 限制、Infinity 编码、ID 游标和虚拟时间，阻止非法状态进入 Scheduler。
 - `4b8c5f9`：Warm Start SessionStore 校验 Global 版本/Privacy、ResultRef、Result provenance 和驻留元数据的一致性。
 - `51e7bad`：补齐架构宿主查询出口 `runtime.effects.inspect(effectId)` 与 `runtime.results.get(resultRef)`，返回脱离内部状态的快照，并验证宿主修改不会反向污染 Runtime。
-- 当前确定性门禁：`npm test`，68 个测试文件、421 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
+- `b602b12`：LLM 输入引用数组现在执行 fail-closed 合同校验；`results`、`findings`、`rejectedOutputRefs`、`artifacts`、`events` 中的非法/空引用不再被静默丢弃，而是以结构化 `control_error` 拒绝提交。
+- 当前确定性门禁：`npm test`，68 个测试文件、422 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
