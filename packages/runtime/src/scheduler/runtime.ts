@@ -61,7 +61,16 @@ interface EffectCompletionFact {
   dispatchError?: JsonValue
 }
 
-type RuntimeFact = HostCommand | EffectCompletionFact
+interface LLMPreparationFact {
+  [key: string]: JsonValue
+  type: 'llm_preparation'
+  effectId: string
+  generation: number
+  status: 'prepared' | 'stale'
+  projectionRef?: string
+}
+
+type RuntimeFact = HostCommand | EffectCompletionFact | LLMPreparationFact
 
 export interface RuntimeConfig {
   maxLaneStepsPerTick?: number
@@ -957,29 +966,36 @@ export class PulseRuntime {
     this.mutationLog.append(transactionId, mutations, this.state.now)
   }
 
-  enqueueHostCommand(command: HostCommand): void {
-    validateHostCommand(command)
-    const eventId = `host-command-${this.hostCommandSeq}`
+  private enqueueFact(fact: RuntimeFact, eventId: string): boolean {
     const candidateInbox = FactInbox.fromSnapshot<RuntimeFact>(this.factInbox.snapshot())
-    if (!candidateInbox.enqueue(command, eventId)) return
+    if (!candidateInbox.enqueue(fact, eventId)) return false
     const candidatePolicy = this.storagePolicy.clone()
     this.syncStoragePolicy(candidatePolicy, this.state, candidateInbox)
-    const envelope = this.factInbox.enqueue(command, eventId)
-    if (!envelope) return
-    this.hostCommandSeq++
+    const envelope = this.factInbox.enqueue(fact, eventId)
+    if (!envelope) return false
     this.syncStoragePolicy()
     this.schedulePersistence()
     this.scheduleWake()
     for (const resolve of this.factWaiters.splice(0)) resolve()
+    return true
+  }
+
+  enqueueHostCommand(command: HostCommand): void {
+    validateHostCommand(command)
+    const eventId = `host-command-${this.hostCommandSeq}`
+    if (!this.enqueueFact(command, eventId)) return
+    this.hostCommandSeq++
   }
 
   private enqueueEffectCompletion(effectId: string, attemptId: string, execution: EffectExecution, status: EffectCompletionFact['status'] = 'succeeded', error?: RuntimeError, dispatchError?: RuntimeError): void {
     const fact: EffectCompletionFact = { type: 'effect_completion', effectId, attemptId, execution: encodeEffectExecution(execution), status, ...(error === undefined ? {} : { error: error as unknown as JsonValue }), ...(dispatchError === undefined ? {} : { dispatchError: dispatchError as unknown as JsonValue }) }
     const eventId = `effect-completion:${effectId}:${attemptId}`
-    if (!this.factInbox.enqueue(fact, eventId)) return
-    this.schedulePersistence()
-    this.scheduleWake()
-    for (const resolve of this.factWaiters.splice(0)) resolve()
+    this.enqueueFact(fact, eventId)
+  }
+
+  private enqueueLLMPreparation(effectId: string, generation: number, status: LLMPreparationFact['status'], projectionRef?: string): void {
+    const fact: LLMPreparationFact = { type: 'llm_preparation', effectId, generation, status, ...(projectionRef === undefined ? {} : { projectionRef }) }
+    this.enqueueFact(fact, `llm-preparation:${effectId}:${generation}:${status}`)
   }
 
   private scheduleWake(force = false): void {
@@ -1070,12 +1086,26 @@ export class PulseRuntime {
       if (!envelope) break
       try {
         let commandApplied = false
-      if (!this.state.events.some((event) => event.id === envelope.eventId && event.type === 'command.enqueued')) {
+      if (envelope.fact.type !== 'llm_preparation' && !this.state.events.some((event) => event.id === envelope.eventId && event.type === 'command.enqueued')) {
         const enqueuedEvent = { id: envelope.eventId, type: 'command.enqueued' as const, data: envelope.fact as unknown as JsonValue }
         if (envelope.fact.type === 'effect_completion') this.tryEmit(enqueuedEvent)
         else this.emit(enqueuedEvent)
       }
-      if (envelope.fact.type === 'effect_completion') {
+      if (envelope.fact.type === 'llm_preparation') {
+        this.preparingLLMs.delete(envelope.fact.effectId)
+        const effect = this.state.effects.get(envelope.fact.effectId)
+        if (effect && !effect.outcome && effect.state === 'queued' && effect.preparation?.generation === envelope.fact.generation && !effect.cancelRequested) {
+          const prepared = structuredClone(effect)
+          prepared.preparation = { state: envelope.fact.status, generation: envelope.fact.generation, ...(envelope.fact.projectionRef === undefined ? {} : { projectionRef: envelope.fact.projectionRef }) }
+          const mutations: Mutation[] = [{ op: 'setEffect', effectId: effect.id, record: prepared }]
+          if (envelope.fact.status === 'prepared') mutations.push({ op: 'appendEvent', event: { type: 'llm.request_prepared', effectId: effect.id, data: { generation: envelope.fact.generation, projectionRef: envelope.fact.projectionRef ?? null } } })
+          this.assertStorageAdmission(mutations)
+          commitMutationTransaction(this.state, this.mutationLog, `llm-preparation:${effect.id}:${envelope.fact.generation}:${envelope.fact.status}`, mutations, this.state.now, this.sessionId)
+          Object.assign(effect, prepared)
+          this.state.effects.set(effect.id, effect)
+          commandApplied = true
+        }
+      } else if (envelope.fact.type === 'effect_completion') {
         if (envelope.fact.dispatchError !== undefined) this.tryEmit({ type: 'effect.dispatch_failed', effectId: envelope.fact.effectId, data: envelope.fact.dispatchError })
         const effect = this.state.effects.get(envelope.fact.effectId)
         if (!effect || effect.attemptId !== envelope.fact.attemptId) {
@@ -2078,7 +2108,7 @@ export class PulseRuntime {
       }).catch((cause) => {
         const runtimeError = runtimeErrorFromCause(cause)
         this.enqueueEffectCompletion(effect.id, attemptId, { value: null, sideEffectState: 'none' }, 'failed', runtimeError, runtimeError)
-      }).finally(() => { this.refreshWaits() })
+      })
       executionRecord.promise = promise
       if (effect.attemptTimeoutMs !== undefined) executionRecord.timeoutTimer = this.scheduleRuntimeDelay(effect.attemptTimeoutMs, () => this.expireEffect(effect.id, 'ATTEMPT_TIMEOUT'))
       if (effect.deadlineAt !== undefined) executionRecord.deadlineTimer = this.scheduleRuntimeTimer(effect.deadlineAt, () => this.expireEffect(effect.id, 'TIMEOUT'))
@@ -2102,16 +2132,9 @@ export class PulseRuntime {
     effect.preparation = { state: 'preparing', generation, ...(typeof request?.projectionHash === 'string' ? { projectionRef: request.projectionHash } : {}) }
     this.preparingLLMs.add(effect.id)
     Promise.resolve().then(() => {
-      this.preparingLLMs.delete(effect.id)
-      if (effect.outcome || effect.state !== 'queued' || effect.preparation?.generation !== generation || effect.cancelRequested) {
-        if (effect.preparation?.generation === generation) effect.preparation = { state: 'stale', generation }
-        return
-      }
-      effect.preparation = { ...effect.preparation, state: 'prepared' }
-      this.emit({ type: 'llm.request_prepared', effectId: effect.id, data: { generation, projectionRef: effect.preparation.projectionRef ?? null } })
-      this.dispatchQueuedEffects()
-      this.syncStoragePolicy()
-      this.schedulePersistence()
+      const current = this.state.effects.get(effect.id)
+      const stale = current === undefined || current.outcome !== undefined || current.state !== 'queued' || current.preparation?.generation !== generation || current.cancelRequested !== undefined
+      this.enqueueLLMPreparation(effect.id, generation, stale ? 'stale' : 'prepared', current?.preparation?.projectionRef)
     })
     return false
   }

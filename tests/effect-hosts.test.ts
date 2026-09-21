@@ -18,7 +18,7 @@ describe('built-in Timer and Human Effect hosts', () => {
   })
 
   it('keeps HumanEffect pending until Session.reply arrives through FactInbox', async () => {
-    const runtime = new PulseRuntime()
+    const runtime = new PulseRuntime({ maxTickMs: 1000 })
     const program: LaneProgram = { id: 'human-host', version: '1', step: ({ lane, resumeInput }) => lane.resume.step === 'start'
       ? { actions: [{ type: 'submit_effects', effects: [{ key: 'approval', kind: 'human', concurrencyClass: 'none', input: { question: 'Approve?' } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('human-host', 'finish') }
       : { actions: [{ type: 'complete', result: { reply: resumeInput?.type === 'wait' ? resumeInput.resolution.dependencies.approval : null } }], next: point('human-host', 'finish') } }

@@ -17,7 +17,7 @@ describe('advanced any/quorum waits', () => {
   })
 
   it('resumes an any wait after the first acceptable dependency settles', () => {
-    const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
+    const runtime = new PulseRuntime({ maxTickMs: 1000, effectExecutor: async () => await new Promise(() => undefined) })
     const program: LaneProgram = { id: 'join', version: '1', step: ({ lane }) => {
       if (lane.resume.step === 'start') return { actions: [{ type: 'submit_effects', effects: [{ key: 'first', kind: 'tool', concurrencyClass: 'tool', input: {} }, { key: 'second', kind: 'tool', concurrencyClass: 'tool', input: {} }] }], next: point('wait') }
       if (lane.resume.step === 'wait') return { actions: [{ type: 'wait', spec: { dependencies: [{ key: 'first', target: { kind: 'effect', id: 'effect-1' }, condition: 'settled' }, { key: 'second', target: { kind: 'effect', id: 'effect-2' }, condition: 'settled' }], mode: 'any', onUnsatisfied: 'resume_with_error', reason: 'join' } }], next: point('finish') }
@@ -34,7 +34,7 @@ describe('advanced any/quorum waits', () => {
   })
 
   it('wakes a waiting lane through the TimerWheel when its deadline expires', () => {
-    const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
+    const runtime = new PulseRuntime({ maxTickMs: 1000, effectExecutor: async () => await new Promise(() => undefined) })
     const program: LaneProgram = { id: 'deadline', version: '1', step: ({ lane }) => {
       if (lane.resume.step === 'start') return { actions: [{ type: 'submit_effects', effects: [{ key: 'slow', kind: 'tool', concurrencyClass: 'tool', input: {} }] }], next: point('wait', 'deadline') }
       if (lane.resume.step === 'wait') return { actions: [{ type: 'wait', spec: { dependencies: [{ key: 'slow', target: { kind: 'effect', id: 'effect-1' }, condition: 'settled' }], mode: 'all', deadlineAt: 5, onUnsatisfied: 'resume_with_error', reason: 'dependency' } }], next: point('finish', 'deadline') }

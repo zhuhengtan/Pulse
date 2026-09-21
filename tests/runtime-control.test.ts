@@ -355,7 +355,7 @@ describe('runtime control boundaries', () => {
   })
 
   it('preserves a closing Lane pending Outcome when cancellation arrives during child cleanup', () => {
-    const runtime = new PulseRuntime({ effectExecutor: async () => await new Promise(() => undefined) })
+    const runtime = new PulseRuntime({ maxTickMs: 1000, effectExecutor: async () => await new Promise(() => undefined) })
     const childPoint = (step: string) => ({ programId: 'cancel-closing', programVersion: '1', step, locals: {} })
     const program: LaneProgram = { id: 'cancel-closing', version: '1', step: ({ lane }) => {
       if (lane.goal === 'parent' && lane.resume.step === 'start') return { actions: [{ type: 'fork', lanes: [{ key: 'child', goal: 'child', program: childPoint('child') }] }], next: childPoint('close') }
@@ -397,7 +397,7 @@ describe('runtime control boundaries', () => {
 
   it('pre-admits the complete Agent cancellation cascade before mutating any target', () => {
     const build = () => {
-      const runtime = new PulseRuntime({ storagePolicy: { maxEventLogBytes: 1_000_000 }, effectExecutor: async () => await new Promise(() => undefined) })
+      const runtime = new PulseRuntime({ maxTickMs: 1000, storagePolicy: { maxEventLogBytes: 1_000_000 }, effectExecutor: async () => await new Promise(() => undefined) })
       const program: LaneProgram = { id: 'cancel-cascade-admission', version: '1', step: ({ lane }) => lane.resume.step === 'start'
         ? { actions: [{ type: 'submit_effects', effects: [{ key: 'write', kind: 'tool', concurrencyClass: 'tool', input: {}, sideEffectPolicy: 'write' }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('cancel-cascade-admission', 'finish') }
         : { actions: [{ type: 'complete', result: { ok: true } }], next: point('cancel-cascade-admission', 'finish') } }
@@ -676,13 +676,14 @@ describe('runtime control boundaries', () => {
     const program: LaneProgram = { id: 'completion-fact', version: '1', step: ({ lane }) => lane.resume.step === 'start'
       ? { actions: [{ type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('completion-fact', 'finish') }
       : { actions: [{ type: 'complete', result: { done: true } }], next: point('completion-fact', 'finish') } }
-    runtime.createAgent('completion fact', program)
+    const { laneId } = runtime.createAgent('completion fact', program)
     runtime.tick()
     const effect = runtime.state.effects.get('effect-1')!
     resolveExecution({ value: null, artifact: { mediaType: 'text/plain', content: new Uint8Array([80, 117, 108, 115, 101]) } })
     await Promise.resolve()
     await Promise.resolve()
     expect(effect.outcome).toBeUndefined()
+    expect(runtime.state.lanes.get(laneId)?.status).toBe('waiting')
     expect(runtime.factInbox.snapshot().queue).toMatchObject([{ fact: { type: 'effect_completion', effectId: 'effect-1', attemptId: 'effect-1-attempt-1' } }])
     runtime.tick()
     expect(runtime.state.effects.get('effect-1')?.outcome?.status).toBe('succeeded')

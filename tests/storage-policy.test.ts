@@ -78,9 +78,11 @@ describe('session storage policy', () => {
     runtime.createAgent('pin active work', program)
     runtime.tick()
     await Promise.resolve()
+    expect(runtime.factInbox.snapshot().queue).toMatchObject([{ fact: { type: 'llm_preparation', effectId: 'effect-1', status: 'prepared' } }])
     const records = runtime.storagePolicy.inspect()
     expect(records.find((record) => record.key.startsWith('snapshot:lane:'))?.pinCount).toBeGreaterThan(0)
     expect(records.find((record) => record.key.startsWith('snapshot:request:'))?.pinCount).toBeGreaterThan(0)
+    runtime.tick()
     release()
   })
 
