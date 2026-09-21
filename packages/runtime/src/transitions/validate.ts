@@ -349,7 +349,10 @@ function applyContextDelta(state: RuntimeState, lane: LaneRecord, delta: Context
       if (delta.target !== 'lane' || upToSeq === undefined || summary === undefined || (op.summary === undefined && op.summaryRef === undefined) || !Number.isInteger(upToSeq) || upToSeq < 1) return { nextVersion: base, error: 'INVALID_HISTORY_COMPACTION' }
       if (!history.some((record) => record.seq <= upToSeq)) return { nextVersion: base, error: 'INVALID_HISTORY_COMPACTION' }
       if (history.length > 0 && upToSeq > Math.max(...history.map((record) => record.seq))) return { nextVersion: base, error: 'INVALID_HISTORY_COMPACTION' }
-      history = [{ seq: upToSeq, instruction: '[history compacted]', resultRefs: op.summaryRef === undefined ? [] : [op.summaryRef], output: clone(summary), privacy: delta.privacy ?? summaryResult?.privacy ?? 'public' }, ...history.filter((record) => record.seq > upToSeq)]
+      const compacted = history.filter((record) => record.seq <= upToSeq)
+      const summaryTaints = mergePrivacyTaints(...compacted.map((record) => record.privacyTaints), summaryResult?.privacyTaints)
+      const summaryPrivacy = effectivePrivacy(strictestPrivacy([...(compacted.map((record) => record.privacy)), delta.privacy ?? 'public', summaryResult?.privacy ?? 'public']), summaryTaints)
+      history = [{ seq: upToSeq, instruction: '[history compacted]', resultRefs: op.summaryRef === undefined ? [] : [op.summaryRef], output: clone(summary), privacy: summaryPrivacy, ...(summaryTaints.length ? { privacyTaints: summaryTaints } : {}) }, ...history.filter((record) => record.seq > upToSeq)]
       continue
     }
     if (!op.path || op.path.length === 0) return { nextVersion: base, error: 'INVALID_CONTEXT_PATH' }
