@@ -1,16 +1,16 @@
-import { defineLaneProgram, type LaneProgramDefinition, type StepContext, type InstructionView, type NextStepTarget } from './program.js'
+import { defineLaneProgram, type LaneProgramDefinition, type StepContext, type InstructionView, type NextStepTarget, type StepInputs } from './program.js'
 import type { LaneProgram } from '../scheduler/runtime.js'
 import type { Outcome, JsonValue } from '../core/types.js'
 import type { ZodTypeAny } from 'zod'
 
 export interface ProgramRef { programId: string; programVersion: string; step?: string; locals?: JsonValue }
 
-export function defineReActLane(config: { id: string; version?: string; system?: string; toolSet?: string; instruction: string | ((view: InstructionView<JsonValue>) => string); toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; historyCompaction?: { summarizeTask: string; keepRecentRounds: number } }): LaneProgramDefinition {
+export function defineReActLane(config: { id: string; version?: string; system?: string; toolSet?: string; task?: string; instruction: string | ((view: InstructionView<JsonValue>) => string); inputs?: (ctx: StepContext<JsonValue>) => StepInputs; toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; historyCompaction?: { summarizeTask: string; keepRecentRounds: number } }): LaneProgramDefinition {
   return defineLaneProgram({ id: config.id, version: config.version ?? '1', ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSet: config.toolSet }), ...(config.historyCompaction === undefined ? {} : { historyCompaction: config.historyCompaction }) }, (builder) => {
     const onFinish = config.outputSchema === undefined
       ? { text: (resultRef: string) => ({ complete: { value: { textRef: resultRef } } }) }
       : { text: (resultRef: string) => ({ complete: { value: { textRef: resultRef } } }), structured: { schema: config.outputSchema, onParsed: (value: unknown) => ({ complete: { value: value as JsonValue } }) } }
-    builder.addReActLoopStep('react', { instruction: config.instruction, ...(config.toolAllow === undefined ? {} : { toolAllow: config.toolAllow }), ...(config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns }), ...(config.outputSchema === undefined ? {} : { outputSchema: config.outputSchema }), onFinish })
+    builder.addReActLoopStep('react', { ...(config.task === undefined ? {} : { task: config.task }), instruction: config.instruction, ...(config.inputs === undefined ? {} : { inputs: config.inputs }), ...(config.toolAllow === undefined ? {} : { toolAllow: config.toolAllow }), ...(config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns }), ...(config.outputSchema === undefined ? {} : { outputSchema: config.outputSchema }), ...(config.requirements === undefined ? {} : { requirements: config.requirements }), onFinish })
   })
 }
 

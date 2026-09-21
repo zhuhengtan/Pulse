@@ -95,6 +95,19 @@ describe('DSL Human/Timer host macros', () => {
     expect(runtime.state.results.get(lane.resultRef as string)?.value).toEqual({ answer: 'verified' })
   })
 
+  it('preserves ReAct template task, inputs, and model requirements', async () => {
+    const program = defineReActLane({ id: 'react-template-contract', task: 'investigate', instruction: 'inspect', inputs: () => ({ results: ['result-7'] }), requirements: { reasoning: 'high' } })
+    const requests: any[] = []
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => { requests.push(effect.input); return { value: { text: 'done', finishReason: 'stop', toolCalls: [] } } } })
+    const { agentId, laneId } = runtime.createAgent('template contract', program)
+    runtime.state.results.set('result-7', { id: 'result-7', value: { source: true }, producer: { kind: 'lane', id: laneId }, privacy: 'public', derivedFrom: [], storageState: 'memory', pinCount: 0 })
+    runtime.state.lanes.get(laneId)!.visibleResultRefs = new Set(['result-7'])
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(requests[0]?.task).toBe('investigate')
+    expect(requests[0]?.inputs.results).toEqual(['result-7'])
+    expect(requests[0]?.requirements.reasoning).toBe('high')
+  })
+
   it('returns a textRef for unstructured template output', async () => {
     const program = defineReActLane({ id: 'react-text-template', instruction: 'answer plainly' })
     const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { text: 'plain answer', finishReason: 'stop', toolCalls: [] } }) })
