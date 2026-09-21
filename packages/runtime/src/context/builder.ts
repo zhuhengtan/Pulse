@@ -94,14 +94,25 @@ export function historyPressure(history: ReadonlyArray<{ seq: number; instructio
 export function stableSerialize(value: unknown): string { return stable(value) }
 export function contentHash(value: unknown): string { return hash(value) }
 
+/**
+ * Path segments that would reach the prototype chain instead of own data. Any
+ * ContextDelta, MergeProposal or draft-proxy path containing one of these is
+ * rejected before it can touch `Object.prototype`.
+ */
+const UNSAFE_PATH_SEGMENTS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype'])
+export function isUnsafePathSegment(segment: string): boolean { return UNSAFE_PATH_SEGMENTS.has(segment) }
+export function hasUnsafePathSegment(path: readonly string[]): boolean { return path.some(isUnsafePathSegment) }
+/** Own-property lookup that never walks the prototype chain. */
+export function ownChild(container: Record<string, JsonValue>, key: string): JsonValue | undefined { return Object.hasOwn(container, key) ? container[key] : undefined }
+
 export interface RebaseConflict { path: string[]; reason: 'changed_since_base' | 'append_target_changed' | 'history_compaction_requires_review' }
 export interface RebaseResult { delta?: ContextDelta; conflicts: RebaseConflict[] }
 
 function atPath(value: JsonValue, path: string[]): JsonValue | undefined {
   let current: JsonValue | undefined = value
   for (const part of path) {
-    if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined
-    current = (current as Record<string, JsonValue>)[part]
+    if (!current || typeof current !== 'object' || Array.isArray(current) || isUnsafePathSegment(part)) return undefined
+    current = ownChild(current as Record<string, JsonValue>, part)
   }
   return current
 }

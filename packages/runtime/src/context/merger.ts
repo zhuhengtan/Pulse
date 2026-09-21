@@ -1,4 +1,4 @@
-import { rebaseContextDelta, stableSerialize, type RebaseConflict } from './builder.js'
+import { hasUnsafePathSegment, ownChild, rebaseContextDelta, stableSerialize, type RebaseConflict } from './builder.js'
 import { apply } from '../core/mutations.js'
 import type { Mutation } from '../core/mutations.js'
 import { privacyTaintPrivacy, strictestPrivacy } from '../core/types.js'
@@ -25,7 +25,7 @@ function clone<T>(value: T): T { return structuredClone(value) }
 function setPath(root: JsonValue, path: string[], value: JsonValue): void {
   let cursor = root as Record<string, JsonValue>
   for (const part of path.slice(0, -1)) {
-    const child = cursor[part]
+    const child = ownChild(cursor, part)
     if (!child || typeof child !== 'object' || Array.isArray(child)) cursor[part] = {}
     cursor = cursor[part] as Record<string, JsonValue>
   }
@@ -36,7 +36,7 @@ function removePath(root: JsonValue, path: string[]): void {
   let cursor: JsonValue = root
   for (const part of path.slice(0, -1)) {
     if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) return
-    const next = (cursor as Record<string, JsonValue>)[part]
+    const next = ownChild(cursor as Record<string, JsonValue>, part)
     if (next === undefined) return
     cursor = next
   }
@@ -48,14 +48,14 @@ function applyDelta(root: JsonValue, delta: ContextDelta): JsonValue {
   for (const op of delta.ops) {
     if (op.op === 'compact_history') throw new Error('GLOBAL_HISTORY_COMPACTION_NOT_ALLOWED')
     const path = op.path ?? []
-    if (path.length === 0) throw new Error('INVALID_CONTEXT_PATH')
+    if (path.length === 0 || hasUnsafePathSegment(path)) throw new Error('INVALID_CONTEXT_PATH')
     if (op.op === 'set') setPath(result, path, op.value ?? null)
     else if (op.op === 'remove') removePath(result, path)
     else {
       let cursor: JsonValue = result
       for (const part of path) {
         if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) throw new Error('APPEND_TARGET_NOT_ARRAY')
-        const next = (cursor as Record<string, JsonValue>)[part]
+        const next = ownChild(cursor as Record<string, JsonValue>, part)
         if (next === undefined) throw new Error('APPEND_TARGET_NOT_ARRAY')
         cursor = next
       }
@@ -84,6 +84,7 @@ export class ContextMerger {
     const appliedProposalIds: string[] = []
     const conflicts: MergeConflict[] = []
     const mutations: Mutation[] = []
+    const versionMutations: Mutation[] = []
     for (const proposal of proposals) {
       const base = agent.globalVersions.get(proposal.baseGlobalVersion)
       if (base === undefined) {
@@ -104,6 +105,9 @@ export class ContextMerger {
         if (stableSerialize(next) !== stableSerialize(value) || stableSerialize(nextMetadata) !== stableSerialize(metadata)) {
           value = next
           version++
+          // Every version number that is handed out must exist in `globalVersions`;
+          // otherwise `adopt_context(version)` for an intermediate version fails.
+          versionMutations.push({ op: 'setGlobal', agentId, version, value: clone(value), metadata: clone(nextMetadata) })
         }
         metadata = nextMetadata
         appliedProposalIds.push(proposal.id)
@@ -113,7 +117,7 @@ export class ContextMerger {
       }
     }
     if (appliedProposalIds.length) {
-      mutations.unshift({ op: 'setGlobal', agentId, version, value: clone(value), metadata: clone(metadata) })
+      mutations.unshift(...versionMutations)
       mutations.push({ op: 'appendEvent', event: { type: 'context.merge_committed', agentId, data: { version, proposalIds: appliedProposalIds } as unknown as JsonValue } })
     }
     return { agentId, ...(appliedProposalIds.length ? { version, value: clone(value) } : {}), appliedProposalIds, conflicts, mutations }
