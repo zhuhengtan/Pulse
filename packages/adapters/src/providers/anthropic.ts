@@ -1,5 +1,5 @@
 import type { JsonValue, LLMRequestProjection } from '@pulse/runtime'
-import { consumeProviderSse, normalizeAnthropicResponse, providerHttpError } from './normalize.js'
+import { consumeProviderSse, normalizeAnthropicResponse, parseProviderJson, providerHttpError, providerNetworkError, providerResponseError } from './normalize.js'
 import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'Anthropic Messages'
@@ -13,7 +13,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     try {
       const response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
       if (!response.ok) throw providerHttpError(response.status)
-      if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeAnthropicResponse(await response.json())
+      if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeAnthropicResponse(await parseProviderJson(response))
       const events = await consumeProviderSse(response)
       const blocks: Array<Record<string, unknown>> = []
       let stopReason: string | undefined
@@ -38,14 +38,15 @@ export class AnthropicAdapter implements ProviderAdapter {
       const content = blocks.filter(Boolean).map((block) => {
         if (block.type === 'tool_use' && typeof block.inputJson === 'string') {
           try { return { ...block, input: JSON.parse(block.inputJson) as unknown } }
-          catch { throw new Error('INVALID_TOOL_ARGUMENTS') }
+          catch { throw providerResponseError('INVALID_TOOL_ARGUMENTS') }
         }
         return block
       })
       return normalizeAnthropicResponse({ content, stop_reason: stopReason, ...(Object.keys(usage).length ? { usage } : {}) })
     } catch (cause) {
       if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
-      throw cause
+      if (cause instanceof Error && 'code' in cause && typeof (cause as { code?: unknown }).code === 'string' && 'retryable' in cause && typeof (cause as { retryable?: unknown }).retryable === 'boolean') throw cause
+      throw providerNetworkError(cause)
     }
   }
 }

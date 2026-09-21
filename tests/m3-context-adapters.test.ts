@@ -99,6 +99,18 @@ describe('M1-3 context, models and adapters', () => {
     vi.unstubAllGlobals()
   })
 
+  it('classifies native provider network failures and invalid JSON responses', async () => {
+    const request = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'transport-contract@1', instruction: 'transport', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'instruction' as const, content: 'transport' }], prefixHash: 'transport-prefix', projectionHash: 'transport-projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'transport-contract@1', privacy: 'public' as const, privacyRefs: [] }
+    vi.stubGlobal('fetch', vi.fn(async () => { throw Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' }) }))
+    await expect(new OpenAICompatibleAdapter('openai-network-error', { provider: 'openai' }).executeAttempt({ request, signal: new AbortController().signal })).rejects.toMatchObject({ code: 'PROVIDER_NETWORK_ERROR', retryable: true })
+    await expect(new AnthropicAdapter('anthropic-network-error', { provider: 'anthropic' }).executeAttempt({ request, signal: new AbortController().signal })).rejects.toMatchObject({ code: 'PROVIDER_NETWORK_ERROR', retryable: true })
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{invalid', { status: 200, headers: { 'content-type': 'application/json' } })))
+    await expect(new OpenAICompatibleAdapter('openai-invalid-json', { provider: 'openai' }).executeAttempt({ request, signal: new AbortController().signal })).rejects.toMatchObject({ code: 'PROVIDER_RESPONSE_INVALID', retryable: true })
+    await expect(new AnthropicAdapter('anthropic-invalid-json', { provider: 'anthropic' }).executeAttempt({ request, signal: new AbortController().signal })).rejects.toMatchObject({ code: 'PROVIDER_RESPONSE_INVALID', retryable: true })
+    vi.unstubAllGlobals()
+  })
+
   it('normalizes provider fetch cancellation into a non-retryable adapter error', async () => {
     const controller = new AbortController()
     controller.abort()

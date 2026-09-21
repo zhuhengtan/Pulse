@@ -1,5 +1,5 @@
 import type { JsonValue, LLMRequestProjection } from '@pulse/runtime'
-import { consumeProviderSse, normalizeOpenAIResponse, providerHttpError } from './normalize.js'
+import { consumeProviderSse, normalizeOpenAIResponse, parseProviderJson, providerHttpError, providerNetworkError } from './normalize.js'
 import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
 export class OpenAICompatibleAdapter implements ProviderAdapter {
   readonly name = 'OpenAI Compatible'
@@ -12,7 +12,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     try {
       const response = await fetch(`${this.baseURL.replace(/\/$/, '')}/chat/completions`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}), ...(this.config.extraHeaders ?? {}) }, body: JSON.stringify(body) })
       if (!response.ok) throw providerHttpError(response.status)
-      if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeOpenAIResponse(await response.json())
+      if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeOpenAIResponse(await parseProviderJson(response))
       const events = await consumeProviderSse(response)
       const content: string[] = []
       const refusals: string[] = []
@@ -39,7 +39,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       return normalizeOpenAIResponse({ choices: [{ message: { content: content.join('') || null, ...(refusals.length ? { refusal: refusals.join('') } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => ({ id: call.id, function: { name: call.name, arguments: call.arguments } })) } : {}) }, finish_reason: finishReason ?? 'stop' }], ...(usage === undefined ? {} : { usage }) })
     } catch (cause) {
       if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
-      throw cause
+      if (cause instanceof Error && 'code' in cause && typeof (cause as { code?: unknown }).code === 'string' && 'retryable' in cause && typeof (cause as { retryable?: unknown }).retryable === 'boolean') throw cause
+      throw providerNetworkError(cause)
     }
   }
 }
