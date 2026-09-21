@@ -2168,21 +2168,20 @@ export class PulseRuntime {
       this.state.lanes.set(lane.id, lane)
     }
     for (const effect of targetEffects) {
-      if (this.tickBudget && !this.tickBudget.canStart()) break
       const childAgent = effect.childAgentId === undefined ? undefined : this.state.agents.get(effect.childAgentId)
       if (childAgent?.detached === true) continue
       this.requestEffectCancellation(effect.id, reason, effect.cancelGraceMs ?? 0)
       this.tickBudget?.consume()
     }
-    this.finalizeCancellations()
+    this.finalizeCancellations(true)
     this.schedulePersistence()
     return commandApplied
   }
 
-  private finalizeCancellations(): void {
+  private finalizeCancellations(force = false): void {
     let changed = true
     while (changed) {
-      if (this.tickBudget && !this.tickBudget.canStart()) return
+      if (!force && this.tickBudget && !this.tickBudget.canStart()) return
       changed = false
       for (const lane of [...this.state.lanes.values()]) {
         if (lane.status !== 'cancelling') continue
@@ -2218,7 +2217,7 @@ export class PulseRuntime {
       if (changed) this.refreshWaits()
     }
     for (const agent of [...this.state.agents.values()]) {
-      if (this.tickBudget && !this.tickBudget.canStart()) return
+      if (!force && this.tickBudget && !this.tickBudget.canStart()) return
       if (agent.state !== 'cancelling') continue
       const lanes = [...this.state.lanes.values()].filter((lane) => lane.agentId === agent.id)
       if (lanes.some((lane) => !['succeeded', 'failed', 'cancelled'].includes(lane.status))) continue
