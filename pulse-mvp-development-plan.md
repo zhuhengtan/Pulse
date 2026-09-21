@@ -48,6 +48,7 @@
 | warm start / DSL | facts/findings 筛选、ResultRef 授权、递归 Draft Proxy、ReAct 完成回调只传 ResultRef | `tests/warm-start.test.ts`、`tests/dsl-context.test.ts`、`tests/m4-dsl-e2e.test.ts` | `79a993f`、`324f1bc`、`e6c228b` |
 | Session warm-start handle | `PulseSession.sessionId` 与 DSL/架构规定的 `warmStart.sessionId` 对齐，同时保留旧 `agentId` source alias；复制仍是一次性、隔离的 Global Context adopt | `tests/warm-start.test.ts` | `7658937` |
 | Runtime Storage 编排 | Runtime 自动登记 Event/Result/Snapshot/LLM Request，活动 Lane/Wait/未结算 Request/可见 ResultRef 幂等 pin；Step 提交前 clone 预检 hard limit | `tests/storage-policy.test.ts` | `43a9847` |
+| Privacy-aware log export | 新增独立 `exportRuntimeLog()` 审计出口；默认只导出 `public` 正文，`cloud_allowed`/`local_only` 和无法确认来源的事件只保留元数据/脱敏标记，不改变完整恢复快照 | `tests/storage-session.test.ts` | `1e385cc` |
 | SQLite 持久化事务 | 提供 Node `node:sqlite` RuntimePersistenceBackend；WAL/FULL synchronous、单行快照、`BEGIN IMMEDIATE` 和 digest CAS 支持原子保存/恢复 | `tests/sqlite-persistence.test.ts` | `0372a5a` |
 | SQLite 持久化一体化 | RuntimePersistenceBackend 自动挂载 SQLite ResultStore、SnapshotStore 与 EventArchive；checkpoint 外置正文、事实归档和 static restore 可直接闭环；读穿外置正文后保留原始 digest 作为恢复续写 CAS 基线 | `tests/sqlite-persistence.test.ts` | `4ac21f3`、`3627c75` |
 | SQLite Result/Snapshot/EventArchive | 提供带 namespace 的 SQLite Result/Snapshot body store 与幂等冲突检测，以及按事件序号原子追加、范围读取的 SQLite EventArchive | `tests/sqlite-content-store.test.ts` | `b832588` |
@@ -209,7 +210,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、379/379 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、模型 fallback 的 `maxAttempts` 上限、Session `warmStart.sessionId`、逻辑 ToolCall ID 稳定化、Action Decoder 工具隐私/来源传播、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Watchdog 二级策略变更与推理能力提升、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、380/380 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、模型 fallback 的 `maxAttempts` 上限、Session `warmStart.sessionId`、逻辑 ToolCall ID 稳定化、Action Decoder 工具隐私/来源传播、隐私感知日志导出、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Watchdog 二级策略变更与推理能力提升、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -650,6 +651,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `a524e72`：DSL 内置 ReAct 工具解码路径同步继承 LLM ResultRef 的 `privacy` 与 `derivedFrom`。
 - `711c0be`：公共 Action Decoder 默认继承 `LLMResult` 自带的 `privacy/derivedFrom`，调用方无需重复传递来源元数据。
 - `959f658`：`LLMResult.derivedFrom` 对齐 `ProvenanceRef`，支持 Artifact 来源并由 Action Decoder 原样传播。
+- `1e385cc`：增加独立隐私感知 `exportRuntimeLog()`，默认 public 导出，敏感 Result/Artifact 正文和无法确认隐私的事件自动脱敏；完整恢复快照保持不变。
 - `a885019`：Progress Watchdog 只有在 Action 签名确实在窗口中重复时才升级；二级干预接受一次新策略并给 LLM 注入 `reasoning: high` floor，避免“换策略”被误判为重复而直接三级失败。
 - `b2de59b`：`createAgent` 补齐 priority/policy/limits 契约，Agent root Lane 使用声明优先级，`maxActiveLanes` 与 `timeoutMs` 真实生效并可恢复。
 - `0ce2a6e`：在开发模式为 Step/ErrorBoundary 增加运行时纯度守卫，阻断动态全局 IO/时间/随机源访问并保持生产模式兼容。
@@ -699,7 +701,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，68 个测试文件、379 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，68 个测试文件、380 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
@@ -707,6 +709,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | --- | --- | --- |
 | 真实 Provider Live Smoke | 已执行但被鉴权阻塞 | 请求已到真实 HTTP endpoint，当前返回 `PROVIDER_HTTP_401`；需要有效凭证验证 token、取消、structured output 和 tool-call 往返 |
 | Runtime Storage pin/retention | 确定性代码、文件后端和 SQLite 事务后端已覆盖，生命周期自动落盘、完整性和 CAS、ResultStore/SnapshotStore 读穿已接入 | 自动 pin、hard-limit 预检、compact、backend 确认后的 `persisted` 标记、restore、完整性校验、共享快照 CAS、Result/Context Snapshot 正文外部化、外置索引 fail-closed，以及 Runtime `run()`/`shutdown()`/异步 Effect 结算自动持久化已有测试；多进程生产部署与外部数据库运维仍需验证 |
+| 隐私日志导出 | `exportRuntimeLog()` 已按 `public` / `cloud_allowed` / `local_only` ceiling 裁剪 Result、Artifact 和无法确认来源的事件 payload | 仅有确定性导出边界和脱敏测试；外部审计系统的字段策略、密钥管理和生产脱敏规则仍需宿主配置 |
 | 崩溃恢复与副作用对账 | 进程级重启和本地真实写入对账已验证，远程副作用仍待验证 | 已补子进程 `SIGKILL` 后恢复、启动 quarantine、资源锁隔离，以及 `executionRef` 从 Tool 到 Runtime 的持久化链；仍缺真实远程写系统 reconcile 和生产环境的持久化事务边界证明 |
 | Provider 请求完整能力 | 确定性映射已覆盖，真实厂商仍待验证 | OpenAI-compatible/Anthropic 请求带 model、tool schema、structured schema，usage 已归一化；真实 endpoint 的字段兼容、计费口径、取消和 tool-call 往返仍需有效凭证 |
 | 跨运行时 Session warm start | 单 Runtime 内的显式 `sessionId` adopt 已实现 | 当前 Session handle 仍解析到同一 Runtime 内的 Agent 状态；跨进程/跨 Runtime 的 Session Store、版本读取和新 Host Policy 重算仍需接入 |
@@ -736,7 +739,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 本方案继承并落地《Pulse Runtime 架构设计》与《Pulse Application DSL 规范》：
 1. 以主架构第 26 节的 M0/M1 标注为唯一验收来源，不重复维护场景数量。
 2. M1 的真实 Adapter、受控 Mock、三层 Context、工具 SDK、StepBuilder、Session 和确定性端到端示例已贯通；其他 Provider 与真实网络任务属于独立集成验证。
-3. ResultRef 隔离、record/leaf Privacy、ContextDelta provenance、Action Decoder 与 DSL ReAct 的 ToolEffect privacy/derivedFrom 传播、Watchdog、Fork Affinity（含 DSL series collapse 与 Runtime 可选自动 coalesce）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射与实时 Observation emitter、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由及快照恢复、按 Agent 隔离的 Session、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、恢复程序/工具版本 fail-closed、ResultStore 外部正文读穿、File/SQLite Snapshot 外置索引与 EventArchive 一体化、取消事务存储准入、correlated telemetry、JSONL/HTTP exporter、聚合和告警规则、Bearer-authenticated HTTP lease-based Worker transport、Worker snapshot/restore、HTTP lease reaper、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、生产级持久化事务边界、生产级 Worker TLS/密钥轮换与共享 durable lease store、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
+3. ResultRef 隔离、record/leaf Privacy、ContextDelta provenance、Action Decoder 与 DSL ReAct 的 ToolEffect privacy/derivedFrom 传播、隐私感知日志导出、Watchdog、Fork Affinity（含 DSL series collapse 与 Runtime 可选自动 coalesce）、warm start、history 归档、结构化拒绝输出、ToolCallCorrelation、Runtime 自动 Storage pin、bounded preparation、Provider 请求映射与实时 Observation emitter、backend restore、进程级 SIGKILL 恢复、本地 RecoverableTool 对账、Runtime 生命周期自动持久化、自适应模型路由及快照恢复、按 Agent 隔离的 Session、单进程 Detached/background scope、Step 同步边界、恢复锁重建、快照引用校验、Tool admission 默认锁、恢复程序/工具版本 fail-closed、ResultStore 外部正文读穿、File/SQLite Snapshot 外置索引与 EventArchive 一体化、取消事务存储准入、correlated telemetry、JSONL/HTTP exporter、聚合和告警规则、Bearer-authenticated HTTP lease-based Worker transport、Worker snapshot/restore、HTTP lease reaper、动态 ToolSet Context 编译、Host allow/deny 工具权限已实现并有确定性测试；真实 Provider smoke、远程副作用对账、生产级持久化事务边界、生产级 Worker TLS/密钥轮换与共享 durable lease store、细粒度宿主权限/隐私策略生产接入、生产样本校准和外部生产指标系统接入仍未勾选。
 4. 所有外部模型与工具行为都必须经统一 Effect/Attempt、隐私、取消、重试和 ResultRef 契约进入 Runtime。
 
 已勾选条目对应的实现和测试证据已经落库；未勾选条目仍是明确的后续验收任务。本方案不把当前确定性参考实现等同于生产级可靠恢复或完整多模型产品交付。
