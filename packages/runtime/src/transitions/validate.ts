@@ -263,7 +263,14 @@ function validateForkActionShape(action: unknown): string | undefined {
   return undefined
 }
 
-function validateWait(state: RuntimeState, laneId: string, spec: WaitSpec, locals: Map<string, TargetRef>, newTargets: Map<string, TargetRef>): string | undefined {
+function validateSubmitWaitShape(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'INVALID_WAIT_DEPENDENCY'
+  const wait = value as Record<string, unknown>
+  if (!['fail_lane', 'resume_with_error'].includes(String(wait.onUnsatisfied)) || (wait.onCancelled !== undefined && !['unsatisfied', 'ignore'].includes(String(wait.onCancelled))) || (wait.reason !== undefined && !['startup', 'effect', 'dependency', 'join', 'timer'].includes(String(wait.reason))) || (wait.deadlineAt !== undefined && (typeof wait.deadlineAt !== 'number' || !Number.isFinite(wait.deadlineAt)))) return 'INVALID_WAIT_DEPENDENCY'
+  return undefined
+}
+
+function validateWait(state: RuntimeState, laneId: string, spec: WaitSpec, locals: Map<string, TargetRef>, newTargets: Map<string, TargetRef>, allowDuplicateTargets = false): string | undefined {
   if (!spec || typeof spec !== 'object' || Array.isArray(spec) || !Array.isArray(spec.dependencies)) return 'INVALID_WAIT_DEPENDENCY'
   if (!['all', 'any', 'quorum'].includes(spec.mode) || (spec.dependencies.length === 0 && spec.mode !== 'all') || !['fail_lane', 'resume_with_error'].includes(spec.onUnsatisfied) || (spec.onCancelled !== undefined && !['unsatisfied', 'ignore'].includes(spec.onCancelled)) || (spec.reason !== undefined && !['startup', 'effect', 'dependency', 'join', 'timer'].includes(spec.reason)) || spec.dependencies.some((dependency) => !dependency || typeof dependency !== 'object' || !nonEmptyString(dependency.key) || !validTargetRef(dependency.target) || !['success', 'settled'].includes(dependency.condition) || !resolveTarget(dependency.target, newTargets.size ? newTargets : locals))) return 'INVALID_WAIT_DEPENDENCY'
   if (spec.mode === 'quorum' && (!Number.isInteger(spec.quorum) || spec.quorum! < 1 || spec.quorum! > spec.dependencies.length)) return 'INVALID_WAIT_QUORUM'
@@ -276,10 +283,11 @@ function validateWait(state: RuntimeState, laneId: string, spec: WaitSpec, local
     keys.add(dependency.key)
     const target = resolveTarget(dependency.target, newTargets.size ? newTargets : locals)!
     const targetKey = `${target.kind}:${target.id}`
-    if (targets.has(targetKey)) return 'DUPLICATE_WAIT_TARGET'
+    if (!allowDuplicateTargets && targets.has(targetKey)) return 'DUPLICATE_WAIT_TARGET'
     targets.add(targetKey)
-    if (target.kind === 'lane' && !state.lanes.has(target.id) && !newTargets.has(target.id)) return 'UNKNOWN_TARGET'
-    if (target.kind === 'effect' && !state.effects.has(target.id) && !newTargets.has(target.id)) return 'UNKNOWN_TARGET'
+    const isNewTarget = [...newTargets.values()].some((candidate) => candidate.kind === target.kind && candidate.id === target.id)
+    if (target.kind === 'lane' && !state.lanes.has(target.id) && !isNewTarget) return 'UNKNOWN_TARGET'
+    if (target.kind === 'effect' && !state.effects.has(target.id) && !isNewTarget) return 'UNKNOWN_TARGET'
     if (target.kind === 'lane' && target.id === laneId) return 'SELF_DEPENDENCY'
   }
   return undefined
@@ -468,6 +476,10 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
     if (action.type === 'submit_effects') {
       if (!Array.isArray(action.effects)) return { rejection: error('INVALID_EFFECT_BATCH', 'submit_effects.effects must be an array') }
       if (action.effects.length === 0) return { rejection: error('EMPTY_EFFECT_BATCH', 'submit_effects requires at least one effect') }
+      if (action.wait !== undefined) {
+        const waitShapeError = validateSubmitWaitShape(action.wait)
+        if (waitShapeError) return { rejection: error(waitShapeError, 'Wait rejected') }
+      }
       for (const submission of action.effects) {
         const submissionError = validateEffectSubmission(submission)
         if (submissionError) return { rejection: error(submissionError, 'Effect submission rejected') }
@@ -497,6 +509,8 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
       }
       if (action.wait) {
         const spec: WaitSpec = { dependencies: action.effects.map((submission) => ({ key: submission.key, target: batchTargets.get(submission.key)!, condition: 'settled' as const })), mode: 'all', ...(action.wait.deadlineAt === undefined ? {} : { deadlineAt: action.wait.deadlineAt }), onUnsatisfied: action.wait.onUnsatisfied, ...(action.wait.onCancelled ? { onCancelled: action.wait.onCancelled } : {}), reason: action.wait.reason ?? 'effect' }
+        const waitError = validateWait(state, lane.id, spec, new Map(), batchTargets)
+        if (waitError) return { rejection: error(waitError, 'Wait rejected') }
         if (hasDependencyCycle(state, spec.dependencies.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: dependency.target as TargetRef })))) return { rejection: error('DEPENDENCY_CYCLE', 'Wait would create a dependency cycle') }
         addWait(state, workingLane, spec, batchTargets, mutations, `wait-${waitCounter++}`)
       }
@@ -550,6 +564,8 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
         forkEdges.push(...deps.map((dependency) => ({ from: { kind: 'lane' as const, id: lane.id }, to: dependency.target as TargetRef })))
         if (forkEdges.some((edge) => !edge.to) || hasDependencyCycle(state, forkEdges)) return { rejection: error('DEPENDENCY_CYCLE', 'Fork dependencies would create a cycle') }
         const joinTargets = new Map(deps.map((dependency) => [dependency.key, dependency.target] as const))
+        const waitError = validateWait(state, lane.id, spec, new Map(), joinTargets, true)
+        if (waitError) return { rejection: error(waitError, 'Join rejected') }
         addWait(state, workingLane, spec, joinTargets, mutations, `wait-${waitCounter++}`)
       }
     } else if (action.type === 'wait') {

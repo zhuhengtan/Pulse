@@ -117,6 +117,24 @@ describe('runtime control boundaries', () => {
     }
   })
 
+  it('applies the Wait admission contract to submit and join shortcuts', () => {
+    const cases: Array<{ action: unknown; code: string }> = [
+      { action: { type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'invalid' } }, code: 'INVALID_WAIT_DEPENDENCY' },
+      { action: { type: 'fork', lanes: [{ key: 'child', goal: 'child', program: point('wait-shortcuts', 'done') }], join: { condition: 'settled', mode: 'quorum', quorum: 2, onUnsatisfied: 'resume_with_error' } }, code: 'INVALID_WAIT_QUORUM' },
+    ]
+    for (const [index, candidate] of cases.entries()) {
+      const runtime = new PulseRuntime()
+      const program: LaneProgram = { id: 'wait-shortcuts', version: '1', step: () => ({ actions: [candidate.action as never], next: point('wait-shortcuts', 'done') }), }
+      const { laneId } = runtime.createAgent(`invalid wait shortcut ${index}`, program)
+
+      runtime.tick()
+
+      expect(runtime.state.lanes).toHaveLength(1)
+      expect(runtime.state.waits).toHaveLength(0)
+      expect(runtime.state.lanes.get(laneId)?.pendingResumeInput).toMatchObject({ type: 'control_error', error: { code: candidate.code } })
+    }
+  })
+
   it('rejects malformed Host Facts before they enter the FactInbox', () => {
     const runtime = new PulseRuntime()
     expect(() => runtime.enqueueHostCommand({ type: 'cancel', agentId: '', reason: 'USER_REQUESTED' })).toThrow('INVALID_HOST_COMMAND')
