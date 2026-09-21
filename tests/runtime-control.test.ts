@@ -27,6 +27,19 @@ describe('runtime control boundaries', () => {
     expect(runtime.results.get('missing')).toBeUndefined()
   })
 
+  it('rejects malformed LLM input reference lists instead of silently dropping them', () => {
+    const runtime = new PulseRuntime()
+    const program: LaneProgram = { id: 'invalid-llm-inputs', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', inputs: { results: [''] } } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('invalid-llm-inputs', 'finish') }
+      : { actions: [{ type: 'complete', result: { done: true } }], next: point('invalid-llm-inputs', 'finish') } }
+    const { laneId } = runtime.createAgent('invalid llm inputs', program)
+
+    runtime.tick()
+
+    expect(runtime.state.effects).toHaveLength(0)
+    expect(runtime.state.lanes.get(laneId)?.pendingResumeInput).toMatchObject({ type: 'control_error', error: { code: 'INVALID_LLM_INPUT_REFS:results' } })
+  })
+
   it('rejects invalid RuntimeConfig values before constructing scheduler state', () => {
     expect(() => new PulseRuntime({ maxLaneStepsPerTick: -1 })).toThrow('INVALID_RUNTIME_CONFIG:maxLaneStepsPerTick')
     expect(() => new PulseRuntime({ agingIntervalMs: 0 })).toThrow('INVALID_RUNTIME_CONFIG:agingIntervalMs')

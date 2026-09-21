@@ -274,13 +274,27 @@ function prepareLLMInput(state: RuntimeState, lane: LaneRecord, submission: Subm
   if (input.request !== undefined) return { input: submission.input }
   if (typeof input.task !== 'string') return { input: submission.input }
   const instruction = typeof input.instruction === 'string' ? input.instruction : input.task
-  const rawInputs = input.inputs && typeof input.inputs === 'object' && !Array.isArray(input.inputs) ? input.inputs as Record<string, JsonValue> : {}
-  const resultRefs = [...new Set([...(Array.isArray(rawInputs.results) ? rawInputs.results.filter((ref): ref is string => typeof ref === 'string') : []), ...(Array.isArray(rawInputs.findings) ? rawInputs.findings.filter((ref): ref is string => typeof ref === 'string') : []), ...(Array.isArray(rawInputs.rejectedOutputRefs) ? rawInputs.rejectedOutputRefs.filter((ref): ref is string => typeof ref === 'string') : [])])]
-  const artifactRefs = [...new Set(Array.isArray(rawInputs.artifacts) ? rawInputs.artifacts.filter((ref): ref is string => typeof ref === 'string') : [])]
+  if (input.inputs !== undefined && (!input.inputs || typeof input.inputs !== 'object' || Array.isArray(input.inputs))) return { error: 'INVALID_LLM_INPUTS' }
+  const rawInputs = (input.inputs ?? {}) as Record<string, JsonValue>
+  const readRefs = (key: string): { refs?: string[]; error?: string } => {
+    const value = rawInputs[key]
+    if (value === undefined) return { refs: [] }
+    if (!Array.isArray(value) || value.some((ref) => typeof ref !== 'string' || ref.length === 0)) return { error: `INVALID_LLM_INPUT_REFS:${key}` }
+    return { refs: value as string[] }
+  }
+  const resultInputs = readRefs('results')
+  const findingInputs = readRefs('findings')
+  const rejectedInputs = readRefs('rejectedOutputRefs')
+  const artifactInputs = readRefs('artifacts')
+  const eventInputs = readRefs('events')
+  const inputError = resultInputs.error ?? findingInputs.error ?? rejectedInputs.error ?? artifactInputs.error ?? eventInputs.error
+  if (inputError) return { error: inputError }
+  const resultRefs = [...new Set([...(resultInputs.refs ?? []), ...(findingInputs.refs ?? []), ...(rejectedInputs.refs ?? [])])]
+  const artifactRefs = [...new Set(artifactInputs.refs ?? [])]
   try {
     const agent = state.agents.get(lane.agentId)
     if (!agent) return { error: 'UNKNOWN_AGENT' }
-    const projection = new ContextBuilder(state).build({ agent, lane, resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), instruction, ...(typeof input.system === 'string' ? { system: input.system } : {}), ...(input.policy === undefined ? {} : { policy: input.policy }), ...(input.tools === undefined ? {} : { tools: input.tools }), toolSetId: typeof input.toolSetId === 'string' ? input.toolSetId : 'default' })
+    const projection = new ContextBuilder(state).build({ agent, lane, resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: eventInputs.refs ?? [], instruction, ...(typeof input.system === 'string' ? { system: input.system } : {}), ...(input.policy === undefined ? {} : { policy: input.policy }), ...(input.tools === undefined ? {} : { tools: input.tools }), toolSetId: typeof input.toolSetId === 'string' ? input.toolSetId : 'default' })
     return { input: { ...input, request: projection as unknown as JsonValue } }
   } catch (cause) {
     return { error: cause instanceof Error ? cause.message : 'INVALID_LLM_CONTEXT' }
