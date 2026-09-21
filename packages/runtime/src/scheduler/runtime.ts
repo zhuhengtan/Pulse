@@ -174,6 +174,17 @@ function priorityScore(priority: AgentCreateRequest['priority']): number | undef
 function invalidConfig(field: string): never { throw new Error(`INVALID_RUNTIME_CONFIG:${field}`) }
 function optionalNonNegativeInteger(value: unknown, field: string): void { if (value !== undefined && (!Number.isInteger(value) || (value as number) < 0)) invalidConfig(field) }
 function optionalNonNegativeNumber(value: unknown, field: string): void { if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0)) invalidConfig(field) }
+function validateProgramShape(value: unknown): asserts value is LaneProgram {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_PROGRAM')
+  const program = value as Record<string, unknown>
+  if (typeof program.id !== 'string' || program.id.length === 0 || typeof program.version !== 'string' || program.version.length === 0 || typeof program.step !== 'function') throw new Error('INVALID_PROGRAM')
+  if (program.entry !== undefined && (typeof program.entry !== 'string' || program.entry.length === 0)) throw new Error('INVALID_PROGRAM')
+  if (program.errorBoundary !== undefined && typeof program.errorBoundary !== 'function') throw new Error('INVALID_PROGRAM')
+  if (program.seriesMember !== undefined && (!program.seriesMember || typeof program.seriesMember !== 'object' || Array.isArray(program.seriesMember))) throw new Error('INVALID_PROGRAM')
+  if (program.seriesMemberProgram !== undefined && (!program.seriesMemberProgram || typeof program.seriesMemberProgram !== 'object' || Array.isArray(program.seriesMemberProgram))) throw new Error('INVALID_PROGRAM')
+  if (program.seriesKeys !== undefined && (!Array.isArray(program.seriesKeys) || program.seriesKeys.length === 0 || program.seriesKeys.some((key) => typeof key !== 'string' || key.length === 0) || new Set(program.seriesKeys).size !== program.seriesKeys.length)) throw new Error('INVALID_PROGRAM')
+  if (program.seriesOnMemberFailure !== undefined && !['continue', 'abort'].includes(String(program.seriesOnMemberFailure))) throw new Error('INVALID_PROGRAM')
+}
 function validateRuntimeConfig(config: RuntimeConfig): void {
   optionalNonNegativeInteger(config.maxLaneStepsPerTick, 'maxLaneStepsPerTick')
   if (config.agingIntervalMs !== undefined && (!Number.isFinite(config.agingIntervalMs) || config.agingIntervalMs <= 0)) invalidConfig('agingIntervalMs')
@@ -220,6 +231,7 @@ export class ProgramRegistry {
     const pending = new Map<string, LaneProgram>()
     const visiting = new Set<string>()
     const visit = (candidate: LaneProgram): void => {
+      validateProgramShape(candidate)
       const key = `${candidate.id}@${candidate.version}`
       if (visiting.has(key)) throw new Error(`PROGRAM_REGISTRATION_CYCLE:${key}`)
       if (pending.has(key)) return

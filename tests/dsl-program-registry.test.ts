@@ -48,4 +48,12 @@ describe('DSL program registry contract', () => {
     expect(runtime.programs.has('cycle-a', '1')).toBe(false)
     expect(runtime.programs.has('cycle-b', '1')).toBe(false)
   })
+
+  it('rejects malformed programs with an explicit contract error', () => {
+    const runtime = new PulseRuntime()
+    expect(() => runtime.programs.register({ id: '', version: '1', step: () => ({ actions: [], next: { programId: 'bad', programVersion: '1', step: 'start', locals: {} } }) } as never)).toThrow('INVALID_PROGRAM')
+    expect(() => runtime.programs.register({ id: 'bad', version: '1', step: undefined } as never)).toThrow('INVALID_PROGRAM')
+    expect(() => runtime.programs.register({ id: 'bad-keys', version: '1', step: () => ({ actions: [], next: { programId: 'bad-keys', programVersion: '1', step: 'start', locals: {} } }), seriesKeys: ['one', 'one'] } as never)).toThrow('INVALID_PROGRAM')
+    expect([...runtime.programs.entries()]).toHaveLength(0)
+  })
 })
