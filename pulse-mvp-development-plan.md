@@ -763,7 +763,8 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `87d73a9`：Host Fact 入队前校验 reply/cancel/cancel_effect/set_lane_priority 的身份、原因、优先级和 JSON payload；非法宿主输入不再进入 FactInbox。
 - `fd6f5ac`：`submit_effects.wait` 与 `fork.join` 统一复用 Wait admission；校验同批新目标和 coalesced join alias，非法 deadline/quorum/策略不再生成 WaitRecord，合法 alias 语义保持可用。
 - `00fbec4`：Fork child 的 `dependsOn` 在创建 Lane 前复用 Wait admission，统一拒绝重复 dependency key/target 与 self-dependency，避免异常依赖在 child lane 已写入后才暴露。
-- 当前确定性门禁：`npm test`，68 个测试文件、428 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
+- `cb21061`：StepTransaction 对 cancel/propose_cancel、adopt_context、downgrade_privacy 和 ContextDelta 操作项执行运行时形状校验，畸形对象在分支逻辑前 fail-closed。
+- 当前确定性门禁：`npm test`，68 个测试文件、429 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
