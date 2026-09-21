@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { validateJsonSchema } from '../models/router.js'
 import type { JsonValue, ResourceLockSpec } from '../core/types.js'
 
+export interface RuntimeToolPermissions { workspaceRoots?: string[]; networkHosts?: string[] }
 export interface RuntimeToolManifest {
   name: string
   version: string
@@ -17,6 +18,7 @@ export interface RuntimeToolManifest {
   retrySafety: 'read_only' | 'idempotent' | 'unsafe'
   defaultTimeoutMs: number
   maxResultSummaryBytes?: number
+  permissions?: RuntimeToolPermissions
 }
 
 export interface RuntimeToolContext {
@@ -47,7 +49,7 @@ export interface RuntimeToolDefinition {
 export interface RuntimeToolDiscoveryQuery { text?: string; tags?: string[]; sideEffectPolicy?: RuntimeToolManifest['sideEffectPolicy']; concurrencyClass?: RuntimeToolManifest['concurrencyClass']; limit?: number }
 export interface RuntimeToolDiscoveryResult { manifest: RuntimeToolManifest; score: number }
 export interface RuntimeToolSetSnapshot { id: string; version: string; tools: RuntimeToolManifest[] }
-export interface RuntimeToolRegistryPolicy { allow?: string[]; deny?: string[] }
+export interface RuntimeToolRegistryPolicy { allow?: string[]; deny?: string[]; workspaceRoots?: string[]; networkHosts?: string[]; allowNetwork?: boolean }
 export interface RuntimeToolAdmission { locks: ResourceLockSpec[]; sideEffectPolicy: RuntimeToolManifest['sideEffectPolicy']; defaultTimeoutMs: number; retrySafety: RuntimeToolManifest['retrySafety']; version: string }
 
 /**
@@ -57,10 +59,10 @@ export interface RuntimeToolAdmission { locks: ResourceLockSpec[]; sideEffectPol
  */
 export class RuntimeToolRegistry {
   private readonly definitions = new Map<string, RuntimeToolDefinition>()
-  private readonly policy: { allow?: ReadonlySet<string>; deny: ReadonlySet<string> }
+  private readonly policy: { allow?: ReadonlySet<string>; deny: ReadonlySet<string>; workspaceRoots?: ReadonlySet<string>; networkHosts?: ReadonlySet<string>; allowNetwork: boolean }
 
   constructor(policy: RuntimeToolRegistryPolicy = {}) {
-    this.policy = { ...(policy.allow === undefined ? {} : { allow: new Set(policy.allow) }), deny: new Set(policy.deny ?? []) }
+    this.policy = { ...(policy.allow === undefined ? {} : { allow: new Set(policy.allow) }), deny: new Set(policy.deny ?? []), ...(policy.workspaceRoots === undefined ? {} : { workspaceRoots: new Set(policy.workspaceRoots) }), ...(policy.networkHosts === undefined ? {} : { networkHosts: new Set(policy.networkHosts) }), allowNetwork: policy.allowNetwork ?? true }
   }
 
   register(definition: RuntimeToolDefinition | unknown): void {
@@ -69,12 +71,27 @@ export class RuntimeToolRegistry {
     if (!manifest || typeof manifest.name !== 'string' || !manifest.name || this.definitions.has(manifest.name)) throw new Error(`TOOL_ALREADY_REGISTERED:${manifest?.name ?? ''}`)
     if (!manifest.version || !Number.isFinite(manifest.defaultTimeoutMs) || manifest.defaultTimeoutMs < 0) throw new Error(`INVALID_TOOL_MANIFEST:${manifest.name}`)
     if (manifest.supportsAbortSignal !== true) throw new Error(`TOOL_ABORT_SIGNAL_REQUIRED:${manifest.name}`)
+    if (manifest.permissions?.workspaceRoots?.some((root) => !root || typeof root !== 'string') || manifest.permissions?.networkHosts?.some((host) => !host || typeof host !== 'string')) throw new Error(`INVALID_TOOL_PERMISSIONS:${manifest.name}`)
     if (typeof candidate.execute !== 'function') throw new Error(`INVALID_TOOL_DEFINITION:${manifest.name}`)
     this.definitions.set(manifest.name, candidate)
   }
 
   get(name: string): RuntimeToolDefinition | undefined { return this.isAllowed(name) ? this.definitions.get(name) : undefined }
-  isAllowed(name: string): boolean { return this.policy.deny.has(name) === false && (this.policy.allow === undefined || this.policy.allow.has(name)) }
+  isAllowed(name: string): boolean {
+    const definition = this.definitions.get(name)
+    return this.policy.deny.has(name) === false && (this.policy.allow === undefined || this.policy.allow.has(name)) && (definition === undefined || this.permissionsAllowed(definition.manifest))
+  }
+  permissionReasons(name: string): string[] {
+    const definition = this.definitions.get(name)
+    if (!definition) return ['UNKNOWN_TOOL']
+    const reasons: string[] = []
+    const permissions = definition.manifest.permissions
+    if (!permissions) return reasons
+    if (!this.policy.allowNetwork && (permissions.networkHosts?.length ?? 0) > 0) reasons.push('NETWORK_DISABLED')
+    if (this.policy.networkHosts !== undefined) for (const host of permissions.networkHosts ?? []) if (!this.policy.networkHosts.has('*') && !this.policy.networkHosts.has(host)) reasons.push(`NETWORK_HOST_NOT_ALLOWED:${host}`)
+    if (this.policy.workspaceRoots !== undefined) for (const root of permissions.workspaceRoots ?? []) if (![...this.policy.workspaceRoots].some((allowed) => allowed === '*' || root === allowed || root.startsWith(`${allowed.replace(/\/$/, '')}/`))) reasons.push(`WORKSPACE_ROOT_NOT_ALLOWED:${root}`)
+    return reasons
+  }
   list(): RuntimeToolManifest[] { return [...this.definitions.values()].filter((definition) => this.isAllowed(definition.manifest.name)).map((definition) => structuredClone(definition.manifest)) }
 
   validateInput(name: string, input: unknown): unknown {
@@ -163,4 +180,6 @@ export class RuntimeToolRegistry {
     if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`)
     return definition
   }
+
+  private permissionsAllowed(manifest: RuntimeToolManifest): boolean { return this.permissionReasons(manifest.name).length === 0 }
 }

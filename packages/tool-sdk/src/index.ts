@@ -19,6 +19,7 @@ export interface ToolContext {
 }
 export interface ReconcileContext { toolCallId: string; effectId: string; attemptId: string; agentId: string; laneId: string; signal: AbortSignal }
 export interface ReconcileResult<TOutput> { status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; output?: TOutput; error?: { code: string; message: string; retryable?: boolean; details?: JsonValue } }
+export interface ToolPermissions { workspaceRoots?: string[]; networkHosts?: string[] }
 export interface ToolManifest {
   name: string
   version: string
@@ -34,11 +35,12 @@ export interface ToolManifest {
   retrySafety: 'read_only' | 'idempotent' | 'unsafe'
   defaultTimeoutMs: number
   maxResultSummaryBytes?: number
+  permissions?: ToolPermissions
 }
 export interface ToolDiscoveryQuery { text?: string; tags?: string[]; sideEffectPolicy?: ToolManifest['sideEffectPolicy']; concurrencyClass?: ConcurrencyClass; limit?: number }
 export interface ToolDiscoveryResult { manifest: ToolManifest; score: number }
 export interface ToolSetSnapshot { id: string; version: string; tools: ToolManifest[] }
-export interface ToolRegistryPolicy { allow?: string[]; deny?: string[] }
+export interface ToolRegistryPolicy { allow?: string[]; deny?: string[]; workspaceRoots?: string[]; networkHosts?: string[]; allowNetwork?: boolean }
 export interface ToolAdmission { locks: ResourceClaim[]; sideEffectPolicy: ToolManifest['sideEffectPolicy']; defaultTimeoutMs: number; retrySafety: ToolManifest['retrySafety']; version: string }
 export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   manifest: ToolManifest
@@ -70,14 +72,15 @@ export class ToolError extends Error {
 
 export class ToolRegistry {
   private readonly definitions = new Map<string, ToolDefinition<any, any>>()
-  private readonly policy: { allow?: ReadonlySet<string>; deny: ReadonlySet<string> }
+  private readonly policy: { allow?: ReadonlySet<string>; deny: ReadonlySet<string>; workspaceRoots?: ReadonlySet<string>; networkHosts?: ReadonlySet<string>; allowNetwork: boolean }
   constructor(policy: ToolRegistryPolicy = {}) {
-    this.policy = { ...(policy.allow === undefined ? {} : { allow: new Set(policy.allow) }), deny: new Set(policy.deny ?? []) }
+    this.policy = { ...(policy.allow === undefined ? {} : { allow: new Set(policy.allow) }), deny: new Set(policy.deny ?? []), ...(policy.workspaceRoots === undefined ? {} : { workspaceRoots: new Set(policy.workspaceRoots) }), ...(policy.networkHosts === undefined ? {} : { networkHosts: new Set(policy.networkHosts) }), allowNetwork: policy.allowNetwork ?? true }
   }
   register<TInput, TOutput>(definition: ToolDefinition<TInput, TOutput>): void {
     if (!definition.manifest.name || this.definitions.has(definition.manifest.name)) throw new Error(`TOOL_ALREADY_REGISTERED:${definition.manifest.name}`)
     if (!definition.manifest.version || !Number.isFinite(definition.manifest.defaultTimeoutMs) || definition.manifest.defaultTimeoutMs < 0) throw new Error(`INVALID_TOOL_MANIFEST:${definition.manifest.name}`)
     if (!definition.manifest.supportsAbortSignal) throw new Error(`TOOL_ABORT_SIGNAL_REQUIRED:${definition.manifest.name}`)
+    if (definition.manifest.permissions?.workspaceRoots?.some((root) => !root || typeof root !== 'string') || definition.manifest.permissions?.networkHosts?.some((host) => !host || typeof host !== 'string')) throw new Error(`INVALID_TOOL_PERMISSIONS:${definition.manifest.name}`)
     this.definitions.set(definition.manifest.name, definition)
   }
   get(name: string): ToolDefinition<any, any> | undefined { return this.isAllowed(name) ? this.definitions.get(name) : undefined }
@@ -90,7 +93,21 @@ export class ToolRegistry {
     }
     catch { throw new ToolError('INVALID_TOOL_INPUT', `Input does not match the manifest for tool ${name}.`, { retryable: false }) }
   }
-  isAllowed(name: string): boolean { return this.policy.deny.has(name) === false && (this.policy.allow === undefined || this.policy.allow.has(name)) }
+  isAllowed(name: string): boolean {
+    const definition = this.definitions.get(name)
+    return this.policy.deny.has(name) === false && (this.policy.allow === undefined || this.policy.allow.has(name)) && (definition === undefined || this.permissionsAllowed(definition.manifest))
+  }
+  permissionReasons(name: string): string[] {
+    const definition = this.definitions.get(name)
+    if (!definition) return ['UNKNOWN_TOOL']
+    const permissions = definition.manifest.permissions
+    if (!permissions) return []
+    const reasons: string[] = []
+    if (!this.policy.allowNetwork && (permissions.networkHosts?.length ?? 0) > 0) reasons.push('NETWORK_DISABLED')
+    if (this.policy.networkHosts !== undefined) for (const host of permissions.networkHosts ?? []) if (!this.policy.networkHosts.has('*') && !this.policy.networkHosts.has(host)) reasons.push(`NETWORK_HOST_NOT_ALLOWED:${host}`)
+    if (this.policy.workspaceRoots !== undefined) for (const root of permissions.workspaceRoots ?? []) if (![...this.policy.workspaceRoots].some((allowed) => allowed === '*' || root === allowed || root.startsWith(`${allowed.replace(/\/$/, '')}/`))) reasons.push(`WORKSPACE_ROOT_NOT_ALLOWED:${root}`)
+    return reasons
+  }
   list(): ToolManifest[] { return [...this.definitions.values()].filter((definition) => this.isAllowed(definition.manifest.name)).map((definition) => structuredClone(definition.manifest)) }
   discover(query: ToolDiscoveryQuery = {}): ToolDiscoveryResult[] {
     const terms = (query.text ?? '').toLocaleLowerCase().split(/[^a-z0-9_:-]+/).filter(Boolean)
@@ -158,6 +175,7 @@ export class ToolRegistry {
     if (!definition) throw new Error(`UNKNOWN_TOOL:${name}`)
     return definition
   }
+  private permissionsAllowed(manifest: ToolManifest): boolean { return this.permissionReasons(manifest.name).length === 0 }
 }
 
 function schemaToJsonSchema(schema: ZodTypeAny, seen = new Set<ZodTypeAny>()): Record<string, unknown> {
@@ -246,6 +264,7 @@ export function defineTool<TInput, TOutput>(config: {
   retrySafety?: ToolManifest['retrySafety']
   defaultTimeoutMs?: number
   maxResultSummaryBytes?: number
+  permissions?: ToolPermissions
   resolveResources?: (input: TInput) => ResourceClaim[]
   reconcile?: (executionRef: JsonValue, context: ReconcileContext) => Promise<ReconcileResult<TOutput>>
   normalize?: (output: TOutput) => JsonValue
@@ -253,6 +272,6 @@ export function defineTool<TInput, TOutput>(config: {
   execute(input: TInput, context: ToolContext): Promise<TOutput> | TOutput
   executionRef?: (input: TInput, context: ToolContext) => JsonValue
 }): ToolDefinition<TInput, TOutput> {
-  const manifest: ToolManifest = { name: config.name, version: config.version ?? '1', description: config.description, ...(config.tags === undefined ? {} : { tags: [...new Set(config.tags)] }), inputSchema: zodToJsonSchema(config.input), outputSchema: zodToJsonSchema(config.output), concurrencyClass: config.concurrencyClass ?? 'tool', locks: config.locks ?? [], ...(config.resources === undefined ? {} : { resources: config.resources }), supportsAbortSignal: config.supportsAbortSignal ?? true, sideEffectPolicy: config.sideEffectPolicy ?? 'none', retrySafety: config.retrySafety ?? (config.sideEffectPolicy === 'write' ? 'unsafe' : 'read_only'), defaultTimeoutMs: config.defaultTimeoutMs ?? 30_000, ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }) }
+  const manifest: ToolManifest = { name: config.name, version: config.version ?? '1', description: config.description, ...(config.tags === undefined ? {} : { tags: [...new Set(config.tags)] }), inputSchema: zodToJsonSchema(config.input), outputSchema: zodToJsonSchema(config.output), concurrencyClass: config.concurrencyClass ?? 'tool', locks: config.locks ?? [], ...(config.resources === undefined ? {} : { resources: config.resources }), supportsAbortSignal: config.supportsAbortSignal ?? true, sideEffectPolicy: config.sideEffectPolicy ?? 'none', retrySafety: config.retrySafety ?? (config.sideEffectPolicy === 'write' ? 'unsafe' : 'read_only'), defaultTimeoutMs: config.defaultTimeoutMs ?? 30_000, ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }), ...(config.permissions === undefined ? {} : { permissions: structuredClone(config.permissions) }) }
   return { manifest, resourceAdmissionMode: config.resolveResources !== undefined || config.resources !== undefined || config.locks !== undefined ? 'explicit' : 'default', validateInput: (input: unknown) => config.input.parse(input), execute: async (input, context) => config.output.parse(await config.execute(config.input.parse(input), context)), ...(config.executionRef === undefined ? {} : { executionRef: (input: TInput, context: ToolContext) => config.executionRef!(config.input.parse(input), context) }), ...(config.resolveResources === undefined ? {} : { resolveResources: (input: TInput) => config.resolveResources!(config.input.parse(input)) }), ...(config.reconcile === undefined ? {} : { reconcile: async (executionRef: JsonValue, context: ReconcileContext) => { const result = await config.reconcile!(executionRef, context); return result.status === 'succeeded' && result.output !== undefined ? { ...result, output: config.output.parse(result.output) } : result } }), ...(config.normalize === undefined ? {} : { normalize: config.normalize }), ...(config.summarize === undefined ? {} : { summarize: (output: TOutput) => config.summarize!(output) }) }
 }

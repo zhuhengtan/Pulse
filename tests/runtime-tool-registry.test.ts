@@ -23,6 +23,21 @@ describe('Runtime tool registry', () => {
     await expect(registry.execute('echo', { value: 1 }, new AbortController().signal)).rejects.toMatchObject({ code: 'INVALID_TOOL_INPUT' })
   })
 
+  it('filters manifest workspace and network permissions before discovery or execution', () => {
+    const remote = { ...echo, manifest: { ...echo.manifest, name: 'remote-echo', permissions: { workspaceRoots: ['/workspace/project'], networkHosts: ['api.example.com'] } } }
+    const denied = new RuntimeToolRegistry({ workspaceRoots: ['/workspace'], allowNetwork: false })
+    denied.register(remote)
+    expect(denied.isAllowed('remote-echo')).toBe(false)
+    expect(denied.permissionReasons('remote-echo')).toEqual(['NETWORK_DISABLED'])
+    expect(denied.list()).toEqual([])
+    expect(() => denied.admission('remote-echo', { value: 'x' })).toThrow('TOOL_NOT_ALLOWED')
+
+    const allowed = new RuntimeToolRegistry({ workspaceRoots: ['/workspace'], networkHosts: ['api.example.com'] })
+    allowed.register(remote)
+    expect(allowed.isAllowed('remote-echo')).toBe(true)
+    expect(allowed.compileToolSet('restricted').tools[0]).toMatchObject({ name: 'remote-echo', permissions: remote.manifest.permissions })
+  })
+
   it('can be consumed directly by the standard Tool Effect adapter', async () => {
     const registry = new RuntimeToolRegistry()
     registry.register(echo)
