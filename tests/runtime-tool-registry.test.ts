@@ -102,4 +102,15 @@ describe('Runtime tool registry', () => {
     expect(runtime.state.effects.get(effect.id)?.outcome?.status).toBe('succeeded')
     expect([...runtime.state.results.values()].find((result) => result.effectId === effect.id)?.value).toEqual({ status: 'done' })
   })
+
+  it('fails closed when a direct Runtime Tool returns an invalid reconcile output', async () => {
+    const recoverable = {
+      manifest: { ...echo.manifest, name: 'invalid-reconcile', sideEffectPolicy: 'external' as const, outputSchema: { type: 'object', required: ['status'], properties: { status: { type: 'string' } } } },
+      execute: () => ({ status: 'done' }),
+      reconcile: async () => ({ status: 'succeeded' as const, output: { invalid: true } }),
+    }
+    const registry = new RuntimeToolRegistry()
+    registry.register(recoverable)
+    await expect(registry.reconcileDetailed('invalid-reconcile', { job: 'job-1' }, { toolCallId: '', effectId: 'effect-1', attemptId: 'attempt-1', agentId: 'agent-1', laneId: 'lane-1', signal: new AbortController().signal })).rejects.toMatchObject({ code: 'TOOL_RECONCILE_OUTPUT_SCHEMA_VIOLATION' })
+  })
 })

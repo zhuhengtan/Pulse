@@ -154,7 +154,11 @@ export class RuntimeToolRegistry {
   async reconcileDetailed(name: string, executionRef: JsonValue, context: RuntimeReconcileContext): Promise<RuntimeReconcileResult> {
     const definition = this.require(name)
     if (!definition.reconcile) throw new Error(`TOOL_NOT_RECOVERABLE:${name}`)
-    return definition.reconcile(executionRef, context)
+    const result = await definition.reconcile(executionRef, context)
+    if (!result || typeof result !== 'object' || !['succeeded', 'failed', 'cancelled', 'unknown'].includes(result.status)) throw Object.assign(new Error(`Reconcile returned an invalid result for tool ${name}.`), { code: 'TOOL_RECONCILE_RESULT_INVALID', retryable: false })
+    if (result.status === 'succeeded' && !validateJsonSchema(result.output, definition.manifest.outputSchema)) throw Object.assign(new Error(`Reconcile output does not match the manifest for tool ${name}.`), { code: 'TOOL_RECONCILE_OUTPUT_SCHEMA_VIOLATION', retryable: false })
+    if (result.error !== undefined && (typeof result.error !== 'object' || result.error === null || typeof result.error.code !== 'string' || typeof result.error.message !== 'string')) throw Object.assign(new Error(`Reconcile returned an invalid error for tool ${name}.`), { code: 'TOOL_RECONCILE_ERROR_INVALID', retryable: false })
+    return result
   }
 
   executionRef(name: string, input: unknown, context: RuntimeToolContext): JsonValue | undefined {
