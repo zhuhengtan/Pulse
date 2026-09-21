@@ -756,7 +756,8 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `4b8c5f9`：Warm Start SessionStore 校验 Global 版本/Privacy、ResultRef、Result provenance 和驻留元数据的一致性。
 - `51e7bad`：补齐架构宿主查询出口 `runtime.effects.inspect(effectId)` 与 `runtime.results.get(resultRef)`，返回脱离内部状态的快照，并验证宿主修改不会反向污染 Runtime。
 - `b602b12`：LLM 输入引用数组现在执行 fail-closed 合同校验；`results`、`findings`、`rejectedOutputRefs`、`artifacts`、`events` 中的非法/空引用不再被静默丢弃，而是以结构化 `control_error` 拒绝提交。
-- 当前确定性门禁：`npm test`，68 个测试文件、422 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
+- `54e89a7`：Runtime 在 `submit_effects` 入队前统一校验 Effect kind/concurrency、JSON 输入、provenance、隐私、时间限制、重试策略、幂等字段和资源锁；畸形提交 fail-closed，不再把非法 Effect 带入调度队列。
+- 当前确定性门禁：`npm test`，68 个测试文件、423 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
