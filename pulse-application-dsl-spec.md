@@ -525,8 +525,8 @@ interface PulseSession {
 
 | 类别 | 事件 | 慢消费者时 |
 | --- | --- | --- |
-| 观测（ObservationInbox 镜像） | `llm:chunk`、`tool:progress`、`scheduler:trace`、`step:trace` | 有界 ring buffer，可丢弃 |
-| 事实（FactInbox / EventLog 镜像） | `lane:created`、`lane:fork`、`lane:settled`、`effect:settled`、`agent:settled`、`human:requested` | 不丢弃；缓冲满时插入 `{ kind: 'gap', fromSeq, toSeq }`，宿主用 `session.snapshot()` 重同步 |
+| 观测（ObservationInbox 镜像） | `SessionEvent.kind = 'observation'`，底层 `observation.type` 为 `llm:chunk`、`tool:progress`、`scheduler:trace`、`step:trace` | 有界 ring buffer，可丢弃 |
+| 事实（FactInbox / EventLog 镜像） | `SessionEvent.kind = 'fact'`，底层 `event.type` 为 `lane:created`、`lane:fork`、`lane:settled`、`effect:settled`、`agent:settled`、`human:requested` | 不丢弃；缓冲满时插入 `{ kind: 'gap', fromSeq, toSeq }`，宿主用 `session.snapshot()` 重同步 |
 
 两类事件都不能反向阻塞 Scheduler tick；事实事件的"不丢弃"靠 gap 标记 + 快照重同步实现，不是靠阻塞内核。流的消费与内核状态转换完全解耦：宿主对流做任何事都不会进入 `validate` / `apply`。
 
