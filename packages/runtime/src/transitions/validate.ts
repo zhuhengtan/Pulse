@@ -11,6 +11,58 @@ const isLocal = (value: TargetRef | LocalRef): value is LocalRef => 'local' in v
 const clone = <T>(value: T): T => structuredClone(value)
 const resultMetadata = (value: JsonValue): { sizeBytes: number; contentHash: string } => ({ sizeBytes: Buffer.byteLength(stableSerialize(value), 'utf8'), contentHash: contentHash(value) })
 const laneCopy = (lane: LaneRecord): LaneRecord => ({ ...lane, resume: clone(lane.resume), context: clone(lane.context), ...(lane.visibleResultRefs === undefined ? {} : { visibleResultRefs: new Set(lane.visibleResultRefs) }), children: new Set(lane.children), ownedEffectIds: new Set(lane.ownedEffectIds), ...(lane.pendingResumeInput === undefined ? {} : { pendingResumeInput: clone(lane.pendingResumeInput) }), ...(lane.pendingOutcome === undefined ? {} : { pendingOutcome: clone(lane.pendingOutcome) }) })
+function isRuntimeJsonValue(value: unknown, seen = new Set<object>()): value is JsonValue {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (typeof value !== 'object') return false
+  if (seen.has(value)) return false
+  seen.add(value)
+  const valid = Array.isArray(value)
+    ? value.every((item) => isRuntimeJsonValue(item, seen))
+    : (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null) && Object.values(value as Record<string, unknown>).every((item) => isRuntimeJsonValue(item, seen))
+  seen.delete(value)
+  return valid
+}
+
+function nonEmptyString(value: unknown): value is string { return typeof value === 'string' && value.length > 0 }
+
+function validProvenanceRef(value: unknown): boolean {
+  if (nonEmptyString(value)) return true
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const ref = value as { kind?: unknown; ref?: unknown }
+  return (ref.kind === 'result' || ref.kind === 'artifact') && nonEmptyString(ref.ref)
+}
+
+function validateEffectSubmission(submission: unknown): string | undefined {
+  if (!submission || typeof submission !== 'object' || Array.isArray(submission)) return 'INVALID_EFFECT_SUBMISSION'
+  const value = submission as Record<string, unknown>
+  if (!nonEmptyString(value.key)) return 'INVALID_EFFECT_KEY'
+  if (!['llm', 'tool', 'human', 'agent', 'timer'].includes(String(value.kind))) return 'INVALID_EFFECT_KIND'
+  if (!['llm', 'tool', 'agent', 'none'].includes(String(value.concurrencyClass))) return 'INVALID_EFFECT_CONCURRENCY'
+  const expectedClass: Record<string, string> = { llm: 'llm', tool: 'tool', human: 'none', agent: 'agent', timer: 'none' }
+  if (expectedClass[String(value.kind)] !== value.concurrencyClass) return 'INVALID_EFFECT_CONCURRENCY'
+  if (!isRuntimeJsonValue(value.input)) return 'INVALID_EFFECT_INPUT'
+  if (value.derivedFrom !== undefined && (!Array.isArray(value.derivedFrom) || value.derivedFrom.some((ref) => !validProvenanceRef(ref)))) return 'INVALID_EFFECT_PROVENANCE'
+  if (value.wait !== undefined && typeof value.wait !== 'boolean') return 'INVALID_EFFECT_WAIT'
+  if (value.privacy !== undefined && !['public', 'cloud_allowed', 'local_only'].includes(String(value.privacy))) return 'INVALID_EFFECT_PRIVACY'
+  for (const field of ['priority', 'deadlineAt', 'cancelGraceMs', 'attemptTimeoutMs']) {
+    if (value[field] !== undefined && (typeof value[field] !== 'number' || !Number.isFinite(value[field]) || (['cancelGraceMs', 'attemptTimeoutMs'].includes(field) && value[field] < 0))) return `INVALID_EFFECT_${field.toUpperCase()}`
+  }
+  for (const field of ['idempotencyKey', 'toolVersion', 'toolCallId', 'llmEffectId']) if (value[field] !== undefined && !nonEmptyString(value[field])) return `INVALID_EFFECT_${field.toUpperCase()}`
+  if (value.sideEffectPolicy !== undefined && !['none', 'read', 'write', 'external'].includes(String(value.sideEffectPolicy))) return 'INVALID_EFFECT_SIDE_EFFECT_POLICY'
+  if (value.duplicateExecutionPolicy !== undefined && !['allow', 'forbid'].includes(String(value.duplicateExecutionPolicy))) return 'INVALID_EFFECT_DUPLICATE_POLICY'
+  if (value.maxUnknownAttempts !== undefined && (!Number.isInteger(value.maxUnknownAttempts) || (value.maxUnknownAttempts as number) < 0)) return 'INVALID_EFFECT_UNKNOWN_ATTEMPTS'
+  if (value.retryPolicy !== undefined) {
+    if (!value.retryPolicy || typeof value.retryPolicy !== 'object' || Array.isArray(value.retryPolicy)) return 'INVALID_EFFECT_RETRY_POLICY'
+    const retry = value.retryPolicy as Record<string, unknown>
+    if (!Number.isInteger(retry.maxAttempts) || (retry.maxAttempts as number) < 1 || typeof retry.jitter !== 'boolean' || typeof retry.initialBackoffMs !== 'number' || !Number.isFinite(retry.initialBackoffMs) || retry.initialBackoffMs < 0 || typeof retry.maxBackoffMs !== 'number' || !Number.isFinite(retry.maxBackoffMs) || retry.maxBackoffMs < retry.initialBackoffMs) return 'INVALID_EFFECT_RETRY_POLICY'
+  }
+  if (value.locks !== undefined) {
+    if (!Array.isArray(value.locks) || value.locks.some((lock) => !lock || typeof lock !== 'object' || Array.isArray(lock) || !nonEmptyString((lock as Record<string, unknown>).resource) || !['shared', 'exclusive'].includes(String((lock as Record<string, unknown>).mode)))) return 'INVALID_EFFECT_LOCK'
+  }
+  return undefined
+}
+
 function mergePrivacyTaints(...groups: Array<readonly PrivacyTaint[] | undefined>): PrivacyTaint[] {
   const output: PrivacyTaint[] = []; const seen = new Set<string>()
   for (const group of groups) for (const taint of group ?? []) { const key = JSON.stringify(taint); if (!seen.has(key)) { seen.add(key); output.push(clone(taint)) } }
@@ -355,7 +407,12 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
 
   for (const action of actions) {
     if (action.type === 'submit_effects') {
+      if (!Array.isArray(action.effects)) return { rejection: error('INVALID_EFFECT_BATCH', 'submit_effects.effects must be an array') }
       if (action.effects.length === 0) return { rejection: error('EMPTY_EFFECT_BATCH', 'submit_effects requires at least one effect') }
+      for (const submission of action.effects) {
+        const submissionError = validateEffectSubmission(submission)
+        if (submissionError) return { rejection: error(submissionError, 'Effect submission rejected') }
+      }
       const newQueued = action.effects.filter((submission) => submission.concurrencyClass !== 'none').length
       if (queuedEffectCount + newQueued > state.maxQueuedEffects) return { rejection: error('EFFECT_QUEUE_FULL', 'effect queue capacity would be exceeded') }
       queuedEffectCount += newQueued

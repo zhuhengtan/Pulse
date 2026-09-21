@@ -40,6 +40,27 @@ describe('runtime control boundaries', () => {
     expect(runtime.state.lanes.get(laneId)?.pendingResumeInput).toMatchObject({ type: 'control_error', error: { code: 'INVALID_LLM_INPUT_REFS:results' } })
   })
 
+  it('rejects malformed Effect submissions at the Runtime boundary', () => {
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    const cases: Array<{ effect: unknown; code: string }> = [
+      { effect: { key: 'bad-input', kind: 'tool', concurrencyClass: 'tool', input: { value: undefined } }, code: 'INVALID_EFFECT_INPUT' },
+      { effect: { key: 'bad-retry', kind: 'tool', concurrencyClass: 'tool', input: {}, retryPolicy: { maxAttempts: 0, initialBackoffMs: 1, maxBackoffMs: 0, jitter: false } }, code: 'INVALID_EFFECT_RETRY_POLICY' },
+      { effect: { key: 'bad-lock', kind: 'tool', concurrencyClass: 'tool', input: {}, locks: [{ resource: '', mode: 'exclusive' }] }, code: 'INVALID_EFFECT_LOCK' },
+      { effect: { key: 'cyclic-input', kind: 'tool', concurrencyClass: 'tool', input: cyclic }, code: 'INVALID_EFFECT_INPUT' },
+    ]
+    for (const [index, candidate] of cases.entries()) {
+      const runtime = new PulseRuntime()
+      const program: LaneProgram = { id: `invalid-effect-${index}`, version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [candidate.effect] as never }], next: point(`invalid-effect-${index}`, 'done') }), }
+      const { laneId } = runtime.createAgent(`invalid effect ${index}`, program)
+
+      runtime.tick()
+
+      expect(runtime.state.effects).toHaveLength(0)
+      expect(runtime.state.lanes.get(laneId)?.pendingResumeInput).toMatchObject({ type: 'control_error', error: { code: candidate.code } })
+    }
+  })
+
   it('rejects invalid RuntimeConfig values before constructing scheduler state', () => {
     expect(() => new PulseRuntime({ maxLaneStepsPerTick: -1 })).toThrow('INVALID_RUNTIME_CONFIG:maxLaneStepsPerTick')
     expect(() => new PulseRuntime({ agingIntervalMs: 0 })).toThrow('INVALID_RUNTIME_CONFIG:agingIntervalMs')
