@@ -140,6 +140,12 @@ describe('runtime control boundaries', () => {
     const { laneId } = runtime.createAgent('invalid context op', program)
     runtime.tick()
     expect(runtime.state.lanes.get(laneId)?.pendingResumeInput).toMatchObject({ type: 'control_error', error: { code: 'INVALID_CONTEXT_OP' } })
+
+    const invalidOptionalFields: LaneProgram = { id: 'invalid-output-fields', version: '1', step: () => ({ contextDelta: null as never, adoptCommittedContext: 'yes' as never, actions: [], next: point('invalid-output-fields', 'done') }), }
+    const invalidOutputRuntime = new PulseRuntime()
+    const invalidOutput = invalidOutputRuntime.createAgent('invalid output fields', invalidOptionalFields)
+    invalidOutputRuntime.tick()
+    expect(invalidOutputRuntime.state.lanes.get(invalidOutput.laneId)?.pendingResumeInput).toMatchObject({ type: 'control_error', error: { code: 'INVALID_ADOPT_COMMITTED_CONTEXT' } })
   })
 
   it('applies the Wait admission contract to submit and join shortcuts', () => {

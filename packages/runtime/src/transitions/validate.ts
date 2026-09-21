@@ -469,6 +469,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
     const actionShapeError = validateControlActionShape(action)
     if (actionShapeError) return { rejection: error(actionShapeError, 'RuntimeAction shape is invalid') }
   }
+  if (output.adoptCommittedContext !== undefined && typeof output.adoptCommittedContext !== 'boolean') return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'adoptCommittedContext must be a boolean') }
   const waitSources = actions.filter((action) => action.type === 'wait' || (action.type === 'submit_effects' && Boolean(action.wait)) || (action.type === 'fork' && Boolean(action.join))).length
   if (waitSources > 1) return { rejection: error('MULTIPLE_WAIT_SOURCES', 'a StepTransaction may have only one Wait source') }
   const terminal = actions.filter((action) => action.type === 'complete' || action.type === 'fail')
@@ -489,7 +490,7 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   const seenToolCallIds = new Set<string>()
   const seenCancelTargets = new Set<string>()
 
-  if (output.contextDelta) {
+  if (output.contextDelta !== undefined) {
     const deltaShapeError = validateContextDeltaShape(output.contextDelta)
     if (deltaShapeError) return { rejection: error(deltaShapeError, 'ContextDelta shape is invalid') }
     const deltaPrivacyTaintError = validatePrivacyTaints(output.contextDelta.privacyTaints)
