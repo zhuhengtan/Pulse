@@ -70,7 +70,17 @@ interface LLMPreparationFact {
   projectionRef?: string
 }
 
-type RuntimeFact = HostCommand | EffectCompletionFact | LLMPreparationFact
+interface EffectReconcileFact {
+  [key: string]: JsonValue
+  type: 'effect_reconcile'
+  effectId: string
+  attemptId: string
+  value: JsonValue
+  status: 'succeeded' | 'failed' | 'cancelled'
+  error?: JsonValue
+}
+
+type RuntimeFact = HostCommand | EffectCompletionFact | LLMPreparationFact | EffectReconcileFact
 
 export interface RuntimeConfig {
   maxLaneStepsPerTick?: number
@@ -998,6 +1008,11 @@ export class PulseRuntime {
     this.enqueueFact(fact, `llm-preparation:${effectId}:${generation}:${status}`)
   }
 
+  private enqueueEffectReconcile(effect: Readonly<EffectRecord>, value: JsonValue, status: EffectReconcileFact['status'], error?: RuntimeError): void {
+    const fact: EffectReconcileFact = { type: 'effect_reconcile', effectId: effect.id, attemptId: effect.attemptId, value: structuredClone(value), status, ...(error === undefined ? {} : { error: error as unknown as JsonValue }) }
+    this.enqueueFact(fact, `effect-reconcile:${effect.id}:${effect.attemptId}:${status}`)
+  }
+
   private scheduleWake(force = false): void {
     if (this.wakeScheduled || this.inDrain) return
     if (!force && this.factInbox.size === 0) return
@@ -1116,6 +1131,14 @@ export class PulseRuntime {
           commandApplied = this.completeEffect(envelope.fact.effectId, decodeEffectExecution(envelope.fact.execution), envelope.fact.status, envelope.fact.error as unknown as RuntimeError | undefined)
           this.executions.delete(envelope.fact.effectId)
           this.refreshWaits()
+        }
+      } else if (envelope.fact.type === 'effect_reconcile') {
+        const effect = this.state.effects.get(envelope.fact.effectId)
+        if (!effect || effect.attemptId !== envelope.fact.attemptId || effect.state !== 'reconcile_required') {
+          this.tryEmit({ type: 'attempt.late_emit', effectId: envelope.fact.effectId, attemptId: envelope.fact.attemptId, data: { kind: 'reconcile', status: effect?.outcome?.status ?? effect?.state ?? 'missing' } })
+        } else {
+          this.reconcileEffect(envelope.fact.effectId, envelope.fact.value, envelope.fact.status, envelope.fact.error as unknown as RuntimeError | undefined)
+          commandApplied = true
         }
       } else if (envelope.fact.type === 'reply') {
         const effect = this.state.effects.get(envelope.fact.effectId)
@@ -1706,13 +1729,13 @@ export class PulseRuntime {
     this.schedulePersistence()
   }
 
-  reconcileEffect(effectId: string, value: JsonValue, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded'): void {
+  reconcileEffect(effectId: string, value: JsonValue, status: 'succeeded' | 'failed' | 'cancelled' = 'succeeded', error?: RuntimeError): void {
     const effect = this.state.effects.get(effectId)
     if (!effect || effect.state !== 'reconcile_required') return
     const safeValue = strictJsonValue(value)
     if (!['succeeded', 'failed', 'cancelled'].includes(status)) throw new Error('INVALID_RECONCILE_STATUS')
     this.quarantine.reconcile(effectId)
-    this.completeEffect(effectId, { value: safeValue, sideEffectState: 'known' }, status)
+    this.completeEffect(effectId, { value: safeValue, sideEffectState: 'known' }, status, error)
   }
 
   async reconcileEffectWith(effectId: string, resolver: (executionRef: JsonValue | undefined, effect: Readonly<EffectRecord>, signal: AbortSignal) => Promise<{ status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; output?: JsonValue; error?: RuntimeError }>, signal = new AbortController().signal): Promise<{ status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; output?: JsonValue; error?: RuntimeError }> {
@@ -1726,7 +1749,7 @@ export class PulseRuntime {
     let output: JsonValue | undefined
     try { output = result.output === undefined ? undefined : strictJsonValue(result.output) } catch { return { status: 'unknown', error: { code: 'INVALID_RECONCILE_OUTPUT', message: 'Reconcile resolver returned a non-JSON output.', retryable: false } } }
     if (result.error !== undefined && (typeof result.error !== 'object' || result.error === null || typeof result.error.code !== 'string' || typeof result.error.message !== 'string')) return { status: 'unknown', error: { code: 'INVALID_RECONCILE_ERROR', message: 'Reconcile resolver returned an invalid error.', retryable: false } }
-    if (result.status === 'succeeded' || result.status === 'failed' || result.status === 'cancelled') this.reconcileEffect(effectId, output ?? null, result.status)
+    if (result.status === 'succeeded' || result.status === 'failed' || result.status === 'cancelled') this.enqueueEffectReconcile(effect, output ?? null, result.status, result.error)
     return { status: result.status, ...(output === undefined ? {} : { output }), ...(result.error === undefined ? {} : { error: result.error }) }
   }
 
