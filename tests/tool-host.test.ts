@@ -119,6 +119,17 @@ describe('Tool SDK to Runtime Effect host', () => {
     await expect(pending).resolves.toMatchObject({ executionState: 'remote_unknown', sideEffectState: 'unknown' })
   })
 
+  it('keeps a cancelled external Tool in remote-unknown state', async () => {
+    const registry = new ToolRegistry()
+    registry.register(defineTool({ name: 'external-job', description: 'remote external job', input: z.object({}), output: z.object({ ok: z.boolean() }), sideEffectPolicy: 'external', execute: async (_input, context) => { await new Promise<void>((_resolve, reject) => { context.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }) }); return { ok: true } } }))
+    const controller = new AbortController()
+    const executor = createToolEffectExecutor(registry)
+    const effect = { id: 'effect-external', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'external-job', kind: 'tool', concurrencyClass: 'tool', input: { name: 'external-job', arguments: {} }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as EffectRecord
+    const pending = executor(effect, controller.signal)
+    controller.abort()
+    await expect(pending).resolves.toMatchObject({ executionState: 'remote_unknown', sideEffectState: 'unknown' })
+  })
+
   it('carries a recoverable execution reference from a real write through cancellation', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-tool-reconcile-'))
     try {

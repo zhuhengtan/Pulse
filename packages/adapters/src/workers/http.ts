@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { createServer as createHttpsServer, type ServerOptions as HttpsServerOptions } from 'node:https'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
-import type { EffectExecution, EffectExecutor, EffectRecord, JsonValue, RuntimeError, WorkerCoordinatorContract, WorkerHandler, WorkerLease, WorkerSubmitOptions, WorkerTaskRecord } from '@pulse/runtime'
+import { isSideEffectful, type EffectExecution, type EffectExecutor, type EffectRecord, type JsonValue, type RuntimeError, type WorkerCoordinatorContract, type WorkerHandler, type WorkerLease, type WorkerSubmitOptions, type WorkerTaskRecord } from '@pulse/runtime'
 
 interface JsonObject { [key: string]: JsonValue }
 
@@ -260,7 +260,7 @@ export function createHttpWorkerEffectExecutor(client: HttpWorkerClient, options
     const taskId = `${effect.id}:${effect.attemptId}`
     const idempotencyKey = effect.idempotencyKey ?? taskId
     const executionRef = { transport: 'http-worker', taskId, idempotencyKey }
-    const sideEffectState = effect.sideEffectPolicy === 'write' ? 'applied' as const : 'none' as const
+    const sideEffectState = isSideEffectful(effect.sideEffectPolicy) ? 'applied' as const : 'none' as const
     try {
       const value = await client.submit({ effectId: effect.id, attemptId: effect.attemptId, kind: effect.kind, input: effect.input }, { taskId, idempotencyKey, ...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }), signal })
       return { value, executionState: 'succeeded', sideEffectState, executionRef }
@@ -271,7 +271,7 @@ export function createHttpWorkerEffectExecutor(client: HttpWorkerClient, options
       if (task?.state === 'succeeded') return { value: task.result ?? null, executionState: 'succeeded', sideEffectState, executionRef }
       if (task?.state === 'failed') return { value: null, executionState: 'failed', sideEffectState: 'none', executionRef, error: task.error ?? { code: 'WORKER_FAILED', message: 'Remote Worker task failed.' } }
       if (task?.state === 'cancelled') return { value: null, status: 'cancelled', executionState: 'failed', sideEffectState: 'none', executionRef, error: { code: 'WORKER_CANCELLED', message: 'Remote Worker task was cancelled.' } }
-      return { value: null, executionState: 'remote_unknown', sideEffectState: effect.sideEffectPolicy === 'write' ? 'unknown' : 'none', executionRef, error: { code: 'WORKER_EXECUTION_UNKNOWN', message: `Remote Worker task outcome is unknown: ${message}` } }
+      return { value: null, executionState: 'remote_unknown', sideEffectState: isSideEffectful(effect.sideEffectPolicy) ? 'unknown' : 'none', executionRef, error: { code: 'WORKER_EXECUTION_UNKNOWN', message: `Remote Worker task outcome is unknown: ${message}` } }
     }
   }
 }

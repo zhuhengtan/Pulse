@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { validateJsonSchema } from '../models/router.js'
-import type { JsonValue, ResourceLockSpec } from '../core/types.js'
+import type { JsonValue, ResourceLockSpec, SideEffectPolicy } from '../core/types.js'
 
 export interface RuntimeToolPermissions { workspaceRoots?: string[]; networkHosts?: string[] }
 export interface RuntimeToolManifest {
@@ -14,7 +14,7 @@ export interface RuntimeToolManifest {
   locks: ResourceLockSpec[]
   resources?: ResourceLockSpec[]
   supportsAbortSignal: boolean
-  sideEffectPolicy: 'none' | 'read' | 'write'
+  sideEffectPolicy: SideEffectPolicy
   retrySafety: 'read_only' | 'idempotent' | 'unsafe'
   defaultTimeoutMs: number
   maxResultSummaryBytes?: number
@@ -165,6 +165,7 @@ export class RuntimeToolRegistry {
     if (definition.manifest.locks.length > 0 || definition.resourceAdmissionMode === 'explicit') return definition.manifest.locks
     if (definition.manifest.sideEffectPolicy === 'write') return [{ resource: 'workspace', mode: 'exclusive' }]
     if (definition.manifest.sideEffectPolicy === 'read') return [{ resource: 'workspace', mode: 'shared' }]
+    if (definition.manifest.sideEffectPolicy === 'external') return [{ resource: `external:${name}`, mode: 'exclusive' }]
     return []
   }
 

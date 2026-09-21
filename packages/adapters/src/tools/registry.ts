@@ -1,4 +1,4 @@
-import type { EffectArtifactOutput, EffectExecutor, EffectExecution, EffectRecord, EffectSubmission, JsonValue } from '@pulse/runtime'
+import { isSideEffectful, type EffectArtifactOutput, type EffectExecutor, type EffectExecution, type EffectRecord, type EffectSubmission, type JsonValue } from '@pulse/runtime'
 import { ToolRegistry, type ReconcileResult, type ToolDiscoveryQuery } from '@pulse/tool-sdk'
 
 function toJson(value: unknown, seen = new Set<object>()): import('@pulse/runtime').JsonValue {
@@ -66,7 +66,7 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
         emit,
       })
     } catch (error) {
-      if (signal.aborted && definition.manifest.sideEffectPolicy === 'write') return { value: null, executionState: 'remote_unknown', sideEffectState: 'unknown', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: definition.manifest.version, reconcileRequired: true }, ...(error instanceof Error ? { error: { code: 'TOOL_CANCELLED_UNKNOWN', message: error.message } } : {}) }
+      if (signal.aborted && isSideEffectful(definition.manifest.sideEffectPolicy)) return { value: null, executionState: 'remote_unknown', sideEffectState: 'unknown', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: definition.manifest.version, reconcileRequired: true }, ...(error instanceof Error ? { error: { code: 'TOOL_CANCELLED_UNKNOWN', message: error.message } } : {}) }
       throw error
     }
     const summary = detailed.summary === undefined ? undefined : toJson(detailed.summary)
@@ -74,7 +74,7 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
     let value: JsonValue
     let artifact: EffectArtifactOutput | undefined
     try { value = toJson(detailed.output) } catch { value = null; artifact = artifactOutput(detailed.output) }
-    return { value, ...(detailed.normalized === undefined ? {} : { normalized: toJson(detailed.normalized) }), ...(artifact === undefined ? {} : { artifact }), ...(summary === undefined ? {} : { summary }), sideEffectState: definition.manifest.sideEffectPolicy === 'write' ? 'applied' : 'none', executionState: 'succeeded', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length, ...(artifact === undefined ? {} : { artifactMediaType: artifact.mediaType }) }, ...(observations.length ? { observations } : {}) }
+    return { value, ...(detailed.normalized === undefined ? {} : { normalized: toJson(detailed.normalized) }), ...(artifact === undefined ? {} : { artifact }), ...(summary === undefined ? {} : { summary }), sideEffectState: isSideEffectful(definition.manifest.sideEffectPolicy) ? 'applied' : 'none', executionState: 'succeeded', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length, ...(artifact === undefined ? {} : { artifactMediaType: artifact.mediaType }) }, ...(observations.length ? { observations } : {}) }
   }
 }
 

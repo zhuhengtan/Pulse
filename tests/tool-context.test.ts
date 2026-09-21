@@ -31,6 +31,12 @@ describe('ToolContext and manifest contract', () => {
     expect(registry.admission('explicit-none', {}).locks).toEqual([])
   })
 
+  it('treats external tools as remote side effects with unsafe retry defaults', () => {
+    const registry = new ToolRegistry()
+    registry.register(defineTool({ name: 'remote-job', description: 'remote job', sideEffectPolicy: 'external', input: z.object({}), output: z.object({}), execute: () => ({}) }))
+    expect(registry.admission('remote-job', {})).toMatchObject({ sideEffectPolicy: 'external', retrySafety: 'unsafe', locks: [{ resource: 'external:remote-job', mode: 'exclusive' }] })
+  })
+
   it('rejects manifests that do not declare abort support', () => {
     const registry = new ToolRegistry()
     expect(() => registry.register(defineTool({ name: 'unsafe', description: 'unsafe', supportsAbortSignal: false, input: z.object({}), output: z.object({}), execute: () => ({}) }))).toThrow('TOOL_ABORT_SIGNAL_REQUIRED')

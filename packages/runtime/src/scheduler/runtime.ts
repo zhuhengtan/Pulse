@@ -3,7 +3,7 @@ import { buildAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock, type RuntimeClock } from './index.js'
 import type { ArtifactRecord, EffectRecord, EffectSubmission, EffectState, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, RuntimeEventInput, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyTaint, PrivacyMetadata, ProvenanceRef, ResumePoint } from '../core/types.js'
-import { createRuntimeState, effectivePrivacy, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, provenanceRefId, provenanceRefKind, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
+import { createRuntimeState, effectivePrivacy, isSideEffectful, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, provenanceRefId, provenanceRefKind, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
 import { assertProgramPure, withPureStepGuard } from '../dsl/program.js'
@@ -312,11 +312,11 @@ export class PulseRuntime {
         const outboxEntry = this.outbox.get(`${effect.id}:${effect.attemptId}`)
         if (effect.state === 'running' && (outboxEntry === undefined || outboxEntry.state === 'pending')) {
           const recovered = structuredClone(effect)
-          const recoveryReason = effect.sideEffectPolicy === 'write' ? 'recovery_in_doubt' : 'recovery_requeue'
-          if (effect.sideEffectPolicy === 'write') { recovered.state = 'reconcile_required'; recovered.executionState = 'remote_unknown'; recovered.sideEffectState = 'unknown' }
+          const recoveryReason = isSideEffectful(effect.sideEffectPolicy) ? 'recovery_in_doubt' : 'recovery_requeue'
+          if (isSideEffectful(effect.sideEffectPolicy)) { recovered.state = 'reconcile_required'; recovered.executionState = 'remote_unknown'; recovered.sideEffectState = 'unknown' }
           else { recovered.state = 'queued'; recovered.executionState = 'local' }
           commitMutationTransaction(this.state, this.mutationLog, `recovery:${effect.id}:${effect.attemptId}:${recoveryReason}`, [{ op: 'setEffect', effectId: effect.id, record: recovered }], this.state.now, this.sessionId)
-          if (effect.sideEffectPolicy === 'write') this.quarantine.add(effect.id, this.state.now, 'recovery_in_doubt')
+          if (isSideEffectful(effect.sideEffectPolicy)) this.quarantine.add(effect.id, this.state.now, 'recovery_in_doubt')
         }
         if (effect.state === 'retry_wait' && effect.retryAt !== undefined) {
           const attemptId = effect.attemptId
@@ -1461,7 +1461,7 @@ export class PulseRuntime {
       ...cancellableEffects.map((effect) => ({ type: 'effect.cancel_requested', effectId: effect.id, data: { reason } })),
       ...cancellableEffects.flatMap((effect) => {
         if (this.executions.has(effect.id) && (effect.cancelGraceMs ?? 0) === 0) {
-          const state = effect.sideEffectPolicy === 'write' ? 'reconcile_required' : 'cancelled'
+          const state = isSideEffectful(effect.sideEffectPolicy) ? 'reconcile_required' : 'cancelled'
           return [{ type: 'effect.quarantined' as const, effectId: effect.id, data: { reason, state } }]
         }
         if (!this.executions.has(effect.id)) return [{ type: 'effect.settled', effectId: effect.id, data: { status: 'cancelled', error: { code: 'CANCELLED', message: reason } } }]
@@ -1486,7 +1486,7 @@ export class PulseRuntime {
         candidate.status = 'cancelling'
         candidate.cancelReason = reason
         candidate.version++
-        candidate.unresolvedEffectIds = [...new Set([...(candidate.unresolvedEffectIds ?? []), ...cancellableEffects.filter((effect) => effect.ownerLaneId === lane.id && effect.sideEffectPolicy === 'write').map((effect) => effect.id)])]
+        candidate.unresolvedEffectIds = [...new Set([...(candidate.unresolvedEffectIds ?? []), ...cancellableEffects.filter((effect) => effect.ownerLaneId === lane.id && isSideEffectful(effect.sideEffectPolicy)).map((effect) => effect.id)])]
         return [{ op: 'setLane' as const, laneId: lane.id, record: candidate }]
       }),
       ...cancellableEffects.flatMap((effect) => {
@@ -1494,7 +1494,7 @@ export class PulseRuntime {
         candidate.cancelRequested = { reason, at: this.state.now }
         if (this.executions.has(effect.id) && (effect.cancelGraceMs ?? 0) === 0) {
           candidate.executionState = 'remote_unknown'
-          candidate.sideEffectState = candidate.sideEffectPolicy === 'write' ? 'unknown' : 'none'
+          candidate.sideEffectState = isSideEffectful(candidate.sideEffectPolicy) ? 'unknown' : 'none'
           candidate.state = candidate.sideEffectState === 'unknown' ? 'reconcile_required' : 'cancelled'
           if (candidate.state === 'cancelled') candidate.outcome = { status: 'cancelled', reason, error: { code: reason, message: reason } }
         } else if (!this.executions.has(effect.id)) {
@@ -1805,7 +1805,7 @@ export class PulseRuntime {
     const candidate = structuredClone(effect)
     if (precedingEvent?.type === 'effect.cancel_requested' || precedingEvent?.type === 'limit.rejected') candidate.cancelRequested = { reason, at: this.state.now }
     candidate.executionState = 'remote_unknown'
-    candidate.sideEffectState = candidate.sideEffectPolicy === 'write' ? 'unknown' : 'none'
+    candidate.sideEffectState = isSideEffectful(candidate.sideEffectPolicy) ? 'unknown' : 'none'
     candidate.state = candidate.sideEffectState === 'unknown' ? 'reconcile_required' : 'cancelled'
     if (candidate.state === 'cancelled') candidate.outcome = { status: 'cancelled', reason, error: { code: reason, message: reason } }
     const lane = this.state.lanes.get(effect.ownerLaneId)

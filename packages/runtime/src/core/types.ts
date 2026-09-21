@@ -12,6 +12,7 @@ export function provenanceRefId(ref: ProvenanceRef): string { return typeof ref 
 export function provenanceRefKind(ref: ProvenanceRef): 'legacy' | DataRef['kind'] { return typeof ref === 'string' ? 'legacy' : ref.kind }
 export type ContextVersion = number
 export type PrivacyLabel = 'public' | 'cloud_allowed' | 'local_only'
+export type SideEffectPolicy = 'none' | 'read' | 'write' | 'external'
 export type ForkAffinityMode = 'off' | 'advise' | 'coalesce'
 export type LaneStatus = 'ready' | 'running' | 'waiting' | 'closing' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled'
 export type EffectState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'retry_wait' | 'reconcile_required'
@@ -154,7 +155,7 @@ export interface EffectRecord {
   cancelGraceMs?: number
   attemptTimeoutMs?: number
   idempotencyKey?: string
-  sideEffectPolicy?: 'none' | 'read' | 'write'
+  sideEffectPolicy?: SideEffectPolicy
   toolVersion?: string
   retryPolicy?: { maxAttempts: number; initialBackoffMs: number; maxBackoffMs: number; jitter: boolean }
   duplicateExecutionPolicy?: 'allow' | 'forbid'
@@ -289,7 +290,7 @@ export interface EffectSubmission {
   cancelGraceMs?: number
   attemptTimeoutMs?: number
   idempotencyKey?: string
-  sideEffectPolicy?: 'none' | 'read' | 'write'
+  sideEffectPolicy?: SideEffectPolicy
   toolVersion?: string
   retryPolicy?: { maxAttempts: number; initialBackoffMs: number; maxBackoffMs: number; jitter: boolean }
   duplicateExecutionPolicy?: 'allow' | 'forbid'
@@ -538,6 +539,7 @@ export function createRuntimeState(maxTotalLanes = 64, options: { maxQueuedEffec
 
 export function privacyRank(label: PrivacyLabel): number { return label === 'public' ? 0 : label === 'cloud_allowed' ? 1 : 2 }
 export function strictestPrivacy(labels: PrivacyLabel[]): PrivacyLabel { return labels.reduce<PrivacyLabel>((current, next) => privacyRank(next) > privacyRank(current) ? next : current, 'public') }
+export function isSideEffectful(policy: SideEffectPolicy | undefined): boolean { return policy === 'write' || policy === 'external' }
 export function privacyTaintPrivacy(taints: readonly PrivacyTaint[] | undefined): PrivacyLabel { return strictestPrivacy((taints ?? []).map((taint) => taint.privacy)) }
 export function effectivePrivacy(base: PrivacyLabel, taints: readonly PrivacyTaint[] | undefined): PrivacyLabel { return strictestPrivacy([base, privacyTaintPrivacy(taints)]) }
 export function validatePrivacyTaints(value: readonly PrivacyTaint[] | undefined): string | undefined {
