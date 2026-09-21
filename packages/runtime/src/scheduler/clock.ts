@@ -4,13 +4,37 @@ export interface TimerEntry { id: string; at: number; callback: () => void; canc
 
 export class TimerWheel {
   private readonly entries = new Map<string, TimerEntry>()
+  private readonly selected = new Map<string, TimerEntry>()
   private seq = 0
   schedule(at: number, callback: () => void): string { const id = `timer-${++this.seq}`; this.entries.set(id, { id, at, callback, cancelled: false }); return id }
-  cancel(id: string): void { const entry = this.entries.get(id); if (entry) entry.cancelled = true }
+  cancel(id: string): void { const entry = this.entries.get(id) ?? this.selected.get(id); if (entry) entry.cancelled = true }
   due(now: number, limit = Number.POSITIVE_INFINITY): TimerEntry[] {
     const due = [...this.entries.values()].filter((entry) => !entry.cancelled && entry.at <= now).sort((a, b) => a.at - b.at || a.id.localeCompare(b.id)).slice(0, limit)
-    for (const entry of due) this.entries.delete(entry.id)
-    return due
+    return due.map((entry) => {
+      this.entries.delete(entry.id)
+      this.selected.set(entry.id, entry)
+      let completed = false
+      return {
+        ...entry,
+        callback: () => {
+          if (completed) return
+          if (entry.cancelled) {
+            completed = true
+            this.selected.delete(entry.id)
+            return
+          }
+          try {
+            entry.callback()
+            completed = true
+            this.selected.delete(entry.id)
+          } catch (cause) {
+            this.selected.delete(entry.id)
+            if (!entry.cancelled) this.entries.set(entry.id, entry)
+            throw cause
+          }
+        },
+      }
+    })
   }
   nextAt(): number | undefined { return [...this.entries.values()].filter((entry) => !entry.cancelled).sort((a, b) => a.at - b.at)[0]?.at }
   get size(): number { return [...this.entries.values()].filter((entry) => !entry.cancelled).length }

@@ -19,6 +19,56 @@ describe('M1-2 scheduler and lifecycle primitives', () => {
     expect(calls).toEqual(['early', 'late'])
   })
 
+  it('retains a failed due timer and retries it before later timers', () => {
+    const clock = new VirtualClock()
+    const calls: string[] = []
+    let failed = true
+    clock.schedule(10, () => {
+      calls.push('first')
+      if (failed) {
+        failed = false
+        throw new Error('timer failed')
+      }
+    })
+    clock.schedule(10, () => calls.push('second'))
+    clock.advance(10)
+
+    const firstAttempt = clock.timers.due(clock.now(), 1)[0]!
+    expect(() => firstAttempt.callback()).toThrow('timer failed')
+    expect(calls).toEqual(['first'])
+    expect(clock.timers.size).toBe(2)
+
+    clock.timers.due(clock.now(), 1)[0]!.callback()
+    expect(calls).toEqual(['first', 'first'])
+    expect(clock.timers.size).toBe(1)
+    clock.timers.due(clock.now(), 1)[0]!.callback()
+    expect(calls).toEqual(['first', 'first', 'second'])
+  })
+
+  it('keeps cancelled timers out of the due queue', () => {
+    const clock = new VirtualClock()
+    const calls: string[] = []
+    const timerId = clock.schedule(10, () => calls.push('cancelled'))
+    clock.timers.cancel(timerId)
+    clock.advance(10)
+
+    expect(clock.timers.due(clock.now())).toEqual([])
+    expect(clock.timers.size).toBe(0)
+    expect(calls).toEqual([])
+  })
+
+  it('does not execute a timer cancelled after it was selected', () => {
+    const clock = new VirtualClock()
+    const calls: string[] = []
+    const timerId = clock.schedule(10, () => calls.push('cancelled'))
+    clock.advance(10)
+    const selected = clock.timers.due(clock.now(), 1)[0]!
+    clock.timers.cancel(timerId)
+    selected.callback()
+    expect(calls).toEqual([])
+    expect(clock.timers.size).toBe(0)
+  })
+
   it('orders ready work by priority, aging, then FIFO', () => {
     const queue = new ReadyQueue(10)
     queue.enqueue({ laneId: 'old-low', basePriority: 0, readySince: 0, enqueueSeq: 1 })
