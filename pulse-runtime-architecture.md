@@ -1,6 +1,6 @@
 # Pulse Runtime 架构设计
 
-> 整合设计稿：2026-09-19 · 设计规范，尚未实现或验证
+> 整合设计稿：2026-09-19 · 统一架构与验收依据；仓库内可实现部分已落地，外部 Provider/生产系统仍需独立验证
 >
 > 修订：同日架构审查结论已全部并入本文；核心仍是类 Node.js event loop
 > （同步 Step = Macrotask，Scheduler Tick = Event Loop Turn，Effect = Async I/O）。

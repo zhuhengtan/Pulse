@@ -4,7 +4,7 @@ Pulse 是一个面向多步骤 Agent 应用的可恢复运行时。它把 Agent 
 
 Pulse 关注的是执行语义：状态如何提交、并发如何调度、结果如何传递、取消和重试是否安全，以及模型换 Provider 后上下文是否仍然可重建。模型 Provider、工具和宿主 UI 都是可替换的适配层。
 
-> 当前仓库包含架构规范、应用 DSL 规范和 M0/M1 实施计划；M0/M1 主链及部分 M1.5/M2 本地扩展已经实现并由确定性测试覆盖。真实 Provider、远程副作用和生产运维仍需独立环境验收。
+> 当前仓库已实现架构文档中可在本地落地的 M0/M1/M1.5/M2 主链，包括确定性调度、DSL、Provider/Tool Host、File/SQLite 持久化、checkpoint、Worker 和 FactInbox durable dedupe。真实 Provider、远程副作用和生产运维仍需独立环境验收。
 
 ## 为什么需要 Pulse
 
@@ -279,5 +279,7 @@ M1 的真实 Provider 和网络任务通过独立 Live Smoke 验证；确定性 
 ## 当前验证边界
 
 确定性实现和本地故障恢复已经由仓库测试覆盖，但这不等于所有生产环境都已验收。当前仍需要独立环境证明的项目包括：真实 Provider 凭证下的 Live Smoke、真实远程写系统的副作用对账、生产级持久化事务与多主机 Worker 故障注入、跨进程 Detached Agent scope 迁移、细粒度宿主权限/隐私策略，以及外部指标系统接入。
+
+最近一次允许本机 loopback 的全量门禁为 73 个测试文件、473/473 通过；`npx tsc -b --pretty false`、`npm run build` 和 deterministic benchmark 也通过。受限沙箱中运行 HTTP/HTTPS 测试会因禁止 `listen` 返回 `EPERM`，不代表 Provider 或 Worker 代码失败。
 
 Provider Thread 仍不是状态源；自动 Fork 合并、动态工具检索和自适应路由已有确定性实现，但生产样本校准与外部服务兼容性仍需单独验证。所有能力继续遵守 Lane、Step、Action、Effect 和 StepTransaction 的核心语义。
