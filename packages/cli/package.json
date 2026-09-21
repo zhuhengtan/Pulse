@@ -1,12 +1,24 @@
 {
   "name": "@hunterzhu/pulse-cli",
-  "version": "0.1.0",
-  "repository": { "type": "git", "url": "https://github.com/zhuhengtan/Pulse" },
+  "version": "0.1.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhuhengtan/Pulse"
+  },
   "type": "module",
-  "bin": { "pulse": "dist/bin.js" },
+  "bin": {
+    "pulse": "dist/bin.js"
+  },
   "main": "dist/bin.js",
   "types": "dist/bin.d.ts",
-  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org" },
-  "scripts": { "build": "tsc -p tsconfig.json" },
-  "dependencies": { "@hunterzhu/pulse-server": "workspace:*" }
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@hunterzhu/pulse-server": "workspace:*"
+  }
 }

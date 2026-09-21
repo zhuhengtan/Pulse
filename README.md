@@ -274,16 +274,71 @@ const finalOutcome = await session.outcome()
 
 `runtime.run()` 等待 Agent 收尾并返回 `Outcome`；`runtime.start()` 是 DSL 提供的交互式 Session Facade。流消费不会反向阻塞 Scheduler，事实事件丢失时通过 `gap + snapshot()` 重同步。
 
-## MVP 路线
+## CLI 使用
 
-| 阶段 | 交付内容 |
-| --- | --- |
-| M0 | Lane 状态机、StepTransaction、依赖图、Scheduler、TimerWheel、取消、Quarantine、虚拟/真实单调时钟验收 |
-| M1 | 三层 Context、稳定前缀、Provider Adapter、MockAdapter、Tool SDK、LLMResult、ModelRouter、DSL、确定性 E2E |
-| M1.5 | record/leaf 级 Privacy/`derivedFrom`、Progress Watchdog、Storage pin/compact、Fork Affinity、warm start、动态 ToolSet、Host 工具 allow/deny |
-| M2 | 本地 File/SQLite persist/checkpoint/restore、outbox、RecoverableTool 对账、HTTP/HTTPS 与 SQLite Worker 协调、自适应路由、观察导出 |
+Pulse CLI 会把当前执行目录作为工作目录，启动后可以像本地编程助手一样持续对话。
 
-M1 的真实 Provider 和网络任务通过独立 Live Smoke 验证；确定性 Gate 使用 Mock Executor、Virtual Clock 和离线 Fixtures。带有效凭证时可按需开启 `PULSE_LIVE_TOOL_SMOKE=1`、`PULSE_LIVE_STRUCTURED_SMOKE=1`、`PULSE_LIVE_CANCELLATION_SMOKE=1`，分别验收真实 tool-call、structured output 和在途取消。
+### 安装与启动
+
+在项目根目录直接运行：
+
+```bash
+npx @hunterzhu/pulse-cli
+```
+
+首次启动会自动创建用户配置文件，不需要手动建立目录：
+
+- macOS/Linux：`~/.pulse/config.json`
+- Windows：`%USERPROFILE%\.pulse\config.json`
+
+配置文件只保存 Provider 和运行策略，API Key 通过环境变量读取，不会写入配置或会话数据。初始配置使用本地 `mock` Provider，可以先用来验证 CLI 和工具链路。
+
+### 常用命令
+
+```bash
+# 对当前项目执行一次任务
+npx @hunterzhu/pulse-cli run "检查这个项目的构建问题"
+
+# 指定只读模式，禁止写文件和执行 Shell
+npx @hunterzhu/pulse-cli --read-only
+
+# 查看本地配置、数据目录和工具状态
+npx @hunterzhu/pulse-cli doctor
+
+# 查看已保存的会话
+npx @hunterzhu/pulse-cli sessions
+
+# 继续一个已有会话
+npx @hunterzhu/pulse-cli resume <conversation-id> "继续处理上次的问题"
+```
+
+交互模式内置 `/help`、`/status`、`/tools`、`/artifacts` 和 `/exit`。需要先生成配置模板时，可以运行 `npx @hunterzhu/pulse-cli setup`。
+
+### 配置模型 Provider
+
+编辑用户配置文件，例如使用 OpenAI 兼容接口：
+
+```json
+{
+  "provider": {
+    "provider": "openai-compatible",
+    "model": "gpt-4o-mini",
+    "baseURL": "https://api.openai.com/v1",
+    "apiKeyEnv": "OPENAI_API_KEY"
+  },
+  "approvalMode": "ask",
+  "allowNetwork": false
+}
+```
+
+然后在当前 Shell 中设置密钥并运行：
+
+```bash
+export OPENAI_API_KEY="your-api-key"
+npx @hunterzhu/pulse-cli
+```
+
+也可以用 `--provider`、`--model`、`--base-url`、`--config` 或对应的 `PULSE_*` 环境变量临时覆盖配置。完整配置加载顺序和字段说明见 [`docs/cli-config.md`](./docs/cli-config.md)。
 
 ## 仓库文档
 

@@ -29,17 +29,16 @@ jobs:
           version: 12.4.2
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.14.0
           cache: pnpm
           registry-url: https://registry.npmjs.org
+      - name: Enable npm trusted publishing
+        run: npm install --global npm@11.15.0
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm check
       - run: pnpm release:check
       - run: pnpm cli:build
       - run: pnpm release:npm-publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_PROVENANCE: '1'
       - run: pnpm cli:pack
       - name: Create GitHub Release
         env:

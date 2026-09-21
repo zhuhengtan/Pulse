@@ -1,11 +1,21 @@
 {
   "name": "@hunterzhu/pulse-tool-sdk",
-  "version": "0.1.0",
-  "repository": { "type": "git", "url": "https://github.com/zhuhengtan/Pulse" },
+  "version": "0.1.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhuhengtan/Pulse"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org" },
-  "scripts": { "build": "tsc -p tsconfig.json" },
-  "dependencies": { "zod": "^3.24.1" }
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "^3.24.1"
+  }
 }
