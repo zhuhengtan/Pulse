@@ -44,7 +44,10 @@ export class PulseSession {
         cursor = gapEnd
       }
       const events = this.runtime.state.events.filter((event) => event.seq > cursor)
-      for (const event of events) { cursor = event.seq; if (this.ownsEvent(event)) yield { kind: 'fact', type: 'fact', seq: event.seq, event } }
+      for (const event of events) {
+        cursor = event.seq
+        if (this.ownsEvent(event)) yield { kind: 'fact', type: 'fact', seq: event.seq, event: structuredClone(event) }
+      }
       const observationGapEnd = this.runtime.observationInbox.droppedThrough(this.agentId)
       if (observationCursor < observationGapEnd) {
         yield { kind: 'gap', type: 'gap', seq: observationGapEnd, fromSeq: observationCursor + 1, toSeq: observationGapEnd }

@@ -302,9 +302,15 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
 
 export class StepBuilder<TState = JsonValue> {
   readonly handlers = new Map<string, Handler>()
+  /**
+   * History compaction is a macro boundary concern. Internal handlers such as
+   * `:submit`, `:decode`, `:join`, and `:resume` must consume the pending
+   * Wait input before the next compaction check can run.
+   */
+  private readonly compactionBoundaries = new Set<string>()
   private boundaryHandler?: ErrorBoundaryHandler<TState>
   constructor(readonly config: { id: string; version: string; system?: string; toolSet?: string; state?: z.ZodType<TState>; historyCompaction?: HistoryCompactionOptions }) {}
-  addStep(name: string, handler: Handler): this { this.handlers.set(name, handler); return this }
+  addStep(name: string, handler: Handler): this { this.handlers.set(name, handler); this.compactionBoundaries.add(name); return this }
   onErrorBoundary(handler: ErrorBoundaryHandler<TState>): this { this.boundaryHandler = handler; return this }
   addStructuredLLMStep<TOutput extends ZodTypeAny>(name: string, options: {
     task: string
@@ -318,6 +324,7 @@ export class StepBuilder<TState = JsonValue> {
     onSuccess: (data: z.infer<TOutput>, ctx: StepContext<TState>) => NextStepTarget<TState>
     onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState>
   }): this {
+    this.compactionBoundaries.add(name)
     const submit = `${name}:submit`; const decode = `${name}:decode`
     const maxCorrectionRounds = options.selfCorrect?.maxRounds ?? 1
     const correctionRoundKey = `${name}CorrectRound`
@@ -363,6 +370,7 @@ export class StepBuilder<TState = JsonValue> {
     return this
   }
   addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; onFinish: ((resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>) | { text: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; structured?: { schema: ZodTypeAny; onParsed: (data: unknown, ctx: StepContext<TState>) => NextStepTarget<TState> } }; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
+    this.compactionBoundaries.add(name)
     const readTurns = (ctx: StepContext<TState>): number => { const sdk = sdkLocals(ctx.lane.resume.locals); const turn = sdk[`${name}Turns`]; return typeof turn === 'number' && Number.isInteger(turn) && turn >= 0 ? turn : 0 }
     const inputKey = `${name}Inputs`
     const readInputs = (ctx: StepContext<TState>): StepInputs => { const value = sdkLocals(ctx.lane.resume.locals)[inputKey]; return value && typeof value === 'object' && !Array.isArray(value) ? value as StepInputs : {} }
@@ -419,6 +427,7 @@ export class StepBuilder<TState = JsonValue> {
     return this
   }
   addParallelStep(name: string, options: { lanes: Record<string, ForkProposalLane & { dependsOn?: ForkProposalLane['dependsOn'] | Array<{ key: string; target: { local: string } | { kind: 'lane' | 'effect'; id: string }; condition: 'success' | 'settled' }> }>; join?: ForkJoinOptions; condition?: 'success' | 'settled'; mode?: 'all' | 'any' | 'quorum'; quorum?: number; deadlineAt?: number; affinity?: 'collapse' | 'ack'; next?: NextStepTarget; onJoin?: (outcomes: Record<string, Outcome>, ctx: StepContext<TState>) => NextStepTarget }): this {
+    this.compactionBoundaries.add(name)
     const joinStep = `${name}:join`
     this.handlers.set(name, (ctx) => {
       const join = joinOptions(options.join, options)
@@ -431,6 +440,7 @@ export class StepBuilder<TState = JsonValue> {
     return this
   }
   addDynamicForkStep(name: string, options: { proposal?: (ctx: StepContext<TState>) => ForkProposal; lanes?: (ctx: StepContext<TState>) => Record<string, ForkProposalLane>; join?: ForkJoinOptions; condition?: 'success' | 'settled'; mode?: 'all' | 'any' | 'quorum'; quorum?: number; deadlineAt?: number; affinity?: 'collapse' | 'ack' | ((groups: AffinityAdviceGroup[], ctx: StepContext<TState>) => 'collapse' | 'ack'); next?: NextStepTarget; onJoin?: (outcomes: Map<string, Outcome>, ctx: StepContext<TState>) => NextStepTarget }): this {
+    this.compactionBoundaries.add(name)
     const joinStep = `${name}:join`
     this.handlers.set(name, (ctx) => {
       const join = joinOptions(options.join, options)
@@ -446,6 +456,7 @@ export class StepBuilder<TState = JsonValue> {
     return this
   }
   addMergeStep(name: string, options: { task?: string; next?: NextStepTarget; sources?: { proposals?: 'joined' | LaneId[]; outcomes?: 'joined' | LaneId[] }; instruction?: string | ((ctx: StepContext<TState>) => string); schema?: ZodTypeAny; onSynthesized?: (value: unknown, ctx: StepContext<TState>) => NextStepTarget; onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget }): this {
+    this.compactionBoundaries.add(name)
     this.handlers.set(name, (ctx) => {
       const dependencies = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies) : []
       const joinedLaneIds = new Set(dependencies.filter((dependency) => dependency.target.kind === 'lane').map((dependency) => dependency.target.id))
@@ -477,6 +488,7 @@ export class StepBuilder<TState = JsonValue> {
     return this
   }
   addWaitStep(name: string, spec: { dependencies: Array<{ key: string; target: { kind: 'lane' | 'effect'; id: string }; condition: 'success' | 'settled' }>; mode?: 'all' | 'any' | 'quorum'; quorum?: number; deadlineAt?: number; next: NextStepTarget } | { targets: (ctx: StepContext<TState>) => Array<{ key: string; target: { kind: 'lane' | 'effect'; id: string }; condition: 'success' | 'settled' }>; mode?: 'all' | 'any' | 'quorum'; quorum?: number; timeoutMs?: number; onResolved: (resolution: WaitResolution, ctx: StepContext<TState>) => NextStepTarget<TState>; onUnsatisfied?: (resolution: WaitResolution, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
+    this.compactionBoundaries.add(name)
     if ('dependencies' in spec) {
       this.handlers.set(name, () => ({ actions: [{ type: 'wait', spec: { ...spec, mode: spec.mode ?? 'all', ...(spec.quorum === undefined ? {} : { quorum: spec.quorum }), ...(spec.deadlineAt === undefined ? {} : { deadlineAt: spec.deadlineAt }), onUnsatisfied: 'resume_with_error', reason: 'dependency' } }], next: spec.next }))
       return this
@@ -493,6 +505,7 @@ export class StepBuilder<TState = JsonValue> {
     return this
   }
   addHumanStep<TOutput extends ZodTypeAny>(name: string, options: { prompt: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; schema: TOutput; onReply: (reply: z.infer<TOutput>, ctx: StepContext<TState>) => NextStepTarget; onTimeout?: (ctx: StepContext<TState>) => NextStepTarget; timeoutMs?: number }): this {
+    this.compactionBoundaries.add(name)
     const decode = `${name}:decode`
     this.handlers.set(name, (ctx) => { const prompt = boundedInstruction(typeof options.prompt === 'string' ? options.prompt : options.prompt({ goal: ctx.goal, state: scalarProjection(ctx.laneState) as ScalarProjection<TState> })); const inputs = options.inputs?.(ctx) ?? {}; const inputResultRefs = [...new Set([...(inputs.results ?? []), ...(inputs.findings ?? []), ...(inputs.artifacts ?? [])])]; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-human`, kind: 'human', concurrencyClass: 'none', input: asJson({ prompt, inputs }), ...(inputResultRefs.length ? { derivedFrom: inputResultRefs } : {}), ...(options.timeoutMs === undefined ? {} : { attemptTimeoutMs: options.timeoutMs }) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode } })
     this.handlers.set(decode, (ctx) => {
@@ -516,6 +529,7 @@ export class StepBuilder<TState = JsonValue> {
     return this
   }
   addTimerStep(name: string, options: { delayMs: number | ((ctx: StepContext<TState>) => number); onFire: (ctx: StepContext<TState>) => NextStepTarget }): this {
+    this.compactionBoundaries.add(name)
     const decode = `${name}:resume`
     this.handlers.set(name, (ctx) => ({ actions: [{ type: 'submit_effects', effects: [{ key: `${name}-timer`, kind: 'timer', concurrencyClass: 'none', input: { delayMs: typeof options.delayMs === 'number' ? options.delayMs : options.delayMs(ctx) } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: decode }))
     this.handlers.set(decode, (ctx) => {
@@ -577,7 +591,7 @@ export class StepBuilder<TState = JsonValue> {
       step: (context) => {
         const sdk = sdkLocals(context.lane.resume.locals)
         const pressure = context.lane.historyPressure
-        const shouldCompact = compaction !== undefined && !context.lane.resume.step.startsWith('$compact:') && context.lane.activeWaitId === undefined && sdk.compactPending !== true && pressure !== undefined && pressure.historyTokens > pressure.softTokens && context.lane.context.history.length > Math.max(0, Math.floor(compaction.keepRecentRounds))
+        const shouldCompact = compaction !== undefined && this.compactionBoundaries.has(context.lane.resume.step) && !context.lane.resume.step.startsWith('$compact:') && context.lane.activeWaitId === undefined && sdk.compactPending !== true && pressure !== undefined && pressure.historyTokens > pressure.softTokens && context.lane.context.history.length > Math.max(0, Math.floor(compaction.keepRecentRounds))
         if (shouldCompact) return { actions: [], next: { programId: this.config.id, programVersion: this.config.version, step: compactSummarize, locals: { ...ordinaryLocals(context.lane.resume.locals), $sdk: { ...sdk, compactPending: true, compactReturnStep: context.lane.resume.step } } } }
         const requestedStep = shouldCompact ? compactSummarize : context.lane.resume.step
         const handler = this.handlers.get(requestedStep) ?? this.handlers.get(entry)!
