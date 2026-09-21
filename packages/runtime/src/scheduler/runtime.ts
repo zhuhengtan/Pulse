@@ -471,7 +471,7 @@ export class PulseRuntime {
   private wakeScheduled = false
   private inDrain = false
   private wakeError: unknown
-  private tickDispatchBudget: { canStart: () => boolean; consume: () => void } | undefined
+  private tickBudget: { canStart: () => boolean; consume: () => void } | undefined
 
   static async restore(backend: RuntimePersistenceBackend, config: Omit<RuntimeConfig, 'persistence'> = {}): Promise<PulseRuntime> {
     const loaded = await backend.load()
@@ -1026,7 +1026,7 @@ export class PulseRuntime {
         this.wakeError = cause
       } finally {
         this.inDrain = false
-        if (this.factInbox.size > 0 && this.wakeError === undefined) this.scheduleWake()
+        if (this.wakeError === undefined && (this.factInbox.size > 0 || this.hasPendingTickCleanup())) this.scheduleWake(true)
       }
     })
   }
@@ -1095,7 +1095,8 @@ export class PulseRuntime {
     const tickStartedAt = performance.now()
     let tickOperations = 0
     const canStartTickOperation = (): boolean => tickOperations === 0 || performance.now() - tickStartedAt < this.maxTickMs
-    this.tickDispatchBudget = { canStart: canStartTickOperation, consume: () => { tickOperations++ } }
+    this.tickBudget = { canStart: canStartTickOperation, consume: () => { tickOperations++ } }
+    if (this.hasPendingTickCleanup()) this.refreshWaits()
     while (this.factInbox.size > 0 && canStartTickOperation()) {
       const before = this.factInbox.snapshot()
       const envelope = this.factInbox.drain(1)[0]
@@ -1285,7 +1286,9 @@ export class PulseRuntime {
     this.finalizeCancellations()
     this.syncStoragePolicy()
     this.schedulePersistence()
-    this.tickDispatchBudget = undefined
+    const pendingTickCleanup = this.hasPendingTickCleanup()
+    this.tickBudget = undefined
+    if (pendingTickCleanup) this.scheduleWake(true)
     return progressed
   }
 
@@ -1298,8 +1301,7 @@ export class PulseRuntime {
       const work = this.tick()
       await this.flushPersistence()
       if (this.executionYieldPending.size) { this.executionYieldPending.clear(); await new Promise<void>((resolve) => setImmediate(resolve)) }
-      this.refreshWaits()
-      if (this.ready.size === 0 && this.executions.size === 0 && !this.hasQueuedEffects()) {
+      if (this.ready.size === 0 && this.executions.size === 0 && !this.hasQueuedEffects() && !this.hasPendingTickCleanup()) {
         if (this.preparingLLMs.size) { await Promise.resolve(); continue }
         if (this.factInbox.size > 0) continue
         if (this.hasPendingHostInteraction()) { await this.waitForFact(); continue }
@@ -1335,7 +1337,6 @@ export class PulseRuntime {
       const work = this.tick()
       await this.flushPersistence()
       if (this.executionYieldPending.size) { this.executionYieldPending.clear(); await new Promise<void>((resolve) => setImmediate(resolve)) }
-      this.refreshWaits()
       const root = this.state.lanes.get(agent.rootLaneId)
       if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status)) {
         const status: 'succeeded' | 'failed' | 'cancelled' = root.status === 'succeeded' ? 'succeeded' : root.status === 'cancelled' ? 'cancelled' : 'failed'
@@ -1344,7 +1345,7 @@ export class PulseRuntime {
         await this.flushPersistence()
         return runOutcome(root, this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)))
       }
-      if (this.ready.size === 0 && this.executions.size === 0 && !this.hasQueuedEffects()) {
+      if (this.ready.size === 0 && this.executions.size === 0 && !this.hasQueuedEffects() && !this.hasPendingTickCleanup()) {
         if (this.preparingLLMs.size) { await Promise.resolve(); continue }
         if (this.factInbox.size > 0) continue
         if (this.hasPendingHostInteraction(agentId)) { await this.waitForFact(); continue }
@@ -1371,13 +1372,13 @@ export class PulseRuntime {
     return runOutcome(root, this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)))
   }
 
-  async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await Promise.resolve(); else if (this.hasQueuedEffects() || this.factInbox.size) await new Promise<void>((resolve) => setImmediate(resolve)) } await this.flushPersistence() }
+  async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup()) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await Promise.resolve(); else if (this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup()) await new Promise<void>((resolve) => setImmediate(resolve)) } await this.flushPersistence() }
 
   async shutdown(timeoutMs = 5_000): Promise<{ status: 'stopped' | 'timed_out'; unresolvedEffectIds: string[]; quarantine: string[] }> {
     this.shuttingDown = true
     for (const agent of this.state.agents.values()) if (agent.state === 'running' || agent.state === 'cancelling') this.cancelAgent(agent.id, 'USER_REQUESTED')
     const deadline = Date.now() + Math.max(0, timeoutMs)
-    while ((this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size) && Date.now() < deadline) {
+    while ((this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup()) && Date.now() < deadline) {
       this.tick()
       if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise).concat([new Promise<void>((resolve) => setTimeout(resolve, Math.min(10, Math.max(0, deadline - Date.now()))))]))
       else if (this.factInbox.size) await new Promise<void>((resolve) => setImmediate(resolve))
@@ -1510,6 +1511,28 @@ export class PulseRuntime {
   }
 
   private hasQueuedEffects(): boolean { return [...this.state.effects.values()].some((effect) => effect.state === 'queued' && !this.executions.has(effect.id)) }
+  private hasPendingTickCleanup(): boolean {
+    if ([...this.state.lanes.values()].some((lane) => lane.status === 'cancelling')) return true
+    for (const agent of this.state.agents.values()) {
+      if (agent.state !== 'cancelling') continue
+      const lanes = [...this.state.lanes.values()].filter((lane) => lane.agentId === agent.id)
+      if (lanes.some((lane) => !['succeeded', 'failed', 'cancelled'].includes(lane.status))) continue
+      const effects = [...this.state.effects.values()].filter((effect) => effect.agentId === agent.id)
+      if (!effects.some((effect) => !effect.outcome && !['cancelled', 'reconcile_required', 'succeeded', 'failed'].includes(effect.state))) return true
+    }
+    for (const wait of this.state.waits.values()) {
+      if (wait.state !== 'pending') continue
+      for (const dependency of wait.spec.dependencies) {
+        const target = dependency.target as TargetRef
+        if (target.kind === 'effect' && this.state.effects.get(target.id)?.outcome !== undefined) return true
+        if (target.kind === 'lane') {
+          const lane = this.state.lanes.get(target.id)
+          if (lane !== undefined && ['succeeded', 'failed', 'cancelled'].includes(lane.status)) return true
+        }
+      }
+    }
+    return false
+  }
   private hasPendingHostInteraction(agentId?: string): boolean { return [...this.state.effects.values()].some((effect) => effect.kind === 'human' && !effect.outcome && (agentId === undefined || effect.agentId === agentId)) }
   private waitForFact(): Promise<void> { return new Promise((resolve) => this.factWaiters.push(resolve)) }
   private completeFinishedChildAgents(): void {
@@ -1916,9 +1939,11 @@ export class PulseRuntime {
       this.state.lanes.set(lane.id, lane)
     }
     for (const effect of targetEffects) {
+      if (this.tickBudget && !this.tickBudget.canStart()) break
       const childAgent = effect.childAgentId === undefined ? undefined : this.state.agents.get(effect.childAgentId)
       if (childAgent?.detached === true) continue
       this.requestEffectCancellation(effect.id, reason, effect.cancelGraceMs ?? 0)
+      this.tickBudget?.consume()
     }
     this.finalizeCancellations()
     this.schedulePersistence()
@@ -1928,6 +1953,7 @@ export class PulseRuntime {
   private finalizeCancellations(): void {
     let changed = true
     while (changed) {
+      if (this.tickBudget && !this.tickBudget.canStart()) return
       changed = false
       for (const lane of [...this.state.lanes.values()]) {
         if (lane.status !== 'cancelling') continue
@@ -1957,11 +1983,13 @@ export class PulseRuntime {
         commitMutationTransaction(this.state, this.mutationLog, `lane:${nextLane.id}:cancelled:${nextLane.version}`, mutations, this.state.now, this.sessionId)
         Object.assign(lane, nextLane)
         this.state.lanes.set(lane.id, lane)
+        this.tickBudget?.consume()
         changed = true
       }
       if (changed) this.refreshWaits()
     }
     for (const agent of [...this.state.agents.values()]) {
+      if (this.tickBudget && !this.tickBudget.canStart()) return
       if (agent.state !== 'cancelling') continue
       const lanes = [...this.state.lanes.values()].filter((lane) => lane.agentId === agent.id)
       if (lanes.some((lane) => !['succeeded', 'failed', 'cancelled'].includes(lane.status))) continue
@@ -1970,6 +1998,7 @@ export class PulseRuntime {
       const root = this.state.lanes.get(agent.rootLaneId)
       const finalState = root?.status === 'succeeded' && root.cancelReason !== undefined ? 'succeeded' : root?.status === 'failed' && root.cancelReason === undefined ? 'failed' : 'cancelled'
       this.commitAgentState(agent.id, finalState, `agent:${agent.id}:${finalState}:${this.state.now}`, [{ op: 'appendEvent', event: { type: `agent.${finalState}`, agentId: agent.id, data: root?.cancelReason ?? 'USER_REQUESTED' } }])
+      this.tickBudget?.consume()
     }
   }
 
@@ -2063,7 +2092,7 @@ export class PulseRuntime {
   private dispatchQueuedEffectsNow(): void {
     const queued = [...this.state.effects.values()].filter((effect) => effect.state === 'queued' && !this.executions.has(effect.id)).sort((a, b) => (Math.max(a.schedulePriority ?? 0, a.inheritedFloor ?? Number.NEGATIVE_INFINITY) - Math.max(b.schedulePriority ?? 0, b.inheritedFloor ?? Number.NEGATIVE_INFINITY)) || a.id.localeCompare(b.id))
     for (const effect of queued) {
-      if (this.tickDispatchBudget && !this.tickDispatchBudget.canStart()) break
+      if (this.tickBudget && !this.tickBudget.canStart()) break
       if (effect.state !== 'queued' || this.executions.has(effect.id)) continue
       if (effect.kind === 'llm' && !this.prepareLLMEffect(effect)) continue
       if (effect.concurrencyClass !== 'none' && this.runningCount(effect.concurrencyClass) >= this.state.maxRunning[effect.concurrencyClass]) continue
@@ -2083,7 +2112,7 @@ export class PulseRuntime {
       commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${effect.attemptId}:dispatched`, dispatchMutations, this.state.now, this.sessionId)
       Object.assign(effect, running)
       this.state.effects.set(effect.id, effect)
-      this.tickDispatchBudget?.consume()
+      this.tickBudget?.consume()
       const controller = new AbortController()
       if (effect.kind === 'human' && !this.customExecutor) {
         this.emit({ type: 'human.requested', effectId: effect.id, data: effect.input })
@@ -2232,10 +2261,12 @@ export class PulseRuntime {
 
   private propagateCancelledLanes(): void {
     for (const lane of this.state.lanes.values()) if (lane.status === 'cancelled' || lane.status === 'cancelling') for (const effectId of lane.ownedEffectIds) {
+      if (this.tickBudget && !this.tickBudget.canStart()) return
       const effect = this.state.effects.get(effectId)
       const childAgent = effect?.childAgentId === undefined ? undefined : this.state.agents.get(effect.childAgentId)
       if (childAgent?.detached === true) continue
       this.requestEffectCancellation(effectId, 'LANE_CANCELLED', effect?.cancelGraceMs ?? 0)
+      this.tickBudget?.consume()
     }
   }
 
@@ -2373,15 +2404,19 @@ export class PulseRuntime {
   private refreshWaits(): void {
     let changed = true
     while (changed) {
+      if (this.tickBudget && !this.tickBudget.canStart()) return
       changed = false
       for (const wait of [...this.state.waits.values()]) {
         if (wait.state !== 'pending') continue
+        let budgetExhausted = false
         const commitResolution = (nextWait: import('../core/types.js').WaitRecord, nextLane?: LaneRecord, extra: Mutation[] = []): boolean => {
+          if (this.tickBudget && !this.tickBudget.canStart()) { budgetExhausted = true; return false }
           const mutations: Mutation[] = [{ op: 'setWait', waitId: nextWait.id, record: nextWait }]
           if (nextLane) mutations.push({ op: 'setLane', laneId: nextLane.id, record: nextLane })
           mutations.push(...extra)
           try { this.assertStorageAdmission(mutations) } catch { return false }
           commitMutationTransaction(this.state, this.mutationLog, `wait:${nextWait.id}:${nextWait.state}:${this.state.now}`, mutations, this.state.now, this.sessionId)
+          this.tickBudget?.consume()
           this.cancelWaitDeadline(nextWait.id)
           if (nextLane?.status === 'ready') this.enqueueLane(nextLane.id)
           this.schedulePersistence()
@@ -2472,7 +2507,7 @@ export class PulseRuntime {
               delete nextLane.closingResult
               if (nextLane.visibleResultRefs) nextLane.visibleResultRefs.add(resultId)
               else nextLane.visibleResultRefs = new Set([resultId])
-              if (!commitResolution(nextWait, nextLane, [{ op: 'publishResult', record: result }, { op: 'appendEvent', event: { type: 'lane.succeeded', laneId: nextLane.id, data: resultId } }])) {
+              if (!commitResolution(nextWait, nextLane, [{ op: 'publishResult', record: result }, { op: 'appendEvent', event: { type: 'lane.succeeded', laneId: nextLane.id, data: resultId } }]) && !budgetExhausted) {
                 const storageError: RuntimeError = { code: 'SESSION_STORAGE_LIMIT_EXCEEDED', message: 'Session storage limit exceeded while committing a closing Lane result.' }
                 const failedWait = structuredClone(wait)
                 failedWait.state = 'unsatisfied'
@@ -2500,6 +2535,7 @@ export class PulseRuntime {
             commitResolution(nextWait)
           }
         }
+        if (budgetExhausted) return
       }
     }
     this.recomputePriorityInheritance()
