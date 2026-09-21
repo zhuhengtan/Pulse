@@ -89,6 +89,9 @@ function isPermissions(value: unknown): boolean {
 function isManifestContract(manifest: Record<string, unknown>): boolean {
   return typeof manifest.description === 'string' && isJsonSchema(manifest.inputSchema) && isJsonSchema(manifest.outputSchema) && ['llm', 'tool', 'agent', 'none'].includes(String(manifest.concurrencyClass)) && ['none', 'read', 'write', 'external'].includes(String(manifest.sideEffectPolicy)) && ['read_only', 'idempotent', 'unsafe'].includes(String(manifest.retrySafety)) && isResourceClaims(manifest.locks) && (manifest.resources === undefined || isResourceClaims(manifest.resources)) && (manifest.tags === undefined || (Array.isArray(manifest.tags) && manifest.tags.every((tag) => typeof tag === 'string' && tag.length > 0))) && (manifest.maxResultSummaryBytes === undefined || (Number.isInteger(manifest.maxResultSummaryBytes) && (manifest.maxResultSummaryBytes as number) >= 0)) && isPermissions(manifest.permissions)
 }
+function summaryWithinBudget(value: unknown, maxBytes: number): boolean {
+  try { return Buffer.byteLength(JSON.stringify(value), 'utf8') <= maxBytes } catch { return false }
+}
 export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   manifest: ToolManifest
   resourceAdmissionMode?: 'explicit' | 'default'
@@ -193,7 +196,7 @@ export class ToolRegistry {
     const output = await definition.execute(parsedInput, toolContext)
     if (!matchesJsonSchema(output, definition.manifest.outputSchema)) throw new ToolError('TOOL_OUTPUT_SCHEMA_VIOLATION', `Output does not match the manifest for tool ${name}.`, { retryable: false })
     const summary = definition.summarize?.(output)
-    const summaryAllowed = summary === undefined || Buffer.byteLength(JSON.stringify(summary), 'utf8') <= (definition.manifest.maxResultSummaryBytes ?? 4096)
+    const summaryAllowed = summary === undefined || summaryWithinBudget(summary, definition.manifest.maxResultSummaryBytes ?? 4096)
     const normalized = definition.normalize?.(output)
     return { output, ...(normalized === undefined ? {} : { normalized }), ...(summaryAllowed && summary !== undefined ? { summary } : {}), manifest: structuredClone(definition.manifest) }
   }

@@ -98,6 +98,9 @@ function isPermissions(value: unknown): boolean {
 function isManifestContract(manifest: Record<string, unknown>): boolean {
   return typeof manifest.description === 'string' && isJsonSchema(manifest.inputSchema) && isJsonSchema(manifest.outputSchema) && ['llm', 'tool', 'agent', 'none'].includes(String(manifest.concurrencyClass)) && ['none', 'read', 'write', 'external'].includes(String(manifest.sideEffectPolicy)) && ['read_only', 'idempotent', 'unsafe'].includes(String(manifest.retrySafety)) && isResourceLocks(manifest.locks) && (manifest.resources === undefined || isResourceLocks(manifest.resources)) && (manifest.tags === undefined || (Array.isArray(manifest.tags) && manifest.tags.every((tag) => typeof tag === 'string' && tag.length > 0))) && (manifest.maxResultSummaryBytes === undefined || (Number.isInteger(manifest.maxResultSummaryBytes) && (manifest.maxResultSummaryBytes as number) >= 0)) && isPermissions(manifest.permissions)
 }
+function summaryWithinBudget(value: unknown, maxBytes: number): boolean {
+  try { return Buffer.byteLength(JSON.stringify(value), 'utf8') <= maxBytes } catch { return false }
+}
 
 /**
  * Core tool catalog used by PulseRuntime. Tool SDK definitions are structurally
@@ -189,7 +192,7 @@ export class RuntimeToolRegistry {
     const output = await definition.execute(parsed, toolContext)
     if (!validateJsonSchema(output, definition.manifest.outputSchema)) throw Object.assign(new Error(`Output does not match the manifest for tool ${name}.`), { code: 'TOOL_OUTPUT_SCHEMA_VIOLATION', retryable: false })
     const summary = definition.summarize?.(output)
-    const summaryAllowed = summary === undefined || Buffer.byteLength(JSON.stringify(summary), 'utf8') <= (definition.manifest.maxResultSummaryBytes ?? 4096)
+    const summaryAllowed = summary === undefined || summaryWithinBudget(summary, definition.manifest.maxResultSummaryBytes ?? 4096)
     const normalized = definition.normalize?.(output)
     return { output, ...(normalized === undefined ? {} : { normalized }), ...(summaryAllowed && summary !== undefined ? { summary } : {}), manifest: structuredClone(definition.manifest) }
   }

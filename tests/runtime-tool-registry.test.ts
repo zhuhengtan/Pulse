@@ -79,6 +79,18 @@ describe('Runtime tool registry', () => {
     expect(result.summary).toBeUndefined()
   })
 
+  it('drops a non-serializable summary without failing either registry', async () => {
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    const definition = { ...echo, manifest: { ...echo.manifest, name: 'cyclic-summary' }, summarize: () => cyclic as never }
+    const runtimeRegistry = new RuntimeToolRegistry()
+    runtimeRegistry.register(definition)
+    await expect(runtimeRegistry.executeDetailed('cyclic-summary', { value: 'ok' }, new AbortController().signal)).resolves.toMatchObject({ output: { value: 'ok' } })
+    const sdkRegistry = new ToolRegistry()
+    sdkRegistry.register(definition as never)
+    await expect(sdkRegistry.executeDetailed('cyclic-summary', { value: 'ok' }, new AbortController().signal)).resolves.toMatchObject({ output: { value: 'ok' } })
+  })
+
   it('automatically prepares tool admission and dynamic tool sets before commit', () => {
     const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
     runtime.tools.register(echo)
