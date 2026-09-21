@@ -59,7 +59,7 @@
 | Provider loopback HTTP 集成 | 通过真实本机 HTTP 栈验证 OpenAI-compatible JSON 请求、Bearer 认证、model/request body 映射，以及 SSE chunk 观测与完整 tool 参数收尾 | `tests/provider-http-integration.test.ts` | `b832af3` |
 | Registered Runtime Provider path | 通过真实本机 HTTP 栈验证 `runtime.models.register(adapter)` → `modelRouter` → 默认 LLM Executor → Effect/Wait/Result 的高层闭环 | `tests/provider-http-integration.test.ts` | `740c033` |
 | Program Registry / ProgramRef | 对外提供 `runtime.programs.register()`、ProgramRef 解析与版本校验；`createAgent` 支持已注册引用并拒绝未注册引用，同时保留直接传 LaneProgram 的兼容入口 | `tests/dsl-program-registry.test.ts` | `b879c5a` |
-| Runtime Model Registry / task route | 对外提供 `runtime.models.register()` 与 `runtime.modelRouter.register()`；按显式候选顺序结合任务、隐私、推理能力、结构化/工具能力、声明的最低上下文容量和实际投影窗口过滤，保留 Adapter 注入边界 | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts` | `37d75cb` |
+| Runtime Model Registry / task route | 对外提供 `runtime.models.register()` 与 `runtime.modelRouter.register()`；按显式候选顺序结合任务、隐私、Host Cloud Policy、推理能力、结构化/工具能力、声明的最低上下文容量和实际投影窗口过滤，保留 Adapter 注入边界 | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts` | `37d75cb`、`5387ccd` |
 | Registered Model Adapter execution | Model Registry 候选可绑定标准 Adapter；未注入自定义 `effectExecutor` 时，Runtime 自动完成路由、隐私/能力/窗口准入、归一化、结构化能力与 schema contract 校验、候选 fallback 与 usage/route metadata | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts` | `47ec7a9` |
 | Model fallback EffectQueue re-entry | Runtime 内置 Executor 与标准 Provider Adapter 每个 Attempt 只执行一个候选；失败后按 `retryPolicy` 重新进入统一队列，保留同一 EffectId 并记录每个候选的 model/provider | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts`、`tests/retry-policy.test.ts` | `2028516`、`2ce6462` |
 | Logical ToolCall identity | Runtime 默认 Executor 与 Provider Adapter 将 Provider-native call id 重写为按逻辑 LLM Effect 命名空间化的 `EffectId:tool:n`，避免跨 Effect 冲突并支持 Action Decoder 关联 | `tests/runtime-model-registry.test.ts`、`tests/provider-host.test.ts` | `336de83` |
@@ -211,7 +211,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、383/383 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、模型 fallback 的 `maxAttempts` 上限、Session `warmStart.sessionId`、跨 Runtime Session Store warm start、文件/SQLite Session Store durable 恢复与 revision CAS、逻辑 ToolCall ID 稳定化、Action Decoder 工具隐私/来源传播、隐私感知日志导出、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Watchdog 二级策略变更与推理能力提升、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、384/384 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、模型 fallback 的 `maxAttempts` 上限、Session `warmStart.sessionId`、跨 Runtime Session Store warm start、文件/SQLite Session Store durable 恢复与 revision CAS、目标 Host Policy 的云端候选重算、逻辑 ToolCall ID 稳定化、Action Decoder 工具隐私/来源传播、隐私感知日志导出、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Watchdog 二级策略变更与推理能力提升、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -655,6 +655,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `1e385cc`：增加独立隐私感知 `exportRuntimeLog()`，默认 public 导出，敏感 Result/Artifact 正文和无法确认隐私的事件自动脱敏；完整恢复快照保持不变。
 - `34067fd`：增加可注入 `RuntimeSessionStore`，支持跨 Runtime warm start 的 Global 版本、选定 ResultRef、可见性和 Privacy/Provenance 迁移，并修正目标 Result ID 水位。
 - `257ab69`：增加文件/SQLite durable Session Store，使用原子写入或 SQLite 事务保存 warm-start 快照，并以 revision CAS 拒绝陈旧 Runtime 覆盖新版本。
+- `5387ccd`：ModelRouter 增加可注入 Host Cloud Policy；目标 Runtime 可在 warm start 后独立重算云端候选，策略收紧时输出 `HOST_CLOUD_BLOCKED`。
 - `a885019`：Progress Watchdog 只有在 Action 签名确实在窗口中重复时才升级；二级干预接受一次新策略并给 LLM 注入 `reasoning: high` floor，避免“换策略”被误判为重复而直接三级失败。
 - `b2de59b`：`createAgent` 补齐 priority/policy/limits 契约，Agent root Lane 使用声明优先级，`maxActiveLanes` 与 `timeoutMs` 真实生效并可恢复。
 - `0ce2a6e`：在开发模式为 Step/ErrorBoundary 增加运行时纯度守卫，阻断动态全局 IO/时间/随机源访问并保持生产模式兼容。
@@ -704,7 +705,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，68 个测试文件、383 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，68 个测试文件、384 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
@@ -715,7 +716,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 | 隐私日志导出 | `exportRuntimeLog()` 已按 `public` / `cloud_allowed` / `local_only` ceiling 裁剪 Result、Artifact 和无法确认来源的事件 payload | 仅有确定性导出边界和脱敏测试；外部审计系统的字段策略、密钥管理和生产脱敏规则仍需宿主配置 |
 | 崩溃恢复与副作用对账 | 进程级重启和本地真实写入对账已验证，远程副作用仍待验证 | 已补子进程 `SIGKILL` 后恢复、启动 quarantine、资源锁隔离，以及 `executionRef` 从 Tool 到 Runtime 的持久化链；仍缺真实远程写系统 reconcile 和生产环境的持久化事务边界证明 |
 | Provider 请求完整能力 | 确定性映射已覆盖，真实厂商仍待验证 | OpenAI-compatible/Anthropic 请求带 model、tool schema、structured schema，usage 已归一化；真实 endpoint 的字段兼容、计费口径、取消和 tool-call 往返仍需有效凭证 |
-| 跨运行时 Session warm start | 内存、文件和 SQLite `RuntimeSessionStore` 已支持跨 Runtime 的版本读取、ResultRef 迁移、可见性和 Privacy/Provenance 保留；文件锁/原子替换与 SQLite 事务均有 revision CAS | 新 Host Policy 的独立重算、跨主机数据库运维和生产部署参数仍需接入与验证 |
+| 跨运行时 Session warm start | 内存、文件和 SQLite `RuntimeSessionStore` 已支持跨 Runtime 的版本读取、ResultRef 迁移、可见性和 Privacy/Provenance 保留；文件锁/原子替换与 SQLite 事务均有 revision CAS；目标 `ModelRouter` 已独立重算更严格的 Host Cloud Policy | 跨主机数据库运维、生产部署参数和真实多节点故障注入仍需接入与验证 |
 | 动态模型路由 | 确定性反馈路由与 snapshot/restore 已实现 | `AdaptiveModelRouter` 已按质量、延迟、费用、缓存和探索项调整未来候选顺序，Executor 已自动采集反馈；仍需真实生产样本校准权重和跨进程快照宿主接入 |
 | Detached/background scope | 单进程后台 scope 已实现 | detached Child Agent 的取消传播、查询、attach 和 Runtime shutdown 边界已有测试；跨进程 Agent scope 迁移仍需独立编排协议 |
 | Host 调用与费用限制 | 确定性调用预算已实现 | `maxTotalAttempts`、`maxLLMAttempts`、`maxToolAttempts` 和按 currency 的 cost 累计已接入 Runtime；真实账单口径、跨 Runtime 聚合和宿主策略配置仍需生产接入 |
