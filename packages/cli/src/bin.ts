@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { createInterface } from 'node:readline'
 import { access, chmod, mkdir, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { dirname } from 'node:path'
 import { createLocalHost, type AssistantEvent, type LocalHostOptions, type RunHandle } from '@hunterzhu/pulse-server'
 import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig } from './config.js'
 
-const version = '0.1.0'
+const packageManifest = createRequire(import.meta.url)('../package.json') as { version: string }
+const version = packageManifest.version
 const help = `Pulse ${version}
 
 Usage:
