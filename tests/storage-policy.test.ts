@@ -93,6 +93,22 @@ describe('session storage policy', () => {
     expect(restored.inspect().find((record) => record.key === 'result:r1')).toMatchObject({ pinCount: 1, storageState: 'memory' })
   })
 
+  it('rejects malformed storage policy snapshots before replacing live state', () => {
+    const policy = new SessionStoragePolicy({ maxResultBytes: 100 })
+    policy.put('result', 'result:r1', { answer: 1 })
+    const before = policy.snapshot()
+    const malformed = structuredClone(before)
+    malformed.limits.maxResultBytes = -1
+    expect(() => SessionStoragePolicy.fromSnapshot(malformed)).toThrow('INVALID_STORAGE_POLICY_SNAPSHOT')
+    const invalidRecord = structuredClone(before)
+    invalidRecord.records[0]!.storageState = 'compacted'
+    expect(() => policy.replaceSnapshot(invalidRecord)).toThrow('INVALID_STORAGE_POLICY_SNAPSHOT')
+    expect(policy.snapshot()).toEqual(before)
+    const invalidHash = structuredClone(before)
+    invalidHash.records[0]!.hash = '0'.repeat(64)
+    expect(() => SessionStoragePolicy.fromSnapshot(invalidHash)).toThrow('INVALID_STORAGE_POLICY_SNAPSHOT')
+  })
+
   it('marks records persisted only after the backend acknowledges the snapshot', () => {
     const policy = new SessionStoragePolicy({ maxResultBytes: 100 })
     policy.put('result', 'result:r1', { answer: 1 })

@@ -29,13 +29,45 @@ export interface StoragePolicySnapshot {
   pinSources: Array<[string, string[]]>
 }
 
+const storageLimitKeys = ['maxEventLogBytes', 'maxResultBytes', 'maxArtifactBytes', 'maxSnapshotBytes', 'maxTotalMemoryBytes'] as const
+function validStorageLimits(value: unknown): value is Required<StoragePolicyConfig> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const limits = value as Record<string, unknown>
+  return storageLimitKeys.every((key) => Number.isInteger(limits[key]) && (limits[key] as number) >= 0)
+}
+function validStoragePolicySnapshot(value: unknown): value is StoragePolicySnapshot {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const snapshot = value as StoragePolicySnapshot
+  if (snapshot.schemaVersion !== 1 || !validStorageLimits(snapshot.limits) || !Array.isArray(snapshot.records) || !Array.isArray(snapshot.pinSources)) return false
+  const keys = new Set<string>()
+  for (const record of snapshot.records) {
+    if (!record || typeof record.key !== 'string' || record.key.length === 0 || keys.has(record.key) || !['event', 'result', 'artifact', 'snapshot'].includes(record.kind) || !['memory', 'persisted', 'compacted'].includes(record.storageState) || !Number.isInteger(record.pinCount) || record.pinCount < 0 || !Number.isInteger(record.bytes) || record.bytes < 0 || !/^[a-f0-9]{64}$/.test(record.hash) || (record.kind === 'event' && record.storageState === 'compacted') || (record.storageState === 'memory' && record.value === undefined) || (record.storageState !== 'memory' && record.value !== undefined)) return false
+    if (record.value !== undefined) {
+      try { if (Buffer.byteLength(stableSerialize(record.value), 'utf8') !== record.bytes || contentHash(record.value) !== record.hash) return false } catch { return false }
+    }
+    keys.add(record.key)
+  }
+  const sources = new Set<string>()
+  for (const entry of snapshot.pinSources) {
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || entry[0].length === 0 || sources.has(entry[0]) || !Array.isArray(entry[1]) || new Set(entry[1]).size !== entry[1].length || entry[1].some((key) => typeof key !== 'string' || key.length === 0)) return false
+    sources.add(entry[0])
+  }
+  for (const record of snapshot.records) {
+    const managedPins = snapshot.pinSources.filter(([, pinned]) => pinned.includes(record.key)).length
+    if (record.pinCount < managedPins) return false
+  }
+  return true
+}
+
 export class SessionStoragePolicy {
   private readonly records = new Map<string, StoredRecord>()
   private readonly pinSources = new Map<string, Set<string>>()
   private readonly limits: Required<StoragePolicyConfig>
 
   constructor(config: StoragePolicyConfig = {}) {
-    this.limits = { maxEventLogBytes: config.maxEventLogBytes ?? 1_000_000, maxResultBytes: config.maxResultBytes ?? 1_000_000, maxArtifactBytes: config.maxArtifactBytes ?? 4_000_000, maxSnapshotBytes: config.maxSnapshotBytes ?? 1_000_000, maxTotalMemoryBytes: config.maxTotalMemoryBytes ?? 4_000_000 }
+    const limits = { maxEventLogBytes: config.maxEventLogBytes ?? 1_000_000, maxResultBytes: config.maxResultBytes ?? 1_000_000, maxArtifactBytes: config.maxArtifactBytes ?? 4_000_000, maxSnapshotBytes: config.maxSnapshotBytes ?? 1_000_000, maxTotalMemoryBytes: config.maxTotalMemoryBytes ?? 4_000_000 }
+    if (!validStorageLimits(limits)) throw new Error('INVALID_STORAGE_POLICY_LIMITS')
+    this.limits = limits
   }
 
   put(kind: StorageKind, key: string, value: JsonValue, pin = false): StoredRecord {
@@ -95,11 +127,14 @@ export class SessionStoragePolicy {
   snapshot(): StoragePolicySnapshot { return { schemaVersion: 1, limits: { ...this.limits }, records: [...this.records.values()].map((record) => this.copyRecord(record)), pinSources: [...this.pinSources.entries()].map(([source, keys]) => [source, [...keys]]) } }
 
   /** Atomically replace this policy with a previously validated candidate snapshot. */
-  replaceSnapshot(snapshot: StoragePolicySnapshot): void { this.restore(snapshot) }
+  replaceSnapshot(snapshot: StoragePolicySnapshot): void {
+    if (!validStoragePolicySnapshot(snapshot)) throw new Error('INVALID_STORAGE_POLICY_SNAPSHOT')
+    this.restore(snapshot)
+  }
 
   static fromSnapshot(snapshot: StoragePolicySnapshot | JsonValue): SessionStoragePolicy {
     const value = snapshot as StoragePolicySnapshot
-    if (!value || value.schemaVersion !== 1 || !value.limits || !Array.isArray(value.records) || !Array.isArray(value.pinSources)) throw new Error('INVALID_STORAGE_POLICY_SNAPSHOT')
+    if (!validStoragePolicySnapshot(value)) throw new Error('INVALID_STORAGE_POLICY_SNAPSHOT')
     const policy = new SessionStoragePolicy(value.limits)
     policy.restore(value)
     return policy
