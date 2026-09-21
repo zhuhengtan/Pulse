@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defineTool } from '@pulse/tool-sdk'
+import { defineTool, ToolRegistry } from '@pulse/tool-sdk'
 import { RuntimeToolRegistry, PulseRuntime } from '@pulse/runtime'
 import { createToolEffectExecutor } from '@pulse/adapters'
 import type { EffectRecord } from '@pulse/runtime'
@@ -36,6 +36,19 @@ describe('Runtime tool registry', () => {
     allowed.register(remote)
     expect(allowed.isAllowed('remote-echo')).toBe(true)
     expect(allowed.compileToolSet('restricted').tools[0]).toMatchObject({ name: 'remote-echo', permissions: remote.manifest.permissions })
+  })
+
+  it('normalizes permission paths and host names before allowlist matching', () => {
+    const traversal = { ...echo, manifest: { ...echo.manifest, name: 'traversal', permissions: { workspaceRoots: ['/workspace/../secret'], networkHosts: ['API.EXAMPLE.COM.'] } } }
+    const runtimeRegistry = new RuntimeToolRegistry({ workspaceRoots: ['/workspace/'], networkHosts: ['api.example.com'] })
+    runtimeRegistry.register(traversal)
+    expect(runtimeRegistry.isAllowed('traversal')).toBe(false)
+    expect(runtimeRegistry.permissionReasons('traversal')).toEqual(['WORKSPACE_ROOT_NOT_ALLOWED:/workspace/../secret'])
+
+    const sdkRegistry = new ToolRegistry({ workspaceRoots: ['/workspace/'], networkHosts: ['api.example.com'] })
+    sdkRegistry.register(traversal)
+    expect(sdkRegistry.isAllowed('traversal')).toBe(false)
+    expect(sdkRegistry.permissionReasons('traversal')).toEqual(['WORKSPACE_ROOT_NOT_ALLOWED:/workspace/../secret'])
   })
 
   it('can be consumed directly by the standard Tool Effect adapter', async () => {

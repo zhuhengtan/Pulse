@@ -1,8 +1,12 @@
 import { z, type ZodTypeAny } from 'zod'
 import { createHash } from 'node:crypto'
+import { normalize } from 'node:path'
 import { matchesJsonSchema } from './schema.js'
 
 export { matchesJsonSchema } from './schema.js'
+
+function normalizeWorkspaceRoot(root: string): string { if (root === '*') return root; const value = normalize(root); return value.length > 1 ? value.replace(/\/$/, '') : value }
+function normalizeNetworkHost(host: string): string { return host.toLocaleLowerCase().replace(/\.$/, '') }
 
 export const TOOL_SDK_VERSION = '0.1.0'
 export type ConcurrencyClass = 'llm' | 'tool' | 'agent' | 'none'
@@ -74,7 +78,7 @@ export class ToolRegistry {
   private readonly definitions = new Map<string, ToolDefinition<any, any>>()
   private readonly policy: { allow?: ReadonlySet<string>; deny: ReadonlySet<string>; workspaceRoots?: ReadonlySet<string>; networkHosts?: ReadonlySet<string>; allowNetwork: boolean }
   constructor(policy: ToolRegistryPolicy = {}) {
-    this.policy = { ...(policy.allow === undefined ? {} : { allow: new Set(policy.allow) }), deny: new Set(policy.deny ?? []), ...(policy.workspaceRoots === undefined ? {} : { workspaceRoots: new Set(policy.workspaceRoots) }), ...(policy.networkHosts === undefined ? {} : { networkHosts: new Set(policy.networkHosts) }), allowNetwork: policy.allowNetwork ?? true }
+    this.policy = { ...(policy.allow === undefined ? {} : { allow: new Set(policy.allow) }), deny: new Set(policy.deny ?? []), ...(policy.workspaceRoots === undefined ? {} : { workspaceRoots: new Set(policy.workspaceRoots.map(normalizeWorkspaceRoot)) }), ...(policy.networkHosts === undefined ? {} : { networkHosts: new Set(policy.networkHosts.map(normalizeNetworkHost)) }), allowNetwork: policy.allowNetwork ?? true }
   }
   register<TInput, TOutput>(definition: ToolDefinition<TInput, TOutput>): void {
     if (!definition.manifest.name || this.definitions.has(definition.manifest.name)) throw new Error(`TOOL_ALREADY_REGISTERED:${definition.manifest.name}`)
@@ -104,8 +108,8 @@ export class ToolRegistry {
     if (!permissions) return []
     const reasons: string[] = []
     if (!this.policy.allowNetwork && (permissions.networkHosts?.length ?? 0) > 0) reasons.push('NETWORK_DISABLED')
-    if (this.policy.networkHosts !== undefined) for (const host of permissions.networkHosts ?? []) if (!this.policy.networkHosts.has('*') && !this.policy.networkHosts.has(host)) reasons.push(`NETWORK_HOST_NOT_ALLOWED:${host}`)
-    if (this.policy.workspaceRoots !== undefined) for (const root of permissions.workspaceRoots ?? []) if (![...this.policy.workspaceRoots].some((allowed) => allowed === '*' || root === allowed || root.startsWith(`${allowed.replace(/\/$/, '')}/`))) reasons.push(`WORKSPACE_ROOT_NOT_ALLOWED:${root}`)
+    if (this.policy.networkHosts !== undefined) for (const rawHost of permissions.networkHosts ?? []) { const host = normalizeNetworkHost(rawHost); if (!this.policy.networkHosts.has('*') && !this.policy.networkHosts.has(host)) reasons.push(`NETWORK_HOST_NOT_ALLOWED:${rawHost}`) }
+    if (this.policy.workspaceRoots !== undefined) for (const rawRoot of permissions.workspaceRoots ?? []) { const root = normalizeWorkspaceRoot(rawRoot); if (![...this.policy.workspaceRoots].some((allowed) => allowed === '*' || root === allowed || root.startsWith(`${allowed}/`))) reasons.push(`WORKSPACE_ROOT_NOT_ALLOWED:${rawRoot}`) }
     return reasons
   }
   list(): ToolManifest[] { return [...this.definitions.values()].filter((definition) => this.isAllowed(definition.manifest.name)).map((definition) => structuredClone(definition.manifest)) }
