@@ -11,7 +11,7 @@ export type ScalarProjection<T> = T extends string | number | boolean | null ? T
 export interface InstructionView<TState> { goal: string; state: ScalarProjection<TState> }
 export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; artifacts?: string[]; events?: string[] }
 export interface HistoryCompactionOptions { summarizeTask: string; keepRecentRounds: number }
-export interface HistoryRecordMeta { seq: number; effectId?: string; resultRefs: ResultRef[]; resultSelection?: Array<{ ref: ResultRef; rule: string; hash: string }>; result?: ResultRef; findings?: ResultRef[]; privacy: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[] }
+export interface HistoryRecordMeta { seq: number; hash: string; effectId?: string; resultRefs: ResultRef[]; resultSelection?: Array<{ ref: ResultRef; rule: string; hash: string }>; result?: ResultRef; findings?: ResultRef[]; privacy: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[] }
 export interface ResultMeta { ref: ResultRef; privacy: PrivacyLabel; derivedFrom: ProvenanceRef[]; sizeBytes: number; hash: string; producer: { kind: 'lane' | 'effect'; id: string }; summary?: JsonValue }
 export interface StepContext<TState = JsonValue> {
   lane: Readonly<LaneRecord>
@@ -244,7 +244,17 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
   derivedRefs.add(laneContextRef(context.lane.id, context.lane.context.version))
   collectResumeResultRefs(context.resumeInput, derivedRefs)
   for (const record of context.lane.context.history) for (const ref of record.resultRefs) derivedRefs.add(ref)
-  const history = context.lane.context.history.map((record: HistoryRecord): HistoryRecordMeta => ({ seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), resultRefs: [...record.resultRefs], ...(record.resultSelection === undefined ? {} : { resultSelection: clone(record.resultSelection) }), ...(record.result === undefined ? {} : { result: record.result }), ...(record.findings === undefined ? {} : { findings: [...record.findings] }), privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: clone(record.privacyTaints) }) }))
+  const history = context.lane.context.history.map((record: HistoryRecord): HistoryRecordMeta => ({
+    seq: record.seq,
+    hash: contentHash({ seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), instruction: record.instruction, resultRefs: record.resultRefs, ...(record.resultSelection === undefined ? {} : { resultSelection: record.resultSelection }), ...(record.result === undefined ? {} : { result: record.result }), ...(record.findings === undefined ? {} : { findings: record.findings }), output: record.output, privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: record.privacyTaints }) }),
+    ...(record.effectId === undefined ? {} : { effectId: record.effectId }),
+    resultRefs: [...record.resultRefs],
+    ...(record.resultSelection === undefined ? {} : { resultSelection: clone(record.resultSelection) }),
+    ...(record.result === undefined ? {} : { result: record.result }),
+    ...(record.findings === undefined ? {} : { findings: [...record.findings] }),
+    privacy: record.privacy,
+    ...(record.privacyTaints === undefined ? {} : { privacyTaints: clone(record.privacyTaints) }),
+  }))
   const resultMeta = (ref: ResultRef): ResultMeta | undefined => {
     const result = resultVisible(context, ref) ? context.state.results.get(ref) : undefined
     if (result) derivedRefs.add(ref)

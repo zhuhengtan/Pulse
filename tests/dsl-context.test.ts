@@ -68,4 +68,20 @@ describe('DSL StepContext', () => {
     expect(value).toMatchObject({ privacy: 'public', producer: { kind: 'effect' }, sizeBytes: expect.any(Number), hash: expect.stringMatching(/^[a-f0-9]{64}$/) })
     expect(value).not.toHaveProperty('secret')
   })
+
+  it('exposes a stable history hash without exposing the archived output body', async () => {
+    const point = (step: string) => ({ programId: 'dsl-history-hash', programVersion: '1', step, locals: {} })
+    const program = defineLaneProgram({ id: 'dsl-history-hash', version: '1' }, (builder) => {
+      builder.addStep('start', () => ({ actions: [{ type: 'submit_effects', effects: [{ key: 'reason', kind: 'llm', concurrencyClass: 'llm', input: { task: 'reason', instruction: 'answer' } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('inspect') }))
+      builder.addStep('inspect', (ctx) => {
+        expect(ctx.history).toHaveLength(1)
+        expect(ctx.history[0]).toMatchObject({ seq: 1, hash: expect.stringMatching(/^[a-f0-9]{64}$/) })
+        expect(ctx.history[0]).not.toHaveProperty('output')
+        return { actions: [{ type: 'complete', result: { ok: true } }], next: point('inspect') }
+      })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { answer: 'body' }, privacy: 'public' }) })
+    const { agentId } = runtime.createAgent('history hash', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+  })
 })
