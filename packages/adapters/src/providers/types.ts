@@ -1,4 +1,4 @@
-import type { JsonValue, LLMRequestProjection, LLMResult } from '@pulse/runtime'
+import type { JsonValue, LLMRequestProjection, LLMResult } from '@hunterzhu/pulse-runtime'
 
 export type ProviderToolChoice = 'auto' | 'required' | 'none' | { type: 'function'; function: { name: string } }
 

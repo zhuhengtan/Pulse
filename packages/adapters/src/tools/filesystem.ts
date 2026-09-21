@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
+import { pipeline } from 'node:stream/promises'
 
 export interface FilesystemWriteResult { hash: string; bytes: number }
+export interface FilesystemReadResult { content: string; truncated: boolean }
 
 function filesystemError(code: string, retryable = false, cause?: unknown): Error & { code: string; retryable: boolean; cause?: unknown } {
   return Object.assign(new Error(code), { code, retryable, ...(cause === undefined ? {} : { cause }) })
@@ -15,8 +18,15 @@ function filesystemCause(cause: unknown): Error & { code: string; retryable: boo
   return filesystemError(code, retryable, cause)
 }
 
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ESRCH') return false
+    throw cause
+  }
+}
+
 export class FilesystemTool {
-  constructor(readonly root: string) {}
+  constructor(readonly root: string, private readonly lockTimeoutMs = 30_000) {}
   private safe(path: string): string { const target = resolve(this.root, path); if (isAbsolute(path) || relative(resolve(this.root), target).startsWith('..')) throw filesystemError('PATH_OUTSIDE_SANDBOX'); return target }
   private async existing(path: string): Promise<string> {
     const target = this.safe(path)
@@ -36,11 +46,37 @@ export class FilesystemTool {
     return target
   }
   async read(path: string, signal?: AbortSignal): Promise<string> { if (signal?.aborted) throw filesystemError('ABORTED'); return readFile(await this.existing(path), 'utf8') }
+  async readLimited(path: string, maxBytes: number, signal?: AbortSignal): Promise<FilesystemReadResult> {
+    if (signal?.aborted) throw filesystemError('ABORTED')
+    const handle = await open(await this.existing(path), 'r')
+    try {
+      const buffer = Buffer.alloc(maxBytes + 1)
+      const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, 0)
+      return { content: buffer.subarray(0, Math.min(bytesRead, maxBytes)).toString('utf8'), truncated: bytesRead > maxBytes }
+    } finally { await handle.close() }
+  }
   async list(path = '.', signal?: AbortSignal): Promise<string[]> { if (signal?.aborted) throw filesystemError('ABORTED'); return readdir(await this.existing(path)) }
   async write(path: string, content: string, signal?: AbortSignal): Promise<void> { if (signal?.aborted) throw filesystemError('ABORTED'); await writeFile(await this.writable(path), content, 'utf8') }
+  async move(source: string, destination: string, expectedHash?: string, signal?: AbortSignal): Promise<{ hash: string; bytes: number }> {
+    if (signal?.aborted) throw filesystemError('ABORTED')
+    const sourcePath = this.safe(source)
+    const sourceEntry = await lstat(sourcePath).catch((cause) => (cause as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : Promise.reject(cause))
+    if (!sourceEntry) throw filesystemError('ENOENT')
+    if (sourceEntry.isSymbolicLink()) throw filesystemError('PATH_OUTSIDE_SANDBOX')
+    const sourceTarget = await this.existing(source)
+    const destinationTarget = await this.writable(destination)
+    const destinationExists = await lstat(destinationTarget).catch((cause) => (cause as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : Promise.reject(cause))
+    if (destinationExists) throw filesystemError('MOVE_DESTINATION_EXISTS')
+    const currentHash = await this.hash(source, signal)
+    if (expectedHash !== undefined && currentHash !== expectedHash) throw filesystemError('FILE_BASELINE_CONFLICT')
+    await this.withLock(sourceTarget, async () => { await rename(sourceTarget, destinationTarget) })
+    return { hash: currentHash, bytes: sourceEntry.size }
+  }
   async hash(path: string, signal?: AbortSignal): Promise<string> {
     if (signal?.aborted) throw filesystemError('ABORTED')
-    return createHash('sha256').update(await readFile(await this.existing(path))).digest('hex')
+    const digest = createHash('sha256')
+    await pipeline(createReadStream(await this.existing(path)), digest, signal === undefined ? {} : { signal })
+    return digest.digest('hex')
   }
   async writeIfUnchanged(path: string, content: string, expectedHash: string, signal?: AbortSignal): Promise<FilesystemWriteResult> {
     if (signal?.aborted) throw filesystemError('ABORTED')
@@ -72,14 +108,22 @@ export class FilesystemTool {
 
   private async withLock<T>(target: string, work: () => Promise<T>): Promise<T> {
     const lockPath = `${target}.pulse.lock`
-    const deadline = Date.now() + 30_000
+    const deadline = Date.now() + this.lockTimeoutMs
+    const payload = JSON.stringify({ pid: process.pid, token: `${process.pid}:${process.hrtime.bigint()}` })
     let lock: Awaited<ReturnType<typeof open>> | undefined
     while (lock === undefined) {
-      try { lock = await open(lockPath, 'wx', 0o600) }
-      catch (cause) {
+      try {
+        lock = await open(lockPath, 'wx', 0o600)
+        await lock.writeFile(payload)
+      } catch (cause) {
         if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw filesystemCause(cause)
-        const lockStat = await stat(lockPath).catch(() => undefined)
-        if (lockStat && Date.now() - lockStat.mtimeMs > 30_000) { await rm(lockPath, { force: true }); continue }
+        const body = await readFile(lockPath, 'utf8').catch(() => undefined)
+        let owner: { pid?: number } | undefined
+        try { owner = body ? JSON.parse(body) as { pid?: number } : undefined } catch { owner = undefined }
+        if (typeof owner?.pid === 'number' && !pidAlive(owner.pid) && body !== undefined) {
+          const current = await readFile(lockPath, 'utf8').catch(() => undefined)
+          if (current === body) { await rm(lockPath, { force: true }); continue }
+        }
         if (Date.now() >= deadline) throw filesystemError('FILESYSTEM_LOCK_TIMEOUT', true)
         await new Promise((resolve) => setTimeout(resolve, 5))
       }

@@ -1,4 +1,4 @@
-import type { LLMResult } from '@pulse/runtime'
+import type { LLMResult } from '@hunterzhu/pulse-runtime'
 import type { ProviderAdapter } from './types.js'
 export class MockAdapter implements ProviderAdapter {
   readonly name = 'Mock Provider'

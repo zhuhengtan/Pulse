@@ -1,4 +1,4 @@
-import type { JsonValue, LLMRequestProjection } from '@pulse/runtime'
+import type { JsonValue, LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 import { consumeProviderSse, normalizeAnthropicResponse, parseProviderJson, providerHttpError, providerNetworkError, providerResponseError } from './normalize.js'
 import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
 export class AnthropicAdapter implements ProviderAdapter {

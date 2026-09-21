@@ -1,4 +1,4 @@
-import type { LLMResult } from '@pulse/runtime'
+import type { LLMResult } from '@hunterzhu/pulse-runtime'
 
 export interface ProviderSseEvent { event?: string; data: any }
 

@@ -3,12 +3,12 @@ export interface ShellResult { code: number | null; stdout: string; stderr: stri
 function shellError(code: string, retryable = false, cause?: unknown): Error & { code: string; retryable: boolean; cause?: unknown } {
   return Object.assign(new Error(code), { code, retryable, ...(cause === undefined ? {} : { cause }) })
 }
-export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number } = {}): Promise<ShellResult> {
+export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv } = {}): Promise<ShellResult> {
   const max = options.maxOutputBytes ?? 256 * 1024
   if (!Number.isFinite(max) || max < 0) return Promise.reject(shellError('INVALID_SHELL_OUTPUT_LIMIT'))
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0)) return Promise.reject(shellError('INVALID_SHELL_TIMEOUT'))
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: options.cwd, shell: false, detached: process.platform !== 'win32' })
+    const child = spawn(command, args, { cwd: options.cwd, env: options.env, shell: false, detached: process.platform !== 'win32' })
     let stdout = ''; let stderr = ''; let truncated = false
     const append = (target: 'stdout' | 'stderr', chunk: Buffer): void => { const value = chunk.toString(); const current = target === 'stdout' ? stdout : stderr; const next = current + value; if (Buffer.byteLength(next) > max) { truncated = true; const limited = next.slice(0, max); if (target === 'stdout') stdout = limited; else stderr = limited } else if (target === 'stdout') stdout = next; else stderr = next }
     let closed = false

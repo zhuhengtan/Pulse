@@ -1,5 +1,5 @@
-import type { EffectExecutor, EffectExecution, JsonValue, LLMRequestProjection, LLMResult, ModelCandidate, ModelRouteRequirements, ModelRouter } from '@pulse/runtime'
-import { assignRuntimeToolCallIds, ModelFallbackController, OutputValidationError, estimateProjectionTokens, stableSerialize, validateAdapterResult, validateJsonSchema, modelFallbackError, runtimeErrorFromCause } from '@pulse/runtime'
+import type { EffectExecutor, EffectExecution, JsonValue, LLMRequestProjection, LLMResult, ModelCandidate, ModelRouteRequirements, ModelRouter } from '@hunterzhu/pulse-runtime'
+import { assignRuntimeToolCallIds, ModelFallbackController, OutputValidationError, estimateProjectionTokens, stableSerialize, validateAdapterResult, validateJsonSchema, modelFallbackError, runtimeErrorFromCause } from '@hunterzhu/pulse-runtime'
 import type { ProviderAdapter } from './types.js'
 
 class AsyncSlot {

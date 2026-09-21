@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { createServer as createHttpsServer, type ServerOptions as HttpsServerOptions } from 'node:https'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
-import { isSideEffectful, type EffectExecution, type EffectExecutor, type EffectRecord, type JsonValue, type RuntimeError, type WorkerCoordinatorContract, type WorkerHandler, type WorkerLease, type WorkerSubmitOptions, type WorkerTaskRecord } from '@pulse/runtime'
+import { isSideEffectful, type EffectExecution, type EffectExecutor, type EffectRecord, type JsonValue, type RuntimeError, type WorkerCoordinatorContract, type WorkerHandler, type WorkerLease, type WorkerSubmitOptions, type WorkerTaskRecord } from '@hunterzhu/pulse-runtime'
 
 interface JsonObject { [key: string]: JsonValue }
 

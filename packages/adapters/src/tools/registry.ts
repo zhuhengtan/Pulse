@@ -1,7 +1,7 @@
-import { isSideEffectful, type EffectArtifactOutput, type EffectExecutor, type EffectExecution, type EffectRecord, type EffectSubmission, type JsonValue } from '@pulse/runtime'
-import { ToolRegistry, type ReconcileResult, type ToolDiscoveryQuery } from '@pulse/tool-sdk'
+import { isSideEffectful, type EffectArtifactOutput, type EffectExecutor, type EffectExecution, type EffectRecord, type EffectSubmission, type JsonValue } from '@hunterzhu/pulse-runtime'
+import { ToolRegistry, type ReconcileResult, type ToolDiscoveryQuery } from '@hunterzhu/pulse-tool-sdk'
 
-function toJson(value: unknown, seen = new Set<object>()): import('@pulse/runtime').JsonValue {
+function toJson(value: unknown, seen = new Set<object>()): import('@hunterzhu/pulse-runtime').JsonValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') return value
   if (Array.isArray(value)) {
     if (seen.has(value)) throw new Error('TOOL_OUTPUT_NOT_SERIALIZABLE')
@@ -30,7 +30,7 @@ function artifactOutput(value: unknown): EffectArtifactOutput {
 export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor {
   return async (effect, signal, emitObservation): Promise<EffectExecution> => {
     if (effect.kind !== 'tool') throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`)
-    const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, import('@pulse/runtime').JsonValue> : {}
+    const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, import('@hunterzhu/pulse-runtime').JsonValue> : {}
     const name = input.name
     if (typeof name !== 'string') throw new Error('INVALID_TOOL_EFFECT_INPUT')
     if (!registry.isAllowed(name)) throw new Error(`TOOL_NOT_ALLOWED:${name}`)

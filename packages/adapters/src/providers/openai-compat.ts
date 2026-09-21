@@ -1,4 +1,4 @@
-import type { JsonValue, LLMRequestProjection } from '@pulse/runtime'
+import type { JsonValue, LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 import { consumeProviderSse, normalizeOpenAIResponse, parseProviderJson, providerHttpError, providerNetworkError } from './normalize.js'
 import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
 export class OpenAICompatibleAdapter implements ProviderAdapter {
@@ -45,8 +45,17 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 }
 
-function toMessages(request: LLMRequestProjection): Array<{ role: 'system' | 'user'; content: string }> {
-  return request.blocks.map((block) => ({ role: block.kind === 'system' || block.kind === 'policy' || block.kind === 'tools' ? 'system' : 'user', content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content) }))
+export function toOpenAIMessages(request: LLMRequestProjection): Array<{ role: 'system' | 'user' | 'assistant'; content: string; name?: string }> {
+  return request.blocks.map((block) => {
+    const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
+    if (block.kind === 'system' || block.kind === 'policy' || block.kind === 'tools') return { role: 'system' as const, content }
+    if (block.kind === 'history') return { role: 'assistant' as const, content }
+    return { role: 'user' as const, name: block.kind, content }
+  })
+}
+
+function toMessages(request: LLMRequestProjection) {
+  return toOpenAIMessages(request)
 }
 
 function toolDefinitions(request: LLMRequestProjection): Array<{ type: 'function'; function: { name: string; description?: string; parameters: JsonValue } }> {
