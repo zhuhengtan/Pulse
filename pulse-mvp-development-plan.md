@@ -56,6 +56,7 @@
 | SQLite Result/Snapshot/EventArchive | 提供带 namespace 的 SQLite Result/Snapshot body store 与幂等冲突检测，以及按事件序号原子追加、范围读取的 SQLite EventArchive | `tests/sqlite-content-store.test.ts` | `b832588` |
 | LLM Preparation | bounded preparing/prepared 窗口、generation、迟到准备丢弃、explain 展示 | `tests/provider-host.test.ts` | `944c3ad` |
 | Provider 请求与 usage | modelId、工具 schema、structured output schema、uncached token、latency/cost 归一化与 metadata | `tests/m3-context-adapters.test.ts`、`tests/provider-host.test.ts` | `fa723c7` |
+| Provider HTTP retryability | Provider Adapter 为 401/4xx、408/425/429 和 5xx 生成明确 retryable 语义；Runtime Model Executor 保留不可重试错误，认证/权限失败不会错误 fallback 到下一模型 | `tests/m3-context-adapters.test.ts`、`tests/provider-host.test.ts` | `b0fe13a` |
 | Provider 强制 Tool Choice | OpenAI-compatible 支持 `tool_choice`，Anthropic 映射为 `auto`/`any`/`tool`；Live Smoke 可在 `PULSE_LIVE_TOOL_SMOKE=1` 下强制真实 tool-call 并校验归一化 | `tests/m3-context-adapters.test.ts`、`tests/live/openai-adapter.live.test.ts` | `fb83aa2` |
 | Provider Structured Output Live Smoke | 增加显式 `PULSE_LIVE_STRUCTURED_SMOKE=1` 的真实 structured-output 请求，校验 Provider 返回的 JSON 与请求 schema 一致；未设置凭证或开关时保持跳过 | `tests/live/openai-adapter.live.test.ts` | `7d2ca82` |
 | Provider Cancellation Live Smoke | 增加显式 `PULSE_LIVE_CANCELLATION_SMOKE=1` 的真实在途请求取消验收，要求归一化为不可重试的 `PROVIDER_REQUEST_CANCELLED`；未设置凭证或开关时保持跳过 | `tests/live/openai-adapter.live.test.ts` | `478a66e` |
@@ -218,7 +219,7 @@
 | 事实事件外部归档 | Checkpoint 截断内存事实事件前写入幂等 EventArchive，并记录 archive watermark；归档失败不保存、不截断 | `tests/storage-outbox.test.ts` | 本轮事件归档提交 |
 | 确定性调度基准 | 提供串行、批量 Tool、多 Lane、`forkAffinity: coalesce` 四模式对照；输出样本、均值、p50/p95、终态、Effect/Lane 结构指标 | `benchmarks/deterministic.mjs`、`benchmarks/README.md` | `a4b6672` |
 
-统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、399/399 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、模型 fallback 的 `maxAttempts` 上限、Session `warmStart.sessionId`、跨 Runtime Session Store warm start、文件/SQLite Session Store durable 恢复与 revision CAS、Persistence Backend 自动绑定 Session Store、目标 Host Policy 的云端候选重算及 Runtime 配置 fail-closed、Manifest workspace/network 权限与动态 ToolSet fail-closed、权限路径/主机规范化、Tool Manifest malformed contract fail-closed、external side-effect policy 的远程未知/取消/恢复处理、逻辑 ToolCall ID 稳定化、Action Decoder 工具隐私/来源传播、隐私感知日志导出、File/HTTP 审计日志 sink、Runtime `auditLogSink`/`auditLogPrivacy` 配置出口、注册 Tool 的默认 Runtime Executor 闭环、注册 external Tool 的 executionRef/reconcile 对账与结果 schema fail-closed、当前时刻 due timer 处理、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Provider fetch/SSE cancellation 契约、Watchdog 二级策略变更与推理能力提升、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
+统一验证命令为 `npx tsc -b --pretty false && npm test`；当前结果为 68 个测试文件、401/401 通过，`npm run build` 和 `git diff --check` 也已通过。最近一次运行还覆盖了取消原因、失败 Lane Outcome、未决 Effect 传播、Observation gap 重同步、observation 字节上限、Runtime 配置、Provider loopback HTTP、Registered Runtime Provider path、Program Registry/ProgramRef、Runtime Model Registry/task route、Registered Model Adapter execution、模型 fallback 的 `maxAttempts` 上限、Provider HTTP retryability、Session `warmStart.sessionId`、跨 Runtime Session Store warm start、文件/SQLite Session Store durable 恢复与 revision CAS、Persistence Backend 自动绑定 Session Store、目标 Host Policy 的云端候选重算及 Runtime 配置 fail-closed、Manifest workspace/network 权限与动态 ToolSet fail-closed、权限路径/主机规范化、Tool Manifest malformed contract fail-closed、external side-effect policy 的远程未知/取消/恢复处理、逻辑 ToolCall ID 稳定化、Action Decoder 工具隐私/来源传播、隐私感知日志导出、File/HTTP 审计日志 sink、Runtime `auditLogSink`/`auditLogPrivacy` 配置出口、注册 Tool 的默认 Runtime Executor 闭环、注册 external Tool 的 executionRef/reconcile 对账与结果 schema fail-closed、当前时刻 due timer 处理、结构化模型能力准入与 schema contract、推理能力下限路由、显式 contextSize 容量准入、Provider fetch/SSE cancellation 契约、Watchdog 二级策略变更与推理能力提升、Runtime Tool Registry、Agent create policy/limits、开发模式纯 Step 守卫、DSL 只读 Context 和 ResultMeta 元数据回归。HTTP Worker 测试需要允许本机回环端口监听。
 
 以下内容没有被无凭证确定性测试伪装成“已完成”：有效凭证下的真实 Provider Live Smoke、真实远程写系统的副作用对账、生产级持久化事务边界，以及真实网络下的 Provider 工具 schema/取消验证。确定性持久化、进程级 SIGKILL 恢复、本地文件副作用对账、pin/retention 和 telemetry 已补齐对应代码与测试，但不替代真实远程系统/网络证据。
 
@@ -646,6 +647,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `889db76`：PulseRuntime 对外暴露 Model Registry 与 ModelRouter；支持显式 task route 注册，按注册顺序和隐私/能力/窗口约束筛选模型候选。
 - `2c0da03`：PulseRuntime 对外暴露 Tool Registry；支持 Tool SDK 定义注册、目录/ToolSet、allow/deny、schema admission，并验证标准 Tool Effect Adapter 可直接消费。
 - `57ef9b4`：Runtime Tool Registry 与 Tool SDK 对 malformed Manifest 统一 fail-closed，补齐 JSON Schema、权限、资源锁、并发/副作用/重试策略等契约校验。
+- `b0fe13a`：Provider HTTP 错误补齐 retryable 分类，Runtime Executor 保留认证/权限等不可重试错误，避免错误 fallback。
 - `8b59574`：Runtime Persistence compatibility 自动合并已注册 Tool manifest 版本；恢复活动 Tool Effect 时按实际 Registry 版本校验，不再只依赖手工 `toolVersions`。
 - `b674a0e`：ModelRouter 对显式 task route 未入选的模型返回 `TASK_ROUTE_EXCLUDED` 诊断，保证路由结果、拒绝原因和 telemetry 一致。
 - `598c19b`：PulseRuntime 默认把自身 Tool Registry 接入提交前准备；已注册 Tool 自动补齐锁、版本、超时和动态 ToolSet，未注册 Tool 继续兼容外部 Adapter Registry。
@@ -728,7 +730,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，68 个测试文件、399 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，68 个测试文件、401 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
