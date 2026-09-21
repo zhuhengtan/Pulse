@@ -268,7 +268,7 @@ const finalOutcome = await session.outcome()
 | M1.5 | record/leaf 级 Privacy/`derivedFrom`、Progress Watchdog、Storage pin/compact、Fork Affinity、warm start、动态 ToolSet、Host 工具 allow/deny |
 | M2 | 持久化事务/outbox、崩溃恢复、RecoverableTool 对账、HTTP/HTTPS 与 SQLite Worker 协调、自适应路由、观察导出 |
 
-M1 的真实 Provider 和网络任务通过独立 Live Smoke 验证；确定性 Gate 使用 Mock Executor、Virtual Clock 和离线 Fixtures。
+M1 的真实 Provider 和网络任务通过独立 Live Smoke 验证；确定性 Gate 使用 Mock Executor、Virtual Clock 和离线 Fixtures。带有效凭证时可按需开启 `PULSE_LIVE_TOOL_SMOKE=1`、`PULSE_LIVE_STRUCTURED_SMOKE=1`、`PULSE_LIVE_CANCELLATION_SMOKE=1`，分别验收真实 tool-call、structured output 和在途取消。
 
 ## 仓库文档
 

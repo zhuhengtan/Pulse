@@ -58,6 +58,7 @@
 | Provider 请求与 usage | modelId、工具 schema、structured output schema、uncached token、latency/cost 归一化与 metadata | `tests/m3-context-adapters.test.ts`、`tests/provider-host.test.ts` | `fa723c7` |
 | Provider 强制 Tool Choice | OpenAI-compatible 支持 `tool_choice`，Anthropic 映射为 `auto`/`any`/`tool`；Live Smoke 可在 `PULSE_LIVE_TOOL_SMOKE=1` 下强制真实 tool-call 并校验归一化 | `tests/m3-context-adapters.test.ts`、`tests/live/openai-adapter.live.test.ts` | `fb83aa2` |
 | Provider Structured Output Live Smoke | 增加显式 `PULSE_LIVE_STRUCTURED_SMOKE=1` 的真实 structured-output 请求，校验 Provider 返回的 JSON 与请求 schema 一致；未设置凭证或开关时保持跳过 | `tests/live/openai-adapter.live.test.ts` | `7d2ca82` |
+| Provider Cancellation Live Smoke | 增加显式 `PULSE_LIVE_CANCELLATION_SMOKE=1` 的真实在途请求取消验收，要求归一化为不可重试的 `PROVIDER_REQUEST_CANCELLED`；未设置凭证或开关时保持跳过 | `tests/live/openai-adapter.live.test.ts` | `478a66e` |
 | Provider cancellation 契约 | OpenAI-compatible 与 Anthropic 在底层 fetch 或 SSE 流读取因 AbortSignal 取消时统一返回不可重试的 `PROVIDER_REQUEST_CANCELLED`，不把取消伪装成网络失败 | `tests/m3-context-adapters.test.ts` | `b92e764`、`37589a6` |
 | Provider SSE 观测流 | OpenAI-compatible 与 Anthropic SSE 读取 `llm:chunk` 文本观测；工具参数只在完整流结束后归一化，不执行未闭合参数；非 SSE 响应安全回退 JSON | `tests/m3-context-adapters.test.ts` | `44c8608` |
 | Provider loopback HTTP 集成 | 通过真实本机 HTTP 栈验证 OpenAI-compatible JSON 请求、Bearer 认证、model/request body 映射，以及 SSE chunk 观测与完整 tool 参数收尾 | `tests/provider-http-integration.test.ts` | `b832af3` |
@@ -638,6 +639,7 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `b92e764`：Provider Adapter 将 AbortSignal 导致的底层 fetch 取消统一归一化为不可重试的 `PROVIDER_REQUEST_CANCELLED`，并覆盖 OpenAI-compatible/Anthropic 两条路径。
 - `37589a6`：Provider Adapter 将 AbortSignal 取消契约扩展到 SSE 流读取阶段，并覆盖 OpenAI-compatible/Anthropic 两条流式路径。
 - `7d2ca82`：增加显式 `PULSE_LIVE_STRUCTURED_SMOKE=1` 的真实 structured-output 验收路径，校验响应结构与声明 schema 一致；默认不访问网络。
+- `478a66e`：增加显式 `PULSE_LIVE_CANCELLATION_SMOKE=1` 的真实在途请求取消验收路径，校验取消错误不可重试；默认不访问网络。
 - `b832af3`：通过真实 loopback HTTP 栈验证 OpenAI-compatible JSON/SSE 请求、Bearer 认证、model/request body 映射、chunk 观测和完整 tool 参数收尾。
 - `b879c5a`：对外提供 Program Registry 与 ProgramRef 入口，已注册版本可创建 Agent，未注册引用 fail-closed，并保留直接传 LaneProgram 的兼容入口。
 - `889db76`：PulseRuntime 对外暴露 Model Registry 与 ModelRouter；支持显式 task route 注册，按注册顺序和隐私/能力/窗口约束筛选模型候选。
@@ -724,13 +726,13 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `5dc799a`：外置 Result/Snapshot 正文索引缺失时 fail-closed，并支持 checkpoint 同时外置两类正文后完整恢复。
 - `4a854e9` / `2394813`：backend 确认后的 Artifact residency 与 Finding 发布事务/owner Lane 可见性保持一致。
 - `ee722a3`：M1.5 亲和检查已经交付，Runtime 默认 `forkAffinity` 从 `off` 切换为架构规定的 `advise`；显式 `off` 仍可关闭检查，旧快照缺省值也按当前规范恢复为 `advise`。
-- 当前确定性门禁：`npm test`，68 个测试文件、396 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
+- 当前确定性门禁：`npm test`，68 个测试文件、398 个测试通过；`npm run build` 与 `git diff --check` 通过。此前一次 Live Smoke 到达真实 HTTP 鉴权层并收到 `PROVIDER_HTTP_401`；本轮按当前环境重新尝试时在 DNS 阶段收到 `ENOTFOUND api.openai.com`，因此仍未把真实 Provider 证明写成通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
 | 验收项 | 当前状态 | 缺口 |
 | --- | --- | --- |
-| 真实 Provider Live Smoke | 已执行但被鉴权阻塞 | 请求已到真实 HTTP endpoint，当前返回 `PROVIDER_HTTP_401`；需要有效凭证验证 token、取消、structured output 和 tool-call 往返；structured 可用 `PULSE_LIVE_STRUCTURED_SMOKE=1`，tool-call 可用 `PULSE_LIVE_TOOL_SMOKE=1` |
+| 真实 Provider Live Smoke | 已执行但被鉴权阻塞 | 请求已到真实 HTTP endpoint，当前返回 `PROVIDER_HTTP_401`；需要有效凭证验证 token、取消、structured output 和 tool-call 往返；structured 可用 `PULSE_LIVE_STRUCTURED_SMOKE=1`，tool-call 可用 `PULSE_LIVE_TOOL_SMOKE=1`，取消可用 `PULSE_LIVE_CANCELLATION_SMOKE=1` |
 | Runtime Storage pin/retention | 确定性代码、文件后端和 SQLite 事务后端已覆盖，生命周期自动落盘、完整性和 CAS、ResultStore/SnapshotStore 读穿已接入 | 自动 pin、hard-limit 预检、compact、backend 确认后的 `persisted` 标记、restore、完整性校验、共享快照 CAS、Result/Context Snapshot 正文外部化、外置索引 fail-closed，以及 Runtime `run()`/`shutdown()`/异步 Effect 结算自动持久化已有测试；多进程生产部署与外部数据库运维仍需验证 |
 | 隐私日志导出 | `exportRuntimeLog()` 已按 `public` / `cloud_allowed` / `local_only` ceiling 裁剪 Result、Artifact 和无法确认来源的事件 payload；`exportRuntimeLogTo()` 已提供 fsync JSONL 与 HTTP sink；Runtime 已支持 `auditLogSink`/`auditLogPrivacy` 配置 | 已有确定性导出、JSONL 落盘、HTTP 请求/失败和 Runtime 配置出口测试；外部审计系统的字段策略、密钥管理和生产脱敏规则仍需宿主配置 |
 | 崩溃恢复与副作用对账 | 进程级重启和本地真实写入对账已验证；Runtime Registry 已可直接调用注册 Tool 的 `executionRef/reconcile`，远程副作用仍待验证 | 已补子进程 `SIGKILL` 后恢复、启动 quarantine、资源锁隔离、注册 Tool 直接对账，以及 `executionRef` 从 Tool 到 Runtime 的持久化链；仍缺真实远程写系统 reconcile 和生产环境的持久化事务边界证明 |
