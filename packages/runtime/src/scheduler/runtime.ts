@@ -2,7 +2,7 @@ import { commitMutationTransaction, MutationLog } from '../storage/mutation-log.
 import { buildAgent } from '../core/factory.js'
 import { validateStep } from '../transitions/validate.js'
 import { PriorityInheritance, ReadyQueue, readyItemFromLane, VirtualClock, type RuntimeClock } from './index.js'
-import type { ArtifactRecord, EffectRecord, EffectSubmission, EffectState, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, RuntimeEventInput, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyLabel, PrivacyTaint, PrivacyMetadata, ProvenanceRef, ResumePoint } from '../core/types.js'
+import type { ArtifactRecord, EffectRecord, EffectSubmission, EffectState, JsonValue, LaneRecord, LaneStepOutput, Outcome, ResumeInput, RuntimeState, RuntimeError, RuntimeEventInput, TargetRef, WaitRecord, ToolCallCorrelation, SeriesLaneSpec, ForkAffinityMode, PrivacyLabel, PrivacyTaint, PrivacyMetadata, ProvenanceRef, ResumePoint, ResultRecord } from '../core/types.js'
 import { createRuntimeState, effectivePrivacy, isSideEffectful, privacyMetadataForDerivedRef, privacyTaintsForDerivedRefs, provenanceRefId, provenanceRefKind, strictestPrivacy, validatePrivacyTaints } from '../core/types.js'
 import { QuarantineScope } from '../lifecycle/scopes.js'
 import { PulseSession } from '../dsl/session.js'
@@ -283,6 +283,20 @@ function outcomeForSeriesMember(state: RuntimeState, lane: LaneRecord, key: stri
 
 export class PulseRuntime {
   readonly state: RuntimeState
+  /** Host-facing read-only effect inspection. Returned records are detached snapshots. */
+  readonly effects = {
+    inspect: (effectId: string): EffectRecord | undefined => {
+      const effect = this.state.effects.get(effectId)
+      return effect === undefined ? undefined : structuredClone(effect)
+    },
+  }
+  /** Host-facing read-only result lookup. Returned records are detached snapshots. */
+  readonly results = {
+    get: (resultRef: string): ResultRecord | undefined => {
+      const result = this.state.results.get(resultRef)
+      return result === undefined ? undefined : structuredClone(result)
+    },
+  }
   private shuttingDown = false
   private readonly telemetryExporter: RuntimeTelemetryExporter | undefined
   private readonly auditLogSink: RuntimeLogSink | undefined

@@ -5,6 +5,28 @@ import type { EffectRecord, LaneProgram } from '@pulse/runtime'
 const point = (programId: string, step: string) => ({ programId, programVersion: '1', step, locals: {} })
 
 describe('runtime control boundaries', () => {
+  it('exposes detached effect and result inspection for hosts', async () => {
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { answer: 42 } }) })
+    const program: LaneProgram = { id: 'host-inspection', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'lookup', kind: 'tool', concurrencyClass: 'tool', input: { query: 'status' } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('host-inspection', 'finish') }
+      : { actions: [{ type: 'complete', result: { done: true } }], next: point('host-inspection', 'finish') } }
+    const { agentId, laneId } = runtime.createAgent('host inspection', program)
+
+    runtime.tick()
+    const effect = runtime.effects.inspect('effect-1')!
+    effect.input = { query: 'mutated' }
+    expect(runtime.state.effects.get('effect-1')?.input).toEqual({ query: 'status' })
+    expect(runtime.effects.inspect('missing')).toBeUndefined()
+
+    await expect(runtime.start(agentId).outcome()).resolves.toMatchObject({ status: 'succeeded' })
+    const resultRef = runtime.state.lanes.get(laneId)?.resultRef
+    expect(resultRef).toBeDefined()
+    const result = runtime.results.get(resultRef!)!
+    result.value = { done: false }
+    expect(runtime.state.results.get(resultRef!)?.value).toEqual({ done: true })
+    expect(runtime.results.get('missing')).toBeUndefined()
+  })
+
   it('rejects invalid RuntimeConfig values before constructing scheduler state', () => {
     expect(() => new PulseRuntime({ maxLaneStepsPerTick: -1 })).toThrow('INVALID_RUNTIME_CONFIG:maxLaneStepsPerTick')
     expect(() => new PulseRuntime({ agingIntervalMs: 0 })).toThrow('INVALID_RUNTIME_CONFIG:agingIntervalMs')
