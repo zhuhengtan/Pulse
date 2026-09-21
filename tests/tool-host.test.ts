@@ -212,6 +212,20 @@ describe('Tool SDK to Runtime Effect host', () => {
     expect(sdkRegistry.resolveResources('ref-input', { value: 'ok' })).toEqual([{ resource: 'value:ok', mode: 'shared' }])
   })
 
+  it('rejects malformed dynamic resource locks at the Tool Registry boundary', () => {
+    const definition = {
+      manifest: { name: 'bad-resources', version: '1', description: 'malformed dynamic resources', inputSchema: {}, outputSchema: {}, concurrencyClass: 'tool' as const, locks: [], supportsAbortSignal: true, sideEffectPolicy: 'write' as const, retrySafety: 'unsafe' as const, defaultTimeoutMs: 1000 },
+      resolveResources: () => [{ resource: '', mode: 'shared' }],
+      execute: () => ({ ok: true }),
+    }
+    const runtimeRegistry = new PulseRuntime().tools
+    runtimeRegistry.register(definition)
+    expect(() => runtimeRegistry.resolveResources('bad-resources', {})).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_RESOURCE_LOCKS', retryable: false }))
+    const sdkRegistry = new ToolRegistry()
+    sdkRegistry.register(definition as never)
+    expect(() => sdkRegistry.resolveResources('bad-resources', {})).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_RESOURCE_LOCKS', retryable: false }))
+  })
+
   it('compiles dynamic tool discovery into a versioned Context ToolSet', async () => {
     const registry = new ToolRegistry()
     registry.register(defineTool({ name: 'read-file', description: 'read a file', tags: ['filesystem', 'read'], input: z.object({ path: z.string() }), output: z.object({ text: z.string() }), execute: () => ({ text: '' }) }))

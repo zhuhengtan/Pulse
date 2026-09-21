@@ -89,6 +89,10 @@ function isResourceLocks(value: unknown): value is ResourceLockSpec[] {
     return typeof record.resource === 'string' && record.resource.length > 0 && (record.mode === 'shared' || record.mode === 'exclusive')
   })
 }
+function validateResolvedLocks(value: unknown, name: string): ResourceLockSpec[] {
+  if (!isResourceLocks(value)) throw Object.assign(new Error(`Resolved resources are invalid for tool ${name}.`), { code: 'INVALID_TOOL_RESOURCE_LOCKS', retryable: false })
+  return value
+}
 function isPermissions(value: unknown): boolean {
   if (value === undefined) return true
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
@@ -224,7 +228,7 @@ export class RuntimeToolRegistry {
 
   resolveResources(name: string, input: unknown): ResourceLockSpec[] {
     const definition = this.require(name)
-    if (definition.resolveResources) return definition.resolveResources(this.validateInput(name, input))
+    if (definition.resolveResources) return validateResolvedLocks(definition.resolveResources(this.validateInput(name, input)), name)
     if (definition.manifest.resources !== undefined) return definition.manifest.resources
     if (definition.manifest.locks.length > 0 || definition.resourceAdmissionMode === 'explicit') return definition.manifest.locks
     if (definition.manifest.sideEffectPolicy === 'write') return [{ resource: 'workspace', mode: 'exclusive' }]
