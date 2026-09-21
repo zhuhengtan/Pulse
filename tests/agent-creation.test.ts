@@ -30,8 +30,9 @@ describe('Agent creation transaction', () => {
   it('supports the architecture-level run(agentId) Host API', async () => {
     const runtime = new PulseRuntime()
     const program: LaneProgram = { id: 'run-agent', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: point('run-agent') }) }
-    const { agentId } = runtime.createAgent('run one agent', program)
-    await expect(runtime.run(agentId)).resolves.toMatchObject({ status: 'succeeded', unresolvedEffectIds: [] })
+    const agent = runtime.createAgent('run one agent', program)
+    expect(agent.id).toBe(agent.agentId)
+    await expect(runtime.run(agent.id)).resolves.toMatchObject({ status: 'succeeded', unresolvedEffectIds: [] })
   })
 
   it('keeps explicit and generated Agent IDs unique', () => {

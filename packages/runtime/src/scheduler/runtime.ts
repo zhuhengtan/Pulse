@@ -106,6 +106,7 @@ export interface AgentPolicyRef { id: string }
 export interface AgentLimits { id?: string; timeoutMs?: number; maxActiveLanes?: number }
 export interface AgentCreateRequest { goal: string; program: LaneProgram | ProgramRef; agentId?: string; priority?: number | AgentPriority; policy?: AgentPolicyRef; policyId?: string; limits?: AgentLimits; limitsId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string; inheritedFloor?: number }
 export interface BackgroundAgentInfo { agentId: string; rootLaneId: string; state: NonNullable<import('../core/types.js').AgentRecord['state']>; detached: true }
+export interface AgentHandle { id: string; agentId: string; laneId: string }
 
 function resultMetadata(value: JsonValue): { sizeBytes: number; contentHash: string } { return { sizeBytes: Buffer.byteLength(stableSerialize(value), 'utf8'), contentHash: contentHash(value) } }
 
@@ -496,9 +497,9 @@ export class PulseRuntime {
   }
 
   register(program: LaneProgram): void { this.programs.register(program) }
-  createAgent(request: AgentCreateRequest): { agentId: string; laneId: string }
-  createAgent(goal: string, program: LaneProgram, agentId?: string): { agentId: string; laneId: string }
-  createAgent(goalOrRequest: string | AgentCreateRequest, program?: LaneProgram, agentId?: string): { agentId: string; laneId: string } {
+  createAgent(request: AgentCreateRequest): AgentHandle
+  createAgent(goal: string, program: LaneProgram, agentId?: string): AgentHandle
+  createAgent(goalOrRequest: string | AgentCreateRequest, program?: LaneProgram, agentId?: string): AgentHandle {
     if (this.shuttingDown) throw new Error('RUNTIME_SHUTTING_DOWN')
     const request: AgentCreateRequest = typeof goalOrRequest === 'string' ? { goal: goalOrRequest, program: program!, ...(agentId === undefined ? {} : { agentId }) } : goalOrRequest
     if (!request || typeof request !== 'object' || typeof request.goal !== 'string' || request.goal.length === 0) throw new Error('INVALID_AGENT_GOAL')
@@ -581,7 +582,7 @@ export class PulseRuntime {
     this.ready.enqueue(readyItemFromLane(committedRoot))
     this.syncStoragePolicy()
     this.schedulePersistence()
-    return { agentId: agent.id, laneId: root.id }
+    return { id: agent.id, agentId: agent.id, laneId: root.id }
   }
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
   requestCancel(agentId: string, reason = 'USER_REQUESTED'): void {
