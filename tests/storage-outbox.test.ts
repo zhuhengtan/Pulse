@@ -19,6 +19,22 @@ describe('effect outbox and runtime persistence envelope', () => {
     expect(recovered.pending()).toHaveLength(1)
   })
 
+  it('rejects outbox snapshots with inconsistent identity or claim metadata', () => {
+    const outbox = new EffectOutbox()
+    outbox.enqueue({ id: 'effect-1', attemptId: 'attempt-1' }, 10)
+    const identity = outbox.snapshot()
+    identity.entries[0]!.id = 'wrong-id'
+    expect(() => EffectOutbox.fromSnapshot(identity)).toThrow('INVALID_OUTBOX_SNAPSHOT')
+
+    const nonFinite = outbox.snapshot()
+    nonFinite.entries[0]!.createdAt = Number.NaN
+    expect(() => EffectOutbox.fromSnapshot(nonFinite)).toThrow('INVALID_OUTBOX_SNAPSHOT')
+
+    const claimedWithoutClaim = outbox.snapshot()
+    claimedWithoutClaim.entries[0]!.state = 'claimed'
+    expect(() => EffectOutbox.fromSnapshot(claimedWithoutClaim)).toThrow('INVALID_OUTBOX_SNAPSHOT')
+  })
+
   it('round-trips state, mutation log, and outbox as one persistence envelope', () => {
     const state = createRuntimeState()
     const log = new MutationLog()

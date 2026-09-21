@@ -47,7 +47,7 @@ export class EffectOutbox {
     if (!value || value.schemaVersion !== 1 || !Array.isArray(value.entries)) throw new Error('INVALID_OUTBOX_SNAPSHOT')
     const outbox = new EffectOutbox()
     for (const entry of value.entries) {
-      if (!entry || typeof entry.id !== 'string' || typeof entry.effectId !== 'string' || typeof entry.attemptId !== 'string' || !['pending', 'claimed'].includes(entry.state) || typeof entry.createdAt !== 'number' || !Number.isInteger(entry.claimCount) || entry.claimCount < 0) throw new Error('INVALID_OUTBOX_SNAPSHOT')
+      if (!entry || typeof entry.id !== 'string' || entry.id.length === 0 || typeof entry.effectId !== 'string' || entry.effectId.length === 0 || typeof entry.attemptId !== 'string' || entry.attemptId.length === 0 || entry.id !== `${entry.effectId}:${entry.attemptId}` || !['pending', 'claimed'].includes(entry.state) || typeof entry.createdAt !== 'number' || !Number.isFinite(entry.createdAt) || !Number.isInteger(entry.claimCount) || entry.claimCount < 0 || (entry.state === 'claimed' && entry.claimCount < 1)) throw new Error('INVALID_OUTBOX_SNAPSHOT')
       if (outbox.entries.has(entry.id)) throw new Error('INVALID_OUTBOX_SNAPSHOT')
       outbox.entries.set(entry.id, { ...entry })
     }
