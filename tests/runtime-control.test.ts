@@ -13,6 +13,10 @@ describe('runtime control boundaries', () => {
     expect(() => new PulseRuntime({ budget: { maxCostByCurrency: { USD: -1 } } })).toThrow('INVALID_RUNTIME_CONFIG:budget.maxCostByCurrency')
     expect(() => new PulseRuntime({ forkAffinity: 'invalid' as never })).toThrow('INVALID_RUNTIME_CONFIG:forkAffinity')
     expect(() => new PulseRuntime({ maxObservationEntries: -1 })).toThrow('INVALID_RUNTIME_CONFIG:maxObservationEntries')
+    expect(() => new PulseRuntime({ watchdogNoProgressThreshold: Number.NaN })).toThrow('INVALID_RUNTIME_CONFIG:watchdogNoProgressThreshold')
+    expect(() => new PulseRuntime({ toolVersions: { read: '' } })).toThrow('INVALID_RUNTIME_CONFIG:toolVersions')
+    expect(() => new PulseRuntime({ policyVersion: '' })).toThrow('INVALID_RUNTIME_CONFIG:policyVersion')
+    expect(() => new PulseRuntime({ persistenceExpectedDigest: 'stale' })).toThrow('INVALID_RUNTIME_CONFIG:persistenceExpectedDigest')
     expect(() => new PulseRuntime({ maxObservationBytes: 0 })).not.toThrow()
   })
 
