@@ -12,6 +12,9 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
     devDependencies:
+      '@hunterzhu/pulse-cli':
+        specifier: workspace:*
+        version: link:packages/cli
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.3
