@@ -151,6 +151,40 @@ function priorityScore(priority: AgentCreateRequest['priority']): number | undef
   return { background: -1, normal: 0, high: 1, urgent: 2 }[priority]
 }
 
+function invalidConfig(field: string): never { throw new Error(`INVALID_RUNTIME_CONFIG:${field}`) }
+function optionalNonNegativeInteger(value: unknown, field: string): void { if (value !== undefined && (!Number.isInteger(value) || (value as number) < 0)) invalidConfig(field) }
+function optionalNonNegativeNumber(value: unknown, field: string): void { if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0)) invalidConfig(field) }
+function validateRuntimeConfig(config: RuntimeConfig): void {
+  optionalNonNegativeInteger(config.maxLaneStepsPerTick, 'maxLaneStepsPerTick')
+  if (config.agingIntervalMs !== undefined && (!Number.isFinite(config.agingIntervalMs) || config.agingIntervalMs <= 0)) invalidConfig('agingIntervalMs')
+  if (config.agingCap !== undefined && (config.agingCap !== Number.POSITIVE_INFINITY && (typeof config.agingCap !== 'number' || !Number.isFinite(config.agingCap) || config.agingCap < 0))) invalidConfig('agingCap')
+  optionalNonNegativeInteger(config.maxTotalLanes, 'maxTotalLanes')
+  optionalNonNegativeInteger(config.maxQueuedEffects, 'maxQueuedEffects')
+  if (config.maxRunning !== undefined) for (const [key, value] of Object.entries(config.maxRunning)) if (!['llm', 'tool', 'agent', 'none'].includes(key) || (key === 'none' ? value !== Number.POSITIVE_INFINITY && (!Number.isInteger(value) || value < 0) : (!Number.isInteger(value) || value < 0))) invalidConfig(`maxRunning.${key}`)
+  if (config.forkAffinity !== undefined && !['off', 'advise', 'coalesce'].includes(config.forkAffinity)) invalidConfig('forkAffinity')
+  optionalNonNegativeInteger(config.historySoftTokens, 'historySoftTokens')
+  optionalNonNegativeInteger(config.historyHardTokens, 'historyHardTokens')
+  if (config.historySoftTokens !== undefined && config.historyHardTokens !== undefined && config.historyHardTokens < config.historySoftTokens) invalidConfig('historyHardTokens')
+  optionalNonNegativeInteger(config.maxResultSummaryBytes, 'maxResultSummaryBytes')
+  optionalNonNegativeInteger(config.maxConsecutiveControlErrors, 'maxConsecutiveControlErrors')
+  optionalNonNegativeNumber(config.maxRuntimeMs, 'maxRuntimeMs')
+  optionalNonNegativeInteger(config.maxAgentDepth, 'maxAgentDepth')
+  optionalNonNegativeInteger(config.maxPreparingLLMs, 'maxPreparingLLMs')
+  optionalNonNegativeInteger(config.maxPreparedLLMs, 'maxPreparedLLMs')
+  optionalNonNegativeInteger(config.maxObservationEntries, 'maxObservationEntries')
+  optionalNonNegativeInteger(config.maxObservationBytes, 'maxObservationBytes')
+  if (config.trustedSanitizerIds !== undefined && (!Array.isArray(config.trustedSanitizerIds) || new Set(config.trustedSanitizerIds).size !== config.trustedSanitizerIds.length || config.trustedSanitizerIds.some((id) => typeof id !== 'string' || id.length === 0))) invalidConfig('trustedSanitizerIds')
+  if (config.sessionId !== undefined && (typeof config.sessionId !== 'string' || config.sessionId.length === 0)) invalidConfig('sessionId')
+  if (config.auditLogPrivacy !== undefined && !['public', 'cloud_allowed', 'local_only'].includes(config.auditLogPrivacy)) invalidConfig('auditLogPrivacy')
+  if (config.hostPolicy?.allowCloud !== undefined && typeof config.hostPolicy.allowCloud !== 'boolean') invalidConfig('hostPolicy.allowCloud')
+  if (config.budget !== undefined) {
+    optionalNonNegativeInteger(config.budget.maxTotalAttempts, 'budget.maxTotalAttempts')
+    optionalNonNegativeInteger(config.budget.maxLLMAttempts, 'budget.maxLLMAttempts')
+    optionalNonNegativeInteger(config.budget.maxToolAttempts, 'budget.maxToolAttempts')
+    if (config.budget.maxCostByCurrency !== undefined && (typeof config.budget.maxCostByCurrency !== 'object' || config.budget.maxCostByCurrency === null || Array.isArray(config.budget.maxCostByCurrency) || Object.entries(config.budget.maxCostByCurrency).some(([currency, limit]) => !currency || typeof limit !== 'number' || !Number.isFinite(limit) || limit < 0))) invalidConfig('budget.maxCostByCurrency')
+  }
+}
+
 export class ProgramRegistry {
   private readonly records = new Map<string, LaneProgram>()
 
@@ -306,6 +340,7 @@ export class PulseRuntime {
   }
 
   constructor(config: RuntimeConfig = {}) {
+    validateRuntimeConfig(config)
     const restored = config.persistence === undefined ? undefined : importRuntimePersistence(config.persistence)
     this.enforcingRecoveryPrograms = restored !== undefined
     this.observationInbox = new ObservationInbox(config.maxObservationEntries ?? 4096, config.maxObservationBytes ?? 1_000_000)

@@ -5,6 +5,17 @@ import type { EffectRecord, LaneProgram } from '@pulse/runtime'
 const point = (programId: string, step: string) => ({ programId, programVersion: '1', step, locals: {} })
 
 describe('runtime control boundaries', () => {
+  it('rejects invalid RuntimeConfig values before constructing scheduler state', () => {
+    expect(() => new PulseRuntime({ maxLaneStepsPerTick: -1 })).toThrow('INVALID_RUNTIME_CONFIG:maxLaneStepsPerTick')
+    expect(() => new PulseRuntime({ agingIntervalMs: 0 })).toThrow('INVALID_RUNTIME_CONFIG:agingIntervalMs')
+    expect(() => new PulseRuntime({ historySoftTokens: 100, historyHardTokens: 99 })).toThrow('INVALID_RUNTIME_CONFIG:historyHardTokens')
+    expect(() => new PulseRuntime({ maxRunning: { tool: Number.NaN } })).toThrow('INVALID_RUNTIME_CONFIG:maxRunning.tool')
+    expect(() => new PulseRuntime({ budget: { maxCostByCurrency: { USD: -1 } } })).toThrow('INVALID_RUNTIME_CONFIG:budget.maxCostByCurrency')
+    expect(() => new PulseRuntime({ forkAffinity: 'invalid' as never })).toThrow('INVALID_RUNTIME_CONFIG:forkAffinity')
+    expect(() => new PulseRuntime({ maxObservationEntries: -1 })).toThrow('INVALID_RUNTIME_CONFIG:maxObservationEntries')
+    expect(() => new PulseRuntime({ maxObservationBytes: 0 })).not.toThrow()
+  })
+
   it('uses the host-provided RuntimeClock', () => {
     const clock = new VirtualClock()
     const runtime = new PulseRuntime({ clock })
