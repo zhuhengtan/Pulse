@@ -122,6 +122,16 @@ describe('Runtime tool registry', () => {
     expect(runtime.state.effects.get('effect-1')?.outcome?.status).toBe('succeeded')
   })
 
+  it('fails closed when the default Runtime executor receives an unknown tool', async () => {
+    const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
+    const program = { id: 'runtime-tool-unknown', version: '1', step: ({ lane }: any) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects' as const, effects: [{ key: 'unknown', kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { name: 'missing-tool', arguments: {} } }], wait: { onUnsatisfied: 'resume_with_error' as const } }], next: { programId: 'runtime-tool-unknown', programVersion: '1', step: 'finish', locals: {} } }
+      : { actions: [{ type: 'complete' as const, result: { done: true } }], next: { programId: 'runtime-tool-unknown', programVersion: '1', step: 'finish', locals: {} } } }
+    const { agentId } = runtime.createAgent('unknown tool', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(runtime.state.effects.get('effect-1')?.outcome).toMatchObject({ status: 'failed', error: { code: 'TOOL_NOT_REGISTERED' } })
+  })
+
   it('publishes non-JSON output from a Runtime Tool as an ArtifactRef', async () => {
     const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
     runtime.tools.register({ manifest: { name: 'runtime-binary', version: '1', description: 'returns binary output', inputSchema: { type: 'object' }, outputSchema: {}, concurrencyClass: 'tool', locks: [], supportsAbortSignal: true, sideEffectPolicy: 'none', retrySafety: 'read_only', defaultTimeoutMs: 1000 }, execute: () => new Uint8Array([3, 4, 5]) })

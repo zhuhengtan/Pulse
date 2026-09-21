@@ -884,7 +884,7 @@ export class PulseRuntime {
     if (effect.kind === 'tool') {
       const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
       const name = input.name
-      if (typeof name !== 'string' || this.tools.get(name) === undefined) return { value: null }
+      if (typeof name !== 'string' || this.tools.get(name) === undefined) return { value: null, status: 'failed', executionState: 'failed', sideEffectState: 'none', error: { code: 'TOOL_NOT_REGISTERED', message: typeof name === 'string' ? `Tool ${name} is not registered.` : 'Tool effect requires a registered tool name.' } }
       const observations: EffectObservation[] = []
       const emit = (event: { type: 'progress' | 'warning' | 'diagnostic'; data: JsonValue }): void => {
         if (signal.aborted) return
