@@ -118,6 +118,30 @@ describe('runtime control boundaries', () => {
     }
   })
 
+  it('rejects malformed control actions and context operations before branching', () => {
+    const cases: Array<{ action: unknown; code: string }> = [
+      { action: { type: 'cancel_lane', laneId: 'lane-1', reason: 'INVALID' }, code: 'INVALID_CANCEL_ACTION' },
+      { action: { type: 'propose_cancel', laneId: '', reason: 'POLICY' }, code: 'INVALID_CANCEL_ACTION' },
+      { action: { type: 'adopt_context', version: -1 }, code: 'INVALID_CONTEXT_ADOPTION' },
+      { action: { type: 'downgrade_privacy', sourceRefs: [], outputRef: 'out', value: {}, targetPrivacy: 'cloud_allowed', method: 'unknown' }, code: 'INVALID_PRIVACY_DOWNGRADE' },
+    ]
+    for (const [index, candidate] of cases.entries()) {
+      const runtime = new PulseRuntime()
+      const program: LaneProgram = { id: `invalid-control-${index}`, version: '1', step: () => ({ actions: [candidate.action as never], next: point(`invalid-control-${index}`, 'done') }), }
+      const { laneId } = runtime.createAgent(`invalid control ${index}`, program)
+
+      runtime.tick()
+
+      expect(runtime.state.lanes.get(laneId)?.pendingResumeInput).toMatchObject({ type: 'control_error', error: { code: candidate.code } })
+    }
+
+    const runtime = new PulseRuntime()
+    const program: LaneProgram = { id: 'invalid-context-op', version: '1', step: () => ({ contextDelta: { target: 'lane', baseVersion: 0, ops: [null] } as never, actions: [], next: point('invalid-context-op', 'done') }), }
+    const { laneId } = runtime.createAgent('invalid context op', program)
+    runtime.tick()
+    expect(runtime.state.lanes.get(laneId)?.pendingResumeInput).toMatchObject({ type: 'control_error', error: { code: 'INVALID_CONTEXT_OP' } })
+  })
+
   it('applies the Wait admission contract to submit and join shortcuts', () => {
     const cases: Array<{ action: unknown; code: string }> = [
       { action: { type: 'submit_effects', effects: [{ key: 'work', kind: 'tool', concurrencyClass: 'tool', input: {} }], wait: { onUnsatisfied: 'invalid' } }, code: 'INVALID_WAIT_DEPENDENCY' },

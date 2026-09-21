@@ -43,6 +43,46 @@ function validRuntimeError(value: unknown): boolean {
   return nonEmptyString(candidate.code) && typeof candidate.message === 'string' && (candidate.retryable === undefined || typeof candidate.retryable === 'boolean') && (candidate.details === undefined || isRuntimeJsonValue(candidate.details))
 }
 
+function validateContextDeltaShape(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'INVALID_CONTEXT_DELTA'
+  const delta = value as Record<string, unknown>
+  if (!['lane', 'global'].includes(String(delta.target)) || !Number.isInteger(delta.baseVersion) || (delta.baseVersion as number) < 0 || !Array.isArray(delta.ops)) return 'INVALID_CONTEXT_DELTA'
+  if (delta.sourceLaneId !== undefined && !nonEmptyString(delta.sourceLaneId)) return 'INVALID_CONTEXT_DELTA'
+  if (delta.privacy !== undefined && !['public', 'cloud_allowed', 'local_only'].includes(String(delta.privacy))) return 'INVALID_CONTEXT_DELTA'
+  if (delta.proposal !== undefined && typeof delta.proposal !== 'boolean') return 'INVALID_CONTEXT_DELTA'
+  if (delta.derivedFrom !== undefined && !validProvenanceRefs(delta.derivedFrom)) return 'INVALID_CONTEXT_DELTA'
+  if (delta.privacyTaints !== undefined && !Array.isArray(delta.privacyTaints)) return 'INVALID_CONTEXT_DELTA'
+  for (const operation of delta.ops) {
+    if (!operation || typeof operation !== 'object' || Array.isArray(operation)) return 'INVALID_CONTEXT_OP'
+    const op = operation as Record<string, unknown>
+    if (!['set', 'append', 'remove', 'compact_history'].includes(String(op.op))) return 'INVALID_CONTEXT_OP'
+    if (op.value !== undefined && !isRuntimeJsonValue(op.value)) return 'INVALID_CONTEXT_OP'
+    if (op.summary !== undefined && !isRuntimeJsonValue(op.summary)) return 'INVALID_CONTEXT_OP'
+    if (op.summaryRef !== undefined && !nonEmptyString(op.summaryRef)) return 'INVALID_CONTEXT_OP'
+    if (op.upToSeq !== undefined && !Number.isInteger(op.upToSeq)) return 'INVALID_CONTEXT_OP'
+    if (op.op === 'compact_history') {
+      if (op.path !== undefined) return 'INVALID_CONTEXT_OP'
+      continue
+    }
+    if (!Array.isArray(op.path) || op.path.length === 0 || op.path.some((part) => !nonEmptyString(part))) return 'INVALID_CONTEXT_PATH'
+  }
+  return undefined
+}
+
+function validateControlActionShape(action: unknown): string | undefined {
+  if (!action || typeof action !== 'object' || Array.isArray(action)) return 'INVALID_ACTION'
+  const value = action as Record<string, unknown>
+  if (value.type === 'cancel_lane' && (!nonEmptyString(value.laneId) || !['SUPERSEDED', 'USER_REQUESTED', 'POLICY'].includes(String(value.reason)))) return 'INVALID_CANCEL_ACTION'
+  if (value.type === 'propose_cancel' && (!nonEmptyString(value.laneId) || !['SUPERSEDED', 'POLICY'].includes(String(value.reason)))) return 'INVALID_CANCEL_ACTION'
+  if (value.type === 'adopt_context' && !(value.version === 'latest' || (Number.isInteger(value.version) && (value.version as number) >= 0))) return 'INVALID_CONTEXT_ADOPTION'
+  if (value.type === 'downgrade_privacy') {
+    if (!['human_approval', 'sanitizer'].includes(String(value.method)) || value.targetPrivacy !== 'cloud_allowed' || !nonEmptyString(value.outputRef) || !Array.isArray(value.sourceRefs) || !validProvenanceRefs(value.sourceRefs) || !isRuntimeJsonValue(value.value ?? null) || (value.summary !== undefined && !isRuntimeJsonValue(value.summary))) return 'INVALID_PRIVACY_DOWNGRADE'
+    if (value.approvalRef !== undefined && !nonEmptyString(value.approvalRef)) return 'INVALID_PRIVACY_DOWNGRADE'
+    if (value.sanitizerId !== undefined && !nonEmptyString(value.sanitizerId)) return 'INVALID_PRIVACY_DOWNGRADE'
+  }
+  return undefined
+}
+
 function validateEffectSubmission(submission: unknown): string | undefined {
   if (!submission || typeof submission !== 'object' || Array.isArray(submission)) return 'INVALID_EFFECT_SUBMISSION'
   const value = submission as Record<string, unknown>
@@ -425,6 +465,10 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   const actions = output.actions
   const actionTypes = new Set(['submit_effects', 'fork', 'wait', 'cancel_lane', 'propose_cancel', 'adopt_context', 'downgrade_privacy', 'complete', 'fail'])
   if (actions.some((action) => !action || typeof action !== 'object' || Array.isArray(action) || !actionTypes.has(String((action as RuntimeAction).type)))) return { rejection: error('INVALID_ACTION', 'Step output contains an unknown RuntimeAction') }
+  for (const action of actions) {
+    const actionShapeError = validateControlActionShape(action)
+    if (actionShapeError) return { rejection: error(actionShapeError, 'RuntimeAction shape is invalid') }
+  }
   const waitSources = actions.filter((action) => action.type === 'wait' || (action.type === 'submit_effects' && Boolean(action.wait)) || (action.type === 'fork' && Boolean(action.join))).length
   if (waitSources > 1) return { rejection: error('MULTIPLE_WAIT_SOURCES', 'a StepTransaction may have only one Wait source') }
   const terminal = actions.filter((action) => action.type === 'complete' || action.type === 'fail')
@@ -446,7 +490,8 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   const seenCancelTargets = new Set<string>()
 
   if (output.contextDelta) {
-    if (typeof output.contextDelta !== 'object' || Array.isArray(output.contextDelta) || !Array.isArray(output.contextDelta.ops) || !Number.isInteger(output.contextDelta.baseVersion) || !['lane', 'global'].includes(output.contextDelta.target) || (output.contextDelta.proposal !== undefined && typeof output.contextDelta.proposal !== 'boolean') || (output.contextDelta.derivedFrom !== undefined && !validProvenanceRefs(output.contextDelta.derivedFrom)) || (output.contextDelta.privacyTaints !== undefined && !Array.isArray(output.contextDelta.privacyTaints))) return { rejection: error('INVALID_CONTEXT_DELTA', 'ContextDelta shape is invalid') }
+    const deltaShapeError = validateContextDeltaShape(output.contextDelta)
+    if (deltaShapeError) return { rejection: error(deltaShapeError, 'ContextDelta shape is invalid') }
     const deltaPrivacyTaintError = validatePrivacyTaints(output.contextDelta.privacyTaints)
     if (deltaPrivacyTaintError) return { rejection: error(deltaPrivacyTaintError, 'ContextDelta privacy taints are invalid') }
     const deltaDerived = derivedPrivacy(state, lane, output.contextDelta.derivedFrom ?? [])
