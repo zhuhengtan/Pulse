@@ -766,7 +766,8 @@ Adapter 只负责 Provider 请求和响应归一化：它不生成 `RuntimeActio
 - `cb21061`：StepTransaction 对 cancel/propose_cancel、adopt_context、downgrade_privacy 和 ContextDelta 操作项执行运行时形状校验，畸形对象在分支逻辑前 fail-closed。
 - `bd2ba2f`：Step 输出对 `contextDelta: null` 和非布尔 `adoptCommittedContext` 等可选字段执行存在性/类型校验，避免畸形输出被当作字段缺省。
 - `602a6c8`：CompleteAction 的 `children` 选项在 Runtime 边界执行枚举校验，未知收尾策略不再静默按默认分支处理。
-- 当前确定性门禁：`npm test`，68 个测试文件、429 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
+- `336d2cc`：Program Registry 注册前校验 Program 的标识、Step/ErrorBoundary、Entry、Series 配置形状；畸形 Program 明确以 `INVALID_PROGRAM` 拒绝，循环注册仍保持原子性。
+- 当前确定性门禁：`npm test`，68 个测试文件、430 个测试通过；`npx tsc -b --pretty false`、`npm run build` 与 `git diff --check` 通过。
 
 ### 5.2 当前仍未达到“完全可用”的验收项
 
