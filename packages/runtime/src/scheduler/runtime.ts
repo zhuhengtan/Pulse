@@ -1017,7 +1017,7 @@ export class PulseRuntime {
     if (this.wakeScheduled || this.inDrain) return
     if (!force && this.factInbox.size === 0) return
     this.wakeScheduled = true
-    queueMicrotask(() => {
+    setImmediate(() => {
       this.wakeScheduled = false
       if (this.inDrain || (!force && this.factInbox.size === 0)) return
       this.inDrain = true
@@ -1370,7 +1370,7 @@ export class PulseRuntime {
     return runOutcome(root, this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)))
   }
 
-  async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects()) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await Promise.resolve(); else if (this.hasQueuedEffects()) await new Promise<void>((resolve) => setImmediate(resolve)) } }
+  async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await Promise.resolve(); else if (this.hasQueuedEffects() || this.factInbox.size) await new Promise<void>((resolve) => setImmediate(resolve)) } await this.flushPersistence() }
 
   async shutdown(timeoutMs = 5_000): Promise<{ status: 'stopped' | 'timed_out'; unresolvedEffectIds: string[]; quarantine: string[] }> {
     this.shuttingDown = true
