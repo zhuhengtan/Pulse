@@ -9,6 +9,7 @@ import {
   InMemoryModelRegistry,
   PulseRuntime,
   defineReActLane,
+  type ConversationMessage,
   type JsonValue,
   type ModelCapabilities,
   type Outcome,
@@ -28,14 +29,18 @@ import {
 } from '@hunterzhu/pulse-adapters'
 import { defineTool, ToolRegistry } from '@hunterzhu/pulse-tool-sdk'
 import { legacyPulseDataPath, pulseDataPath, pulseLogPath } from './paths.js'
+import { detectResponseLanguage, responseLanguageInstruction } from './language.js'
+import { buildSystemPrompt, loadProjectInstructions, type BuildSystemPromptOptions, type DiscoveredInstructions } from './prompt.js'
 
 export { legacyPulseDataPath, pulseDataPath, pulseHomePath, pulseLogPath } from './paths.js'
+export { buildSystemPrompt, loadProjectInstructions, MAX_INSTRUCTION_BYTES, type BuildSystemPromptOptions, type DiscoveredInstructions } from './prompt.js'
 
 export type ApprovalMode = 'read-only' | 'ask' | 'auto'
 export interface LocalHostOptions {
   cwd?: string
   dataDir?: string
   logDir?: string
+  systemPrompt?: string
   provider?: ProviderPresetConfig
   mockResponse?: string
   mockToolCalls?: Array<{ name: string; input?: JsonValue; toolCallId?: string }>
@@ -44,6 +49,13 @@ export interface LocalHostOptions {
   allowNetwork?: boolean
   networkHosts?: string[]
   maxRuntimeMs?: number
+  /** Maximum model/tool turns allowed for one ReAct run. */
+  maxTurns?: number
+  /**
+   * Percent of the configured context window that triggers automatic compaction.
+   * Values above 90 are clamped so the summary request still has room.
+   */
+  autoCompactPercent?: number
 }
 export interface CreateConversationInput { cwd?: string; title?: string }
 export interface ArtifactSummary { path: string; hash: string; bytes: number; mediaType?: string; label?: string; runId: string }
@@ -51,7 +63,7 @@ export interface ConversationSummary { id: string; title: string; cwd: string; c
 export interface UserMessageInput { text: string; format?: 'text' | 'jsonl' }
 export interface AssistantEvent {
   schemaVersion: 1
-  type: 'text' | 'fact' | 'observation' | 'waiting' | 'complete' | 'error' | 'gap'
+  type: 'text' | 'fact' | 'observation' | 'waiting' | 'complete' | 'error' | 'gap' | 'notice'
   conversationId: string
   runId: string
   seq: number
@@ -73,6 +85,19 @@ interface Manifest extends ConversationSummary { schemaVersion: 1; runs: string[
 interface StoredMessage { id: string; role: 'user' | 'assistant' | 'system'; text: string; runId?: string; createdAt: string }
 
 const compactChunkLimit = 12_000
+const defaultAutoCompactPercent = 90
+const maxAutoCompactPercent = 90
+
+function resolveAutoCompactPercent(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return defaultAutoCompactPercent
+  const percent = Math.round(value)
+  if (percent < 1) return defaultAutoCompactPercent
+  return Math.min(maxAutoCompactPercent, percent)
+}
+
+function transcriptBytes(messages: Array<{ role: string; text: string }>): number {
+  return Buffer.byteLength(messages.map((message) => `${message.role}: ${message.text}`).join('\n\n'), 'utf8')
+}
 
 function splitTextChunks(text: string, limit: number): string[] {
   if (text.length <= limit) return [text]
@@ -135,6 +160,17 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
   registry.register(defineTool({
     name: 'fs.list', description: 'List files in the workspace.', tags: ['files', 'read'], input: z.object({ path: z.string().default('.') }), output: z.object({ path: z.string(), entries: z.array(z.string()) }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ path }) => { const safePath = path ?? '.'; return { path: safePath, entries: await fsTool.list(safePath) } }, summarize: (output) => ({ path: output.path ?? '.', entries: output.entries.slice(0, 100) }),
   }))
+  const askOption = z.union([z.string(), z.object({ label: z.string().min(1), value: z.string().min(1) })])
+  const askOptions = z.array(askOption).min(1).max(50)
+  registry.register(defineTool({
+    name: 'ask.choice', description: 'Ask the human to choose exactly one option before continuing.', tags: ['ask', 'human', 'interaction'], input: z.object({ prompt: z.string().min(1).max(2_000), options: askOptions }), output: z.object({ value: z.string() }), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
+  }))
+  registry.register(defineTool({
+    name: 'ask.multi', description: 'Ask the human to choose one or more options before continuing.', tags: ['ask', 'human', 'interaction'], input: z.object({ prompt: z.string().min(1).max(2_000), options: askOptions, min: z.number().int().min(0).optional(), max: z.number().int().positive().optional() }), output: z.object({ values: z.array(z.string()) }), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
+  }))
+  registry.register(defineTool({
+    name: 'ask.input', description: 'Ask the human to provide free-form text before continuing.', tags: ['ask', 'human', 'interaction'], input: z.object({ prompt: z.string().min(1).max(2_000), placeholder: z.string().max(500).optional(), defaultValue: z.string().max(2_000).optional() }), output: z.object({ text: z.string() }), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
+  }))
   registry.register(defineTool({
     name: 'fs.read', description: 'Read a UTF-8 text file from the workspace.', tags: ['files', 'read'], input: z.object({ path: z.string(), maxBytes: z.number().int().positive().max(200_000).optional() }), output: z.object({ path: z.string(), content: z.string(), truncated: z.boolean() }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ path, maxBytes }) => { const limit = maxBytes ?? 64_000; const read = await fsTool.readLimited(path, limit); return { path, content: read.content, truncated: read.truncated } }, summarize: (output) => ({ path: output.path, content: output.content.slice(0, 1_000), truncated: output.truncated }),
   }))
@@ -166,8 +202,40 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
   }
 }
 
-function buildProgram(toolNames: string[], workspace: string) {
-  return (approvalMode: ApprovalMode = 'ask') => defineReActLane({ id: 'pulse.assistant', version: '1', system: `You are Pulse, a careful general task assistant. The current workspace is ${workspace}. When the user asks about the project, files, code, or directory contents, use the provided filesystem tools to inspect the workspace before answering. Paths passed to filesystem tools are relative to this workspace unless the tool says otherwise. Explain what you did and cite workspace paths. Never claim an action succeeded unless its tool result confirms it.`, toolSet: 'pulse.default', task: 'reason', instruction: ({ goal }) => goal, inputs: () => ({ toolDiscovery: { limit: toolNames.length } }), toolAllow: toolNames, maxTurns: 12, ...(approvalMode === 'ask' ? { toolApproval: { prompt: () => 'Reply with approved=true to continue or approved=false to deny.' } } : {}) })
+function buildProgram(toolNames: string[], systemPrompt: string, conversation: ConversationMessage[] = [], includeCurrentGoal = true, configuredMaxTurns = 32) {
+  return (approvalMode: ApprovalMode = 'ask') => defineReActLane({
+    id: 'pulse.assistant',
+    version: '1',
+    system: systemPrompt,
+    toolSet: 'pulse.default',
+    task: 'reason',
+    instruction: 'Handle the current user request using the conversation context and available tools.',
+    inputs: (ctx) => {
+      const currentGoal = ctx.goal.startsWith('Human input: ') ? ctx.goal.slice('Human input: '.length) : ctx.goal
+      const messages = includeCurrentGoal && currentGoal.trim().length > 0
+        ? [...conversation, { role: 'user' as const, content: currentGoal }]
+        : conversation
+      const inheritedResults = ctx.history.length === 0 && ctx.lane.visibleResultRefs && ctx.lane.visibleResultRefs.size > 0
+        ? [...ctx.lane.visibleResultRefs].slice(-64)
+        : []
+      return { toolDiscovery: { limit: toolNames.length }, conversation: messages, ...(inheritedResults.length ? { results: inheritedResults } : {}) }
+    },
+    toolAllow: toolNames,
+    maxTurns: Math.max(1, Math.min(256, Math.floor(configuredMaxTurns))),
+    historyCompaction: {
+      summarizeTask: 'reason',
+      instruction: 'Summarize the older conversation and tool history into durable facts, decisions, constraints, and unresolved work. Preserve information needed to continue the current task.',
+      keepRecentRounds: 4,
+    },
+    ...(approvalMode === 'ask' ? { toolApproval: { prompt: () => 'Reply with approved=true to continue or approved=false to deny.' } } : {}),
+  })
+}
+
+function historyBudget(capabilities: ModelCapabilities): { historySoftTokens: number; historyHardTokens: number } {
+  const maxOutput = capabilities.maxOutputTokens ?? 4_096
+  const usable = Math.max(2_000, capabilities.maxContextTokens - maxOutput)
+  const historyHardTokens = Math.max(2_000, Math.floor(usable / 2))
+  return { historyHardTokens, historySoftTokens: Math.max(1_000, Math.floor(historyHardTokens / 2)) }
 }
 
 function providerFromOptions(options: LocalHostOptions): { adapter: ProviderAdapter; model: { id: string; providerId: string; tasks: string[]; priority: number; capabilities: ModelCapabilities; adapter: ProviderAdapter } } {
@@ -179,7 +247,64 @@ function providerFromOptions(options: LocalHostOptions): { adapter: ProviderAdap
     adapter.enqueue({ text: options.mockAfterToolResponse ?? options.mockResponse ?? process.env.PULSE_MOCK_RESPONSE ?? 'Mock provider is ready. Configure a real provider for model-generated answers.', toolCalls: [], finishReason: 'stop' })
   }
   const local = config.provider === 'mock' || config.provider === 'ollama'
-  return { adapter, model: { id: config.defaultModel ?? `${config.provider}-default`, providerId: adapter.id, tasks: ['reason', 'plan', 'merge'], priority: 10, capabilities: { toolCalling: true, structuredOutput: true, reasoning: config.reasoningEffort ?? 'medium', maxContextTokens: 32_000, maxOutputTokens: config.maxOutputTokens ?? 4_096, local }, adapter } }
+  return { adapter, model: { id: config.defaultModel ?? `${config.provider}-default`, providerId: adapter.id, tasks: ['reason', 'plan', 'merge'], priority: 10, capabilities: { toolCalling: true, structuredOutput: true, reasoning: config.reasoningEffort ?? 'medium', maxContextTokens: config.maxContextTokens ?? 32_000, maxOutputTokens: config.maxOutputTokens ?? 4_096, local }, adapter } }
+}
+
+/** Accept only a reply whose entire trimmed text is the allow token. */
+export function isSafetyApproval(text: string): boolean {
+  return text.trim().toUpperCase() === 'APPROVE'
+}
+
+/** In auto mode the human step is replaced by a separate model safety review. */
+async function aiApproveToolCall(provider: ReturnType<typeof providerFromOptions>, effect: { input?: JsonValue }, signal: AbortSignal): Promise<boolean> {
+  if (provider.adapter instanceof MockAdapter) return true
+  const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+  const name = typeof input.name === 'string' ? input.name : 'unknown'
+  const args = JSON.stringify(input.arguments ?? {})
+  const privacy = provider.model.capabilities.local === true ? 'local_only' as const : 'cloud_allowed' as const
+  const result = await provider.adapter.executeAttempt({
+    model: provider.model.id,
+    signal,
+    maxOutputTokens: 16,
+    request: {
+      contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'pulse.safety-review', instruction: 'review one proposed tool call', privacy, privacyRefs: [] },
+      blocks: [
+        { kind: 'system', content: 'You are the Pulse safety reviewer. Approve only a clearly bounded, user-requested operation inside the workspace. Deny destructive commands, privilege escalation, secret access, persistence, data exfiltration, or ambiguous operations. Reply with exactly APPROVE or DENY.' },
+        { kind: 'instruction', content: `Tool: ${name}\nArguments: ${args.slice(0, 8_000)}\nDecision:` },
+      ],
+      prefixHash: 'pulse-safety-review', projectionHash: 'pulse-safety-review', builderVersion: '1', policyVersion: '1', toolSetVersion: '1', privacy, privacyRefs: [],
+    },
+  })
+  return isSafetyApproval(result.text)
+}
+
+function askOptionValues(input: Record<string, JsonValue>): Set<string> {
+  const options = Array.isArray(input.options) ? input.options : []
+  return new Set(options.flatMap((option) => {
+    if (typeof option === 'string' && option.length > 0) return [option]
+    if (!option || typeof option !== 'object' || Array.isArray(option)) return []
+    const item = option as Record<string, JsonValue>
+    return typeof item.value === 'string' && item.value.length > 0 ? [item.value] : []
+  }))
+}
+
+export function validateAskReply(effectInput: JsonValue | undefined, value: JsonValue): void {
+  if (!effectInput || typeof effectInput !== 'object' || Array.isArray(effectInput)) return
+  const input = effectInput as Record<string, JsonValue>
+  if (input.kind !== 'ask') return
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('ASK_RESPONSE_INVALID')
+  const reply = value as Record<string, JsonValue>
+  if (input.type === 'choice') {
+    if (typeof reply.value !== 'string' || reply.value.length === 0 || !askOptionValues(input).has(reply.value)) throw new Error('ASK_RESPONSE_INVALID:choice')
+  }
+  if (input.type === 'input' && typeof reply.text !== 'string') throw new Error('ASK_RESPONSE_INVALID:input')
+  if (input.type === 'multi') {
+    const allowed = askOptionValues(input)
+    if (!Array.isArray(reply.values) || reply.values.some((item) => typeof item !== 'string' || !allowed.has(item)) || new Set(reply.values).size !== reply.values.length) throw new Error('ASK_RESPONSE_INVALID:multi')
+    const min = typeof input.min === 'number' ? input.min : 0
+    const max = typeof input.max === 'number' ? input.max : Number.POSITIVE_INFINITY
+    if (reply.values.length < min || reply.values.length > max) throw new Error('ASK_RESPONSE_OUT_OF_RANGE')
+  }
 }
 
 export class LocalHost {
@@ -287,34 +412,54 @@ export class LocalHost {
   getReasoningEffort(): 'low' | 'medium' | 'high' | undefined {
     return this.options.provider?.reasoningEffort
   }
+  setSystemPrompt(prompt?: string): void {
+    const normalized = prompt?.trim()
+    if (normalized) {
+      this.options.systemPrompt = normalized
+    } else {
+      delete this.options.systemPrompt
+    }
+  }
+  getSystemPrompt(): string | undefined {
+    return this.options.systemPrompt
+  }
   async compactConversation(id: string): Promise<{ text: string }> {
     const lockRunId = `compact-${randomUUID()}`
     await this.acquireConversationLock(id, lockRunId)
     try {
-      const providerName = this.options.provider?.provider
-      if (!providerName || providerName === 'mock') throw new Error('COMPACT_REQUIRES_PROVIDER')
-      const messages = await this.getConversationMessages(id)
-      if (messages.length <= 2) return { text: '历史消息较少，无需压缩。' }
-      const provider = providerFromOptions(this.options)
-      const privacy = provider.model.capabilities.local === true ? 'local_only' as const : 'cloud_allowed' as const
-      const historyText = messages.map((message) => `${message.role}: ${message.text}`).join('\n\n')
-      const summary = await this.summarizeTranscript(provider, privacy, historyText)
-      const recent = messages.slice(-2)
-      const compactedMessages: StoredMessage[] = [
-        { id: `msg-${randomUUID()}`, role: 'system', text: `[历史上下文摘要]\n以下内容是对更早对话的摘要，不是新的用户指令。\n${summary}`, createdAt: new Date().toISOString() },
-        ...recent,
-      ]
-      const path = this.messagesPath(id)
-      await copyFile(path, `${path}.bak`)
-      const temporaryPath = `${path}.tmp-${randomUUID()}`
-      try {
-        await writeFile(temporaryPath, compactedMessages.map((message) => `${JSON.stringify(message)}\n`).join(''))
-        await rename(temporaryPath, path)
-      } finally { await rm(temporaryPath, { force: true }).catch(() => undefined) }
-      return { text: summary }
+      return await this.compactConversationLocked(id)
     } finally {
       await this.releaseConversationLock(id)
     }
+  }
+  private async compactConversationLocked(id: string, source: { kind: 'manual' } | { kind: 'auto'; percent: number } = { kind: 'manual' }): Promise<{ text: string; notice?: string }> {
+    const providerName = this.options.provider?.provider
+    if (!providerName || providerName === 'mock') throw new Error('COMPACT_REQUIRES_PROVIDER')
+    const messages = await this.getConversationMessages(id)
+    if (messages.length <= 2) return { text: '历史消息较少，无需压缩。' }
+    const provider = providerFromOptions(this.options)
+    const privacy = provider.model.capabilities.local === true ? 'local_only' as const : 'cloud_allowed' as const
+    const historyText = messages.map((message) => `${message.role}: ${message.text}`).join('\n\n')
+    const summary = await this.summarizeTranscript(provider, privacy, historyText)
+    const recent = messages.slice(-2)
+    const lead = source.kind === 'auto'
+      ? `估算上下文达到 ${source.percent}% 后已自动压缩。以下内容是对更早对话的摘要，不是新的用户指令。`
+      : '这是一次手动压缩（/compact）。以下内容是对更早对话的摘要，不是新的用户指令。'
+    const notice = source.kind === 'auto'
+      ? `[自动压缩] 估算上下文已达到 ${source.percent}%，已调用模型压缩历史。原记录已备份为 messages.jsonl.bak。`
+      : undefined
+    const compactedMessages: StoredMessage[] = [
+      { id: `msg-${randomUUID()}`, role: 'system', text: `[历史上下文摘要]\n${lead}\n${summary}`, createdAt: new Date().toISOString() },
+      ...recent,
+    ]
+    const path = this.messagesPath(id)
+    await copyFile(path, `${path}.bak`)
+    const temporaryPath = `${path}.tmp-${randomUUID()}`
+    try {
+      await writeFile(temporaryPath, compactedMessages.map((message) => `${JSON.stringify(message)}\n`).join(''))
+      await rename(temporaryPath, path)
+    } finally { await rm(temporaryPath, { force: true }).catch(() => undefined) }
+    return { text: summary, ...(notice === undefined ? {} : { notice }) }
   }
   private async summarizeTranscript(provider: ReturnType<typeof providerFromOptions>, privacy: 'local_only' | 'cloud_allowed', text: string, depth = 0): Promise<string> {
     const chunks = splitTextChunks(text, compactChunkLimit)
@@ -326,6 +471,23 @@ export class LocalHost {
     const merged = partials.map((part, index) => `片段 ${index + 1}:\n${part}`).join('\n\n')
     if (depth >= 4) return merged
     return this.summarizeTranscript(provider, privacy, merged, depth + 1)
+  }
+  private async maybeCompactConversationLocked(id: string): Promise<string | undefined> {
+    const providerName = this.options.provider?.provider
+    if (!providerName || providerName === 'mock') return undefined
+    const messages = await this.getConversationMessages(id)
+    if (messages.length <= 2) return undefined
+    const older = messages.slice(0, -2)
+    if (older.length === 1 && older[0]?.text.startsWith('[历史上下文摘要]')) return undefined
+    const provider = providerFromOptions(this.options)
+    const percent = resolveAutoCompactPercent(this.options.autoCompactPercent)
+    const manifest = await this.readManifest(id)
+    const conversation = messages.map((message): ConversationMessage => ({ role: message.role, content: message.text }))
+    const systemPrompt = await this.resolveSystemPrompt(manifest.cwd, conversation.filter((message) => message.role === 'user').at(-1)?.content, conversation)
+    const usedBytes = transcriptBytes(messages) + Buffer.byteLength(systemPrompt, 'utf8')
+    const capacityBytes = Math.max(1, provider.model.capabilities.maxContextTokens) * 4
+    if (usedBytes * 100 < capacityBytes * percent) return undefined
+    return (await this.compactConversationLocked(id, { kind: 'auto', percent })).notice
   }
   private async requestSummary(provider: ReturnType<typeof providerFromOptions>, privacy: 'local_only' | 'cloud_allowed', transcript: string, part?: number, parts?: number): Promise<string> {
     const controller = new AbortController()
@@ -367,10 +529,25 @@ export class LocalHost {
     router.register({ task: 'reason', candidates: [provider.model.id] }); router.register({ task: 'plan', candidates: [provider.model.id] }); router.register({ task: 'merge', candidates: [provider.model.id] })
     const backend = new FileRuntimePersistenceBackend(join(this.runDir(conversationId, runId), 'runtime.json'))
     const toolVersions = Object.fromEntries(registry.list().map((tool) => [tool.name, tool.version]))
-    const runtime = new PulseRuntime({ sessionId: runId, maxRuntimeMs: this.options.maxRuntimeMs ?? 15 * 60_000, programs: [], models, modelRouter: router, toolVersions, builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') return createModelEffectExecutor({ router, providers: new Map([[provider.adapter.id, provider.adapter]]) })(effect, signal, observe); if (effect.kind === 'tool') return createToolEffectExecutor(registry)(effect, signal, observe); throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    const runtime = new PulseRuntime({ sessionId: runId, maxRuntimeMs: this.options.maxRuntimeMs ?? 15 * 60_000, programs: [], models, modelRouter: router, toolVersions, builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') return createModelEffectExecutor({ router, providers: new Map([[provider.adapter.id, provider.adapter]]) })(effect, signal, observe); if (effect.kind === 'tool') { const toolName = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) && typeof (effect.input as Record<string, JsonValue>).name === 'string' ? String((effect.input as Record<string, JsonValue>).name) : ''; const policy = registry.get(toolName)?.manifest.sideEffectPolicy; if (this.options.approvalMode === 'auto' && (policy === 'write' || policy === 'external') && !(await aiApproveToolCall(provider, effect, signal))) throw new Error(`AI_APPROVAL_DENIED:${toolName || 'tool'}`); return createToolEffectExecutor(registry)(effect, signal, observe) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    const budget = historyBudget(provider.model.capabilities)
+    runtime.state.historySoftTokens = budget.historySoftTokens
+    runtime.state.historyHardTokens = budget.historyHardTokens
     return { runtime, registry }
   }
-  private async restoreRuntimeFor(conversationId: string, runId: string, cwd: string): Promise<{ runtime: PulseRuntime; registry: ToolRegistry }> {
+  private async resolveSystemPrompt(workspace: string, languageHint?: string, conversation: ConversationMessage[] = []): Promise<string> {
+    const instructions = await loadProjectInstructions(workspace)
+    const textForLang = languageHint ?? conversation.filter((m) => m.role === 'user').at(-1)?.content ?? ''
+    const lang = detectResponseLanguage(textForLang)
+    return buildSystemPrompt({
+      workspace,
+      systemPrompt: this.options.systemPrompt,
+      projectInstructions: instructions.projectRules,
+      userInstructions: instructions.userRules,
+      responseLanguage: lang,
+    })
+  }
+  private async restoreRuntimeFor(conversationId: string, runId: string, cwd: string, conversation: ConversationMessage[] = [], systemPrompt?: string): Promise<{ runtime: PulseRuntime; registry: ToolRegistry }> {
     const registry = new ToolRegistry({ workspaceRoots: [cwd], allowNetwork: this.options.allowNetwork === true, ...(this.options.networkHosts === undefined ? {} : { networkHosts: this.options.networkHosts }) })
     registerBuiltIns(registry, cwd, this.options.approvalMode ?? 'ask', this.options.allowNetwork === true, (toolCallId) => this.approvedToolCalls.get(runId)?.has(toolCallId) === true, this.options.networkHosts)
     const provider = providerFromOptions(this.options)
@@ -378,12 +555,16 @@ export class LocalHost {
     const router = new ModelRouter(models)
     router.register({ task: 'reason', candidates: [provider.model.id] }); router.register({ task: 'plan', candidates: [provider.model.id] }); router.register({ task: 'merge', candidates: [provider.model.id] })
     const backend = new FileRuntimePersistenceBackend(join(this.runDir(conversationId, runId), 'runtime.json'))
-    const program = buildProgram(registry.list().map((tool) => tool.name), cwd)(this.options.approvalMode ?? 'ask')
+    const prompt = systemPrompt ?? await this.resolveSystemPrompt(cwd, undefined, conversation)
+    const program = buildProgram(registry.list().map((tool) => tool.name), prompt, conversation, false, this.options.maxTurns ?? 32)(this.options.approvalMode ?? 'ask')
     const toolVersions = Object.fromEntries(registry.list().map((tool) => [tool.name, tool.version]))
-    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, maxRuntimeMs: this.options.maxRuntimeMs ?? 15 * 60_000, programs: [program], models, modelRouter: router, toolVersions, builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') return createModelEffectExecutor({ router, providers: new Map([[provider.adapter.id, provider.adapter]]) })(effect, signal, observe); if (effect.kind === 'tool') return createToolEffectExecutor(registry)(effect, signal, observe); throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, maxRuntimeMs: this.options.maxRuntimeMs ?? 15 * 60_000, programs: [program], models, modelRouter: router, toolVersions, builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') return createModelEffectExecutor({ router, providers: new Map([[provider.adapter.id, provider.adapter]]) })(effect, signal, observe); if (effect.kind === 'tool') { const toolName = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) && typeof (effect.input as Record<string, JsonValue>).name === 'string' ? String((effect.input as Record<string, JsonValue>).name) : ''; const policy = registry.get(toolName)?.manifest.sideEffectPolicy; if (this.options.approvalMode === 'auto' && (policy === 'write' || policy === 'external') && !(await aiApproveToolCall(provider, effect, signal))) throw new Error(`AI_APPROVAL_DENIED:${toolName || 'tool'}`); return createToolEffectExecutor(registry)(effect, signal, observe) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    const budget = historyBudget(provider.model.capabilities)
+    runtime.state.historySoftTokens = budget.historySoftTokens
+    runtime.state.historyHardTokens = budget.historyHardTokens
     return { runtime, registry }
   }
-  private makeRunHandle(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession): RunHandle {
+  private makeRunHandle(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, contextNotice?: string): RunHandle {
     let finalized: Promise<Outcome & { text?: string }> | undefined
     const finish = (): Promise<Outcome & { text?: string }> => finalized ??= (async () => {
       const outcome = await session.outcome()
@@ -408,21 +589,23 @@ export class LocalHost {
       await writeFile(join(this.runDir(conversationId, runId), 'outcome.json'), JSON.stringify({ schemaVersion: 1, ...outcome, ...(text === undefined ? {} : { text }), completedAt: new Date().toISOString() }, null, 2))
       return { ...outcome, ...(text === undefined ? {} : { text }) }
     })().finally(async () => { await this.releaseConversationLock(conversationId) })
-    const events = this.projectEvents(conversationId, runId, runtime, session, finish)
-    return { id: runId, conversationId, events, outcome: finish, cancel: async (reason = 'USER_REQUESTED') => { await session.cancel(reason) }, reply: async (effectId, value) => { const effect = runtime.state.effects.get(effectId); const approved = value && typeof value === 'object' && !Array.isArray(value) && (value as Record<string, JsonValue>).approved === true; if (approved && effect?.kind === 'human' && effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input)) { const calls = (effect.input as Record<string, JsonValue>).tools; if (Array.isArray(calls)) { const approvedIds = this.approvedToolCalls.get(runId) ?? new Set<string>(); this.approvedToolCalls.set(runId, approvedIds); for (const call of calls) if (call && typeof call === 'object' && !Array.isArray(call) && typeof (call as Record<string, JsonValue>).toolCallId === 'string') approvedIds.add((call as Record<string, JsonValue>).toolCallId as string) } } await session.reply(effectId, value) }, submitHumanInput: async (text, targetEffectId) => { if (!text.trim()) throw new Error('MESSAGE_REQUIRED'); const inputId = `human-${randomUUID()}`; await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text, runId, createdAt: new Date().toISOString() }); await session.submitHumanInput(inputId, { text }, targetEffectId) } }
+    const events = this.projectEvents(conversationId, runId, runtime, session, finish, contextNotice)
+    return { id: runId, conversationId, events, outcome: finish, cancel: async (reason = 'USER_REQUESTED') => { await session.cancel(reason) }, reply: async (effectId, value) => { const effect = runtime.state.effects.get(effectId); validateAskReply(effect?.input, value); const approved = value && typeof value === 'object' && !Array.isArray(value) && (value as Record<string, JsonValue>).approved === true; if (approved && effect?.kind === 'human' && effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input)) { const calls = (effect.input as Record<string, JsonValue>).tools; if (Array.isArray(calls)) { const approvedIds = this.approvedToolCalls.get(runId) ?? new Set<string>(); this.approvedToolCalls.set(runId, approvedIds); for (const call of calls) if (call && typeof call === 'object' && !Array.isArray(call) && typeof (call as Record<string, JsonValue>).toolCallId === 'string') approvedIds.add((call as Record<string, JsonValue>).toolCallId as string) } } await session.reply(effectId, value) }, submitHumanInput: async (text, targetEffectId) => { if (!text.trim()) throw new Error('MESSAGE_REQUIRED'); const inputId = `human-${randomUUID()}`; await session.submitHumanInput(inputId, { text }, targetEffectId); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text, runId, createdAt: new Date().toISOString() }) } }
   }
   async sendMessage(conversationId: string, input: UserMessageInput): Promise<RunHandle> {
     if (!input.text.trim()) throw new Error('MESSAGE_REQUIRED')
     const runId = `run-${randomUUID()}`; await this.acquireConversationLock(conversationId, runId)
     try {
       const manifest = await this.readManifest(conversationId); if (manifest.activeRunId) throw new Error('CONVERSATION_BUSY')
-    const previous = await readFile(this.messagesPath(conversationId), 'utf8').catch(() => '')
-    const context = previous.split('\n').filter(Boolean).slice(-8).map((line) => { try { const message = JSON.parse(line) as StoredMessage; return `${message.role}: ${message.text.slice(0, 4_000)}` } catch { return '' } }).filter(Boolean).join('\n')
-    const goal = context ? `Conversation context:\n${context}\n\nuser: ${input.text}` : input.text
-    const now = new Date().toISOString(); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal: input.text, cwd: manifest.cwd, provider: this.options.provider?.provider ?? 'mock', approvalMode: this.options.approvalMode ?? 'ask', createdAt: now }, null, 2))
-    if (!context) manifest.title = input.text.length > 50 ? input.text.slice(0, 50) + '...' : input.text;
-    const { runtime, registry } = this.runtimeFor(conversationId, runId, manifest.cwd); const program = buildProgram(registry.list().map((tool) => tool.name), manifest.cwd)(this.options.approvalMode ?? 'ask'); runtime.register(program); runtime.setHumanInputProgram(program); const { agentId } = runtime.createAgent({ goal, program }); const session = runtime.start(agentId); this.active.set(runId, { runtime, session, conversationId, runId }); manifest.activeRunId = runId; manifest.runs.push(runId); manifest.updatedAt = now; await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
-    return this.makeRunHandle(conversationId, runId, runtime, session)
+      const contextNotice = await this.maybeCompactConversationLocked(conversationId)
+      const previous = await readFile(this.messagesPath(conversationId), 'utf8').catch(() => '')
+      const conversation = parseStoredMessages(previous).map((message): ConversationMessage => ({ role: message.role, content: message.text }))
+      const goal = input.text
+      const now = new Date().toISOString(); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal: input.text, cwd: manifest.cwd, provider: this.options.provider?.provider ?? 'mock', approvalMode: this.options.approvalMode ?? 'ask', createdAt: now }, null, 2))
+      if (conversation.length === 0) manifest.title = input.text.length > 50 ? input.text.slice(0, 50) + '...' : input.text;
+      const systemPrompt = await this.resolveSystemPrompt(manifest.cwd, input.text, conversation)
+      const { runtime, registry } = this.runtimeFor(conversationId, runId, manifest.cwd); const program = buildProgram(registry.list().map((tool) => tool.name), systemPrompt, conversation, true, this.options.maxTurns ?? 32)(this.options.approvalMode ?? 'ask'); runtime.register(program); runtime.setHumanInputProgram(program); const { agentId } = runtime.createAgent({ goal, program }); const session = runtime.start(agentId); this.active.set(runId, { runtime, session, conversationId, runId }); manifest.activeRunId = runId; manifest.runs.push(runId); manifest.updatedAt = now; await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
+      return this.makeRunHandle(conversationId, runId, runtime, session, contextNotice)
     } catch (error) { await this.releaseConversationLock(conversationId); throw error }
   }
   async resumeRun(conversationId: string): Promise<RunHandle> {
@@ -433,8 +616,11 @@ export class LocalHost {
     if (existing) return this.makeRunHandle(conversationId, runId, existing.runtime, existing.session)
     await this.acquireConversationLock(conversationId, runId)
     try {
-    const { runtime, registry } = await this.restoreRuntimeFor(conversationId, runId, manifest.cwd)
-      const interactionProgram = buildProgram(registry.list().map((tool) => tool.name), manifest.cwd)(this.options.approvalMode ?? 'ask')
+      const conversation = (await this.getConversationMessages(conversationId)).map((message): ConversationMessage => ({ role: message.role, content: message.text }))
+      const lastUserMsg = conversation.filter((m) => m.role === 'user').at(-1)?.content
+      const systemPrompt = await this.resolveSystemPrompt(manifest.cwd, lastUserMsg, conversation)
+      const { runtime, registry } = await this.restoreRuntimeFor(conversationId, runId, manifest.cwd, conversation, systemPrompt)
+      const interactionProgram = buildProgram(registry.list().map((tool) => tool.name), systemPrompt, conversation, true, this.options.maxTurns ?? 32)(this.options.approvalMode ?? 'ask')
       runtime.setHumanInputProgram(interactionProgram)
       const agent = [...runtime.state.agents.values()].find((candidate) => candidate.parentAgentId === undefined)
       if (!agent) throw new Error('RESTORED_AGENT_NOT_FOUND')
@@ -476,12 +662,20 @@ export class LocalHost {
     const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
     if (typeof input.name !== 'string') return undefined
     const outcome = data && typeof data === 'object' && !Array.isArray(data) ? data as Record<string, JsonValue> : {}
-    const status = outcome.status === 'succeeded' ? 'succeeded' : 'failed'
+    const status = outcome.status === 'succeeded'
+      ? 'succeeded'
+      : outcome.status === 'cancelled'
+        ? 'cancelled'
+        : 'failed'
     const args = input.arguments && typeof input.arguments === 'object' && !Array.isArray(input.arguments) ? input.arguments : {}
     return { tool: input.name, toolCallId: effect.toolCallId ?? effectId, args, status, ...(outcome.error === undefined ? {} : { result: outcome.error }) }
   }
-  private async *projectEvents(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, finish: () => Promise<Outcome & { text?: string }>): AsyncIterable<AssistantEvent> {
+  private async *projectEvents(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, finish: () => Promise<Outcome & { text?: string }>, contextNotice?: string): AsyncIterable<AssistantEvent> {
     let seq = 0
+    if (contextNotice) {
+      seq++
+      yield { schemaVersion: 1, type: 'notice', conversationId, runId, seq, data: { kind: 'context_compacted', text: contextNotice } }
+    }
     const textAgents = new Set<string>()
     for await (const event of session.stream()) {
       seq++
@@ -529,7 +723,7 @@ export class LocalHost {
         textAgents.add(item.agentId)
         yield { schemaVersion: 1, type: 'text', conversationId, runId, seq, data: item.text }
       }
-      yield { schemaVersion: 1, type: 'complete', conversationId, runId, seq: seq + 1, data: { status: outcome.status } }
+      yield { schemaVersion: 1, type: 'complete', conversationId, runId, seq: seq + 1, data: { status: outcome.status, ...(outcome.error === undefined ? {} : { error: outcome.error as unknown as JsonValue }), ...(outcome.reason === undefined ? {} : { reason: outcome.reason }), ...(outcome.unresolvedEffectIds === undefined ? {} : { unresolvedEffectIds: outcome.unresolvedEffectIds }) } }
     } catch (error) {
       yield { schemaVersion: 1, type: 'error', conversationId, runId, seq: seq + 1, data: String(error) }
     }

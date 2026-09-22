@@ -1,9 +1,30 @@
 import { describe, expect, it } from 'vitest'
+import { createServer } from 'node:http'
+import { once } from 'node:events'
 import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createLocalHost } from '@hunterzhu/pulse-server'
+
+async function startSummaryServer(): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ choices: [{ message: { content: 'kept the constraint' }, finish_reason: 'stop' }] }))
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('HTTP_TEST_SERVER_ADDRESS_MISSING')
+  return {
+    url: `http://127.0.0.1:${address.port}/v1`,
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+  }
+}
+
+function storedMessage(id: string, role: 'user' | 'assistant', text: string): string {
+  return `${JSON.stringify({ id, role, text, createdAt: '2026-01-01T00:00:00.000Z' })}\n`
+}
 
 describe('local CLI application host', () => {
   it('runs a mock task, projects events, and stores the conversation', async () => {
@@ -17,6 +38,32 @@ describe('local CLI application host', () => {
       await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'local result' })
       expect(events.some((event) => event.type === 'complete')).toBe(true)
       expect(JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'manifest.json'), 'utf8')).activeRunId).toBeUndefined()
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('keeps accumulated conversation context within the DSL instruction budget', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-context-budget-'))
+    try {
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), mockResponse: 'context handled' })
+      const conversation = await host.createConversation()
+      const messagesPath = join(directory, 'data', 'conversations', conversation.id, 'messages.jsonl')
+      await writeFile(messagesPath, `${JSON.stringify({ id: 'msg-old', role: 'user', text: '历史内容 '.repeat(2_000), createdAt: new Date(0).toISOString() })}\n`)
+      const run = await host.sendMessage(conversation.id, { text: '继续处理' })
+      for await (const _event of run.events) { /* drain */ }
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'context handled' })
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('keeps a long user message in conversation context instead of the DSL instruction', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-long-message-'))
+    try {
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), mockResponse: 'long message handled' })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: '用户上下文 '.repeat(1_500) })
+      for await (const _event of run.events) { /* drain */ }
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'long message handled' })
       await host.close()
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
@@ -96,6 +143,43 @@ describe('local CLI application host', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('pauses for ask.choice and resumes with the selected value', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-ask-'))
+    try {
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), mockToolCalls: [{ name: 'ask.choice', input: { prompt: 'Pick a mode', options: ['safe', 'fast'] } }], mockAfterToolResponse: 'choice received' })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'ask me for a mode' })
+      let waiting = false
+      for await (const event of run.events) {
+        if (event.type !== 'waiting') continue
+        waiting = true
+        const data = event.data as { effectId?: string; input?: { kind?: string; type?: string; options?: Array<{ value?: string }> } }
+        expect(data.input).toMatchObject({ kind: 'ask', type: 'choice' })
+        expect(data.input?.options).toEqual([{ label: 'safe', value: 'safe' }, { label: 'fast', value: 'fast' }])
+        await expect(run.reply(data.effectId!, { value: '' })).rejects.toThrow('ASK_RESPONSE_INVALID:choice')
+        await expect(run.reply(data.effectId!, { value: 'unsafe' })).rejects.toThrow('ASK_RESPONSE_INVALID:choice')
+        await run.reply(data.effectId!, { value: 'safe' })
+      }
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'choice received' })
+      expect(waiting).toBe(true)
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('rejects an ask prompt that exceeds the tool schema', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-ask-large-'))
+    try {
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), mockToolCalls: [{ name: 'ask.choice', input: { prompt: 'x'.repeat(2_001), options: ['safe'] } }], mockAfterToolResponse: 'should not continue' })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'ask with a huge prompt' })
+      const events = []
+      for await (const event of run.events) events.push(event)
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'failed' })
+      expect(JSON.stringify(events)).toContain('ASK_PROMPT_TOO_LARGE')
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('supports exact patching and records an artifact in the conversation index', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-patch-'))
     try {
@@ -124,13 +208,16 @@ describe('local CLI application host', () => {
       const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), mockToolCalls: [{ name: 'fs.write', input: { path: 'denied.txt', content: 'nope' } }], mockAfterToolResponse: 'should not run' })
       const conversation = await host.createConversation()
       const run = await host.sendMessage(conversation.id, { text: 'do not write' })
+      const events = []
       for await (const event of run.events) {
+        events.push(event)
         if (event.type === 'waiting') {
           const data = event.data as { effectId?: string }
           await run.reply(data.effectId!, { approved: false, reason: 'user denied' })
         }
       }
       await expect(run.outcome()).resolves.toMatchObject({ status: 'failed' })
+      expect(events.find((event) => event.type === 'complete')?.data).toMatchObject({ status: 'failed', error: { code: expect.any(String), message: expect.any(String) } })
       await expect(readFile(join(directory, 'denied.txt'), 'utf8')).rejects.toThrow()
       await host.close()
     } finally { await rm(directory, { recursive: true, force: true }) }
@@ -267,5 +354,206 @@ describe('local CLI application host', () => {
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
+  })
+
+  it('leaves history intact when the mock provider is over the auto-compact threshold', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-compact-mock-'))
+    try {
+      const dataDir = join(directory, 'data')
+      const host = createLocalHost({
+        cwd: directory,
+        dataDir,
+        mockResponse: 'still here',
+        autoCompactPercent: 1,
+        provider: { provider: 'mock', maxContextTokens: 100 },
+      })
+      const conversation = await host.createConversation()
+      const messagesPath = join(dataDir, 'conversations', conversation.id, 'messages.jsonl')
+      const original = [
+        storedMessage('msg-1', 'user', 'x'.repeat(400)),
+        storedMessage('msg-2', 'assistant', 'y'.repeat(400)),
+        storedMessage('msg-3', 'user', 'keep'),
+      ].join('')
+      await writeFile(messagesPath, original)
+
+      const run = await host.sendMessage(conversation.id, { text: 'continue' })
+      const notices = []
+      for await (const event of run.events) {
+        if (event.type === 'notice') notices.push(event)
+      }
+      const stored = await readFile(messagesPath, 'utf8')
+      expect(notices).toEqual([])
+      expect(stored).toContain('x'.repeat(400))
+      expect(stored).toContain('continue')
+      await host.close()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('auto-compacts at the clamped percent and records the summary in the session', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-compact-auto-'))
+    const server = await startSummaryServer()
+    try {
+      const dataDir = join(directory, 'data')
+      const host = createLocalHost({
+        cwd: directory,
+        dataDir,
+        autoCompactPercent: 95,
+        provider: {
+          provider: 'openai-compatible',
+          defaultModel: 'loopback-model',
+          baseURL: server.url,
+          apiKey: 'test-key',
+          maxContextTokens: 32_000,
+        },
+      })
+      const conversation = await host.createConversation()
+      const messagesPath = join(dataDir, 'conversations', conversation.id, 'messages.jsonl')
+      const dropped = `old-${'x'.repeat(58_996)}`
+      const kept = `new-${'y'.repeat(58_996)}`
+      const measured = Buffer.byteLength([`user: ${dropped}`, `assistant: ${kept}`, 'user: tail'].join('\n\n'))
+      expect(measured).toBeGreaterThan(32_000 * 4 * 0.9)
+      expect(measured).toBeLessThan(32_000 * 4 * 0.95)
+      const original = [
+        storedMessage('msg-1', 'user', dropped),
+        storedMessage('msg-2', 'assistant', kept),
+        storedMessage('msg-3', 'user', 'tail'),
+      ].join('')
+      await writeFile(messagesPath, original)
+
+      const run = await host.sendMessage(conversation.id, { text: 'continue' })
+      const events = []
+      for await (const event of run.events) events.push(event)
+
+      expect(events[0]).toMatchObject({
+        type: 'notice',
+        data: { kind: 'context_compacted', text: expect.stringContaining('已达到 90%') },
+      })
+      const stored = await host.getConversationMessages(conversation.id)
+      expect(stored[0]).toMatchObject({ role: 'system' })
+      expect(stored[0]?.text).toContain('已自动压缩')
+      expect(stored[0]?.text).toContain('kept the constraint')
+      expect(stored.some((message) => message.text === dropped)).toBe(false)
+      expect(stored.some((message) => message.text === kept)).toBe(true)
+      expect(stored.some((message) => message.text === 'tail')).toBe(true)
+      await expect(readFile(`${messagesPath}.bak`, 'utf8')).resolves.toBe(original)
+      await host.close()
+    } finally {
+      await server.close()
+      await rm(directory, { recursive: true, force: true })
+    }
+  }, 20_000)
+
+  it('does not compact again when the older transcript is already a summary', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-compact-once-'))
+    let summaryCalls = 0
+    const server = createServer((request, response) => {
+      const chunks: Buffer[] = []
+      request.on('data', (chunk: Buffer) => chunks.push(chunk))
+      request.on('end', () => {
+        if (Buffer.concat(chunks).toString('utf8').includes('结构化摘要')) summaryCalls += 1
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }))
+      })
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('HTTP_TEST_SERVER_ADDRESS_MISSING')
+    try {
+      const dataDir = join(directory, 'data')
+      const host = createLocalHost({
+        cwd: directory,
+        dataDir,
+        autoCompactPercent: 90,
+        provider: { provider: 'openai-compatible', defaultModel: 'loopback-model', baseURL: `http://127.0.0.1:${address.port}/v1`, apiKey: 'test-key', maxContextTokens: 8_000 },
+      })
+      const conversation = await host.createConversation()
+      const huge = 'z'.repeat(20_000)
+      await writeFile(join(dataDir, 'conversations', conversation.id, 'messages.jsonl'), [
+        `${JSON.stringify({ id: 'msg-summary', role: 'system', text: '[历史上下文摘要]\n已自动压缩\nolder facts', createdAt: '2026-01-01T00:00:00.000Z' })}\n`,
+        storedMessage('msg-kept', 'assistant', huge),
+        storedMessage('msg-tail', 'user', huge),
+      ].join(''))
+      const run = await host.sendMessage(conversation.id, { text: 'continue' })
+      const events = []
+      for await (const event of run.events) events.push(event)
+      expect(events.some((event) => event.type === 'notice')).toBe(false)
+      expect(summaryCalls).toBe(0)
+      const stored = await host.getConversationMessages(conversation.id)
+      expect(stored[0]?.text).toContain('older facts')
+      await host.close()
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+      await rm(directory, { recursive: true, force: true })
+    }
+  }, 20_000)
+
+  it('does not auto-compact below the configured percent and still accepts /compact', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-compact-manual-'))
+    const server = await startSummaryServer()
+    try {
+      const dataDir = join(directory, 'data')
+      const host = createLocalHost({
+        cwd: directory,
+        dataDir,
+        autoCompactPercent: 90,
+        provider: {
+          provider: 'openai-compatible',
+          defaultModel: 'loopback-model',
+          baseURL: server.url,
+          apiKey: 'test-key',
+          maxContextTokens: 100_000,
+        },
+      })
+      const conversation = await host.createConversation()
+      const messagesPath = join(dataDir, 'conversations', conversation.id, 'messages.jsonl')
+      const original = [
+        storedMessage('msg-1', 'user', 'first constraint'),
+        storedMessage('msg-2', 'assistant', 'middle decision'),
+        storedMessage('msg-3', 'user', 'latest request'),
+      ].join('')
+      await writeFile(messagesPath, original)
+
+      const run = await host.sendMessage(conversation.id, { text: 'continue' })
+      const notices = []
+      for await (const event of run.events) {
+        if (event.type === 'notice') notices.push(event)
+      }
+      expect(notices).toEqual([])
+      expect(await readFile(messagesPath, 'utf8')).toContain('first constraint')
+
+      const compacted = await host.compactConversation(conversation.id)
+      expect(compacted.text).toBe('kept the constraint')
+      const stored = await host.getConversationMessages(conversation.id)
+      expect(stored[0]?.text).toContain('手动压缩')
+      expect(stored[0]?.text).toContain('kept the constraint')
+      await host.close()
+    } finally {
+      await server.close()
+      await rm(directory, { recursive: true, force: true })
+    }
+  }, 20_000)
+
+  it('sizes lane history limits from the model window', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-history-budget-'))
+    try {
+      const dataDir = join(directory, 'data')
+      const host = createLocalHost({
+        cwd: directory,
+        dataDir,
+        mockResponse: 'window sized',
+        provider: { provider: 'mock', defaultModel: 'mock', maxContextTokens: 256_000, maxOutputTokens: 16_384 },
+      })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'hello' })
+      for await (const event of run.events) void event
+      await run.outcome()
+      const snapshot = JSON.parse(await readFile(join(dataDir, 'conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8'))
+      expect(snapshot.state.state.historySoftTokens).toBe(59_904)
+      expect(snapshot.state.state.historyHardTokens).toBe(119_808)
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
   })
 })
