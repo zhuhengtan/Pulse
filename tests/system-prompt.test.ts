@@ -26,6 +26,8 @@ describe('system prompt and instructions discovery', () => {
       expect(prompt).toContain('You are Pulse')
       expect(prompt).toContain('/test/workspace')
       expect(prompt).toContain('## Engineering & Investigation Discipline')
+      expect(prompt).toContain('## Task Execution Contract')
+      expect(prompt).toContain('Work in bounded phases')
       expect(prompt).toContain('Investigate first')
       expect(prompt).toContain('Surgical, minimal changes')
       expect(prompt).toContain('Autonomous command execution')

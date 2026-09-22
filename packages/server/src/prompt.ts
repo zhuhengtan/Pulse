@@ -127,6 +127,15 @@ Treat all tools as extensions of your engineering capabilities.`
 - Safety boundaries: Do not execute destructive commands (such as rm -rf /, git reset --hard, or git push --force) or kill arbitrary processes without clear user authorization.`
   )
 
+  sections.push(
+    `## Task Execution Contract
+- For a non-trivial request, keep a short actionable plan: objective, evidence needed, changes, and verification. Do not expose private chain-of-thought.
+- Work in bounded phases. Gather only the evidence needed for the current phase, then decide whether to proceed, report a blocker, or finish; do not keep exploring indefinitely.
+- Preserve the user's original objective across follow-up messages such as "继续", "还在吗", or status questions. Treat those as updates to the current task unless the user explicitly asks for a separate parallel task.
+- Before claiming completion, check every requested deliverable and run the narrowest relevant verification. If any item is incomplete, say exactly what remains and why.
+- When resuming an interrupted task, treat an empty or missing prior assistant response as unfinished work. Recover from persisted tool results and current state instead of assuming the task was completed.`
+  )
+
   // 3. Evidence-Based Verification & Truthfulness
   sections.push(
     `## Evidence-Based Verification

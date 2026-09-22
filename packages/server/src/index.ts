@@ -209,12 +209,27 @@ function buildProgram(toolNames: string[], systemPrompt: string, conversation: C
     system: systemPrompt,
     toolSet: 'pulse.default',
     task: 'reason',
-    instruction: 'Handle the current user request using the conversation context and available tools.',
+    instruction: `Execute the user's request as a bounded task.
+1. Establish the concrete objective and a short plan before broad exploration.
+2. Gather only the evidence needed for the current step; prefer the smallest useful set of files, commands, and tool calls.
+3. Make changes only when requested or clearly required, then verify each requested deliverable.
+4. Stop when the objective is complete or a concrete blocker is confirmed. Do not continue exploratory tool calls without a new reason.
+5. Finish with a concise result, changed items, verification evidence, and any remaining work. Follow-up messages like "继续" or status checks update this task; they are not new parallel tasks unless explicitly requested.
+Do not expose private chain-of-thought.`,
     inputs: (ctx) => {
       const currentGoal = ctx.goal.startsWith('Human input: ') ? ctx.goal.slice('Human input: '.length) : ctx.goal
-      const messages = includeCurrentGoal && currentGoal.trim().length > 0
-        ? [...conversation, { role: 'user' as const, content: currentGoal }]
-        : conversation
+      const humanUpdates = (ctx.humanInputs ?? []).flatMap((input) => {
+        const value = input.value && typeof input.value === 'object' && !Array.isArray(input.value)
+          ? (input.value as Record<string, JsonValue>).text
+          : input.value
+        if (typeof value !== 'string' || value.trim().length === 0) return []
+        return [{ role: 'user' as const, content: `[Current task update]\n${value}` }]
+      })
+      const messages = [
+        ...conversation,
+        ...humanUpdates,
+        ...(includeCurrentGoal && currentGoal.trim().length > 0 ? [{ role: 'user' as const, content: currentGoal }] : []),
+      ]
       const inheritedResults = ctx.history.length === 0 && ctx.lane.visibleResultRefs && ctx.lane.visibleResultRefs.size > 0
         ? [...ctx.lane.visibleResultRefs].slice(-64)
         : []
