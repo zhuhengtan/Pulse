@@ -71,6 +71,32 @@ describe('external Human input', () => {
     expect(runtime.state.lanes.get(child!.rootLaneId)?.priority).toBe(2)
   })
 
+  it('steers continuation and status messages into the current lane', async () => {
+    const received: string[] = []
+    const program: LaneProgram = {
+      id: 'interaction-steer-rules',
+      version: '1',
+      step: ({ humanInputs }) => {
+        for (const input of humanInputs ?? []) {
+          if (input.value && typeof input.value === 'object' && !Array.isArray(input.value)) {
+            const text = (input.value as Record<string, unknown>).text
+            if (typeof text === 'string') received.push(text)
+          }
+        }
+        return { actions: [], next: point('interaction-steer-rules', 'start') }
+      },
+    }
+    const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
+    const { agentId, laneId } = runtime.createAgent('main', program)
+    const session = runtime.start(agentId)
+    await session.submitHumanInput('continue-1', { text: '继续' })
+    await session.submitHumanInput('status-1', { text: '你还活着吗？' })
+    for (let i = 0; i < 5 && received.length < 2; i++) runtime.tick()
+    expect(runtime.state.humanInputs.get('continue-1')).toMatchObject({ status: 'consumed', decision: 'steer', handledByLaneId: laneId })
+    expect(runtime.state.humanInputs.get('status-1')).toMatchObject({ status: 'consumed', decision: 'steer', handledByLaneId: laneId })
+    expect(received).toEqual(expect.arrayContaining(['继续', '你还活着吗？']))
+  })
+
   it('carries the parent visible results into a spawned human interaction', async () => {
     const runtime = new PulseRuntime()
     const program: LaneProgram = { id: 'interaction-context', version: '1', step: () => ({ actions: [], next: point('interaction-context', 'start') }) }

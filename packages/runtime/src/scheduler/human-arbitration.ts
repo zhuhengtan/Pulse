@@ -82,10 +82,18 @@ export function ruleHumanArbitration(value: JsonValue, agentId: string, inputId:
   const object = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, JsonValue> : undefined
   const text = typeof value === 'string' ? value.trim() : typeof object?.text === 'string' ? object.text.trim() : undefined
   const command = typeof object?.command === 'string' ? object.command : text?.startsWith('/') ? text.slice(1).split(/\s+/, 1)[0] : undefined
-  if (!command) return undefined
-  const normalized = command.toLowerCase()
   const targetLaneId = typeof object?.laneId === 'string' ? object.laneId : undefined
   const targetEffectId = typeof object?.effectId === 'string' ? object.effectId : undefined
+  if (!command && text) {
+    const normalizedText = text.toLowerCase().replace(/[\s，。！？!?、,.]+/g, '')
+    const isContinuation = /^(继续|继续处理|接着做|往下做|恢复任务|resume|continue|goon|keepgoing)$/.test(normalizedText)
+    const isStatusCheck = /^(你还活着吗|还在吗|有进展吗|进展呢|现在怎么样|areyoualive|areyoustillthere|anyupdate|status)$/.test(normalizedText)
+    if (isContinuation || isStatusCheck) {
+      return { schemaVersion: 1, decisionId: `rule:${inputId}`, inputId, agentId, action: 'steer', ...(targetLaneId === undefined ? {} : { targetLaneId }), reason: isContinuation ? 'Human asked the current task to continue.' : 'Human asked for the current task status.', modelId }
+    }
+  }
+  if (!command) return undefined
+  const normalized = command.toLowerCase()
   if (normalized === 'cancel' || normalized === 'stop' || normalized === 'abort') return { schemaVersion: 1, decisionId: `rule:${inputId}`, inputId, agentId, action: 'cancel', ...(targetLaneId === undefined ? {} : { targetLaneId }), ...(targetEffectId === undefined ? {} : { targetEffectId }), reason: 'Human requested cancellation.', modelId }
   if (normalized === 'steer' || normalized === 'redirect') return { schemaVersion: 1, decisionId: `rule:${inputId}`, inputId, agentId, action: 'steer', ...(targetLaneId === undefined ? {} : { targetLaneId }), reason: 'Human requested steering.', modelId }
   if (normalized === 'spawn' || normalized === 'parallel') return { schemaVersion: 1, decisionId: `rule:${inputId}`, inputId, agentId, action: 'spawn', reason: 'Human requested a concurrent interaction.', modelId }

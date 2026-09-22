@@ -1,7 +1,7 @@
 import { z, type ZodTypeAny } from 'zod'
 import type { LaneProgram, LaneStepContext } from '../scheduler/runtime.js'
 import { globalContextRef, laneContextRef } from '../core/types.js'
-import type { ContextDelta, ConversationMessage, JsonValue, LaneRecord, LaneStepOutput, ResultRef, ProvenanceRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec, WaitResolution } from '../core/types.js'
+import type { ContextDelta, ConversationMessage, JsonValue, LaneRecord, LaneStepOutput, ResultRef, ProvenanceRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec, WaitResolution, HumanInputRecord } from '../core/types.js'
 import { createDraftProxy } from './context-proxy.js'
 import type { ProgramRef } from './templates.js'
 import { assertDslInstructionSize, contentHash, stableSerialize } from '../context/builder.js'
@@ -24,6 +24,7 @@ export interface StepContext<TState = JsonValue> {
   now: number
   watchdog?: ProgressWatchdogState
   resumeInput?: ResumeInput
+  humanInputs?: readonly HumanInputRecord[]
   results: { meta(ref: ResultRef): ResultMeta | undefined; summary(ref: ResultRef): JsonValue | undefined }
   mergeProposals: ReadonlyArray<MergeProposal>
   mutateLane(mutator: (draft: TState) => void): void
@@ -296,7 +297,7 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
     delta = { target: 'global', baseVersion: agent?.latestGlobalVersion ?? 0, sourceLaneId: context.lane.id, ops: clone(ops), ...(value.privacy === undefined ? {} : { privacy: value.privacy }), proposal: value.proposal }
   }
   const ctx: StepContext<TState> = {
-    lane: context.lane, goal: context.lane.goal, global, globalVersion, laneState: readonlyState, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}),
+    lane: context.lane, goal: context.lane.goal, global, globalVersion, laneState: readonlyState, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}), ...(context.humanInputs?.length ? { humanInputs: context.humanInputs } : {}),
 
     results: { meta: resultMeta, summary: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return resultMeta(ref)?.summary } },
     mergeProposals: [...context.state.mergeProposals.values()].filter((proposal) => proposal.agentId === context.lane.agentId).map((proposal) => { for (const ref of proposal.delta.derivedFrom ?? []) derivedRefs.add(ref); return clone(proposal) }),
