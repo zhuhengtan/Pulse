@@ -7,4 +7,4 @@ export interface ProviderAdapter {
   readonly name: string
   executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number }): Promise<LLMResult>
 }
-export interface ProviderPresetConfig { provider: string; apiKey?: string; baseURL?: string; defaultModel?: string; maxOutputTokens?: number; toolChoice?: ProviderToolChoice; extraHeaders?: Record<string, string>; reasoningEffort?: 'low' | 'medium' | 'high' | undefined }
+export interface ProviderPresetConfig { provider: string; apiKey?: string; baseURL?: string; defaultModel?: string; maxContextTokens?: number; maxOutputTokens?: number; toolChoice?: ProviderToolChoice; extraHeaders?: Record<string, string>; reasoningEffort?: 'low' | 'medium' | 'high' | undefined }

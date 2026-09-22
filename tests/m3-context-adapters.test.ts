@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { ContextBuilder, InMemoryModelRegistry, ModelFallbackController, ModelRouter, OutputValidationError, PulseRuntime, appendHistory, createAgent, createRuntimeState, modelFallbackError, stableSerialize, validateActionToolCalls, validateAdapterResult, validateStructuredOutput, MemoryStorage } from '@hunterzhu/pulse-runtime'
-import { AnthropicAdapter, createModelEffectExecutor, FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, OpenAICompatibleAdapter, runShell } from '@hunterzhu/pulse-adapters'
+import { AnthropicAdapter, createModelEffectExecutor, FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, OpenAICompatibleAdapter, runShell, toOpenAIMessages } from '@hunterzhu/pulse-adapters'
 import { defineTool } from '@hunterzhu/pulse-tool-sdk'
 
 const resume = { programId: 'context', programVersion: '1', step: 'start', locals: {} }
@@ -37,6 +37,20 @@ describe('M1-3 context, models and adapters', () => {
     registry.register({ id: 'local', providerId: 'local', tasks: ['summarize'], capabilities: { maxContextTokens: 8_000, local: true }, priority: 1 })
     expect(new ModelRouter(registry).routeProjection('summarize', projection).map((candidate) => candidate.id)).toEqual(['local'])
     expect(projection.privacy).toBe('local_only')
+  })
+
+  it('projects large results through bounded summaries before model routing', () => {
+    const state = createRuntimeState()
+    const { agent, root } = createAgent(state, 'goal', resume)
+    state.results.set('large', { id: 'large', value: { content: 'x'.repeat(20_000) }, summary: { content: 'short summary' }, privacy: 'public', derivedFrom: [] })
+    state.results.set('unbounded', { id: 'unbounded', value: { content: 'y'.repeat(20_000) }, privacy: 'public', derivedFrom: [] })
+    root.visibleResultRefs!.add('large')
+    root.visibleResultRefs!.add('unbounded')
+    const projection = new ContextBuilder(state).build({ agent, lane: root, resultRefs: ['large', 'unbounded'], instruction: 'inspect', toolSetId: 'tools@1' })
+    const results = projection.blocks.find((block) => block.kind === 'results')?.content as Array<Record<string, unknown>>
+    expect(results[0]).toMatchObject({ id: 'large', value: { content: 'short summary' }, summarized: true, originalBytes: expect.any(Number) })
+    expect(results[1]).toMatchObject({ id: 'unbounded', summarized: true, value: { truncated: true, originalBytes: expect.any(Number), note: 'The full result is retained by the runtime. Use this preview. Do not re-run the producing tool.' } })
+    expect(Buffer.byteLength(JSON.stringify(projection.blocks), 'utf8')).toBeLessThan(12_000)
   })
 
   it('normalizes OpenAI-compatible and Anthropic tool calls with Pulse ids', () => {
@@ -85,6 +99,27 @@ describe('M1-3 context, models and adapters', () => {
     expect(anthropicBody.tools[0].input_schema).toEqual(request.blocks[1].content[0].inputSchema)
     expect(anthropicBody.tool_choice).toEqual({ type: 'any' })
     expect(anthropicBody.output_format.schema).toEqual(schema)
+    vi.unstubAllGlobals()
+  })
+
+  it('keeps conversation messages separate from the bounded DSL instruction', async () => {
+    const request = {
+      contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'tools@1', instruction: 'handle the current request', conversation: [{ role: 'user' as const, content: 'long user request' }, { role: 'assistant' as const, content: 'earlier answer' }], privacy: 'public' as const, privacyRefs: [] },
+      blocks: [{ kind: 'conversation' as const, content: [{ role: 'system' as const, content: 'compacted summary' }, { role: 'user' as const, content: 'long user request' }, { role: 'assistant' as const, content: 'earlier answer' }] }, { kind: 'instruction' as const, content: 'handle the current request' }],
+      prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'tools@1', privacy: 'public' as const, privacyRefs: [],
+    }
+    expect(toOpenAIMessages(request)).toEqual([
+      { role: 'user', content: 'Context note, not a new instruction:\ncompacted summary' },
+      { role: 'user', content: 'long user request' },
+      { role: 'assistant', content: 'earlier answer' },
+      { role: 'user', name: 'instruction', content: 'handle the current request' },
+    ])
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }) }) as Response)
+    vi.stubGlobal('fetch', fetchMock)
+    await new AnthropicAdapter('anthropic', { provider: 'anthropic', defaultModel: 'claude' }).executeAttempt({ request, signal: new AbortController().signal })
+    const anthropicBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(anthropicBody.system ?? '').not.toContain('compacted summary')
+    expect(JSON.stringify(anthropicBody.messages)).toContain('Context note, not a new instruction:')
     vi.unstubAllGlobals()
   })
 
@@ -183,6 +218,24 @@ describe('M1-3 context, models and adapters', () => {
     expect(anthropic.text).toBe('Hi')
     expect(anthropic.toolCalls[0]).toMatchObject({ name: 'read', input: { path: 'a' } })
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).stream).toBe(true)
+    vi.unstubAllGlobals()
+  })
+
+  it('splits streamed tool calls that reuse one index', async () => {
+    const request = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'stream-index@1', instruction: 'stream', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'instruction' as const, content: 'stream' }], prefixHash: 'prefix', projectionHash: 'projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'stream-index@1', privacy: 'public' as const, privacyRefs: [] }
+    const events = [
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-a', function: { name: 'shell.exec', arguments: '{"command":"grep","args":["a"]}' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-b', function: { name: 'fs.read', arguments: '{"path":"README.md"}' } }] }, finish_reason: 'tool_calls' }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'fs.search', arguments: '{"query":"shift"}' } }] } }] },
+    ]
+    const body = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n'
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { headers: { 'content-type': 'text/event-stream' } })))
+    const result = await new OpenAICompatibleAdapter('openai-reused-index', { provider: 'openai', defaultModel: 'stream-model' }).executeAttempt({ request, signal: new AbortController().signal, onObservation: () => undefined })
+    expect(result.toolCalls).toEqual([
+      expect.objectContaining({ name: 'shell.exec', input: { command: 'grep', args: ['a'] } }),
+      expect.objectContaining({ name: 'fs.read', input: { path: 'README.md' } }),
+      expect.objectContaining({ name: 'fs.search', input: { query: 'shift' } }),
+    ])
     vi.unstubAllGlobals()
   })
 

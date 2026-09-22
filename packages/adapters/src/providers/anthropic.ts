@@ -14,8 +14,27 @@ export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'Anthropic Messages'
   constructor(readonly id: string, private readonly config: ProviderPresetConfig) {}
   async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; outputSchema?: JsonValue; model?: string; maxOutputTokens?: number }) {
-    const system = params.request.blocks.filter((block) => block.kind === 'system' || block.kind === 'policy' || block.kind === 'tools').map((block) => typeof block.content === 'string' ? block.content : JSON.stringify(block.content)).join('\n')
-    const messages = [{ role: 'user', content: params.request.blocks.filter((block) => !['system', 'policy', 'tools'].includes(block.kind)).map((block) => ({ type: 'text', text: typeof block.content === 'string' ? block.content : JSON.stringify(block.content) })) }]
+    const systemParts = params.request.blocks.filter((block) => block.kind === 'system' || block.kind === 'policy' || block.kind === 'tools').map((block) => typeof block.content === 'string' ? block.content : JSON.stringify(block.content))
+    const messages: Array<{ role: 'user' | 'assistant'; content: Array<{ type: 'text'; text: string }> }> = []
+    const appendMessage = (role: 'user' | 'assistant', text: string): void => {
+      const previous = messages.at(-1)
+      if (previous?.role === role) previous.content.push({ type: 'text', text })
+      else messages.push({ role, content: [{ type: 'text', text }] })
+    }
+    for (const block of params.request.blocks) {
+      if (block.kind === 'system' || block.kind === 'policy' || block.kind === 'tools') continue
+      if (block.kind === 'conversation' && Array.isArray(block.content)) {
+        for (const item of block.content) {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+          const message = item as { role?: unknown; content?: unknown }
+          if (message.role === 'system' && typeof message.content === 'string') appendMessage('user', `Context note, not a new instruction:\n${message.content}`)
+          else if ((message.role === 'user' || message.role === 'assistant') && typeof message.content === 'string') appendMessage(message.role, message.content)
+        }
+        continue
+      }
+      appendMessage('user', typeof block.content === 'string' ? block.content : JSON.stringify(block.content))
+    }
+    const system = systemParts.join('\n')
     const streaming = params.onObservation !== undefined
     const tools = toolDefinitions(params.request)
     const maxTokens = params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096

@@ -217,6 +217,7 @@ export class HttpWorkerClient {
     this.baseUrl = options.baseUrl.replace(/\/$/, '')
     this.workerId = options.workerId
     this.pollMs = options.pollMs ?? 10
+    if (!Number.isFinite(this.pollMs) || this.pollMs <= 0) throw new Error('INVALID_WORKER_POLL_INTERVAL')
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000
     if (!Number.isFinite(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) throw new Error('INVALID_WORKER_HTTP_TIMEOUT')
     this.authToken = options.authToken

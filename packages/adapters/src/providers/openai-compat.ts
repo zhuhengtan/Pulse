@@ -25,7 +25,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       const events = await consumeProviderSse(response)
       const content: string[] = []
       const refusals: string[] = []
-      const toolCalls = new Map<number, { id?: string; name: string; arguments: string }>()
+      const toolCalls = new Map<number, StreamToolCall>()
       let finishReason: string | undefined
       let usage: any
       for (const event of events) {
@@ -35,14 +35,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         if (typeof delta?.content === 'string') { content.push(delta.content); params.onObservation?.(delta.content) }
         if (typeof delta?.refusal === 'string') { refusals.push(delta.refusal); params.onObservation?.(delta.refusal) }
         if (typeof choice?.finish_reason === 'string') finishReason = choice.finish_reason
-        if (Array.isArray(delta?.tool_calls)) for (const call of delta.tool_calls) {
-          const index = Number(call.index ?? 0)
-          const current = toolCalls.get(index) ?? { name: '', arguments: '' }
-          if (typeof call.id === 'string') current.id = call.id
-          if (typeof call.function?.name === 'string') current.name += call.function.name
-          if (typeof call.function?.arguments === 'string') current.arguments += call.function.arguments
-          toolCalls.set(index, current)
-        }
+        if (Array.isArray(delta?.tool_calls)) for (const call of delta.tool_calls) accumulateStreamToolCall(toolCalls, call)
         if (event.data.usage !== undefined) usage = event.data.usage
       }
       return normalizeOpenAIResponse({ choices: [{ message: { content: content.join('') || null, ...(refusals.length ? { refusal: refusals.join('') } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => ({ id: call.id, function: { name: call.name, arguments: call.arguments } })) } : {}) }, finish_reason: finishReason ?? 'stop' }], ...(usage === undefined ? {} : { usage }) }, toolNameAliases)
@@ -59,16 +52,75 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 }
 
 export function toOpenAIMessages(request: LLMRequestProjection): Array<{ role: 'system' | 'user' | 'assistant'; content: string; name?: string }> {
-  return request.blocks.map((block) => {
+  const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string; name?: string }> = []
+  for (const block of request.blocks) {
     const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
-    if (block.kind === 'system' || block.kind === 'policy' || block.kind === 'tools') return { role: 'system' as const, content }
-    if (block.kind === 'history') return { role: 'assistant' as const, content }
-    return { role: 'user' as const, name: block.kind, content }
-  })
+    if (block.kind === 'conversation' && Array.isArray(block.content)) {
+      for (const item of block.content) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+        const message = item as { role?: unknown; content?: unknown }
+        if (message.role === 'system' && typeof message.content === 'string') messages.push({ role: 'user', content: `Context note, not a new instruction:\n${message.content}` })
+        else if ((message.role === 'user' || message.role === 'assistant') && typeof message.content === 'string') messages.push({ role: message.role, content: message.content })
+      }
+      continue
+    }
+    if (block.kind === 'system' || block.kind === 'policy' || block.kind === 'tools') {
+      messages.push({ role: 'system' as const, content })
+      continue
+    }
+    if (block.kind === 'history') messages.push({ role: 'assistant' as const, content })
+    else messages.push({ role: 'user' as const, name: block.kind, content })
+  }
+  return messages
 }
 
 function toMessages(request: LLMRequestProjection) {
   return toOpenAIMessages(request)
+}
+
+interface StreamToolCall { id?: string; name: string; arguments: string }
+
+function nextToolIndex(toolCalls: Map<number, StreamToolCall>): number {
+  let next = 0
+  for (const index of toolCalls.keys()) if (index >= next) next = index + 1
+  return next
+}
+
+function jsonTextComplete(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed) return false
+  try { JSON.parse(trimmed); return true } catch { return false }
+}
+
+/**
+ * OpenAI-compatible streams sometimes reuse `tool_calls[].index` for a new
+ * call and only distinguish it by `id`. Concatenating those argument
+ * fragments produces invalid JSON (`{"a":1}{"b":2}`).
+ */
+function accumulateStreamToolCall(toolCalls: Map<number, StreamToolCall>, call: { index?: unknown; id?: unknown; function?: { name?: unknown; arguments?: unknown } }): void {
+  const id = typeof call.id === 'string' && call.id.length > 0 ? call.id : undefined
+  const name = typeof call.function?.name === 'string' ? call.function.name : ''
+  const args = typeof call.function?.arguments === 'string' ? call.function.arguments : ''
+  const rawIndex = call.index
+  let index = typeof rawIndex === 'number' && Number.isInteger(rawIndex) && rawIndex >= 0 ? rawIndex : typeof rawIndex === 'string' && /^\d+$/.test(rawIndex) ? Number(rawIndex) : undefined
+  if (index !== undefined) {
+    const current = toolCalls.get(index)
+    const startsAnotherCall = current !== undefined && (
+      (id !== undefined && current.id !== undefined && current.id !== id) ||
+      (name.length > 0 && current.name.length > 0 && jsonTextComplete(current.arguments) && /^[\[{]/.test(args.trimStart()))
+    )
+    if (startsAnotherCall) index = nextToolIndex(toolCalls)
+  } else if (id !== undefined) {
+    index = [...toolCalls.entries()].find(([, item]) => item.id === id)?.[0] ?? nextToolIndex(toolCalls)
+  } else {
+    const keys = [...toolCalls.keys()]
+    index = keys.length === 0 ? 0 : Math.max(...keys)
+  }
+  const current = toolCalls.get(index) ?? { name: '', arguments: '' }
+  if (id !== undefined) current.id = id
+  if (name.length > 0) current.name += name
+  if (args.length > 0) current.arguments += args
+  toolCalls.set(index, current)
 }
 
 function toolDefinitions(request: LLMRequestProjection): { definitions: Array<{ type: 'function'; function: { name: string; description?: string; parameters: JsonValue } }>; aliases: ReadonlyMap<string, string> } {
