@@ -19,6 +19,16 @@ export function InputArea({ onSubmit, disabled, focus = true, placeholder }: Pro
   useInput((input, key) => {
     if (disabled || !focus) return;
 
+    if (key.return) {
+      if (key.shift) {
+        setAccumulatedLines((current) => [...current, value]);
+        setValue('');
+      } else {
+        handleSubmit(value);
+      }
+      return;
+    }
+
     if (key.upArrow) {
       if (historyIndex < history.length - 1) {
         const nextIndex = historyIndex + 1;
@@ -76,7 +86,6 @@ export function InputArea({ onSubmit, disabled, focus = true, placeholder }: Pro
             focus={focus}
             value={value}
             onChange={setValue}
-            onSubmit={handleSubmit}
             placeholder={placeholder || ''}
           />
         )}

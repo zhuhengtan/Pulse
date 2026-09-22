@@ -12,13 +12,24 @@ interface Props {
 
 export function AskPrompt({ request, disabled = false, onReply }: Props) {
   const [value, setValue] = useState(request.defaultValue ?? '');
+  const [inputLines, setInputLines] = useState<string[]>([]);
   const [index, setIndex] = useState(0);
   const [selected, setSelected] = useState<string[]>([]);
   const options = request.options ?? [];
   const clampedIndex = options.length === 0 ? 0 : Math.min(Math.max(0, index), options.length - 1);
 
   useInput((input, key) => {
-    if (disabled || (request.type !== 'choice' && request.type !== 'multi') || options.length === 0) return;
+    if (disabled) return;
+    if (request.type === 'input' && key.return) {
+      if (key.shift) {
+        setInputLines((current) => [...current, value]);
+        setValue('');
+      } else {
+        onReply({ text: [...inputLines, value].join('\n') });
+      }
+      return;
+    }
+    if ((request.type !== 'choice' && request.type !== 'multi') || options.length === 0) return;
     if (key.upArrow) {
       setIndex((current) => Math.max(0, current - 1));
       return;
@@ -68,9 +79,17 @@ export function AskPrompt({ request, disabled = false, onReply }: Props) {
         </Box>
       )}
       {request.type === 'input' && (
-        <Box marginTop={1}>
-          <Text color={theme.primary}>› </Text>
-          <TextInput focus={!disabled} value={value} onChange={setValue} onSubmit={(text) => onReply({ text })} placeholder={request.placeholder ?? ''} />
+        <Box flexDirection="column" marginTop={1}>
+          {inputLines.map((line, lineIndex) => (
+            <Box key={`${lineIndex}:${line}`}>
+              <Text color={theme.primary}>› </Text>
+              <Text>{line}</Text>
+            </Box>
+          ))}
+          <Box>
+            <Text color={theme.primary}>› </Text>
+            <TextInput focus={!disabled} value={value} onChange={setValue} placeholder={request.placeholder ?? ''} />
+          </Box>
         </Box>
       )}
     </Box>
