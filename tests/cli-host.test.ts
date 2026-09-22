@@ -162,4 +162,93 @@ describe('local CLI application host', () => {
       await first.close(); await second.close()
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
+
+  it('does not delete or compact a conversation while another run owns its lock', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-mutating-lock-'))
+    try {
+      const dataDir = join(directory, 'data')
+      const options = {
+        cwd: directory,
+        dataDir,
+        mockToolCalls: [{ name: 'fs.write', input: { path: 'held.txt', content: 'held' } }],
+      }
+      const first = createLocalHost(options)
+      const second = createLocalHost({ ...options, mockResponse: 'summary' })
+      const conversation = await first.createConversation()
+      const run = await first.sendMessage(conversation.id, { text: 'hold the conversation' })
+      for await (const event of run.events) {
+        if (event.type === 'waiting') break
+      }
+
+      await expect(second.deleteConversation(conversation.id)).rejects.toThrow('CONVERSATION_BUSY')
+      await expect(second.compactConversation(conversation.id)).rejects.toThrow('CONVERSATION_BUSY')
+
+      await run.cancel('test cleanup')
+      for await (const _event of run.events) { /* drain */ }
+      await run.outcome().catch(() => undefined)
+      await first.close()
+      await second.close()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to compact with the mock provider and keeps the transcript', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-compact-'))
+    try {
+      const dataDir = join(directory, 'data')
+      const host = createLocalHost({ cwd: directory, dataDir, mockResponse: 'should not replace history' })
+      const conversation = await host.createConversation()
+      const messagesPath = join(dataDir, 'conversations', conversation.id, 'messages.jsonl')
+      const original = [
+        { id: 'msg-1', role: 'user', text: 'first constraint', createdAt: '2026-01-01T00:00:00.000Z' },
+        { id: 'msg-2', role: 'assistant', text: 'middle decision', createdAt: '2026-01-01T00:00:01.000Z' },
+        { id: 'msg-3', role: 'user', text: 'latest request', createdAt: '2026-01-01T00:00:02.000Z' },
+      ].map((message) => `${JSON.stringify(message)}\n`).join('')
+      await writeFile(messagesPath, original)
+
+      await expect(host.compactConversation(conversation.id)).rejects.toThrow('COMPACT_REQUIRES_PROVIDER')
+      await expect(readFile(messagesPath, 'utf8')).resolves.toBe(original)
+      await host.close()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('skips corrupt transcript lines and projects settled tool status', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-transcript-'))
+    try {
+      const dataDir = join(directory, 'data')
+      const host = createLocalHost({
+        cwd: directory,
+        dataDir,
+        mockToolCalls: [{ name: 'fs.write', input: { path: 'noted.txt', content: 'noted' } }],
+        mockAfterToolResponse: 'done',
+      })
+      const conversation = await host.createConversation()
+      const messagesPath = join(dataDir, 'conversations', conversation.id, 'messages.jsonl')
+      await writeFile(messagesPath, '{"id":"msg-1","role":"user","text":"keep","createdAt":"2026-01-01T00:00:00.000Z"}\n{not-json}\n{"id":"msg-2","role":"assistant","text":"also","createdAt":"2026-01-01T00:00:01.000Z"}\n')
+      await expect(host.getConversationMessages(conversation.id)).resolves.toMatchObject([
+        { text: 'keep' },
+        { text: 'also' },
+      ])
+
+      const run = await host.sendMessage(conversation.id, { text: 'write the note' })
+      const observations: Array<Record<string, unknown>> = []
+      for await (const event of run.events) {
+        if (event.type === 'waiting') {
+          const data = event.data as { effectId?: string }
+          await run.reply(data.effectId ?? '', { approved: true })
+        }
+        if (event.type === 'observation' && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
+          observations.push(event.data as Record<string, unknown>)
+        }
+      }
+      expect(observations.some((observation) => observation.tool === 'fs.write' && observation.status === 'succeeded')).toBe(true)
+      await expect(readFile(join(directory, 'noted.txt'), 'utf8')).resolves.toBe('noted')
+      await host.close()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
 })

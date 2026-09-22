@@ -2,3 +2,4 @@ packages:
   - packages/*
 allowBuilds:
   esbuild: set this to true or false
+  esbuild@0.21.5: true

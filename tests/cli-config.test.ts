@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig } from '../packages/cli/src/config.js'
+import { runSetup } from '../packages/cli/src/commands/setup.js'
 
 const temporaryDirectories: string[] = []
 
@@ -44,5 +45,18 @@ describe('ensurePulseUserConfig', () => {
 
     expect(await readFile(path, 'utf8')).toBe(original)
     await expect(access(path)).resolves.toBeUndefined()
+  })
+
+  it('treats --config as a file path and writes the runtime config schema', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-setup-'))
+    temporaryDirectories.push(directory)
+    const path = join(directory, 'nested', 'config.json')
+
+    await expect(runSetup(false, path)).resolves.toBe(0)
+
+    await expect(readFile(path, 'utf8')).resolves.toBe(`${JSON.stringify(defaultPulseConfig, null, 2)}\n`)
+    await expect(stat(join(directory, 'nested'))).resolves.toMatchObject({ mode: expect.any(Number) })
+    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    await expect(access(`${path}/config.json`)).rejects.toThrow()
   })
 })

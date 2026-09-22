@@ -1,6 +1,15 @@
 import type { JsonValue, LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 import { consumeProviderSse, normalizeAnthropicResponse, parseProviderJson, providerHttpErrorFromResponse, providerNetworkError, providerResponseError } from './normalize.js'
 import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
+
+function anthropicThinking(effort: ProviderPresetConfig['reasoningEffort'], maxTokens: number): { thinking?: { type: 'enabled'; budget_tokens: number } } {
+  if (!effort) return {}
+  const requested = effort === 'high' ? 8_000 : effort === 'medium' ? 2_048 : 1_024
+  const budget = Math.min(requested, maxTokens - 1_024)
+  if (budget < 1_024 || budget >= maxTokens) return {}
+  return { thinking: { type: 'enabled', budget_tokens: budget } }
+}
+
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'Anthropic Messages'
   constructor(readonly id: string, private readonly config: ProviderPresetConfig) {}
@@ -9,7 +18,8 @@ export class AnthropicAdapter implements ProviderAdapter {
     const messages = [{ role: 'user', content: params.request.blocks.filter((block) => !['system', 'policy', 'tools'].includes(block.kind)).map((block) => ({ type: 'text', text: typeof block.content === 'string' ? block.content : JSON.stringify(block.content) })) }]
     const streaming = params.onObservation !== undefined
     const tools = toolDefinitions(params.request)
-    const body = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096, ...(system ? { system } : {}), messages, ...(tools.length ? { tools, ...(this.config.toolChoice === undefined ? {} : { tool_choice: anthropicToolChoice(this.config.toolChoice) }) } : {}), ...(params.outputSchema === undefined ? {} : { output_format: { type: 'json_schema', schema: params.outputSchema } }), ...(streaming ? { stream: true } : {}) }
+    const maxTokens = params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096
+    const body = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), max_tokens: maxTokens, ...anthropicThinking(this.config.reasoningEffort, maxTokens), ...(system ? { system } : {}), messages, ...(tools.length ? { tools, ...(this.config.toolChoice === undefined ? {} : { tool_choice: anthropicToolChoice(this.config.toolChoice) }) } : {}), ...(params.outputSchema === undefined ? {} : { output_format: { type: 'json_schema', schema: params.outputSchema } }), ...(streaming ? { stream: true } : {}) }
     try {
       const response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
       if (!response.ok) throw await providerHttpErrorFromResponse(response)
