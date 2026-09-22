@@ -56,6 +56,21 @@ describe('built-in Timer and Human Effect hosts', () => {
     expect(runtime.state.events.some((event) => event.type === 'command.rejected')).toBe(true)
   })
 
+  it('routes a Human reply to an owned descendant Agent', async () => {
+    const childProgram: LaneProgram = { id: 'human-descendant', version: '1', step: ({ lane, resumeInput }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [{ key: 'approval', kind: 'human', concurrencyClass: 'none', input: {} }], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('human-descendant', 'finish') }
+      : { actions: [{ type: 'complete', result: { reply: resumeInput?.type === 'wait' ? resumeInput.resolution.dependencies.approval : null } }], next: point('human-descendant', 'finish') } }
+    const parentProgram: LaneProgram = { id: 'human-parent', version: '1', step: () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: point('human-parent', 'finish') }) }
+    const runtime = new PulseRuntime()
+    const parent = runtime.createAgent('parent', parentProgram)
+    runtime.createAgent({ goal: 'child', program: childProgram, parentAgentId: parent.agentId })
+    runtime.tick()
+    const session = runtime.start(parent.agentId)
+    await session.reply('effect-1', { approved: true })
+    runtime.tick()
+    expect(runtime.state.effects.get('effect-1')?.outcome?.status).toBe('succeeded')
+  })
+
   it('does not let Reply bypass a non-human Effect executor', async () => {
     const program: LaneProgram = { id: 'reply-kind', version: '1', step: ({ lane }) => lane.resume.step === 'start'
       ? { actions: [{ type: 'submit_effects', effects: [{ key: 'tool', kind: 'tool', concurrencyClass: 'tool', input: {} }] }], next: point('reply-kind', 'finish') }

@@ -148,6 +148,17 @@ describe('DSL Human/Timer host macros', () => {
     expect(runtime.state.lanes.get(laneId)?.failure).toMatchObject({ error: { code: 'MAX_TURNS_REACHED' } })
   })
 
+  it('surfaces a cancelled ReAct effect instead of reporting a missing result reference', async () => {
+    const program = defineLaneProgram({ id: 'react-cancelled-effect', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'inspect', onFinish: () => 'finish' })
+      builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'finish' }))
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: null, status: 'cancelled' as const, executionState: 'failed' as const, error: { code: 'PROVIDER_REQUEST_CANCELLED', message: 'Provider request was cancelled.', retryable: false } }) })
+    const { agentId } = runtime.createAgent('cancelled model request', program)
+    await expect(runtime.start(agentId).outcome()).resolves.toMatchObject({ status: 'failed', error: { code: 'PROVIDER_REQUEST_CANCELLED' } })
+    expect(runtime.state.lanes.get(runtime.state.agents.get(agentId)!.rootLaneId)?.failure).not.toMatchObject({ error: { code: 'MISSING_RESULT_REF' } })
+  })
+
   it('allows scatter-gather reducers to return a terminal target', async () => {
     const worker = defineLaneProgram({ id: 'scatter-worker', version: '1' }, (builder) => {
       builder.addStep('start', (ctx) => ({ actions: [{ type: 'complete', result: { item: ctx.goal } }], next: 'start' }))

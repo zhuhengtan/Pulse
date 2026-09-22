@@ -199,6 +199,8 @@ export class WorkerCoordinator implements WorkerCoordinatorContract {
   private readonly persistenceBackend: WorkerPersistenceBackend | undefined
   private persistenceDigest: string | undefined
   private persistencePending: Promise<void> = Promise.resolve()
+  private persistenceDirty = false
+  private persistenceScheduled = false
   private sequence = 1
 
   constructor(options: WorkerCoordinatorOptions = {}) { this.persistenceBackend = options.persistenceBackend }
@@ -351,10 +353,25 @@ export class WorkerCoordinator implements WorkerCoordinatorContract {
 
   private schedulePersistence(): void {
     if (!this.persistenceBackend) return
+    this.persistenceDirty = true
+    if (this.persistenceScheduled) return
+    this.persistenceScheduled = true
     const operation = this.persistencePending.catch(() => undefined).then(async () => {
-      const snapshot = this.snapshot()
-      await this.persistenceBackend!.save(snapshot, this.persistenceDigest)
-      this.persistenceDigest = snapshot.integrity?.digest
+      while (this.persistenceDirty) {
+        this.persistenceDirty = false
+        const snapshot = this.snapshot()
+        const digest = snapshot.integrity?.digest
+        if (digest === this.persistenceDigest) continue
+        try {
+          await this.persistenceBackend!.save(snapshot, this.persistenceDigest)
+          this.persistenceDigest = digest
+        } catch (cause) {
+          this.persistenceDirty = true
+          throw cause
+        }
+      }
+    }).finally(() => {
+      this.persistenceScheduled = false
     })
     this.persistencePending = operation
   }
@@ -632,7 +649,7 @@ export class SqliteDistributedWorkerCoordinator implements WorkerCoordinatorCont
       if (task.state === 'succeeded') result.resolve(task.result ?? null)
       else if (task.state === 'failed') result.reject(task.error ?? { code: 'WORKER_FAILED', message: 'WORKER_FAILED' })
       else result.reject(new Error('WORKER_CANCELLED'))
-    }, 10)
+    }, 50)
     watcher.unref()
     this.watchers.set(taskId, watcher)
   }

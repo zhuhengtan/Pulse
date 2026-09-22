@@ -440,14 +440,20 @@ export interface LLMContextSpec {
   eventIds: string[]
   toolSetId: string
   instruction: string
+  conversation?: ConversationMessage[]
   privacy: PrivacyLabel
   privacyRefs: ProvenanceRef[]
   privacyTaints?: PrivacyTaint[]
 }
 
+export interface ConversationMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+
 export interface LLMRequestProjection {
   contextSpec: LLMContextSpec
-  blocks: Array<{ kind: 'system' | 'policy' | 'tools' | 'global' | 'history' | 'lane' | 'events' | 'results' | 'artifacts' | 'instruction'; content: JsonValue }>
+  blocks: Array<{ kind: 'system' | 'policy' | 'tools' | 'global' | 'conversation' | 'history' | 'lane' | 'events' | 'results' | 'artifacts' | 'instruction'; content: JsonValue }>
   prefixHash: string
   projectionHash: string
   builderVersion: string

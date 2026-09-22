@@ -183,6 +183,29 @@ describe('late completion of a quarantined Effect', () => {
   })
 })
 
+describe('cancellation persistence invariants', () => {
+  it('does not place a local cancellation into the external-effect quarantine', () => {
+    const runtime = new PulseRuntime({ maxTickMs: 1000, effectExecutor: hang })
+    const program: LaneProgram = {
+      id: 'local-cancel', version: '1',
+      step: () => ({
+        actions: [{ type: 'submit_effects', effects: [{ key: 'local-work', kind: 'tool', concurrencyClass: 'tool', input: {}, sideEffectPolicy: 'none' }], wait: { onUnsatisfied: 'resume_with_error' } }],
+        next: point('local-cancel', 'done'),
+      }),
+    }
+    const { agentId } = runtime.createAgent('local cancellation', program)
+    runtime.tick()
+    const effect = [...runtime.state.effects.values()][0]!
+
+    runtime.cancelEffect(effect.id, 0, 'USER_CANCELLED')
+
+    expect(runtime.state.effects.get(effect.id)).toMatchObject({ state: 'cancelled', executionState: 'local_closed', sideEffectState: 'none' })
+    expect(runtime.quarantine.unresolvedEffectIds).toEqual([])
+    expect(() => importRuntimePersistence(runtime.exportPersistence())).not.toThrow()
+    expect(runtime.state.agents.get(agentId)).toBeDefined()
+  })
+})
+
 describe('Effect dispatch order', () => {
   it('dispatches the highest effective priority first when a class is saturated', () => {
     const runtime = new PulseRuntime({ maxTickMs: 1000, maxRunning: { tool: 1 }, effectExecutor: hang })

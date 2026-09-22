@@ -1,11 +1,11 @@
-import { defineLaneProgram, type LaneProgramDefinition, type StepContext, type InstructionView, type NextStepTarget, type StepInputs } from './program.js'
+import { defineLaneProgram, type HistoryCompactionOptions, type LaneProgramDefinition, type StepContext, type InstructionView, type NextStepTarget, type StepInputs } from './program.js'
 import type { LaneProgram } from '../scheduler/runtime.js'
 import type { Outcome, JsonValue } from '../core/types.js'
 import type { ZodTypeAny } from 'zod'
 
 export interface ProgramRef { programId: string; programVersion: string; step?: string; locals?: JsonValue }
 
-export function defineReActLane(config: { id: string; version?: string; system?: string; toolSet?: string; task?: string; instruction: string | ((view: InstructionView<JsonValue>) => string); inputs?: (ctx: StepContext<JsonValue>) => StepInputs; toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; toolApproval?: { prompt: string | ((calls: JsonValue, ctx: StepContext<JsonValue>) => string); onDenied?: (reason: string, ctx: StepContext<JsonValue>) => NextStepTarget<JsonValue> }; historyCompaction?: { summarizeTask: string; keepRecentRounds: number } }): LaneProgramDefinition {
+export function defineReActLane(config: { id: string; version?: string; system?: string; toolSet?: string; task?: string; instruction: string | ((view: InstructionView<JsonValue>) => string); inputs?: (ctx: StepContext<JsonValue>) => StepInputs; toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; toolApproval?: { prompt: string | ((calls: JsonValue, ctx: StepContext<JsonValue>) => string); onDenied?: (reason: string, ctx: StepContext<JsonValue>) => NextStepTarget<JsonValue> }; historyCompaction?: HistoryCompactionOptions }): LaneProgramDefinition {
   return defineLaneProgram({ id: config.id, version: config.version ?? '1', ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSet: config.toolSet }), ...(config.historyCompaction === undefined ? {} : { historyCompaction: config.historyCompaction }) }, (builder) => {
     const onFinish = config.outputSchema === undefined
       ? { text: (resultRef: string) => ({ complete: { value: { textRef: resultRef } } }) }

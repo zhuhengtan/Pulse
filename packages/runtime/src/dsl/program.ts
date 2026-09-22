@@ -1,17 +1,17 @@
 import { z, type ZodTypeAny } from 'zod'
 import type { LaneProgram, LaneStepContext } from '../scheduler/runtime.js'
 import { globalContextRef, laneContextRef } from '../core/types.js'
-import type { ContextDelta, JsonValue, LaneRecord, LaneStepOutput, ResultRef, ProvenanceRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec, WaitResolution } from '../core/types.js'
+import type { ContextDelta, ConversationMessage, JsonValue, LaneRecord, LaneStepOutput, ResultRef, ProvenanceRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec, WaitResolution } from '../core/types.js'
 import { createDraftProxy } from './context-proxy.js'
 import type { ProgramRef } from './templates.js'
-import { contentHash, stableSerialize } from '../context/builder.js'
+import { assertDslInstructionSize, contentHash, stableSerialize } from '../context/builder.js'
 import type { RuntimeToolDiscoveryQuery } from '../tools/registry.js'
 
 export type NextStepTarget<TState = unknown> = string | { step: string } | { complete: { value?: JsonValue; privacy?: PrivacyLabel; children?: 'reject_if_active' | 'cancel' | 'await' } } | { fail: { code: string; message: string; retryable?: boolean; details?: JsonValue; privacy?: PrivacyLabel; derivedFrom?: ProvenanceRef[] } }
 export type ScalarProjection<T> = T extends string | number | boolean | null ? T : T extends readonly unknown[] ? never : T extends object ? { [K in keyof T]: T[K] extends string | number | boolean | null ? T[K] : never } : never
 export interface InstructionView<TState> { goal: string; state: ScalarProjection<TState> }
-export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; artifacts?: string[]; events?: string[]; toolDiscovery?: RuntimeToolDiscoveryQuery }
-export interface HistoryCompactionOptions { summarizeTask: string; keepRecentRounds: number }
+export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; artifacts?: string[]; events?: string[]; conversation?: ConversationMessage[]; toolDiscovery?: RuntimeToolDiscoveryQuery }
+export interface HistoryCompactionOptions { summarizeTask: string; keepRecentRounds: number; instruction?: string }
 export interface HistoryRecordMeta { seq: number; hash: string; effectId?: string; resultRefs: ResultRef[]; resultSelection?: Array<{ ref: ResultRef; rule: string; hash: string }>; result?: ResultRef; findings?: ResultRef[]; privacy: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[] }
 export interface ResultMeta { ref: ResultRef; privacy: PrivacyLabel; derivedFrom: ProvenanceRef[]; sizeBytes: number; hash: string; producer: { kind: 'lane' | 'effect'; id: string }; summary?: JsonValue }
 export interface StepContext<TState = JsonValue> {
@@ -72,8 +72,7 @@ function scalarProjection(value: unknown): JsonValue {
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([, child]) => child === null || typeof child === 'string' || typeof child === 'number' || typeof child === 'boolean').map(([key, child]) => [key, child as JsonValue]))
 }
 function boundedInstruction(value: string): string {
-  if (Buffer.byteLength(value, 'utf8') > 2048) throw Object.assign(new Error('Instruction exceeds the 2 KB DSL limit.'), { code: 'INSTRUCTION_TOO_LARGE', retryable: false })
-  return value
+  return assertDslInstructionSize(value)
 }
 function programLLMInput(config: { system?: string; toolSet?: string }, input: Record<string, JsonValue>): Record<string, JsonValue> {
   return { ...input, ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSetId: config.toolSet }) }
@@ -207,6 +206,14 @@ function collectResumeResultRefs(input: ResumeInput | undefined, refs: Set<Prove
   }
 }
 
+/** Return a wait resolution even when the scheduler wrapped it in a control error. */
+function waitResolution(input: ResumeInput | undefined): import('../core/types.js').WaitResolution | undefined {
+  if (!input) return undefined
+  if (input.type === 'wait') return input.resolution
+  if (input.type === 'control_error') return waitResolution(input.original)
+  return undefined
+}
+
 function annotateAction(action: RuntimeAction, derivedFrom: ProvenanceRef[]): RuntimeAction {
   if (!derivedFrom.length) return action
   if (action.type === 'complete' || action.type === 'fail') return { ...action, derivedFrom: [...new Set([...derivedFrom, ...(action.derivedFrom ?? [])])] }
@@ -218,11 +225,15 @@ const resultReaders = new WeakMap<object, (ref: ResultRef) => JsonValue | undefi
 function readResult(ctx: StepContext, ref: ResultRef): JsonValue | undefined { return resultReaders.get(ctx)?.(ref) }
 
 function waitFailure(ctx: StepContext): RuntimeError | undefined {
-  const resolution = ctx.resumeInput?.type === 'wait' ? ctx.resumeInput.resolution : undefined
+  const resolution = waitResolution(ctx.resumeInput)
   if (!resolution) return undefined
   let dependencyError: RuntimeError | undefined
   for (const dependency of Object.values(resolution.dependencies)) {
     if (dependency.state !== 'pending' && dependency.outcome.status === 'failed' && dependency.outcome.error && !(dependency.outcome.rejectedOutputRefs?.length)) { dependencyError = dependency.outcome.error; break }
+    if (dependency.state !== 'pending' && dependency.outcome.status === 'cancelled') {
+      dependencyError = dependency.outcome.error ?? { code: 'EFFECT_CANCELLED', message: dependency.outcome.reason ?? 'A waited effect was cancelled.', retryable: false }
+      break
+    }
   }
   if (dependencyError) return dependencyError
   return resolution.status === 'unsatisfied' ? resolution.error ?? { code: 'WAIT_UNSATISFIED', message: 'Wait did not reach its required outcome.' } : undefined
@@ -372,16 +383,33 @@ export class StepBuilder<TState = JsonValue> {
   }
   addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; toolApproval?: { prompt: string | ((calls: JsonValue, ctx: StepContext<TState>) => string); onDenied?: (reason: string, ctx: StepContext<TState>) => NextStepTarget<TState> }; onFinish: ((resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>) | { text: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; structured?: { schema: ZodTypeAny; onParsed: (data: unknown, ctx: StepContext<TState>) => NextStepTarget<TState> } }; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
     this.compactionBoundaries.add(name)
+    // The decode step handles ReAct compaction after consuming the current
+    // model result. This preserves the wait's result references while the
+    // summary is being generated.
     const readTurns = (ctx: StepContext<TState>): number => { const sdk = sdkLocals(ctx.lane.resume.locals); const turn = sdk[`${name}Turns`]; return typeof turn === 'number' && Number.isInteger(turn) && turn >= 0 ? turn : 0 }
     const inputKey = `${name}Inputs`
     const readInputs = (ctx: StepContext<TState>): StepInputs => { const value = sdkLocals(ctx.lane.resume.locals)[inputKey]; return value && typeof value === 'object' && !Array.isArray(value) ? value as StepInputs : {} }
-    const writeTurns = (ctx: StepContext<TState>, turns: number, inputs: StepInputs = readInputs(ctx)): JsonValue => { const locals = ctx.lane.resume.locals; const base = locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}; return { ...base, $sdk: { ...sdkLocals(locals), [`${name}Turns`]: turns, [inputKey]: asJson(inputs) } } }
-    const resultRefFromWait = (ctx: StepContext<TState>): ResultRef | undefined => { const dependency = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies)[0] : undefined; return dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined }
-    const resultRefsFromWait = (ctx: StepContext<TState>): ResultRef[] => ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef ? [dependency.outcome.resultRef] : []) : []
+    const writeTurns = (ctx: StepContext<TState>, turns: number, inputs: StepInputs = readInputs(ctx)): JsonValue => { const { conversation: _conversation, ...persistedInputs } = inputs; const locals = ctx.lane.resume.locals; const base = locals && typeof locals === 'object' && !Array.isArray(locals) ? locals as Record<string, JsonValue> : {}; return { ...base, $sdk: { ...sdkLocals(locals), [`${name}Turns`]: turns, [inputKey]: asJson(persistedInputs) } } }
+    const pendingResultKey = `${name}PendingResultRef`
+    const pendingResultRef = (ctx: StepContext<TState>): ResultRef | undefined => { const value = sdkLocals(ctx.lane.resume.locals)[pendingResultKey]; return typeof value === 'string' ? value : undefined }
+    const clearPendingResult = (ctx: StepContext<TState>): JsonValue => {
+      const locals = ordinaryLocals(ctx.lane.resume.locals)
+      const sdk = { ...sdkLocals(ctx.lane.resume.locals) }
+      delete sdk[pendingResultKey]
+      return { ...locals, $sdk: sdk }
+    }
+    const resultRefFromWait = (ctx: StepContext<TState>): ResultRef | undefined => {
+      const pending = pendingResultRef(ctx)
+      if (pending) return pending
+      const resolution = waitResolution(ctx.resumeInput)
+      const dependency = resolution === undefined ? undefined : Object.values(resolution.dependencies).find((candidate) => candidate.state === 'settled')
+      return dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined
+    }
+    const resultRefsFromWait = (ctx: StepContext<TState>): ResultRef[] => { const resolution = waitResolution(ctx.resumeInput); return resolution === undefined ? [] : Object.values(resolution.dependencies).flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef ? [dependency.outcome.resultRef] : []) }
     const instruction = (ctx: StepContext<TState>): string => boundedInstruction(typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: scalarProjection(ctx.laneState) as ScalarProjection<TState> }))
-    const submitModel = (ctx: StepContext<TState>, turn: number, inputs: StepInputs = {}): LaneStepOutput => { const resultRefs = [...new Set(inputs.results ?? [])]; const findingRefs = [...new Set(inputs.findings ?? [])]; const artifactRefs = [...new Set(inputs.artifacts ?? [])]; const dataRefs: ProvenanceRef[] = [...resultRefs, ...findingRefs, ...artifactRefs.map((ref) => ({ kind: 'artifact' as const, ref }))]; const requirements = { ...(options.requirements ?? {}), ...(options.toolAllow === undefined ? {} : { toolCalling: true }) }; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { ...(resultRefs.length ? { results: resultRefs } : {}), ...(findingRefs.length ? { findings: findingRefs } : {}), ...(artifactRefs.length ? { artifacts: artifactRefs } : {}), ...(inputs.events?.length ? { events: [...new Set(inputs.events)] } : {}) }, turn, ...(inputs.toolDiscovery === undefined ? {} : { toolDiscovery: inputs.toolDiscovery as JsonValue }), ...(options.outputSchema === undefined ? {} : { outputSchema: zodJsonSchema(options.outputSchema) }), ...(Object.keys(requirements).length ? { requirements } : {}) }), ...(dataRefs.length ? { derivedFrom: dataRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn, inputs) }, locals: writeTurns(ctx, turn, inputs) } }
+    const submitModel = (ctx: StepContext<TState>, turn: number, inputs: StepInputs = {}): LaneStepOutput => { const resultRefs = [...new Set(inputs.results ?? [])]; const findingRefs = [...new Set(inputs.findings ?? [])]; const artifactRefs = [...new Set(inputs.artifacts ?? [])]; const dataRefs: ProvenanceRef[] = [...resultRefs, ...findingRefs, ...artifactRefs.map((ref) => ({ kind: 'artifact' as const, ref }))]; const requirements = { ...(options.requirements ?? {}), ...(options.toolAllow === undefined ? {} : { toolCalling: true }) }; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { ...(resultRefs.length ? { results: resultRefs } : {}), ...(findingRefs.length ? { findings: findingRefs } : {}), ...(artifactRefs.length ? { artifacts: artifactRefs } : {}), ...(inputs.events?.length ? { events: [...new Set(inputs.events)] } : {}), ...(inputs.conversation?.length ? { conversation: inputs.conversation as unknown as JsonValue } : {}) }, turn, ...(inputs.toolDiscovery === undefined ? {} : { toolDiscovery: inputs.toolDiscovery as JsonValue }), ...(options.outputSchema === undefined ? {} : { outputSchema: zodJsonSchema(options.outputSchema) }), ...(Object.keys(requirements).length ? { requirements } : {}) }), ...(dataRefs.length ? { derivedFrom: dataRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn, inputs) }, locals: writeTurns(ctx, turn, inputs) } }
     this.handlers.set(name, (ctx) => { const turn = readTurns(ctx) + 1; const inputs = options.inputs?.(ctx) ?? {}; const output = submitModel(ctx, turn, inputs); return { ...output, next: `${name}:decode` } })
-    this.handlers.set(`${name}:tools`, (ctx) => { const turn = readTurns(ctx); const previous = readInputs(ctx); const inputs = { ...previous, results: [...new Set([...(previous.results ?? []), ...resultRefsFromWait(ctx)])] }; return { ...submitModel(ctx, turn + 1, inputs), next: `${name}:decode` } })
+    this.handlers.set(`${name}:tools`, (ctx) => { const turn = readTurns(ctx); const previous = readInputs(ctx); const current = options.inputs?.(ctx) ?? {}; const inputs = { ...current, ...previous, results: [...new Set([...(previous.results ?? []), ...resultRefsFromWait(ctx)])] }; return { ...submitModel(ctx, turn + 1, inputs), next: `${name}:decode` } })
     this.handlers.set(`${name}:decode`, (ctx) => {
       const turns = readTurns(ctx)
       const ref = resultRefFromWait(ctx)
@@ -389,16 +417,31 @@ export class StepBuilder<TState = JsonValue> {
       const record = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, JsonValue> : undefined
       const finishReason = record?.finishReason
       const toolCalls = Array.isArray(record?.toolCalls) ? record.toolCalls : []
-      const fail = (runtimeError: RuntimeError): { next: NextStepTarget<TState> } => options.onError ? { next: options.onError(runtimeError, ctx) } : (() => { const error = Object.assign(new Error(runtimeError.message), runtimeError); throw error })()
+      const fail = (runtimeError: RuntimeError): { next: NextStepTarget<TState>; locals?: JsonValue } => options.onError ? { next: options.onError(runtimeError, ctx), locals: clearPendingResult(ctx) } : (() => { const error = Object.assign(new Error(runtimeError.message), runtimeError); throw error })()
       const dependencyError = waitFailure(ctx)
       if (dependencyError) return fail(dependencyError)
       const maxTurns = Math.max(1, Math.floor(options.maxTurns ?? 10))
-      const maxTurnsReached = (): { next: NextStepTarget<TState> } => options.onMaxTurns ? { next: options.onMaxTurns(ctx) } : fail({ code: 'MAX_TURNS_REACHED', message: `ReAct loop ${name} reached its maximum of ${maxTurns} turns.`, retryable: false })
+      const maxTurnsReached = (): { next: NextStepTarget<TState>; locals?: JsonValue } => options.onMaxTurns ? { next: options.onMaxTurns(ctx), locals: clearPendingResult(ctx) } : fail({ code: 'MAX_TURNS_REACHED', message: `ReAct loop ${name} reached its maximum of ${maxTurns} turns.`, retryable: false })
+
+      // The current model result must be retained while older history is
+      // summarized. The generic compaction macro then returns to decode and
+      // this pending reference lets us continue processing the same result.
+      const compaction = this.config.historyCompaction
+      const pressure = ctx.lane.historyPressure
+      const shouldCompactAfterResult = compaction !== undefined && ref !== undefined && pendingResultRef(ctx) === undefined && sdkLocals(ctx.lane.resume.locals).compactPending !== true && pressure !== undefined && pressure.historyTokens > pressure.softTokens && ctx.lane.context.history.length > Math.max(0, Math.floor(compaction.keepRecentRounds))
+      if (shouldCompactAfterResult) {
+        const locals = ordinaryLocals(ctx.lane.resume.locals)
+        const sdk = sdkLocals(ctx.lane.resume.locals)
+        return { actions: [], next: '$compact:summarize', locals: { ...locals, $sdk: { ...sdk, compactPending: true, compactReturnStep: `${name}:decode`, [pendingResultKey]: ref } } }
+      }
       if (finishReason === 'tool_calls') {
         if (turns >= maxTurns || toolCalls.length === 0) return maxTurnsReached()
         const invalidTool = toolCalls.find((call) => { const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}; const toolName = typeof item.name === 'string' ? item.name : ''; return !toolName || (options.toolAllow !== undefined && !options.toolAllow.includes(toolName)) })
         if (invalidTool !== undefined) return fail({ code: 'ACTION_TOOL_NOT_ALLOWED', message: 'Model requested a tool outside the ReAct allow-list.', retryable: false })
-        const sourceEffectId = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).find((dependency) => dependency.state === 'settled' && dependency.target.kind === 'effect')?.target.id : undefined
+        const resolution = waitResolution(ctx.resumeInput)
+        const sourceEffectId = ref !== undefined && ctx.results.meta(ref)?.producer.kind === 'effect'
+          ? ctx.results.meta(ref)?.producer.id
+          : resolution === undefined ? undefined : Object.values(resolution.dependencies).find((dependency) => dependency.state === 'settled' && dependency.target.kind === 'effect')?.target.id
         const sourcePrivacy = ref === undefined ? undefined : ctx.results.meta(ref)?.privacy
         const toolDerivedFrom = ref === undefined ? [] : [ref]
         const calls = toolCalls.map((call, index) => {
@@ -407,6 +450,58 @@ export class StepBuilder<TState = JsonValue> {
           const toolName = typeof item.name === 'string' ? item.name : ''
           return { originalId, toolName, toolCallId: `${name}:${turns}:${originalId}`, input: item.input ?? {} }
         })
+        const askCalls = calls.filter((call) => String(call.toolName).startsWith('ask.'))
+        if (askCalls.length > 0) {
+          if (askCalls.length !== calls.length) return fail({ code: 'ASK_MIXED_TOOL_CALLS', message: 'An ask interaction must be requested in a separate model turn from workspace tools.', retryable: false })
+          if (askCalls.length !== 1) return fail({ code: 'ASK_MULTIPLE_REQUESTS', message: 'Only one ask interaction may be requested at a time.', retryable: false })
+          const call = askCalls[0]!
+          const rawInput = call.input && typeof call.input === 'object' && !Array.isArray(call.input) ? call.input as Record<string, JsonValue> : {}
+          const askType = call.toolName === 'ask.choice' ? 'choice' : call.toolName === 'ask.multi' ? 'multi' : call.toolName === 'ask.input' ? 'input' : undefined
+          if (!askType) return fail({ code: 'ASK_TOOL_UNKNOWN', message: `Unknown ask tool ${String(call.toolName)}.`, retryable: false })
+          if (typeof rawInput.prompt === 'string' && rawInput.prompt.length > 2_000) return fail({ code: 'ASK_PROMPT_TOO_LARGE', message: 'Ask prompts must be 2000 characters or fewer.', retryable: false })
+          const prompt = typeof rawInput.prompt === 'string' && rawInput.prompt.trim() ? rawInput.prompt : `Pulse needs your input for ${askType}.`
+          const askInput: Record<string, JsonValue> = { kind: 'ask', type: askType, toolName: String(call.toolName), toolCallId: String(call.toolCallId), prompt }
+          if (askType === 'choice' || askType === 'multi') {
+            const rawOptions = Array.isArray(rawInput.options) ? rawInput.options : []
+            if (rawOptions.length > 50) return fail({ code: 'ASK_OPTIONS_TOO_MANY', message: 'ask.choice and ask.multi accept at most 50 options.', retryable: false })
+            const seen = new Set<string>()
+            const options = rawOptions.flatMap((option) => {
+              const item = typeof option === 'string' ? { label: option, value: option } : option && typeof option === 'object' && !Array.isArray(option) ? option as Record<string, JsonValue> : undefined
+              if (!item || typeof item.label !== 'string' || typeof item.value !== 'string') return []
+              if (item.label.length === 0 || item.label.length > 500 || item.value.length === 0 || item.value.length > 500 || seen.has(item.value)) return []
+              seen.add(item.value)
+              return [{ label: item.label, value: item.value }]
+            })
+            if (options.length === 0) return fail({ code: 'ASK_OPTIONS_REQUIRED', message: 'ask.choice and ask.multi require at least one valid option.', retryable: false })
+            askInput.options = options
+            if (askType === 'multi') {
+              const min = typeof rawInput.min === 'number' && Number.isInteger(rawInput.min) ? rawInput.min : undefined
+              const max = typeof rawInput.max === 'number' && Number.isInteger(rawInput.max) ? rawInput.max : undefined
+              if ((rawInput.min !== undefined && (min === undefined || min < 0)) || (rawInput.max !== undefined && (max === undefined || max < 1)) || (min !== undefined && max !== undefined && min > max)) return fail({ code: 'ASK_RANGE_INVALID', message: 'ask.multi min and max must be integers with min <= max.', retryable: false })
+              if (min !== undefined) askInput.min = min
+              if (max !== undefined) askInput.max = max
+            }
+          } else {
+            if (typeof rawInput.placeholder === 'string') {
+              if (rawInput.placeholder.length > 500) return fail({ code: 'ASK_PROMPT_TOO_LARGE', message: 'Ask placeholders must be 500 characters or fewer.', retryable: false })
+              askInput.placeholder = rawInput.placeholder
+            }
+            if (typeof rawInput.defaultValue === 'string') {
+              if (rawInput.defaultValue.length > 2_000) return fail({ code: 'ASK_PROMPT_TOO_LARGE', message: 'Ask default values must be 2000 characters or fewer.', retryable: false })
+              askInput.defaultValue = rawInput.defaultValue
+            }
+          }
+          const humanEffect = {
+            key: `${name}-ask-${turns}`,
+            ...(sourceEffectId === undefined ? {} : { llmEffectId: sourceEffectId }),
+            ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }),
+            ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}),
+            kind: 'human' as const,
+            concurrencyClass: 'none' as const,
+            input: askInput,
+          }
+          return { actions: [{ type: 'submit_effects', effects: [humanEffect], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:tools`, locals: clearPendingResult(ctx) }
+        }
         const makeToolEffects = (approvedCalls: Array<{ originalId: JsonValue; toolName: JsonValue; toolCallId?: JsonValue; input: JsonValue }>): RuntimeAction => ({ type: 'submit_effects', effects: approvedCalls.map((call, index) => ({ key: `${name}-tool-${turns}-${index + 1}`, toolCallId: String(call.toolCallId ?? `${name}:${turns}:${String(call.originalId)}`), ...(sourceEffectId === undefined ? {} : { llmEffectId: sourceEffectId }), ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }), ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}), kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { toolCallId: String(call.toolCallId ?? `${name}:${turns}:${String(call.originalId)}`), name: String(call.toolName), arguments: call.input, ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }), ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}) } })), wait: { onUnsatisfied: 'resume_with_error' } })
         if (options.toolApproval) {
           const approvalKey = `${name}PendingToolCalls`
@@ -417,11 +512,20 @@ export class StepBuilder<TState = JsonValue> {
           const extra = typeof options.toolApproval.prompt === 'string' ? options.toolApproval.prompt : options.toolApproval.prompt(calls.map((call) => ({ name: call.toolName, toolCallId: call.originalId })) as unknown as JsonValue, ctx)
           const prompt = boundedInstruction(`Approve ${calls.length} tool call(s). Digest ${digest}.\n${listing}\n${extra}`)
           this.handlers.set(`${name}:approval`, (approvalCtx) => {
-            const dependency = approvalCtx.resumeInput?.type === 'wait' ? Object.values(approvalCtx.resumeInput.resolution.dependencies)[0] : undefined
+            const resolution = waitResolution(approvalCtx.resumeInput)
+            const dependency = resolution === undefined ? undefined : Object.values(resolution.dependencies).find((candidate) => candidate.state === 'settled')
             const approvalError = waitFailure(approvalCtx)
             if (approvalError) return fail(approvalError)
-            if (dependency?.state !== 'settled') return fail({ code: 'APPROVAL_RESPONSE_MISSING', message: 'Approval response was not received.', retryable: false })
-            const value = dependency.outcome.resultRef ? readResult(approvalCtx, dependency.outcome.resultRef) : undefined
+            const settledDependency = dependency
+            if (settledDependency?.state !== 'settled') {
+              return fail({
+                code: 'APPROVAL_RESPONSE_MISSING',
+                message: 'Approval response was not received.',
+                retryable: false,
+                details: { dependencyState: settledDependency?.state ?? 'missing', waitId: resolution?.waitId ?? null },
+              })
+            }
+            const value = settledDependency.outcome.resultRef ? readResult(approvalCtx, settledDependency.outcome.resultRef) : undefined
             const parsed = z.object({ approved: z.boolean(), reason: z.string().optional() }).safeParse(value)
             if (!parsed.success) return fail({ code: 'APPROVAL_RESPONSE_INVALID', message: 'Approval response must contain approved=true or false.', retryable: false, details: parsed.error.message })
             if (!parsed.data.approved) {
@@ -439,7 +543,7 @@ export class StepBuilder<TState = JsonValue> {
           })
           return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-approval-${turns}`, kind: 'human', concurrencyClass: 'none', input: { prompt, digest, tools: calls as unknown as JsonValue }, ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:approval`, locals: { ...locals, $sdk: { ...sdkLocals(locals), [approvalKey]: calls as unknown as JsonValue, [digestKey]: digest } } }
         }
-        return { actions: [makeToolEffects(calls)], next: `${name}:tools` }
+        return { actions: [makeToolEffects(calls)], next: `${name}:tools`, locals: clearPendingResult(ctx) }
       }
       if (turns >= maxTurns) return maxTurnsReached()
       if (options.outputSchema) {
@@ -448,14 +552,14 @@ export class StepBuilder<TState = JsonValue> {
         if (!parsed.success) return fail({ code: 'OUTPUT_SCHEMA_VIOLATION', message: 'ReAct result did not match outputSchema.', retryable: false, details: parsed.error.message })
       }
       if (!ref) return fail({ code: 'MISSING_RESULT_REF', message: 'ReAct result did not produce a ResultRef.', retryable: false })
-      if (typeof options.onFinish === 'function') return { next: options.onFinish(ref, ctx) }
+      if (typeof options.onFinish === 'function') return { next: options.onFinish(ref, ctx), locals: clearPendingResult(ctx) }
       if (options.onFinish.structured) {
         const structuredValue = record?.structured ?? value
         const parsed = options.onFinish.structured.schema.safeParse(structuredValue)
         if (!parsed.success) return fail({ code: 'OUTPUT_SCHEMA_VIOLATION', message: 'ReAct structured result did not match schema.', retryable: false, details: parsed.error.message })
-        return { next: options.onFinish.structured.onParsed(parsed.data, ctx) }
+        return { next: options.onFinish.structured.onParsed(parsed.data, ctx), locals: clearPendingResult(ctx) }
       }
-      return { next: options.onFinish.text(ref, ctx) }
+      return { next: options.onFinish.text(ref, ctx), locals: clearPendingResult(ctx) }
     })
     return this
   }
@@ -589,7 +693,7 @@ export class StepBuilder<TState = JsonValue> {
         const returnStep = typeof sdk.compactReturnStep === 'string' ? sdk.compactReturnStep : ctx.lane.resume.step
         if (upToSeq === undefined) return { next: returnStep === compactSummarize ? entry : returnStep, locals: { ...locals, $sdk: sdk } }
         return {
-          actions: [{ type: 'submit_effects', effects: [{ key: '$compact-summary', kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: compaction.summarizeTask, historySeqs: candidates.map((record) => record.seq), upToSeq }) }], wait: { onUnsatisfied: 'resume_with_error' } }],
+          actions: [{ type: 'submit_effects', effects: [{ key: '$compact-summary', kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: compaction.summarizeTask, ...(compaction.instruction === undefined ? {} : { instruction: compaction.instruction }), historySeqs: candidates.map((record) => record.seq), upToSeq }) }], wait: { onUnsatisfied: 'resume_with_error' } }],
           next: compactApply,
           locals: { ...locals, $sdk: { ...sdk, compactPending: true, compactReturnStep: returnStep, compactUpToSeq: upToSeq } },
         }
@@ -624,7 +728,12 @@ export class StepBuilder<TState = JsonValue> {
       step: (context) => {
         const sdk = sdkLocals(context.lane.resume.locals)
         const pressure = context.lane.historyPressure
-        const shouldCompact = compaction !== undefined && this.compactionBoundaries.has(context.lane.resume.step) && !context.lane.resume.step.startsWith('$compact:') && context.lane.activeWaitId === undefined && sdk.compactPending !== true && pressure !== undefined && pressure.historyTokens > pressure.softTokens && context.lane.context.history.length > Math.max(0, Math.floor(compaction.keepRecentRounds))
+        const keepRecentRounds = compaction === undefined ? 0 : Math.max(0, Math.floor(compaction.keepRecentRounds))
+        const foldable = context.lane.context.history.slice(0, Math.max(0, context.lane.context.history.length - keepRecentRounds))
+        // A prefix that is already one compaction summary cannot get smaller by
+        // summarizing it again. Wait until newer rounds accumulate.
+        const onlyExistingSummary = foldable.length === 1 && foldable[0]?.instruction === '[history compacted]'
+        const shouldCompact = compaction !== undefined && this.compactionBoundaries.has(context.lane.resume.step) && !context.lane.resume.step.startsWith('$compact:') && context.lane.activeWaitId === undefined && sdk.compactPending !== true && pressure !== undefined && pressure.historyTokens > pressure.softTokens && context.lane.context.history.length > keepRecentRounds && !onlyExistingSummary
         if (shouldCompact) return { actions: [], next: { programId: this.config.id, programVersion: this.config.version, step: compactSummarize, locals: { ...ordinaryLocals(context.lane.resume.locals), $sdk: { ...sdk, compactPending: true, compactReturnStep: context.lane.resume.step } } } }
         const requestedStep = shouldCompact ? compactSummarize : context.lane.resume.step
         const handler = this.handlers.get(requestedStep) ?? this.handlers.get(entry)!

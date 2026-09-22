@@ -480,14 +480,19 @@ function prepareLLMInput(state: RuntimeState, lane: LaneRecord, submission: Subm
   const rejectedInputs = readRefs('rejectedOutputRefs')
   const artifactInputs = readRefs('artifacts')
   const eventInputs = readRefs('events')
-  const inputError = resultInputs.error ?? findingInputs.error ?? rejectedInputs.error ?? artifactInputs.error ?? eventInputs.error
+  const rawConversation = rawInputs.conversation
+  const conversation = rawConversation === undefined ? [] : Array.isArray(rawConversation) && rawConversation.every((item) => item && typeof item === 'object' && !Array.isArray(item) && (item as Record<string, JsonValue>).role !== undefined && ['system', 'user', 'assistant'].includes(String((item as Record<string, JsonValue>).role)) && typeof (item as Record<string, JsonValue>).content === 'string')
+    ? rawConversation as unknown as import('../core/types.js').ConversationMessage[]
+    : undefined
+  const conversationError = rawConversation !== undefined && conversation === undefined ? 'INVALID_LLM_CONVERSATION' : undefined
+  const inputError = resultInputs.error ?? findingInputs.error ?? rejectedInputs.error ?? artifactInputs.error ?? eventInputs.error ?? conversationError
   if (inputError) return { error: inputError }
   const resultRefs = [...new Set([...(resultInputs.refs ?? []), ...(findingInputs.refs ?? []), ...(rejectedInputs.refs ?? [])])]
   const artifactRefs = [...new Set(artifactInputs.refs ?? [])]
   try {
     const agent = state.agents.get(lane.agentId)
     if (!agent) return { error: 'UNKNOWN_AGENT' }
-    const projection = new ContextBuilder(state).build({ agent, lane, resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: eventInputs.refs ?? [], instruction, ...(typeof input.system === 'string' ? { system: input.system } : {}), ...(input.policy === undefined ? {} : { policy: input.policy }), ...(input.tools === undefined ? {} : { tools: input.tools }), toolSetId: typeof input.toolSetId === 'string' ? input.toolSetId : 'default' })
+    const projection = new ContextBuilder(state).build({ agent, lane, resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: eventInputs.refs ?? [], ...(conversation === undefined || conversation.length === 0 ? {} : { conversation }), instruction, ...(typeof input.system === 'string' ? { system: input.system } : {}), ...(input.policy === undefined ? {} : { policy: input.policy }), ...(input.tools === undefined ? {} : { tools: input.tools }), toolSetId: typeof input.toolSetId === 'string' ? input.toolSetId : 'default' })
     return { input: { ...input, request: projection as unknown as JsonValue } }
   } catch (cause) {
     return { error: cause instanceof Error ? cause.message : 'INVALID_LLM_CONTEXT' }
@@ -551,8 +556,13 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   } else if (output.adoptCommittedContext) return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'adoptCommittedContext requires a ContextDelta') }
 
   const compactRequested = output.contextDelta?.target === 'lane' && output.contextDelta.ops.some((op) => op.op === 'compact_history')
+  // ReAct can discover pressure only after consuming a model result. Permit
+  // the two-step compaction handoff and its summary request to cross the hard
+  // threshold; the following compact_history delta removes the old records.
+  const compactionHandoff = output.next.step === '$compact:summarize' && actions.length === 0
+  const compactionSummarySubmission = actions.some((action) => action.type === 'submit_effects' && action.effects.some((effect) => effect.key === '$compact-summary'))
   const nextHistoryTokens = estimateHistoryTokens(workingLane.context.history)
-  if (nextHistoryTokens > state.historyHardTokens && !compactRequested) return { rejection: error('CONTEXT_TOO_LARGE', 'Lane history exceeded hardTokens and must be compacted before another Step can commit.', { historyTokens: nextHistoryTokens, softTokens: state.historySoftTokens, hardTokens: state.historyHardTokens }) }
+  if (nextHistoryTokens > state.historyHardTokens && !compactRequested && !compactionHandoff && !compactionSummarySubmission) return { rejection: error('CONTEXT_TOO_LARGE', 'Lane history exceeded hardTokens and must be compacted before another Step can commit.', { historyTokens: nextHistoryTokens, softTokens: state.historySoftTokens, hardTokens: state.historyHardTokens }) }
   const pressure = historyPressure(workingLane.context.history, state.historySoftTokens, state.historyHardTokens)
   if (pressure) workingLane.historyPressure = pressure
   else delete workingLane.historyPressure

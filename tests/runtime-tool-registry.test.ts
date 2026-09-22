@@ -132,6 +132,17 @@ describe('Runtime tool registry', () => {
     expect(runtime.state.effects.get('effect-1')?.outcome).toMatchObject({ status: 'failed', error: { code: 'TOOL_NOT_REGISTERED' } })
   })
 
+  it('preserves structured failures thrown by a tool as the Effect error', async () => {
+    const runtime = new PulseRuntime()
+    runtime.tools.register({
+      ...echo,
+      manifest: { ...echo.manifest, name: 'structured-failure' },
+      execute: () => { throw { code: 'TOOL_BACKEND_DOWN', message: 'backend unavailable', retryable: true } },
+    })
+    const effect = { id: 'effect-structured-failure', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'structured-failure', kind: 'tool', concurrencyClass: 'tool', input: { name: 'structured-failure', arguments: { value: 'x' } }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as EffectRecord
+    await expect((runtime as unknown as { executor: (effect: EffectRecord, signal: AbortSignal) => Promise<unknown> }).executor(effect, new AbortController().signal)).resolves.toMatchObject({ status: 'failed', error: { code: 'TOOL_BACKEND_DOWN', message: 'backend unavailable', retryable: true } })
+  })
+
   it('publishes non-JSON output from a Runtime Tool as an ArtifactRef', async () => {
     const runtime = new PulseRuntime({ maxLaneStepsPerTick: 1 })
     runtime.tools.register({ manifest: { name: 'runtime-binary', version: '1', description: 'returns binary output', inputSchema: { type: 'object' }, outputSchema: {}, concurrencyClass: 'tool', locks: [], supportsAbortSignal: true, sideEffectPolicy: 'none', retrySafety: 'read_only', defaultTimeoutMs: 1000 }, execute: () => new Uint8Array([3, 4, 5]) })

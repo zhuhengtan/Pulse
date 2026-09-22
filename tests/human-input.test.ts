@@ -71,6 +71,22 @@ describe('external Human input', () => {
     expect(runtime.state.lanes.get(child!.rootLaneId)?.priority).toBe(2)
   })
 
+  it('carries the parent visible results into a spawned human interaction', async () => {
+    const runtime = new PulseRuntime()
+    const program: LaneProgram = { id: 'interaction-context', version: '1', step: () => ({ actions: [], next: point('interaction-context', 'start') }) }
+    runtime.setHumanInputProgram(program)
+    const parent = runtime.createAgent('main', program)
+    const parentLane = runtime.state.lanes.get(parent.laneId)!
+    runtime.state.results.set('parent-result', { id: 'parent-result', value: { files: ['README.md'] }, privacy: 'public', derivedFrom: [] })
+    parentLane.visibleResultRefs!.add('parent-result')
+    const session = runtime.start(parent.agentId)
+    await session.submitHumanInput('context-input', { text: 'continue from there' })
+    runtime.tick()
+    const child = [...runtime.state.agents.values()].find((agent) => agent.id !== parent.agentId)
+    expect(child).toBeDefined()
+    expect(runtime.state.lanes.get(child!.rootLaneId)?.visibleResultRefs).toEqual(new Set(['parent-result']))
+  })
+
   it('sends ordinary input through a model decision fact and supports steer', async () => {
     let requestSeen = false
     const model: HumanArbitrationModel = {

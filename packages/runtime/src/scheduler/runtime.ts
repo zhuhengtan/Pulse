@@ -487,6 +487,13 @@ export class PulseRuntime {
   private readonly auditLogPrivacy: PrivacyLabel | undefined
   private readonly persistenceBackend: RuntimePersistenceBackend | undefined
   private readonly sessionStore: RuntimeSessionStore | undefined
+  /**
+   * The file session store is synchronous by design, so avoid rewriting an
+   * unchanged warm-start snapshot on every scheduler tick.  Without this
+   * guard an idle run can spend its whole event loop serializing and fsyncing
+   * the same snapshot, starving effect dispatch and human input handling.
+   */
+  private readonly sessionStoreDigests = new Map<string, string>()
   private readonly enforcingRecoveryPrograms: boolean
   private readonly toolVersions: Readonly<Record<string, string>>
   private readonly recoveryCompatibility: RuntimePersistenceCompatibility | undefined
@@ -569,6 +576,7 @@ export class PulseRuntime {
   private readonly sessionId: string
   private hostCommandSeq = 1
   private factWaiters: Array<() => void> = []
+  private activityWaiters = new Set<() => void>()
   private wakeScheduled = false
   /**
    * A lock grant can happen synchronously while an effect completion is being
@@ -801,11 +809,11 @@ export class PulseRuntime {
   }
   start(agentId: string): PulseSession { if (!this.state.agents.has(agentId)) throw new Error(`UNKNOWN_AGENT:${agentId}`); return new PulseSession(this, agentId) }
   /** Accept external human input without waiting for the current Effect to settle. */
-  submitHumanInput(agentId: string, inputId: string, value: JsonValue, targetEffectId?: string): void {
+  submitHumanInput(agentId: string, inputId: string, value: JsonValue, targetEffectId?: string): boolean {
     if (!agentId) throw new Error('INVALID_AGENT_ID')
     if (!inputId) throw new Error('INVALID_HUMAN_INPUT_ID')
     strictJsonValue(value)
-    this.enqueueHostCommand({ type: 'human_input', agentId, inputId, value, ...(targetEffectId === undefined ? {} : { targetEffectId }) })
+    return this.enqueueHostCommand({ type: 'human_input', agentId, inputId, value, ...(targetEffectId === undefined ? {} : { targetEffectId }) })
   }
   humanInputsFor(agentId: string): HumanInputRecord[] {
     return [...this.state.humanInputs.values()].filter((input) => input.agentId === agentId).map((input) => structuredClone(input))
@@ -883,7 +891,10 @@ export class PulseRuntime {
         return this.applyHumanArbitrationDecision(deferred)
       }
       try {
-        const child = this.createAgent({ goal: `Human input: ${typeof record.value === 'string' ? record.value : JSON.stringify(record.value)}`, program: this.humanInputProgram, priority: 'urgent', parentAgentId: record.agentId, warmStart: { agentId: record.agentId, globalVersion: 'latest', include: 'facts_and_findings' } })
+        const parentAgent = this.state.agents.get(record.agentId)
+        const parentLane = parentAgent === undefined ? undefined : this.state.lanes.get(parentAgent.rootLaneId)
+        const inheritedResults = parentLane?.visibleResultRefs === undefined ? [] : [...parentLane.visibleResultRefs].slice(-64)
+        const child = this.createAgent({ goal: `Human input: ${typeof record.value === 'string' ? record.value : JSON.stringify(record.value)}`, program: this.humanInputProgram, priority: 'urgent', parentAgentId: record.agentId, warmStart: { agentId: record.agentId, globalVersion: 'latest', include: 'facts_and_findings', ...(inheritedResults.length ? { relevanceRefs: inheritedResults } : {}) } })
         const next = structuredClone(record); next.status = 'consumed'; next.handledByLaneId = child.laneId
         this.commitHumanInputDecision(record, decision)
         const mutations: Mutation[] = [{ op: 'setHumanInput', inputId: record.id, record: next }, { op: 'appendEvent', event: { type: 'human.input.dispatched', agentId: record.agentId, laneId: child.laneId, data: { inputId: record.id, decision: 'spawn', childAgentId: child.agentId } } }]
@@ -998,22 +1009,37 @@ export class PulseRuntime {
   async persist(backend: RuntimePersistenceBackend): Promise<void> {
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
-    const exported = exportRuntimePersistence(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, this.factInbox.snapshot(), this.persistenceCompatibility())
+    // The saved state is already authoritative: restore does not replay the
+    // journal unless the snapshot is a checkpoint. Rewriting every historical
+    // mutation on each flush copies full Effect records into a file that grows
+    // without bound and blocks the next dispatch. For the attached backend,
+    // persist the watermark only and drop those entries after the save succeeds.
+    const attached = backend === this.persistenceBackend
+    const journalWatermark = attached ? this.mutationLog.lastSequence : undefined
+    const exportedLog = journalWatermark === undefined ? this.mutationLog : new MutationLog([], journalWatermark)
+    const exported = exportRuntimePersistence(this.persistenceState(), exportedLog, this.outbox, this.quarantine, persistedPolicy, this.factInbox.snapshot(), this.persistenceCompatibility())
     // Never write a snapshot that the constructor would refuse to load; failing here is recoverable, a poisoned store is not.
     validateRuntimePersistenceSnapshot(exported)
     const withResults = backend.resultStore === undefined ? exported : await externalizeRuntimeResultBodies(exported, backend.resultStore)
     const snapshot = backend.snapshotStore === undefined ? withResults : await externalizeRuntimeSnapshotBodies(withResults, backend.snapshotStore)
-    await backend.save(snapshot, backend === this.persistenceBackend ? this.persistenceDigest : undefined)
-    if (backend === this.persistenceBackend) this.persistenceDigest = snapshot.integrity?.digest
+    await backend.save(snapshot, attached ? this.persistenceDigest : undefined)
+    if (attached) {
+      this.persistenceDigest = snapshot.integrity?.digest
+      if (journalWatermark !== undefined && journalWatermark > this.mutationLog.watermark && journalWatermark <= this.mutationLog.lastSequence) this.mutationLog.truncateThrough(journalWatermark)
+    }
     this.storagePolicy.markPersisted()
     this.markArtifactsPersisted()
     this.syncStoragePolicy()
   }
   async flushPersistence(): Promise<void> {
     if (!this.persistenceBackend) return
-    // An explicit flush is a request to try now, even while background retries are backing off.
+    // An explicit flush retries a pending/dirty snapshot, but must not mark an
+    // already clean runtime dirty on every scheduler tick. The run loop calls
+    // this after each tick; forcing a new write there can keep persistence
+    // permanently dirty and starve the durable-dispatch gate.
     this.persistenceBackoff = false
-    this.schedulePersistence()
+    if (!this.persistenceDirty && !this.persistenceScheduled) return
+    if (this.persistenceDirty) this.schedulePersistence()
     while (true) {
       await this.persistencePending
       if (!this.persistenceDirty) return
@@ -1203,9 +1229,9 @@ export class PulseRuntime {
         try { value = strictJsonValue(detailed.output) } catch { value = null; artifact = artifactOutput(detailed.output) }
         return { value, ...(artifact === undefined ? {} : { artifact }), ...(detailed.normalized === undefined ? {} : { normalized: strictJsonValue(detailed.normalized) }), ...(detailed.summary === undefined ? {} : { summary: strictJsonValue(detailed.summary) }), sideEffectState: isSideEffectful(definition.manifest.sideEffectPolicy) ? 'applied' : 'none', executionState: 'succeeded', status: 'succeeded', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length, ...(artifact === undefined ? {} : { artifactMediaType: artifact.mediaType }) }, ...(observations.length ? { observations } : {}) }
       } catch (cause) {
-        if (signal.aborted && isSideEffectful(definition.manifest.sideEffectPolicy)) return { value: null, executionState: 'remote_unknown', sideEffectState: 'unknown', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: definition.manifest.version, reconcileRequired: true }, ...(cause instanceof Error ? { error: { code: 'TOOL_CANCELLED_UNKNOWN', message: cause.message } } : {}) }
+        if (signal.aborted && isSideEffectful(definition.manifest.sideEffectPolicy)) return { value: null, executionState: 'remote_unknown', sideEffectState: 'unknown', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: definition.manifest.version, reconcileRequired: true }, error: runtimeErrorFromCause(cause, 'TOOL_CANCELLED_UNKNOWN') }
         const error = runtimeErrorFromCause(cause, 'TOOL_EXECUTION_FAILED')
-        return { value: null, status: signal.aborted ? 'cancelled' : 'failed', executionState: 'failed', sideEffectState: 'none', ...(executionRef === undefined ? {} : { executionRef }), ...(cause instanceof Error ? { error } : {}), ...(observations.length ? { observations } : {}) }
+        return { value: null, status: signal.aborted ? 'cancelled' : 'failed', executionState: 'failed', sideEffectState: 'none', ...(executionRef === undefined ? {} : { executionRef }), error, ...(observations.length ? { observations } : {}) }
       }
     }
     if (effect.kind !== 'llm') return { value: null }
@@ -1286,16 +1312,18 @@ export class PulseRuntime {
     this.syncStoragePolicy()
     this.schedulePersistence()
     this.scheduleWake()
+    this.notifyActivity()
     for (const resolve of this.factWaiters.splice(0)) resolve()
     return true
   }
 
-  enqueueHostCommand(command: HostCommand): void {
+  enqueueHostCommand(command: HostCommand): boolean {
     validateHostCommand(command)
     const eventId = `host-command-${this.hostCommandSeq}`
     const urgent = command.type === 'human_input' || command.type === 'reply' || command.type === 'cancel' || command.type === 'cancel_effect'
-    if (!this.enqueueFact(command, eventId, urgent)) return
+    if (!this.enqueueFact(command, eventId, urgent)) return false
     this.hostCommandSeq++
+    return true
   }
 
   private enqueueEffectCompletion(effectId: string, attemptId: string, execution: EffectExecution, status: EffectCompletionFact['status'] = 'succeeded', error?: RuntimeError, dispatchError?: RuntimeError): void {
@@ -1474,6 +1502,7 @@ export class PulseRuntime {
     this.wakeError = undefined
     this.assertRecoveryPrograms()
     this.state.now = this.clock.now()
+    const mutationSequenceBeforeTick = this.mutationLog.lastSequence
     const tickStartedAt = performance.now()
     let tickOperations = 0
     const canStartTickOperation = (): boolean => tickOperations === 0 || performance.now() - tickStartedAt < this.maxTickMs
@@ -1608,6 +1637,11 @@ export class PulseRuntime {
       timer.callback()
       tickOperations++
     }
+    // A restored snapshot may contain a settled Effect and its still-pending
+    // Wait when the process stopped between the two persistence writes. Re-run
+    // wait resolution after recovery timers have fired so the Lane receives its
+    // ResumeInput before the next program step is evaluated.
+    if ([...this.state.waits.values()].some((wait) => wait.state === 'pending')) this.refreshWaits()
     let progressed = 0
     while (progressed < this.maxSteps && canStartTickOperation()) {
       const laneId = this.selectReadyLane(this.state.now, this.maxSteps - progressed)
@@ -1622,7 +1656,7 @@ export class PulseRuntime {
       const program = this.programs.get(`${lane.resume.programId}@${lane.resume.programVersion}`)
       if (!program) { this.failLane(lane, { code: 'PROGRAM_NOT_REGISTERED', message: `${lane.resume.programId}@${lane.resume.programVersion}` }); continue }
       let output: LaneStepOutput
-      const stepContext: LaneStepContext = { lane: stepLane, state: structuredClone(this.state), ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), ...(lane.pendingHumanInputs?.length ? { humanInputs: structuredClone(lane.pendingHumanInputs) } : {}), now: this.state.now, observe: (event) => { this.observationInbox.enqueue({ ...event, agentId: lane.agentId, laneId: lane.id, timestamp: this.state.now }) } }
+      const stepContext: LaneStepContext = { lane: stepLane, state: structuredClone(this.state), ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), ...(lane.pendingHumanInputs?.length ? { humanInputs: structuredClone(lane.pendingHumanInputs) } : {}), now: this.state.now, observe: (event) => { this.observationInbox.enqueue({ ...event, agentId: lane.agentId, laneId: lane.id, timestamp: this.state.now }); this.notifyActivity() } }
       try { output = withPureStepGuard(() => lane.series || program.seriesMember ? this.seriesStep(program, stepContext, lane.series) : program.step(stepContext)) }
       catch (cause) {
         const failure: RuntimeError = runtimeErrorFromCause(cause, 'STEP_FAILED')
@@ -1707,11 +1741,16 @@ export class PulseRuntime {
     this.dispatchQueuedEffects()
     this.completeFinishedChildAgents()
     this.finalizeCancellations()
-    this.syncStoragePolicy()
-    this.schedulePersistence()
+    const tickMutated = this.mutationLog.lastSequence !== mutationSequenceBeforeTick
+    if (tickMutated) this.syncStoragePolicy()
+    // A wake can be scheduled solely to retry dispatch or drain an empty
+    // queue. Persist only when this tick committed a mutation; otherwise a
+    // waiting run rewrites the full runtime snapshot on every wake.
+    if (tickMutated) this.schedulePersistence()
     const pendingTickCleanup = this.hasPendingTickCleanup()
     this.tickBudget = undefined
     if (pendingTickCleanup) this.scheduleWake(true)
+    this.notifyActivity()
     return progressed
   }
 
@@ -1725,7 +1764,7 @@ export class PulseRuntime {
       await this.flushPersistence()
       if (this.executionYieldPending.size) { this.executionYieldPending.clear(); await new Promise<void>((resolve) => setImmediate(resolve)) }
       if (this.ready.size === 0 && this.executions.size === 0 && !this.hasQueuedEffects() && !this.hasPendingTickCleanup()) {
-        if (this.preparingLLMs.size) { await Promise.resolve(); continue }
+        if (this.preparingLLMs.size) { await this.waitForFact(); continue }
         if (this.factInbox.size > 0) continue
         if (this.hasPendingHostInteraction()) { await this.waitForFact(); continue }
         const nextAt = this.clock.timers.nextAt()
@@ -1769,7 +1808,7 @@ export class PulseRuntime {
         return runOutcome(root, this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)))
       }
       if (this.ready.size === 0 && this.executions.size === 0 && !this.hasQueuedEffects() && !this.hasPendingTickCleanup()) {
-        if (this.preparingLLMs.size) { await Promise.resolve(); continue }
+        if (this.preparingLLMs.size) { await this.waitForFact(); continue }
         if (this.factInbox.size > 0) continue
         if (this.hasPendingHostInteraction(agentId)) { await this.waitForFact(); continue }
         const nextAt = this.clock.timers.nextAt()
@@ -1795,7 +1834,7 @@ export class PulseRuntime {
     return runOutcome(root, this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)))
   }
 
-  async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup() || this.hasDueTimer()) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await Promise.resolve(); else if (this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup() || this.hasDueTimer()) await new Promise<void>((resolve) => setImmediate(resolve)) } await this.flushPersistence() }
+  async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup() || this.hasDueTimer()) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await this.waitForFact(); else if (this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup() || this.hasDueTimer()) await new Promise<void>((resolve) => setImmediate(resolve)) } await this.flushPersistence() }
 
   async shutdown(timeoutMs = 5_000): Promise<{ status: 'stopped' | 'timed_out'; unresolvedEffectIds: string[]; quarantine: string[] }> {
     this.shuttingDown = true
@@ -1948,7 +1987,15 @@ export class PulseRuntime {
         const result = state.results.get(id)
         if (result) Object.assign(result, value)
       }
-      if (this.sessionStore) for (const agent of state.agents.values()) this.sessionStore.put(exportWarmStartSession(state, agent.id))
+      if (this.sessionStore) {
+        for (const agent of state.agents.values()) {
+          const snapshot = exportWarmStartSession(state, agent.id)
+          const digest = contentHash(snapshot as unknown as JsonValue)
+          if (this.sessionStoreDigests.get(agent.id) === digest) continue
+          this.sessionStore.put(snapshot)
+          this.sessionStoreDigests.set(agent.id, digest)
+        }
+      }
     }
   }
 
@@ -1981,6 +2028,26 @@ export class PulseRuntime {
   }
   private hasPendingHostInteraction(agentId?: string): boolean { return [...this.state.effects.values()].some((effect) => effect.kind === 'human' && !effect.outcome && (agentId === undefined || effect.agentId === agentId)) }
   private waitForFact(): Promise<void> { return new Promise((resolve) => this.factWaiters.push(resolve)) }
+
+  /** Wait for a state or observation change without polling the event loop. */
+  waitForActivity(timeoutMs = 250): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false
+      const finish = (): void => {
+        if (settled) return
+        settled = true
+        this.activityWaiters.delete(finish)
+        clearTimeout(timer)
+        resolve()
+      }
+      const timer = setTimeout(finish, timeoutMs)
+      this.activityWaiters.add(finish)
+    })
+  }
+
+  private notifyActivity(): void {
+    for (const resolve of [...this.activityWaiters]) resolve()
+  }
   private completeFinishedChildAgents(): void {
     // Human interaction Agents are detached from the main Lane rather than
     // represented by an agent Effect. Settle their Agent record when the root
@@ -2157,7 +2224,7 @@ export class PulseRuntime {
     }
     this.releaseEffectLocks(effectId)
     this.outbox.ack(`${effect.id}:${effect.attemptId}`)
-    for (const observation of effectiveExecution.observations ?? []) this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now })
+    for (const observation of effectiveExecution.observations ?? []) { this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now }); this.notifyActivity() }
     const settlementTransactionId = `effect:${effect.id}:${settledAttemptId}:settled`
     const settlementMutations = [...publicationMutations]
     commitMutationTransaction(this.state, this.mutationLog, settlementTransactionId, settlementMutations, this.state.now, this.sessionId)
@@ -2341,8 +2408,8 @@ export class PulseRuntime {
       ...cancellableEffects.map((effect) => ({ type: 'effect.cancel_requested', effectId: effect.id, data: { reason } })),
       ...cancellableEffects.flatMap((effect) => {
         if (this.executions.has(effect.id) && (effect.cancelGraceMs ?? 0) === 0) {
-          const state = isSideEffectful(effect.sideEffectPolicy) ? 'reconcile_required' : 'cancelled'
-          return [{ type: 'effect.quarantined' as const, effectId: effect.id, data: { reason, state } }]
+          if (isSideEffectful(effect.sideEffectPolicy)) return [{ type: 'effect.quarantined' as const, effectId: effect.id, data: { reason, state: 'reconcile_required' as const } }]
+          return [{ type: 'effect.settled' as const, effectId: effect.id, data: { status: 'cancelled' as const, error: { code: 'CANCELLED', message: reason } } }]
         }
         if (!this.executions.has(effect.id)) return [{ type: 'effect.settled', effectId: effect.id, data: { status: 'cancelled', error: { code: 'CANCELLED', message: reason } } }]
         return [] as RuntimeEventInput[]
@@ -2373,9 +2440,10 @@ export class PulseRuntime {
         const candidate = structuredClone(effect)
         candidate.cancelRequested = { reason, at: this.state.now }
         if (this.executions.has(effect.id) && (effect.cancelGraceMs ?? 0) === 0) {
-          candidate.executionState = 'remote_unknown'
-          candidate.sideEffectState = isSideEffectful(candidate.sideEffectPolicy) ? 'unknown' : 'none'
-          candidate.state = candidate.sideEffectState === 'unknown' ? 'reconcile_required' : 'cancelled'
+          const shouldQuarantine = isSideEffectful(candidate.sideEffectPolicy)
+          candidate.executionState = shouldQuarantine ? 'remote_unknown' : 'local_closed'
+          candidate.sideEffectState = shouldQuarantine ? 'unknown' : 'none'
+          candidate.state = shouldQuarantine ? 'reconcile_required' : 'cancelled'
           if (candidate.state === 'cancelled') candidate.outcome = { status: 'cancelled', reason, error: { code: reason, message: reason } }
         } else if (!this.executions.has(effect.id)) {
           candidate.state = 'cancelled'
@@ -2544,8 +2612,12 @@ export class PulseRuntime {
         this.dispatchQueuedEffectsNow()
         return
       }
-      this.schedulePersistence()
       if (this.dispatchPersistencePending) return
+      // Do not mark persistence dirty again while the durability gate is
+      // already flushing. The scheduler calls this method on every tick; a
+      // write scheduled before this guard would keep the flush promise alive
+      // forever and starve the queued effects behind it.
+      this.schedulePersistence()
       this.dispatchPersistencePending = true
       void this.flushPersistence().then(() => {
         this.dispatchPersistencePending = false
@@ -2649,7 +2721,7 @@ export class PulseRuntime {
           this.tryEmit({ type: 'attempt.late_emit', effectId: effect.id, attemptId: effect.attemptId, data: { kind: 'observation', status: liveEffect.outcome?.status ?? liveEffect.state } })
           return
         }
-        this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now })
+        this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now }); this.notifyActivity()
       }
       const attemptId = effect.attemptId
       const promise = this.executor(effect, controller.signal, emitObservation).then((execution) => {
@@ -2726,20 +2798,23 @@ export class PulseRuntime {
     const execution = this.executions.get(effectId)
     if (!effect || effect.outcome) return false
     const candidate = structuredClone(effect)
+    const shouldQuarantine = isSideEffectful(candidate.sideEffectPolicy)
     if (precedingEvent?.type === 'effect.cancel_requested' || precedingEvent?.type === 'limit.rejected') candidate.cancelRequested = { reason, at: this.state.now }
-    candidate.executionState = 'remote_unknown'
-    candidate.sideEffectState = isSideEffectful(candidate.sideEffectPolicy) ? 'unknown' : 'none'
-    candidate.state = candidate.sideEffectState === 'unknown' ? 'reconcile_required' : 'cancelled'
+    candidate.executionState = shouldQuarantine ? 'remote_unknown' : 'local_closed'
+    candidate.sideEffectState = shouldQuarantine ? 'unknown' : 'none'
+    candidate.state = shouldQuarantine ? 'reconcile_required' : 'cancelled'
     if (candidate.state === 'cancelled') candidate.outcome = { status: 'cancelled', reason, error: { code: reason, message: reason } }
     const lane = this.state.lanes.get(effect.ownerLaneId)
     const candidateLane = lane === undefined ? undefined : structuredClone(lane)
-    if (candidateLane) candidateLane.unresolvedEffectIds = [...new Set([...(candidateLane.unresolvedEffectIds ?? []), effectId])]
-    const quarantineEvent: import('../core/types.js').RuntimeEventInput = { type: 'effect.quarantined', effectId, data: { reason, state: candidate.state } }
+    if (shouldQuarantine && candidateLane) candidateLane.unresolvedEffectIds = [...new Set([...(candidateLane.unresolvedEffectIds ?? []), effectId])]
+    const terminalEvent: import('../core/types.js').RuntimeEventInput = shouldQuarantine
+      ? { type: 'effect.quarantined', effectId, data: { reason, state: candidate.state } }
+      : { type: 'effect.settled', effectId, data: candidate.outcome as unknown as JsonValue }
     const admission: Mutation[] = [{ op: 'setEffect', effectId, record: candidate }]
     if (candidateLane) admission.push({ op: 'setLane', laneId: candidateLane.id, record: candidateLane })
     if (precedingEvent) admission.push({ op: 'appendEvent', event: precedingEvent })
     admission.push(...additionalMutations.map((mutation) => structuredClone(mutation)))
-    admission.push({ op: 'appendEvent', event: quarantineEvent })
+    admission.push({ op: 'appendEvent', event: terminalEvent })
     this.assertStorageAdmission(admission)
     if (execution) { execution.controller.abort(); this.executions.delete(effectId) }
     this.releaseEffectLocks(effectId)
@@ -2747,7 +2822,7 @@ export class PulseRuntime {
     Object.assign(effect, candidate)
     this.state.effects.set(effectId, effect)
     if (candidateLane && lane) { Object.assign(lane, candidateLane); this.state.lanes.set(candidateLane.id, lane) }
-    this.quarantine.add(effectId, this.state.now, reason)
+    if (shouldQuarantine) this.quarantine.add(effectId, this.state.now, reason)
     this.refreshWaits()
     this.schedulePersistence()
     return true

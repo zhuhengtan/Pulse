@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { AgentRecord, ArtifactRef, LaneRecord, LLMContextSpec, LLMRequestProjection, PrivacyLabel, PrivacyTaint, ResultRef, RuntimeState, JsonValue, ContextDelta, ContextOp } from '../core/types.js'
+import type { AgentRecord, ArtifactRef, ConversationMessage, LaneRecord, LLMContextSpec, LLMRequestProjection, PrivacyLabel, PrivacyTaint, ResultRef, RuntimeState, JsonValue, ContextDelta, ContextOp } from '../core/types.js'
 import { effectivePrivacy, privacyRank, strictestPrivacy } from '../core/types.js'
 
 function stable(value: unknown): string {
@@ -15,6 +15,7 @@ export interface ContextBuildInput {
   resultRefs?: ResultRef[]
   artifactRefs?: ArtifactRef[]
   eventIds?: string[]
+  conversation?: ConversationMessage[]
   instruction: string
   system?: string
   policy?: JsonValue
@@ -22,11 +23,41 @@ export interface ContextBuildInput {
   toolSetId: string
 }
 
+export const MAX_DSL_INSTRUCTION_BYTES = 2_048
+/** Keep large tool results from crowding out the actual task and conversation. */
+export const MAX_INLINE_RESULT_BYTES = 4_096
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  return Buffer.from(value, 'utf8').subarray(0, maxBytes).toString('utf8')
+}
+
+function projectResultValue(result: { value?: JsonValue; summary?: JsonValue }): { value: JsonValue; summarized: boolean; originalBytes?: number } {
+  const value = result.value ?? null
+  const originalBytes = Buffer.byteLength(JSON.stringify(value), 'utf8')
+  if (originalBytes <= MAX_INLINE_RESULT_BYTES) return { value, summarized: false }
+  if (result.summary !== undefined) return { value: result.summary, summarized: true, originalBytes }
+  return {
+    value: {
+      truncated: true,
+      originalBytes,
+      preview: utf8Prefix(JSON.stringify(value), MAX_INLINE_RESULT_BYTES),
+      note: 'The full result is retained by the runtime. Use this preview. Do not re-run the producing tool.',
+    },
+    summarized: true,
+    originalBytes,
+  }
+}
+
+export function assertDslInstructionSize(value: string): string {
+  if (Buffer.byteLength(value, 'utf8') > MAX_DSL_INSTRUCTION_BYTES) throw Object.assign(new Error('Instruction exceeds the 2 KB DSL limit.'), { code: 'INSTRUCTION_TOO_LARGE', retryable: false })
+  return value
+}
+
 export class ContextBuilder {
   readonly version = '1'
   constructor(private readonly state: RuntimeState) {}
   build(input: ContextBuildInput): LLMRequestProjection {
-    if (input.instruction.length > 2048) throw new Error('INSTRUCTION_TOO_LARGE')
+    assertDslInstructionSize(input.instruction)
     const global = input.agent.globalVersions.get(input.lane.contextSnapshotVersion)
     if (global === undefined) throw new Error('UNKNOWN_CONTEXT_VERSION')
     const resultRefs = input.resultRefs ?? []
@@ -60,15 +91,20 @@ export class ContextBuilder {
       ...effectiveResults.flatMap((item) => (item.result.privacyTaints ?? []).map((taint) => ({ path: [item.result.id, ...taint.path], privacy: taint.privacy }))),
       ...effectiveArtifacts.flatMap((item) => (item.artifact.privacyTaints ?? []).map((taint) => ({ path: [item.artifact.ref, ...taint.path], privacy: taint.privacy }))),
     ]
-    const contextSpec: LLMContextSpec = { globalSnapshotVersion: input.lane.contextSnapshotVersion, laneSnapshotVersion: input.lane.context.version, resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: input.eventIds ?? [], toolSetId: input.toolSetId, instruction: input.instruction, privacy, privacyRefs, ...(privacyTaints.length ? { privacyTaints } : {}) }
+    const conversation = input.conversation ?? []
+    const contextSpec: LLMContextSpec = { globalSnapshotVersion: input.lane.contextSnapshotVersion, laneSnapshotVersion: input.lane.context.version, resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: input.eventIds ?? [], toolSetId: input.toolSetId, instruction: input.instruction, ...(conversation.length ? { conversation: structuredClone(conversation) } : {}), privacy, privacyRefs, ...(privacyTaints.length ? { privacyTaints } : {}) }
     const prefixBlocks = [
       { kind: 'system' as const, content: input.system ?? '' },
       { kind: 'policy' as const, content: input.policy ?? {} },
       { kind: 'tools' as const, content: input.tools ?? {} },
       { kind: 'global' as const, content: global },
+      ...(conversation.length ? [{ kind: 'conversation' as const, content: structuredClone(conversation) as unknown as JsonValue }] : []),
       { kind: 'history' as const, content: input.lane.context.history.map((record) => ({ seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), instruction: record.instruction, resultRefs: record.resultRefs, ...(record.resultSelection === undefined ? {} : { resultSelection: record.resultSelection }), ...(record.result === undefined ? {} : { result: record.result }), ...(record.findings === undefined ? {} : { findings: record.findings }), output: record.output, privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: record.privacyTaints as unknown as JsonValue }) })) },
     ]
-    const blocks = [...prefixBlocks, { kind: 'lane' as const, content: input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: results.map((result) => ({ id: result.id, value: result.value ?? null, ...(result.privacyTaints === undefined ? {} : { privacyTaints: result.privacyTaints.map((taint) => ({ path: [...taint.path], privacy: taint.privacy }) as unknown as JsonValue) }) })) }, { kind: 'artifacts' as const, content: artifacts.map((artifact) => ({ ref: artifact.ref, mediaType: artifact.mediaType, sizeBytes: artifact.sizeBytes, contentHash: artifact.contentHash })) }, { kind: 'instruction' as const, content: input.instruction }]
+    const blocks = [...prefixBlocks, { kind: 'lane' as const, content: input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: results.map((result) => {
+      const projected = projectResultValue(result)
+      return { id: result.id, value: projected.value, ...(projected.summarized ? { summarized: true, ...(projected.originalBytes === undefined ? {} : { originalBytes: projected.originalBytes }) } : {}), ...(result.privacyTaints === undefined ? {} : { privacyTaints: result.privacyTaints.map((taint) => ({ path: [...taint.path], privacy: taint.privacy }) as unknown as JsonValue) }) }
+    }) }, { kind: 'artifacts' as const, content: artifacts.map((artifact) => ({ ref: artifact.ref, mediaType: artifact.mediaType, sizeBytes: artifact.sizeBytes, contentHash: artifact.contentHash })) }, { kind: 'instruction' as const, content: input.instruction }]
     return { contextSpec, blocks, prefixHash: hash(prefixBlocks), projectionHash: hash(blocks), builderVersion: this.version, policyVersion: '1', toolSetVersion: input.toolSetId, privacy, privacyRefs, ...(privacyTaints.length ? { privacyTaints } : {}) }
   }
 }

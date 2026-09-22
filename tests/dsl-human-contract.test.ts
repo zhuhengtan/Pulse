@@ -31,6 +31,17 @@ describe('DSL Human and instruction contracts', () => {
     expect(runtime.state.lanes.get(laneId)?.failure?.error.code).toBe('INSTRUCTION_TOO_LARGE')
   })
 
+  it('uses UTF-8 bytes consistently for non-ASCII instruction limits', () => {
+    const program = defineLaneProgram({ id: 'human-byte-limit', version: '1' }, (builder) => {
+      builder.addHumanStep('approve', { prompt: '你'.repeat(700), schema: z.object({ approved: z.boolean() }), onReply: () => 'done' })
+      builder.addStep('done', () => ({ actions: [{ type: 'complete', result: { done: true } }], next: 'done' }))
+    })
+    const runtime = new PulseRuntime()
+    const { laneId } = runtime.createAgent('human byte limit', program)
+    runtime.tick()
+    expect(runtime.state.lanes.get(laneId)?.failure?.error.code).toBe('INSTRUCTION_TOO_LARGE')
+  })
+
   it('does not treat a malformed human reply as a timeout', async () => {
     let timedOut = false
     const program = defineLaneProgram({ id: 'human-reply-schema', version: '1' }, (builder) => {

@@ -72,7 +72,9 @@ export class PulseSession {
       }
       const root = [...this.runtime.state.lanes.values()].find((lane) => lane.agentId === this.agentId && lane.ownerLaneId === undefined)
       if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status) && !this.hasActiveDescendant() && (this.runtime.state.events.at(-1)?.seq ?? compactedThrough) === cursor) return
-      await new Promise<void>((resolve) => setImmediate(resolve))
+      // Wait for runtime activity instead of polling with setImmediate while
+      // an external effect is still in flight.
+      await this.runtime.waitForActivity()
     }
   }
   async snapshot(): Promise<PulseSessionSnapshot> {
@@ -99,15 +101,19 @@ export class PulseSession {
   async outcome(): Promise<Outcome> { return this.execution }
   async reply(effectId: string, value: JsonValue): Promise<void> {
     const effect = this.runtime.state.effects.get(effectId)
-    if (!effect || effect.agentId !== this.agentId) throw new Error('EFFECT_NOT_OWNED')
+    if (!effect || !this.ownsAgent(effect.agentId)) throw new Error('EFFECT_NOT_OWNED')
     if (effect.kind !== 'human' || effect.outcome) throw new Error('EFFECT_NOT_REPLYABLE')
-    this.runtime.enqueueHostCommand({ type: 'reply', agentId: this.agentId, effectId, value })
+    if (!this.runtime.enqueueHostCommand({ type: 'reply', agentId: effect.agentId, effectId, value })) {
+      throw new Error('HOST_COMMAND_NOT_ENQUEUED')
+    }
   }
   /** Submit a human message while the agent is still running. The scheduler
    * records it immediately; targetEffectId is optional for direct replies to
    * a waiting Human Effect. */
   async submitHumanInput(inputId: string, value: JsonValue, targetEffectId?: string): Promise<void> {
-    this.runtime.submitHumanInput(this.agentId, inputId, value, targetEffectId)
+    if (!this.runtime.submitHumanInput(this.agentId, inputId, value, targetEffectId)) {
+      throw new Error('HOST_COMMAND_NOT_ENQUEUED')
+    }
   }
   async cancel(reason: string): Promise<void> { this.runtime.requestCancel(this.agentId, reason) }
 }

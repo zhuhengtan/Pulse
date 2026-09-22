@@ -223,6 +223,27 @@ describe('effect outbox and runtime persistence envelope', () => {
     expect(restored.state.agents.get(agentId)).toBeDefined()
   })
 
+  it('resolves a settled effect whose wait was persisted before the wait transition', async () => {
+    let saved: any
+    const backend = { load: async () => saved, save: async (snapshot: any) => { saved = structuredClone(snapshot) } }
+    const program = { id: 'restore-settled-effect-wait', version: '1', step: ({ lane }: any) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects' as const, effects: [{ key: 'work', kind: 'tool' as const, concurrencyClass: 'tool' as const, input: {} }], wait: { onUnsatisfied: 'resume_with_error' as const } }], next: { programId: 'restore-settled-effect-wait', programVersion: '1', step: 'finish', locals: {} } }
+      : { actions: [{ type: 'complete' as const, result: { done: true } }], next: { programId: 'restore-settled-effect-wait', programVersion: '1', step: 'finish', locals: {} } } }
+    const runtime = new PulseRuntime({ maxRunning: { tool: 0 } })
+    const { agentId, laneId } = runtime.createAgent('restore settled wait', program)
+    runtime.tick()
+    const effect = [...runtime.state.effects.values()][0]!
+    effect.state = 'succeeded'
+    effect.executionState = 'succeeded'
+    effect.outcome = { status: 'succeeded', resultRef: 'result-1' }
+    runtime.state.results.set('result-1', { id: 'result-1', effectId: effect.id, producer: { kind: 'effect', id: effect.id }, value: { ok: true }, privacy: 'public', derivedFrom: [], storageState: 'memory', pinCount: 0 })
+    runtime.state.nextIds.result = 2
+    await runtime.persist(backend)
+    const restored = await PulseRuntime.restore(backend, { programs: [program], maxRunning: { tool: 0 } })
+    expect(restored.state.lanes.get(laneId)?.status).toBe('waiting')
+    await expect(restored.start(agentId).outcome()).resolves.toMatchObject({ status: 'succeeded' })
+  })
+
   it('rejects malformed persistence envelopes before recovery', () => {
     expect(() => importRuntimePersistence({ schemaVersion: 1 } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
     expect(() => importRuntimePersistence({ schemaVersion: 1, state: { state: {} }, mutationLog: {}, outbox: {} } as any)).toThrow('INVALID_RUNTIME_PERSISTENCE_SNAPSHOT')
@@ -312,6 +333,36 @@ describe('effect outbox and runtime persistence envelope', () => {
     release()
     await runtime.flushPersistence()
     await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(started).toBe(true)
+  })
+
+  it('does not keep the durable dispatch gate dirty while its first flush is pending', async () => {
+    let release!: () => void
+    let pendingSave = false
+    let started = false
+    const backend = {
+      load: async () => undefined,
+      save: async (snapshot: import('@hunterzhu/pulse-runtime').RuntimePersistenceSnapshot) => {
+        if (snapshot.outbox.entries.length > 0 && !pendingSave) {
+          pendingSave = true
+          await new Promise<void>((resolve) => { release = resolve })
+        }
+      },
+    }
+    const runtime = new PulseRuntime({ persistenceBackend: backend, effectExecutor: async () => { started = true; return { value: { ok: true } } } })
+    const program = { id: 'durable-dispatch-no-starvation', version: '1', step: ({ lane }: any) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects' as const, effects: [{ key: 'work', kind: 'tool' as const, concurrencyClass: 'tool' as const, input: {} }], wait: { onUnsatisfied: 'resume_with_error' as const } }], next: { programId: 'durable-dispatch-no-starvation', programVersion: '1', step: 'done', locals: {} } }
+      : { actions: [{ type: 'complete' as const, result: { ok: true } }], next: { programId: 'durable-dispatch-no-starvation', programVersion: '1', step: 'done', locals: {} } } }
+    const { agentId } = runtime.createAgent('durable dispatch no starvation', program)
+    const session = runtime.start(agentId)
+    const deadline = Date.now() + 1_000
+    while (!pendingSave && Date.now() < deadline) await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(pendingSave).toBe(true)
+    release()
+    await expect(Promise.race([
+      session.outcome(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('DISPATCH_GATE_TIMEOUT')), 1_000)),
+    ])).resolves.toMatchObject({ status: 'succeeded' })
     expect(started).toBe(true)
   })
 
@@ -408,6 +459,31 @@ describe('effect outbox and runtime persistence envelope', () => {
       const loaded = await backend.load()
       expect(loaded?.state.state.now).toBe(2)
       expect((await readdir(directory)).filter((name) => name.includes('.tmp-'))).toEqual([])
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('persists an attached journal as a watermark instead of rewriting every mutation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-journal-watermark-'))
+    try {
+      const backend = new FileRuntimePersistenceBackend(join(directory, 'runtime.json'))
+      const runtime = new PulseRuntime({ persistenceBackend: backend })
+      runtime.createAgent('journal watermark', { id: 'journal-watermark', version: '1', step: () => ({ actions: [], next: { programId: 'journal-watermark', programVersion: '1', step: 'start', locals: {} } }) })
+      const watermark = runtime.mutationLog.lastSequence
+      expect(watermark).toBeGreaterThan(0)
+      await runtime.flushPersistence()
+      expect(runtime.mutationLog.size).toBe(0)
+      expect(runtime.mutationLog.watermark).toBe(watermark)
+      const saved = await backend.load()
+      expect(saved?.mutationLog.entries).toEqual([])
+      expect(saved?.mutationLog.baseSeq).toBe(watermark)
+      expect(saved?.state.state.agents).toHaveLength(1)
+      const explicit = new FileRuntimePersistenceBackend(join(directory, 'explicit.json'))
+      const detached = new PulseRuntime()
+      detached.createAgent('detached journal', { id: 'detached-journal', version: '1', step: () => ({ actions: [], next: { programId: 'detached-journal', programVersion: '1', step: 'start', locals: {} } }) })
+      const retained = detached.mutationLog.size
+      await detached.persist(explicit)
+      expect(detached.mutationLog.size).toBe(retained)
+      expect((await explicit.load())?.mutationLog.entries).toHaveLength(retained)
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
