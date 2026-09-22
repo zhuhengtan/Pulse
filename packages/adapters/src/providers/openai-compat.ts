@@ -1,5 +1,5 @@
 import type { JsonValue, LLMRequestProjection } from '@hunterzhu/pulse-runtime'
-import { consumeProviderSse, normalizeOpenAIResponse, parseProviderJson, providerHttpError, providerNetworkError } from './normalize.js'
+import { consumeProviderSse, normalizeOpenAIResponse, parseProviderJson, providerHttpErrorFromResponse, providerNetworkError } from './normalize.js'
 import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
 export class OpenAICompatibleAdapter implements ProviderAdapter {
   readonly name = 'OpenAI Compatible'
@@ -7,12 +7,12 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   constructor(readonly id: string, private readonly config: ProviderPresetConfig) { this.baseURL = config.baseURL ?? 'https://api.openai.com/v1' }
   async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number }) {
     const streaming = params.onObservation !== undefined
-    const tools = toolDefinitions(params.request)
+    const { definitions: tools, aliases: toolNameAliases } = toolDefinitions(params.request)
     const body: Record<string, unknown> = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), ...((params.maxOutputTokens ?? this.config.maxOutputTokens) === undefined ? {} : { max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens }), messages: toMessages(params.request), ...(tools.length ? { tools, ...(this.config.toolChoice === undefined ? {} : { tool_choice: this.config.toolChoice }) } : {}), ...(params.outputSchema === undefined ? {} : { response_format: { type: 'json_schema', json_schema: { name: 'pulse_output', strict: true, schema: params.outputSchema } } }), ...(streaming ? { stream: true, stream_options: { include_usage: true } } : {}) }
     try {
       const response = await fetch(`${this.baseURL.replace(/\/$/, '')}/chat/completions`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}), ...(this.config.extraHeaders ?? {}) }, body: JSON.stringify(body) })
-      if (!response.ok) throw providerHttpError(response.status)
-      if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeOpenAIResponse(await parseProviderJson(response))
+      if (!response.ok) throw await providerHttpErrorFromResponse(response)
+      if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeOpenAIResponse(await parseProviderJson(response), toolNameAliases)
       const events = await consumeProviderSse(response)
       const content: string[] = []
       const refusals: string[] = []
@@ -36,7 +36,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         }
         if (event.data.usage !== undefined) usage = event.data.usage
       }
-      return normalizeOpenAIResponse({ choices: [{ message: { content: content.join('') || null, ...(refusals.length ? { refusal: refusals.join('') } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => ({ id: call.id, function: { name: call.name, arguments: call.arguments } })) } : {}) }, finish_reason: finishReason ?? 'stop' }], ...(usage === undefined ? {} : { usage }) })
+      return normalizeOpenAIResponse({ choices: [{ message: { content: content.join('') || null, ...(refusals.length ? { refusal: refusals.join('') } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => ({ id: call.id, function: { name: call.name, arguments: call.arguments } })) } : {}) }, finish_reason: finishReason ?? 'stop' }], ...(usage === undefined ? {} : { usage }) }, toolNameAliases)
     } catch (cause) {
       if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
       if (cause instanceof Error && 'code' in cause && typeof (cause as { code?: unknown }).code === 'string' && 'retryable' in cause && typeof (cause as { retryable?: unknown }).retryable === 'boolean') throw cause
@@ -58,9 +58,21 @@ function toMessages(request: LLMRequestProjection) {
   return toOpenAIMessages(request)
 }
 
-function toolDefinitions(request: LLMRequestProjection): Array<{ type: 'function'; function: { name: string; description?: string; parameters: JsonValue } }> {
+function toolDefinitions(request: LLMRequestProjection): { definitions: Array<{ type: 'function'; function: { name: string; description?: string; parameters: JsonValue } }>; aliases: ReadonlyMap<string, string> } {
   const block = request.blocks.find((candidate) => candidate.kind === 'tools')
   const content = block?.content
   const values: JsonValue[] = Array.isArray(content) ? content : content && typeof content === 'object' && !Array.isArray(content) && Array.isArray((content as Record<string, JsonValue>).tools) ? (content as Record<string, JsonValue>).tools as JsonValue[] : []
-  return values.filter((value): value is Record<string, JsonValue> => typeof value === 'object' && value !== null && !Array.isArray(value) && typeof value.name === 'string').map((value) => ({ type: 'function', function: { name: value.name as string, ...(typeof value.description === 'string' ? { description: value.description } : {}), parameters: (value.inputSchema ?? value.parameters ?? {}) as JsonValue } }))
+  const aliases = new Map<string, string>()
+  const used = new Set<string>()
+  const definitions = values.filter((value): value is Record<string, JsonValue> => typeof value === 'object' && value !== null && !Array.isArray(value) && typeof value.name === 'string').map((value, index) => {
+    const originalName = value.name as string
+    const baseName = originalName.replace(/[^a-zA-Z0-9_-]/g, '_') || `tool_${index + 1}`
+    let providerName = baseName
+    let suffix = 2
+    while (used.has(providerName)) providerName = `${baseName}_${suffix++}`
+    used.add(providerName)
+    aliases.set(providerName, originalName)
+    return { type: 'function' as const, function: { name: providerName, ...(typeof value.description === 'string' ? { description: value.description } : {}), parameters: (value.inputSchema ?? value.parameters ?? {}) as JsonValue } }
+  })
+  return { definitions, aliases }
 }

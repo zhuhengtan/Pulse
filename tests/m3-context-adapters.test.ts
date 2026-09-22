@@ -88,6 +88,16 @@ describe('M1-3 context, models and adapters', () => {
     vi.unstubAllGlobals()
   })
 
+  it('maps workspace tool names to provider-safe OpenAI function names and restores them in tool calls', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => new Response(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [{ function: { name: 'fs_read', arguments: '{"path":"README.md"}' } }] }, finish_reason: 'tool_calls' }] }), { headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const request = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'provider-tool-name@1', instruction: 'inspect', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'tools' as const, content: [{ name: 'fs.read', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } }] }, { kind: 'instruction' as const, content: 'inspect' }], prefixHash: 'provider-tool-name-prefix', projectionHash: 'provider-tool-name-projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'provider-tool-name@1', privacy: 'public' as const, privacyRefs: [] }
+    const result = await new OpenAICompatibleAdapter('deepseek', { provider: 'deepseek', defaultModel: 'deepseek-flash' }).executeAttempt({ request, signal: new AbortController().signal })
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).tools[0].function.name).toBe('fs_read')
+    expect(result.toolCalls[0]).toMatchObject({ name: 'fs.read', input: { path: 'README.md' } })
+    vi.unstubAllGlobals()
+  })
+
   it('classifies Provider HTTP failures so authentication does not become retryable fallback', async () => {
     const request = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'http-error@1', instruction: 'error', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'instruction' as const, content: 'error' }], prefixHash: 'http-error-prefix', projectionHash: 'http-error-projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'http-error@1', privacy: 'public' as const, privacyRefs: [] }
     const fetchMock = vi.fn(async () => ({ ok: false, status: 401, headers: new Headers(), json: async () => ({}) }) as Response)
@@ -96,6 +106,13 @@ describe('M1-3 context, models and adapters', () => {
     await expect(new AnthropicAdapter('anthropic-auth-error', { provider: 'anthropic' }).executeAttempt({ request, signal: new AbortController().signal })).rejects.toMatchObject({ code: 'PROVIDER_HTTP_401', retryable: false })
     fetchMock.mockResolvedValue({ ok: false, status: 503, headers: new Headers(), json: async () => ({}) } as Response)
     await expect(new OpenAICompatibleAdapter('openai-server-error', { provider: 'openai' }).executeAttempt({ request, signal: new AbortController().signal })).rejects.toMatchObject({ code: 'PROVIDER_HTTP_503', retryable: true })
+    vi.unstubAllGlobals()
+  })
+
+  it('preserves the provider error detail for HTTP failures without exposing the full body', async () => {
+    const request = { contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'http-detail@1', instruction: 'error', privacy: 'public' as const, privacyRefs: [] }, blocks: [{ kind: 'instruction' as const, content: 'error' }], prefixHash: 'http-detail-prefix', projectionHash: 'http-detail-projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'http-detail@1', privacy: 'public' as const, privacyRefs: [] }
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { message: 'Model does not exist', type: 'invalid_request_error', code: 'model_not_found', secret: 'must-not-be-copied' } }), { status: 400, headers: { 'content-type': 'application/json' } })))
+    await expect(new OpenAICompatibleAdapter('openai-detail', { provider: 'openai' }).executeAttempt({ request, signal: new AbortController().signal })).rejects.toMatchObject({ code: 'PROVIDER_HTTP_400', message: 'PROVIDER_HTTP_400: Model does not exist | invalid_request_error | model_not_found' })
     vi.unstubAllGlobals()
   })
 

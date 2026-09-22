@@ -2,9 +2,41 @@ import type { LLMResult } from '@hunterzhu/pulse-runtime'
 
 export interface ProviderSseEvent { event?: string; data: any }
 
-export function providerHttpError(status: number): Error & { code: string; retryable: boolean } {
+export function providerHttpError(status: number, detail?: string): Error & { code: string; retryable: boolean } {
   const retryable = status === 408 || status === 425 || status === 429 || status >= 500
-  return Object.assign(new Error(`PROVIDER_HTTP_${status}`), { code: `PROVIDER_HTTP_${status}`, retryable })
+  const suffix = detail === undefined || detail.length === 0 ? '' : `: ${detail}`
+  return Object.assign(new Error(`PROVIDER_HTTP_${status}${suffix}`), { code: `PROVIDER_HTTP_${status}`, retryable })
+}
+
+/** Preserve the provider's actionable error message without copying arbitrary response bodies into logs. */
+export async function providerHttpErrorFromResponse(response: Response): Promise<Error & { code: string; retryable: boolean }> {
+  let raw = ''
+  try { raw = typeof response.text === 'function' ? await response.text() : '' } catch { /* keep the status-only error */ }
+  return providerHttpError(response.status, summarizeProviderError(raw))
+}
+
+function summarizeProviderError(raw: string): string | undefined {
+  if (!raw.trim()) return undefined
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const root = parsed as Record<string, unknown>
+      const error = root.error
+      if (typeof error === 'string') return truncateProviderDetail(error)
+      if (error && typeof error === 'object' && !Array.isArray(error)) {
+        const value = error as Record<string, unknown>
+        const fields = [value.message, value.type, value.code, value.param].filter((field): field is string => typeof field === 'string' && field.length > 0)
+        if (fields.length > 0) return truncateProviderDetail(fields.join(' | '))
+      }
+      const message = root.message
+      if (typeof message === 'string' && message.length > 0) return truncateProviderDetail(message)
+    }
+  } catch { /* fall back to a bounded plain-text detail */ }
+  return truncateProviderDetail(raw.replace(/\s+/g, ' ').trim())
+}
+
+function truncateProviderDetail(value: string): string {
+  return value.length <= 500 ? value : `${value.slice(0, 497)}...`
 }
 
 export function providerNetworkError(cause: unknown): Error & { code: string; retryable: boolean } {
@@ -61,12 +93,12 @@ export async function consumeProviderSse(response: Response): Promise<ProviderSs
   return events
 }
 
-export function normalizeOpenAIResponse(response: any): LLMResult {
+export function normalizeOpenAIResponse(response: any, toolNameAliases?: ReadonlyMap<string, string>): LLMResult {
   const root = providerRecord(response, 'OpenAI response')
   if (!Array.isArray(root.choices) || root.choices.length === 0) throw providerResponseError('OpenAI response must contain at least one choice')
   const choice = providerRecord(root.choices[0], 'OpenAI choice')
   const message = providerRecord(choice.message, 'OpenAI message')
-  const toolCalls = message.tool_calls === undefined ? [] : normalizeOpenAIToolCalls(message.tool_calls)
+  const toolCalls = message.tool_calls === undefined ? [] : normalizeOpenAIToolCalls(message.tool_calls, toolNameAliases)
   const refusal = message.refusal === undefined ? undefined : requiredProviderString(message.refusal, 'OpenAI refusal')
   const text = providerText(message.content, 'OpenAI message content')
   const finishReason = normalizeOpenAIFinishReason(choice.finish_reason, refusal, toolCalls.length > 0)
@@ -137,12 +169,13 @@ function normalizeCost(raw: unknown, provider: string): NonNullable<LLMResult['u
   return { amount: value.amount, currency: value.currency, source: 'reported', ...(value.pricing_version === undefined ? {} : { pricingVersion: value.pricing_version }) }
 }
 
-function normalizeOpenAIToolCalls(raw: unknown): Array<{ toolCallId: string; name: string; input: unknown }> {
+function normalizeOpenAIToolCalls(raw: unknown, toolNameAliases?: ReadonlyMap<string, string>): Array<{ toolCallId: string; name: string; input: unknown }> {
   if (!Array.isArray(raw)) throw providerResponseError('OpenAI tool_calls must be an array')
   return raw.map((call: unknown, index: number) => {
     const value = providerRecord(call, 'OpenAI tool call')
     const fn = providerRecord(value.function, 'OpenAI tool function')
-    return { toolCallId: `pulse-tool-${index + 1}`, name: requiredProviderString(fn.name, 'OpenAI tool name'), input: parseJson(fn.arguments) }
+    const providerName = requiredProviderString(fn.name, 'OpenAI tool name')
+    return { toolCallId: `pulse-tool-${index + 1}`, name: toolNameAliases?.get(providerName) ?? providerName, input: parseJson(fn.arguments) }
   })
 }
 
