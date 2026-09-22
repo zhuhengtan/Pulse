@@ -64,6 +64,8 @@ export interface RunHandle {
   outcome(): Promise<Outcome & { text?: string }>
   cancel(reason?: string): Promise<void>
   reply(effectId: string, value: JsonValue): Promise<void>
+  /** Submit a human message while this run is active. */
+  submitHumanInput(text: string, targetEffectId?: string): Promise<void>
 }
 export interface ConversationHandle { readonly id: string; readonly summary: ConversationSummary }
 
@@ -383,9 +385,31 @@ export class LocalHost {
   }
   private makeRunHandle(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession): RunHandle {
     let finalized: Promise<Outcome & { text?: string }> | undefined
-    const finish = (): Promise<Outcome & { text?: string }> => finalized ??= (async () => { const outcome = await session.outcome(); const text = this.resultText(runtime, outcome.resultRef); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'assistant', text: text ?? '', runId, createdAt: new Date().toISOString() }); const current = await this.readManifest(conversationId); const artifacts = [...runtime.state.results.values()].flatMap((result) => { const value = result.value; if (!value || typeof value !== 'object' || Array.isArray(value)) return []; const record = value as Record<string, JsonValue>; if (typeof record.path !== 'string' || typeof record.hash !== 'string' || typeof record.bytes !== 'number') return []; return [{ path: record.path, hash: record.hash, bytes: record.bytes, ...(typeof record.mediaType === 'string' ? { mediaType: record.mediaType } : {}), ...(typeof record.label === 'string' ? { label: record.label } : {}), runId }] as ArtifactSummary[] }); current.artifacts = [...(current.artifacts ?? []).filter((item) => item.runId !== runId), ...artifacts]; if (current.activeRunId === runId) delete current.activeRunId; current.updatedAt = new Date().toISOString(); await writeFile(this.manifestPath(conversationId), JSON.stringify(current, null, 2)); this.active.delete(runId); this.approvedToolCalls.delete(runId); await runtime.flushPersistence(); await writeFile(join(this.runDir(conversationId, runId), 'outcome.json'), JSON.stringify({ schemaVersion: 1, ...outcome, ...(text === undefined ? {} : { text }), completedAt: new Date().toISOString() }, null, 2)); return { ...outcome, ...(text === undefined ? {} : { text }) } })().finally(async () => { await this.releaseConversationLock(conversationId) })
-    const events = this.projectEvents(conversationId, runId, session, finish)
-    return { id: runId, conversationId, events, outcome: finish, cancel: async (reason = 'USER_REQUESTED') => { await session.cancel(reason) }, reply: async (effectId, value) => { const effect = runtime.state.effects.get(effectId); const approved = value && typeof value === 'object' && !Array.isArray(value) && (value as Record<string, JsonValue>).approved === true; if (approved && effect?.kind === 'human' && effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input)) { const calls = (effect.input as Record<string, JsonValue>).tools; if (Array.isArray(calls)) { const approvedIds = this.approvedToolCalls.get(runId) ?? new Set<string>(); this.approvedToolCalls.set(runId, approvedIds); for (const call of calls) if (call && typeof call === 'object' && !Array.isArray(call) && typeof (call as Record<string, JsonValue>).toolCallId === 'string') approvedIds.add((call as Record<string, JsonValue>).toolCallId as string) } } await session.reply(effectId, value) } }
+    const finish = (): Promise<Outcome & { text?: string }> => finalized ??= (async () => {
+      const outcome = await session.outcome()
+      const text = this.resultText(runtime, outcome.resultRef)
+      // A free-form human input runs as a detached child Agent. Its answer is
+      // part of the same user-visible run, but it is not the root Outcome.
+      // Persist each child answer before the root answer so a restored
+      // conversation has the same order the user saw in the event stream.
+      for (const child of this.interactionResultTexts(runtime, session.agentId)) {
+        await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'assistant', text: child.text, runId, createdAt: new Date().toISOString() })
+      }
+      if (text !== undefined) await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'assistant', text, runId, createdAt: new Date().toISOString() })
+      const current = await this.readManifest(conversationId)
+      const artifacts = [...runtime.state.results.values()].flatMap((result) => { const value = result.value; if (!value || typeof value !== 'object' || Array.isArray(value)) return []; const record = value as Record<string, JsonValue>; if (typeof record.path !== 'string' || typeof record.hash !== 'string' || typeof record.bytes !== 'number') return []; return [{ path: record.path, hash: record.hash, bytes: record.bytes, ...(typeof record.mediaType === 'string' ? { mediaType: record.mediaType } : {}), ...(typeof record.label === 'string' ? { label: record.label } : {}), runId }] as ArtifactSummary[] })
+      current.artifacts = [...(current.artifacts ?? []).filter((item) => item.runId !== runId), ...artifacts]
+      if (current.activeRunId === runId) delete current.activeRunId
+      current.updatedAt = new Date().toISOString()
+      await writeFile(this.manifestPath(conversationId), JSON.stringify(current, null, 2))
+      this.active.delete(runId)
+      this.approvedToolCalls.delete(runId)
+      await runtime.flushPersistence()
+      await writeFile(join(this.runDir(conversationId, runId), 'outcome.json'), JSON.stringify({ schemaVersion: 1, ...outcome, ...(text === undefined ? {} : { text }), completedAt: new Date().toISOString() }, null, 2))
+      return { ...outcome, ...(text === undefined ? {} : { text }) }
+    })().finally(async () => { await this.releaseConversationLock(conversationId) })
+    const events = this.projectEvents(conversationId, runId, runtime, session, finish)
+    return { id: runId, conversationId, events, outcome: finish, cancel: async (reason = 'USER_REQUESTED') => { await session.cancel(reason) }, reply: async (effectId, value) => { const effect = runtime.state.effects.get(effectId); const approved = value && typeof value === 'object' && !Array.isArray(value) && (value as Record<string, JsonValue>).approved === true; if (approved && effect?.kind === 'human' && effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input)) { const calls = (effect.input as Record<string, JsonValue>).tools; if (Array.isArray(calls)) { const approvedIds = this.approvedToolCalls.get(runId) ?? new Set<string>(); this.approvedToolCalls.set(runId, approvedIds); for (const call of calls) if (call && typeof call === 'object' && !Array.isArray(call) && typeof (call as Record<string, JsonValue>).toolCallId === 'string') approvedIds.add((call as Record<string, JsonValue>).toolCallId as string) } } await session.reply(effectId, value) }, submitHumanInput: async (text, targetEffectId) => { if (!text.trim()) throw new Error('MESSAGE_REQUIRED'); const inputId = `human-${randomUUID()}`; await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text, runId, createdAt: new Date().toISOString() }); await session.submitHumanInput(inputId, { text }, targetEffectId) } }
   }
   async sendMessage(conversationId: string, input: UserMessageInput): Promise<RunHandle> {
     if (!input.text.trim()) throw new Error('MESSAGE_REQUIRED')
@@ -397,7 +421,7 @@ export class LocalHost {
     const goal = context ? `Conversation context:\n${context}\n\nuser: ${input.text}` : input.text
     const now = new Date().toISOString(); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal: input.text, cwd: manifest.cwd, provider: this.options.provider?.provider ?? 'mock', approvalMode: this.options.approvalMode ?? 'ask', createdAt: now }, null, 2))
     if (!context) manifest.title = input.text.length > 50 ? input.text.slice(0, 50) + '...' : input.text;
-    const { runtime, registry } = this.runtimeFor(conversationId, runId, manifest.cwd); const program = buildProgram(registry.list().map((tool) => tool.name), manifest.cwd)(this.options.approvalMode ?? 'ask'); runtime.register(program); const { agentId } = runtime.createAgent({ goal, program }); const session = runtime.start(agentId); this.active.set(runId, { runtime, session, conversationId, runId }); manifest.activeRunId = runId; manifest.runs.push(runId); manifest.updatedAt = now; await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
+    const { runtime, registry } = this.runtimeFor(conversationId, runId, manifest.cwd); const program = buildProgram(registry.list().map((tool) => tool.name), manifest.cwd)(this.options.approvalMode ?? 'ask'); runtime.register(program); runtime.setHumanInputProgram(program); const { agentId } = runtime.createAgent({ goal, program }); const session = runtime.start(agentId); this.active.set(runId, { runtime, session, conversationId, runId }); manifest.activeRunId = runId; manifest.runs.push(runId); manifest.updatedAt = now; await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
     return this.makeRunHandle(conversationId, runId, runtime, session)
     } catch (error) { await this.releaseConversationLock(conversationId); throw error }
   }
@@ -409,8 +433,10 @@ export class LocalHost {
     if (existing) return this.makeRunHandle(conversationId, runId, existing.runtime, existing.session)
     await this.acquireConversationLock(conversationId, runId)
     try {
-      const { runtime } = await this.restoreRuntimeFor(conversationId, runId, manifest.cwd)
-      const agent = [...runtime.state.agents.values()][0]
+    const { runtime, registry } = await this.restoreRuntimeFor(conversationId, runId, manifest.cwd)
+      const interactionProgram = buildProgram(registry.list().map((tool) => tool.name), manifest.cwd)(this.options.approvalMode ?? 'ask')
+      runtime.setHumanInputProgram(interactionProgram)
+      const agent = [...runtime.state.agents.values()].find((candidate) => candidate.parentAgentId === undefined)
       if (!agent) throw new Error('RESTORED_AGENT_NOT_FOUND')
       const session = runtime.start(agent.id)
       this.active.set(runId, { runtime, session, conversationId, runId })
@@ -429,6 +455,21 @@ export class LocalHost {
     }
   }
   private resultText(runtime: PulseRuntime, ref: string | undefined): string | undefined { if (!ref) return undefined; const first = runtime.state.results.get(ref)?.value; if (typeof first === 'string') return first; if (!first || typeof first !== 'object' || Array.isArray(first)) return JSON.stringify(first); const firstRecord = first as Record<string, JsonValue>; const textRef = firstRecord.textRef; const value = typeof textRef === 'string' ? runtime.state.results.get(textRef)?.value : first; if (typeof value === 'string') return value; if (value && typeof value === 'object' && !Array.isArray(value) && typeof (value as Record<string, JsonValue>).text === 'string') return (value as Record<string, JsonValue>).text as string; return value === undefined ? undefined : JSON.stringify(value, null, 2) }
+  private interactionResultTexts(runtime: PulseRuntime, rootAgentId: string): Array<{ agentId: string; text: string }> {
+    const descendants = new Set<string>()
+    const visit = (parentId: string): void => {
+      for (const agent of runtime.state.agents.values()) {
+        if (agent.parentAgentId !== parentId || descendants.has(agent.id)) continue
+        descendants.add(agent.id)
+        visit(agent.id)
+      }
+    }
+    visit(rootAgentId)
+    return [...runtime.state.agents.values()]
+      .filter((agent) => descendants.has(agent.id))
+      .map((agent) => ({ agentId: agent.id, text: this.resultText(runtime, runtime.state.lanes.get(agent.rootLaneId)?.resultRef) }))
+      .filter((item): item is { agentId: string; text: string } => item.text !== undefined && item.text.length > 0)
+  }
   private toolSettlementObservation(runId: string, effectId: string, data: JsonValue | undefined): JsonValue | undefined {
     const effect = this.active.get(runId)?.runtime.state.effects.get(effectId)
     if (effect?.kind !== 'tool') return undefined
@@ -439,13 +480,17 @@ export class LocalHost {
     const args = input.arguments && typeof input.arguments === 'object' && !Array.isArray(input.arguments) ? input.arguments : {}
     return { tool: input.name, toolCallId: effect.toolCallId ?? effectId, args, status, ...(outcome.error === undefined ? {} : { result: outcome.error }) }
   }
-  private async *projectEvents(conversationId: string, runId: string, session: PulseSession, finish: () => Promise<Outcome & { text?: string }>): AsyncIterable<AssistantEvent> {
+  private async *projectEvents(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, finish: () => Promise<Outcome & { text?: string }>): AsyncIterable<AssistantEvent> {
     let seq = 0
+    const textAgents = new Set<string>()
     for await (const event of session.stream()) {
       seq++
       if (event.kind === 'observation') {
         const observation = event.observation as Record<string, JsonValue>
-        if (observation.type === 'chunk') yield { schemaVersion: 1, type: 'text', conversationId, runId, seq, data: observation.data ?? '' }
+        if (observation.type === 'chunk') {
+          if (typeof observation.agentId === 'string') textAgents.add(observation.agentId)
+          yield { schemaVersion: 1, type: 'text', conversationId, runId, seq, data: observation.data ?? '' }
+        }
         else yield { schemaVersion: 1, type: 'observation', conversationId, runId, seq, data: event.observation ?? null }
         continue
       }
@@ -470,6 +515,20 @@ export class LocalHost {
     }
     try {
       const outcome = await finish()
+      // Some adapters only return a final LLM message and do not stream
+      // observations. Project that result here so CLI/web clients still get a
+      // visible answer. Child interaction Agents use the same fallback and
+      // are emitted before the root answer in creation order.
+      const agentTexts = [
+        ...this.interactionResultTexts(runtime, session.agentId),
+        ...(outcome.text === undefined ? [] : [{ agentId: session.agentId, text: outcome.text }]),
+      ]
+      for (const item of agentTexts) {
+        if (textAgents.has(item.agentId) || item.text.length === 0) continue
+        seq++
+        textAgents.add(item.agentId)
+        yield { schemaVersion: 1, type: 'text', conversationId, runId, seq, data: item.text }
+      }
       yield { schemaVersion: 1, type: 'complete', conversationId, runId, seq: seq + 1, data: { status: outcome.status } }
     } catch (error) {
       yield { schemaVersion: 1, type: 'error', conversationId, runId, seq: seq + 1, data: String(error) }

@@ -10,6 +10,7 @@ const COMMANDS = [
       { name: '/tools', desc: '列出可用工具' },
       { name: '/artifacts', desc: '查看当前产物列表' },
       { name: '/exit, /quit', desc: '退出 CLI' },
+      { name: '/cancel, /stop', desc: '取消当前运行并保留会话' },
     ],
   },
   {

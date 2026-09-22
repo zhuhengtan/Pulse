@@ -111,6 +111,8 @@ export interface LaneRecord {
   resume: ResumePoint
   series?: SeriesLaneSpec
   pendingResumeInput?: ResumeInput
+  /** Human messages steered into this lane while it was executing or waiting. */
+  pendingHumanInputs?: HumanInputRecord[]
   /** Control proposals that arrived while another ResumeInput occupied the slot. */
   pendingControlProposals?: ControlProposal[]
   contextSnapshotVersion: ContextVersion
@@ -277,6 +279,7 @@ export type ControlProposal = { type: 'cancel_lane'; laneId: LaneId; reason: str
 export type ResumeInput =
   | { type: 'wait'; resolution: WaitResolution }
   | { type: 'submitted'; targets: Record<string, TargetRef> }
+  | { type: 'human'; input: HumanInputRecord }
   | { type: 'control_error'; error: RuntimeError; original?: ResumeInput }
   | { type: 'control_proposal'; proposals: ControlProposal[] }
 
@@ -498,6 +501,7 @@ export interface RuntimeState {
   artifacts: Map<ArtifactRef, ArtifactRecord>
   toolCallCorrelations: Map<string, ToolCallCorrelation>
   mergeProposals: Map<string, MergeProposal>
+  humanInputs: Map<string, HumanInputRecord>
   events: RuntimeEvent[]
   eventsCompactedThrough?: number
   nextIds: { agent: number; lane: number; effect: number; wait: number; result: number; artifact: number; proposal: number; event: number }
@@ -569,8 +573,23 @@ export interface ToolCallCorrelation {
   resultRef?: ResultRef
 }
 
+/** Durable external input accepted while other Effects are still running. */
+export interface HumanInputRecord {
+  id: string
+  agentId: AgentId
+  value: JsonValue
+  receivedAt: number
+  status: 'pending' | 'consumed' | 'deferred'
+  targetEffectId?: EffectId
+  handledByLaneId?: LaneId
+  decision?: 'respond' | 'steer' | 'spawn' | 'defer' | 'cancel'
+  decisionReason?: string
+  decisionModelId?: string
+  decidedAt?: number
+}
+
 export function createRuntimeState(maxTotalLanes = 64, options: { maxQueuedEffects?: number; maxRunning?: Partial<Record<ConcurrencyClass, number>>; forkAffinity?: ForkAffinityMode; historySoftTokens?: number; historyHardTokens?: number; maxResultSummaryBytes?: number; trustedSanitizerIds?: Iterable<string> } = {}): RuntimeState {
-  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), artifacts: new Map(), toolCallCorrelations: new Map(), mergeProposals: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, artifact: 1, proposal: 1, event: 1 }, maxTotalLanes, maxQueuedEffects: options.maxQueuedEffects ?? 256, maxRunning: { llm: 4, tool: 16, agent: 4, none: Number.POSITIVE_INFINITY, ...(options.maxRunning ?? {}) }, forkAffinity: options.forkAffinity ?? 'advise', historySoftTokens: options.historySoftTokens ?? 8_000, historyHardTokens: options.historyHardTokens ?? 16_000, maxResultSummaryBytes: options.maxResultSummaryBytes ?? 4_096, trustedSanitizerIds: new Set(options.trustedSanitizerIds ?? []) }
+  return { now: 0, agents: new Map(), lanes: new Map(), effects: new Map(), waits: new Map(), results: new Map(), artifacts: new Map(), toolCallCorrelations: new Map(), mergeProposals: new Map(), humanInputs: new Map(), events: [], nextIds: { agent: 1, lane: 1, effect: 1, wait: 1, result: 1, artifact: 1, proposal: 1, event: 1 }, maxTotalLanes, maxQueuedEffects: options.maxQueuedEffects ?? 256, maxRunning: { llm: 4, tool: 16, agent: 4, none: Number.POSITIVE_INFINITY, ...(options.maxRunning ?? {}) }, forkAffinity: options.forkAffinity ?? 'advise', historySoftTokens: options.historySoftTokens ?? 8_000, historyHardTokens: options.historyHardTokens ?? 16_000, maxResultSummaryBytes: options.maxResultSummaryBytes ?? 4_096, trustedSanitizerIds: new Set(options.trustedSanitizerIds ?? []) }
 }
 
 export function privacyRank(label: PrivacyLabel): number { return label === 'public' ? 0 : label === 'cloud_allowed' ? 1 : 2 }

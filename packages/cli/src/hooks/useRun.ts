@@ -7,6 +7,28 @@ function toolStatus(value: unknown): ToolCallDisplay['status'] {
   return 'running';
 }
 
+export function describeFactStatus(data: unknown): string {
+  if (typeof data === 'string') {
+    if (data === 'human.input.received') return '已收到你的输入，正在安排处理...';
+    if (data === 'human.input.dispatched') return '已安排优先处理你的输入...';
+    if (data === 'human.input.deferred') return '输入已记录，将在当前副作用安全收尾后处理...';
+    return data;
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return '正在执行...';
+  const payload = data as Record<string, unknown>;
+  const decision = payload.decision ?? payload.action;
+  if (typeof payload.inputId === 'string' && decision === undefined) {
+    return '已收到你的输入，调度器正在决定如何处理...';
+  }
+  if (decision === 'spawn') return '已启动优先交互任务，正在处理你的输入...';
+  if (decision === 'respond') return '已收到回复，正在继续当前任务...';
+  if (decision === 'steer') return '正在根据你的输入调整当前任务...';
+  if (decision === 'cancel') return '正在按你的输入取消相关任务...';
+  if (decision === 'defer') return '输入已记录，等待安全时机处理...';
+  if (typeof payload.reason === 'string') return `输入处理暂缓：${payload.reason}`;
+  return '正在执行...';
+}
+
 export function useRun({
   host,
   conversationId,
@@ -100,11 +122,7 @@ export function useRun({
             break;
           }
           case 'fact':
-            if (typeof event.data === 'string') {
-              setCurrentStep(event.data);
-            } else if (event.data && typeof event.data === 'object') {
-              setCurrentStep('正在执行...');
-            }
+            setCurrentStep(describeFactStatus(event.data));
             break;
           case 'error':
             setError(String(event.data ?? '发生未知错误'));
@@ -131,7 +149,17 @@ export function useRun({
 
   const sendMessage = useCallback(
     async (text: string) => {
-      if (!host || !conversationId || runRef.current) return;
+      if (!host || !conversationId) return;
+      if (runRef.current) {
+        try {
+          await runRef.current.submitHumanInput(text);
+          setError(null);
+          setCurrentStep('已接收输入，调度器正在决定如何处理...');
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+        return;
+      }
       setIsRunning(true);
       setError(null);
       setCurrentStep('思考中...');

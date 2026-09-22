@@ -21,6 +21,23 @@ describe('local CLI application host', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('accepts a human message while the main run is active', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-human-input-'))
+    try {
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), mockResponse: 'main result' })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'start the main task' })
+      await run.submitHumanInput('please handle this urgently')
+      const events = []
+      for await (const event of run.events) events.push(event)
+      expect(events.some((event) => event.type === 'fact' && event.data && typeof event.data === 'object' && (event.data as Record<string, unknown>).inputId !== undefined)).toBe(true)
+      expect(events.some((event) => event.type === 'text' && event.data === 'main result')).toBe(true)
+      const messages = await host.getConversationMessages(conversation.id)
+      expect(messages.some((message) => message.role === 'assistant' && message.text === 'main result')).toBe(true)
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('keeps read-only mode explicit in the diagnostic surface', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-doctor-'))
     try {

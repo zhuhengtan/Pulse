@@ -8,6 +8,7 @@ export interface SlashCommandDependencies {
   onArtifacts?: () => void | Promise<void>;
   onExit?: () => void | Promise<void>;
   onQuit?: () => void | Promise<void>;
+  onCancel?: () => void | Promise<void>;
   onNew?: () => void | Promise<void>;
   onSessions?: () => void | Promise<void>;
   onDelete?: (args: string) => void | Promise<void>;
@@ -30,6 +31,7 @@ export function useSlashCommands(deps: SlashCommandDependencies) {
       { name: '/artifacts', description: '查看当前产物', execute: async () => deps.onArtifacts?.() },
       { name: '/exit', description: '退出程序', execute: async () => deps.onExit?.() },
       { name: '/quit', aliases: ['/q'], description: '退出程序', execute: async () => deps.onQuit?.() },
+      { name: '/cancel', aliases: ['/stop'], description: '取消当前运行（保留会话）', execute: async () => deps.onCancel?.() },
       { name: '/new', description: '开启新会话', execute: async () => deps.onNew?.() },
       { name: '/sessions', description: '查看所有会话', execute: async () => deps.onSessions?.() },
       { name: '/delete', description: '删除会话 [id]', execute: async (args) => deps.onDelete?.(args) },

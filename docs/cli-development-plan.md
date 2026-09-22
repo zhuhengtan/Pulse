@@ -185,12 +185,12 @@ pulse resume <conversation-id> "继续上次任务"
 # `resume --last` 与无 task 的恢复入口仍是后续扩展
 ```
 
-交互命令控制在少量高频功能：`/help`、`/tools`、`/status`、`/artifacts`、`/exit`。每次普通输入都会在同一个 Conversation 中创建新的 Run，继续保留当前目录下的多轮上下文。
+交互命令控制在少量高频功能：`/help`、`/tools`、`/status`、`/artifacts`、`/cancel`、`/exit`。空闲时普通输入会在同一个 Conversation 中创建新的 Run；运行中输入会进入当前 Runtime 的 Human 输入通道，不再静默丢弃或强制等待当前 Run 结束。
 
 默认画面展示：工作目录、模型、权限模式；助手文本；当前动作与耗时；精简工具结果；产物路径；最终状态与用量。Lane/Effect/Attempt 等详情仅在 debug 视图出现。
 
-- 支持中文、粘贴、多行输入、命令历史和终端宽度变化；执行期间先允许取消和回复问答，不承诺任意时刻修改在途目标。
-- 同一 Conversation 首版只允许一个活动 Run；忙碌时提示等待或取消，不静默丢弃新输入。
+- 支持中文、粘贴、多行输入、命令历史和终端宽度变化；执行期间保持输入框可用，取消、审批和普通 Human 输入走不同的控制路径；`/cancel` 和终端 Escape 只取消当前 Run，不删除会话。
+- 同一 Conversation 仍只有一个主 Run，但运行中的 Human 输入会被 Runtime 立即接收、按 `inputId` 去重并持久化。默认交互 Program 以 `urgent` 子 Agent 处理输入，因此主 LLM/Tool Effect 不会被无条件杀掉；外部副作用继续按原取消与恢复协议收尾。
 - 第一次 Ctrl+C 取消当前 Run，等待有界收尾，保留会话；空闲时 Ctrl+C 提示退出，`/exit` 正常保存退出。再次强制退出要标记执行中断，下次按恢复逻辑处理。
 - 用户问答与工具审批使用不同的提示类型。问答答案不是默认授权。
 - 支持 `--no-color` 与非 TTY。JSONL 模式 stdout 只输出版本化事件，日志到 stderr。
@@ -231,6 +231,14 @@ Conversation         用户看到的长期会话
 | 产物 | 记录并列出生成文件 | 路径、类型、hash、所属 Run；最终回复可定位到文件 |
 
 工具定义通过 tool-sdk；通用 I/O 实现归 adapters，启用哪些工具、预算和审批归应用宿主。工具报错需要成为可理解的反馈，让助手重新规划；不能因用户拒绝一次操作就无条件崩掉整场会话。
+
+### Human 输入协议
+
+Human 输入是最高优先级的外部 Effect。CLI、桌面端和 Web 只负责把输入提交给宿主，Runtime 负责单写者接收、FactInbox 排队、幂等去重和恢复。每条输入包含稳定 `inputId`、`agentId`、结构化 `value`、接收时间和处理状态；运行中输入不会调用端侧 readline，也不会写入普通工具队列。
+
+调度顺序固定为：显式控制命令（取消、审批、定向回复）立即处理；普通 Human 输入写入 `human.input.received` 后进入交互 Lane/urgent Agent；交互 Lane 再根据规则与模型选择 `respond`、`steer`、`spawn`、`defer` 或 `cancel`。预留 LLM 交互槽，不为了让 Human 输入进入而盲目终止已有 LLM；shell、文件写入等外部副作用遵循 `sideEffectState`、取消宽限和 quarantine 规则。
+
+当前实现已经完成接收、去重、持久化、定向 Human Effect 回复、规则 + 模型仲裁、steer/cancel/defer/spawn 决策和默认 urgent 子 Agent 分发；仍需要在真实 Provider、TTY、多端恢复和 Web/桌面客户端上做运行验收。CLI 会把收到、分发、延迟和继续执行等状态显示为简短提示，避免把 Human 输入误显示成普通工具输出。
 
 网络首版只读取公开 HTTP(S) 内容。搜索服务使用可替换接口，但先接通一个真实服务；未配置时 `/tools` 明示不可用。限制重定向和目标地址，默认不访问本机/私网/云元数据地址；私人站点以后以显式配置启用。网页与文件正文是资料，不得提高自身权限。
 
@@ -290,6 +298,7 @@ interface AssistantHost {
   createConversation(input: CreateConversationInput): Promise<Conversation>
   listConversations(query: ConversationQuery): Promise<ConversationSummary[]>
   sendMessage(id: string, input: UserMessageInput): Promise<RunHandle>
+  submitHumanInput(runId: string, text: string, targetEffectId?: string): Promise<void>
   resumeConversation(id: string): Promise<ConversationHandle>
   reply(runId: string, requestId: string, value: Reply): Promise<void>
   cancelRun(runId: string): Promise<void>

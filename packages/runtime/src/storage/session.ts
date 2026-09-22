@@ -2,7 +2,7 @@ import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rm
 import { mkdir, open } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname } from 'node:path'
-import type { AgentRecord, ArtifactRecord, EffectRecord, JsonValue, LaneRecord, MergeProposal, PrivacyLabel, PrivacyMetadata, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord, ToolCallCorrelation } from '../core/types.js'
+import type { AgentRecord, ArtifactRecord, EffectRecord, JsonValue, LaneRecord, MergeProposal, PrivacyLabel, PrivacyMetadata, ResultRecord, RuntimeEvent, RuntimeEventInput, RuntimeState, WaitRecord, ToolCallCorrelation, HumanInputRecord } from '../core/types.js'
 import { privacyRank } from '../core/types.js'
 import { createRuntimeState } from '../core/types.js'
 import { normalizeRuntimeEvent } from '../core/events.js'
@@ -19,6 +19,7 @@ export interface SessionSnapshot {
     artifacts?: Array<[string, ArtifactRecord]>
     toolCallCorrelations?: Array<[string, ToolCallCorrelation]>
     mergeProposals: Array<[string, MergeProposal]>
+    humanInputs?: Array<[string, HumanInputRecord]>
     events: RuntimeEvent[]
     eventsCompactedThrough?: number
     nextIds: RuntimeState['nextIds']
@@ -350,6 +351,15 @@ function validateStateConfiguration(value: SessionSnapshot['state']): void {
   const ids = ['agent', 'lane', 'effect', 'wait', 'result', 'artifact', 'proposal', 'event'] as const
   if (!value.nextIds || ids.some((key) => !Number.isInteger(value.nextIds[key]) || value.nextIds[key] < 1)) throw new Error('INVALID_SESSION_SNAPSHOT')
   if (value.trustedSanitizerIds !== undefined && (!Array.isArray(value.trustedSanitizerIds) || new Set(value.trustedSanitizerIds).size !== value.trustedSanitizerIds.length || value.trustedSanitizerIds.some((id) => typeof id !== 'string' || id.length === 0))) throw new Error('INVALID_SESSION_SNAPSHOT')
+  if (value.humanInputs !== undefined) {
+    const ids = new Set<string>()
+    for (const entry of value.humanInputs) {
+      if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || entry[0].length === 0 || ids.has(entry[0])) throw new Error('INVALID_SESSION_SNAPSHOT')
+      const input = entry[1]
+      if (!input || input.id !== entry[0] || typeof input.agentId !== 'string' || input.agentId.length === 0 || !['pending', 'consumed', 'deferred'].includes(input.status) || typeof input.receivedAt !== 'number' || !Number.isFinite(input.receivedAt)) throw new Error('INVALID_SESSION_SNAPSHOT')
+      ids.add(entry[0])
+    }
+  }
 }
 
 export function exportRuntimeState(state: RuntimeState): SessionSnapshot {
@@ -365,6 +375,7 @@ export function exportRuntimeState(state: RuntimeState): SessionSnapshot {
       artifacts: [...state.artifacts.entries()].map(([ref, artifact]) => [ref, structuredClone(artifact)]),
       toolCallCorrelations: [...state.toolCallCorrelations.entries()].map(([id, correlation]) => [id, structuredClone(correlation)]),
       mergeProposals: [...state.mergeProposals.entries()].map(([id, proposal]) => [id, structuredClone(proposal)]),
+      humanInputs: [...state.humanInputs.entries()].map(([id, input]) => [id, structuredClone(input)]),
       events: state.events.map((event) => normalizeRuntimeEvent(event as unknown as RuntimeEventInput, event.seq, { sessionId: event.sessionId, timestamp: event.timestamp })),
       ...(state.eventsCompactedThrough === undefined ? {} : { eventsCompactedThrough: state.eventsCompactedThrough }),
       nextIds: { ...state.nextIds },
@@ -479,6 +490,7 @@ export function importRuntimeState(snapshot: SessionSnapshot | JsonValue): Runti
   for (const [ref, artifact] of value.state.artifacts ?? []) state.artifacts.set(ref, structuredClone(artifact))
   for (const [id, correlation] of value.state.toolCallCorrelations ?? []) state.toolCallCorrelations.set(id, structuredClone(correlation))
   for (const [id, proposal] of value.state.mergeProposals ?? []) state.mergeProposals.set(id, structuredClone(proposal))
+  for (const [id, input] of value.state.humanInputs ?? []) state.humanInputs.set(id, structuredClone(input))
   state.events = value.state.events.map((event) => normalizeRuntimeEvent(event as unknown as RuntimeEventInput, (event as RuntimeEvent).seq, { sessionId: (event as RuntimeEvent).sessionId, timestamp: (event as RuntimeEvent).timestamp }))
   if (value.state.eventsCompactedThrough !== undefined) state.eventsCompactedThrough = value.state.eventsCompactedThrough
   return state

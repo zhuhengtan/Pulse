@@ -325,7 +325,7 @@ npx @hunterzhu/pulse-cli sessions
 npx @hunterzhu/pulse-cli resume <conversation-id> "继续处理上次的问题"
 ```
 
-交互模式内置 `/help`、`/status`、`/tools`、`/artifacts` 和 `/exit`。需要先生成配置模板时，可以运行 `npx @hunterzhu/pulse-cli setup`。
+交互模式内置 `/help`、`/status`、`/tools`、`/artifacts`、`/cancel` 和 `/exit`。运行中仍可直接输入补充信息；`/cancel` 或按 Escape 会取消当前运行并保留会话。需要先生成配置模板时，可以运行 `npx @hunterzhu/pulse-cli setup`。
 
 ### 配置模型 Provider
 

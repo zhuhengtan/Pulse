@@ -75,6 +75,8 @@ export interface FactInboxSnapshot<T extends JsonValue = JsonValue> {
   nextSeq: number
   seen: string[]
   queue: FactEnvelope<T>[]
+  /** Number of queued urgent entries at the head of `queue` (v2+). */
+  urgentCount?: number
   dedupeLedger?: FactInboxDedupeLedgerSnapshot
 }
 
@@ -83,6 +85,7 @@ export class FactInbox<T extends JsonValue = JsonValue> {
   private readonly seen = new Map<string, number | undefined>()
   private nextSeq = 1
   private archivedThrough = 0
+  private urgentCount = 0
   private dedupeArchive: FactInboxDedupeArchive | undefined
 
   constructor(options: { dedupeArchive?: FactInboxDedupeArchive } = {}) {
@@ -96,17 +99,24 @@ export class FactInbox<T extends JsonValue = JsonValue> {
     this.dedupeArchive = archive
   }
 
-  enqueue(fact: T, eventId: string): FactEnvelope<T> | undefined {
+  private enqueueInternal(fact: T, eventId: string, urgent: boolean): FactEnvelope<T> | undefined {
     if (!eventId || this.seen.has(eventId) || this.dedupeArchive?.contains(eventId)) return undefined
     const envelope: FactEnvelope<T> = { eventId, receivedSeq: this.nextSeq++, fact: structuredClone(fact) }
     this.seen.set(eventId, envelope.receivedSeq)
-    this.queue.push(envelope)
+    if (urgent) { this.queue.splice(this.urgentCount, 0, envelope); this.urgentCount++ }
+    else this.queue.push(envelope)
     return structuredClone(envelope)
   }
 
+  enqueue(fact: T, eventId: string): FactEnvelope<T> | undefined { return this.enqueueInternal(fact, eventId, false) }
+  /** Insert a host control fact ahead of already queued background work. */
+  enqueueUrgent(fact: T, eventId: string): FactEnvelope<T> | undefined { return this.enqueueInternal(fact, eventId, true) }
+
   drain(limit = Number.POSITIVE_INFINITY): FactEnvelope<T>[] {
     if (limit !== Number.POSITIVE_INFINITY && (!Number.isInteger(limit) || limit < 0)) throw new Error('INVALID_FACT_DRAIN_LIMIT')
-    return this.queue.splice(0, limit).map((envelope) => structuredClone(envelope))
+    const drained = this.queue.splice(0, limit)
+    this.urgentCount = Math.max(0, this.urgentCount - drained.length)
+    return drained.map((envelope) => structuredClone(envelope))
   }
 
   get size(): number { return this.queue.length }
@@ -120,6 +130,7 @@ export class FactInbox<T extends JsonValue = JsonValue> {
       nextSeq: this.nextSeq,
       seen: [...this.seen.keys()],
       queue: this.queue.map((envelope) => structuredClone(envelope)),
+      ...(this.urgentCount === 0 ? {} : { urgentCount: this.urgentCount }),
       dedupeLedger: {
         schemaVersion: 1,
         archivedThrough: this.archivedThrough,
@@ -176,11 +187,12 @@ export class FactInbox<T extends JsonValue = JsonValue> {
     for (const [eventId, receivedSeq] of restored.seen) this.seen.set(eventId, receivedSeq)
     this.nextSeq = restored.nextSeq
     this.archivedThrough = restored.archivedThrough
+    this.urgentCount = restored.urgentCount
   }
 
   static fromSnapshot<T extends JsonValue = JsonValue>(snapshot: FactInboxSnapshot<T> | JsonValue, options: { dedupeArchive?: FactInboxDedupeArchive } = {}): FactInbox<T> {
     const value = snapshot as FactInboxSnapshot<T>
-    if (!value || (value.schemaVersion !== 1 && value.schemaVersion !== 2) || !Number.isInteger(value.nextSeq) || value.nextSeq < 1 || !Array.isArray(value.seen) || value.seen.some((eventId) => typeof eventId !== 'string' || eventId.length === 0) || !Array.isArray(value.queue)) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
+    if (!value || (value.schemaVersion !== 1 && value.schemaVersion !== 2) || !Number.isInteger(value.nextSeq) || value.nextSeq < 1 || !Array.isArray(value.seen) || value.seen.some((eventId) => typeof eventId !== 'string' || eventId.length === 0) || !Array.isArray(value.queue) || (value.urgentCount !== undefined && (!Number.isInteger(value.urgentCount) || value.urgentCount < 0 || value.urgentCount > value.queue.length))) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
     if (new Set(value.seen).size !== value.seen.length) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
     const ledger = value.dedupeLedger
     if (ledger !== undefined && (ledger.schemaVersion !== 1 || !Number.isInteger(ledger.archivedThrough) || ledger.archivedThrough < 0 || ledger.archivedThrough >= value.nextSeq || !Array.isArray(ledger.entries) || !Array.isArray(ledger.legacyEventIds ?? []) || ledger.entries.some((entry) => !entry || typeof entry.eventId !== 'string' || entry.eventId.length === 0 || !Number.isInteger(entry.receivedSeq) || entry.receivedSeq < 1 || entry.receivedSeq <= ledger.archivedThrough || entry.receivedSeq >= value.nextSeq) || ledger.legacyEventIds?.some((eventId) => typeof eventId !== 'string' || eventId.length === 0) || (ledger.archivedThrough > 0 && ((ledger.legacyEventIds ?? []).length > 0 || !ledger.archiveId || !ledger.archiveDigest || !/^[a-f0-9]{64}$/.test(ledger.archiveDigest))) || (ledger.archivedThrough === 0 && ledger.archiveDigest !== undefined) || new Set(ledger.entries.map((entry) => entry.eventId)).size !== ledger.entries.length || new Set(ledger.entries.map((entry) => entry.receivedSeq)).size !== ledger.entries.length || new Set(ledger.legacyEventIds ?? []).size !== (ledger.legacyEventIds ?? []).length || ledger.entries.some((entry) => (ledger.legacyEventIds ?? []).includes(entry.eventId)))) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
@@ -200,19 +212,30 @@ export class FactInbox<T extends JsonValue = JsonValue> {
     for (const envelope of value.queue) {
       if (!envelope || typeof envelope.eventId !== 'string' || (!seen.has(envelope.eventId) && !options.dedupeArchive?.contains(envelope.eventId, envelope.receivedSeq)) || !Number.isInteger(envelope.receivedSeq) || envelope.receivedSeq < 1 || envelope.fact === undefined) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
       if (inbox.queue.some((candidate) => candidate.eventId === envelope.eventId || candidate.receivedSeq === envelope.receivedSeq)) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
-      if (envelope.receivedSeq <= maxReceivedSeq) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
+      // Urgent host facts may be inserted ahead of older entries, so queue
+      // order is intentionally different from received sequence order.
       const knownSeq = seen.get(envelope.eventId)
       if (knownSeq !== undefined && knownSeq !== envelope.receivedSeq) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
       if ([...seen.entries()].some(([eventId, receivedSeq]) => eventId !== envelope.eventId && receivedSeq === envelope.receivedSeq)) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
       inbox.queue.push({ eventId: envelope.eventId, receivedSeq: envelope.receivedSeq, fact: structuredClone(envelope.fact) })
       maxReceivedSeq = Math.max(maxReceivedSeq, envelope.receivedSeq)
     }
+    // Preserve the serialized queue order. Urgent entries are allowed to have
+    // newer receivedSeq values ahead of background entries, but each priority
+    // band must retain its own FIFO order. This rejects ambiguous snapshots
+    // instead of silently normalizing a caller-provided reorder.
+    const urgentCount = value.urgentCount ?? 0
+    const urgentSeqs = value.queue.slice(0, urgentCount).map((entry) => entry.receivedSeq)
+    const backgroundSeqs = value.queue.slice(urgentCount).map((entry) => entry.receivedSeq)
+    const isAscending = (seqs: number[]): boolean => seqs.every((seq, index) => index === 0 || seq > seqs[index - 1]!)
+    if (!isAscending(urgentSeqs) || !isAscending(backgroundSeqs)) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
     if (value.nextSeq <= maxReceivedSeq) throw new Error('INVALID_FACT_INBOX_SNAPSHOT')
     for (const [eventId, receivedSeq] of seen) inbox.seen.set(eventId, receivedSeq)
     inbox.nextSeq = value.nextSeq
+    inbox.urgentCount = urgentCount
     return inbox
   }
-  clear(): void { this.queue.length = 0 }
+  clear(): void { this.queue.length = 0; this.urgentCount = 0 }
 }
 
 export interface ObservationEnvelope {

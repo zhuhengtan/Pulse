@@ -24,6 +24,33 @@ describe('Effect resource lock admission', () => {
     expect(runtime.resourceLocks.isHeld('db:account', 'exclusive')).toBe(true)
   })
 
+  it('wakes the scheduler when a lock grant happens during async completion', async () => {
+    let releaseFirst!: () => void
+    const runtime = new PulseRuntime({
+      maxTickMs: 1000,
+      maxRunning: { tool: 2 },
+      effectExecutor: async (effect) => effect.id === 'effect-1'
+        ? await new Promise((resolve) => { releaseFirst = () => resolve({ value: { done: 1 } }) })
+        : { value: { done: 2 } },
+    })
+    const program: LaneProgram = { id: 'async-locks', version: '1', step: ({ lane }) => lane.resume.step === 'start'
+      ? { actions: [{ type: 'submit_effects', effects: [
+        { key: 'first', kind: 'tool', concurrencyClass: 'tool', input: {}, locks: [{ resource: 'shell', mode: 'exclusive' }] },
+        { key: 'second', kind: 'tool', concurrencyClass: 'tool', input: {}, locks: [{ resource: 'shell', mode: 'exclusive' }] },
+      ], wait: { onUnsatisfied: 'resume_with_error' } }], next: point('async-locks', 'finish') }
+      : { actions: [{ type: 'complete', result: { ok: true } }], next: point('async-locks', 'finish') } }
+    runtime.createAgent('async lock admission', program)
+    runtime.tick()
+    expect(runtime.state.effects.get('effect-1')?.state).toBe('running')
+    expect(runtime.state.effects.get('effect-2')?.state).toBe('queued')
+
+    releaseFirst()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(runtime.state.effects.get('effect-2')?.state).not.toBe('queued')
+  })
+
   it('keeps a later shared Effect behind a queued writer', () => {
     const runtime = new PulseRuntime({ maxTickMs: 1000, maxRunning: { tool: 3 }, effectExecutor: async () => await new Promise(() => undefined) })
     const program: LaneProgram = { id: 'lock-fairness', version: '1', step: () => ({ actions: [{ type: 'submit_effects', effects: [

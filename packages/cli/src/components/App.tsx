@@ -115,6 +115,18 @@ export function App({
     },
     onExit: () => exit(),
     onQuit: () => exit(),
+    onCancel: async () => {
+      if (!isRunning) {
+        addAssistantMessage({
+          id: `cancel-${Date.now()}`,
+          role: 'system',
+          text: '当前没有正在运行的任务。',
+          createdAt: new Date().toISOString(),
+        });
+        return;
+      }
+      await cancelRun();
+    },
     onConfig: () => {
       addAssistantMessage({
         id: `config-${Date.now()}`,
@@ -455,8 +467,8 @@ export function App({
       <Box marginTop={1}>
         <InputArea
           onSubmit={(txt) => void handleSubmit(txt)}
-          disabled={isRunning || !!approvalRequest}
-          placeholder={isRunning ? '正在处理中...' : '输入消息或 /help...'}
+          disabled={false}
+          placeholder={isRunning ? '运行中也可以输入；/cancel 可取消当前运行...' : '输入消息或 /help...'}
         />
       </Box>
     </Box>

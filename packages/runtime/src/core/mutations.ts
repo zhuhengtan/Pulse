@@ -1,4 +1,4 @@
-import type { RuntimeEventInput, RuntimeState, RuntimeError, ContextVersion, JsonValue, AgentRecord, LaneRecord, EffectRecord, WaitRecord, ResultRecord, FindingRecord, ArtifactRecord, ContextDelta, LaneId, WaitId, EffectId, HistoryRecord, MergeProposal, ToolCallCorrelation, PrivacyMetadata } from './types.js'
+import type { RuntimeEventInput, RuntimeState, RuntimeError, ContextVersion, JsonValue, AgentRecord, LaneRecord, EffectRecord, WaitRecord, ResultRecord, FindingRecord, ArtifactRecord, ContextDelta, LaneId, WaitId, EffectId, HistoryRecord, MergeProposal, ToolCallCorrelation, PrivacyMetadata, HumanInputRecord } from './types.js'
 import { appendRuntimeEvent } from './events.js'
 
 export type Mutation =
@@ -13,6 +13,7 @@ export type Mutation =
   | { op: 'publishFinding'; record: FindingRecord }
   | { op: 'publishArtifact'; record: ArtifactRecord }
   | { op: 'setToolCallCorrelation'; record: ToolCallCorrelation }
+  | { op: 'setHumanInput'; inputId: string; record: HumanInputRecord }
   | { op: 'insertMergeProposal'; proposal: MergeProposal }
   | { op: 'removeMergeProposal'; proposalId: string }
   | { op: 'setGlobal'; agentId: string; version: ContextVersion; value: JsonValue; metadata?: PrivacyMetadata }
@@ -42,7 +43,7 @@ export function forkRuntimeStateForAdmission(state: RuntimeState, mutations: Mut
   }
   for (const id of dirtyLanes) {
     const lane = lanes.get(id)
-    if (lane) lanes.set(id, { ...lane, ...(lane.visibleResultRefs === undefined ? {} : { visibleResultRefs: new Set(lane.visibleResultRefs) }) })
+    if (lane) lanes.set(id, { ...lane, ...(lane.visibleResultRefs === undefined ? {} : { visibleResultRefs: new Set(lane.visibleResultRefs) }), ...(lane.pendingHumanInputs === undefined ? {} : { pendingHumanInputs: structuredClone(lane.pendingHumanInputs) }) })
   }
   return {
     ...state,
@@ -54,6 +55,7 @@ export function forkRuntimeStateForAdmission(state: RuntimeState, mutations: Mut
     artifacts: new Map(state.artifacts),
     toolCallCorrelations: new Map(state.toolCallCorrelations),
     mergeProposals: new Map(state.mergeProposals),
+    humanInputs: new Map(state.humanInputs),
     events: state.events.slice(),
     nextIds: { ...state.nextIds },
     trustedSanitizerIds: new Set(state.trustedSanitizerIds),
@@ -92,6 +94,7 @@ export function apply(state: RuntimeState, mutations: Mutation[], defaults: { se
         break
       }
       case 'setToolCallCorrelation': state.toolCallCorrelations.set(mutation.record.toolCallId, mutation.record); break
+      case 'setHumanInput': state.humanInputs.set(mutation.inputId, mutation.record); break
       case 'insertMergeProposal': state.mergeProposals.set(mutation.proposal.id, mutation.proposal); break
       case 'removeMergeProposal': state.mergeProposals.delete(mutation.proposalId); break
       case 'setGlobal': { const agent = state.agents.get(mutation.agentId)!; agent.globalVersions.set(mutation.version, mutation.value); if (mutation.metadata) { if (!agent.globalPrivacy) agent.globalPrivacy = new Map(); agent.globalPrivacy.set(mutation.version, structuredClone(mutation.metadata)) } agent.latestGlobalVersion = mutation.version; break }
