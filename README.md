@@ -321,11 +321,14 @@ npx @hunterzhu/pulse-cli doctor
 # 查看已保存的会话
 npx @hunterzhu/pulse-cli sessions
 
+# 直接进入最近一次保存的会话；如果有未完成运行则自动恢复
+npx @hunterzhu/pulse-cli --resume
+
 # 继续一个已有会话
 npx @hunterzhu/pulse-cli resume <conversation-id> "继续处理上次的问题"
 ```
 
-交互模式内置 `/help`、`/status`、`/tools`、`/artifacts`、`/cancel` 和 `/exit`。运行中仍可直接输入补充信息；`/cancel` 或按 Escape 会取消当前运行并保留会话。需要先生成配置模板时，可以运行 `npx @hunterzhu/pulse-cli setup`。
+交互模式启动时不会创建空会话，发送第一条普通消息后才会持久化会话。内置 `/help`、`/status`、`/tools`、`/artifacts`、`/new`、`/resume`、`/cancel` 和 `/exit`；`/resume` 会优先恢复最近一个未完成运行，否则切换到最近一次会话。运行中仍可直接输入补充信息；`/cancel` 或按 Escape 会取消当前运行并保留会话。需要先生成配置模板时，可以运行 `npx @hunterzhu/pulse-cli setup`。
 
 ### 配置模型 Provider
 
@@ -337,9 +340,15 @@ npx @hunterzhu/pulse-cli resume <conversation-id> "继续处理上次的问题"
     "provider": "openai-compatible",
     "model": "gpt-4o-mini",
     "baseURL": "https://api.openai.com/v1",
-    "apiKeyEnv": "OPENAI_API_KEY"
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "maxContextTokens": 128000,
+    "maxOutputTokens": 4096,
+    "reasoningEffort": "medium",
+    "toolChoice": "auto"
   },
   "approvalMode": "ask",
+  "maxTurns": 32,
+  "autoCompactPercent": 90,
   "allowNetwork": false
 }
 ```
@@ -350,6 +359,10 @@ npx @hunterzhu/pulse-cli resume <conversation-id> "继续处理上次的问题"
 export OPENAI_API_KEY="your-api-key"
 npx @hunterzhu/pulse-cli
 ```
+
+审批模式可以设置为 `ask`（每次由你确认）、`read-only`（禁止写入和 Shell）或 `auto`（由独立的模型安全审查先替你判断，再执行通过的操作）。一次 ReAct 运行默认最多 32 轮，可用 `--max-turns 64` 或配置文件中的 `maxTurns` 调整。上下文默认在估算用量达到 `autoCompactPercent`（默认 90）时自动压缩，会话里会留下提示；也可以随时用 `/compact` 手动压缩。
+
+Agent 需要询问你时，会调用 `ask.choice`、`ask.multi` 或 `ask.input`。CLI 会显示对应的单选、多选或文本输入卡片，回答会回到同一轮任务中。
 
 也可以用 `--provider`、`--model`、`--base-url`、`--config` 或对应的 `PULSE_*` 环境变量临时覆盖配置。完整配置加载顺序和字段说明见 [`docs/cli-config.md`](./docs/cli-config.md)。
 

@@ -37,7 +37,7 @@ export interface ToolCallDisplay {
   name: string
   arguments?: Record<string, unknown> | undefined
   result?: unknown
-  status: 'running' | 'succeeded' | 'failed'
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled'
   durationMs?: number | undefined
 }
 
@@ -58,6 +58,20 @@ export interface ApprovalRequest {
   prompt: string
   digest?: string | undefined
   tools?: Array<{ name: string; toolCallId?: string; input: Record<string, unknown> }> | undefined
+}
+
+export type AskType = 'choice' | 'multi' | 'input'
+
+export interface AskRequest {
+  effectId: string
+  toolName: string
+  type: AskType
+  prompt: string
+  options?: Array<{ label: string; value: string }> | undefined
+  min?: number | undefined
+  max?: number | undefined
+  placeholder?: string | undefined
+  defaultValue?: string | undefined
 }
 
 /** 应用状态模式 */

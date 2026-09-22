@@ -33,9 +33,15 @@ Windows:     %USERPROFILE%\\.pulse\\config.json
     "provider": "openai-compatible",
     "model": "your-model",
     "baseURL": "https://api.openai.com/v1",
-    "apiKeyEnv": "OPENAI_API_KEY"
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "maxContextTokens": 128000,
+    "maxOutputTokens": 4096,
+    "reasoningEffort": "medium",
+    "toolChoice": "auto"
   },
   "approvalMode": "ask",
+  "maxTurns": 32,
+  "autoCompactPercent": 90,
   "allowNetwork": false
 }
 ```
@@ -47,3 +53,47 @@ export OPENAI_API_KEY="..."
 npx @hunterzhu/pulse-cli doctor --live
 npx @hunterzhu/pulse-cli
 ```
+
+`maxContextTokens` 必须填写你所选模型官方支持的上下文窗口大小；它只影响 Pulse 的本地路由准入，不会扩展模型实际能力。`maxOutputTokens` 是预留给模型输出的预算，过大时会减少可用输入空间。
+
+Provider 字段说明：
+
+- `provider`：`deepseek`、`openai-compatible`、`anthropic`、`ollama` 或 `mock`。除 `anthropic` 和 `mock` 外，其他值使用 OpenAI-compatible Chat Completions 格式。
+- `model`：发送给 Provider 的模型名。
+- `baseURL`：Provider API 根地址。DeepSeek 当前 OpenAI 格式地址是 `https://api.deepseek.com`。
+- `apiKeyEnv`：API Key 所在的环境变量名，值本身不会写进配置文件。
+- `maxContextTokens`：Pulse 本地路由使用的上下文窗口声明。
+- `maxOutputTokens`：每次模型响应的输出预算。
+- `reasoningEffort`：`low`、`medium` 或 `high`；是否被 Provider 接受由适配器处理。
+- `toolChoice`：`auto`、`required`、`none`，或指定一个函数工具。
+- `approvalMode`：`ask` 每次副作用由你确认；`read-only` 禁止写入和 shell；`auto` 由独立的 Pulse safety reviewer 再审一次后执行。审查回复必须整段就是 `APPROVE` 才会放行，`DENY`、解释句，以及「不允许」「不批准」都不会放行。
+- `systemPrompt`：自定义系统指令文本。也可通过 `--system-prompt` 或 `PULSE_SYSTEM_PROMPT` 注入。未加 `--trust-workspace` 时，工作区 `.pulse/config.json` 里的此项会被忽略。
+- `systemPromptFile`：从文件载入自定义系统指令。也可通过 `--system-prompt-file` 或 `PULSE_SYSTEM_PROMPT_FILE` 注入。未加 `--trust-workspace` 时，工作区配置不能指定这个路径。
+- `maxTurns`：一次 ReAct 运行允许的最大模型/工具轮数，默认 32，命令行可用 `--max-turns` 或 `PULSE_MAX_TURNS` 覆盖，最大 256。
+- `autoCompactPercent`：自动压缩阈值，按 `maxContextTokens` 的百分比估算。默认 90，可用 `--auto-compact-percent` 或 `PULSE_AUTO_COMPACT_PERCENT` 覆盖，超过 90 会降到 90，给摘要请求留出空间。达到阈值后，下一条消息发送前会调用已配置模型压缩历史，并在会话里留下 `[自动压缩]` 提示；原记录备份为 `messages.jsonl.bak`。估算会加上系统提示词的体积。更早内容如果已经只剩一条历史摘要，则不再重复压缩。摘要留在对话记录里，适配器会把它当作上下文，而不会并入系统提示词。`mock` provider 不会自动压缩。会话中也可以随时执行 `/compact` 手动压缩。
+
+## 系统提示词与规则自动发现
+
+Pulse 采用模块化系统提示词基座（参考 Claude Code、OpenAI Codex CLI 与 ZCode），由工程调查铁律、基于证据的闭环验证铁律、零废话工程交付规范、自定义提示词、项目规则、用户规则与自适应语言指令组合而成。
+
+### 规则自动发现机制
+
+每次执行时，Pulse 会自动扫描并按优先级加载规则文件：
+
+1. **项目级规则（优先使用首个命中）**：
+   - `<workspace>/PULSE.md`
+   - `<workspace>/.pulse/rules.md`
+   - `<workspace>/CLAUDE.md`（兼容 Claude Code 规则）
+   - `<workspace>/AGENTS.md`（兼容通用 Agent 规则）
+
+   规则文件的真实路径必须留在工作区内。指向工作区外的符号链接会被跳过，并继续尝试下一优先级。单个文件最多读入 16 KB。
+2. **用户全局规则**：
+   - `~/.pulse/instructions.md`
+3. **自定义提示词（来自配置、CLI 参数或 API）**：
+   - 配置文件 `systemPrompt` / `systemPromptFile`
+   - CLI 参数 `--system-prompt` / `--system-prompt-file`
+   - API：服务层 `LocalHost` 提供 `getSystemPrompt()` / `setSystemPrompt(prompt)`，支持未来 Web 端与桌面端设置界面动态热更新。
+
+模型可以使用 `ask.choice`、`ask.multi` 和 `ask.input` 向你发起交互。它们属于 `ask.*` 命名空间，分别对应单选、多选和文本输入。提问最多 2000 字、50 个选项。回答必须落在给出的选项里，单选列表到顶或到底后不会环绕。回答会作为下一轮模型上下文的一部分继续运行。
+
+当前适配器没有把 `temperature`、`top_p`、`presence_penalty` 等采样参数暴露为统一配置；Agent CLI 通常优先控制模型、推理强度、工具和权限，而不是覆盖采样参数。

@@ -244,7 +244,7 @@ Human 输入是最高优先级的外部 Effect。CLI、桌面端和 Web 只负�
 
 审批流程：模型产生完整操作提议 → 同步策略判定 → 如需询问，提交 human Effect → 校验回复与请求匹配 → 提交 ToolEffect → 执行器再次核对权限与操作参数 → 结算结果。
 
-当前实现把审批建模为 Runtime Human Effect：工具提议先持久化并发出 waiting 事件，CLI 询问后以 `approved`/`reason` 回复；批准只放行对应 toolCallId，拒绝回到助手错误路径。`--auto-approve` 用于明确的无人值守运行。
+当前实现把审批建模为 Runtime Human Effect：工具提议先持久化并发出 waiting 事件，CLI 询问后以 `approved`/`reason` 回复；批准只放行对应 toolCallId，拒绝回到助手错误路径。`auto`/`--auto-approve` 不会直接放行副作用，而是先调用独立的 safety reviewer 对工具名和参数做一次模型审查，只有返回 `APPROVE` 才执行；`mock` Provider 为了保持本地确定性测试会直接通过这一步。
 
 ## 7. 权限与配置
 

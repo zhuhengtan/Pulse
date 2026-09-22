@@ -6,17 +6,18 @@ import { theme } from '../theme.js';
 interface Props {
   onSubmit: (text: string) => void;
   disabled?: boolean;
+  focus?: boolean;
   placeholder?: string;
 }
 
-export function InputArea({ onSubmit, disabled, placeholder }: Props) {
+export function InputArea({ onSubmit, disabled, focus = true, placeholder }: Props) {
   const [value, setValue] = useState('');
   const [accumulatedLines, setAccumulatedLines] = useState<string[]>([]);
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
 
   useInput((input, key) => {
-    if (disabled) return;
+    if (disabled || !focus) return;
 
     if (key.upArrow) {
       if (historyIndex < history.length - 1) {
@@ -72,6 +73,7 @@ export function InputArea({ onSubmit, disabled, placeholder }: Props) {
           <Text color={theme.dim}>{placeholder || '处理中...'}</Text>
         ) : (
           <TextInput
+            focus={focus}
             value={value}
             onChange={setValue}
             onSubmit={handleSubmit}

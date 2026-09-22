@@ -11,6 +11,9 @@ function writeEvent(event: AssistantEvent, format: string): void {
     process.stdout.write(String(event.data ?? ''));
   } else if (event.type === 'waiting') {
     process.stdout.write(`\n[需要输入] ${JSON.stringify(event.data ?? '')}\n`);
+  } else if (event.type === 'notice') {
+    const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data as { text?: string } : {};
+    process.stderr.write(`\n${data.text ?? ''}\n`);
   } else if (event.type === 'error') {
     process.stderr.write(`\n[错误] ${String(event.data ?? '')}\n`);
   }

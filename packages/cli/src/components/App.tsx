@@ -7,6 +7,7 @@ import { Welcome } from './Welcome.js';
 import { MessageList } from './MessageList.js';
 import { Spinner } from './Spinner.js';
 import { ApprovalPrompt } from './ApprovalPrompt.js';
+import { AskPrompt } from './AskPrompt.js';
 import { InputArea } from './InputArea.js';
 import { SessionList } from './SessionList.js';
 import { HelpView } from './HelpView.js';
@@ -22,6 +23,7 @@ export interface AppProps {
   hostOptions: LocalHostOptions;
   conversationId?: string | undefined;
   initialTask?: string | undefined;
+  resumeOnStart?: boolean | undefined;
   version: string;
 }
 
@@ -29,6 +31,7 @@ export function App({
   hostOptions,
   conversationId: initialConversationId,
   initialTask,
+  resumeOnStart = false,
   version,
 }: AppProps) {
   const { exit } = useApp();
@@ -37,8 +40,10 @@ export function App({
   const [verbosity, setVerbosity] = useState<'normal' | 'verbose' | 'quiet'>('normal');
   const [sessionsList, setSessionsList] = useState<Array<{ id: string; title: string; updatedAt: string; cwd: string }>>([]);
   const [sessionError, setSessionError] = useState<string | null>(null);
+  const [approvalChoiceFocused, setApprovalChoiceFocused] = useState(false);
+  const [approvalInputMode, setApprovalInputMode] = useState(false);
   const startedTask = useRef(false);
-  const resumedConversation = useRef<string | null>(null);
+  const startedResume = useRef(false);
 
   const { host, error: hostError, ready: hostReady } = useHost(hostOptions);
 
@@ -50,6 +55,7 @@ export function App({
     clearMessages,
     switchConversation,
     newConversation,
+    createConversation,
     error: conversationError,
   } = useConversation({ host, conversationId: initialConversationId });
 
@@ -58,9 +64,12 @@ export function App({
     currentStep,
     error: runError,
     approvalRequest,
+    askRequest,
+    approvalSubmitting,
     sendMessage,
     resumeActive,
     approveAction,
+    replyAsk,
     cancelRun,
   } = useRun({
     host,
@@ -69,6 +78,31 @@ export function App({
   });
 
   const { cumulative } = useTokenStats();
+
+  useEffect(() => {
+    if (approvalRequest) {
+      setApprovalChoiceFocused(true);
+      setApprovalInputMode(false);
+    } else {
+      setApprovalChoiceFocused(false);
+      setApprovalInputMode(false);
+    }
+  }, [approvalRequest?.effectId]);
+
+  useEffect(() => {
+    if (!hostReady || !resumeOnStart || !conversation || isRunning || startedResume.current) return;
+    startedResume.current = true;
+    if (conversation.summary.activeRunId) {
+      void resumeActive(conversation.id);
+    } else {
+      addAssistantMessage({
+        id: `resume-ready-${Date.now()}`,
+        role: 'system',
+        text: `已进入上次会话：${conversation.summary.title}`,
+        createdAt: new Date().toISOString(),
+      });
+    }
+  }, [hostReady, resumeOnStart, conversation, isRunning, resumeActive, addAssistantMessage]);
 
   const loadSessions = useCallback(async () => {
     if (!host) return;
@@ -81,27 +115,25 @@ export function App({
   }, [host]);
 
   useEffect(() => {
-    if (!hostReady || !conversation || isRunning) return;
-    if (conversation.summary.activeRunId && resumedConversation.current !== conversation.id) {
-      resumedConversation.current = conversation.id;
-      if (initialTask && !startedTask.current) {
-        startedTask.current = true;
-        addAssistantMessage({
-          id: `resume-hold-${Date.now()}`,
-          role: 'system',
-          text: '此会话有未完成的运行，已改为恢复该运行。这次附带的新任务没有发送。',
-          createdAt: new Date().toISOString(),
-        });
-      }
-      void resumeActive();
+    if (!hostReady || isRunning || !initialTask || startedTask.current) return;
+    if (conversation?.summary.activeRunId) {
+      startedTask.current = true;
+      addAssistantMessage({
+        id: `resume-hold-${Date.now()}`,
+        role: 'system',
+        text: '此会话有未完成的运行。请使用 /resume 恢复运行；这次附带的新任务没有发送。',
+        createdAt: new Date().toISOString(),
+      });
       return;
     }
-    if (initialTask && !startedTask.current && messages.length === 0 && !conversation.summary.activeRunId) {
-      startedTask.current = true;
+    startedTask.current = true;
+    void (async () => {
+      const target = conversation ?? await createConversation();
+      if (!target) return;
       addUserMessage(initialTask);
-      void sendMessage(initialTask);
-    }
-  }, [hostReady, conversation, initialTask, messages.length, isRunning, addUserMessage, addAssistantMessage, sendMessage, resumeActive]);
+      await sendMessage(initialTask, target.id);
+    })();
+  }, [hostReady, conversation, initialTask, isRunning, addUserMessage, addAssistantMessage, createConversation, sendMessage]);
 
   const { executeCommand, isSlashCommand } = useSlashCommands({
     onHelp: () => setMode('help'),
@@ -112,6 +144,49 @@ export function App({
     onClear: () => clearMessages(),
     onNew: async () => {
       await newConversation();
+    },
+    onResume: async () => {
+      if (!host) return;
+      if (isRunning) {
+        addAssistantMessage({
+          id: `resume-busy-${Date.now()}`,
+          role: 'system',
+          text: '当前已有运行中的任务，请先等待完成或使用 /cancel。',
+          createdAt: new Date().toISOString(),
+        });
+        return;
+      }
+      try {
+        const sessions = await host.listConversations();
+        const target = sessions.find((item) => item.activeRunId) ?? sessions[0];
+        if (!target) {
+          addAssistantMessage({
+            id: `resume-empty-${Date.now()}`,
+            role: 'system',
+            text: '还没有可恢复的会话。发送第一条消息后会自动创建会话。',
+            createdAt: new Date().toISOString(),
+          });
+          return;
+        }
+        await switchConversation(target.id);
+        if (target.activeRunId) {
+          await resumeActive(target.id);
+        } else {
+          addAssistantMessage({
+            id: `resume-done-${Date.now()}`,
+            role: 'system',
+            text: `已恢复上一次会话：${target.title}`,
+            createdAt: new Date().toISOString(),
+          });
+        }
+      } catch (err) {
+        addAssistantMessage({
+          id: `resume-error-${Date.now()}`,
+          role: 'system',
+          text: `恢复会话失败: ${err instanceof Error ? err.message : String(err)}`,
+          createdAt: new Date().toISOString(),
+        });
+      }
     },
     onExit: () => exit(),
     onQuit: () => exit(),
@@ -137,6 +212,8 @@ export function App({
           provider: hostOptions.provider?.provider ?? 'mock',
           model: hostOptions.provider?.defaultModel ?? '默认',
           approvalMode: hostOptions.approvalMode ?? 'ask',
+          maxTurns: hostOptions.maxTurns ?? 32,
+          autoCompactPercent: hostOptions.autoCompactPercent ?? 90,
           allowNetwork: hostOptions.allowNetwork ?? false,
         }, null, 2),
         createdAt: new Date().toISOString(),
@@ -333,11 +410,13 @@ export function App({
           });
         }
       } else {
+        const target = conversation ?? await createConversation();
+        if (!target) return;
         addUserMessage(text);
-        await sendMessage(text);
+        await sendMessage(text, target.id);
       }
     },
-    [isSlashCommand, executeCommand, addUserMessage, sendMessage]
+    [isSlashCommand, executeCommand, conversation, createConversation, addUserMessage, sendMessage]
   );
 
   useInput((input, key) => {
@@ -351,6 +430,14 @@ export function App({
     }
     if (isRunning && key.escape) {
       void cancelRun();
+      return;
+    }
+    if (approvalRequest && input === '\t') {
+      setApprovalInputMode((inputMode) => {
+        const nextInputMode = !inputMode;
+        setApprovalChoiceFocused(!nextInputMode);
+        return nextInputMode;
+      });
       return;
     }
     if (mode === 'help') {
@@ -370,18 +457,19 @@ export function App({
     );
   }
 
-  if (!hostReady || !conversation) {
-    if (conversationError) {
-      return (
-        <Box padding={1} flexDirection="column">
-          <Text color="red">会话加载失败：{conversationError}</Text>
-          <Text dimColor>按 n 新建会话，按 q 退出。</Text>
-        </Box>
-      );
-    }
+  if (!hostReady) {
     return (
       <Box padding={1}>
         <Spinner label="正在初始化 Pulse 运行时..." />
+      </Box>
+    );
+  }
+
+  if (conversationError && !conversation) {
+    return (
+      <Box padding={1} flexDirection="column">
+        <Text color="red">会话加载失败：{conversationError}</Text>
+        <Text dimColor>按 n 新建会话，按 q 退出。</Text>
       </Box>
     );
   }
@@ -422,8 +510,8 @@ export function App({
     );
   }
 
-  const cwd = conversation.summary.cwd;
-  const title = conversation.summary.title;
+  const cwd = conversation?.summary.cwd ?? hostOptions.cwd ?? process.cwd();
+  const title = conversation?.summary.title ?? 'New conversation';
   const modelName = hostOptions.provider?.defaultModel || hostOptions.provider?.provider || 'default';
 
   return (
@@ -435,10 +523,10 @@ export function App({
       )}
 
       {messages.length > 0 && (
-        <MessageList messages={messages} showThinking={showThinking} verbosity={verbosity} />
+        <MessageList messages={messages} showThinking={showThinking} verbosity={verbosity} isRunning={isRunning} />
       )}
 
-      {isRunning && !approvalRequest && (
+      {isRunning && !approvalRequest && !askRequest && (
         <Box marginY={1}>
           <Spinner label={currentStep || '正在思考与执行...'} />
         </Box>
@@ -459,16 +547,44 @@ export function App({
       {approvalRequest && (
         <ApprovalPrompt
           request={approvalRequest}
-          onApprove={() => void approveAction(approvalRequest.effectId, true)}
-          onDeny={(reason) => void approveAction(approvalRequest.effectId, false, reason)}
+          inputMode={approvalInputMode}
+          isFocused={approvalChoiceFocused && !approvalSubmitting}
+          onApprove={() => {
+            void approveAction(approvalRequest.effectId, true);
+          }}
+          onDeny={(reason) => {
+            void approveAction(approvalRequest.effectId, false, reason);
+          }}
+          onInput={() => {
+            setApprovalChoiceFocused(false);
+            setApprovalInputMode(true);
+          }}
+        />
+      )}
+
+      {askRequest && (
+        <AskPrompt
+          key={askRequest.effectId}
+          request={askRequest}
+          disabled={approvalSubmitting}
+          onReply={(value) => void replyAsk(askRequest.effectId, value)}
         />
       )}
 
       <Box marginTop={1}>
         <InputArea
           onSubmit={(txt) => void handleSubmit(txt)}
-          disabled={false}
-          placeholder={isRunning ? '运行中也可以输入；/cancel 可取消当前运行...' : '输入消息或 /help...'}
+          disabled={approvalSubmitting || approvalRequest !== null || askRequest !== null}
+          focus={!approvalRequest && !askRequest && !approvalSubmitting}
+          placeholder={
+            approvalRequest
+              ? '请先在审批卡片中选择操作'
+              : askRequest
+                ? '请先回答上面的提问'
+              : isRunning
+                ? '运行中也可以输入；/cancel 可取消当前运行...'
+                : '输入消息或 /help...'
+          }
         />
       </Box>
     </Box>

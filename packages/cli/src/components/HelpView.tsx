@@ -17,6 +17,7 @@ const COMMANDS = [
     category: 'Session',
     commands: [
       { name: '/new', desc: '新建会话' },
+      { name: '/resume', desc: '恢复上一次会话或未完成运行' },
       { name: '/sessions', desc: '交互式历史会话管理' },
       { name: '/delete [id]', desc: '删除指定历史会话' },
       { name: '/export [format]', desc: '导出会话 (markdown / json)' },
@@ -34,7 +35,7 @@ const COMMANDS = [
     commands: [
       { name: '/model [name]', desc: '切换模型' },
       { name: '/thinking [level]', desc: '设置模型思考深度 (low/medium/high/off)' },
-      { name: '/compact', desc: '用已配置模型压缩历史，并备份原记录' },
+      { name: '/compact', desc: '手动压缩历史；默认在上下文 90% 时自动压缩' },
       { name: '/config', desc: '查看当前运行时配置' },
     ],
   },

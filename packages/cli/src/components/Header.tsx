@@ -21,7 +21,7 @@ export function Header({ title, cwd, model, approvalMode = 'ask' }: Props) {
       <Text color={theme.dim}>{model}</Text>
       <Text color={theme.dim}> · </Text>
       <Text color={approvalMode === 'auto' ? theme.warning : theme.dim}>
-        {approvalMode === 'auto' ? '自动批准' : approvalMode === 'read-only' ? '只读' : '需审批'}
+        {approvalMode === 'auto' ? '替我审批' : approvalMode === 'read-only' ? '只读' : '需审批'}
       </Text>
       <Text color={theme.dim}> · </Text>
       <Text color={theme.dim}>{cwdBasename}</Text>

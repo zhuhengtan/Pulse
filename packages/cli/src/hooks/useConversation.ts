@@ -49,9 +49,10 @@ export function useConversation({
             await loadMessages(conversationId);
           }
         } else {
-          const conv = await currentHost.createConversation();
-          if (mounted && conv) {
-            setConversation(conv);
+          // An interactive window starts without a persisted session. The
+          // first user message (or an explicit /new) creates one.
+          if (mounted) {
+            setConversation(null);
             setMessages([]);
           }
         }
@@ -106,17 +107,23 @@ export function useConversation({
     [host, loadMessages]
   );
 
-  const newConversation = useCallback(async () => {
-    if (!host) return;
+  const createConversation = useCallback(async () => {
+    if (!host) return null;
     try {
       const conv = await host.createConversation();
       setConversation(conv);
       setMessages([]);
       setError(null);
+      return conv;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return null;
     }
   }, [host]);
+
+  const newConversation = useCallback(async () => {
+    return createConversation();
+  }, [createConversation]);
 
   return {
     conversation,
@@ -127,5 +134,6 @@ export function useConversation({
     clearMessages,
     switchConversation,
     newConversation,
+    createConversation,
   };
 }

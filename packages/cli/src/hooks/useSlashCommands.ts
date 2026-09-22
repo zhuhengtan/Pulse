@@ -10,6 +10,7 @@ export interface SlashCommandDependencies {
   onQuit?: () => void | Promise<void>;
   onCancel?: () => void | Promise<void>;
   onNew?: () => void | Promise<void>;
+  onResume?: () => void | Promise<void>;
   onSessions?: () => void | Promise<void>;
   onDelete?: (args: string) => void | Promise<void>;
   onExport?: (args: string) => void | Promise<void>;
@@ -33,6 +34,7 @@ export function useSlashCommands(deps: SlashCommandDependencies) {
       { name: '/quit', aliases: ['/q'], description: '退出程序', execute: async () => deps.onQuit?.() },
       { name: '/cancel', aliases: ['/stop'], description: '取消当前运行（保留会话）', execute: async () => deps.onCancel?.() },
       { name: '/new', description: '开启新会话', execute: async () => deps.onNew?.() },
+      { name: '/resume', description: '恢复上一次会话或未完成运行', execute: async () => deps.onResume?.() },
       { name: '/sessions', description: '查看所有会话', execute: async () => deps.onSessions?.() },
       { name: '/delete', description: '删除会话 [id]', execute: async (args) => deps.onDelete?.(args) },
       { name: '/export', description: '导出会话 [markdown|json]', execute: async (args) => deps.onExport?.(args) },

@@ -5,14 +5,21 @@ import { dirname, join, resolve } from 'node:path'
 export interface PulseCliConfig {
   cwd?: string
   dataDir?: string
-  provider?: { provider?: string; model?: string; baseURL?: string; apiKeyEnv?: string }
+  systemPrompt?: string
+  systemPromptFile?: string
+  provider?: { provider?: string; model?: string; baseURL?: string; apiKeyEnv?: string; maxContextTokens?: number; maxOutputTokens?: number; reasoningEffort?: 'low' | 'medium' | 'high'; toolChoice?: 'auto' | 'required' | 'none' | { type: 'function'; function: { name: string } } }
   approvalMode?: 'read-only' | 'ask' | 'auto'
+  maxTurns?: number
+  /** Percent of maxContextTokens that triggers automatic history compaction. Clamped to 1–90. */
+  autoCompactPercent?: number
   allowNetwork?: boolean
 }
 
 export const defaultPulseConfig: PulseCliConfig = {
-  provider: { provider: 'mock', model: 'mock', apiKeyEnv: 'OPENAI_API_KEY' },
+  provider: { provider: 'mock', model: 'mock', apiKeyEnv: 'OPENAI_API_KEY', maxContextTokens: 32_000, maxOutputTokens: 4_096, reasoningEffort: 'medium', toolChoice: 'auto' },
   approvalMode: 'ask',
+  maxTurns: 32,
+  autoCompactPercent: 90,
   allowNetwork: false,
 }
 
@@ -52,7 +59,7 @@ function asConfig(value: unknown): PulseCliConfig | undefined {
   return value as PulseCliConfig
 }
 
-/** Workspace files must not escalate approval, network, or provider credentials. */
+/** Workspace files must not escalate approval, network, provider credentials, or the system prompt. */
 export function sanitizeWorkspaceConfig(value: PulseCliConfig): PulseCliConfig {
   const provider = value.provider === undefined ? undefined : {
     ...(value.provider.provider === undefined ? {} : { provider: value.provider.provider }),

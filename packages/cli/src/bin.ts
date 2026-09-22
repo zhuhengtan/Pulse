@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
+import { resolve } from 'node:path'
 import type { LocalHostOptions } from '@hunterzhu/pulse-server'
 import { ensurePulseUserConfig, expandHome, loadPulseConfig } from './config.js'
 import { runInteractive } from './commands/interactive.js'
@@ -20,6 +22,7 @@ const help = `Pulse ${version}
 
 Usage:
   pulse [options]                         start an interactive conversation
+  pulse --resume                          enter the latest saved session and recover an unfinished run
   pulse run <task> [options]              run one task
   pulse sessions [options]                list saved conversations
   pulse resume <conversation-id> [task]    continue or recover a conversation
@@ -32,11 +35,20 @@ Options:
   --provider <name>         mock, openai-compatible, or anthropic
   --model <name>            provider model name
   --base-url <url>          provider endpoint
+  --context-tokens <n>      model context window (default 32000)
+  --max-output-tokens <n>   maximum generated tokens (default 4096)
+  --reasoning-effort <x>    low, medium, or high
+  --max-turns <n>           maximum ReAct model/tool turns (default 32)
+  --auto-compact-percent <n> compact automatically at this percent of the context window (1-90, default 90)
   --format <text|jsonl>     output format
+  --resume                  enter the latest saved session
   --read-only               disable write and shell tools
-  --auto-approve             allow local writes and shell execution
+  --auto-approve             approve local writes and shell execution on your behalf
+  --approval-mode <mode>     read-only, ask, or auto
   --allow-network           enable public web search and fetch tools
   --trust-workspace         treat workspace .pulse/config.json as user-trusted
+  --system-prompt <text>    custom system instructions
+  --system-prompt-file <path> load custom system instructions from file
   --mock-response <text>    deterministic response for local debugging
   --live                    doctor: make one real provider request
   --no-color                disable terminal styling
@@ -114,35 +126,77 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const providerName = option(parsed.options, 'provider') ?? process.env.PULSE_PROVIDER ?? config.provider?.provider
   const model = option(parsed.options, 'model') ?? process.env.PULSE_MODEL ?? config.provider?.model
   const baseURL = option(parsed.options, 'base-url') ?? process.env.PULSE_BASE_URL ?? config.provider?.baseURL
+  const contextTokens = option(parsed.options, 'context-tokens') ?? process.env.PULSE_CONTEXT_TOKENS
+  const maxOutputTokens = option(parsed.options, 'max-output-tokens') ?? process.env.PULSE_MAX_OUTPUT_TOKENS
+  const reasoningEffort = option(parsed.options, 'reasoning-effort') ?? process.env.PULSE_REASONING_EFFORT
+  const maxTurns = option(parsed.options, 'max-turns') ?? process.env.PULSE_MAX_TURNS
+  const autoCompactPercent = option(parsed.options, 'auto-compact-percent') ?? process.env.PULSE_AUTO_COMPACT_PERCENT
   const apiKeyEnv =
     config.provider?.apiKeyEnv ?? (providerName === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
   const apiKey = process.env[apiKeyEnv]
+  const parsePositiveInteger = (value: string | undefined): number | undefined => {
+    if (value === undefined) return undefined
+    const parsed = Number(value)
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+  }
+  const configuredContextTokens = parsePositiveInteger(contextTokens) ?? config.provider?.maxContextTokens
+  const configuredMaxOutputTokens = parsePositiveInteger(maxOutputTokens) ?? config.provider?.maxOutputTokens
+  const configuredReasoningEffort = reasoningEffort === 'low' || reasoningEffort === 'medium' || reasoningEffort === 'high' ? reasoningEffort : config.provider?.reasoningEffort
+  const configuredMaxTurns = parsePositiveInteger(maxTurns) ?? config.maxTurns
+  const configuredAutoCompactPercent = parsePositiveInteger(autoCompactPercent) ?? config.autoCompactPercent
   const provider = providerName
     ? {
         provider: providerName,
         ...(model === undefined ? {} : { defaultModel: model }),
         ...(baseURL === undefined ? {} : { baseURL }),
         ...(apiKey === undefined ? {} : { apiKey }),
+        ...(configuredContextTokens === undefined ? {} : { maxContextTokens: configuredContextTokens }),
+        ...(configuredMaxOutputTokens === undefined ? {} : { maxOutputTokens: configuredMaxOutputTokens }),
+        ...(configuredReasoningEffort === undefined ? {} : { reasoningEffort: configuredReasoningEffort }),
+        ...(config.provider?.toolChoice === undefined ? {} : { toolChoice: config.provider.toolChoice }),
       }
     : undefined
   const cwd = requestedCwd ?? expandHome(config.cwd)
   const dataDir = expandHome(option(parsed.options, 'data-dir') ?? process.env.PULSE_DATA_DIR ?? config.dataDir)
   const mockResponse = option(parsed.options, 'mock-response')
+  const requestedApprovalMode = option(parsed.options, 'approval-mode') ?? process.env.PULSE_APPROVAL_MODE
   const approvalMode =
-    parsed.options['read-only'] === true
+    requestedApprovalMode === 'read-only' || parsed.options['read-only'] === true
       ? ('read-only' as const)
-      : parsed.options['auto-approve'] === true || process.env.PULSE_AUTO_APPROVE === '1'
+      : requestedApprovalMode === 'auto' || parsed.options['auto-approve'] === true || process.env.PULSE_AUTO_APPROVE === '1'
         ? ('auto' as const)
-        : config.approvalMode
+        : requestedApprovalMode === 'ask' ? ('ask' as const) : config.approvalMode
   const allowNetwork =
     parsed.options['allow-network'] === true || process.env.PULSE_ALLOW_NETWORK === '1' ? true : config.allowNetwork
+
+  const rawSystemPrompt = option(parsed.options, 'system-prompt') ?? process.env.PULSE_SYSTEM_PROMPT ?? config.systemPrompt
+  const rawSystemPromptFile = option(parsed.options, 'system-prompt-file') ?? process.env.PULSE_SYSTEM_PROMPT_FILE ?? config.systemPromptFile
+  let systemPrompt = rawSystemPrompt
+  if (rawSystemPromptFile) {
+    const expanded = expandHome(rawSystemPromptFile)
+    const filePath = expanded ? resolve(requestedCwd ?? process.cwd(), expanded) : undefined
+    if (filePath) {
+      try {
+        const fileContent = await readFile(filePath, 'utf8')
+        systemPrompt = systemPrompt ? `${systemPrompt}\n\n${fileContent.trim()}` : fileContent.trim()
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new Error(`SYSTEM_PROMPT_FILE_NOT_FOUND: ${filePath}`)
+        }
+        throw error
+      }
+    }
+  }
 
   return {
     ...(cwd === undefined ? {} : { cwd }),
     ...(dataDir === undefined ? {} : { dataDir }),
+    ...(systemPrompt && systemPrompt.trim().length > 0 ? { systemPrompt: systemPrompt.trim() } : {}),
     ...(provider === undefined ? {} : { provider }),
     ...(mockResponse === undefined ? {} : { mockResponse }),
     ...(approvalMode === undefined ? {} : { approvalMode }),
+    ...(configuredMaxTurns === undefined ? {} : { maxTurns: configuredMaxTurns }),
+    ...(configuredAutoCompactPercent === undefined ? {} : { autoCompactPercent: Math.min(90, configuredAutoCompactPercent) }),
     ...(allowNetwork === undefined ? {} : { allowNetwork }),
   }
 }
@@ -186,7 +240,7 @@ async function main(): Promise<number> {
   }
 
   // 默认启动交互式 Ink 界面
-  return runInteractive(options, undefined, undefined, version)
+  return runInteractive(options, undefined, undefined, version, parsed.options.resume === true)
 }
 
 main()

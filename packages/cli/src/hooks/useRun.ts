@@ -1,9 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { LocalHost, RunHandle } from '@hunterzhu/pulse-server';
-import type { ApprovalRequest, DisplayMessage, ToolCallDisplay } from '../types.js';
+import type { ApprovalRequest, AskRequest, DisplayMessage, ToolCallDisplay } from '../types.js';
 
 function toolStatus(value: unknown): ToolCallDisplay['status'] {
-  if (value === 'succeeded' || value === 'failed' || value === 'running') return value;
+  if (value === 'succeeded' || value === 'failed' || value === 'running' || value === 'cancelled') return value;
   return 'running';
 }
 
@@ -42,6 +42,8 @@ export function useRun({
   const [currentStep, setCurrentStep] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
+  const [askRequest, setAskRequest] = useState<AskRequest | null>(null);
+  const [approvalSubmitting, setApprovalSubmitting] = useState(false);
 
   const runRef = useRef<RunHandle | null>(null);
 
@@ -56,9 +58,30 @@ export function useRun({
         toolCalls: [],
         runId: run.id,
       };
-      addAssistantMessage({ ...assistantMessage, toolCalls: [] });
+      let assistantStarted = false;
+      const ensureAssistant = () => {
+        if (assistantStarted) return;
+        assistantStarted = true;
+        addAssistantMessage({ ...assistantMessage, toolCalls: [] });
+      };
 
       for await (const event of run.events) {
+        if (event.type === 'notice') {
+          const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data)
+            ? event.data as Record<string, unknown>
+            : {};
+          const text = typeof data.text === 'string' ? data.text : '';
+          if (text) {
+            addAssistantMessage({
+              id: `notice-${run.id}-${event.seq}`,
+              role: 'system',
+              text,
+              createdAt: new Date().toISOString(),
+            });
+          }
+          continue;
+        }
+        ensureAssistant();
         switch (event.type) {
           case 'text':
             assistantMessage.text += String(event.data ?? '');
@@ -96,6 +119,30 @@ export function useRun({
               payload.input && typeof payload.input === 'object' && !Array.isArray(payload.input)
                 ? (payload.input as Record<string, unknown>)
                 : {};
+            if (input.kind === 'ask' && (input.type === 'choice' || input.type === 'multi' || input.type === 'input')) {
+              const options = Array.isArray(input.options)
+                ? input.options.flatMap((option) => {
+                    if (!option || typeof option !== 'object' || Array.isArray(option)) return [];
+                    const item = option as Record<string, unknown>;
+                    return typeof item.label === 'string' && typeof item.value === 'string' ? [{ label: item.label, value: item.value }] : [];
+                  })
+                : undefined;
+              setApprovalRequest(null);
+              setAskRequest({
+                effectId,
+                toolName: typeof input.toolName === 'string' ? input.toolName : `ask.${input.type}`,
+                type: input.type,
+                prompt: typeof input.prompt === 'string' ? input.prompt : '请输入你的回答。',
+                ...(options && options.length ? { options } : {}),
+                ...(typeof input.min === 'number' ? { min: input.min } : {}),
+                ...(typeof input.max === 'number' ? { max: input.max } : {}),
+                ...(typeof input.placeholder === 'string' ? { placeholder: input.placeholder } : {}),
+                ...(typeof input.defaultValue === 'string' ? { defaultValue: input.defaultValue } : {}),
+              });
+              setCurrentStep('等待你的回答...');
+              break;
+            }
+            setAskRequest(null);
             const tools = Array.isArray(input.tools)
               ? input.tools.flatMap((tool) => {
                   if (!tool || typeof tool !== 'object' || Array.isArray(tool)) return [];
@@ -129,10 +176,23 @@ export function useRun({
             setIsRunning(false);
             setCurrentStep(null);
             setApprovalRequest(null);
+            setAskRequest(null);
             break;
           case 'complete':
             setIsRunning(false);
             setCurrentStep(null);
+            setApprovalRequest(null);
+            setAskRequest(null);
+            if (event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
+              const completion = event.data as Record<string, unknown>;
+              const completionError = completion.error;
+              if (completion.status === 'failed' && completionError && typeof completionError === 'object' && !Array.isArray(completionError)) {
+                const error = completionError as Record<string, unknown>;
+                setError(`${String(error.code ?? 'RUN_FAILED')}: ${String(error.message ?? '运行失败')}`);
+              } else if (completion.status === 'failed') {
+                setError('RUN_FAILED: 运行失败');
+              }
+            }
             break;
         }
       }
@@ -144,12 +204,14 @@ export function useRun({
     setIsRunning(false);
     setCurrentStep(null);
     setApprovalRequest(null);
+    setAskRequest(null);
     runRef.current = null;
   }, []);
 
   const sendMessage = useCallback(
-    async (text: string) => {
-      if (!host || !conversationId) return;
+    async (text: string, targetConversationId?: string) => {
+      const activeConversationId = targetConversationId ?? conversationId;
+      if (!host || !activeConversationId) return;
       if (runRef.current) {
         try {
           await runRef.current.submitHumanInput(text);
@@ -165,7 +227,7 @@ export function useRun({
       setCurrentStep('思考中...');
 
       try {
-        const run = await host.sendMessage(conversationId, { text });
+        const run = await host.sendMessage(activeConversationId, { text });
         await consumeRun(run);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -177,13 +239,14 @@ export function useRun({
   );
 
   const resumeActive = useCallback(
-    async () => {
-      if (!host || !conversationId || runRef.current) return;
+    async (targetConversationId?: string) => {
+      const activeConversationId = targetConversationId ?? conversationId;
+      if (!host || !activeConversationId || runRef.current) return;
       setIsRunning(true);
       setError(null);
       setCurrentStep('正在恢复未完成的运行...');
       try {
-        const run = await host.resumeRun(conversationId);
+        const run = await host.resumeRun(activeConversationId);
         await consumeRun(run);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -200,11 +263,36 @@ export function useRun({
   }, []);
 
   const approveAction = useCallback(async (effectId: string, approved: boolean, reason?: string) => {
-    if (!effectId || !runRef.current) return;
-    await runRef.current.reply(effectId, { approved, ...(approved ? {} : { reason: reason || '拒绝执行' }) });
-    setApprovalRequest(null);
-    setCurrentStep('审批已提交，正在继续...');
-  }, []);
+    if (!effectId || !runRef.current || approvalSubmitting) return;
+    setApprovalSubmitting(true);
+    try {
+      await runRef.current.reply(effectId, { approved, ...(approved ? {} : { reason: reason || '拒绝执行' }) });
+      setApprovalRequest(null);
+      setCurrentStep('审批已提交，正在继续...');
+      setError(null);
+    } catch (e) {
+      setError(`审批提交失败: ${e instanceof Error ? e.message : String(e)}`);
+      setCurrentStep('审批仍在等待，请重新选择。');
+    } finally {
+      setApprovalSubmitting(false);
+    }
+  }, [approvalSubmitting]);
+
+  const replyAsk = useCallback(async (effectId: string, value: Record<string, unknown>) => {
+    if (!effectId || !runRef.current || approvalSubmitting) return;
+    setApprovalSubmitting(true);
+    try {
+      await runRef.current.reply(effectId, value as never);
+      setAskRequest(null);
+      setCurrentStep('回答已提交，正在继续...');
+      setError(null);
+    } catch (e) {
+      setError(`回答提交失败: ${e instanceof Error ? e.message : String(e)}`);
+      setCurrentStep('仍在等待你的回答，请重新选择。');
+    } finally {
+      setApprovalSubmitting(false);
+    }
+  }, [approvalSubmitting]);
 
   const cancelRun = useCallback(async () => {
     if (runRef.current) {
@@ -219,9 +307,12 @@ export function useRun({
     currentStep,
     error,
     approvalRequest,
+    askRequest,
+    approvalSubmitting,
     sendMessage,
     resumeActive,
     approveAction,
+    replyAsk,
     cancelRun,
   };
 }
