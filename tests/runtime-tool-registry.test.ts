@@ -3,6 +3,8 @@ import { defineTool, ToolRegistry } from '@hunterzhu/pulse-tool-sdk'
 import { RuntimeToolRegistry, PulseRuntime } from '@hunterzhu/pulse-runtime'
 import { createToolEffectExecutor } from '@hunterzhu/pulse-adapters'
 import type { EffectRecord } from '@hunterzhu/pulse-runtime'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { z } from 'zod'
 
 const echo = defineTool({ name: 'echo', description: 'echo input', input: z.object({ value: z.string() }), output: z.object({ value: z.string() }), execute: (input) => input })
@@ -43,15 +45,17 @@ describe('Runtime tool registry', () => {
   })
 
   it('filters manifest workspace and network permissions before discovery or execution', () => {
-    const remote = { ...echo, manifest: { ...echo.manifest, name: 'remote-echo', permissions: { workspaceRoots: ['/workspace/project'], networkHosts: ['api.example.com'] } } }
-    const denied = new RuntimeToolRegistry({ workspaceRoots: ['/workspace'], allowNetwork: false })
+    const workspaceRoot = join(tmpdir(), 'pulse-workspace')
+    const projectRoot = join(workspaceRoot, 'project')
+    const remote = { ...echo, manifest: { ...echo.manifest, name: 'remote-echo', permissions: { workspaceRoots: [projectRoot], networkHosts: ['api.example.com'] } } }
+    const denied = new RuntimeToolRegistry({ workspaceRoots: [workspaceRoot], allowNetwork: false })
     denied.register(remote)
     expect(denied.isAllowed('remote-echo')).toBe(false)
     expect(denied.permissionReasons('remote-echo')).toEqual(['NETWORK_DISABLED'])
     expect(denied.list()).toEqual([])
     expect(() => denied.admission('remote-echo', { value: 'x' })).toThrow('TOOL_NOT_ALLOWED')
 
-    const allowed = new RuntimeToolRegistry({ workspaceRoots: ['/workspace'], networkHosts: ['api.example.com'] })
+    const allowed = new RuntimeToolRegistry({ workspaceRoots: [workspaceRoot], networkHosts: ['api.example.com'] })
     allowed.register(remote)
     expect(allowed.isAllowed('remote-echo')).toBe(true)
     expect(allowed.compileToolSet('restricted').tools[0]).toMatchObject({ name: 'remote-echo', permissions: remote.manifest.permissions })

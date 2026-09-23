@@ -426,8 +426,13 @@ describe('effect outbox and runtime persistence envelope', () => {
         child.once('error', reject)
         child.once('exit', (code, signal) => resolveExit({ code, signal }))
       })
-      expect(exit.code).toBeNull()
-      expect(exit.signal).toBe('SIGKILL')
+      if (process.platform === 'win32') {
+        // Windows reports process.kill(..., 'SIGKILL') as a forced exit code.
+        expect(exit.code).toBe(1)
+      } else {
+        expect(exit.code).toBeNull()
+        expect(exit.signal).toBe('SIGKILL')
+      }
       const restored = await PulseRuntime.restore(new FileRuntimePersistenceBackend(filePath))
       expect(restored.state.effects.get('effect-1')?.state).toBe('reconcile_required')
       expect(restored.mutationLog.entries.some((entry) => entry.transactionId.startsWith('recovery:effect-1:'))).toBe(true)

@@ -3,7 +3,7 @@ import { normalize } from 'node:path'
 import { validateJsonSchema } from '../models/router.js'
 import type { JsonValue, ResourceLockSpec, SideEffectPolicy } from '../core/types.js'
 
-function normalizeWorkspaceRoot(root: string): string { if (root === '*') return root; const value = normalize(root); return value.length > 1 ? value.replace(/\/$/, '') : value }
+function normalizeWorkspaceRoot(root: string): string { if (root === '*') return root; const value = normalize(root).replace(/\\/g, '/'); const normalized = value.length > 1 ? value.replace(/\/$/, '') : value; return process.platform === 'win32' ? normalized.toLowerCase() : normalized }
 function normalizeNetworkHost(host: string): string { return host.toLocaleLowerCase().replace(/\.$/, '') }
 
 export interface RuntimeToolPermissions { workspaceRoots?: string[]; networkHosts?: string[] }

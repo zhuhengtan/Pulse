@@ -5,7 +5,7 @@ import { matchesJsonSchema } from './schema.js'
 
 export { matchesJsonSchema } from './schema.js'
 
-function normalizeWorkspaceRoot(root: string): string { if (root === '*') return root; const value = normalize(root); return value.length > 1 ? value.replace(/\/$/, '') : value }
+function normalizeWorkspaceRoot(root: string): string { if (root === '*') return root; const value = normalize(root).replace(/\\/g, '/'); const normalized = value.length > 1 ? value.replace(/\/$/, '') : value; return process.platform === 'win32' ? normalized.toLowerCase() : normalized }
 function normalizeNetworkHost(host: string): string { return host.toLocaleLowerCase().replace(/\.$/, '') }
 
 export const TOOL_SDK_VERSION = '0.1.0'
