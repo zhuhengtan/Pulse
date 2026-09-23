@@ -304,7 +304,7 @@ Pulse 的用户级运行目录统一放在同一个 `.pulse` 目录下：
 
 Windows 会把 `~` 解析为 `%USERPROFILE%`。可以用 `PULSE_HOME` 移动整个目录，用 `PULSE_DATA_DIR` 或 `PULSE_LOG_DIR` 单独覆盖数据和日志目录；命令行的 `--data-dir` 优先级更高。旧版本使用的 `~/.local/share/pulse` 会在首次启动时自动迁移到 `~/.pulse/data`。
 
-配置文件只保存 Provider 和运行策略，API Key 通过环境变量读取，不会写入配置或会话数据。初始配置使用本地 `mock` Provider，可以先用来验证 CLI 和工具链路。
+配置文件只保存 Provider 和运行策略，API Key 通过环境变量读取，不会写入配置或会话数据。安装 `@hunterzhu/pulse-cli` 时会在用户主目录自动创建 `.pulse/config.json` 示例配置（Windows 使用 `%USERPROFILE%\.pulse`，macOS/Linux 使用 `~/.pulse`），已有配置不会被覆盖。初始激活模型是本地 `mock`，也附有 OpenAI 和 DeepSeek 的模型映射示例。
 
 ### 常用命令
 

@@ -47,9 +47,23 @@ export interface PulseCliConfig {
 export const defaultPulseConfig: PulseCliConfig = {
   providers: {
     mock: { provider: 'mock', name: 'Mock' },
+    openai: {
+      provider: 'openai-compatible',
+      name: 'OpenAI',
+      baseURL: 'https://api.openai.com/v1',
+      apiKeyEnv: 'OPENAI_API_KEY',
+    },
+    deepseek: {
+      provider: 'deepseek',
+      name: 'DeepSeek',
+      baseURL: 'https://api.deepseek.com',
+      apiKeyEnv: 'DEEPSEEK_API_KEY',
+    },
   },
   models: {
     mock: { displayName: 'mock', provider: 'mock', modelCode: 'mock', maxContextTokens: 32_000, maxOutputTokens: 4_096, reasoningEffort: 'medium' },
+    'gpt5.6-a': { displayName: 'gpt5.6-a', provider: 'openai', modelCode: 'gpt-5.6' },
+    'deepseek-chat': { displayName: 'deepseek-chat', provider: 'deepseek', modelCode: 'deepseek-chat' },
   },
   activeModel: 'mock',
   approvalMode: 'ask',

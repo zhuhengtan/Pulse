@@ -27,6 +27,8 @@ Windows:     %USERPROFILE%\\.pulse\\config.json
 
 Pulse 只使用供应商表和模型表这套配置：模型的 `displayName` 必须全局唯一；`modelCode` 才是实际发送给供应商的模型名。
 
+执行 `npm install @hunterzhu/pulse-cli`（或全局安装）时，跨平台的 Node 安装脚本会在当前操作系统的用户主目录下创建 `.pulse/config.json`（macOS/Linux 为 `~/.pulse/config.json`，Windows 为 `%USERPROFILE%\.pulse\config.json`）。初始文件包含 `mock` 默认模型以及 OpenAI、DeepSeek 的示例映射；已有配置不会被覆盖。API Key 只记录环境变量名，不会写入配置。macOS/Linux 使用 `0600` 文件权限；Windows 由当前用户目录的 Windows ACL 管理访问权限。
+
 旧版单 `provider` 配置不会自动迁移。已有用户配置请执行 `npx @hunterzhu/pulse-cli setup --force` 生成新模板，再按下面的格式填写；该命令会覆盖指定的配置文件。
 
 ```json
