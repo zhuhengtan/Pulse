@@ -6,7 +6,7 @@
 
 CLI 是可在本机日常使用的通用任务助手，编程是其中一种用途。用户用自然语言提出目标，助手读取必要资料、调用工具、产出结果，遇到缺失信息或需要授权的操作时停下来询问，并支持下次继续。
 
-首版以单用户、单机、前台运行、macOS 为验收范围；代码保持平台边界，Linux/Windows 不默认宣称已验收。既能在项目目录工作，也能在普通资料目录工作，不要求 Git 仓库。
+首版最初以 macOS 为验收范围；当前跨平台目标覆盖 Windows、macOS 与 Linux。`.github/workflows/ci.yml` 对 Ubuntu 和 Windows 执行构建、测试、CLI 打包验包及启动脚本 smoke checks。只有 Windows job 实际通过后，才把 Windows 支持记为已验证；本机 macOS 结果不能替代 Windows 终端验收。
 
 首版完成后应能实际完成四类任务：
 
@@ -118,7 +118,7 @@ CLI 不直接修改 Runtime state、不自己重试副作用、不把全部历�
 - 启动脚本转发 SIGINT/SIGTERM 和退出码，只清理自己创建的子进程。Inspector 端口被占用时明确报错或使用用户指定端口，不终止其他进程。
 - 明确定义脚本自身参数与透传 CLI 参数的边界；带空格的路径、中文任务、多行输入和管道输入不得因中间包装层损坏。
 
-首版分发形式采用“需要 Node 的可解压运行包”，先验收 macOS，不承诺独立原生可执行文件。建议产物目录：
+首版分发形式采用“需要 Node 的可解压运行包”，不承诺独立原生可执行文件。Windows 与 macOS/Linux 均提供原生安装入口，并由对应平台 CI 覆盖。建议产物目录：
 
 ```text
 artifacts/cli/
@@ -130,6 +130,8 @@ artifacts/cli/
     bin/pulse             可执行启动器，定位自身目录并调用 Node
     install.sh            解压后可直接使用的用户级安装入口
     uninstall.sh          仅清理本安装器管理的程序文件
+    install.ps1           Windows PowerShell 用户级安装入口
+    uninstall.ps1         仅清理本安装器管理的 Windows 启动器
     app/                  编译后的入口、内部包与完整运行依赖
     package.json          版本、Node 要求等运行元数据
     manifest.json         构建版本、源码 revision/dirty 标记、文件清单
@@ -164,6 +166,14 @@ pnpm cli:install -- --archive /absolute/path/to/pulse-0.1.0.tar.gz
 pulse --version
 pulse doctor
 pulse --cwd /absolute/path/to/workspace
+```
+
+Windows PowerShell 从归档安装：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+pulse.cmd --version
+pulse.cmd doctor
 ```
 
 验收包含：无预先 dist 的首次开发启动；Inspector 能命中 TypeScript 断点；修改依赖包后重新运行能看到变化；从含空格路径启动；在源码仓库不可访问、无开发依赖的目录中运行解压包；安装/升级/回退/卸载保留会话数据。离线产物验证与真实 Provider 验收分开记录。

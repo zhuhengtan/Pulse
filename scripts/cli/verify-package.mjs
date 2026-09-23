@@ -2,20 +2,25 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const args = process.argv.slice(2)
 const index = args.indexOf('--archive')
-const archive = index >= 0 ? args[index + 1] : undefined
-if (!archive) {
-  console.error('Usage: pnpm cli:verify-package -- --archive <path>')
-  process.exit(2)
-}
+const repo = fileURLToPath(new URL('../../', import.meta.url))
+const version = JSON.parse(await readFile(join(repo, 'packages/cli/package.json'), 'utf8')).version
+const archive = index >= 0 ? args[index + 1] : join(repo, 'artifacts/cli', `pulse-${version}.tar.gz`)
+if (!archive) throw new Error('Usage: pnpm cli:verify-package [-- --archive <path>]')
 
 const directory = await mkdtemp(join(tmpdir(), 'pulse-package-verify-'))
 const extracted = spawnSync('tar', ['-xzf', archive, '-C', directory], { stdio: 'inherit' })
 if (extracted.status !== 0) process.exit(extracted.status ?? 1)
 
 const bin = join(directory, 'pulse/bin/pulse')
+const windowsInstall = await readFile(join(directory, 'pulse/install.ps1'), 'utf8')
+const windowsUninstall = await readFile(join(directory, 'pulse/uninstall.ps1'), 'utf8')
+if (!windowsInstall.includes('pulse.cmd') || !windowsInstall.includes('REM Pulse CLI managed launcher') || !windowsUninstall.includes('REM Pulse CLI managed launcher')) {
+  throw new Error('Windows installer scripts are missing managed pulse.cmd support')
+}
 const packageManifest = JSON.parse(await readFile(join(directory, 'pulse/app/node_modules/@hunterzhu/pulse-cli/package.json'), 'utf8'))
 const versionCheck = spawnSync(process.execPath, [bin, '--version'], { encoding: 'utf8' })
 if (versionCheck.status !== 0 || versionCheck.stdout.trim() !== packageManifest.version) {

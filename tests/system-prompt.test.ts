@@ -48,6 +48,8 @@ describe('system prompt and instructions discovery', () => {
       expect(prompt).toContain('Investigate first')
       expect(prompt).toContain('Surgical, minimal changes')
       expect(prompt).toContain('Autonomous command execution')
+      expect(prompt).toContain('On Windows, use native PowerShell commands')
+      expect(prompt).toContain('does not start a shell implicitly')
       expect(prompt).toContain('## Evidence-Based Verification')
       expect(prompt).toContain('## Output & Communication Style')
       expect(prompt).toContain('Reply in the same language')

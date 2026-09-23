@@ -1,6 +1,6 @@
 import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 
 export interface PulseCliProviderProfile {
   /** Adapter/protocol id. The map key is the user-facing provider code. */
@@ -100,7 +100,11 @@ export async function ensurePulseUserConfig(path = defaultPulseConfigPath()): Pr
 
 export function expandHome(path: string | undefined): string | undefined {
   if (path === undefined) return undefined
-  return path === '~' ? homedir() : path.startsWith('~/') ? join(homedir(), path.slice(2)) : path
+  return path === '~' || path === `~${sep}`
+    ? homedir()
+    : path.startsWith('~/') || (sep === '\\' && path.startsWith('~\\'))
+      ? join(homedir(), path.slice(2))
+      : path
 }
 
 function asConfig(value: unknown): PulseCliConfig | undefined {

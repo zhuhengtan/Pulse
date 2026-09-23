@@ -1,8 +1,8 @@
 import { access, readFile, writeFile, mkdtemp, rm, stat } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { join, resolve, sep } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig } from '../packages/cli/src/config.js'
+import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome } from '../packages/cli/src/config.js'
 import { hostOptions, parse } from '../packages/cli/src/bin.js'
 import { runSetup } from '../packages/cli/src/commands/setup.js'
 
@@ -16,12 +16,17 @@ describe('ensurePulseUserConfig', () => {
   it('uses PULSE_HOME for the user configuration root', () => {
     const previous = process.env.PULSE_HOME
     try {
-      process.env.PULSE_HOME = '/tmp/pulse-config-home-test'
-      expect(defaultPulseConfigPath()).toBe('/tmp/pulse-config-home-test/config.json')
+      process.env.PULSE_HOME = join(tmpdir(), 'pulse-config-home-test')
+      expect(defaultPulseConfigPath()).toBe(resolve(join(tmpdir(), 'pulse-config-home-test', 'config.json')))
     } finally {
       if (previous === undefined) delete process.env.PULSE_HOME
       else process.env.PULSE_HOME = previous
     }
+  })
+
+  it('expands a home-relative path using the current platform separator', () => {
+    const separator = sep === '\\' ? '\\' : '/'
+    expect(expandHome(`~${separator}Documents${separator}Pulse`)).toBe(join(homedir(), 'Documents', 'Pulse'))
   })
 
   it('creates the parent .pulse directory and default config on first run', async () => {
@@ -57,7 +62,7 @@ describe('ensurePulseUserConfig', () => {
 
     await expect(readFile(path, 'utf8')).resolves.toBe(`${JSON.stringify(defaultPulseConfig, null, 2)}\n`)
     await expect(stat(join(directory, 'nested'))).resolves.toMatchObject({ mode: expect.any(Number) })
-    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600)
     await expect(access(`${path}/config.json`)).rejects.toThrow()
   })
 

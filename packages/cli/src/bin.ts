@@ -11,6 +11,7 @@ import { runDoctor } from './commands/doctor.js'
 import { runSessions } from './commands/sessions.js'
 import { runResume } from './commands/resume.js'
 import { runSetup } from './commands/setup.js'
+import { isSameModulePath } from './utils/is-main-module.js'
 
 const packageManifest = createRequire(import.meta.url)('../package.json') as { version: string }
 export const version = packageManifest.version
@@ -277,7 +278,7 @@ export async function main(): Promise<number> {
   return runInteractive(options, undefined, undefined, version, parsed.options.resume === true)
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && isSameModulePath(process.argv[1], fileURLToPath(import.meta.url))) {
   main()
     .then((code) => {
       process.exitCode = code

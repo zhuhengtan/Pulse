@@ -8,12 +8,20 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
   if (!Number.isFinite(max) || max < 0) return Promise.reject(shellError('INVALID_SHELL_OUTPUT_LIMIT'))
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0)) return Promise.reject(shellError('INVALID_SHELL_TIMEOUT'))
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: options.cwd, env: options.env, shell: false, detached: process.platform !== 'win32' })
+    const child = spawn(command, args, { cwd: options.cwd, env: options.env, shell: false, detached: process.platform !== 'win32', windowsHide: true })
     let stdout = ''; let stderr = ''; let truncated = false
     const append = (target: 'stdout' | 'stderr', chunk: Buffer): void => { const value = chunk.toString(); const current = target === 'stdout' ? stdout : stderr; const next = current + value; if (Buffer.byteLength(next) > max) { truncated = true; const limited = next.slice(0, max); if (target === 'stdout') stdout = limited; else stderr = limited } else if (target === 'stdout') stdout = next; else stderr = next }
     let closed = false
     const signalProcessGroup = (signal: NodeJS.Signals): void => {
       if (process.platform !== 'win32' && child.pid) { try { process.kill(-child.pid, signal); return } catch { /* process group may already be gone */ } }
+      if (process.platform === 'win32' && child.pid) {
+        // child.kill() only terminates the direct process on Windows; kill the
+        // owned process tree so cancelled shell tools cannot leave descendants.
+        const tree = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+        tree.once('error', () => child.kill(signal))
+        tree.unref()
+        return
+      }
       child.kill(signal)
     }
     let termination: 'timeout' | 'aborted' | undefined

@@ -1,4 +1,4 @@
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { legacyPulseDataPath, pulseDataPath, pulseHomePath, pulseLogPath } from '../packages/server/src/paths.js'
@@ -29,11 +29,11 @@ describe('Pulse user paths', () => {
   })
 
   it('allows relocating the shared root and log directory with environment variables', () => {
-    process.env.PULSE_HOME = '/tmp/pulse-home-test'
-    process.env.PULSE_LOG_DIR = '/tmp/pulse-logs-test'
+    process.env.PULSE_HOME = join(tmpdir(), 'pulse-home-test')
+    process.env.PULSE_LOG_DIR = join(tmpdir(), 'pulse-logs-test')
 
-    expect(pulseHomePath()).toBe('/tmp/pulse-home-test')
-    expect(pulseDataPath()).toBe('/tmp/pulse-home-test/data')
-    expect(pulseLogPath()).toBe('/tmp/pulse-logs-test')
+    expect(pulseHomePath()).toBe(resolve(join(tmpdir(), 'pulse-home-test')))
+    expect(pulseDataPath()).toBe(join(pulseHomePath(), 'data'))
+    expect(pulseLogPath()).toBe(resolve(join(tmpdir(), 'pulse-logs-test')))
   })
 })
