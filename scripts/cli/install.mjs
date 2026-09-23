@@ -39,10 +39,10 @@ try {
     await mkdir(join(root, 'bin'), { recursive: true })
 
     if (windows) {
-      const relativeTarget = `..\\versions\\pulse\\${manifest.version}\\bin\\pulse`
+      const relativeTarget = `..\\versions\\pulse\\${manifest.version}\\bin\\pulse.js`
       await writeFile(launcher, `@echo off\r\nREM Pulse CLI managed launcher\r\nsetlocal DisableDelayedExpansion\r\nnode "%~dp0${relativeTarget}" %*\r\nexit /b %errorlevel%\r\n`)
     } else {
-      await writeFile(launcher, `#!/bin/sh\n# Pulse CLI managed launcher\nexec node "${target}/bin/pulse" "$@"\n`, { mode: 0o755 })
+      await writeFile(launcher, `#!/bin/sh\n# Pulse CLI managed launcher\nexec node "${target}/bin/pulse.js" "$@"\n`, { mode: 0o755 })
     }
 
     console.log(`Installed Pulse ${manifest.version} to ${target}`)

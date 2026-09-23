@@ -15,7 +15,7 @@ const directory = await mkdtemp(join(tmpdir(), 'pulse-package-verify-'))
 const extracted = spawnSync('tar', ['-xzf', archive, '-C', directory], { stdio: 'inherit' })
 if (extracted.status !== 0) process.exit(extracted.status ?? 1)
 
-const bin = join(directory, 'pulse/bin/pulse')
+const bin = join(directory, 'pulse/bin/pulse.js')
 const windowsInstall = await readFile(join(directory, 'pulse/install.ps1'), 'utf8')
 const windowsUninstall = await readFile(join(directory, 'pulse/uninstall.ps1'), 'utf8')
 if (!windowsInstall.includes('pulse.cmd') || !windowsInstall.includes('REM Pulse CLI managed launcher') || !windowsUninstall.includes('REM Pulse CLI managed launcher')) {

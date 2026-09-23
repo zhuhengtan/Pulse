@@ -299,7 +299,7 @@ Pulse 的用户级运行目录统一放在同一个 `.pulse` 目录下：
 ├── data/             # 会话、运行状态和恢复快照
 ├── logs/             # 应用日志
 ├── versions/pulse/   # 独立安装包及内置 server
-└── bin/pulse         # 独立安装的启动器
+└── bin/pulse         # macOS/Linux 启动器；Windows 使用 bin/pulse.cmd
 ```
 
 Windows 会把 `~` 解析为 `%USERPROFILE%`。可以用 `PULSE_HOME` 移动整个目录，用 `PULSE_DATA_DIR` 或 `PULSE_LOG_DIR` 单独覆盖数据和日志目录；命令行的 `--data-dir` 优先级更高。旧版本使用的 `~/.local/share/pulse` 会在首次启动时自动迁移到 `~/.pulse/data`。

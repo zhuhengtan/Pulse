@@ -2,4 +2,25 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-const args = process.argv.slice(2); const index = args.indexOf('--archive'); const archive = index >= 0 ? args[index + 1] : undefined; if (!archive) { console.error('Usage: pnpm cli:run-package -- --archive <path> -- <cli args>'); process.exit(2) } const separator = args.indexOf('--', index + 2); const cliArgs = separator >= 0 ? args.slice(separator + 1) : []; const directory = await mkdtemp(join(tmpdir(), 'pulse-package-')); const extracted = spawnSync('tar', ['-xzf', archive, '-C', directory], { stdio: 'inherit' }); if (extracted.status !== 0) process.exit(extracted.status ?? 1); const child = spawn(process.execPath, [join(directory, 'pulse/bin/pulse'), ...cliArgs], { stdio: 'inherit', env: { ...process.env, PULSE_DATA_DIR: join(directory, 'data') } }); child.on('exit', async (code, signal) => { await rm(directory, { recursive: true, force: true }); process.exitCode = code ?? (signal ? 130 : 1) })
+const args = process.argv.slice(2)
+const index = args.indexOf('--archive')
+const archive = index >= 0 ? args[index + 1] : undefined
+if (!archive) {
+  console.error('Usage: pnpm cli:run-package -- --archive <path> -- <cli args>')
+  process.exit(2)
+}
+
+const separator = args.indexOf('--', index + 2)
+const cliArgs = separator >= 0 ? args.slice(separator + 1) : []
+const directory = await mkdtemp(join(tmpdir(), 'pulse-package-'))
+const extracted = spawnSync('tar', ['-xzf', archive, '-C', directory], { stdio: 'inherit' })
+if (extracted.status !== 0) process.exit(extracted.status ?? 1)
+
+const child = spawn(process.execPath, [join(directory, 'pulse/bin/pulse.js'), ...cliArgs], {
+  stdio: 'inherit',
+  env: { ...process.env, PULSE_DATA_DIR: join(directory, 'data') },
+})
+child.on('exit', async (code, signal) => {
+  await rm(directory, { recursive: true, force: true })
+  process.exitCode = code ?? (signal ? 130 : 1)
+})

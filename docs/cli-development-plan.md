@@ -127,7 +127,7 @@ artifacts/cli/
 
 压缩包内部：
   pulse/
-    bin/pulse             可执行启动器，定位自身目录并调用 Node
+    bin/pulse.js          可执行启动器，定位自身目录并调用 Node
     install.sh            解压后可直接使用的用户级安装入口
     uninstall.sh          仅清理本安装器管理的程序文件
     install.ps1           Windows PowerShell 用户级安装入口
@@ -143,7 +143,7 @@ artifacts/cli/
 
 只收集明确的运行产物、文档与许可证，不把开发配置、密钥、会话数据、测试 fixture 或整个工作目录打进去。构建失败保留上一份完整包；`artifacts/cli/` 加入忽略规则，清理仅作用于本脚本管理的输出目录。
 
-包内启动器与安装器应允许用户脱离源码仓库操作。用户级安装采用 `~/.pulse/versions/pulse/<version>/` 加 `~/.pulse/bin/pulse` 入口；已有同名非 Pulse 文件时停止覆盖。升级先安装并验证新版本，再原子切换入口，保留上一版本供回退；程序回退不等于旧版可以读取新版数据，存储兼容检查仍需执行。`PULSE_HOME` 可移动整个用户目录，`PULSE_INSTALL_ROOT` 仅作为旧版本兼容别名。
+包内启动器与安装器应允许用户脱离源码仓库操作。用户级安装采用 `~/.pulse/versions/pulse/<version>/` 加 `~/.pulse/bin/pulse`（Windows 为 `pulse.cmd`）入口；已有同名非 Pulse 文件时停止覆盖。升级先安装并验证新版本，再原子切换入口，保留上一版本供回退；程序回退不等于旧版可以读取新版数据，存储兼容检查仍需执行。`PULSE_HOME` 可移动整个用户目录，`PULSE_INSTALL_ROOT` 仅作为旧版本兼容别名。
 
 开发文档至少给出以下完整路径，示例版本 `0.1.0` 仅用于展示；命令在对应阶段实现后必须实际验证：
 
@@ -264,7 +264,7 @@ Human 输入是最高优先级的外部 Effect。CLI、桌面端和 Web 只负�
 
 `shell.exec` 是受授权的本机进程执行，首版没有 OS 级隔离。工作目录只能限制文件工具，不能限制任意 shell 的读写范围；不得把字符串命令名单当安全沙箱。shell 子进程默认不继承模型/搜索服务密钥等敏感环境变量。
 
-用户配置默认放 `~/.pulse/config.json`，运行数据放 `~/.pulse/data/`，应用日志放 `~/.pulse/logs/`，支持 `PULSE_HOME`、`PULSE_DATA_DIR`、`PULSE_LOG_DIR`、`--config`、`PULSE_CONFIG` 和项目目录 `.pulse/config.json` 覆盖。独立安装包的运行代码和内置 server 放在 `~/.pulse/versions/pulse/<version>/`，启动器放在 `~/.pulse/bin/pulse`。旧版本的 `~/.local/share/pulse/` 在首次默认启动时自动迁移。配置只保存 Provider、baseURL、model、环境变量名、工具开关和限额；密钥在执行时从环境或后续凭据存储读取，不进入会话快照、日志和导出。
+用户配置默认放 `~/.pulse/config.json`，运行数据放 `~/.pulse/data/`，应用日志放 `~/.pulse/logs/`，支持 `PULSE_HOME`、`PULSE_DATA_DIR`、`PULSE_LOG_DIR`、`--config`、`PULSE_CONFIG` 和项目目录 `.pulse/config.json` 覆盖。独立安装包的运行代码和内置 server 放在 `~/.pulse/versions/pulse/<version>/`，启动器放在 `~/.pulse/bin/pulse`（Windows 为 `pulse.cmd`）。旧版本的 `~/.local/share/pulse/` 在首次默认启动时自动迁移。配置只保存 Provider、baseURL、model、环境变量名、工具开关和限额；密钥在执行时从环境或后续凭据存储读取，不进入会话快照、日志和导出。
 
 配置优先级为显式 CLI 参数 → 环境变量 → 经信任的目录配置 → 用户配置 → 默认值。目录配置不能自行扩大授权、修改凭据目标或启用可执行插件。首次使用云模型时明确显示 Provider、目标端点和数据出网设置；不把 `local_only` 内容自动改为允许上传。
 

@@ -108,13 +108,13 @@ process.exitCode = await main()
 `)
 await cp(join(repo, 'packages/cli/dist/config.js'), join(stage, 'pulse/app/config.js'))
 
-await writeFile(join(stage, 'pulse/bin/pulse'), `#!/usr/bin/env node
+await writeFile(join(stage, 'pulse/bin/pulse.js'), `#!/usr/bin/env node
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 await import(join(root, 'app', 'cli.js'))
 `)
-await chmod(join(stage, 'pulse/bin/pulse'), 0o755)
+await chmod(join(stage, 'pulse/bin/pulse.js'), 0o755)
 
 await writeFile(join(stage, 'pulse/install.sh'), `#!/bin/sh
 set -eu
@@ -126,7 +126,7 @@ if [ -e "\$ROOT/bin/pulse" ] && ! grep -q "Pulse CLI managed launcher" "\$ROOT/b
   echo "Refusing to overwrite an unmanaged entry: \$ROOT/bin/pulse" >&2
   exit 1
 fi
-printf '#!/bin/sh\\n# Pulse CLI managed launcher\\nexec node "%s/bin/pulse" "\$@"\\n' "\$ROOT/versions/pulse/\$VERSION" > "\$ROOT/bin/pulse"
+printf '#!/bin/sh\\n# Pulse CLI managed launcher\\nexec node "%s/bin/pulse.js" "\$@"\\n' "\$ROOT/versions/pulse/\$VERSION" > "\$ROOT/bin/pulse"
 chmod 755 "\$ROOT/bin/pulse"
 echo "Installed Pulse \$VERSION to \$ROOT/versions/pulse/\$VERSION"
 echo "Ensure \$ROOT/bin is on PATH."
@@ -162,7 +162,7 @@ const windowsInstallScript = [
   '  }',
   '}',
   "Copy-Item (Join-Path $PSScriptRoot '*') $target -Recurse -Force",
-  '$relativeTarget = "..\\versions\\pulse\\{0}\\bin\\pulse" -f $manifest.version',
+  '$relativeTarget = "..\\versions\\pulse\\{0}\\bin\\pulse.js" -f $manifest.version',
   '$launcherContent = @(\'@echo off\', \'REM Pulse CLI managed launcher\', \'setlocal DisableDelayedExpansion\', "node `"%~dp0$relativeTarget`" %*", \'exit /b %errorlevel%\') -join [Environment]::NewLine',
   'Set-Content -NoNewline -Encoding Ascii $launcher $launcherContent',
   'Write-Output "Installed Pulse $($manifest.version) to $target"',
@@ -194,8 +194,8 @@ Requires Node >=22.
 
 ## Run without installing
 
-- macOS/Linux: \`node bin/pulse --help\`
-- Windows PowerShell: \`node .\\bin\\pulse --help\`
+- macOS/Linux: \`node bin/pulse.js --help\`
+- Windows PowerShell: \`node .\\bin\\pulse.js --help\`
 
 ## Install for the current user
 
