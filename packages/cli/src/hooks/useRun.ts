@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { LocalHost, RunHandle } from '@hunterzhu/pulse-server';
-import type { ApprovalRequest, AskRequest, DisplayMessage, ToolCallDisplay } from '../types.js';
+import type { ApprovalRequest, AskRequest, DisplayMessage, LaneDisplay, ToolCallDisplay } from '../types.js';
 
 function toolStatus(value: unknown): ToolCallDisplay['status'] {
   if (value === 'succeeded' || value === 'failed' || value === 'running' || value === 'cancelled') return value;
@@ -44,6 +44,7 @@ export function useRun({
   const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
   const [askRequest, setAskRequest] = useState<AskRequest | null>(null);
   const [approvalSubmitting, setApprovalSubmitting] = useState(false);
+  const [lanes, setLanes] = useState<LaneDisplay[]>([]);
 
   const runRef = useRef<RunHandle | null>(null);
 
@@ -169,6 +170,23 @@ export function useRun({
             break;
           }
           case 'fact':
+            if (event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
+              const fact = event.data as Record<string, unknown>;
+              if (fact.type === 'lane.snapshot' && Array.isArray(fact.lanes)) {
+                setLanes(fact.lanes.flatMap((lane) => {
+                  if (!lane || typeof lane !== 'object' || Array.isArray(lane)) return [];
+                  const item = lane as Record<string, unknown>;
+                  if (typeof item.id !== 'string' || typeof item.status !== 'string' || typeof item.goal !== 'string') return [];
+                  return [{
+                    id: item.id,
+                    status: item.status,
+                    goal: item.goal,
+                    ...(typeof item.activity === 'string' ? { activity: item.activity } : {}),
+                  }];
+                }));
+                break;
+              }
+            }
             setCurrentStep(describeFactStatus(event.data));
             break;
           case 'error':
@@ -177,6 +195,7 @@ export function useRun({
             setCurrentStep(null);
             setApprovalRequest(null);
             setAskRequest(null);
+            setLanes([]);
             break;
           case 'complete':
             setIsRunning(false);
@@ -308,6 +327,7 @@ export function useRun({
     error,
     approvalRequest,
     askRequest,
+    lanes,
     approvalSubmitting,
     sendMessage,
     resumeActive,

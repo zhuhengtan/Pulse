@@ -41,6 +41,14 @@ export interface ToolCallDisplay {
   durationMs?: number | undefined
 }
 
+/** Runtime lane snapshot rendered in the bottom status HUD. */
+export interface LaneDisplay {
+  id: string
+  status: string
+  goal: string
+  activity?: string | undefined
+}
+
 /** Token 统计数据 */
 export interface TokenStatsData {
   inputTokens: number

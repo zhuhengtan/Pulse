@@ -5,6 +5,7 @@ import type { LocalHostOptions } from '@hunterzhu/pulse-server';
 import { Header } from './Header.js';
 import { Welcome } from './Welcome.js';
 import { MessageList } from './MessageList.js';
+import { StatusHud } from './StatusHud.js';
 import { Spinner } from './Spinner.js';
 import { ApprovalPrompt } from './ApprovalPrompt.js';
 import { AskPrompt } from './AskPrompt.js';
@@ -65,6 +66,7 @@ export function App({
     error: runError,
     approvalRequest,
     askRequest,
+    lanes,
     approvalSubmitting,
     sendMessage,
     resumeActive,
@@ -210,7 +212,8 @@ export function App({
           cwd: hostOptions.cwd ?? process.cwd(),
           dataDir: hostOptions.dataDir ?? '默认 ~/.pulse/data',
           provider: hostOptions.provider?.provider ?? 'mock',
-          model: hostOptions.provider?.defaultModel ?? '默认',
+          model: host?.getModel() ?? hostOptions.provider?.defaultModel ?? '默认',
+          providerProfiles: Object.keys(hostOptions.providerProfiles ?? {}),
           approvalMode: hostOptions.approvalMode ?? 'ask',
           maxTurns: hostOptions.maxTurns ?? 32,
           autoCompactPercent: hostOptions.autoCompactPercent ?? 90,
@@ -318,12 +321,39 @@ export function App({
       }
     },
     onModel: (name?: string) => {
-      const model = name?.trim();
-      if (model && host) host.setModel(model);
+      const selection = name?.trim();
+      try {
+        if (selection && host) {
+          const separator = selection.includes('/') ? '/' : selection.includes(':') ? ':' : undefined;
+          if (separator) {
+            const [providerName, ...modelParts] = selection.split(separator);
+            const selectedModel = modelParts.join(separator).trim();
+            if (providerName && selectedModel) host.setProvider(providerName, selectedModel);
+          } else if (hostOptions.providerModels?.[selection]) {
+            host.setModel(selection);
+          } else if (hostOptions.providerProfiles?.[selection]) {
+            host.setProvider(selection);
+          } else {
+            host.setModel(selection);
+          }
+        }
+      } catch (error) {
+        addAssistantMessage({
+          id: `model-error-${Date.now()}`,
+          role: 'system',
+          text: `模型切换失败: ${error instanceof Error ? error.message : String(error)}`,
+          createdAt: new Date().toISOString(),
+        });
+        return;
+      }
+      const currentProvider = host?.getProvider() || hostOptions.activeProviderCode || hostOptions.provider?.provider || '默认';
+      const currentModel = host?.getModel() || hostOptions.provider?.defaultModel || '默认';
       addAssistantMessage({
         id: `model-${Date.now()}`,
         role: 'system',
-        text: `当前模型设置为: ${model || host?.getModel() || hostOptions.provider?.defaultModel || '默认'}`,
+        text: selection
+          ? `当前模型设置为: ${currentProvider}/${currentModel}`
+          : `当前模型: ${currentModel}\n可用模型: ${Object.keys(hostOptions.providerModels ?? {}).join(', ') || '当前模型'}\n切换示例: /model gpt5.6-a`,
         createdAt: new Date().toISOString(),
       });
     },
@@ -512,10 +542,11 @@ export function App({
 
   const cwd = conversation?.summary.cwd ?? hostOptions.cwd ?? process.cwd();
   const title = conversation?.summary.title ?? 'New conversation';
-  const modelName = hostOptions.provider?.defaultModel || hostOptions.provider?.provider || 'default';
+  const modelName = host?.getModel() || hostOptions.provider?.defaultModel || hostOptions.provider?.provider || 'default';
+  const providerName = host?.getProvider() || hostOptions.activeProviderCode || hostOptions.provider?.provider || 'default';
 
   return (
-    <Box flexDirection="column" width="100%">
+    <Box flexDirection="column" width="100%" height="100%">
       <Header title={title} cwd={cwd} model={modelName} approvalMode={hostOptions.approvalMode ?? 'ask'} />
 
       {messages.length === 0 && !isRunning && (
@@ -544,7 +575,9 @@ export function App({
         </Box>
       )}
 
-      {approvalRequest && (
+      <StatusHud model={modelName} provider={providerName} approvalMode={hostOptions.approvalMode ?? 'ask'} currentStep={currentStep} lanes={lanes} />
+
+      {approvalRequest ? (
         <ApprovalPrompt
           request={approvalRequest}
           inputMode={approvalInputMode}
@@ -560,33 +593,23 @@ export function App({
             setApprovalInputMode(true);
           }}
         />
-      )}
-
-      {askRequest && (
+      ) : askRequest ? (
         <AskPrompt
           key={askRequest.effectId}
           request={askRequest}
           disabled={approvalSubmitting}
           onReply={(value) => void replyAsk(askRequest.effectId, value)}
         />
+      ) : (
+        <Box marginTop={1}>
+          <InputArea
+            onSubmit={(txt) => void handleSubmit(txt)}
+            disabled={approvalSubmitting}
+            focus={!approvalSubmitting}
+            placeholder={isRunning ? '运行中也可以输入；/cancel 可取消当前运行...' : '输入消息或 /help...'}
+          />
+        </Box>
       )}
-
-      <Box marginTop={1}>
-        <InputArea
-          onSubmit={(txt) => void handleSubmit(txt)}
-          disabled={approvalSubmitting || approvalRequest !== null || askRequest !== null}
-          focus={!approvalRequest && !askRequest && !approvalSubmitting}
-          placeholder={
-            approvalRequest
-              ? '请先在审批卡片中选择操作'
-              : askRequest
-                ? '请先回答上面的提问'
-              : isRunning
-                ? '运行中也可以输入；/cancel 可取消当前运行...'
-                : '输入消息或 /help...'
-          }
-        />
-      </Box>
     </Box>
   );
 }

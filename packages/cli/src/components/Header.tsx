@@ -11,20 +11,20 @@ interface Props {
 
 export function Header({ title, cwd, model, approvalMode = 'ask' }: Props) {
   const cwdBasename = path.basename(cwd);
+  const approvalLabel = approvalMode === 'auto' ? 'AUTO' : approvalMode === 'read-only' ? 'READ-ONLY' : 'ASK';
 
   return (
-    <Box borderBottom borderStyle="single" borderColor={theme.border} borderTop={false} borderLeft={false} borderRight={false} width="100%">
-      <Text color={theme.primary} bold>Pulse</Text>
-      <Text color={theme.dim}> · </Text>
-      <Text color="white">{title}</Text>
-      <Text color={theme.dim}> · </Text>
-      <Text color={theme.dim}>{model}</Text>
-      <Text color={theme.dim}> · </Text>
-      <Text color={approvalMode === 'auto' ? theme.warning : theme.dim}>
-        {approvalMode === 'auto' ? '替我审批' : approvalMode === 'read-only' ? '只读' : '需审批'}
-      </Text>
-      <Text color={theme.dim}> · </Text>
-      <Text color={theme.dim}>{cwdBasename}</Text>
+    <Box borderBottom borderStyle="single" borderColor={theme.border} borderTop={false} borderLeft={false} borderRight={false} width="100%" justifyContent="space-between">
+      <Box gap={1}>
+        <Text color={theme.primary} bold> PULSE </Text>
+        <Text color="white" bold>{title}</Text>
+      </Box>
+      <Box gap={1}>
+        <Text color={theme.dim}>{cwdBasename}</Text>
+        <Text color={theme.dim}>·</Text>
+        <Text color={theme.dim}>{model}</Text>
+        <Text color={approvalMode === 'auto' ? theme.warning : theme.dim}>{approvalLabel}</Text>
+      </Box>
     </Box>
   );
 }

@@ -61,17 +61,18 @@ export function ToolCallCard({ call, expanded: defaultExpanded = false, onToggle
       : '';
 
   return (
-    <Box borderStyle="round" borderColor={isFocused ? theme.tool : theme.border} flexDirection="column" paddingX={1}>
+    <Box borderStyle="single" borderLeft borderTop={false} borderRight={false} borderBottom={false} borderColor={isFocused ? theme.tool : theme.border} flexDirection="column" paddingLeft={1}>
       <Box gap={1}>
-        <Text>🔧</Text>
+        <Text color={theme.tool}>◆</Text>
         <Text color={theme.tool} bold>{call.name}</Text>
         {getStatusIcon()}
         {failureSummary && <Text color={call.status === 'failed' ? theme.error : theme.warning}> {failureSummary}</Text>}
-        {call.durationMs && <Text color={theme.dim}>{call.durationMs}ms</Text>}
+        {call.durationMs !== undefined && <Text color={theme.dim}>{call.durationMs}ms</Text>}
+        {!isExpanded && call.result !== undefined && <Text color={theme.dim}> · 已返回结果</Text>}
       </Box>
       {isExpanded && (
         <Box flexDirection="column" marginTop={1}>
-          <Text color={theme.dim}>参数:</Text>
+          <Text color={theme.dim}>参数</Text>
           <Box paddingLeft={2}>
             <Text color={theme.codeLang}>{argsJson}</Text>
           </Box>
@@ -85,6 +86,7 @@ export function ToolCallCard({ call, expanded: defaultExpanded = false, onToggle
           ) : null}
         </Box>
       )}
+      <Text color={theme.dim}>{isExpanded ? 'Enter/Space 收起' : 'Enter/Space 展开详情'}</Text>
     </Box>
   );
 }

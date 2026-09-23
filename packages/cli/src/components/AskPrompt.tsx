@@ -55,9 +55,9 @@ export function AskPrompt({ request, disabled = false, onReply }: Props) {
   });
 
   return (
-    <Box borderStyle="round" borderColor={theme.primary} flexDirection="column" paddingX={1}>
-      <Text color={theme.primary} bold>需要你的回答 · {request.toolName}</Text>
-      <Text>{request.prompt}</Text>
+    <Box borderStyle="double" borderColor={theme.primary} flexDirection="column" paddingX={1} marginTop={1}>
+      <Text color={theme.primary} bold>✦ 需要你的回答 · {request.toolName}</Text>
+      <Text color="white">{request.prompt}</Text>
       {request.type === 'choice' && (
         <Box flexDirection="column" marginTop={1}>
           {options.map((option, optionIndex) => (

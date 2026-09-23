@@ -26,7 +26,8 @@ export function AssistantMessage({
   const renderedText = text ? renderMarkdownToAnsi(text) : '';
 
   return (
-    <Box flexDirection="column" marginY={1}>
+    <Box flexDirection="column" marginY={1} paddingLeft={1} borderStyle="single" borderLeft borderTop={false} borderRight={false} borderBottom={false} borderColor={theme.primary}>
+      <Text color={theme.primary} bold>Pulse</Text>
       {showThinking && thinking && (
         <ThinkingBlock content={thinking} visible={true} />
       )}

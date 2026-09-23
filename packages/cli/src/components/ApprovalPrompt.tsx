@@ -19,16 +19,17 @@ export function ApprovalPrompt({ request, isFocused = false, inputMode = false, 
   const truncated = previews.some((preview) => preview.truncated);
 
   return (
-    <Box borderStyle="round" borderColor={theme.warning} flexDirection="column" paddingX={1}>
-      <Box marginBottom={1}>
-        <Text color={theme.warning} bold>需要批准：{request.toolName}</Text>
+    <Box borderStyle="double" borderColor={theme.warning} flexDirection="column" paddingX={1} marginTop={1}>
+      <Box marginBottom={1} gap={1}>
+        <Text color={theme.warning} bold>⚠ 审批请求</Text>
+        <Text color={theme.tool}>{request.toolName}</Text>
       </Box>
 
       <Box flexDirection="column" marginBottom={1}>
         {previews.map((preview, index) => (
           <Box key={`${preview.name}-${index}`} flexDirection="column" paddingLeft={1}>
-            <Text color={theme.tool}>{preview.name}</Text>
-            <Text>{preview.body}</Text>
+            <Text color={theme.tool} bold>{preview.name}</Text>
+            <Text color={theme.dim}>{preview.body}</Text>
           </Box>
         ))}
       </Box>
