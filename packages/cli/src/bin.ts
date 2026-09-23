@@ -235,7 +235,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   }
 }
 
-async function main(): Promise<number> {
+export async function main(): Promise<number> {
   const parsed = parse(process.argv.slice(2))
   if (parsed.options.help || parsed.options.h) {
     process.stdout.write(help)
