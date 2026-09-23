@@ -334,6 +334,8 @@ npx @hunterzhu/pulse-cli resume <conversation-id> "继续处理上次的问题"
 
 编辑用户配置文件。供应商和模型分开注册，模型显示名可以避免不同供应商的同名模型冲突：
 
+旧版单 `provider` 配置不再读取。已有配置可以先运行 `npx @hunterzhu/pulse-cli setup --force` 生成新模板，再填入下面的供应商、模型和环境变量名。
+
 ```json
 {
   "providers": {
@@ -374,7 +376,7 @@ npx @hunterzhu/pulse-cli
 
 Agent 需要询问你时，会调用 `ask.choice`、`ask.multi` 或 `ask.input`。CLI 会显示对应的单选、多选或文本输入卡片，回答会回到同一轮任务中。
 
-交互模式中可以用 `/model gpt5.6-a` 切换模型；也可以用 `--provider`、`--model`、`--base-url`、`--config` 或对应的 `PULSE_*` 环境变量临时覆盖配置。完整配置加载顺序和字段说明见 [`docs/cli-config.md`](./docs/cli-config.md)。
+交互模式中可以用 `/model gpt5.6-a` 切换模型；启动时也可以用 `--model gpt5.6-a` 或 `PULSE_MODEL=gpt5.6-a` 选择模型。完整配置加载顺序和字段说明见 [`docs/cli-config.md`](./docs/cli-config.md)。
 
 ## 仓库文档
 

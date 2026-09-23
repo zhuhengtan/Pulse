@@ -2,6 +2,7 @@
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { LocalHostOptions } from '@hunterzhu/pulse-server'
 import { ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliModel, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
@@ -32,9 +33,7 @@ Options:
   --cwd <path>              workspace directory
   --data-dir <path>         Pulse data directory
   --config <path>           user configuration file (default home/.pulse/config.json)
-  --provider <name>         provider code (legacy adapter id also accepted)
-  --model <name>            Pulse model display name (or raw provider model code)
-  --base-url <url>          provider endpoint
+  --model <name>            Pulse model display name
   --context-tokens <n>      model context window (default 32000)
   --max-output-tokens <n>   maximum generated tokens (default 4096)
   --reasoning-effort <x>    low, medium, or high
@@ -127,45 +126,45 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const configuredModelEntry = requestedModel === undefined
     ? undefined
     : Object.entries(config.models ?? {}).find(([name, item]) => name === requestedModel || item.displayName === requestedModel)
-  const modelSelection = configuredModelEntry?.[1]
-  const activeModelName = configuredModelEntry === undefined ? requestedModel : (modelSelection?.displayName ?? configuredModelEntry[0])
-  const providerName = option(parsed.options, 'provider') ?? process.env.PULSE_PROVIDER ?? modelSelection?.provider ?? config.provider?.provider
-  const profile = providerName === undefined ? undefined : config.providers?.[providerName]
-  const model = modelSelection?.modelCode ?? requestedModel ?? config.provider?.model
-  const baseURL = option(parsed.options, 'base-url') ?? process.env.PULSE_BASE_URL ?? profile?.baseURL ?? config.provider?.baseURL
+  if (!configuredModelEntry) throw new Error(`UNKNOWN_MODEL_DISPLAY_NAME:${requestedModel ?? '(missing)'}`)
+  const [, modelSelection] = configuredModelEntry
+  const activeModelName = modelSelection.displayName
+  const providerName = modelSelection.provider
+  const profile = config.providers?.[providerName]
+  if (!profile) throw new Error(`MODEL_PROVIDER_NOT_FOUND:${providerName}`)
+  const model = modelSelection.modelCode
+  const baseURL = profile.baseURL
   const contextTokens = option(parsed.options, 'context-tokens') ?? process.env.PULSE_CONTEXT_TOKENS
   const maxOutputTokens = option(parsed.options, 'max-output-tokens') ?? process.env.PULSE_MAX_OUTPUT_TOKENS
   const reasoningEffort = option(parsed.options, 'reasoning-effort') ?? process.env.PULSE_REASONING_EFFORT
   const maxTurns = option(parsed.options, 'max-turns') ?? process.env.PULSE_MAX_TURNS
   const autoCompactPercent = option(parsed.options, 'auto-compact-percent') ?? process.env.PULSE_AUTO_COMPACT_PERCENT
-  const apiKeyEnv =
-    profile?.apiKeyEnv ?? config.provider?.apiKeyEnv ?? (providerName === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
+  const apiKeyEnv = profile.apiKeyEnv ?? (profile.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
   const apiKey = process.env[apiKeyEnv]
   const parsePositiveInteger = (value: string | undefined): number | undefined => {
     if (value === undefined) return undefined
     const parsed = Number(value)
     return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
   }
-  const configuredContextTokens = parsePositiveInteger(contextTokens) ?? modelSelection?.maxContextTokens ?? profile?.maxContextTokens ?? config.provider?.maxContextTokens
-  const configuredMaxOutputTokens = parsePositiveInteger(maxOutputTokens) ?? modelSelection?.maxOutputTokens ?? profile?.maxOutputTokens ?? config.provider?.maxOutputTokens
-  const configuredReasoningEffort = reasoningEffort === 'low' || reasoningEffort === 'medium' || reasoningEffort === 'high' ? reasoningEffort : modelSelection?.reasoningEffort ?? profile?.reasoningEffort ?? config.provider?.reasoningEffort
-  const configuredToolChoice = profile?.toolChoice ?? config.provider?.toolChoice
+  const configuredContextTokens = parsePositiveInteger(contextTokens) ?? modelSelection.maxContextTokens ?? profile.maxContextTokens
+  const configuredMaxOutputTokens = parsePositiveInteger(maxOutputTokens) ?? modelSelection.maxOutputTokens ?? profile.maxOutputTokens
+  const configuredReasoningEffort = reasoningEffort === 'low' || reasoningEffort === 'medium' || reasoningEffort === 'high' ? reasoningEffort : modelSelection.reasoningEffort ?? profile.reasoningEffort
+  const configuredToolChoice = profile.toolChoice
   const configuredMaxTurns = parsePositiveInteger(maxTurns) ?? config.maxTurns
   const configuredAutoCompactPercent = parsePositiveInteger(autoCompactPercent) ?? config.autoCompactPercent
-  const provider = providerName
-    ? {
-        provider: profile?.provider ?? providerName,
-        ...(model === undefined ? {} : { defaultModel: model }),
-        ...(baseURL === undefined ? {} : { baseURL }),
-        ...(apiKey === undefined ? {} : { apiKey }),
-        ...(configuredContextTokens === undefined ? {} : { maxContextTokens: configuredContextTokens }),
-        ...(configuredMaxOutputTokens === undefined ? {} : { maxOutputTokens: configuredMaxOutputTokens }),
-        ...(configuredReasoningEffort === undefined ? {} : { reasoningEffort: configuredReasoningEffort }),
-        ...(configuredToolChoice === undefined ? {} : { toolChoice: configuredToolChoice }),
-      }
-    : undefined
+  const provider = {
+    provider: profile.provider,
+    defaultModel: model,
+    ...(baseURL === undefined ? {} : { baseURL }),
+    ...(apiKey === undefined ? {} : { apiKey }),
+    ...(configuredContextTokens === undefined ? {} : { maxContextTokens: configuredContextTokens }),
+    ...(configuredMaxOutputTokens === undefined ? {} : { maxOutputTokens: configuredMaxOutputTokens }),
+    ...(configuredReasoningEffort === undefined ? {} : { reasoningEffort: configuredReasoningEffort }),
+    ...(configuredToolChoice === undefined ? {} : { toolChoice: configuredToolChoice }),
+  }
   const providerProfiles = Object.fromEntries(Object.entries(config.providers ?? {}).flatMap(([name, item]: [string, PulseCliProviderProfile]) => {
-    const adapterProvider = item.provider ?? name
+    if (!item.provider) throw new Error(`PROVIDER_PROTOCOL_REQUIRED:${name}`)
+    const adapterProvider = item.provider
     const itemKeyEnv = item.apiKeyEnv ?? (adapterProvider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
     const itemKey = process.env[itemKeyEnv]
     return [[name, {
@@ -180,8 +179,9 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   }))
   const modelDisplayNames = new Set<string>()
   const providerModels = Object.fromEntries(Object.entries(config.models ?? {}).flatMap(([name, item]: [string, PulseCliModel]) => {
-    if (!item.provider || !item.modelCode || !config.providers?.[item.provider]) return []
-    const displayName = item.displayName?.trim() || name
+    if (!config.providers?.[item.provider]) throw new Error(`MODEL_PROVIDER_NOT_FOUND:${item.provider}`)
+    const displayName = item.displayName.trim()
+    if (!displayName) throw new Error(`MODEL_DISPLAY_NAME_REQUIRED:${name}`)
     if (modelDisplayNames.has(displayName)) throw new Error(`DUPLICATE_MODEL_DISPLAY_NAME:${displayName}`)
     modelDisplayNames.add(displayName)
     return [[displayName, { provider: item.provider, model: item.modelCode }]]
@@ -222,11 +222,11 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(cwd === undefined ? {} : { cwd }),
     ...(dataDir === undefined ? {} : { dataDir }),
     ...(systemPrompt && systemPrompt.trim().length > 0 ? { systemPrompt: systemPrompt.trim() } : {}),
-    ...(provider === undefined ? {} : { provider }),
-    ...(Object.keys(providerProfiles).length === 0 ? {} : { providerProfiles }),
-    ...(Object.keys(providerModels).length === 0 ? {} : { providerModels }),
-    ...(providerName === undefined ? {} : { activeProviderCode: providerName }),
-    ...(activeModelName === undefined ? {} : { activeModel: activeModelName }),
+    provider,
+    providerProfiles,
+    providerModels,
+    activeProviderCode: providerName,
+    activeModel: activeModelName,
     ...(mockResponse === undefined ? {} : { mockResponse }),
     ...(approvalMode === undefined ? {} : { approvalMode }),
     ...(configuredMaxTurns === undefined ? {} : { maxTurns: configuredMaxTurns }),
@@ -277,11 +277,13 @@ async function main(): Promise<number> {
   return runInteractive(options, undefined, undefined, version, parsed.options.resume === true)
 }
 
-main()
-  .then((code) => {
-    process.exitCode = code
-  })
-  .catch((error) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
-    process.exitCode = 1
-  })
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main()
+    .then((code) => {
+      process.exitCode = code
+    })
+    .catch((error) => {
+      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
+      process.exitCode = 1
+    })
+}

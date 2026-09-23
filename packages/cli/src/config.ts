@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 
 export interface PulseCliProviderProfile {
   /** Adapter/protocol id. The map key is the user-facing provider code. */
-  provider?: string
+  provider: string
   name?: string
   baseURL?: string
   apiKeyEnv?: string
@@ -19,8 +19,8 @@ export interface PulseCliModel {
   provider: string
   /** Exact model identifier sent to the provider. */
   modelCode: string
-  /** Optional label; the models map key is already required to be unique. */
-  displayName?: string
+  /** Globally unique name shown by the CLI and accepted by `/model`. */
+  displayName: string
   maxContextTokens?: number
   maxOutputTokens?: number
   reasoningEffort?: 'low' | 'medium' | 'high'
@@ -31,7 +31,6 @@ export interface PulseCliConfig {
   dataDir?: string
   systemPrompt?: string
   systemPromptFile?: string
-  provider?: { provider?: string; model?: string; baseURL?: string; apiKeyEnv?: string; maxContextTokens?: number; maxOutputTokens?: number; reasoningEffort?: 'low' | 'medium' | 'high'; toolChoice?: 'auto' | 'required' | 'none' | { type: 'function'; function: { name: string } } }
   /** Named provider profiles. The map key is a stable provider code. */
   providers?: Record<string, PulseCliProviderProfile>
   /** Globally unique Pulse model names mapped to provider/model codes. */
@@ -46,7 +45,13 @@ export interface PulseCliConfig {
 }
 
 export const defaultPulseConfig: PulseCliConfig = {
-  provider: { provider: 'mock', model: 'mock', apiKeyEnv: 'OPENAI_API_KEY', maxContextTokens: 32_000, maxOutputTokens: 4_096, reasoningEffort: 'medium', toolChoice: 'auto' },
+  providers: {
+    mock: { provider: 'mock', name: 'Mock' },
+  },
+  models: {
+    mock: { displayName: 'mock', provider: 'mock', modelCode: 'mock', maxContextTokens: 32_000, maxOutputTokens: 4_096, reasoningEffort: 'medium' },
+  },
+  activeModel: 'mock',
   approvalMode: 'ask',
   maxTurns: 32,
   autoCompactPercent: 90,
@@ -91,13 +96,9 @@ function asConfig(value: unknown): PulseCliConfig | undefined {
 
 /** Workspace files must not escalate approval, network, provider credentials, or the system prompt. */
 export function sanitizeWorkspaceConfig(value: PulseCliConfig): PulseCliConfig {
-  const provider = value.provider === undefined ? undefined : {
-    ...(value.provider.provider === undefined ? {} : { provider: value.provider.provider }),
-    ...(value.provider.model === undefined ? {} : { model: value.provider.model }),
-  }
   const providers = value.providers === undefined ? undefined : Object.fromEntries(Object.entries(value.providers).flatMap(([name, profile]) => {
     const safe = {
-      ...(profile.provider === undefined ? {} : { provider: profile.provider }),
+      provider: profile.provider,
       ...(profile.name === undefined ? {} : { name: profile.name }),
     }
     return Object.keys(safe).length ? [[name, safe]] : []
@@ -105,7 +106,6 @@ export function sanitizeWorkspaceConfig(value: PulseCliConfig): PulseCliConfig {
   return {
     ...(value.cwd === undefined ? {} : { cwd: value.cwd }),
     ...(value.dataDir === undefined ? {} : { dataDir: value.dataDir }),
-    ...(provider === undefined || Object.keys(provider).length === 0 ? {} : { provider }),
     ...(providers === undefined || Object.keys(providers).length === 0 ? {} : { providers }),
     ...(value.activeModel === undefined ? {} : { activeModel: value.activeModel }),
     ...(value.models === undefined ? {} : {
@@ -114,7 +114,7 @@ export function sanitizeWorkspaceConfig(value: PulseCliConfig): PulseCliConfig {
         return [[name, {
           provider: model.provider,
           modelCode: model.modelCode,
-          ...(model.displayName === undefined ? {} : { displayName: model.displayName }),
+          displayName: model.displayName,
           ...(model.maxContextTokens === undefined ? {} : { maxContextTokens: model.maxContextTokens }),
           ...(model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens }),
           ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
@@ -131,7 +131,6 @@ export function mergePulseConfigs(layers: Array<{ value: PulseCliConfig; trust: 
     merged = {
       ...merged,
       ...value,
-      ...(merged.provider === undefined && value.provider === undefined ? {} : { provider: { ...merged.provider, ...value.provider } }),
       ...(merged.providers === undefined && value.providers === undefined ? {} : { providers: { ...merged.providers, ...value.providers } }),
       ...(merged.models === undefined && value.models === undefined ? {} : { models: { ...merged.models, ...value.models } }),
     }

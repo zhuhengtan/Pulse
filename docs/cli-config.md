@@ -25,7 +25,9 @@ Windows:     %USERPROFILE%\\.pulse\\config.json
 
 配置优先级从低到高是：用户配置、当前目录 `.pulse/config.json`、`PULSE_CONFIG`、`--config`，命令行参数和对应环境变量再覆盖配置文件字段。
 
-兼容旧版的单 Provider 配置仍然可用。需要在多个供应商之间切换时，使用独立的供应商表和模型表：模型表的 key（或 `displayName`）必须全局唯一；`modelCode` 才是实际发送给供应商的模型名。
+Pulse 只使用供应商表和模型表这套配置：模型的 `displayName` 必须全局唯一；`modelCode` 才是实际发送给供应商的模型名。
+
+旧版单 `provider` 配置不会自动迁移。已有用户配置请执行 `npx @hunterzhu/pulse-cli setup --force` 生成新模板，再按下面的格式填写；该命令会覆盖指定的配置文件。
 
 ```json
 {
@@ -78,7 +80,6 @@ Provider 字段说明：
 - `providers`：供应商注册表，key 是供应商 code；`provider` 是适配器/协议 id，`apiKeyEnv` 只保存环境变量名。
 - `models`：全局模型注册表，key 或 `displayName` 是 Pulse 内显示名，`provider` 引用供应商 code，`modelCode` 是实际传给供应商的模型名。
 - `activeModel`：当前使用的 Pulse 模型显示名。交互界面中可用 `/model gpt5.6-a` 切换。
-- `provider` / `model`：旧版单供应商配置，仍兼容；当存在 `models` 时优先使用模型映射。
 - `baseURL`：Provider API 根地址。DeepSeek 当前 OpenAI 格式地址是 `https://api.deepseek.com`。
 - `apiKeyEnv`：API Key 所在的环境变量名，值本身不会写进配置文件。
 - `maxContextTokens`：Pulse 本地路由使用的上下文窗口声明。

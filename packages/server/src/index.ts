@@ -491,6 +491,9 @@ export class LocalHost {
       this.activeModelName = normalized
       return
     }
+    if (this.options.providerModels && Object.keys(this.options.providerModels).length > 0) {
+      throw new Error(`UNKNOWN_MODEL_DISPLAY_NAME:${normalized}`)
+    }
     if (!this.options.provider) this.options.provider = { provider: 'mock' }
     this.options.provider.defaultModel = normalized
     this.activeModelName = normalized

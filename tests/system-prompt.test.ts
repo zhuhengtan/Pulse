@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { mkdtemp, rm, writeFile, mkdir, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,6 +10,23 @@ import {
   validateAskReply,
 } from '@hunterzhu/pulse-server'
 import { parse, hostOptions } from '../packages/cli/src/bin.js'
+import { defaultPulseConfig, defaultPulseConfigPath } from '../packages/cli/src/config.js'
+
+let cliConfigHome: string
+let previousCliConfigHome: string | undefined
+
+beforeAll(async () => {
+  cliConfigHome = await mkdtemp(join(tmpdir(), 'pulse-system-prompt-config-'))
+  previousCliConfigHome = process.env.PULSE_HOME
+  process.env.PULSE_HOME = cliConfigHome
+  await writeFile(defaultPulseConfigPath(), `${JSON.stringify(defaultPulseConfig, null, 2)}\n`)
+})
+
+afterAll(async () => {
+  if (previousCliConfigHome === undefined) delete process.env.PULSE_HOME
+  else process.env.PULSE_HOME = previousCliConfigHome
+  await rm(cliConfigHome, { recursive: true, force: true })
+})
 
 describe('system prompt and instructions discovery', () => {
   describe('ask reply validation', () => {

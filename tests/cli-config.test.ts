@@ -102,7 +102,7 @@ describe('ensurePulseUserConfig', () => {
       },
     })}\n`)
     try {
-      await expect(hostOptions(parse(['--config', path]))).rejects.toThrow('DUPLICATE_MODEL_DISPLAY_NAME:same')
+      await expect(hostOptions(parse(['--config', path, '--model', 'same']))).rejects.toThrow('DUPLICATE_MODEL_DISPLAY_NAME:same')
     } finally {
       if (previousHome === undefined) delete process.env.PULSE_HOME
       else process.env.PULSE_HOME = previousHome
