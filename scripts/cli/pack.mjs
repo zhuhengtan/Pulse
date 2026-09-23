@@ -109,10 +109,10 @@ process.exitCode = await main()
 await cp(join(repo, 'packages/cli/dist/config.js'), join(stage, 'pulse/app/config.js'))
 
 await writeFile(join(stage, 'pulse/bin/pulse.js'), `#!/usr/bin/env node
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-await import(join(root, 'app', 'cli.js'))
+await import(pathToFileURL(join(root, 'app', 'cli.js')).href)
 `)
 await chmod(join(stage, 'pulse/bin/pulse.js'), 0o755)
 

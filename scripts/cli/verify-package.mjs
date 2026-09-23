@@ -25,6 +25,8 @@ const packageManifest = JSON.parse(await readFile(join(directory, 'pulse/app/nod
 const versionCheck = spawnSync(process.execPath, [bin, '--version'], { encoding: 'utf8' })
 if (versionCheck.status !== 0 || versionCheck.stdout.trim() !== packageManifest.version) {
   console.error(`CLI version mismatch: expected ${packageManifest.version}, received ${versionCheck.stdout.trim()}`)
+  if (versionCheck.error) console.error(`CLI spawn failed: ${versionCheck.error.message}`)
+  if (versionCheck.stderr) console.error(versionCheck.stderr.trim())
   process.exit(versionCheck.status ?? 1)
 }
 
