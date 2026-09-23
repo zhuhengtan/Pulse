@@ -3,6 +3,7 @@ import { theme } from '../theme.js';
 import type { LaneDisplay } from '../types.js';
 
 interface Props {
+  cwd: string;
   model: string;
   provider: string;
   approvalMode: 'read-only' | 'ask' | 'auto';
@@ -15,7 +16,7 @@ function laneLabel(lane: LaneDisplay): string {
   return `${lane.id.slice(0, 8)} ${lane.status}${lane.activity ? ` · ${lane.activity}` : ''}${goal ? ` · ${goal}` : ''}`;
 }
 
-export function StatusHud({ model, provider, approvalMode, currentStep, lanes }: Props) {
+export function StatusHud({ cwd, model, provider, approvalMode, currentStep, lanes }: Props) {
   const activeLanes = lanes.filter((lane) => !['succeeded', 'failed', 'cancelled'].includes(lane.status));
   const approvalLabel = approvalMode === 'auto' ? 'auto' : approvalMode === 'read-only' ? '只读' : 'ask';
 
@@ -28,6 +29,9 @@ export function StatusHud({ model, provider, approvalMode, currentStep, lanes }:
         <Text color={approvalMode === 'auto' ? theme.warning : theme.dim}>approval:{approvalLabel}</Text>
         <Text color={activeLanes.length ? theme.accent : theme.dim}>lanes:{activeLanes.length}/{lanes.length}</Text>
         {currentStep && <Text color={theme.dim}>· {currentStep}</Text>}
+      </Box>
+      <Box paddingLeft={2}>
+        <Text color={theme.dim}>workspace:{cwd}</Text>
       </Box>
       {lanes.length > 0 && (
         <Box flexDirection="column" paddingLeft={2}>

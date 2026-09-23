@@ -33,7 +33,12 @@ export async function runInteractive(
       initialTask={initialTask}
       resumeOnStart={resumeLatest && selectedConversationId !== undefined}
       version={version}
-    />
+    />,
+    {
+      // Keep Pulse in its own full-screen buffer so the shell's previous
+      // command history does not become part of the chat workspace.
+      alternateScreen: true,
+    },
   );
 
   let interrupted = false;

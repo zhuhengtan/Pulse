@@ -575,7 +575,7 @@ export function App({
         </Box>
       )}
 
-      <StatusHud model={modelName} provider={providerName} approvalMode={hostOptions.approvalMode ?? 'ask'} currentStep={currentStep} lanes={lanes} />
+      <StatusHud cwd={cwd} model={modelName} provider={providerName} approvalMode={hostOptions.approvalMode ?? 'ask'} currentStep={currentStep} lanes={lanes} />
 
       {approvalRequest ? (
         <ApprovalPrompt
