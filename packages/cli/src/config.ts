@@ -2,12 +2,42 @@ import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
+export interface PulseCliProviderProfile {
+  /** Adapter/protocol id. The map key is the user-facing provider code. */
+  provider?: string
+  name?: string
+  baseURL?: string
+  apiKeyEnv?: string
+  maxContextTokens?: number
+  maxOutputTokens?: number
+  reasoningEffort?: 'low' | 'medium' | 'high'
+  toolChoice?: 'auto' | 'required' | 'none' | { type: 'function'; function: { name: string } }
+}
+
+export interface PulseCliModel {
+  /** Provider map key, not the adapter id. */
+  provider: string
+  /** Exact model identifier sent to the provider. */
+  modelCode: string
+  /** Optional label; the models map key is already required to be unique. */
+  displayName?: string
+  maxContextTokens?: number
+  maxOutputTokens?: number
+  reasoningEffort?: 'low' | 'medium' | 'high'
+}
+
 export interface PulseCliConfig {
   cwd?: string
   dataDir?: string
   systemPrompt?: string
   systemPromptFile?: string
   provider?: { provider?: string; model?: string; baseURL?: string; apiKeyEnv?: string; maxContextTokens?: number; maxOutputTokens?: number; reasoningEffort?: 'low' | 'medium' | 'high'; toolChoice?: 'auto' | 'required' | 'none' | { type: 'function'; function: { name: string } } }
+  /** Named provider profiles. The map key is a stable provider code. */
+  providers?: Record<string, PulseCliProviderProfile>
+  /** Globally unique Pulse model names mapped to provider/model codes. */
+  models?: Record<string, PulseCliModel>
+  /** Active Pulse model display name. */
+  activeModel?: string
   approvalMode?: 'read-only' | 'ask' | 'auto'
   maxTurns?: number
   /** Percent of maxContextTokens that triggers automatic history compaction. Clamped to 1–90. */
@@ -65,10 +95,32 @@ export function sanitizeWorkspaceConfig(value: PulseCliConfig): PulseCliConfig {
     ...(value.provider.provider === undefined ? {} : { provider: value.provider.provider }),
     ...(value.provider.model === undefined ? {} : { model: value.provider.model }),
   }
+  const providers = value.providers === undefined ? undefined : Object.fromEntries(Object.entries(value.providers).flatMap(([name, profile]) => {
+    const safe = {
+      ...(profile.provider === undefined ? {} : { provider: profile.provider }),
+      ...(profile.name === undefined ? {} : { name: profile.name }),
+    }
+    return Object.keys(safe).length ? [[name, safe]] : []
+  }))
   return {
     ...(value.cwd === undefined ? {} : { cwd: value.cwd }),
     ...(value.dataDir === undefined ? {} : { dataDir: value.dataDir }),
     ...(provider === undefined || Object.keys(provider).length === 0 ? {} : { provider }),
+    ...(providers === undefined || Object.keys(providers).length === 0 ? {} : { providers }),
+    ...(value.activeModel === undefined ? {} : { activeModel: value.activeModel }),
+    ...(value.models === undefined ? {} : {
+      models: Object.fromEntries(Object.entries(value.models).flatMap(([name, model]) => {
+        if (!model.provider || !model.modelCode) return []
+        return [[name, {
+          provider: model.provider,
+          modelCode: model.modelCode,
+          ...(model.displayName === undefined ? {} : { displayName: model.displayName }),
+          ...(model.maxContextTokens === undefined ? {} : { maxContextTokens: model.maxContextTokens }),
+          ...(model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens }),
+          ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
+        }]]
+      })),
+    }),
   }
 }
 
@@ -80,6 +132,8 @@ export function mergePulseConfigs(layers: Array<{ value: PulseCliConfig; trust: 
       ...merged,
       ...value,
       ...(merged.provider === undefined && value.provider === undefined ? {} : { provider: { ...merged.provider, ...value.provider } }),
+      ...(merged.providers === undefined && value.providers === undefined ? {} : { providers: { ...merged.providers, ...value.providers } }),
+      ...(merged.models === undefined && value.models === undefined ? {} : { models: { ...merged.models, ...value.models } }),
     }
   }
   return merged

@@ -42,6 +42,11 @@ export interface LocalHostOptions {
   logDir?: string
   systemPrompt?: string
   provider?: ProviderPresetConfig
+  /** Named provider profiles used by the interactive `/model` selector. */
+  providerProfiles?: Record<string, ProviderPresetConfig>
+  providerModels?: Record<string, { provider: string; model: string }>
+  activeProviderCode?: string
+  activeModel?: string
   mockResponse?: string
   mockToolCalls?: Array<{ name: string; input?: JsonValue; toolCallId?: string }>
   mockAfterToolResponse?: string
@@ -280,6 +285,26 @@ function isBoundedWorkspaceWrite(toolName: string): boolean {
   return toolName === 'fs.write' || toolName === 'fs.apply_patch' || toolName === 'fs.move'
 }
 
+function laneSnapshot(runtime: PulseRuntime): JsonValue {
+  return {
+    type: 'lane.snapshot',
+    lanes: [...runtime.state.lanes.values()].map((lane) => {
+      const activeEffect = [...lane.ownedEffectIds]
+        .map((effectId) => runtime.state.effects.get(effectId))
+        .find((effect) => effect && (effect.state === 'queued' || effect.state === 'running' || effect.state === 'retry_wait' || effect.state === 'reconcile_required'))
+      const effectInput = activeEffect?.input && typeof activeEffect.input === 'object' && !Array.isArray(activeEffect.input)
+        ? activeEffect.input as Record<string, JsonValue>
+        : undefined
+      return {
+        id: lane.id,
+        status: lane.status,
+        goal: lane.goal.slice(0, 240),
+        ...(typeof effectInput?.name === 'string' ? { activity: effectInput.name } : activeEffect ? { activity: activeEffect.kind } : {}),
+      }
+    }),
+  } as JsonValue
+}
+
 /** In auto mode the human step is replaced by a separate model safety review. */
 async function aiApproveToolCall(provider: ReturnType<typeof providerFromOptions>, effect: { input?: JsonValue }, signal: AbortSignal, userIntent = ''): Promise<boolean> {
   if (provider.adapter instanceof MockAdapter) return true
@@ -365,6 +390,8 @@ export class LocalHost {
   private readonly usesDefaultDataDir: boolean
   private readonly shouldMigrateLegacyData: boolean
   private readonly options: LocalHostOptions
+  private activeProviderName: string | undefined
+  private activeModelName: string | undefined
   private readonly approvedToolCalls = new Map<string, Set<string>>()
   private readonly active = new Map<string, { runtime: PulseRuntime; session: PulseSession; conversationId: string; runId: string }>()
   private readonly conversationLocks = new Map<string, Awaited<ReturnType<typeof open>>>()
@@ -375,6 +402,8 @@ export class LocalHost {
     this.dataDir = resolve(options.dataDir ?? process.env.PULSE_DATA_DIR ?? pulseDataPath())
     this.logDir = resolve(options.logDir ?? process.env.PULSE_LOG_DIR ?? pulseLogPath())
     this.options = options
+    this.activeProviderName = options.activeProviderCode ?? options.provider?.provider
+    this.activeModelName = options.activeModel ?? options.provider?.defaultModel
   }
   private async migrateLegacyData(): Promise<void> {
     if (!this.shouldMigrateLegacyData) return
@@ -456,10 +485,28 @@ export class LocalHost {
   setModel(model: string): void {
     const normalized = model.trim()
     if (!normalized) return
+    const selection = this.options.providerModels?.[normalized]
+    if (selection) {
+      this.setProvider(selection.provider, selection.model)
+      this.activeModelName = normalized
+      return
+    }
     if (!this.options.provider) this.options.provider = { provider: 'mock' }
     this.options.provider.defaultModel = normalized
+    this.activeModelName = normalized
   }
-  getModel(): string | undefined { return this.options.provider?.defaultModel }
+  setProvider(providerName: string, model?: string): void {
+    const profile = this.options.providerProfiles?.[providerName]
+    if (!profile) throw new Error(`UNKNOWN_PROVIDER:${providerName}`)
+    this.options.provider = { ...profile, ...(model === undefined ? {} : { defaultModel: model }) }
+    this.activeProviderName = providerName
+    this.activeModelName = model ?? profile.defaultModel
+  }
+  getProvider(): string | undefined { return this.activeProviderName ?? this.options.provider?.provider }
+  getModel(): string | undefined { return this.activeModelName ?? this.options.provider?.defaultModel }
+  getAvailableModels(): Array<{ name: string; provider: string; model: string }> {
+    return Object.entries(this.options.providerModels ?? {}).map(([name, selection]) => ({ name, ...selection }))
+  }
   getReasoningEffort(): 'low' | 'medium' | 'high' | undefined {
     return this.options.provider?.reasoningEffort
   }
@@ -729,6 +776,7 @@ export class LocalHost {
       yield { schemaVersion: 1, type: 'notice', conversationId, runId, seq, data: { kind: 'context_compacted', text: contextNotice } }
     }
     const textAgents = new Set<string>()
+    let lastLaneSnapshot = ''
     for await (const event of session.stream()) {
       seq++
       if (event.kind === 'observation') {
@@ -744,19 +792,28 @@ export class LocalHost {
         yield { schemaVersion: 1, type: 'gap', conversationId, runId, seq, data: { fromSeq: event.fromSeq ?? 0, toSeq: event.toSeq ?? 0 } }
         continue
       }
+      const snapshot = laneSnapshot(runtime)
+      const snapshotText = JSON.stringify(snapshot)
+      if (snapshotText !== lastLaneSnapshot) {
+        lastLaneSnapshot = snapshotText
+        seq++
+        yield { schemaVersion: 1, type: 'fact', conversationId, runId, seq, data: snapshot }
+      }
       if (event.event?.type === 'human.requested') {
         const liveEffect = event.event.effectId === undefined ? undefined : this.active.get(runId)?.runtime.state.effects.get(event.event.effectId)
         if (liveEffect?.state !== 'running' || liveEffect.outcome !== undefined) continue
+        seq++
         yield { schemaVersion: 1, type: 'waiting', conversationId, runId, seq, data: { effectId: event.event.effectId ?? null, input: event.event.data ?? null } }
         continue
       }
       if (event.event?.type === 'effect.settled' && event.event.effectId) {
         const toolEvent = this.toolSettlementObservation(runId, event.event.effectId, event.event.data)
         if (toolEvent) {
-          yield { schemaVersion: 1, type: 'observation', conversationId, runId, seq, data: toolEvent }
           seq++
+          yield { schemaVersion: 1, type: 'observation', conversationId, runId, seq, data: toolEvent }
         }
       }
+      seq++
       yield { schemaVersion: 1, type: 'fact', conversationId, runId, seq, data: event.event?.data ?? event.event?.type ?? null }
     }
     try {

@@ -1,8 +1,9 @@
-import { access, readFile, mkdtemp, rm, stat } from 'node:fs/promises'
+import { access, readFile, writeFile, mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig } from '../packages/cli/src/config.js'
+import { hostOptions, parse } from '../packages/cli/src/bin.js'
 import { runSetup } from '../packages/cli/src/commands/setup.js'
 
 const temporaryDirectories: string[] = []
@@ -58,5 +59,53 @@ describe('ensurePulseUserConfig', () => {
     await expect(stat(join(directory, 'nested'))).resolves.toMatchObject({ mode: expect.any(Number) })
     expect((await stat(path)).mode & 0o777).toBe(0o600)
     await expect(access(`${path}/config.json`)).rejects.toThrow()
+  })
+
+  it('resolves a unique Pulse model name to its provider and wire model code', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-model-map-'))
+    temporaryDirectories.push(directory)
+    const previousHome = process.env.PULSE_HOME
+    process.env.PULSE_HOME = directory
+    const path = join(directory, 'config.json')
+    await writeFile(path, `${JSON.stringify({
+      providers: {
+        deepseek: { provider: 'deepseek', baseURL: 'https://api.deepseek.com', apiKeyEnv: 'DEEPSEEK_API_KEY' },
+      },
+      models: {
+        'gpt5.6-b': { displayName: 'gpt5.6-b', provider: 'deepseek', modelCode: 'deepseek-chat' },
+      },
+      activeModel: 'gpt5.6-b',
+    })}\n`)
+    try {
+      const options = await hostOptions(parse(['--config', path]))
+      expect(options.activeModel).toBe('gpt5.6-b')
+      expect(options.activeProviderCode).toBe('deepseek')
+      expect(options.provider).toMatchObject({ provider: 'deepseek', defaultModel: 'deepseek-chat' })
+      expect(options.providerModels).toEqual({ 'gpt5.6-b': { provider: 'deepseek', model: 'deepseek-chat' } })
+    } finally {
+      if (previousHome === undefined) delete process.env.PULSE_HOME
+      else process.env.PULSE_HOME = previousHome
+    }
+  })
+
+  it('rejects duplicate model display names across providers', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-model-duplicate-'))
+    temporaryDirectories.push(directory)
+    const previousHome = process.env.PULSE_HOME
+    process.env.PULSE_HOME = directory
+    const path = join(directory, 'config.json')
+    await writeFile(path, `${JSON.stringify({
+      providers: { a: { provider: 'a' }, b: { provider: 'b' } },
+      models: {
+        one: { displayName: 'same', provider: 'a', modelCode: 'one' },
+        two: { displayName: 'same', provider: 'b', modelCode: 'two' },
+      },
+    })}\n`)
+    try {
+      await expect(hostOptions(parse(['--config', path]))).rejects.toThrow('DUPLICATE_MODEL_DISPLAY_NAME:same')
+    } finally {
+      if (previousHome === undefined) delete process.env.PULSE_HOME
+      else process.env.PULSE_HOME = previousHome
+    }
   })
 })

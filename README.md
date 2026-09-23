@@ -332,20 +332,29 @@ npx @hunterzhu/pulse-cli resume <conversation-id> "继续处理上次的问题"
 
 ### 配置模型 Provider
 
-编辑用户配置文件，例如使用 OpenAI 兼容接口：
+编辑用户配置文件。供应商和模型分开注册，模型显示名可以避免不同供应商的同名模型冲突：
 
 ```json
 {
-  "provider": {
-    "provider": "openai-compatible",
-    "model": "gpt-4o-mini",
-    "baseURL": "https://api.openai.com/v1",
-    "apiKeyEnv": "OPENAI_API_KEY",
-    "maxContextTokens": 128000,
-    "maxOutputTokens": 4096,
-    "reasoningEffort": "medium",
-    "toolChoice": "auto"
+  "providers": {
+    "openai": {
+      "name": "OpenAI",
+      "provider": "openai-compatible",
+      "baseURL": "https://api.openai.com/v1",
+      "apiKeyEnv": "OPENAI_API_KEY"
+    },
+    "deepseek": {
+      "name": "DeepSeek",
+      "provider": "deepseek",
+      "baseURL": "https://api.deepseek.com",
+      "apiKeyEnv": "DEEPSEEK_API_KEY"
+    }
   },
+  "models": {
+    "gpt5.6-a": { "displayName": "gpt5.6-a", "provider": "openai", "modelCode": "gpt-5.6" },
+    "gpt5.6-b": { "displayName": "gpt5.6-b", "provider": "deepseek", "modelCode": "deepseek-chat" }
+  },
+  "activeModel": "gpt5.6-a",
   "approvalMode": "ask",
   "maxTurns": 32,
   "autoCompactPercent": 90,
@@ -353,10 +362,11 @@ npx @hunterzhu/pulse-cli resume <conversation-id> "继续处理上次的问题"
 }
 ```
 
-然后在当前 Shell 中设置密钥并运行：
+然后在当前 Shell 中设置对应密钥并运行：
 
 ```bash
 export OPENAI_API_KEY="your-api-key"
+export DEEPSEEK_API_KEY="your-api-key"
 npx @hunterzhu/pulse-cli
 ```
 
@@ -364,7 +374,7 @@ npx @hunterzhu/pulse-cli
 
 Agent 需要询问你时，会调用 `ask.choice`、`ask.multi` 或 `ask.input`。CLI 会显示对应的单选、多选或文本输入卡片，回答会回到同一轮任务中。
 
-也可以用 `--provider`、`--model`、`--base-url`、`--config` 或对应的 `PULSE_*` 环境变量临时覆盖配置。完整配置加载顺序和字段说明见 [`docs/cli-config.md`](./docs/cli-config.md)。
+交互模式中可以用 `/model gpt5.6-a` 切换模型；也可以用 `--provider`、`--model`、`--base-url`、`--config` 或对应的 `PULSE_*` 环境变量临时覆盖配置。完整配置加载顺序和字段说明见 [`docs/cli-config.md`](./docs/cli-config.md)。
 
 ## 仓库文档
 
