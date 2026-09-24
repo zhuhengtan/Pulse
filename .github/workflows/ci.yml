@@ -20,6 +20,8 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 12.4.2
+      - name: Expose pnpm installation to shell sandbox
+        run: node -e "const fs = require('node:fs'); const path = require('node:path'); const os = require('node:os'); fs.appendFileSync(process.env.GITHUB_ENV, 'PNPM_HOME=' + path.join(os.homedir(), 'setup-pnpm', 'node_modules', '.bin') + os.EOL)"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
