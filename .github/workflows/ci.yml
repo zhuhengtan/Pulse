@@ -47,7 +47,12 @@ jobs:
         id: windows-sandbox
         if: runner.os == 'Windows'
         run: pnpm --filter @hunterzhu/pulse-adapters exec srt windows-install
+      - name: Verify Windows sandbox toolchain
+        if: runner.os == 'Windows'
+        timeout-minutes: 4
+        run: pnpm exec vitest run tests/m3-context-adapters.test.ts -t "runs the installed development toolchain" --reporter verbose
       - run: pnpm check
+        timeout-minutes: 10
       - name: Validate agent evaluation task set
         run: pnpm eval:validate
       - run: pnpm cli:build

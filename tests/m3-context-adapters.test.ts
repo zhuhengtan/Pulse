@@ -384,7 +384,9 @@ describe('M1-3 context, models and adapters', () => {
     try {
       if (process.env.CI && process.platform === 'win32') expect(process.env.PNPM_HOME, 'CI must expose the pnpm setup shim directory').toBeTruthy()
       for (const [command, args] of [['node', ['--version']], ['pnpm', ['--version']], ['git', ['init', '--quiet']], ['git', ['status', '--porcelain']]] as const) {
+        if (process.env.CI) console.info(`[sandbox toolchain] starting ${command} ${args.join(' ')}`)
         const result = await runShell(command, [...args], { cwd: root, timeoutMs: 30_000 })
+        if (process.env.CI) console.info(`[sandbox toolchain] ${command} exited ${result.code}`)
         expect(result.code, `${command}; PNPM_HOME=${process.env.PNPM_HOME ?? '(unset)'}: ${result.stderr}`).toBe(0)
         if (command === 'pnpm' && process.env.PULSE_EXPECTED_PNPM_VERSION) expect(result.stdout.trim()).toBe(process.env.PULSE_EXPECTED_PNPM_VERSION)
         expect(result.stderr).not.toContain('Operation not permitted')
