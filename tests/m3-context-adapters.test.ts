@@ -376,9 +376,10 @@ describe('M1-3 context, models and adapters', () => {
   it('runs the installed development toolchain inside the sandbox by name', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse toolchain 雪-'))
     try {
+      if (process.platform === 'win32') expect(process.env.PNPM_HOME, 'CI must expose the pnpm setup shim directory').toBeTruthy()
       for (const [command, args] of [['node', ['--version']], ['pnpm', ['--version']], ['git', ['init', '--quiet']], ['git', ['status', '--porcelain']]] as const) {
         const result = await runShell(command, [...args], { cwd: root, timeoutMs: 30_000 })
-        expect(result.code, `${command}: ${result.stderr}`).toBe(0)
+        expect(result.code, `${command}; PNPM_HOME=${process.env.PNPM_HOME ?? '(unset)'}: ${result.stderr}`).toBe(0)
         expect(result.stderr).not.toContain('Operation not permitted')
       }
       const child = await runShell('node', ['-e', 'const c=require("node:child_process").spawnSync("node",["--version"],{encoding:"utf8"});process.stdout.write(c.stdout||"");process.exit(c.status??1)'], { cwd: root })
