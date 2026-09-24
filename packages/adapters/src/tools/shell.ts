@@ -8,6 +8,7 @@ import { promisify } from 'node:util'
 import { SandboxManager, VENDORED_SRT_WIN_EXE, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import { resolveWindowsPackageManager } from './windows-package-manager.js'
 import { carveWindowsReadDenies } from './windows-read-policy.js'
+import { initializeShellSandbox } from './sandbox-initialization.js'
 
 export interface ShellResult { code: number | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean; aborted: boolean }
 
@@ -262,7 +263,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       // reset first in case an earlier initialize failed part-way through.
       await SandboxManager.reset()
       setupStage = 'initialize'
-      await SandboxManager.initialize(policy, undefined, false)
+      await initializeShellSandbox(policy)
       const commandText = encodeSandboxCommand(executable, executableArgs)
       setupStage = 'wrap'
       const descriptor = await SandboxManager.wrapWithSandboxArgv(commandText, undefined, undefined, options.signal, cwd, { commandId: invocationId, commandText: 'shell.exec' })
