@@ -255,6 +255,7 @@ describe('local CLI application host', () => {
     try {
       const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'read-only' })
       const doctor = await host.doctor()
+      expect(doctor.errors.filter(message => message.startsWith('SHELL_SANDBOX:'))).toEqual([])
       expect(doctor.tools).toContain('fs.read')
       expect(doctor.tools).toContain('shell.exec')
       await host.close()

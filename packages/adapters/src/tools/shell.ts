@@ -5,7 +5,7 @@ import { basename, delimiter, dirname, join, parse, resolve, sep } from 'node:pa
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
-import { SandboxManager, VENDORED_SRT_WIN_EXE, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
+import { SandboxManager, VENDORED_SRT_WIN_EXE, checkWindowsDependenciesAsync, resolveSrtWin, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import { resolveWindowsPackageManager } from './windows-package-manager.js'
 import { carveWindowsReadDenies } from './windows-read-policy.js'
 import { initializeShellSandbox } from './sandbox-initialization.js'
@@ -28,7 +28,11 @@ function withSandboxLease<T>(work: () => Promise<T>): Promise<T> {
 
 /** Read-only prerequisite probe; never provisions accounts or changes permissions. */
 export async function checkShellSandbox(): Promise<{ errors: string[]; warnings: string[] }> {
-  return withSandboxLease(() => SandboxManager.checkDependenciesAsync())
+  // doctor runs before initialize(), so the manager has no Windows config yet.
+  // Probe the same packaged helper used for execution without provisioning it.
+  return withSandboxLease(() => process.platform === 'win32'
+    ? checkWindowsDependenciesAsync({ srtWin: resolveSrtWin({ path: VENDORED_SRT_WIN_EXE }) })
+    : SandboxManager.checkDependenciesAsync())
 }
 
 function quotePosix(value: string): string {
