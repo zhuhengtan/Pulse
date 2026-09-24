@@ -7,6 +7,7 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { SandboxManager, VENDORED_SRT_WIN_EXE, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import { resolveWindowsPackageManager } from './windows-package-manager.js'
+import { carveWindowsReadDenies } from './windows-read-policy.js'
 
 export interface ShellResult { code: number | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean; aborted: boolean }
 
@@ -115,13 +116,14 @@ async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolcha
   // the workspace's immediate container, then re-open only this invocation's
   // cwd. Root workspaces cannot be carved this way and are rejected upstream.
   if (parent !== parse(cwd).root && parent !== cwd) denyRead.add(parent)
+  const allowRead = [cwd, ...toolchainRoots, ...(scratch ? [scratch] : []), ...(seccompPath ? [seccompPath] : [])]
   // Reads default to the system toolchain plus this workspace. Writes are
   // limited to the workspace; srt adds only its required stdio/temp paths.
   return {
     network: { allowedDomains, deniedDomains: [], strictAllowlist: true },
     filesystem: {
-      denyRead: [...denyRead],
-      allowRead: [cwd, ...toolchainRoots, ...(scratch ? [scratch] : []), ...(seccompPath ? [seccompPath] : [])],
+      denyRead: process.platform === 'win32' ? await carveWindowsReadDenies([...denyRead], allowRead) : [...denyRead],
+      allowRead,
       allowWrite: [cwd, ...(scratch ? [scratch] : [])],
       denyWrite: [],
     },
