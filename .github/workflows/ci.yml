@@ -57,47 +57,9 @@ jobs:
         if: runner.os == 'Windows'
         timeout-minutes: 4
         run: pnpm exec vitest run tests/m3-context-adapters.test.ts -t "runs the installed development toolchain" --reporter verbose
-      - run: pnpm check
-        timeout-minutes: 10
-      - name: Validate agent evaluation task set
-        run: pnpm eval:validate
-      - run: pnpm cli:build
-      - name: Test CLI install bootstrap
-        run: |
-          node packages/cli/scripts/postinstall.mjs
-          pnpm --filter @hunterzhu/pulse-cli exec pulse --version
-          pnpm --filter @hunterzhu/pulse-cli exec pulse doctor --format json
-        env:
-          PULSE_HOME: ${{ runner.temp }}/pulse-user
-      - run: pnpm cli:pack
-      - run: pnpm cli:verify-package
-      - name: Test Windows archive install and uninstall
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          PULSE_HOME: ${{ runner.temp }}/pulse-archive-user
-        run: |
-          $archive = Get-ChildItem artifacts/cli/pulse-*.tar.gz | Select-Object -First 1
-          New-Item -ItemType Directory -Force "$env:PULSE_HOME/data" | Out-Null
-          Set-Content "$env:PULSE_HOME/data/keep.txt" 'preserve me'
-          node scripts/cli/install.mjs --archive $archive.FullName
-          & "$env:PULSE_HOME/bin/pulse.cmd" --version
-          node scripts/cli/uninstall.mjs
-          if (Test-Path "$env:PULSE_HOME/bin/pulse.cmd") { throw 'Pulse launcher was not removed' }
-          if ((Get-Content "$env:PULSE_HOME/data/keep.txt" -Raw).Trim() -ne 'preserve me') { throw 'User data was not preserved' }
-          $archiveRoot = Join-Path $env:RUNNER_TEMP 'pulse-archive-extracted'
-          New-Item -ItemType Directory -Force $archiveRoot | Out-Null
-          tar -xzf $archive.FullName -C $archiveRoot
-          pwsh -NoProfile -ExecutionPolicy Bypass -File "$archiveRoot/pulse/install.ps1"
-          & "$env:PULSE_HOME/bin/pulse.cmd" --version
-          pwsh -NoProfile -ExecutionPolicy Bypass -File "$archiveRoot/pulse/uninstall.ps1"
-          if (Test-Path "$env:PULSE_HOME/bin/pulse.cmd") { throw 'PowerShell installer launcher was not removed' }
-          if ((Get-Content "$env:PULSE_HOME/data/keep.txt" -Raw).Trim() -ne 'preserve me') { throw 'PowerShell installer did not preserve user data' }
-      - run: pnpm cli:start -- --version
-      - run: pnpm cli:dev -- --version
-      - run: pnpm cli:debug -- --version
-        env:
-          PULSE_INSPECTOR: 127.0.0.1:0
+      - name: Run shared local and cloud checks
+        timeout-minutes: 15
+        run: pnpm ci:local
       - name: Remove Windows shell sandbox
         if: always() && runner.os == 'Windows' && steps.windows-sandbox.outcome == 'success'
         run: pnpm --filter @hunterzhu/pulse-adapters exec srt windows-uninstall

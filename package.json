@@ -5,6 +5,7 @@
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {
+    "ci:local": "node scripts/ci/local.mjs",
     "build": "tsc -b",
     "cli:build": "node scripts/cli/build.mjs",
     "cli:dev": "node scripts/cli/dev.mjs",

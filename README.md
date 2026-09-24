@@ -413,6 +413,10 @@ pulse --read-only schedule daemon
 - [Runtime 架构设计](./pulse-runtime-architecture.md)：状态模型、调度、Effect、Context、隐私、持久化边界和验收契约。DSL 用法见上文示例与 `packages/runtime/src/dsl/`。
 - [Agent 任务质量评测](./evals/README.md)：固定的代码、研究和文件整理任务集，支持验证、隔离运行、机械产物评分与报告。dry run 只验证评测集，不构成真实任务质量基线。
 
+## 本地 CI
+
+安装依赖后运行 `pnpm ci:local`，即可在本机执行与 GitHub CI 相同的检查、构建、打包和安装/卸载验证，不会发布版本。平台依赖和验证范围见 [发布流程](./docs/release.md#在本地运行-ci)。
+
 ## 当前验证边界
 
 当前工作区的测试结果以 `pnpm check` 的实际输出为准，不再固定具体数量（其范围不含 `tests/live/**`）；测试包含 loopback Provider/Worker 与 SRT 集成测试；`pnpm build`、评测集验证和独立 CLI 包的解压、运行、安装、卸载验证也已通过。dry run 只证明评测数据集可用，不代表真实模型质量基线。
