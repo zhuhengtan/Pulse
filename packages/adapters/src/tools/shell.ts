@@ -67,7 +67,7 @@ catch {
 $outTask = $child.StandardOutput.ReadToEndAsync()
 $errTask = $child.StandardError.ReadToEndAsync()
 $inTask = [Console]::OpenStandardInput().CopyToAsync($child.StandardInput.BaseStream)
-$inTask.GetAwaiter().GetResult()
+[void]$inTask.GetAwaiter().GetResult()
 $child.StandardInput.Close()
 $child.WaitForExit()
 try { [Console]::Out.Write([string]$outTask.GetAwaiter().GetResult()) } catch {}
