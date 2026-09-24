@@ -111,7 +111,11 @@ async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolcha
   if (cwd === root || cwd === home || home.startsWith(cwd + sep) || parent === root) {
     throw shellError('SANDBOX_WORKSPACE_TOO_BROAD')
   }
-  const denyRead = new Set([home])
+  // Windows runs as a separate srt-sandbox account, which has no access to
+  // private host-profile files without explicit grants. Stamping the entire
+  // profile recursively is both redundant and very expensive (registry/cache
+  // trees); only carve the workspace's sibling boundary on that platform.
+  const denyRead = new Set(process.platform === 'win32' ? [] : [home])
   // Close the common sibling-workspace and temporary-directory escape: deny
   // the workspace's immediate container, then re-open only this invocation's
   // cwd. Root workspaces cannot be carved this way and are rejected upstream.

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { ContextBuilder, InMemoryModelRegistry, ModelFallbackController, ModelRouter, OutputValidationError, PulseRuntime, appendHistory, createAgent, createRuntimeState, modelFallbackError, stableSerialize, validateActionToolCalls, validateAdapterResult, validateStructuredOutput, MemoryStorage } from '@hunterzhu/pulse-runtime'
@@ -340,6 +340,7 @@ describe('M1-3 context, models and adapters', () => {
   it('enforces filesystem sandbox and runs bounded shell output', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-m3-'))
     const sibling = await mkdtemp(join(tmpdir(), 'pulse-m3-sibling-'))
+    const privateProfile = process.platform === 'win32' ? await mkdtemp(join(homedir(), 'pulse-private-profile-')) : undefined
     try {
       const filesystem = new FilesystemTool(root)
       await filesystem.write('nested/file.txt', 'ok')
@@ -372,10 +373,19 @@ describe('M1-3 context, models and adapters', () => {
       expect(isolationResults[1]).not.toBe('wrote')
       expect(isolationResults[2]).not.toBe('wrote')
       expect(await readFile(secretPath, 'utf8')).toBe('outside workspace')
+      if (privateProfile) {
+        const privateFile = join(privateProfile, 'secret.txt')
+        await writeFile(privateFile, 'private host profile')
+        const profileAccess = await runShell('node', ['-e', 'const fs=require("node:fs");const p=process.argv[1];let r=[];try{r.push(fs.readFileSync(p,"utf8"))}catch{r.push("blocked")};try{fs.writeFileSync(p,"changed");r.push("wrote")}catch{r.push("blocked")};process.stdout.write(JSON.stringify(r))', privateFile], { cwd: root })
+        expect(profileAccess.code, profileAccess.stderr).toBe(0)
+        expect(JSON.parse(profileAccess.stdout)).toEqual(['blocked', 'blocked'])
+        expect(await readFile(privateFile, 'utf8')).toBe('private host profile')
+      }
       expect(await readFile(join(root, 'nested/file.txt'), 'utf8')).toBe('ok')
     } finally {
       await rm(root, { recursive: true, force: true })
       await rm(sibling, { recursive: true, force: true })
+      if (privateProfile) await rm(privateProfile, { recursive: true, force: true })
     }
   })
 
