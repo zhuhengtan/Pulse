@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
   id-token: write
 
 jobs:
@@ -24,6 +25,30 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - name: Require successful CI for this exact commit
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execFileSync } = require('node:child_process');
+            const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              ...context.repo, workflow_id: 'ci.yml', head_sha: sha, event: 'push', per_page: 100
+            });
+            const latest = runs.filter(run => run.head_sha === sha && run.head_branch === 'main')
+              .sort((a, b) => b.id - a.id)[0];
+            if (!latest || latest.status !== 'completed' || latest.conclusion !== 'success') {
+              throw new Error(`Release blocked: latest main CI for ${sha} is not successful.`);
+            }
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              ...context.repo, run_id: latest.id, filter: 'latest', per_page: 100
+            });
+            for (const os of ['ubuntu-latest', 'macos-latest', 'windows-latest']) {
+              const job = jobs.find(job => job.name === `check (${os})`);
+              if (!job || job.status !== 'completed' || job.conclusion !== 'success') {
+                throw new Error(`Release blocked: ${os} has not passed for ${sha}.`);
+              }
+            }
+            core.info(`Release approved by CI run ${latest.id} for ${sha}`);
       - uses: pnpm/action-setup@v4
         with:
           version: 12.4.2
@@ -34,7 +59,17 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Enable npm trusted publishing
         run: npm install --global npm@11.15.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Install Linux shell sandbox dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ripgrep socat
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - run: pnpm check
       - run: pnpm release:check
       - run: pnpm cli:build

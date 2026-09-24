@@ -51,7 +51,8 @@ async function behavior(base, item) {
     args = ['-c', `import importlib.util,sys;from pathlib import Path;import unittest; p=Path(${JSON.stringify(source)});s=importlib.util.spec_from_file_location('candidate',p);m=importlib.util.module_from_spec(s);s.loader.exec_module(m);${body}`]
   } else return false
   const result = await runShell(command, args, { cwd: base, timeoutMs: 5_000, maxOutputBytes: 2_000 })
-  return result.code === 0 && !result.timedOut && !result.aborted
+  if (result.code !== 0 || result.timedOut || result.aborted) throw new Error(`Behavior probe failed (exit=${result.code}, timedOut=${result.timedOut}, aborted=${result.aborted}): ${result.stderr}`)
+  return true
 }
 function parseJson(text) { try { return JSON.parse(text) } catch { return undefined } }
 function includes(text, needle, sensitive = true) { const haystack = sensitive ? text : text.toLowerCase(); const target = sensitive ? needle : needle.toLowerCase(); return haystack.includes(target) }

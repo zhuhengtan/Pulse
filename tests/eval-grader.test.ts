@@ -25,7 +25,8 @@ describe('evaluation grader regressions', () => {
       await mkdir(join(root, 'src'))
       const source = 'import json\ndef load_json(text, default=None):\n    try: return json.loads(text)\n    except json.JSONDecodeError: return default\n'
       await writeFile(join(root, 'src/json_util.py'), source)
-      expect((await grade(root, 'code-03')).checks.find((item: any) => item.type === 'behavior').passed).toBe(true)
+      const behavior = (await grade(root, 'code-03')).checks.find((item: any) => item.type === 'behavior')
+      expect(behavior.passed, behavior.error).toBe(true)
       await writeFile(join(root, 'src/json_util.py'), source.replace('json.JSONDecodeError', 'Exception'))
       expect((await grade(root, 'code-03')).checks.find((item: any) => item.type === 'behavior').passed).toBe(false)
     } finally { await rm(root, { recursive: true, force: true }) }

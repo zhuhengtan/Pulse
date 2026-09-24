@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, parse, resolve, sep } from 'node:path'
@@ -78,7 +79,12 @@ export function encodeSandboxCommand(command: string, args: string[], platform: 
   return `exec ${[command, ...args].map(quotePosix).join(' ')}`
 }
 
-function sandboxConfig(cwd: string): SandboxRuntimeConfig {
+async function sandboxConfig(cwd: string): Promise<SandboxRuntimeConfig> {
+  // Linux invokes this trusted helper *inside* the read-restricted namespace.
+  // A user-local npm install otherwise hides it together with the home directory.
+  const seccompPath = process.platform === 'linux'
+    ? await realpath(resolve(dirname(createRequire(import.meta.url).resolve('@anthropic-ai/sandbox-runtime')), '..', 'vendor', 'seccomp', process.arch, 'apply-seccomp'))
+    : undefined
   const home = homedir()
   const parent = dirname(cwd)
   const root = parse(cwd).root
@@ -96,10 +102,11 @@ function sandboxConfig(cwd: string): SandboxRuntimeConfig {
     network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
     filesystem: {
       denyRead: [...denyRead],
-      allowRead: [cwd],
+      allowRead: [cwd, ...(seccompPath ? [seccompPath] : [])],
       allowWrite: [cwd],
       denyWrite: [],
     },
+    ...(seccompPath ? { seccomp: { applyPath: seccompPath } } : {}),
     ...(process.platform === 'win32' ? { windows: { srtWin: { path: VENDORED_SRT_WIN_EXE } } } : {}),
   }
 }
@@ -146,7 +153,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       throw shellError('INVALID_SHELL_CWD', false, cause)
     }
     const invocationId = randomUUID()
-    const policy = sandboxConfig(cwd)
+    const policy = await sandboxConfig(cwd)
     let child: ReturnType<typeof spawn> | undefined
     const outputChunks = { stdout: [] as Buffer[], stderr: [] as Buffer[] }
     const outputBytes = { stdout: 0, stderr: 0 }

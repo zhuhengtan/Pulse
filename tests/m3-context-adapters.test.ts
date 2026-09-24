@@ -354,11 +354,13 @@ describe('M1-3 context, models and adapters', () => {
       expect(unicode.truncated).toBe(true)
       const argv = ['', 'two words', `quote'" ; $(touch ${join(root, 'injected')})`, 'line\nbreak', '雪']
       const echoed = await runShell(process.execPath, ['-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))', ...argv], { cwd: root })
+      expect(echoed.code, echoed.stderr).toBe(0)
       expect(JSON.parse(echoed.stdout)).toEqual(argv)
       await expect(readFile(join(root, 'injected'), 'utf8')).rejects.toThrow()
       const secretPath = join(sibling, 'secret.txt')
       await writeFile(secretPath, 'outside workspace', 'utf8')
       const isolated = await runShell(process.execPath, ['-e', 'const fs=require("node:fs");let result=[];for(const p of process.argv.slice(1)){try{result.push(fs.readFileSync(p,"utf8"))}catch(e){result.push(e.code||"blocked")};try{fs.writeFileSync(p,"changed");result.push("wrote")}catch(e){result.push(e.code||"blocked")}}process.stdout.write(JSON.stringify(result))', secretPath, join(sibling, 'new.txt')], { cwd: root })
+      expect(isolated.code, isolated.stderr).toBe(0)
       const isolationResults = JSON.parse(isolated.stdout) as string[]
       expect(isolationResults[0]).not.toBe('outside workspace')
       expect(isolationResults[1]).not.toBe('wrote')
