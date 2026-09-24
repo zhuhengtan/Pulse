@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  PNPM_HOME: ${{ runner.temp }}/setup-pnpm/node_modules
+  PNPM_HOME: ${{ github.workspace }}/.pnpm-action/node_modules
 
 jobs:
   check:
@@ -23,7 +23,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 12.4.2
-          dest: ${{ runner.temp }}/setup-pnpm
+          dest: ${{ github.workspace }}/.pnpm-action
       - uses: actions/setup-node@v4
         with:
           node-version: 22
