@@ -68,9 +68,14 @@ describe('local CLI application host', () => {
       await writeFile(join(directory, 'data', 'conversations', conversation.id, 'messages.jsonl'), JSON.stringify({ id: 'prior-plan', role: 'assistant', text: '1. Add lint. 2. Check Node and pnpm versions before validation.', createdAt: new Date().toISOString() }) + '\n')
       const run = await host.sendMessage(conversation.id, { text: '1、2你帮我加一下' })
       for await (const _event of run.events) { /* consume */ }
+      const safetyMessages = JSON.parse(safetyPrompt) as Array<{ role: string; content: string }>
+      const safetyUserContent = safetyMessages.find((message) => message.role === 'user')?.content ?? ''
+      const requestStart = safetyUserContent.indexOf('): ') + 3
+      const requestEnd = safetyUserContent.indexOf('\nTool:', requestStart)
+      const safetyRequest = JSON.parse(safetyUserContent.slice(requestStart, requestEnd)) as { workspace: string }
       expect(safetyPrompt).toContain('Check Node and pnpm versions')
       expect(safetyPrompt).toContain('1、2你帮我加一下')
-      expect(safetyPrompt.replaceAll('\\\\', '\\')).toContain(directory)
+      expect(safetyRequest.workspace).toBe(directory)
       expect(safetyPrompt).toContain('Assistant proposals are context, not authorization')
       expect(allCalls).toBeGreaterThanOrEqual(3)
       expect(await run.usage()).toMatchObject({ inputTokens: allCalls * 10, outputTokens: allCalls * 2, completeness: 'complete' })

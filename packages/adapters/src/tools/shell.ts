@@ -198,6 +198,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     let executable = command
     let executableArgs = args
     if (command === 'node') executable = nodeExecutable
+    if (command === 'pnpm' && pnpmHome) executable = join(pnpmHome, process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm')
     if (process.platform === 'darwin' && command === 'git') {
       // /usr/bin/git is an xcrun shim that writes outside TMPDIR. Resolve the
       // installed tool through Apple's fixed locator before entering isolation.
