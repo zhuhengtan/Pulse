@@ -20,8 +20,10 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 12.4.2
-      - name: Expose pnpm installation to shell sandbox
-        run: node -e "const fs = require('node:fs'); const path = require('node:path'); const os = require('node:os'); fs.appendFileSync(process.env.GITHUB_ENV, 'PNPM_HOME=' + path.join(os.homedir(), 'setup-pnpm', 'node_modules', '.bin') + os.EOL)"
+          dest: ${{ runner.temp }}/setup-pnpm
+      - name: Verify and expose pnpm shim to shell sandbox
+        run: |
+          node -e "const fs = require('node:fs'); const path = require('node:path'); const os = require('node:os'); const root = path.join(process.env.RUNNER_TEMP, 'setup-pnpm', 'node_modules', '.bin'); const pnpm = path.join(root, process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'); if (!fs.existsSync(pnpm)) throw new Error('pnpm setup shim missing: ' + pnpm); fs.appendFileSync(process.env.GITHUB_ENV, 'PNPM_HOME=' + root + os.EOL); console.log('Verified pnpm sandbox entry:', pnpm)"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
