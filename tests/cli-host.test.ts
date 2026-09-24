@@ -8,6 +8,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createLocalHost } from '@hunterzhu/pulse-server'
+import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 import type { CapabilityPack } from '../packages/server/src/capabilities.js'
 
 async function startSummaryServer(): Promise<{ url: string; close: () => Promise<void> }> {
@@ -58,9 +59,14 @@ describe('local CLI application host', () => {
       allCalls++
       const body = JSON.parse(String(options.body))
       const safety = body.messages.some((message: { content: string }) => message.content.includes('You are the Pulse safety reviewer'))
+      const planning = !safety && body.messages.some((message: { content: string }) => message.content.includes('Create an executable plan'))
       if (safety) safetyPrompt = JSON.stringify(body.messages)
-      const callTool = !safety && ++mainCalls === 1
-      return new Response(JSON.stringify({ choices: [{ message: callTool ? { content: '', tool_calls: [{ id: 'call', function: { name: 'shell_exec', arguments: '{"command":"node","args":["--version"]}' } }] } : { content: safety ? 'DENY' : 'blocked' }, finish_reason: callTool ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } }), { headers: { 'content-type': 'application/json' } })
+      if (!safety) mainCalls++
+      const callTool = !safety && !planning && mainCalls === 2
+      const message = planning
+        ? { content: JSON.stringify({ tasks: [{ id: 'task-1', goal: 'Handle the requested updates', criterionIds: acceptanceCriteriaFromObjective('1、2你帮我加一下').map((criterion) => criterion.id), dependsOn: [], check: 'Verify the requested updates.' }] }) }
+        : callTool ? { content: '', tool_calls: [{ id: 'call', function: { name: 'shell_exec', arguments: '{"command":"node","args":["--version"]}' } }] } : { content: safety ? 'DENY' : 'blocked' }
+      return new Response(JSON.stringify({ choices: [{ message, finish_reason: callTool ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } }), { headers: { 'content-type': 'application/json' } })
     }))
     const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', provider: { provider: 'openai', defaultModel: 'test' } })
     try {
@@ -78,9 +84,13 @@ describe('local CLI application host', () => {
       expect(safetyRequest.workspace).toBe(directory)
       expect(safetyPrompt).toContain('Assistant proposals are context, not authorization')
       expect(allCalls).toBeGreaterThanOrEqual(3)
-      expect(await run.usage()).toMatchObject({ inputTokens: allCalls * 10, outputTokens: allCalls * 2, completeness: 'complete' })
+      const usage = await run.usage()
+      expect(usage).toMatchObject({ inputTokens: allCalls * 10, outputTokens: allCalls * 2, reasoningTokens: null, modelCalls: allCalls, truncationEvents: 0, completeness: 'complete' })
+      expect(usage.visibleOutputChars).toBeGreaterThan(0)
       const persisted = JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'usage.json'), 'utf8'))
       expect(persisted.inputTokens).toBe(allCalls * 10)
+      expect(persisted.reasoningTokens).toBeNull()
+      expect(persisted.modelCalls).toBe(allCalls)
     } finally { vi.unstubAllGlobals(); await host.close(); await rm(directory, { recursive: true, force: true }) }
   })
 

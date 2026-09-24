@@ -155,6 +155,12 @@ describe('efficiency safety boundaries', () => {
       await expect(registry.executeDetailed('task.conversation', {}, { ...context, laneId: 'child-lane' })).rejects.toThrow('CONVERSATION_NOT_VISIBLE')
       await expect(registry.executeDetailed('task.recall', {}, { ...context, laneId: 'child-lane' })).rejects.toThrow('CHECKPOINT_NOT_VISIBLE')
       await expect(registry.executeDetailed('task.evidence', { ref: 'unknown' }, context)).rejects.toThrow('RESULT_NOT_VISIBLE')
+      runtime.state.results.set('visible-parent-result', { id: 'visible-parent-result', value: { content: 'retained parent evidence' }, privacy: 'public', derivedFrom: [], producer: { kind: 'effect', id: 'parent-effect' } })
+      runtime.state.results.set('hidden-result', { id: 'hidden-result', value: { content: 'not exposed' }, privacy: 'public', derivedFrom: [], producer: { kind: 'effect', id: 'other-effect' } })
+      runtime.state.lanes.get(laneId)!.visibleResultRefs = new Set(['visible-parent-result'])
+      const evidence = await registry.executeDetailed('task.evidence', { ref: 'visible-parent-result' }, context)
+      expect(JSON.stringify(evidence.output)).toContain('retained parent evidence')
+      await expect(registry.executeDetailed('task.evidence', { ref: 'hidden-result' }, context)).rejects.toThrow('RESULT_NOT_VISIBLE')
       runtime.state.lanes.get(laneId)!.context.privacy = 'local_only'
       await expect(registry.executeDetailed('task.history', {}, context)).rejects.toThrow('HISTORY_NOT_VISIBLE')
     } finally { await host.close(); await rm(root, { recursive: true, force: true }) }

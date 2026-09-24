@@ -70,6 +70,25 @@ describe('DSL ReAct contract', () => {
     expect(toolCalls).toBe(2)
   })
 
+  it('re-evaluates a proposed write batch after one operation instead of draining the queue', async () => {
+    let models = 0
+    let tools = 0
+    const program = defineLaneProgram({ id: 'one-write-per-turn', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', maxTurns: 5, serialTools: ['write'], stopAfterFirstSerialTool: true, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { tools++; return { value: 'applied' } }
+      models++
+      if (models === 1) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'write', input: { step: 1 } }, { name: 'write', input: { step: 2 } }] } }
+      expect(JSON.stringify(effect.input)).toContain('remaining 1 proposed tool calls were NOT executed')
+      return { value: { text: 'done', finishReason: 'stop' } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(tools).toBe(1)
+    expect(models).toBe(2)
+  })
+
   it.each([false, true])('stops queued mutations after a failure rather than executing dependent writes (nonzero exit=%s)', async (nonzeroExit) => {
     let models = 0
     let calls = 0

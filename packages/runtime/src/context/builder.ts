@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { AgentRecord, ArtifactRef, ConversationMessage, LaneRecord, LLMContextSpec, LLMRequestProjection, PrivacyLabel, PrivacyTaint, ResultRef, RuntimeState, JsonValue, ContextDelta, ContextOp } from '../core/types.js'
+import type { AgentRecord, ArtifactRef, ConversationMessage, LaneRecord, LLMContextSpec, LLMRequestProjection, PrivacyLabel, PrivacyTaint, ResultRef, RuntimeState, JsonValue, ContextDelta, ContextOp, ProviderHistoryMessage } from '../core/types.js'
 import { effectivePrivacy, privacyRank, strictestPrivacy } from '../core/types.js'
 
 function stable(value: unknown): string {
@@ -49,13 +49,60 @@ function projectResultValue(result: { value?: JsonValue; summary?: JsonValue }):
   }
 }
 
+function buildProviderHistory(state: RuntimeState, history: LaneRecord['context']['history'], visible?: Set<ResultRef>): ProviderHistoryMessage[] | undefined {
+  if (!history.length) return undefined
+  const messages: ProviderHistoryMessage[] = []
+  for (const record of history) {
+    if (!record.output || typeof record.output !== 'object' || Array.isArray(record.output)) return undefined
+    const output = record.output as Record<string, JsonValue>
+    if (typeof output.text !== 'string' || !Array.isArray(output.toolCalls)) return undefined
+    if (output.finishReason === 'length') {
+      messages.push({ role: 'user', content: 'Runtime recovery notice: a previous model response was truncated. Its incomplete output was not executed or accepted. Continue from completed evidence and do not repeat completed operations.' })
+      break
+    }
+    const calls = output.toolCalls
+    const continuation = output.providerContinuation && typeof output.providerContinuation === 'object' && !Array.isArray(output.providerContinuation)
+      ? output.providerContinuation as Record<string, JsonValue>
+      : undefined
+    const reasoning = continuation?.reasoningContent
+    if (calls.length === 0) {
+      messages.push({ role: 'assistant', content: output.text || null, ...(continuation?.provider === 'deepseek' && typeof reasoning === 'string' ? { reasoningContent: reasoning } : {}) })
+      continue
+    }
+    const correlated: Array<{ id: string; name: string; arguments: string; result: JsonValue; resultRef: ResultRef }> = []
+    let incomplete = false
+    for (const raw of calls) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+      const call = raw as Record<string, JsonValue>
+      const runtimeId = call.toolCallId
+      const providerId = call.providerToolCallId
+      const name = call.name
+      const providerName = typeof call.providerToolName === 'string' ? call.providerToolName : name
+      const providerArguments = typeof call.providerToolArguments === 'string' ? call.providerToolArguments : JSON.stringify(call.input ?? {})
+      if (typeof runtimeId !== 'string' || typeof providerId !== 'string' || !providerId || typeof name !== 'string' || !name || typeof providerName !== 'string' || !providerName || typeof providerArguments !== 'string') return undefined
+      const correlation = state.toolCallCorrelations.get(runtimeId)
+      if (!correlation?.resultRef || (visible !== undefined && !visible.has(correlation.resultRef))) { incomplete = true; break }
+      const result = state.results.get(correlation.resultRef)
+      if (!result) { incomplete = true; break }
+      correlated.push({ id: providerId, name: providerName, arguments: providerArguments, result: projectResultValue(result).value, resultRef: correlation.resultRef })
+    }
+    if (incomplete) {
+      messages.push({ role: 'user', content: 'Runtime recovery notice: a previous tool-call batch is incomplete in retained history. No missing or partial call is being represented as executed. Continue from the completed evidence supplied below; do not replay completed operations.' })
+      break
+    }
+    messages.push({ role: 'assistant', content: output.text || null, ...(continuation?.provider === 'deepseek' && typeof reasoning === 'string' ? { reasoningContent: reasoning } : {}), toolCalls: correlated.map(({ id, name, arguments: args }) => ({ id, name, arguments: args })) })
+    for (const item of correlated) messages.push({ role: 'tool', toolCallId: item.id, name: item.name, content: JSON.stringify(item.result), resultRef: item.resultRef })
+  }
+  return messages
+}
+
 export function assertDslInstructionSize(value: string): string {
   if (Buffer.byteLength(value, 'utf8') > MAX_DSL_INSTRUCTION_BYTES) throw Object.assign(new Error('Instruction exceeds the 2 KB DSL limit.'), { code: 'INSTRUCTION_TOO_LARGE', retryable: false })
   return value
 }
 
 export class ContextBuilder {
-  readonly version = '1'
+  readonly version = '2'
   constructor(private readonly state: RuntimeState) {}
   build(input: ContextBuildInput): LLMRequestProjection {
     assertDslInstructionSize(input.instruction)
@@ -93,7 +140,8 @@ export class ContextBuilder {
       ...effectiveArtifacts.flatMap((item) => (item.artifact.privacyTaints ?? []).map((taint) => ({ path: [item.artifact.ref, ...taint.path], privacy: taint.privacy }))),
     ]
     const conversation = input.conversation ?? []
-    const contextSpec: LLMContextSpec = { globalSnapshotVersion: input.lane.contextSnapshotVersion, laneSnapshotVersion: input.lane.context.version, resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: input.eventIds ?? [], toolSetId: input.toolSetId, instruction: input.instruction, ...(conversation.length ? { conversation: structuredClone(conversation) } : {}), privacy, privacyRefs, ...(privacyTaints.length ? { privacyTaints } : {}) }
+    const providerHistory = input.explicitContext ? undefined : buildProviderHistory(this.state, input.lane.context.history, input.lane.visibleResultRefs)
+    const contextSpec: LLMContextSpec = { globalSnapshotVersion: input.lane.contextSnapshotVersion, laneSnapshotVersion: input.lane.context.version, resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: input.eventIds ?? [], toolSetId: input.toolSetId, instruction: input.instruction, ...(conversation.length ? { conversation: structuredClone(conversation) } : {}), ...(providerHistory === undefined ? {} : { providerHistory }), privacy, privacyRefs, ...(privacyTaints.length ? { privacyTaints } : {}) }
     const prefixBlocks = [
       { kind: 'system' as const, content: input.system ?? '' },
       { kind: 'policy' as const, content: input.policy ?? {} },
@@ -102,7 +150,9 @@ export class ContextBuilder {
       ...(conversation.length ? [{ kind: 'conversation' as const, content: structuredClone(conversation) as unknown as JsonValue }] : []),
       { kind: 'history' as const, content: (input.explicitContext ? [] : input.lane.context.history).map((record) => ({ seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), instruction: record.instruction, resultRefs: record.resultRefs, ...(record.resultSelection === undefined ? {} : { resultSelection: record.resultSelection }), ...(record.result === undefined ? {} : { result: record.result }), ...(record.findings === undefined ? {} : { findings: record.findings }), output: record.output, privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: record.privacyTaints as unknown as JsonValue }) })) },
     ]
-    const blocks = [...prefixBlocks, { kind: 'lane' as const, content: input.explicitContext ? {} : input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: results.map((result) => {
+    const correlatedRefs = new Set((providerHistory ?? []).flatMap((message) => message.role === 'tool' ? [message.resultRef] : []))
+    const remainingResults = results.filter((result) => !correlatedRefs.has(result.id))
+    const blocks = [...prefixBlocks, ...(providerHistory === undefined ? [] : [{ kind: 'provider_history' as const, content: providerHistory as unknown as JsonValue }]), { kind: 'lane' as const, content: input.explicitContext ? {} : input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: remainingResults.map((result) => {
       const projected = projectResultValue(result)
       return { id: result.id, value: projected.value, ...(projected.summarized ? { summarized: true, ...(projected.originalBytes === undefined ? {} : { originalBytes: projected.originalBytes }) } : {}), ...(result.privacyTaints === undefined ? {} : { privacyTaints: result.privacyTaints.map((taint) => ({ path: [...taint.path], privacy: taint.privacy }) as unknown as JsonValue) }) }
     }) }, { kind: 'artifacts' as const, content: artifacts.map((artifact) => ({ ref: artifact.ref, mediaType: artifact.mediaType, sizeBytes: artifact.sizeBytes, contentHash: artifact.contentHash })) }, { kind: 'instruction' as const, content: input.instruction }]

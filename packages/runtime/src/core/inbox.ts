@@ -242,6 +242,8 @@ export interface ObservationEnvelope {
   seq: number
   agentId: string
   laneId?: string
+  effectId?: string
+  attemptId?: string
   type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'
   data: JsonValue
   timestamp: number

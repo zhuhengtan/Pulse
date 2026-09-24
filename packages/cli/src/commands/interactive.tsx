@@ -38,17 +38,23 @@ export async function runInteractive(
       // Keep Pulse in its own full-screen buffer so the shell's previous
       // command history does not become part of the chat workspace.
       alternateScreen: true,
+      // Ctrl+C is a selection-copy shortcut inside the chat. Exit explicitly
+      // through /exit so an accidental keypress cannot drop an active task.
+      exitOnCtrlC: false,
     },
   );
 
   let interrupted = false;
-  const onSignal = () => {
+  const onInterrupt = () => {
+    // Ignore SIGINT while the interactive app is active; /exit is the exit path.
+  };
+  const onTerminate = () => {
     interrupted = true;
     unmount();
   };
 
-  process.on('SIGINT', onSignal);
-  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onInterrupt);
+  process.on('SIGTERM', onTerminate);
 
   try {
     await waitUntilExit();
@@ -57,8 +63,8 @@ export async function runInteractive(
     console.error(error);
     return 1;
   } finally {
-    process.off('SIGINT', onSignal);
-    process.off('SIGTERM', onSignal);
+    process.off('SIGINT', onInterrupt);
+    process.off('SIGTERM', onTerminate);
     await closePendingHosts();
   }
 }

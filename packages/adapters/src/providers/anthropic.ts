@@ -23,6 +23,9 @@ export class AnthropicAdapter implements ProviderAdapter {
     }
     for (const block of params.request.blocks) {
       if (block.kind === 'system' || block.kind === 'policy' || block.kind === 'tools') continue
+      // Provider-native tool history is currently projected only by compatible
+      // OpenAI adapters. Keep Anthropic on the legacy history projection.
+      if (block.kind === 'provider_history') continue
       if (block.kind === 'conversation' && Array.isArray(block.content)) {
         for (const item of block.content) {
           if (!item || typeof item !== 'object' || Array.isArray(item)) continue

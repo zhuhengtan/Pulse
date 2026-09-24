@@ -95,7 +95,7 @@ export async function consumeProviderSse(response: Response, onEvent?: (event: P
   return events
 }
 
-export function normalizeOpenAIResponse(response: any, toolNameAliases?: ReadonlyMap<string, string>): LLMResult {
+export function normalizeOpenAIResponse(response: any, toolNameAliases?: ReadonlyMap<string, string>, provider = 'openai'): LLMResult {
   const root = providerRecord(response, 'OpenAI response')
   if (!Array.isArray(root.choices) || root.choices.length === 0) throw providerResponseError('OpenAI response must contain at least one choice')
   const choice = providerRecord(root.choices[0], 'OpenAI choice')
@@ -106,8 +106,10 @@ export function normalizeOpenAIResponse(response: any, toolNameAliases?: Readonl
   const finishReason = normalizeOpenAIFinishReason(choice.finish_reason, refusal, toolCalls.length > 0)
   const rawUsage = root.usage === undefined ? undefined : providerRecord(root.usage, 'OpenAI usage')
   const promptDetails = rawUsage?.prompt_tokens_details === undefined ? undefined : providerRecord(rawUsage.prompt_tokens_details, 'OpenAI prompt token details')
-  const usage = normalizeUsage(rawUsage === undefined ? undefined : { ...rawUsage, cached_tokens: rawUsage.cached_tokens ?? promptDetails?.cached_tokens ?? rawUsage.cache_read_input_tokens }, { input: 'prompt_tokens', output: 'completion_tokens', cached: 'cached_tokens' }, 'OpenAI')
-  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason, ...(usage === undefined ? {} : { usage }) }
+  const usage = normalizeUsage(rawUsage === undefined ? undefined : { ...rawUsage, cached_tokens: rawUsage.cached_tokens ?? promptDetails?.cached_tokens ?? rawUsage.cache_read_input_tokens, reasoning_tokens: rawUsage.completion_tokens_details?.reasoning_tokens ?? rawUsage.reasoning_tokens }, { input: 'prompt_tokens', output: 'completion_tokens', cached: 'cached_tokens', reasoning: 'reasoning_tokens' }, 'OpenAI')
+  const reasoningContent = typeof message.reasoning_content === 'string' ? message.reasoning_content : undefined
+  const measuredUsage = usage === undefined ? undefined : { ...usage, visibleOutputChars: text.length }
+  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason, ...(measuredUsage === undefined ? {} : { usage: measuredUsage }), ...(provider !== 'deepseek' || reasoningContent === undefined ? {} : { providerContinuation: { provider, reasoningContent } }) }
 }
 export function normalizeAnthropicResponse(response: any): LLMResult {
   const root = providerRecord(response, 'Anthropic response')
@@ -123,7 +125,8 @@ export function normalizeAnthropicResponse(response: any): LLMResult {
   const refusal = refusalBlock?.text as string | undefined
   const finishReason = normalizeAnthropicFinishReason(root.stop_reason, refusal, toolCalls.length > 0)
   const usage = normalizeUsage(root.usage, { input: 'input_tokens', output: 'output_tokens', cached: 'cache_read_input_tokens' }, 'Anthropic')
-  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason, ...(usage === undefined ? {} : { usage }) }
+  const measuredUsage = usage === undefined ? undefined : { ...usage, visibleOutputChars: text.length }
+  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason, ...(measuredUsage === undefined ? {} : { usage: measuredUsage }) }
 }
 function providerRecord(value: unknown, label: string): Record<string, any> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw providerResponseError(`${label} must be an object`)
@@ -152,15 +155,16 @@ function providerMetric(value: unknown, label: string): number | undefined {
   return value as number
 }
 
-function normalizeUsage(raw: unknown, fields: { input: string; output: string; cached: string }, provider: string): NonNullable<LLMResult['usage']> | undefined {
+function normalizeUsage(raw: unknown, fields: { input: string; output: string; cached: string; reasoning?: string }, provider: string): NonNullable<LLMResult['usage']> | undefined {
   if (raw === undefined) return undefined
   const value = providerRecord(raw, `${provider} usage`)
   const inputTokens = providerMetric(value[fields.input], `${provider} input tokens`)
   const outputTokens = providerMetric(value[fields.output], `${provider} output tokens`)
   const cachedInputTokens = providerMetric(value[fields.cached], `${provider} cached input tokens`)
+  const reasoningTokens = fields.reasoning === undefined ? undefined : providerMetric(value[fields.reasoning], `${provider} reasoning tokens`)
   if (inputTokens !== undefined && cachedInputTokens !== undefined && cachedInputTokens > inputTokens) throw providerResponseError(`${provider} cached input tokens exceed input tokens`)
   const cost = value.cost === undefined ? undefined : normalizeCost(value.cost, provider)
-  return { ...(inputTokens === undefined ? {} : { inputTokens }), ...(outputTokens === undefined ? {} : { outputTokens }), ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }), ...(inputTokens !== undefined && cachedInputTokens !== undefined ? { uncachedInputTokens: inputTokens - cachedInputTokens } : {}), ...(cost === undefined ? {} : { cost }) }
+  return { ...(inputTokens === undefined ? {} : { inputTokens }), ...(outputTokens === undefined ? {} : { outputTokens }), ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }), ...(reasoningTokens === undefined ? {} : { reasoningTokens }), ...(inputTokens !== undefined && cachedInputTokens !== undefined ? { uncachedInputTokens: inputTokens - cachedInputTokens } : {}), ...(cost === undefined ? {} : { cost }) }
 }
 
 function normalizeCost(raw: unknown, provider: string): NonNullable<LLMResult['usage']>['cost'] {
@@ -177,7 +181,9 @@ function normalizeOpenAIToolCalls(raw: unknown, toolNameAliases?: ReadonlyMap<st
     const value = providerRecord(call, 'OpenAI tool call')
     const fn = providerRecord(value.function, 'OpenAI tool function')
     const providerName = requiredProviderString(fn.name, 'OpenAI tool name')
-    return { toolCallId: `pulse-tool-${index + 1}`, name: toolNameAliases?.get(providerName) ?? providerName, input: parseJson(fn.arguments) }
+    const providerToolCallId = typeof value.id === 'string' && value.id.length > 0 ? value.id : undefined
+    if (typeof fn.arguments !== 'string') throw providerResponseError('OpenAI tool arguments must be a JSON string')
+    return { toolCallId: `pulse-tool-${index + 1}`, ...(providerToolCallId === undefined ? {} : { providerToolCallId }), providerToolName: providerName, providerToolArguments: fn.arguments, name: toolNameAliases?.get(providerName) ?? providerName, input: parseJson(fn.arguments) }
   })
 }
 

@@ -7,8 +7,9 @@ interface Props {
   showThinking?: boolean | undefined;
   verbosity?: Verbosity | undefined;
   isRunning?: boolean | undefined;
+  onSelectionChange?: ((text: string) => void) | undefined;
 }
 
-export function MessageList({ mouseEnabled = true, messages, showThinking, verbosity = 'normal', isRunning = false }: Props) {
-  return <MessageViewport mouseEnabled={mouseEnabled} messages={messages} {...(showThinking === undefined ? {} : { showThinking })} verbosity={verbosity} isRunning={isRunning} />;
+export function MessageList({ mouseEnabled = true, messages, showThinking, verbosity = 'normal', isRunning = false, onSelectionChange }: Props) {
+  return <MessageViewport mouseEnabled={mouseEnabled} messages={messages} {...(showThinking === undefined ? {} : { showThinking })} verbosity={verbosity} isRunning={isRunning} {...(onSelectionChange === undefined ? {} : { onSelectionChange })} />;
 }

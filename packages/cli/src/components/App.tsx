@@ -18,6 +18,8 @@ import { useConversation } from '../hooks/useConversation.js';
 import { useRun } from '../hooks/useRun.js';
 import { useTokenStats } from '../hooks/useTokenStats.js';
 import { useSlashCommands } from '../hooks/useSlashCommands.js';
+import { copyToClipboard, isCopyShortcut } from '../utils/clipboard.js';
+import { emptyInputHistory, navigateInputHistory, rememberInput } from '../utils/inputHistory.js';
 import type { AppMode } from '../types.js';
 
 export interface AppProps {
@@ -41,6 +43,10 @@ export function App({
   useEffect(() => { const resize = () => setTerminalRows(stdout.rows || 24); stdout.on('resize', resize); return () => { stdout.off('resize', resize); }; }, [stdout]);
   const [mode, setMode] = useState<AppMode>('chat');
   const [mouseEnabled, setMouseEnabled] = useState(true);
+  const [selectedText, setSelectedText] = useState('');
+  const [inputHistory, setInputHistory] = useState(emptyInputHistory);
+  const inputHistoryRef = useRef(inputHistory);
+  inputHistoryRef.current = inputHistory;
   const [showThinking, setShowThinking] = useState(false);
   const [verbosity, setVerbosity] = useState<'normal' | 'verbose' | 'quiet'>('normal');
   const [sessionsList, setSessionsList] = useState<Array<{ id: string; title: string; updatedAt: string; cwd: string }>>([]);
@@ -66,7 +72,6 @@ export function App({
 
   const {
     isRunning,
-    currentStep,
     error: runError,
     approvalRequest,
     askRequest,
@@ -84,6 +89,30 @@ export function App({
   });
 
   const { cumulative } = useTokenStats();
+
+  const rememberUserInput = useCallback((text: string) => {
+    const next = rememberInput(inputHistoryRef.current, text);
+    inputHistoryRef.current = next;
+    setInputHistory(next);
+  }, []);
+  const navigateUserInputHistory = useCallback((direction: 'up' | 'down', currentValue: string) => {
+    const result = navigateInputHistory(inputHistoryRef.current, direction, currentValue);
+    inputHistoryRef.current = result.state;
+    setInputHistory(result.state);
+    return result.value;
+  }, []);
+
+  useEffect(() => { setSelectedText(''); }, [conversation?.id]);
+
+  const copySelectedText = useCallback(async () => {
+    if (!selectedText) return;
+    try {
+      await copyToClipboard(selectedText);
+      addAssistantMessage({ id: `copy-${Date.now()}`, role: 'system', text: `已复制选中的内容（${selectedText.length.toLocaleString()} 个字符）。`, createdAt: new Date().toISOString() });
+    } catch {
+      addAssistantMessage({ id: `copy-${Date.now()}`, role: 'system', text: '复制失败：当前系统没有可用的剪贴板工具。', createdAt: new Date().toISOString() });
+    }
+  }, [selectedText, addAssistantMessage]);
 
   useEffect(() => {
     if (approvalRequest) {
@@ -143,6 +172,18 @@ export function App({
 
   const { executeCommand, isSlashCommand } = useSlashCommands({
     onMouse: (arg) => setMouseEnabled((current) => arg === 'off' ? false : arg === 'on' ? true : !current),
+    onCopy: async () => {
+      if (selectedText) { await copySelectedText(); return }
+      const latest = [...messages].reverse().find((message) => message.role === 'assistant' && message.text.trim() && message.streamStatus !== 'streaming' && message.streamStatus !== 'incomplete')
+      const payload = latest?.text || ''
+      if (!payload) { addAssistantMessage({ id: `copy-${Date.now()}`, role: 'system', text: '请先拖动选择内容，或发送一条消息后再复制回复。', createdAt: new Date().toISOString() }); return }
+      try {
+        await copyToClipboard(payload)
+        addAssistantMessage({ id: `copy-${Date.now()}`, role: 'system', text: `已复制最近一条完整回复（${payload.length.toLocaleString()} 个字符）。`, createdAt: new Date().toISOString() })
+      } catch {
+        addAssistantMessage({ id: `copy-${Date.now()}`, role: 'system', text: '复制失败：当前系统没有可用的剪贴板工具。可试试 /mouse off 后用终端选择文本。', createdAt: new Date().toISOString() })
+      }
+    },
     onHelp: () => setMode('help'),
     onSessions: async () => {
       await loadSessions();
@@ -196,7 +237,6 @@ export function App({
       }
     },
     onExit: () => exit(),
-    onQuit: () => exit(),
     onCancel: async () => {
       if (!isRunning) {
         addAssistantMessage({
@@ -456,8 +496,8 @@ export function App({
   );
 
   useInput((input, key) => {
-    if ((hostError || (conversationError && !conversation)) && (input === 'q' || key.escape)) {
-      exit();
+    if (isCopyShortcut(input, key)) {
+      if (selectedText) void copySelectedText();
       return;
     }
     if (conversationError && !conversation && input === 'n') {
@@ -488,7 +528,7 @@ export function App({
       <Box padding={1} flexDirection="column">
         <Text color="red">Pulse 初始化失败：{hostError}</Text>
         <Text dimColor>请检查工作目录、配置文件和数据目录权限后重试。</Text>
-        <Text dimColor>按 q 退出。</Text>
+        <Text dimColor>输入 /exit 退出。</Text>
       </Box>
     );
   }
@@ -505,7 +545,7 @@ export function App({
     return (
       <Box padding={1} flexDirection="column">
         <Text color="red">会话加载失败：{conversationError}</Text>
-        <Text dimColor>按 n 新建会话，按 q 退出。</Text>
+        <Text dimColor>按 n 新建会话，输入 /exit 退出。</Text>
       </Box>
     );
   }
@@ -560,7 +600,7 @@ export function App({
       )}
 
       {messages.length > 0 && (
-        <MessageList mouseEnabled={mouseEnabled} messages={messages} showThinking={showThinking} verbosity={verbosity} isRunning={isRunning} />
+      <MessageList mouseEnabled={mouseEnabled} messages={messages} showThinking={showThinking} verbosity={verbosity} isRunning={isRunning} onSelectionChange={setSelectedText} />
       )}
 
       {runError && (
@@ -575,7 +615,7 @@ export function App({
         </Box>
       )}
 
-      <StatusHud isRunning={isRunning} cwd={cwd} model={modelName} provider={providerName} approvalMode={hostOptions.approvalMode ?? 'ask'} currentStep={currentStep} lanes={lanes} />
+      <StatusHud isRunning={isRunning} cwd={cwd} model={modelName} provider={providerName} approvalMode={hostOptions.approvalMode ?? 'ask'} lanes={lanes} />
 
       {approvalRequest ? (
         <ApprovalPrompt
@@ -604,6 +644,8 @@ export function App({
         <Box marginTop={1}>
           <InputArea
             onSubmit={(txt) => void handleSubmit(txt)}
+            onRememberInput={rememberUserInput}
+            onNavigateHistory={navigateUserInputHistory}
             disabled={approvalSubmitting}
             focus={!approvalSubmitting}
             placeholder={isRunning ? '运行中也可以输入；/cancel 可取消当前运行...' : '输入消息或 /help...'}

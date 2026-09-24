@@ -87,12 +87,42 @@ describe('M1-3 context, models and adapters', () => {
   it('normalizes OpenAI-compatible and Anthropic tool calls with Pulse ids', () => {
     const openai = normalizeOpenAIResponse({ choices: [{ message: { content: 'ok', tool_calls: [{ id: 'provider-id', function: { name: 'read', arguments: '{"path":"a"}' } }] }, finish_reason: 'tool_calls' }] })
     const anthropic = normalizeAnthropicResponse({ content: [{ type: 'text', text: 'ok' }, { type: 'tool_use', id: 'provider-id', name: 'read', input: { path: 'a' } }] })
-    expect(openai.toolCalls[0]).toEqual({ toolCallId: 'pulse-tool-1', name: 'read', input: { path: 'a' } })
+    expect(openai.toolCalls[0]).toEqual({ toolCallId: 'pulse-tool-1', providerToolCallId: 'provider-id', providerToolName: 'read', providerToolArguments: '{"path":"a"}', name: 'read', input: { path: 'a' } })
     expect(anthropic.toolCalls[0]?.toolCallId).toBe('pulse-tool-1')
     expect(openai.finishReason).toBe('tool_calls')
     expect(normalizeOpenAIResponse({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 3 } } }).usage).toMatchObject({ inputTokens: 10, outputTokens: 2, cachedInputTokens: 3, uncachedInputTokens: 7 })
     expect(normalizeOpenAIResponse({ choices: [{ message: { content: null, refusal: 'not allowed' }, finish_reason: 'stop' }] })).toMatchObject({ finishReason: 'refusal', refusal: 'not allowed' })
+    const deepseek = normalizeOpenAIResponse({ choices: [{ message: { content: 'answer', reasoning_content: 'private reasoning' }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 9, completion_tokens_details: { reasoning_tokens: 6 } } }, undefined, 'deepseek')
+    expect(deepseek).toMatchObject({ text: 'answer', providerContinuation: { provider: 'deepseek', reasoningContent: 'private reasoning' }, usage: { reasoningTokens: 6, visibleOutputChars: 6 } })
     expect(normalizeAnthropicResponse({ content: [{ type: 'refusal', text: 'not allowed' }], stop_reason: 'refusal' })).toMatchObject({ finishReason: 'refusal', refusal: 'not allowed' })
+  })
+
+  it('round-trips native OpenAI tool exchanges and DeepSeek continuation without exposing reasoning as text', () => {
+    const state = createRuntimeState()
+    const { agent, root } = createAgent(state, 'goal', resume)
+    state.results.set('tool-result', { id: 'tool-result', value: { content: 'file contents' }, privacy: 'public', derivedFrom: [], producer: { kind: 'effect', id: 'tool-effect' } })
+    root.visibleResultRefs!.add('tool-result')
+    state.toolCallCorrelations.set('runtime-call', { toolCallId: 'runtime-call', llmEffectId: 'llm-effect', toolEffectId: 'tool-effect', resultRef: 'tool-result' })
+    const history = appendHistory(root, { instruction: 'read a file', resultRefs: ['tool-result'], output: { text: '', finishReason: 'tool_calls', toolCalls: [{ toolCallId: 'runtime-call', providerToolCallId: 'provider-call-id', providerToolName: 'read_file', providerToolArguments: '{ "path" : "a.txt" }', name: 'read', input: { path: 'a.txt' } }], providerContinuation: { provider: 'deepseek', reasoningContent: 'private continuation' } }, privacy: 'public' })
+    const projection = new ContextBuilder(state).build({ agent, lane: history, resultRefs: ['tool-result'], instruction: 'continue', toolSetId: 'tools@1' })
+    const messages = toOpenAIMessages(projection, 'deepseek')
+    expect(messages).toContainEqual({ role: 'assistant', content: null, reasoning_content: 'private continuation', tool_calls: [{ id: 'provider-call-id', type: 'function', function: { name: 'read_file', arguments: '{ "path" : "a.txt" }' } }] })
+    expect(messages).toContainEqual({ role: 'tool', tool_call_id: 'provider-call-id', name: 'read_file', content: '{"content":"file contents"}' })
+    expect(messages.some((message) => message.content === 'private continuation')).toBe(false)
+    expect(projection.blocks.find((block) => block.kind === 'results')?.content).toEqual([])
+  })
+
+  it('does not invent a missing tool result when projecting incomplete or legacy history', () => {
+    const state = createRuntimeState()
+    const { agent, root } = createAgent(state, 'goal', resume)
+    const history = appendHistory(root, { instruction: 'read', resultRefs: [], output: { text: '', finishReason: 'tool_calls', toolCalls: [{ toolCallId: 'runtime-call', providerToolCallId: 'provider-call-id', name: 'read', input: {} }] }, privacy: 'public' })
+    const projection = new ContextBuilder(state).build({ agent, lane: history, instruction: 'continue', toolSetId: 'tools@1' })
+    const native = projection.blocks.find((block) => block.kind === 'provider_history')?.content as any[]
+    expect(native).toEqual([{ role: 'user', content: expect.stringContaining('incomplete in retained history') }])
+    expect(toOpenAIMessages(projection).some((message) => Array.isArray(message.tool_calls))).toBe(false)
+    const legacy = appendHistory(root, { instruction: 'old', resultRefs: [], output: { legacy: true }, privacy: 'public' })
+    const legacyProjection = new ContextBuilder(state).build({ agent, lane: legacy, instruction: 'continue', toolSetId: 'tools@1' })
+    expect(legacyProjection.contextSpec.providerHistory).toBeUndefined()
   })
 
   it('fails closed on malformed provider JSON and malformed tool arguments', async () => {
@@ -255,6 +285,18 @@ describe('M1-3 context, models and adapters', () => {
     expect(openai.toolCalls[0]).toMatchObject({ name: 'read', input: { path: 'a' } })
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).stream).toBe(true)
 
+    const deepseekStream = [
+      { choices: [{ delta: { reasoning_content: 'private ' } }] },
+      { choices: [{ delta: { reasoning_content: 'reasoning', content: 'visible' } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      { usage: { prompt_tokens: 8, completion_tokens: 12, completion_tokens_details: { reasoning_tokens: 7 } } },
+    ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n'
+    fetchMock.mockResolvedValueOnce(new Response(deepseekStream, { headers: { 'content-type': 'text/event-stream' } }))
+    const deepseekChunks: string[] = []
+    const deepseek = await new OpenAICompatibleAdapter('deepseek-stream', { provider: 'deepseek', defaultModel: 'deepseek-flash' }).executeAttempt({ request, signal: new AbortController().signal, onObservation: (chunk) => deepseekChunks.push(chunk) })
+    expect(deepseekChunks).toEqual(['visible'])
+    expect(deepseek).toMatchObject({ text: 'visible', providerContinuation: { provider: 'deepseek', reasoningContent: 'private reasoning' }, usage: { reasoningTokens: 7, visibleOutputChars: 7 } })
+
     const anthropicStream = [
       ['message_start', { message: { usage: { input_tokens: 5 } } }],
       ['content_block_start', { index: 0, content_block: { type: 'text', text: '' } }],
@@ -269,7 +311,7 @@ describe('M1-3 context, models and adapters', () => {
     expect(anthropicChunks).toEqual(['Hi'])
     expect(anthropic.text).toBe('Hi')
     expect(anthropic.toolCalls[0]).toMatchObject({ name: 'read', input: { path: 'a' } })
-    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).stream).toBe(true)
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)).stream).toBe(true)
     vi.unstubAllGlobals()
   })
 

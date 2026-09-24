@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { PulseRuntime, type JsonValue } from '@hunterzhu/pulse-runtime'
 import { buildTaskControllerProgram } from '../packages/server/src/task-controller/program.js'
-import { initialController, nextTask, reviseController, validatePlan } from '../packages/server/src/task-controller/state.js'
+import { initialController, isReadOnlyInspectionCommand, nextTask, reviseController, validatePlan } from '../packages/server/src/task-controller/state.js'
 
 const task = (id: string, dependsOn: string[] = []) => ({ id, goal: `Implement ${id}`, check: 'Read and verify result', dependsOn, criterionIds: [id.replace('task-', 'criterion-')] })
 const initialGlobal = (count: number): JsonValue => ({ taskRecord: { schemaVersion: 1, runId: 'test', objective: 'Complete the checklist', acceptanceCriteria: Array.from({ length: count }, (_, index) => ({ id: `criterion-${index + 1}`, description: `Requirement ${index + 1}` })), status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] } })
@@ -14,10 +14,37 @@ function finalReview(runtime: PulseRuntime): { value: JsonValue } {
 }
 
 describe('Host task controller', () => {
+  it('keeps a pure writing task accepted when its verified stage has evidence but final review omits citations', async () => {
+    let agentId = ''
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: {} }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [{ ...task('task-1'), goal: 'Write a commit message from the supplied changes', check: 'Return a title and concise bullets' }] } }
+      if (effect.key?.startsWith('verify-stage')) {
+        const candidateRef = globalFor(runtime, agentId).taskController.tasks[0].candidateRef
+        return { value: { status: 'passed', evidenceRefs: [candidateRef], note: 'The requested commit message was produced.' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return { value: { criteria: [{ criterionId: 'criterion-1', status: 'unverifiable', evidenceRefs: [], rationale: 'Final review omitted its citation.' }] } }
+      return { value: { text: 'feat: improve CLI\n\n- Make terminal output easier to copy', finishReason: 'stop' } }
+    } })
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 12 })
+    agentId = runtime.createAgent({ goal: 'Write a commit message', program, initialGlobal: initialGlobal(1) }).agentId
+    expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'succeeded' })
+    expect(globalFor(runtime, agentId).taskOutcome).toMatchObject({ status: 'accepted', criteria: [{ status: 'passed', evidenceRefs: [expect.any(String)] }] })
+  })
+
   it('rejects cycles, unknown dependencies and omitted original requirements', () => {
     expect(() => validatePlan([task('task-1', ['task-2']), task('task-2', ['task-1'])], ['criterion-1', 'criterion-2'])).toThrow('CYCLE')
     expect(() => validatePlan([task('task-1', ['missing'])], ['criterion-1'])).toThrow('UNKNOWN_DEPENDENCY')
     expect(() => validatePlan([task('task-1')], ['criterion-1', 'criterion-2'])).toThrow('CRITERIA_MISMATCH')
+  })
+
+  it('recognizes bounded shell inspection without treating mutating commands as investigation', () => {
+    expect(isReadOnlyInspectionCommand('git status --short')).toBe(true)
+    expect(isReadOnlyInspectionCommand('git status --short && git diff --stat')).toBe(true)
+    expect(isReadOnlyInspectionCommand('git diff -- packages/cli/src/App.tsx')).toBe(true)
+    expect(isReadOnlyInspectionCommand('git add .')).toBe(false)
+    expect(isReadOnlyInspectionCommand('git diff > changes.patch')).toBe(false)
+    expect(isReadOnlyInspectionCommand('git status; git reset --hard')).toBe(false)
   })
 
   it('blocks dependent tasks while selecting independent work and preserves revision budget', () => {
@@ -109,6 +136,116 @@ describe('Host task controller', () => {
     expect(outcome).toMatchObject({ status: 'succeeded' })
     expect(calls).toBeLessThanOrEqual(5)
     expect(globalFor(runtime, agentId).taskOutcome.status).toBe('incomplete')
+  })
+
+  it('requests one structured progress review after four read-only rounds without requiring repeated file names', async () => {
+    let workCalls = 0
+    let reads = 0
+    let progressReviews = 0
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['read'], readOnlyToolNames: ['read'], approvalMode: 'auto', maxTurns: 24 })
+    let agentId = ''
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { reads++; return { value: { file: `file-${reads}`, content: 'evidence' } } }
+      const key = effect.key ?? ''
+      if (key.startsWith('plan')) return { value: { tasks: [task('task-1')] } }
+      const state = globalFor(runtime, agentId).taskController
+      if (key.startsWith('progress-review')) {
+        progressReviews++
+        expect(state.tasks[0].investigationRounds).toBe(4)
+        return { value: { status: 'ready', evidenceRefs: state.tasks[0].evidenceRefs, note: 'Evidence is sufficient.' } }
+      }
+      if (key.startsWith('verify-stage')) return { value: { status: 'passed', evidenceRefs: state.tasks[0].evidenceRefs, note: 'Verified evidence.' } }
+      if (key.startsWith('verify-task')) return finalReview(runtime)
+      workCalls++
+      return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: { path: `file-${workCalls}` } }] } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Inspect the relevant files and explain the issue', program, initialGlobal: initialGlobal(1) }).agentId
+    const outcome = await runtime.start(agentId).outcome()
+    expect(outcome.status).toBe('succeeded')
+    expect(reads).toBe(4)
+    expect(progressReviews).toBe(1)
+    expect(globalFor(runtime, agentId).taskController.tasks[0].investigationRounds).toBe(4)
+  })
+
+  it('bounds repeated read-only git shell inspections too', async () => {
+    let reads = 0
+    let progressReviews = 0
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['shell.exec'], approvalMode: 'auto', maxTurns: 24 })
+    let agentId = ''
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { reads++; return { value: { code: 0, stdout: 'working tree', stderr: '', truncated: false, timedOut: false, aborted: false } } }
+      const key = effect.key ?? ''
+      if (key.startsWith('plan')) return { value: { tasks: [task('task-1')] } }
+      const active = globalFor(runtime, agentId).taskController.tasks[0]
+      if (key.startsWith('progress-review')) {
+        progressReviews++
+        expect(active.investigationRounds).toBe(4)
+        return { value: { status: 'ready', evidenceRefs: active.evidenceRefs, note: 'The current diff evidence is sufficient.' } }
+      }
+      if (key.startsWith('verify-stage')) return { value: { status: 'passed', evidenceRefs: active.evidenceRefs, note: 'Verified.' } }
+      if (key.startsWith('verify-task')) return finalReview(runtime)
+      return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'shell.exec', input: { command: 'git', args: ['status', '--short'] } }] } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Inspect the git changes and summarize them', program, initialGlobal: initialGlobal(1) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(reads).toBe(4)
+    expect(progressReviews).toBe(1)
+  })
+
+  it('keeps moving with a bounded read allowance when the progress review output is invalid', async () => {
+    let reads = 0
+    let workCalls = 0
+    let progressReviews = 0
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['read'], readOnlyToolNames: ['read'], approvalMode: 'auto', maxTurns: 24 })
+    let agentId = ''
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { reads++; return { value: { content: `evidence-${reads}` } } }
+      const key = effect.key ?? ''
+      if (key.startsWith('plan')) return { value: { tasks: [task('task-1')] } }
+      const active = globalFor(runtime, agentId).taskController.tasks[0]
+      if (key.startsWith('progress-review')) { progressReviews++; return { value: { status: 'not-a-status', evidenceRefs: [], note: '' } } }
+      if (key.startsWith('verify-stage')) return { value: { status: 'passed', evidenceRefs: active.evidenceRefs, note: 'Evidence verified.' } }
+      if (key.startsWith('verify-task')) return finalReview(runtime)
+      workCalls++
+      if (workCalls <= 6) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: { path: `file-${workCalls}` } }] } }
+      return { value: { text: 'stage report', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Inspect and resolve the issue', program, initialGlobal: initialGlobal(1) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(progressReviews).toBe(2) // One structured correction retry, then bounded fallback.
+    expect(reads).toBe(5)
+    expect(workCalls).toBe(5)
+    const state = globalFor(runtime, agentId).taskController.tasks[0]
+    expect(state.progressReviewed).toBe(true)
+    expect(state.directedInvestigations).toBeLessThanOrEqual(2)
+  })
+
+  it('turns a needs-work review into the next concrete stage action', async () => {
+    let workCalls = 0
+    let stageReviews = 0
+    let retryConversation: any[] = []
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['read'], approvalMode: 'auto', maxTurns: 16 })
+    let agentId = ''
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { content: 'source evidence' } }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [task('task-1')] } }
+      const state = globalFor(runtime, agentId).taskController
+      if (effect.key?.startsWith('verify-stage')) {
+        stageReviews++
+        const refs = state.tasks[0].evidenceRefs
+        return { value: stageReviews === 1 ? { status: 'needs_work', evidenceRefs: refs, note: 'Add a /copy command that copies the latest complete response.' } : { status: 'blocked', evidenceRefs: refs, note: 'The bounded retry did not complete the correction.' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      workCalls++
+      if (workCalls === 3) retryConversation = (effect.input as any).inputs.conversation
+      return { value: workCalls === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: { path: 'source.ts' } }] } : { text: 'stage report', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Implement and verify the copy feature', program, initialGlobal: initialGlobal(1) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(workCalls).toBe(3)
+    expect(stageReviews).toBe(2)
+    expect(JSON.stringify(retryConversation)).toContain('NEXT: Implement the missing deliverable for this stage')
+    expect(JSON.stringify(retryConversation)).toContain('Verifier finding: Add a /copy command')
   })
 
   it.each(['passed', 'not_met'])('verifies settled evidence at the stage limit and respects final review (%s)', async (finalStatus) => {

@@ -21,6 +21,7 @@ export interface DisplayMessage {
   id: string
   role: MessageRole
   text: string
+  streamStatus?: 'streaming' | 'complete' | 'incomplete' | undefined
   runId?: string | undefined
   createdAt: string
   /** 工具调用事件 */

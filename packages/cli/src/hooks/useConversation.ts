@@ -76,10 +76,11 @@ export function useConversation({
     setMessages((prev) => [...prev, newMessage]);
   }, []);
 
-  const addAssistantMessage = useCallback((msg: DisplayMessage) => {
+  const addAssistantMessage = useCallback((msg: DisplayMessage, options?: { moveToEnd?: boolean }) => {
     setMessages((prev) => {
       const index = prev.findIndex((m) => m.id === msg.id);
       if (index >= 0) {
+        if (options?.moveToEnd) return [...prev.filter((m) => m.id !== msg.id), msg];
         const next = [...prev];
         next[index] = msg;
         return next;

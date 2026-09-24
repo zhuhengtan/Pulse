@@ -36,7 +36,7 @@ export function useRun({
 }: {
   host: LocalHost | null;
   conversationId: string | null;
-  addAssistantMessage: (msg: DisplayMessage) => void;
+  addAssistantMessage: (msg: DisplayMessage, options?: { moveToEnd?: boolean }) => void;
 }) {
   const [isRunning, setIsRunning] = useState(false);
   const [currentStep, setCurrentStep] = useState<string | null>(null);
@@ -55,11 +55,29 @@ export function useRun({
         id: run.id,
         role: 'assistant',
         text: '',
+        streamStatus: 'streaming',
         createdAt: new Date().toISOString(),
         toolCalls: [],
         runId: run.id,
       };
       let assistantStarted = false;
+      let streamedEffectId: string | undefined;
+      let streamedAttemptId: string | undefined;
+      let lastProgressText = '';
+      const addProgress = (key: string, text: string) => {
+        if (!text || text === lastProgressText) return;
+        lastProgressText = text;
+        addAssistantMessage({
+          // One live activity cell is updated in place, like Codex/Claude's
+          // active-turn transcript, instead of appending every snapshot.
+          id: `run-activity-${run.id}`,
+          role: 'system',
+          text,
+          createdAt: new Date().toISOString(),
+          runId: run.id,
+        }, key === 'finished' ? { moveToEnd: true } : undefined);
+      };
+      addProgress('received', '已收到任务，正在理解需求并安排步骤…');
       const ensureAssistant = () => {
         if (assistantStarted) return;
         assistantStarted = true;
@@ -73,6 +91,16 @@ export function useRun({
             : {};
           const text = typeof data.text === 'string' ? data.text : '';
           if (text) {
+            if (data.kind === 'task_progress') {
+              const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+              const visibleText = tasks.length === 0 ? '正在理解需求并规划执行步骤…' : text;
+              setCurrentStep(visibleText);
+              const active = tasks.find((task) => task && typeof task === 'object' && ['running', 'verifying'].includes(String((task as Record<string, unknown>).status))) as Record<string, unknown> | undefined;
+              const stageKey = active ? `${String(active.id)}:${String(active.status)}:${String(active.goal)}` : visibleText.replace(/\s*[·|]\s*(阶段调用|stage calls)\s*\d+.*$/i, '');
+              const stageText = visibleText.replace(/\s*[·|]\s*(阶段调用|stage calls)\s*\d+.*$/i, '');
+              addProgress(`stage:${stageKey}`, stageText);
+              continue;
+            }
             addAssistantMessage({
               id: `notice-${run.id}-${event.seq}`,
               role: 'system',
@@ -82,10 +110,33 @@ export function useRun({
           }
           continue;
         }
-        ensureAssistant();
+        if (event.type !== 'complete' && event.type !== 'error') ensureAssistant();
         switch (event.type) {
+          case 'delta': {
+            const delta = event.data && typeof event.data === 'object' && !Array.isArray(event.data)
+              ? event.data as Record<string, unknown>
+              : {};
+            const effectId = typeof delta.effectId === 'string' ? delta.effectId : undefined;
+            const attemptId = typeof delta.attemptId === 'string' ? delta.attemptId : undefined;
+            const text = typeof delta.text === 'string' ? delta.text : '';
+            if (!text) break;
+            if (effectId !== streamedEffectId || attemptId !== streamedAttemptId) {
+              assistantMessage.text = '';
+              streamedEffectId = effectId;
+              streamedAttemptId = attemptId;
+            }
+            assistantMessage.text += text;
+            assistantMessage.streamStatus = 'streaming';
+            addAssistantMessage({ ...assistantMessage, toolCalls: assistantMessage.toolCalls?.map((call) => ({ ...call })) });
+            setCurrentStep('正在生成回复…');
+            break;
+          }
           case 'text':
-            assistantMessage.text += String(event.data ?? '');
+            if (streamedEffectId !== undefined) assistantMessage.text = String(event.data ?? '');
+            else assistantMessage.text += String(event.data ?? '');
+            streamedEffectId = undefined;
+            streamedAttemptId = undefined;
+            assistantMessage.streamStatus = 'complete';
             addAssistantMessage({ ...assistantMessage, toolCalls: assistantMessage.toolCalls?.map((call) => ({ ...call })) });
             break;
           case 'observation': {
@@ -107,6 +158,8 @@ export function useRun({
                 ? calls.map((call, callIndex) => callIndex === index ? { ...call, ...nextCall } : call)
                 : [...calls, nextCall];
               addAssistantMessage({ ...assistantMessage, toolCalls: assistantMessage.toolCalls.map((call) => ({ ...call })) });
+              setCurrentStep(nextCall.status === 'succeeded' ? `已完成 ${nextCall.name}，正在整理结果…` : nextCall.status === 'failed' ? `${nextCall.name} 未成功，正在处理错误…` : `正在执行 ${nextCall.name}…`);
+              addProgress(`tool-result:${id}:${nextCall.status}`, `${nextCall.status === 'succeeded' ? '已完成' : nextCall.status === 'cancelled' ? '已取消' : '执行失败'} · ${nextCall.name}`);
             }
             break;
           }
@@ -141,6 +194,7 @@ export function useRun({
                 ...(typeof input.defaultValue === 'string' ? { defaultValue: input.defaultValue } : {}),
               });
               setCurrentStep('等待你的回答...');
+              addProgress(`waiting:${effectId}`, '等待你的回答…');
               break;
             }
             setAskRequest(null);
@@ -167,12 +221,13 @@ export function useRun({
               ...(tools.length ? { tools } : {}),
             });
             setCurrentStep('等待用户审批...');
+            addProgress(`approval:${effectId}`, `等待审批 · ${tools.map((tool) => tool.name).join('、') || '系统操作'}`);
             break;
           }
           case 'fact':
             if (event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
-              const fact = event.data as Record<string, unknown>;
-              if (fact.type === 'lane.snapshot' && Array.isArray(fact.lanes)) {
+            const fact = event.data as Record<string, unknown>;
+            if (fact.type === 'lane.snapshot' && Array.isArray(fact.lanes)) {
                 setLanes(fact.lanes.flatMap((lane) => {
                   if (!lane || typeof lane !== 'object' || Array.isArray(lane)) return [];
                   const item = lane as Record<string, unknown>;
@@ -184,6 +239,29 @@ export function useRun({
                     ...(typeof item.activity === 'string' ? { activity: item.activity } : {}),
                   }];
                 }));
+                const activeLanes = (fact.lanes as Array<Record<string, unknown>>).filter((lane) => typeof lane.status === 'string' && !['succeeded', 'failed', 'cancelled'].includes(lane.status));
+                const active = activeLanes.find((lane) => lane.activityKind === 'tool') ?? activeLanes[0];
+                if (active && typeof active.goal === 'string') {
+                  const toolName = active.activityKind === 'tool' && typeof active.activity === 'string' ? active.activity : undefined;
+                  const activity = toolName ? `正在调用工具 · ${toolName}` : typeof active.activity === 'string'
+                    ? active.activity === 'llm' ? '正在分析需求和已有证据…' : '正在处理任务…'
+                    : '正在处理任务…';
+                  setCurrentStep(`${activity}：${active.goal}`);
+                  const activityId = toolName
+                    ? (typeof active.activityEffectId === 'string' ? active.activityEffectId : active.id)
+                    : active.activity === 'llm' ? 'analysis' : `${active.id}:${active.status}`;
+                  addProgress(`activity:${activityId}`, activity);
+                  if (toolName && typeof active.activityToolCallId === 'string') {
+                    const id = active.activityToolCallId;
+                    const calls = assistantMessage.toolCalls ?? [];
+                    const index = calls.findIndex((call) => call.id === id);
+                    const nextCall: ToolCallDisplay = { id, name: toolName, status: 'running', arguments: {} };
+                    assistantMessage.toolCalls = index >= 0
+                      ? calls.map((call, callIndex) => callIndex === index ? { ...call, ...nextCall } : call)
+                      : [...calls, nextCall];
+                    addAssistantMessage({ ...assistantMessage, toolCalls: assistantMessage.toolCalls.map((call) => ({ ...call })) });
+                  }
+                }
                 break;
               }
             }
@@ -191,6 +269,11 @@ export function useRun({
             if (typeof event.data === 'string' && event.data.startsWith('human.input.')) setCurrentStep(describeFactStatus(event.data));
             break;
           case 'error':
+            addProgress('finished', '运行遇到错误。');
+            if (assistantStarted && assistantMessage.text) {
+              assistantMessage.streamStatus = 'incomplete';
+              addAssistantMessage({ ...assistantMessage, toolCalls: assistantMessage.toolCalls?.map((call) => ({ ...call })) });
+            }
             setError(String(event.data ?? '发生未知错误'));
             setIsRunning(false);
             setCurrentStep(null);
@@ -199,22 +282,32 @@ export function useRun({
             setLanes([]);
             break;
           case 'complete':
+            addProgress('finished', event.data && typeof event.data === 'object' && !Array.isArray(event.data) && (event.data as Record<string, unknown>).status === 'succeeded' ? '任务处理完成。' : '任务已结束。');
             setIsRunning(false);
             setCurrentStep(null);
             setApprovalRequest(null);
             setAskRequest(null);
             if (event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
               const completion = event.data as Record<string, unknown>;
+              const accepted = completion.status === 'succeeded' && (!completion.taskOutcome || (typeof completion.taskOutcome === 'object' && completion.taskOutcome !== null && (completion.taskOutcome as Record<string, unknown>).status === 'accepted'));
+              if (assistantStarted && assistantMessage.text) {
+                assistantMessage.streamStatus = accepted ? 'complete' : 'incomplete';
+                addAssistantMessage({ ...assistantMessage, toolCalls: assistantMessage.toolCalls?.map((call) => ({ ...call })) });
+              }
               const usage = completion.usage && typeof completion.usage === 'object' && !Array.isArray(completion.usage)
                 ? completion.usage as Record<string, unknown>
                 : undefined;
               if (usage) {
                 const input = typeof usage.inputTokens === 'number' ? usage.inputTokens.toLocaleString() : '未知';
                 const output = typeof usage.outputTokens === 'number' ? usage.outputTokens.toLocaleString() : '未知';
+                const reasoning = typeof usage.reasoningTokens === 'number' ? usage.reasoningTokens.toLocaleString() : '未知';
+                const visibleChars = typeof usage.visibleOutputChars === 'number' ? usage.visibleOutputChars.toLocaleString() : '未知';
+                const modelCalls = typeof usage.modelCalls === 'number' ? usage.modelCalls.toLocaleString() : '未知';
+                const truncations = typeof usage.truncationEvents === 'number' ? usage.truncationEvents.toLocaleString() : '未知';
                 const costs = Array.isArray(usage.providerCosts) ? usage.providerCosts.filter((item): item is { currency: string; amount: number } => Boolean(item && typeof item === 'object' && typeof (item as { currency?: unknown }).currency === 'string' && typeof (item as { amount?: unknown }).amount === 'number')) : [];
                 const estimate = usage.estimatedCost && typeof usage.estimatedCost === 'object' ? usage.estimatedCost as { currency?: unknown; amount?: unknown; pricingVersion?: unknown } : undefined;
                 const costLabel = costs.length ? costs.map((item) => `${item.amount} ${item.currency}`).join(', ') : estimate && typeof estimate.amount === 'number' ? `估算 ${estimate.amount} ${String(estimate.currency)} (价格 ${String(estimate.pricingVersion)})` : '费用未知';
-                addAssistantMessage({ id: `run-usage-${run.id}`, role: 'system', text: `用量：输入 ${input} · 输出 ${output} · ${costLabel}${usage.completeness === 'partial' ? ' · 数据不完整' : ''}`, createdAt: new Date().toISOString(), runId: run.id });
+                addAssistantMessage({ id: `run-usage-${run.id}`, role: 'system', text: `用量：输入 ${input} · 输出 ${output} · 思考 ${reasoning} · 可见字符 ${visibleChars} · 模型调用 ${modelCalls} · 截断 ${truncations} · ${costLabel}${usage.completeness === 'partial' ? ' · 数据不完整' : ''}`, createdAt: new Date().toISOString(), runId: run.id });
               }
               const taskOutcome = completion.taskOutcome && typeof completion.taskOutcome === 'object' && !Array.isArray(completion.taskOutcome)
                 ? completion.taskOutcome as Record<string, unknown>
@@ -274,7 +367,7 @@ export function useRun({
       }
       setIsRunning(true);
       setError(null);
-      setCurrentStep('思考中...');
+      setCurrentStep('正在理解你的需求并安排执行步骤…');
 
       try {
         const run = await host.sendMessage(activeConversationId, { text });
@@ -294,7 +387,7 @@ export function useRun({
       if (!host || !activeConversationId || runRef.current) return;
       setIsRunning(true);
       setError(null);
-      setCurrentStep('正在恢复未完成的运行...');
+      setCurrentStep('正在恢复任务进度…');
       try {
         const run = await host.resumeRun(activeConversationId);
         await consumeRun(run);

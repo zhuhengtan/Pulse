@@ -441,6 +441,8 @@ export interface LLMContextSpec {
   toolSetId: string
   instruction: string
   conversation?: ConversationMessage[]
+  /** Provider-native assistant/tool messages reconstructed from complete durable tool exchanges. */
+  providerHistory?: ProviderHistoryMessage[]
   privacy: PrivacyLabel
   privacyRefs: ProvenanceRef[]
   privacyTaints?: PrivacyTaint[]
@@ -451,9 +453,14 @@ export interface ConversationMessage {
   content: string
 }
 
+export type ProviderHistoryMessage =
+  | { role: 'user'; content: string }
+  | { role: 'assistant'; content: string | null; reasoningContent?: string; toolCalls?: Array<{ id: string; name: string; arguments: string }> }
+  | { role: 'tool'; toolCallId: string; name: string; content: string; resultRef: ResultRef }
+
 export interface LLMRequestProjection {
   contextSpec: LLMContextSpec
-  blocks: Array<{ kind: 'system' | 'policy' | 'tools' | 'global' | 'conversation' | 'history' | 'lane' | 'events' | 'results' | 'artifacts' | 'instruction'; content: JsonValue }>
+  blocks: Array<{ kind: 'system' | 'policy' | 'tools' | 'global' | 'conversation' | 'history' | 'provider_history' | 'lane' | 'events' | 'results' | 'artifacts' | 'instruction'; content: JsonValue }>
   prefixHash: string
   projectionHash: string
   builderVersion: string

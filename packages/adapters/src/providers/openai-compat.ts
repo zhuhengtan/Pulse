@@ -17,7 +17,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const streaming = params.onObservation !== undefined
     const { definitions: tools, aliases: toolNameAliases } = toolDefinitions(params.request)
     const includeReasoning = Boolean(this.config.reasoningEffort) && !this.reasoningUnsupported
-    const messages = toMessages(params.request)
+    const messages = toMessages(params.request, this.config.provider)
     const deepSeekJsonMode = params.outputSchema !== undefined && this.config.provider === 'deepseek'
     if (deepSeekJsonMode) messages.unshift({ role: 'system', content: `Return only a JSON object matching this schema. The application will validate the result:\n${JSON.stringify(params.outputSchema)}` })
     const responseFormat = params.outputSchema === undefined ? undefined : deepSeekJsonMode
@@ -27,13 +27,14 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     try {
       const response = await fetch(`${this.baseURL.replace(/\/$/, '')}/chat/completions`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}), ...(this.config.extraHeaders ?? {}) }, body: JSON.stringify(body) })
       if (!response.ok) throw await providerHttpErrorFromResponse(response)
-      if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeOpenAIResponse(await parseProviderJson(response), toolNameAliases)
+      if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeOpenAIResponse(await parseProviderJson(response), toolNameAliases, this.config.provider)
       const events = await consumeProviderSse(response, (event) => {
         const delta = event.data?.choices?.[0]?.delta
         if (typeof delta?.content === 'string') params.onObservation?.(delta.content)
         if (typeof delta?.refusal === 'string') params.onObservation?.(delta.refusal)
       })
       const content: string[] = []
+      const reasoningContent: string[] = []
       const refusals: string[] = []
       const toolCalls = new Map<number, StreamToolCall>()
       let finishReason: string | undefined
@@ -43,12 +44,13 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         const choice = event.data.choices?.[0]
         const delta = choice?.delta
         if (typeof delta?.content === 'string') { content.push(delta.content) }
+        if (typeof delta?.reasoning_content === 'string') reasoningContent.push(delta.reasoning_content)
         if (typeof delta?.refusal === 'string') { refusals.push(delta.refusal) }
         if (typeof choice?.finish_reason === 'string') finishReason = choice.finish_reason
         if (Array.isArray(delta?.tool_calls)) for (const call of delta.tool_calls) accumulateStreamToolCall(toolCalls, call)
         if (event.data.usage !== undefined) usage = event.data.usage
       }
-      return normalizeOpenAIResponse({ choices: [{ message: { content: content.join('') || null, ...(refusals.length ? { refusal: refusals.join('') } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => ({ id: call.id, function: { name: call.name, arguments: call.arguments } })) } : {}) }, finish_reason: finishReason ?? 'stop' }], ...(usage === undefined ? {} : { usage }) }, toolNameAliases)
+      return normalizeOpenAIResponse({ choices: [{ message: { content: content.join('') || null, ...(reasoningContent.length ? { reasoning_content: reasoningContent.join('') } : {}), ...(refusals.length ? { refusal: refusals.join('') } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => ({ id: call.id, function: { name: call.name, arguments: call.arguments } })) } : {}) }, finish_reason: finishReason ?? 'stop' }], ...(usage === undefined ? {} : { usage }) }, toolNameAliases, this.config.provider)
     } catch (cause) {
       if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
       if (includeReasoning && reasoningParameterRejected(cause)) {
@@ -61,8 +63,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 }
 
-export function toOpenAIMessages(request: LLMRequestProjection): Array<{ role: 'system' | 'user' | 'assistant'; content: string; name?: string }> {
-  const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string; name?: string }> = []
+export function toOpenAIMessages(request: LLMRequestProjection, provider = 'openai'): Array<Record<string, unknown>> {
+  const messages: Array<Record<string, unknown>> = []
   for (const block of request.blocks) {
     const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
     if (block.kind === 'conversation' && Array.isArray(block.content)) {
@@ -78,14 +80,24 @@ export function toOpenAIMessages(request: LLMRequestProjection): Array<{ role: '
       messages.push({ role: 'system' as const, content })
       continue
     }
-    if (block.kind === 'history') messages.push({ role: 'assistant' as const, content })
+    if (block.kind === 'history' && request.contextSpec.providerHistory !== undefined) continue
+    if (block.kind === 'provider_history' && request.contextSpec.providerHistory !== undefined) {
+      for (const item of request.contextSpec.providerHistory) {
+        if (item.role === 'user') messages.push({ role: 'user', content: item.content })
+        else if (item.role === 'assistant') messages.push({ role: 'assistant', content: item.content, ...(provider === 'deepseek' && item.reasoningContent !== undefined ? { reasoning_content: item.reasoningContent } : {}), ...(item.toolCalls === undefined ? {} : { tool_calls: item.toolCalls.map((call) => ({ id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments } })) }) })
+        else messages.push({ role: 'tool', tool_call_id: item.toolCallId, name: item.name, content: item.content })
+      }
+      continue
+    }
+    else if (block.kind === 'history') messages.push({ role: 'assistant', content })
+    else if (block.kind === 'provider_history') continue
     else messages.push({ role: 'user' as const, name: block.kind, content })
   }
   return messages
 }
 
-function toMessages(request: LLMRequestProjection) {
-  return toOpenAIMessages(request)
+function toMessages(request: LLMRequestProjection, provider: string) {
+  return toOpenAIMessages(request, provider)
 }
 
 interface StreamToolCall { id?: string; name: string; arguments: string }

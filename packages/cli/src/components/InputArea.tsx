@@ -5,17 +5,16 @@ import { theme } from '../theme.js';
 
 interface Props {
   onSubmit: (text: string) => void;
+  onRememberInput: (text: string) => void;
+  onNavigateHistory: (direction: 'up' | 'down', currentValue: string) => string | undefined;
   disabled?: boolean;
   focus?: boolean;
   placeholder?: string;
 }
 
-export function InputArea({ onSubmit, disabled, focus = true, placeholder }: Props) {
+export function InputArea({ onSubmit, onRememberInput, onNavigateHistory, disabled, focus = true, placeholder }: Props) {
   const [value, setValue] = useState('');
   const [accumulatedLines, setAccumulatedLines] = useState<string[]>([]);
-  const [history, setHistory] = useState<string[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-
   useInput((input, key) => {
     if (disabled || !focus) return;
     if (key.ctrl || key.meta || key.pageUp || key.pageDown) return;
@@ -31,22 +30,19 @@ export function InputArea({ onSubmit, disabled, focus = true, placeholder }: Pro
     }
 
     if (key.upArrow) {
-      if (historyIndex < history.length - 1) {
-        const nextIndex = historyIndex + 1;
-        setHistoryIndex(nextIndex);
-        setValue(history[history.length - 1 - nextIndex] || '');
-      }
+      const previous = onNavigateHistory('up', [...accumulatedLines, value].join('\n'));
+      if (previous !== undefined) restoreInput(previous);
     } else if (key.downArrow) {
-      if (historyIndex > 0) {
-        const nextIndex = historyIndex - 1;
-        setHistoryIndex(nextIndex);
-        setValue(history[history.length - 1 - nextIndex] || '');
-      } else if (historyIndex === 0) {
-        setHistoryIndex(-1);
-        setValue('');
-      }
+      const next = onNavigateHistory('down', [...accumulatedLines, value].join('\n'));
+      if (next !== undefined) restoreInput(next);
     }
   });
+
+  const restoreInput = (text: string) => {
+    const lines = text.split('\n');
+    setAccumulatedLines(lines.slice(0, -1));
+    setValue(lines.at(-1) ?? '');
+  };
 
   const handleSubmit = (text: string) => {
     if (text.endsWith('\\')) {
@@ -57,10 +53,8 @@ export function InputArea({ onSubmit, disabled, focus = true, placeholder }: Pro
       const finalLines = [...accumulatedLines, text];
       const fullText = finalLines.join('\n');
       if (fullText.trim()) {
-        const newHistory = [...history, fullText].slice(-50);
-        setHistory(newHistory);
+        onRememberInput(fullText);
       }
-      setHistoryIndex(-1);
       setAccumulatedLines([]);
       setValue('');
       onSubmit(fullText);

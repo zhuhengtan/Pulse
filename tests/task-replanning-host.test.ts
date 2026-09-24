@@ -14,14 +14,23 @@ describe('task-level bounded replanning in LocalHost', () => {
       const stream = `data: ${JSON.stringify({ choices: [{ delta: { content: outputs[index] }, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`
       return new Response(stream, { headers: { 'content-type': 'text/event-stream' } })
     }))
-    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), provider: { provider: 'openai', defaultModel: 'test' } })
+    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), provider: { provider: 'openai', defaultModel: 'test' }, taskController: false })
     try {
       const conversation = await host.createConversation()
       const run = await host.sendMessage(conversation.id, { text: 'Give one concise answer.' })
       const texts: string[] = []
-      for await (const event of run.events) if (event.type === 'text') texts.push(String(event.data))
+      const deltas: string[] = []
+      for await (const event of run.events) {
+        if (event.type === 'text') texts.push(String(event.data))
+        if (event.type === 'delta' && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
+          const delta = event.data as Record<string, unknown>
+          if (typeof delta.text === 'string') deltas.push(delta.text)
+        }
+      }
       expect(calls).toBe(4)
       expect(texts).toEqual(['FINAL_ONLY'])
+      expect(deltas.join('')).toBe('REJECTED_CANDIDATEFINAL_ONLY')
+      expect(deltas.join('')).not.toContain('INTERNAL_REVIEW')
       expect(await run.taskOutcome()).toMatchObject({ status: 'accepted', replanCount: 1 })
       const messages = await host.getConversationMessages(conversation.id)
       expect(messages.filter((message) => message.role === 'assistant').map((message) => message.text)).toEqual(['FINAL_ONLY'])

@@ -16,6 +16,11 @@ export interface ControlledTask extends PlannedTask {
   evidenceRefs: string[]
   candidateRef?: string
   note?: string
+  modelCalls?: number
+  investigationRounds?: number
+  directedInvestigations?: number
+  progressReviewed?: boolean
+  lastInvestigationBatch?: string
 }
 export interface TaskControllerState {
   schemaVersion: 1
@@ -39,6 +44,8 @@ const controlledTaskSchema = plannedTaskSchema.extend({
   status: z.enum(['pending', 'running', 'verifying', 'passed', 'blocked']),
   attempts: z.number().int().min(0).max(2), evidenceRefs: z.array(z.string()),
   candidateRef: z.string().optional(), note: z.string().optional(),
+  investigationRounds: z.number().int().min(0).default(0), directedInvestigations: z.number().int().min(0).default(0), progressReviewed: z.boolean().default(false), lastInvestigationBatch: z.string().optional(),
+  modelCalls: z.number().int().min(0).default(0),
 })
 const controllerSchema = z.object({
   schemaVersion: z.literal(1), revision: z.number().int().positive(),
@@ -75,6 +82,13 @@ export function validatePlan(tasks: PlannedTask[], criterionIds: string[]): void
     done.add(id)
   }
   tasks.forEach((task) => walk(task.id))
+}
+/** Conservative allowlist for shell commands that inspect state without writing it. */
+export function isReadOnlyInspectionCommand(command: string | undefined): boolean {
+  if (!command || /[|<>;`$\n\r]/.test(command)) return false
+  const segments = command.split(/\s*&&\s*/).map((part) => part.trim()).filter(Boolean)
+  if (!segments.length) return false
+  return segments.every((segment) => /^(?:git\s+(?:status|diff|log|show|branch|rev-parse|ls-files|diff-tree)\b|(?:pwd|ls|rg|grep|find|cat|sed|head|tail|wc)\b)(?!.*(?:\s(?:--output|--exec|--delete|-exec|-delete)\b))/.test(segment))
 }
 /** Block dependent tasks, but keep unrelated tasks eligible. */
 export function nextTask(state: TaskControllerState): ControlledTask | undefined {

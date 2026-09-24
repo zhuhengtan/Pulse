@@ -6,11 +6,12 @@ const COMMANDS = [
     category: 'General',
     commands: [
       { name: '/mouse on|off', desc: '开关滚轮/触控板滚动；关闭后可原生选择文本' },
+      { name: '/copy', desc: '复制当前选区或最近一条完整回复' },
       { name: '/help', desc: '显示帮助信息' },
       { name: '/status', desc: '查看会话状态' },
       { name: '/tools', desc: '列出可用工具' },
       { name: '/artifacts', desc: '查看当前产物列表' },
-      { name: '/exit, /quit', desc: '退出 CLI' },
+      { name: '/exit', desc: '退出 CLI' },
       { name: '/cancel, /stop', desc: '取消当前运行并保留会话' },
     ],
   },

@@ -2730,16 +2730,16 @@ export class PulseRuntime {
         }
         continue
       }
+      const attemptId = effect.attemptId
       const emitObservation: EffectObservationEmitter = (observation) => {
         const liveEffect = this.state.effects.get(effect.id)
         if (!liveEffect) return
-        if (liveEffect.outcome || liveEffect.state !== 'running') {
-          this.tryEmit({ type: 'attempt.late_emit', effectId: effect.id, attemptId: effect.attemptId, data: { kind: 'observation', status: liveEffect.outcome?.status ?? liveEffect.state } })
+        if (liveEffect.outcome || liveEffect.state !== 'running' || liveEffect.attemptId !== attemptId) {
+          this.tryEmit({ type: 'attempt.late_emit', effectId: effect.id, attemptId, data: { kind: 'observation', status: liveEffect.outcome?.status ?? liveEffect.state } })
           return
         }
-        this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, timestamp: this.state.now }); this.notifyActivity()
+        this.observationInbox.enqueue({ ...observation, agentId: effect.agentId, laneId: effect.ownerLaneId, effectId: effect.id, attemptId, timestamp: this.state.now }); this.notifyActivity()
       }
-      const attemptId = effect.attemptId
       const promise = this.executor(effect, controller.signal, emitObservation).then((execution) => {
         this.enqueueEffectCompletion(effect.id, attemptId, execution)
       }).catch((cause) => {

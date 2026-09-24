@@ -3,12 +3,12 @@ import type { SlashCommand } from '../types.js';
 
 export interface SlashCommandDependencies {
   onMouse?: (args: string) => void | Promise<void>;
+  onCopy?: () => void | Promise<void>;
   onHelp?: () => void | Promise<void>;
   onStatus?: () => void | Promise<void>;
   onTools?: () => void | Promise<void>;
   onArtifacts?: () => void | Promise<void>;
   onExit?: () => void | Promise<void>;
-  onQuit?: () => void | Promise<void>;
   onCancel?: () => void | Promise<void>;
   onNew?: () => void | Promise<void>;
   onResume?: () => void | Promise<void>;
@@ -28,12 +28,12 @@ export function useSlashCommands(deps: SlashCommandDependencies) {
   const commands = useMemo<SlashCommand[]>(
     () => [
       { name: '/mouse', description: '滚轮和触控板滚动 [on|off]', execute: async (args) => deps.onMouse?.(args) },
+      { name: '/copy', description: '复制选区或最近一条完整回复', execute: async () => deps.onCopy?.() },
       { name: '/help', aliases: ['/h'], description: '显示帮助信息', execute: async () => deps.onHelp?.() },
       { name: '/status', description: '查看状态', execute: async () => deps.onStatus?.() },
       { name: '/tools', description: '列出可用工具', execute: async () => deps.onTools?.() },
       { name: '/artifacts', description: '查看当前产物', execute: async () => deps.onArtifacts?.() },
       { name: '/exit', description: '退出程序', execute: async () => deps.onExit?.() },
-      { name: '/quit', aliases: ['/q'], description: '退出程序', execute: async () => deps.onQuit?.() },
       { name: '/cancel', aliases: ['/stop'], description: '取消当前运行（保留会话）', execute: async () => deps.onCancel?.() },
       { name: '/new', description: '开启新会话', execute: async () => deps.onNew?.() },
       { name: '/resume', description: '恢复上一次会话或未完成运行', execute: async () => deps.onResume?.() },

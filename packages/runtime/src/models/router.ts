@@ -6,6 +6,10 @@ export interface ModelRouteRequirements extends Partial<ModelCapabilities> { con
 export interface ModelUsage {
   inputTokens?: number
   outputTokens?: number
+  /** Included only when explicitly reported by the provider. */
+  reasoningTokens?: number
+  /** Count of visible response characters, measured by the adapter. */
+  visibleOutputChars?: number
   cachedInputTokens?: number
   uncachedInputTokens?: number
   latencyMs?: number
@@ -217,7 +221,9 @@ export interface LLMResult {
   text: string
   structured?: unknown
   refusal?: string
-  toolCalls: Array<{ toolCallId: string; name: string; input: unknown }>
+  toolCalls: Array<{ toolCallId: string; providerToolCallId?: string; providerToolName?: string; providerToolArguments?: string; name: string; input: unknown }>
+  /** Provider continuation data needed to resume a multi-round tool dialogue. Never render as user-facing text. */
+  providerContinuation?: { provider: string; reasoningContent?: string }
   finishReason: 'stop' | 'tool_calls' | 'length' | 'error' | 'refusal'
   usage?: ModelUsage
   privacy?: PrivacyLabel
@@ -226,7 +232,7 @@ export interface LLMResult {
 
 /** Provider call ids are adapter-local; Runtime owns the stable ToolCall id. */
 export function assignRuntimeToolCallIds(result: LLMResult, effectId: string): LLMResult {
-  return { ...result, toolCalls: result.toolCalls.map((call, index) => ({ ...call, toolCallId: `${effectId}:tool:${index + 1}` })) }
+  return { ...result, toolCalls: result.toolCalls.map((call, index) => ({ ...call, ...(call.providerToolCallId === undefined && call.toolCallId ? { providerToolCallId: call.toolCallId } : {}), toolCallId: `${effectId}:tool:${index + 1}` })) }
 }
 
 export function validateJsonSchema(value: unknown, schema: unknown): boolean {
@@ -338,7 +344,7 @@ function toModelFallbackError(cause: unknown): ModelFallbackError | undefined {
 export type OutputValidationLayer = 'adapter' | 'structured' | 'action'
 
 export class OutputValidationError extends Error {
-  constructor(readonly layer: OutputValidationLayer, readonly code: string, message: string) { super(`${code}: ${message}`) }
+  constructor(readonly layer: OutputValidationLayer, readonly code: string, message: string, readonly details?: JsonValue) { super(`${code}: ${message}`) }
 }
 
 function validNonNegativeMetric(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value) && value >= 0 }
@@ -346,7 +352,7 @@ function validateUsage(usage: unknown): void {
   if (usage === undefined) return
   if (!usage || typeof usage !== 'object' || Array.isArray(usage)) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Provider usage must be an object')
   const value = usage as Record<string, unknown>
-  for (const key of ['inputTokens', 'outputTokens', 'cachedInputTokens', 'uncachedInputTokens']) if (value[key] !== undefined && (!Number.isInteger(value[key]) || !validNonNegativeMetric(value[key]))) throw new OutputValidationError('adapter', 'INVALID_USAGE', `Provider usage ${key} must be a non-negative integer`)
+  for (const key of ['inputTokens', 'outputTokens', 'cachedInputTokens', 'uncachedInputTokens', 'reasoningTokens', 'visibleOutputChars']) if (value[key] !== undefined && (!Number.isInteger(value[key]) || !validNonNegativeMetric(value[key]))) throw new OutputValidationError('adapter', 'INVALID_USAGE', `Provider usage ${key} must be a non-negative integer`)
   if (value.latencyMs !== undefined && !validNonNegativeMetric(value.latencyMs)) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Provider usage latencyMs must be non-negative')
   if (value.inputTokens !== undefined && value.cachedInputTokens !== undefined && (value.cachedInputTokens as number) > (value.inputTokens as number)) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Cached input tokens cannot exceed input tokens')
   if (value.inputTokens !== undefined && value.uncachedInputTokens !== undefined && (value.uncachedInputTokens as number) > (value.inputTokens as number)) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Uncached input tokens cannot exceed input tokens')
