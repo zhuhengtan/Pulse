@@ -1,6 +1,6 @@
 # @hunterzhu/pulse-cli
 
-**A local-first AI assistant for coding, research, and everyday file tasks.**
+**A neural-signal like AI assistant for coding, research and file tasks.**
 
 Pulse runs in your project folder, keeps conversations on your machine, and can resume unfinished work. Requires Node.js 22+.
 
