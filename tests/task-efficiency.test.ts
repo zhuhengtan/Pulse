@@ -1,7 +1,7 @@
 import { ToolRegistry } from '@hunterzhu/pulse-tool-sdk'
 import { createLocalHost } from '@hunterzhu/pulse-server'
 import { describe, it, expect } from 'vitest'
-import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -123,11 +123,19 @@ describe('efficiency safety boundaries', () => {
   })
   it('does not follow workspace symlinks when creating a reusable stamp', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-stamp-'))
+    const outside = await mkdtemp(join(tmpdir(), 'pulse-stamp-outside-'))
     try {
       execFileSync('git', ['init', '-q', root])
-      await symlink(tmpdir(), join(root, 'outside'), process.platform === 'win32' ? 'junction' : 'dir')
+      // A Windows junction is traversed by Git. Point at a small sibling fixture,
+      // not tmpdir() (which includes this repository and creates a traversal loop).
+      await writeFile(join(outside, 'private.txt'), 'outside workspace')
+      await symlink(outside, join(root, 'outside'), process.platform === 'win32' ? 'junction' : 'dir')
       expect((await workspaceStamp(root)).available).toBe(false)
-    } finally { await rm(root, { recursive: true, force: true }) }
+      expect(await readFile(join(outside, 'private.txt'), 'utf8')).toBe('outside workspace')
+    } finally {
+      await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+      await rm(outside, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    }
   })
   it('keeps historical conversation retrievable and rejects access from child lanes', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-retrieval-'))
