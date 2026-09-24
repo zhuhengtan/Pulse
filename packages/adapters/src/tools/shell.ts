@@ -183,6 +183,9 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         if (candidate !== homedir() && candidate !== parse(candidate).root && !homedir().startsWith(candidate + sep)) {
           pnpmHome = candidate
           toolchainRoots.push(candidate)
+          // pnpm/action-setup exposes its executable shims from node_modules/.bin;
+          // their targets live in the adjacent node_modules tree.
+          if (basename(candidate) === '.bin') toolchainRoots.push(dirname(candidate))
         }
       } catch { /* stale installation settings do not grant access */ }
     }
@@ -190,7 +193,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     try {
     const baseEnv = shellEnvironment(options.env)
     const pathKey = Object.keys(baseEnv).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH'
-    const executionEnv = { [pathKey]: [nodeBin, ...(pnpmHome ? [pnpmHome] : []), join(cwd, 'node_modules', '.bin'), baseEnv[pathKey] ?? ''].join(delimiter),
+    const executionEnv = { [pathKey]: [...(pnpmHome ? [pnpmHome] : []), nodeBin, join(cwd, 'node_modules', '.bin'), baseEnv[pathKey] ?? ''].join(delimiter),
       ...(process.platform === 'win32' ? {} : { HOME: scratch, TMPDIR: scratch, TMP: scratch, TEMP: scratch, XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }) }
     let executable = command
     let executableArgs = args
