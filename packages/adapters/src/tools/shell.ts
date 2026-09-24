@@ -198,7 +198,6 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     let executable = command
     let executableArgs = args
     if (command === 'node') executable = nodeExecutable
-    if (command === 'pnpm' && pnpmHome) executable = join(pnpmHome, process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm')
     if (process.platform === 'darwin' && command === 'git') {
       // /usr/bin/git is an xcrun shim that writes outside TMPDIR. Resolve the
       // installed tool through Apple's fixed locator before entering isolation.
@@ -208,7 +207,9 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     }
     if (process.platform === 'win32' && ['npm', 'npx', 'pnpm', 'pnpx', 'corepack'].includes(command)) {
       const entry = command === 'npm' || command === 'npx' ? `npm/bin/${command}-cli.js` : command === 'corepack' ? 'corepack/dist/corepack.js' : 'pnpm/bin/pnpm.cjs'
-      for (const candidate of [join(nodeBin, 'node_modules', entry), join(nodeBin, 'node_modules', 'corepack', 'dist', `${command}.js`)]) {
+      const configuredPnpm = command === 'pnpm' && pnpmHome ? join(dirname(pnpmHome), 'pnpm', 'bin', 'pnpm.cjs') : undefined
+      const candidates = [...(configuredPnpm ? [configuredPnpm] : []), join(nodeBin, 'node_modules', entry), join(nodeBin, 'node_modules', 'corepack', 'dist', `${command}.js`)]
+      for (const candidate of candidates) {
         try { const script = await realpath(candidate); executable = nodeExecutable; executableArgs = [script, ...(command === 'pnpx' && candidate.includes('pnpm.cjs') ? ['dlx'] : []), ...args]; break } catch { /* standalone executables remain supported by PATH */ }
       }
     }
