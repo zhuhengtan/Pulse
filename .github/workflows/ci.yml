@@ -19,6 +19,12 @@ jobs:
       PULSE_EXPECTED_PNPM_VERSION: 12.4.2
     steps:
       - uses: actions/checkout@v4
+      - name: Use runner workspace for Windows temporary files
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: pnpm/action-setup@v4
         with:
           version: ${{ env.PULSE_EXPECTED_PNPM_VERSION }}
