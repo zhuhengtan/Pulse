@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { dirname, parse, resolve, sep } from 'node:path'
 import { realpath } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
-import { SandboxManager, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
+import { SandboxManager, VENDORED_SRT_WIN_EXE, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 
 export interface ShellResult { code: number | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean; aborted: boolean }
 
@@ -100,6 +100,7 @@ function sandboxConfig(cwd: string): SandboxRuntimeConfig {
       allowWrite: [cwd],
       denyWrite: [],
     },
+    ...(process.platform === 'win32' ? { windows: { srtWin: { path: VENDORED_SRT_WIN_EXE } } } : {}),
   }
 }
 

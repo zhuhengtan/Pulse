@@ -25,6 +25,17 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Install Linux shell sandbox dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ripgrep socat
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Install Windows shell sandbox
+        if: runner.os == 'Windows'
+        run: pnpm --filter @hunterzhu/pulse-adapters exec srt windows-install
       - run: pnpm check
       - name: Validate agent evaluation task set
         run: pnpm eval:validate
@@ -65,3 +76,6 @@ jobs:
       - run: pnpm cli:debug -- --version
         env:
           PULSE_INSPECTOR: 127.0.0.1:0
+      - name: Remove Windows shell sandbox
+        if: always() && runner.os == 'Windows'
+        run: pnpm --filter @hunterzhu/pulse-adapters exec srt windows-uninstall
