@@ -19,6 +19,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     env:
+      PULSE_EXPECTED_PNPM_VERSION: 12.4.2
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +52,12 @@ jobs:
             core.info(`Release approved by CI run ${latest.id} for ${sha}`);
       - uses: pnpm/action-setup@v4
         with:
-          version: 12.4.2
+          version: ${{ env.PULSE_EXPECTED_PNPM_VERSION }}
+          dest: ${{ runner.temp }}/setup-pnpm
+      - name: Verify pnpm installation
+        run: |
+          node scripts/ci/verify-pnpm.mjs
+          pnpm --version
       - uses: actions/setup-node@v4
         with:
           node-version: 22.14.0
@@ -73,8 +79,9 @@ jobs:
       - run: pnpm check
       - run: pnpm release:check
       - run: pnpm cli:build
-      - run: pnpm release:npm-publish
       - run: pnpm cli:pack
+      - run: pnpm cli:verify-package
+      - run: pnpm release:npm-publish
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -6,6 +6,7 @@ import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { SandboxManager, VENDORED_SRT_WIN_EXE, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
+import { resolveWindowsPackageManager } from './windows-package-manager.js'
 
 export interface ShellResult { code: number | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean; aborted: boolean }
 
@@ -205,13 +206,9 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       executable = located.stdout.trim()
       if (!executable.startsWith('/')) throw shellError('GIT_TOOLCHAIN_NOT_FOUND')
     }
-    if (process.platform === 'win32' && ['npm', 'npx', 'pnpm', 'pnpx', 'corepack'].includes(command)) {
-      const entry = command === 'npm' || command === 'npx' ? `npm/bin/${command}-cli.js` : command === 'corepack' ? 'corepack/dist/corepack.js' : 'pnpm/bin/pnpm.cjs'
-      const configuredPnpm = command === 'pnpm' && pnpmHome ? join(dirname(pnpmHome), 'pnpm', 'bin', 'pnpm.cjs') : undefined
-      const candidates = [...(configuredPnpm ? [configuredPnpm] : []), join(nodeBin, 'node_modules', entry), join(nodeBin, 'node_modules', 'corepack', 'dist', `${command}.js`)]
-      for (const candidate of candidates) {
-        try { const script = await realpath(candidate); executable = nodeExecutable; executableArgs = [script, ...(command === 'pnpx' && candidate.includes('pnpm.cjs') ? ['dlx'] : []), ...args]; break } catch { /* standalone executables remain supported by PATH */ }
-      }
+    if (process.platform === 'win32') {
+      const resolved = await resolveWindowsPackageManager(command, nodeExecutable, pnpmHome)
+      if (resolved) { executable = resolved.executable; executableArgs = [...resolved.prefixArgs, ...args] }
     }
     const invocationId = randomUUID()
     const policy = await sandboxConfig(cwd, options.allowedDomains ?? [], toolchainRoots, scratch)

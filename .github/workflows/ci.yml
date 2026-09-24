@@ -15,15 +15,18 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      PULSE_EXPECTED_PNPM_VERSION: 12.4.2
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: 12.4.2
+          version: ${{ env.PULSE_EXPECTED_PNPM_VERSION }}
           dest: ${{ runner.temp }}/setup-pnpm
-      - name: Verify and expose pnpm shim to shell sandbox
+      - name: Verify pnpm installation
         run: |
-          node -e "const fs = require('node:fs'); const path = require('node:path'); const os = require('node:os'); const root = path.join(process.env.RUNNER_TEMP, 'setup-pnpm', 'node_modules', '.bin'); const pnpm = path.join(root, process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'); const entry = path.join(path.dirname(root), 'pnpm', 'bin', 'pnpm.cjs'); if (!fs.existsSync(pnpm)) throw new Error('pnpm setup shim missing: ' + pnpm); if (!fs.existsSync(entry)) throw new Error('pnpm package entrypoint missing: ' + entry); fs.appendFileSync(process.env.GITHUB_ENV, 'PNPM_HOME=' + root + os.EOL); console.log('Verified pnpm sandbox entry:', pnpm, entry)"
+          node scripts/ci/verify-pnpm.mjs
+          pnpm --version
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -41,6 +44,7 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - name: Install Windows shell sandbox
+        id: windows-sandbox
         if: runner.os == 'Windows'
         run: pnpm --filter @hunterzhu/pulse-adapters exec srt windows-install
       - run: pnpm check
@@ -84,5 +88,5 @@ jobs:
         env:
           PULSE_INSPECTOR: 127.0.0.1:0
       - name: Remove Windows shell sandbox
-        if: always() && runner.os == 'Windows'
+        if: always() && runner.os == 'Windows' && steps.windows-sandbox.outcome == 'success'
         run: pnpm --filter @hunterzhu/pulse-adapters exec srt windows-uninstall
