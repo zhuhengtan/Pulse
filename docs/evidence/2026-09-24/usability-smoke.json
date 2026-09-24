@@ -1,0 +1,490 @@
+{
+  "date": "2026-09-24",
+  "scope": "macOS local development CLI, real DeepSeek; smoke samples, not full 72-run baseline",
+  "model": "deepseek-flash",
+  "runs": [
+    {
+      "taskId": "code-01",
+      "category": "code",
+      "trial": 1,
+      "status": "succeeded",
+      "elapsedMs": 25605,
+      "tokenUsage": {
+        "inputTokens": 34004,
+        "outputTokens": 4001,
+        "cachedInputTokens": 18304,
+        "completeness": "complete"
+      },
+      "grading": {
+        "status": "sandboxed-behavior-and-artifact-grader",
+        "score": 4,
+        "maxPoints": 4,
+        "passed": true,
+        "checks": [
+          {
+            "type": "fileExists",
+            "path": "src/slug.js",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "containsAll",
+            "path": "src/slug.js",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "contains",
+            "path": "src/slug.js",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "behavior",
+            "path": "src/slug.js",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          }
+        ]
+      },
+      "workspace": "/tmp/pulse-usability-code3-20260924/workspaces/code-01/trial-1"
+    },
+    {
+      "taskId": "code-01",
+      "category": "code",
+      "trial": 2,
+      "status": "succeeded",
+      "elapsedMs": 22749,
+      "tokenUsage": {
+        "inputTokens": 35981,
+        "outputTokens": 3053,
+        "cachedInputTokens": 19584,
+        "completeness": "complete"
+      },
+      "grading": {
+        "status": "sandboxed-behavior-and-artifact-grader",
+        "score": 4,
+        "maxPoints": 4,
+        "passed": true,
+        "checks": [
+          {
+            "type": "fileExists",
+            "path": "src/slug.js",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "containsAll",
+            "path": "src/slug.js",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "contains",
+            "path": "src/slug.js",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "behavior",
+            "path": "src/slug.js",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          }
+        ]
+      },
+      "workspace": "/tmp/pulse-usability-code3-20260924/workspaces/code-01/trial-2"
+    },
+    {
+      "taskId": "code-01",
+      "category": "code",
+      "trial": 3,
+      "status": "succeeded",
+      "elapsedMs": 24125,
+      "tokenUsage": {
+        "inputTokens": 36205,
+        "outputTokens": 3014,
+        "cachedInputTokens": 19840,
+        "completeness": "complete"
+      },
+      "grading": {
+        "status": "sandboxed-behavior-and-artifact-grader",
+        "score": 4,
+        "maxPoints": 4,
+        "passed": true,
+        "checks": [
+          {
+            "type": "fileExists",
+            "path": "src/slug.js",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "containsAll",
+            "path": "src/slug.js",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "contains",
+            "path": "src/slug.js",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "behavior",
+            "path": "src/slug.js",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          }
+        ]
+      },
+      "workspace": "/tmp/pulse-usability-code3-20260924/workspaces/code-01/trial-3"
+    },
+    {
+      "taskId": "files-01",
+      "category": "file-organization",
+      "trial": 1,
+      "status": "succeeded",
+      "elapsedMs": 9505,
+      "tokenUsage": {
+        "inputTokens": 20445,
+        "outputTokens": 1586,
+        "cachedInputTokens": 10240,
+        "completeness": "complete"
+      },
+      "grading": {
+        "status": "sandboxed-behavior-and-artifact-grader",
+        "score": 4,
+        "maxPoints": 4,
+        "passed": true,
+        "checks": [
+          {
+            "type": "fileExists",
+            "path": "output/contacts.csv",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "csvHeader",
+            "path": "output/contacts.csv",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "containsAll",
+            "path": "output/contacts.csv",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "fileContains",
+            "path": "input/contacts.txt",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          }
+        ]
+      },
+      "workspace": "/tmp/pulse-usability-files2-20260924/workspaces/files-01/trial-1"
+    },
+    {
+      "taskId": "files-01",
+      "category": "file-organization",
+      "trial": 2,
+      "status": "succeeded",
+      "elapsedMs": 11900,
+      "tokenUsage": {
+        "inputTokens": 20298,
+        "outputTokens": 2017,
+        "cachedInputTokens": 10112,
+        "completeness": "complete"
+      },
+      "grading": {
+        "status": "sandboxed-behavior-and-artifact-grader",
+        "score": 4,
+        "maxPoints": 4,
+        "passed": true,
+        "checks": [
+          {
+            "type": "fileExists",
+            "path": "output/contacts.csv",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "csvHeader",
+            "path": "output/contacts.csv",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "containsAll",
+            "path": "output/contacts.csv",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "fileContains",
+            "path": "input/contacts.txt",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          }
+        ]
+      },
+      "workspace": "/tmp/pulse-usability-files2-20260924/workspaces/files-01/trial-2"
+    },
+    {
+      "taskId": "files-01",
+      "category": "file-organization",
+      "trial": 3,
+      "status": "succeeded",
+      "elapsedMs": 15167,
+      "tokenUsage": {
+        "inputTokens": 27151,
+        "outputTokens": 3053,
+        "cachedInputTokens": 14464,
+        "completeness": "complete"
+      },
+      "grading": {
+        "status": "sandboxed-behavior-and-artifact-grader",
+        "score": 4,
+        "maxPoints": 4,
+        "passed": true,
+        "checks": [
+          {
+            "type": "fileExists",
+            "path": "output/contacts.csv",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "csvHeader",
+            "path": "output/contacts.csv",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "containsAll",
+            "path": "output/contacts.csv",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "fileContains",
+            "path": "input/contacts.txt",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          }
+        ]
+      },
+      "workspace": "/tmp/pulse-usability-files2-20260924/workspaces/files-01/trial-3"
+    },
+    {
+      "taskId": "research-01",
+      "category": "research",
+      "trial": 1,
+      "status": "succeeded",
+      "elapsedMs": 20621,
+      "tokenUsage": {
+        "inputTokens": 37859,
+        "outputTokens": 4074,
+        "cachedInputTokens": 17152,
+        "completeness": "complete"
+      },
+      "grading": {
+        "status": "sandboxed-behavior-and-artifact-grader",
+        "score": 5,
+        "maxPoints": 5,
+        "passed": true,
+        "checks": [
+          {
+            "type": "fileExists",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "contains",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "accessDate",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "minLines",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "sourceLinks",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          }
+        ]
+      },
+      "workspace": "/tmp/pulse-usability-research-final-20260924/workspaces/research-01/trial-1"
+    },
+    {
+      "taskId": "research-01",
+      "category": "research",
+      "trial": 2,
+      "status": "succeeded",
+      "elapsedMs": 23732,
+      "tokenUsage": {
+        "inputTokens": 38293,
+        "outputTokens": 5871,
+        "cachedInputTokens": 17152,
+        "completeness": "complete"
+      },
+      "grading": {
+        "status": "sandboxed-behavior-and-artifact-grader",
+        "score": 5,
+        "maxPoints": 5,
+        "passed": true,
+        "checks": [
+          {
+            "type": "fileExists",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "contains",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "accessDate",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "minLines",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "sourceLinks",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          }
+        ]
+      },
+      "workspace": "/tmp/pulse-usability-research-final-20260924/workspaces/research-01/trial-2"
+    },
+    {
+      "taskId": "research-01",
+      "category": "research",
+      "trial": 3,
+      "status": "succeeded",
+      "elapsedMs": 32057,
+      "tokenUsage": {
+        "inputTokens": 71297,
+        "outputTokens": 7884,
+        "cachedInputTokens": 31488,
+        "completeness": "complete"
+      },
+      "grading": {
+        "status": "sandboxed-behavior-and-artifact-grader",
+        "score": 5,
+        "maxPoints": 5,
+        "passed": true,
+        "checks": [
+          {
+            "type": "fileExists",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "contains",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "accessDate",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "minLines",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          },
+          {
+            "type": "sourceLinks",
+            "path": "research/node-release-lines.md",
+            "passed": true,
+            "points": 1,
+            "maxPoints": 1
+          }
+        ]
+      },
+      "workspace": "/tmp/pulse-usability-research-final-20260924/workspaces/research-01/trial-3"
+    }
+  ],
+  "chineseLongFile": {
+    "status": "succeeded",
+    "taskStatus": "accepted",
+    "inputTokens": 48244,
+    "outputTokens": 2709,
+    "sourceUnchanged": true,
+    "lastLineMatches": true,
+    "evidence": "/tmp/pulse-usability-zh-20260924"
+  },
+  "cost": "unknown; provider did not return price",
+  "budgetLimitation": "ReAct turns and time bounded; hard total provider-call/token budget not yet enforced",
+  "usageCaveat": "Code and file sample runs preceded safety-review accounting fix. Recorded sums are not a complete accounting of all paid calls. Research and Chinese final runs used the fix."
+}

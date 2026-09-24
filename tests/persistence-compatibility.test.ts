@@ -3,6 +3,33 @@ import { PulseRuntime, validateRuntimePersistenceSnapshot } from '@hunterzhu/pul
 import type { LaneProgram } from '@hunterzhu/pulse-runtime'
 
 describe('runtime persistence compatibility', () => {
+  it('persists and restores an AgentCreateRequest initialGlobal value', () => {
+    const program: LaneProgram = { id: 'initial-global', version: '1', step: () => ({ actions: [], next: { programId: 'initial-global', programVersion: '1', step: 'start', locals: {} } }) }
+    const runtime = new PulseRuntime({ programs: [program] })
+    const { agentId, laneId } = runtime.createAgent({
+      goal: 'seed task context',
+      program,
+      initialGlobal: { task: { id: 'task-1', status: 'executing' } },
+    })
+
+    const snapshot = runtime.exportPersistence()
+    const restored = new PulseRuntime({ persistence: snapshot, programs: [program] })
+    expect(restored.state.agents.get(agentId)?.globalVersions.get(0)).toEqual({ task: { id: 'task-1', status: 'executing' } })
+    expect(restored.state.lanes.get(laneId)?.status).toBe('ready')
+  })
+
+  it('rejects conflicting initialGlobal and warmStart context sources', () => {
+    const program: LaneProgram = { id: 'initial-global-conflict', version: '1', step: () => ({ actions: [], next: { programId: 'initial-global-conflict', programVersion: '1', step: 'start', locals: {} } }) }
+    const runtime = new PulseRuntime({ programs: [program] })
+
+    expect(() => runtime.createAgent({
+      goal: 'conflicting context sources',
+      program,
+      initialGlobal: { task: { id: 'task-1' } },
+      warmStart: { agentId: 'source-agent' },
+    })).toThrow('AGENT_INITIAL_GLOBAL_WARM_START_CONFLICT')
+  })
+
   it('persists program, tool, policy and router versions and rejects incompatible restore hosts', () => {
     const program: LaneProgram = { id: 'compatibility', version: '1', step: () => ({ actions: [], next: { programId: 'compatibility', programVersion: '1', step: 'start', locals: {} } }) }
     const runtime = new PulseRuntime({ programs: [program], toolVersions: { read: '2' }, policyVersion: 'policy-4', routerVersion: 'router-7' })

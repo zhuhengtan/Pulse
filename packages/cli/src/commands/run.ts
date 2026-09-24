@@ -56,6 +56,8 @@ export async function runOneShot(
     }
 
     const outcome = await run.outcome();
+    const taskOutcome = await run.taskOutcome();
+    const usage = await run.usage();
 
     if (format === 'jsonl') {
       process.stdout.write(
@@ -64,6 +66,8 @@ export async function runOneShot(
           type: 'result',
           runId: run.id,
           status: outcome.status,
+          taskOutcome: taskOutcome ?? null,
+          usage,
           text: outcome.text ?? null,
           error: outcome.error ?? null,
         })}\n`
@@ -76,7 +80,8 @@ export async function runOneShot(
       process.stdout.write(`\n[${outcome.status}]\n`);
     }
 
-    return outcome.status === 'succeeded' ? 0 : outcome.status === 'cancelled' ? 3 : 1;
+    if (outcome.status === 'cancelled') return 3;
+    return outcome.status === 'succeeded' && (!taskOutcome || taskOutcome.status === 'accepted') ? 0 : 1;
   } finally {
     unbindSignals();
     await host.close();

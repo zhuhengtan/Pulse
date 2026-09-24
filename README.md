@@ -357,6 +357,7 @@ npx @hunterzhu/pulse-cli resume <conversation-id> "继续处理上次的问题"
     "gpt5.6-b": { "displayName": "gpt5.6-b", "provider": "deepseek", "modelCode": "deepseek-chat" }
   },
   "activeModel": "gpt5.6-a",
+  "taskRouting": { "plan": ["gpt5.6-a", "gpt5.6-b"], "verify": ["gpt5.6-b", "gpt5.6-a"] },
   "approvalMode": "ask",
   "maxTurns": 32,
   "autoCompactPercent": 90,
@@ -376,16 +377,44 @@ npx @hunterzhu/pulse-cli
 
 Agent 需要询问你时，会调用 `ask.choice`、`ask.multi` 或 `ask.input`。CLI 会显示对应的单选、多选或文本输入卡片，回答会回到同一轮任务中。
 
+`taskRouting` 为规划、执行、合并和验收分别配置有序模型候选；某个候选调用失败时会尝试下一项，未配置的任务沿用当前模型。工具和技能扩展只从用户级配置读取，不接受工作区 `.pulse/config.json` 注入进程。可以显式启用 PDF/XLSX 读取、已安装 Skill 指令或受信任的 MCP stdio 服务：
+
+```json
+{
+  "capabilities": {
+    "enabled": ["pdf", "spreadsheet", "skills", "browser"],
+    "skills": ["review"],
+    "mcpServers": {
+      "browser": { "command": "node", "args": ["/absolute/path/to/browser-mcp-server.js"] }
+    }
+  }
+}
+```
+
+MCP 配置会启动本机进程，必须只填写自己信任的服务；服务工具按外部副作用处理并遵守当前审批模式。Skill 只读取用户级安装目录或显式信任的绝对目录中的 `SKILL.md`，内容作为不可信参考指令，不执行其中代码。浏览器与 Jarvis 目前是可接入的能力目录项，需要用户安装并配置对应 MCP 服务；Pulse 不会假装这些连接器已经存在。
+
+持久化定时任务可由一个前台 Worker 处理：
+
+```bash
+pulse schedule add --every 1h --name "项目巡检" "检查项目状态并报告需要处理的问题"
+pulse schedule list
+pulse schedule pause <task-id>
+pulse schedule resume <task-id>
+pulse schedule remove <task-id>
+pulse --read-only schedule daemon
+```
+
+后台任务存储在 Pulse 数据目录下，支持跨进程 claim 防重、失败记录和进程退出恢复。Worker 要求 `read-only` 或显式 `auto` 审批；需要写入的计划应在用户配置中明确设置 `approvalMode: "auto"`，并保持模型安全审查开启。`pulse schedule run-once` 可执行当前已到期的一轮任务。
+
 交互模式中可以用 `/model gpt5.6-a` 切换模型；启动时也可以用 `--model gpt5.6-a` 或 `PULSE_MODEL=gpt5.6-a` 选择模型。完整配置加载顺序和字段说明见 [`docs/cli-config.md`](./docs/cli-config.md)。
 
 ## 仓库文档
 
 - [Runtime 架构设计](./pulse-runtime-architecture.md)：状态模型、调度、Effect、Context、隐私、持久化边界和验收契约。DSL 用法见上文示例与 `packages/runtime/src/dsl/`。
+- [Agent 任务质量评测](./evals/README.md)：固定的代码、研究和文件整理任务集，支持验证、隔离运行、机械产物评分与报告。dry run 只验证评测集，不构成真实任务质量基线。
 
 ## 当前验证边界
 
-确定性实现和本地 File/SQLite 恢复已经由仓库测试覆盖，但这不等于所有生产环境都已验收。当前仍需要独立环境证明的项目包括：真实 Provider 凭证下的 Live Smoke、真实远程写系统的副作用对账、生产级持久化事务与多主机 Worker 故障注入、跨进程 Detached Agent scope 迁移、细粒度宿主权限/隐私策略，以及外部指标系统接入。
+当前工作区已通过 94 个测试文件、642 项本地测试（不含 `tests/live/**`），其中包含 loopback Provider/Worker 与 SRT 集成测试；`pnpm build`、评测集验证和独立 CLI 包的解压、运行、安装、卸载验证也已通过。dry run 只证明评测数据集可用，不代表真实模型质量基线。
 
-最近一次允许本机 loopback 的全量门禁为 74 个测试文件、488/488 通过（不含 `tests/live/**`）。`npx tsc -b --pretty false` 与 `npm run build` 用于类型检查与构建。受限沙箱中运行 HTTP/HTTPS 测试会因禁止 `listen` 返回 `EPERM`，不代表 Provider 或 Worker 代码失败。
-
-Provider Thread 仍不是状态源；自动 Fork 合并、动态工具检索和自适应路由已有确定性实现，但生产样本校准与外部服务兼容性仍需单独验证。所有能力继续遵守 Lane、Step、Action、Effect 和 StepTransaction 的核心语义。
+真实 Provider 凭证下的 Live Smoke、跨 Linux/Windows 的 SRT 实机验证、真实远程写系统的副作用对账、生产级多主机 Worker 故障注入、跨进程 Detached Agent scope 迁移、生产级隐私/权限审计，以及外部指标和 Token 成本接入仍需部署环境单独验收。Browser 与 Jarvis 是 MCP 能力接入点，需用户安装并显式配置服务；本仓库没有内置或模拟这些外部服务。

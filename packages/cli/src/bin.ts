@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { resolve } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { LocalHostOptions } from '@hunterzhu/pulse-server'
+import { createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
 import { ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliModel, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
 import { runOneShot } from './commands/run.js'
@@ -11,6 +11,10 @@ import { runDoctor } from './commands/doctor.js'
 import { runSessions } from './commands/sessions.js'
 import { runResume } from './commands/resume.js'
 import { runSetup } from './commands/setup.js'
+import { runScheduledCommand } from './commands/scheduled.js'
+import { runServiceCommand } from './commands/service.js'
+import { runTemplateCommand } from './commands/template.js'
+import { runMcpDoctor } from './commands/mcp.js'
 import { isSameModulePath } from './utils/is-main-module.js'
 
 const packageManifest = createRequire(import.meta.url)('../package.json') as { version: string }
@@ -29,6 +33,11 @@ Usage:
   pulse sessions [options]                list saved conversations
   pulse resume <conversation-id> [task]    continue or recover a conversation
   pulse doctor [options]                  check local configuration
+  pulse schedule <add|list|pause|resume|remove|daemon> [options]
+                                          manage recurring tasks (daemon requires read-only or auto approval)
+  pulse service <install|status|start|stop|uninstall>
+  pulse template <list|show|run> [name] [values...]
+  pulse mcp doctor [server-id]
 
 Options:
   --cwd <path>              workspace directory
@@ -39,6 +48,7 @@ Options:
   --max-output-tokens <n>   maximum generated tokens (default 4096)
   --reasoning-effort <x>    low, medium, or high
   --max-turns <n>           maximum ReAct model/tool turns (default 32)
+  --execution-mode <mode>   serial (default) or parallel-read (up to three read-only lanes)
   --auto-compact-percent <n> compact automatically at this percent of the context window (1-90, default 90)
   --format <text|jsonl>     output format
   --resume                  enter the latest saved session
@@ -46,10 +56,12 @@ Options:
   --auto-approve             approve local writes and shell execution on your behalf
   --approval-mode <mode>     read-only, ask, or auto
   --allow-network           enable public web search and fetch tools
+  --no-network              disable network tools even when user config enables them
   --trust-workspace         treat workspace .pulse/config.json as user-trusted
   --system-prompt <text>    custom system instructions
   --system-prompt-file <path> load custom system instructions from file
   --mock-response <text>    deterministic response for local debugging
+  --mock-task-assessment <json> deterministic verifier result for local debugging
   --live                    doctor: make one real provider request
   --no-color                disable terminal styling
   --help, -h                show this help
@@ -99,7 +111,7 @@ export function parse(argv: string[]): Parsed {
       options[key] = true
       continue
     }
-    if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup'].includes(arg)) {
+  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp'].includes(arg)) {
       command = arg
     } else {
       positionals.push(arg)
@@ -134,6 +146,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const profile = config.providers?.[providerName]
   if (!profile) throw new Error(`MODEL_PROVIDER_NOT_FOUND:${providerName}`)
   const model = modelSelection.modelCode
+  if (modelSelection.pricing && (!/^[A-Z]{3}$/.test(modelSelection.pricing.currency) || !Number.isFinite(modelSelection.pricing.inputPerMillion) || modelSelection.pricing.inputPerMillion < 0 || !Number.isFinite(modelSelection.pricing.outputPerMillion) || modelSelection.pricing.outputPerMillion < 0 || !modelSelection.pricing.version.trim())) throw new Error(`INVALID_MODEL_PRICING:${activeModelName}`)
   const baseURL = profile.baseURL
   const contextTokens = option(parsed.options, 'context-tokens') ?? process.env.PULSE_CONTEXT_TOKENS
   const maxOutputTokens = option(parsed.options, 'max-output-tokens') ?? process.env.PULSE_MAX_OUTPUT_TOKENS
@@ -185,11 +198,35 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     if (!displayName) throw new Error(`MODEL_DISPLAY_NAME_REQUIRED:${name}`)
     if (modelDisplayNames.has(displayName)) throw new Error(`DUPLICATE_MODEL_DISPLAY_NAME:${displayName}`)
     modelDisplayNames.add(displayName)
-    return [[displayName, { provider: item.provider, model: item.modelCode }]]
+    return [[displayName, {
+      provider: item.provider,
+      model: item.modelCode,
+      ...(item.maxContextTokens === undefined ? {} : { maxContextTokens: item.maxContextTokens }),
+      ...(item.maxOutputTokens === undefined ? {} : { maxOutputTokens: item.maxOutputTokens }),
+      ...(item.reasoningEffort === undefined ? {} : { reasoningEffort: item.reasoningEffort }),
+    }]]
   }))
+  const taskRouting = config.taskRouting
+  for (const [task, models] of Object.entries(taskRouting ?? {})) {
+    if (!Array.isArray(models) || models.length === 0 || models.some((model) => typeof model !== 'string' || !providerModels[model])) {
+      throw new Error(`INVALID_TASK_MODEL_ROUTE:${task}`)
+    }
+    if (new Set(models).size !== models.length) throw new Error(`DUPLICATE_TASK_MODEL_ROUTE_CANDIDATE:${task}`)
+  }
   const cwd = requestedCwd ?? expandHome(config.cwd)
   const dataDir = expandHome(option(parsed.options, 'data-dir') ?? process.env.PULSE_DATA_DIR ?? config.dataDir)
   const mockResponse = option(parsed.options, 'mock-response')
+  const mockTaskAssessment = option(parsed.options, 'mock-task-assessment')
+  let mockTaskAssessments: LocalHostOptions['mockTaskAssessments'] | undefined
+  if (mockTaskAssessment !== undefined) {
+    try {
+      const value = JSON.parse(mockTaskAssessment) as unknown
+      if (!Array.isArray(value) || value.length === 0 || value.some((item) => !item || typeof item !== 'object' || Array.isArray(item))) throw new Error('INVALID')
+      mockTaskAssessments = value as NonNullable<LocalHostOptions['mockTaskAssessments']>
+    } catch {
+      throw new Error('INVALID_MOCK_TASK_ASSESSMENT: expected a non-empty JSON array of assessment objects')
+    }
+  }
   const requestedApprovalMode = option(parsed.options, 'approval-mode') ?? process.env.PULSE_APPROVAL_MODE
   const approvalMode =
     requestedApprovalMode === 'read-only' || parsed.options['read-only'] === true
@@ -197,8 +234,40 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
       : requestedApprovalMode === 'auto' || parsed.options['auto-approve'] === true || process.env.PULSE_AUTO_APPROVE === '1'
         ? ('auto' as const)
         : requestedApprovalMode === 'ask' ? ('ask' as const) : config.approvalMode
-  const allowNetwork =
-    parsed.options['allow-network'] === true || process.env.PULSE_ALLOW_NETWORK === '1' ? true : config.allowNetwork
+  const allowNetwork = parsed.options['no-network'] === true ? false : parsed.options['allow-network'] === true || process.env.PULSE_ALLOW_NETWORK === '1' ? true : config.allowNetwork
+  const executionMode = option(parsed.options, 'execution-mode') ?? process.env.PULSE_EXECUTION_MODE ?? config.executionMode ?? 'serial'
+  if (executionMode !== 'serial' && executionMode !== 'parallel-read') throw new Error('INVALID_EXECUTION_MODE: expected serial or parallel-read')
+
+  const capabilitySettings = config.capabilities ?? {}
+  const skillRoots = capabilitySettings.trustedSkillRoots ?? []
+  if (!Array.isArray(skillRoots) || skillRoots.some((root) => typeof root !== 'string' || !isAbsolute(expandHome(root) ?? root))) throw new Error('SKILL_TRUSTED_ROOT_MUST_BE_ABSOLUTE')
+  const enabledCapabilityPacks = capabilitySettings.enabled ?? []
+  if (!Array.isArray(enabledCapabilityPacks) || enabledCapabilityPacks.some((id) => typeof id !== 'string') || new Set(enabledCapabilityPacks).size !== enabledCapabilityPacks.length) throw new Error('INVALID_ENABLED_CAPABILITY_LIST')
+  const skillNames = capabilitySettings.skills ?? []
+  if (!Array.isArray(skillNames) || skillNames.some((name) => typeof name !== 'string')) throw new Error('INVALID_SKILL_SELECTION')
+  const capabilityPacks = [createPdfCapabilityPack(), createSpreadsheetCapabilityPack(), createSkillCapabilityPack({ trustedRoots: skillRoots.map((root) => resolve(expandHome(root) ?? root)) })]
+  for (const [id, server] of Object.entries(capabilitySettings.mcpServers ?? {})) {
+    if (!server || typeof server.command !== 'string' || server.command.trim().length === 0 || (server.args !== undefined && (!Array.isArray(server.args) || server.args.some((arg) => typeof arg !== 'string')))) throw new Error(`INVALID_MCP_SERVER_CONFIG:${id}`)
+    if (server.toolPolicies && Object.entries(server.toolPolicies).some(([name, policy]) => !name || !['read', 'write', 'external'].includes(policy))) throw new Error(`INVALID_MCP_TOOL_POLICY:${id}`)
+    const resolvedEnv: Record<string, string> = { ...(server.env ?? {}) }
+    for (const [childName, sourceName] of Object.entries(server.envFrom ?? {})) {
+      if (!/^[A-Z_][A-Z0-9_]*$/i.test(childName) || !/^[A-Z_][A-Z0-9_]*$/i.test(sourceName)) throw new Error(`INVALID_MCP_ENV_REFERENCE:${id}`)
+      const value = process.env[sourceName]
+      if (value === undefined) throw new Error(`MCP_ENVIRONMENT_REQUIRED:${id}:${sourceName}`)
+      resolvedEnv[childName] = value
+    }
+    capabilityPacks.push(createMcpCapabilityPack(id, {
+      command: server.command,
+      args: server.args ?? [],
+      ...(server.cwd === undefined ? {} : { cwd: resolve(expandHome(server.cwd) ?? server.cwd) }),
+      ...(Object.keys(resolvedEnv).length === 0 ? {} : { env: resolvedEnv }),
+      ...(server.timeoutMs === undefined ? {} : { timeoutMs: server.timeoutMs }),
+      ...(server.toolPolicies === undefined ? {} : { toolPolicies: server.toolPolicies }),
+    }))
+  }
+  for (const id of enabledCapabilityPacks) {
+    if (!capabilityPacks.some((pack) => pack.manifest.id === id)) throw new Error(`UNKNOWN_ENABLED_CAPABILITY:${id}`)
+  }
 
   const rawSystemPrompt = option(parsed.options, 'system-prompt') ?? process.env.PULSE_SYSTEM_PROMPT ?? config.systemPrompt
   const rawSystemPromptFile = option(parsed.options, 'system-prompt-file') ?? process.env.PULSE_SYSTEM_PROMPT_FILE ?? config.systemPromptFile
@@ -226,13 +295,20 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     provider,
     providerProfiles,
     providerModels,
+    modelPricing: Object.fromEntries(Object.values(config.models ?? {}).flatMap((item) => item.pricing ? [[item.displayName, item.pricing]] : [])),
+    ...(taskRouting === undefined ? {} : { taskRouting }),
+    capabilityPacks,
+    enabledCapabilityPacks,
+    capabilityConfig: { skills: skillNames },
     activeProviderCode: providerName,
     activeModel: activeModelName,
     ...(mockResponse === undefined ? {} : { mockResponse }),
+    ...(mockTaskAssessments === undefined ? {} : { mockTaskAssessments }),
     ...(approvalMode === undefined ? {} : { approvalMode }),
     ...(configuredMaxTurns === undefined ? {} : { maxTurns: configuredMaxTurns }),
     ...(configuredAutoCompactPercent === undefined ? {} : { autoCompactPercent: Math.min(90, configuredAutoCompactPercent) }),
     ...(allowNetwork === undefined ? {} : { allowNetwork }),
+    executionMode,
   }
 }
 
@@ -260,6 +336,13 @@ export async function main(): Promise<number> {
   if (parsed.command === 'sessions') {
     return runSessions(options, option(parsed.options, 'format') ?? 'text', version)
   }
+
+  if (parsed.command === 'schedule') {
+    return runScheduledCommand(options, parsed.positionals, parsed.options)
+  }
+  if (parsed.command === 'service') return runServiceCommand(options, parsed.positionals)
+  if (parsed.command === 'mcp' && parsed.positionals[0] === 'doctor') return runMcpDoctor(options, parsed.positionals.slice(1))
+  if (parsed.command === 'template') return runTemplateCommand(options, parsed.positionals, option(parsed.options, 'format') ?? 'text', version)
 
   if (parsed.command === 'run') {
     const task = parsed.positionals.join(' ').trim()

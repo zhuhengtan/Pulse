@@ -58,7 +58,9 @@ indexDependencyNodes(dependencyRoot.dependencies)
 
 async function resolveDependencySource(name, parentSource) {
   const treeDependency = dependencyNodesByPath.get(parentSource)?.dependency.dependencies?.[name]
-  if (treeDependency?.path) return treeDependency.path
+  if (treeDependency?.path) {
+    try { return await realpath(treeDependency.path) } catch { /* optional platform package may not be installed here */ }
+  }
   try {
     return await realpath(join(parentSource, 'node_modules', name))
   } catch {
@@ -86,17 +88,51 @@ async function copyDependency(name, source, target) {
   await cp(source, target, { recursive: true, dereference: true })
 
   const manifest = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'))
-  const dependencies = { ...manifest.dependencies, ...manifest.optionalDependencies }
+  const dependencies = { ...manifest.dependencies }
   for (const dependencyName of Object.keys(dependencies)) {
     if (dependencyName.startsWith('@hunterzhu/') || dependencyName === 'zod' || dependencyName.startsWith('@types/')) continue
     const dependencySource = await resolveDependencySource(dependencyName, source)
     await copyDependency(dependencyName, dependencySource, join(target, 'node_modules', dependencyName))
+  }
+  for (const dependencyName of Object.keys(manifest.optionalDependencies ?? {})) {
+    if (dependencyName.startsWith('@hunterzhu/') || dependencyName === 'zod' || dependencyName.startsWith('@types/')) continue
+    try {
+      const dependencySource = await resolveDependencySource(dependencyName, source)
+      await copyDependency(dependencyName, dependencySource, join(target, 'node_modules', dependencyName))
+    } catch {
+      // Optional platform integrations may not be installed on this host.
+    }
   }
 }
 
 for (const [name, dependency] of Object.entries(dependencyRoot.dependencies ?? {})) {
   if (!dependency?.path || name.startsWith('@hunterzhu/') || name === 'zod' || name.startsWith('@types/')) continue
   await copyDependency(name, dependency.path, join(stage, 'pulse/app/node_modules', name))
+}
+
+// `pnpm list --filter pulse-cli` nests server/runtime/adapter dependencies
+// below workspace links. Walk each bundled workspace package explicitly so
+// its production dependencies are copied beside the package that imports them.
+for (const packageName of ['cli', 'server', 'runtime', 'adapters', 'tool-sdk']) {
+  const source = join(repo, `packages/${packageName}`)
+  const packageManifest = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'))
+  const target = join(stage, 'pulse/app/node_modules', packageManifest.name)
+  const dependencies = { ...packageManifest.dependencies }
+  for (const dependencyName of Object.keys(dependencies)) {
+    if (dependencyName.startsWith('@hunterzhu/') || dependencyName === 'zod' || dependencyName.startsWith('@types/')) continue
+    const dependencySource = await resolveDependencySource(dependencyName, source)
+    await copyDependency(dependencyName, dependencySource, join(target, 'node_modules', dependencyName))
+  }
+  for (const dependencyName of Object.keys(packageManifest.optionalDependencies ?? {})) {
+    if (dependencyName.startsWith('@hunterzhu/') || dependencyName === 'zod' || dependencyName.startsWith('@types/')) continue
+    try {
+      const dependencySource = await resolveDependencySource(dependencyName, source)
+      await copyDependency(dependencyName, dependencySource, join(target, 'node_modules', dependencyName))
+    } catch {
+      // Keep the package usable on the build host when optional binaries for
+      // other operating systems are absent from the local pnpm store.
+    }
+  }
 }
 
 // Keep the launcher outside the package, but load the complete published CLI

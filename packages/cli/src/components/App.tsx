@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Box, Text, useApp, useInput } from 'ink';
+import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import type { LocalHostOptions } from '@hunterzhu/pulse-server';
 
 import { Header } from './Header.js';
@@ -36,7 +36,11 @@ export function App({
   version,
 }: AppProps) {
   const { exit } = useApp();
+  const { stdout } = useStdout();
+  const [terminalRows, setTerminalRows] = useState(stdout.rows || 24);
+  useEffect(() => { const resize = () => setTerminalRows(stdout.rows || 24); stdout.on('resize', resize); return () => { stdout.off('resize', resize); }; }, [stdout]);
   const [mode, setMode] = useState<AppMode>('chat');
+  const [mouseEnabled, setMouseEnabled] = useState(true);
   const [showThinking, setShowThinking] = useState(false);
   const [verbosity, setVerbosity] = useState<'normal' | 'verbose' | 'quiet'>('normal');
   const [sessionsList, setSessionsList] = useState<Array<{ id: string; title: string; updatedAt: string; cwd: string }>>([]);
@@ -138,6 +142,7 @@ export function App({
   }, [hostReady, conversation, initialTask, isRunning, addUserMessage, addAssistantMessage, createConversation, sendMessage]);
 
   const { executeCommand, isSlashCommand } = useSlashCommands({
+    onMouse: (arg) => setMouseEnabled((current) => arg === 'off' ? false : arg === 'on' ? true : !current),
     onHelp: () => setMode('help'),
     onSessions: async () => {
       await loadSessions();
@@ -546,7 +551,7 @@ export function App({
   const providerName = host?.getProvider() || hostOptions.activeProviderCode || hostOptions.provider?.provider || 'default';
 
   return (
-    <Box flexDirection="column" width="100%" height="100%">
+    <Box flexDirection="column" width="100%" height={terminalRows}>
       <Header title={title} cwd={cwd} model={modelName} approvalMode={hostOptions.approvalMode ?? 'ask'} />
 
       {messages.length === 0 && !isRunning && (
@@ -554,13 +559,7 @@ export function App({
       )}
 
       {messages.length > 0 && (
-        <MessageList messages={messages} showThinking={showThinking} verbosity={verbosity} isRunning={isRunning} />
-      )}
-
-      {isRunning && !approvalRequest && !askRequest && (
-        <Box marginY={1}>
-          <Spinner label={currentStep || '正在思考与执行...'} />
-        </Box>
+        <MessageList mouseEnabled={mouseEnabled} messages={messages} showThinking={showThinking} verbosity={verbosity} isRunning={isRunning} />
       )}
 
       {runError && (
@@ -575,7 +574,7 @@ export function App({
         </Box>
       )}
 
-      <StatusHud cwd={cwd} model={modelName} provider={providerName} approvalMode={hostOptions.approvalMode ?? 'ask'} currentStep={currentStep} lanes={lanes} />
+      <StatusHud isRunning={isRunning} cwd={cwd} model={modelName} provider={providerName} approvalMode={hostOptions.approvalMode ?? 'ask'} currentStep={currentStep} lanes={lanes} />
 
       {approvalRequest ? (
         <ApprovalPrompt

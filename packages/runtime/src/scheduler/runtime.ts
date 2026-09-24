@@ -167,7 +167,22 @@ export interface WarmStartSpec { sessionId?: string; agentId?: string; globalVer
 export type AgentPriority = 'background' | 'normal' | 'high' | 'urgent'
 export interface AgentPolicyRef { id: string }
 export interface AgentLimits { id?: string; timeoutMs?: number; maxActiveLanes?: number }
-export interface AgentCreateRequest { goal: string; program: LaneProgram | ProgramRef; agentId?: string; priority?: number | AgentPriority; policy?: AgentPolicyRef; policyId?: string; limits?: AgentLimits; limitsId?: string; maxActiveLanes?: number; warmStart?: WarmStartSpec; parentAgentId?: string; inheritedFloor?: number }
+export interface AgentCreateRequest {
+  goal: string
+  program: LaneProgram | ProgramRef
+  agentId?: string
+  priority?: number | AgentPriority
+  policy?: AgentPolicyRef
+  policyId?: string
+  limits?: AgentLimits
+  limitsId?: string
+  maxActiveLanes?: number
+  warmStart?: WarmStartSpec
+  /** Initial versioned Global Context. Cannot be combined with `warmStart`. */
+  initialGlobal?: JsonValue
+  parentAgentId?: string
+  inheritedFloor?: number
+}
 export interface BackgroundAgentInfo { agentId: string; rootLaneId: string; state: NonNullable<import('../core/types.js').AgentRecord['state']>; detached: true }
 export interface AgentHandle { id: string; agentId: string; laneId: string }
 
@@ -744,11 +759,12 @@ export class PulseRuntime {
     if (maxActiveLanes !== undefined && (!Number.isInteger(maxActiveLanes) || maxActiveLanes < 1)) throw new Error('INVALID_AGENT_LIMITS')
     const warmStart = request.warmStart
     if (warmStart !== undefined) validateWarmStartShape(warmStart)
-    let initialGlobal: JsonValue | undefined
+    let initialGlobal = request.initialGlobal === undefined ? undefined : strictJsonValue(request.initialGlobal)
     let initialGlobalPrivacy: PrivacyMetadata | undefined
     let warmStartResultRefs: string[] = []
     let warmStartResults: import('../core/types.js').ResultRecord[] = []
     if (warmStart) {
+      if (initialGlobal !== undefined) throw new Error('AGENT_INITIAL_GLOBAL_WARM_START_CONFLICT')
       const sourceSessionId = warmStart.sessionId ?? warmStart.agentId
       if (!sourceSessionId) throw new Error('WARM_START_SESSION_REQUIRED')
       const source = this.state.agents.get(sourceSessionId)

@@ -113,6 +113,7 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
         const output = assignRuntimeToolCallIds(validateAdapterResult(await provider.executeAttempt({ request: projection, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation })), effect.id)
         const measuredUsage = output.usage === undefined ? { latencyMs: Math.max(0, Date.now() - startedAt) } : { ...output.usage, latencyMs: output.usage.latencyMs ?? Math.max(0, Date.now() - startedAt), ...(output.usage.uncachedInputTokens === undefined && output.usage.inputTokens !== undefined && output.usage.cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, output.usage.inputTokens - output.usage.cachedInputTokens) } : {}) }
         usage.set(attempt.attemptId, measuredUsage)
+        if (output.finishReason === 'length' && input.outputSchema !== undefined) throw Object.assign(new OutputValidationError('adapter', 'OUTPUT_TRUNCATED', 'Model output reached its token limit; increase maxOutputTokens before retrying.'), { retryable: false })
         if (output.finishReason === 'refusal') { recordFeedback('refused', 0); throw new OutputValidationError('adapter', 'MODEL_REFUSAL', output.refusal ?? 'Provider refused the request.') }
         if (input.outputSchema !== undefined) {
           const candidateValue = output.structured ?? output.text
@@ -138,7 +139,7 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
       if (measuredUsage !== undefined) usage.set(effect.attemptId, measuredUsage)
       const waited = providerAttempt === undefined ? undefined : slotWaitMs.get(providerAttempt.attemptId)
       if (waited !== undefined) slotWaitMs.set(effect.attemptId, waited)
-      return { ...value, attempts: value.attempts.map(() => ({ effectId: effect.id, attemptId: effect.attemptId, attemptNo, candidate })) }
+      return { ...value, attempts: value.attempts.map((attempt) => ({ ...attempt, effectId: effect.id })) }
     }).catch((cause) => {
       if (failedForSchema && lastSchemaViolation !== undefined) return { result: { text: '', toolCalls: [], finishReason: 'error' as const }, candidate, attempts: [{ effectId: effect.id, attemptId: effect.attemptId, attemptNo, candidate }], schemaRejected: lastSchemaViolation }
       const inner = cause && typeof cause === 'object' && 'modelFallback' in cause ? (cause as { modelFallback?: { cause?: unknown } }).modelFallback?.cause : cause

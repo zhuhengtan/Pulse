@@ -2,7 +2,7 @@ import { access, readFile, writeFile, mkdtemp, rm, stat } from 'node:fs/promises
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome } from '../packages/cli/src/config.js'
+import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, sanitizeWorkspaceConfig } from '../packages/cli/src/config.js'
 import { hostOptions, parse } from '../packages/cli/src/bin.js'
 import { runSetup } from '../packages/cli/src/commands/setup.js'
 
@@ -80,6 +80,8 @@ describe('ensurePulseUserConfig', () => {
         'gpt5.6-b': { displayName: 'gpt5.6-b', provider: 'deepseek', modelCode: 'deepseek-chat' },
       },
       activeModel: 'gpt5.6-b',
+      executionMode: 'parallel-read',
+      taskRouting: { plan: ['gpt5.6-b'], verify: ['gpt5.6-b'] },
     })}\n`)
     try {
       const options = await hostOptions(parse(['--config', path]))
@@ -87,6 +89,9 @@ describe('ensurePulseUserConfig', () => {
       expect(options.activeProviderCode).toBe('deepseek')
       expect(options.provider).toMatchObject({ provider: 'deepseek', defaultModel: 'deepseek-chat' })
       expect(options.providerModels).toEqual({ 'gpt5.6-b': { provider: 'deepseek', model: 'deepseek-chat' } })
+      expect(options.taskRouting).toEqual({ plan: ['gpt5.6-b'], verify: ['gpt5.6-b'] })
+      expect(options.executionMode).toBe('parallel-read')
+      await expect(hostOptions(parse(['--config', path, '--execution-mode', 'serial']))).resolves.toMatchObject({ executionMode: 'serial' })
     } finally {
       if (previousHome === undefined) delete process.env.PULSE_HOME
       else process.env.PULSE_HOME = previousHome
@@ -108,6 +113,40 @@ describe('ensurePulseUserConfig', () => {
     })}\n`)
     try {
       await expect(hostOptions(parse(['--config', path, '--model', 'same']))).rejects.toThrow('DUPLICATE_MODEL_DISPLAY_NAME:same')
+    } finally {
+      if (previousHome === undefined) delete process.env.PULSE_HOME
+      else process.env.PULSE_HOME = previousHome
+    }
+  })
+
+  it('does not allow workspace files to launch MCP processes or enable host capabilities', () => {
+    const sanitized = sanitizeWorkspaceConfig({
+      capabilities: { enabled: ['browser'], skills: ['untrusted'], mcpServers: { browser: { command: 'malicious-command' } } },
+      taskRouting: { plan: ['cloud-model'] },
+      allowNetwork: true,
+    })
+    expect(sanitized).not.toHaveProperty('capabilities')
+    expect(sanitized).not.toHaveProperty('taskRouting')
+    expect(sanitized).not.toHaveProperty('allowNetwork')
+  })
+
+  it('builds explicit user-configured document, skill, and MCP capability packs', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-capability-config-'))
+    temporaryDirectories.push(directory)
+    const previousHome = process.env.PULSE_HOME
+    process.env.PULSE_HOME = directory
+    const path = join(directory, 'config.json')
+    await writeFile(path, `${JSON.stringify({
+      providers: { mock: { provider: 'mock' } },
+      models: { mock: { displayName: 'mock', provider: 'mock', modelCode: 'mock' } },
+      activeModel: 'mock',
+      capabilities: { enabled: ['pdf', 'skills', 'browser'], skills: ['review'], mcpServers: { browser: { command: 'node', args: ['browser-server.js'] } } },
+    })}\n`)
+    try {
+      const options = await hostOptions(parse(['--config', path]))
+      expect(options.enabledCapabilityPacks).toEqual(['pdf', 'skills', 'browser'])
+      expect(options.capabilityConfig).toEqual({ skills: ['review'] })
+      expect(options.capabilityPacks?.map((pack) => pack.manifest.id)).toEqual(['pdf', 'spreadsheet', 'skills', 'browser'])
     } finally {
       if (previousHome === undefined) delete process.env.PULSE_HOME
       else process.env.PULSE_HOME = previousHome

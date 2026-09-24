@@ -5,6 +5,7 @@ const COMMANDS = [
   {
     category: 'General',
     commands: [
+      { name: '/mouse on|off', desc: '开关滚轮/触控板滚动；关闭后可原生选择文本' },
       { name: '/help', desc: '显示帮助信息' },
       { name: '/status', desc: '查看会话状态' },
       { name: '/tools', desc: '列出可用工具' },
@@ -44,6 +45,7 @@ const COMMANDS = [
 export function HelpView() {
   return (
     <Box flexDirection="column" marginY={1}>
+      <Text>滚轮 / 触控板双指滚动 · Ctrl+P / Ctrl+N 翻页 · Ctrl+G 回到底部（也支持 Fn+↑ / Fn+↓）</Text>
       {COMMANDS.map((section, idx) => (
         <Box key={idx} flexDirection="column" marginBottom={1}>
           <Text color={theme.primary} bold>

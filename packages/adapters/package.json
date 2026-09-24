@@ -1,6 +1,6 @@
 {
   "name": "@hunterzhu/pulse-adapters",
-  "version": "0.1.11",
+  "version": "0.2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/zhuhengtan/Pulse"
@@ -16,7 +16,10 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.77",
     "@hunterzhu/pulse-runtime": "workspace:*",
-    "@hunterzhu/pulse-tool-sdk": "workspace:*"
+    "@hunterzhu/pulse-tool-sdk": "workspace:*",
+    "exceljs": "4.4.0",
+    "pdfjs-dist": "4.10.38"
   }
 }

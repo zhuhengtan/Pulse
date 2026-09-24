@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { defineTool } from '@hunterzhu/pulse-tool-sdk'
+import { z } from 'zod'
+import { describe, expect, it, vi } from 'vitest'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { createHash } from 'node:crypto'
@@ -6,6 +8,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createLocalHost } from '@hunterzhu/pulse-server'
+import type { CapabilityPack } from '../packages/server/src/capabilities.js'
 
 async function startSummaryServer(): Promise<{ url: string; close: () => Promise<void> }> {
   const server = createServer((_req, res) => {
@@ -27,6 +30,48 @@ function storedMessage(id: string, role: 'user' | 'assistant', text: string): st
 }
 
 describe('local CLI application host', () => {
+  it('waits for real tool completion instead of fast-forwarding its timeout', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-clock-host-'))
+    let completed = false
+    const pack: CapabilityPack = {
+      manifest: { id: 'delayed', version: '1', kind: 'integration', title: 'Delayed read', description: 'Test real clock' },
+      activate: async () => ({ tools: [defineTool({ name: 'delayed.read', description: 'Read after a real asynchronous delay.', input: z.object({}), output: z.object({ ok: z.boolean() }), sideEffectPolicy: 'read', defaultTimeoutMs: 2000,
+        execute: async (_input, context) => { await new Promise((resolve) => setTimeout(resolve, 80)); context.signal.throwIfAborted(); completed = true; return { ok: true } },
+      })] }),
+    }
+    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), capabilityPacks: [pack], enabledCapabilityPacks: ['delayed'], mockToolCalls: [{ name: 'delayed.read' }], mockAfterToolResponse: 'done', approvalMode: 'auto' })
+    try {
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'Read the delayed source' })
+      for await (const _event of run.events) { /* consume */ }
+      expect((await run.outcome()).status).toBe('succeeded')
+      expect(completed).toBe(true)
+    } finally { await host.close(); await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('includes denied safety-review attempts in persisted run usage', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-safety-usage-'))
+    let mainCalls = 0
+    let allCalls = 0
+    vi.stubGlobal('fetch', vi.fn(async (_url, options) => {
+      allCalls++
+      const body = JSON.parse(String(options.body))
+      const safety = body.messages.some((message: { content: string }) => message.content.includes('You are the Pulse safety reviewer'))
+      const callTool = !safety && ++mainCalls === 1
+      return new Response(JSON.stringify({ choices: [{ message: callTool ? { content: '', tool_calls: [{ id: 'call', function: { name: 'shell_exec', arguments: '{"command":"node","args":["--version"]}' } }] } : { content: safety ? 'DENY' : 'blocked' }, finish_reason: callTool ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } }), { headers: { 'content-type': 'application/json' } })
+    }))
+    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', provider: { provider: 'openai', defaultModel: 'test' } })
+    try {
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'Check node version' })
+      for await (const _event of run.events) { /* consume */ }
+      expect(allCalls).toBeGreaterThanOrEqual(3)
+      expect(await run.usage()).toMatchObject({ inputTokens: allCalls * 10, outputTokens: allCalls * 2, completeness: 'complete' })
+      const persisted = JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'usage.json'), 'utf8'))
+      expect(persisted.inputTokens).toBe(allCalls * 10)
+    } finally { vi.unstubAllGlobals(); await host.close(); await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('runs a mock task, projects events, and stores the conversation', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-host-'))
     try {
@@ -36,8 +81,116 @@ describe('local CLI application host', () => {
       const events = []
       for await (const event of run.events) events.push(event)
       await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'local result' })
+      await expect(run.taskOutcome()).resolves.toMatchObject({ status: 'unverifiable', verifier: 'host' })
       expect(events.some((event) => event.type === 'complete')).toBe(true)
+      await expect(run.usage()).resolves.toMatchObject({ schemaVersion: 1, inputTokens: null, outputTokens: null, completeness: 'unavailable' })
+      const outcomeFile = join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'outcome.json')
+      expect(JSON.parse(await readFile(outcomeFile, 'utf8')).usage).toMatchObject({ completeness: 'unavailable' })
+      expect(JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'usage.json'), 'utf8'))).toMatchObject({ completeness: 'unavailable' })
       expect(JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'manifest.json'), 'utf8')).activeRunId).toBeUndefined()
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('runs at most three opt-in read-only child lanes, joins their evidence, then continues serially', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-parallel-read-host-'))
+    try {
+      const host = createLocalHost({
+        cwd: directory,
+        dataDir: join(directory, 'data'),
+        executionMode: 'parallel-read',
+        mockResponse: 'Merged result from the main lane.',
+        mockParallelPlan: { tasks: [
+          { key: 'task-1', goal: 'Read the project overview.', dependsOn: [] },
+          { key: 'task-2', goal: 'Read package scripts after the overview.', dependsOn: [{ taskKey: 'task-1', required: false }] },
+          { key: 'task-3', goal: 'Read the test layout.', dependsOn: [] },
+        ] },
+      })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'Review the project structure.' })
+      const events = []
+      for await (const event of run.events) events.push(event)
+      const snapshot = await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8')
+      expect(snapshot).toContain('pulse.read-only-worker')
+      expect(snapshot).toContain('parallelRead')
+      expect(snapshot).toContain('Read the project overview.')
+      expect(snapshot).toContain('Read package scripts after the overview.')
+      expect(snapshot).toContain('Read the test layout.')
+      expect(events.filter((event) => event.type === 'fact').length).toBeGreaterThan(0)
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded' })
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('applies one shared model-effect budget across parallel planning, workers, and the main lane', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-parallel-budget-'))
+    try {
+      const host = createLocalHost({
+        cwd: directory,
+        dataDir: join(directory, 'data'),
+        executionMode: 'parallel-read',
+        maxTurns: 1,
+        mockParallelPlan: { tasks: [{ key: 'task-1', goal: 'Read the overview.', dependsOn: [] }] },
+      })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'Inspect the project.' })
+      for await (const _event of run.events) { /* drain */ }
+      const outcome = await run.outcome()
+      expect(outcome.status).toBe('failed')
+      expect(JSON.stringify(outcome)).toContain('PARALLEL_MODEL_EFFECT_BUDGET_EXHAUSTED')
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('activates only enabled host capability packs and disposes them when a run ends', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-capability-lifecycle-'))
+    try {
+      let activations = 0
+      let disposals = 0
+      const pack: CapabilityPack = {
+        manifest: { id: 'fixture', version: '1', kind: 'integration', title: 'Fixture', description: 'Test lifecycle' },
+        async activate() { activations++; return { tools: [], instructions: ['Use fixture guidance.'], dispose() { disposals++ } } },
+      }
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), capabilityPacks: [pack], enabledCapabilityPacks: ['fixture'], mockResponse: 'finished' })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'say hello' })
+      for await (const _event of run.events) { /* drain */ }
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded' })
+      expect(activations).toBe(1)
+      expect(disposals).toBe(1)
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('records a separately accepted TaskOutcome with versioned task state', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-task-accepted-'))
+    try {
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), mockResponse: 'The requested result is ready.', mockTaskAssessments: [{ status: 'accepted', criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: ['result-1'], rationale: 'The candidate directly satisfies the simple request.' }] }] })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'Say hello.' })
+      for await (const _event of run.events) { /* drain */ }
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'The requested result is ready.' })
+      const taskOutcome = await run.taskOutcome()
+      expect(taskOutcome).toMatchObject({ status: 'accepted', verifier: 'llm', replanCount: 0, criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: ['result-1'] }] })
+      const runId = run.id
+      const runDir = join(directory, 'data', 'conversations', conversation.id, 'runs', runId)
+      expect(JSON.parse(await readFile(join(runDir, 'task-outcome.json'), 'utf8'))).toMatchObject({ status: 'accepted' })
+      const snapshot = await readFile(join(runDir, 'runtime.json'), 'utf8')
+      expect(snapshot).toContain('taskRecord')
+      expect(snapshot).toContain('accepted')
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('does not accept a passed criterion when its cited result reference is missing', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-task-unverifiable-'))
+    try {
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), mockResponse: 'A result.', mockTaskAssessments: [{ status: 'accepted', criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: ['missing-result-ref'], rationale: 'Looks complete.' }] }] })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'Summarize the requested item.' })
+      for await (const _event of run.events) { /* drain */ }
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded' })
+      await expect(run.taskOutcome()).resolves.toMatchObject({ status: 'unverifiable', verifier: 'llm', criteria: [{ status: 'unverifiable', evidenceRefs: [] }] })
       await host.close()
     } finally { await rm(directory, { recursive: true, force: true }) }
   })

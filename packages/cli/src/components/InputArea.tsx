@@ -1,5 +1,5 @@
 import { Box, Text, useInput } from 'ink';
-import TextInput from 'ink-text-input';
+import TextInput from './TextInput.js';
 import { useState } from 'react';
 import { theme } from '../theme.js';
 
@@ -18,6 +18,7 @@ export function InputArea({ onSubmit, disabled, focus = true, placeholder }: Pro
 
   useInput((input, key) => {
     if (disabled || !focus) return;
+    if (key.ctrl || key.meta || key.pageUp || key.pageDown) return;
 
     if (key.return) {
       if (key.shift) {

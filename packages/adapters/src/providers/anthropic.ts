@@ -43,7 +43,9 @@ export class AnthropicAdapter implements ProviderAdapter {
       const response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
       if (!response.ok) throw await providerHttpErrorFromResponse(response)
       if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeAnthropicResponse(await parseProviderJson(response))
-      const events = await consumeProviderSse(response)
+      const events = await consumeProviderSse(response, (event) => {
+        if (event.event === 'content_block_delta' && event.data?.delta?.type === 'text_delta' && typeof event.data.delta.text === 'string') params.onObservation?.(event.data.delta.text)
+      })
       const blocks: Array<Record<string, unknown>> = []
       let stopReason: string | undefined
       let usage: Record<string, unknown> = {}
@@ -55,7 +57,7 @@ export class AnthropicAdapter implements ProviderAdapter {
         if (event.event === 'content_block_delta' && data.delta && typeof data.delta === 'object') {
           const index = Number(data.index ?? 0)
           const block = blocks[index] ?? {}
-          if (data.delta.type === 'text_delta' && typeof data.delta.text === 'string') { block.type = 'text'; block.text = `${typeof block.text === 'string' ? block.text : ''}${data.delta.text}`; params.onObservation?.(data.delta.text) }
+          if (data.delta.type === 'text_delta' && typeof data.delta.text === 'string') { block.type = 'text'; block.text = `${typeof block.text === 'string' ? block.text : ''}${data.delta.text}` }
           if (data.delta.type === 'input_json_delta' && typeof data.delta.partial_json === 'string') block.inputJson = `${typeof block.inputJson === 'string' ? block.inputJson : ''}${data.delta.partial_json}`
           blocks[index] = block
         }

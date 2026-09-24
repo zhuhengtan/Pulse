@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { PulseRuntime, defineLaneProgram, definePlanAndExecuteLane, defineReActLane, defineScatterGatherLane } from '@hunterzhu/pulse-runtime'
+import type { JsonValue } from '@hunterzhu/pulse-runtime'
 
 describe('DSL Human/Timer host macros', () => {
   it('compiles addTimerStep into a timer wait and resumes on fire', async () => {
@@ -116,6 +117,33 @@ describe('DSL Human/Timer host macros', () => {
     const lane = runtime.state.lanes.get(laneId)!
     expect(lane.resultRef).toBeDefined()
     expect(runtime.state.results.get(lane.resultRef as string)?.value).toEqual({ answer: 'verified' })
+  })
+
+  it('routes a final ReAct result through a custom finish step', async () => {
+    let candidateRef: string | undefined
+    const program = defineReActLane({
+      id: 'react-custom-finish',
+      instruction: 'answer the task',
+      onFinish: (resultRef, ctx) => {
+        candidateRef = resultRef
+        ctx.mutateLane((draft) => {
+          if (draft && typeof draft === 'object' && !Array.isArray(draft)) (draft as Record<string, JsonValue>).candidate = resultRef
+        })
+        return 'verify'
+      },
+      extend: (builder) => {
+        builder.addStep('verify', (ctx) => {
+          const state = ctx.laneState as Record<string, JsonValue>
+          return { actions: [{ type: 'complete', result: { accepted: true, candidate: state.candidate } }], next: 'verify' }
+        })
+      },
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async () => ({ value: { text: 'candidate answer', finishReason: 'stop', toolCalls: [] } }) })
+    const { agentId, laneId } = runtime.createAgent('custom finish', program)
+
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    const lane = runtime.state.lanes.get(laneId)!
+    expect(runtime.state.results.get(lane.resultRef as string)?.value).toEqual({ accepted: true, candidate: candidateRef })
   })
 
   it('preserves ReAct template task, inputs, and model requirements', async () => {

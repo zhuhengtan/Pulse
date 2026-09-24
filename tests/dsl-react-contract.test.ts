@@ -3,6 +3,58 @@ import { PulseRuntime, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 import { z } from 'zod'
 
 describe('DSL ReAct contract', () => {
+  it('never accepts or executes a token-truncated response', async () => {
+    let finished = false
+    let toolRuns = 0
+    const program = defineLaneProgram({ id: 'truncated-react', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', onFinish: () => { finished = true; return { complete: {} } } })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') toolRuns++
+      return { value: { text: 'partial', finishReason: 'length', toolCalls: [{ name: 'write', input: {} }] } }
+    } })
+    const { agentId, laneId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+    expect(runtime.state.lanes.get(laneId)?.failure?.error.code).toBe('OUTPUT_TRUNCATED')
+    expect(finished).toBe(false)
+    expect(toolRuns).toBe(0)
+  })
+
+  it('returns failed tool outcomes to the model and stops repeated failures', async () => {
+    const requests: any[] = []
+    const program = defineLaneProgram({ id: 'failed-tools', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', maxTurns: 20, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { status: 'failed', executionState: 'failed', error: { code: 'APPROVAL_DENIED', message: 'Permission denied for web.fetch', retryable: false } }
+      requests.push(effect.input)
+      return { value: { text: '', finishReason: 'tool_calls', toolCalls: [{ name: 'web.fetch', input: { url: 'https://example.com' } }] } }
+    } })
+    const { agentId, laneId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+    expect(requests).toHaveLength(3)
+    expect(JSON.stringify(requests[1].inputs.conversation)).toContain('APPROVAL_DENIED')
+    expect(JSON.stringify(requests[1].inputs.conversation)).toContain('Permission denied for web.fetch')
+    expect(runtime.state.lanes.get(laneId)?.failure?.error.code).toBe('REPEATED_TOOL_FAILURE')
+  })
+
+  it('nudges completion and bounds repeated unchanged successful reads', async () => {
+    const requests: any[] = []
+    const program = defineLaneProgram({ id: 'unchanged-tools', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', maxTurns: 20, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { path: 'a', content: 'unchanged' } }
+      requests.push(effect.input)
+      return { value: { text: '', finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: {} }] } }
+    } })
+    const { agentId, laneId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+    expect(requests).toHaveLength(5)
+    expect(JSON.stringify(requests[2].inputs.conversation)).toContain('same evidence')
+    expect(runtime.state.lanes.get(laneId)?.failure?.error.code).toBe('NO_PROGRESS')
+  })
+
   it('supports separate text and structured finish callbacks', async () => {
     const program = defineLaneProgram({ id: 'react-structured-finish', version: '1' }, (builder) => {
       builder.addReActLoopStep('reason', {
@@ -109,4 +161,42 @@ describe('DSL ReAct contract', () => {
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
     expect(symbols).toEqual([])
   })
+
+  it('resets a ReAct turn budget when the durable attempt token changes', async () => {
+    const turns: number[] = []
+    const program = defineLaneProgram({ id: 'react-reset-turns', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', {
+        instruction: 'continue',
+        maxTurns: 4,
+        toolAllow: ['read'],
+        resetTurnsOnEntry: (ctx) => {
+          const global = ctx.global as Record<string, unknown> | undefined
+          return typeof global?.attempt === 'number' && global.attempt > 0 ? global.attempt : undefined
+        },
+        onFinish: (_ref, ctx) => {
+          const global = ctx.global as Record<string, unknown> | undefined
+          return global?.attempt === 1 ? { complete: { value: { ok: true } } } : 'replan'
+        },
+      })
+      builder.addStep('replan', (ctx) => {
+        ctx.commitGlobal({ ops: [{ op: 'set', path: ['attempt'], value: 1 }], adoptImmediately: true })
+        return { actions: [], next: 'reason' }
+      })
+    })
+    let llm = 0
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'llm') {
+        llm++
+        const turn = (effect.input as { turn: number }).turn
+        turns.push(turn)
+        return { value: llm <= 2 ? { text: '', finishReason: 'tool_calls', toolCalls: [{ toolCallId: `call-${llm}`, name: 'read', input: {} }] } : { text: 'candidate', finishReason: 'stop', toolCalls: [] } }
+      }
+      return { value: { content: 'read' } }
+    } })
+    const { agentId } = runtime.createAgent({ goal: 'retry', program, initialGlobal: { attempt: 0 } })
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(llm).toBe(4)
+    expect(turns).toEqual([1, 2, 3, 1])
+  })
+
 })

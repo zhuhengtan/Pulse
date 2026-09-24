@@ -4,12 +4,43 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { ContextBuilder, InMemoryModelRegistry, ModelFallbackController, ModelRouter, OutputValidationError, PulseRuntime, appendHistory, createAgent, createRuntimeState, modelFallbackError, stableSerialize, validateActionToolCalls, validateAdapterResult, validateStructuredOutput, MemoryStorage } from '@hunterzhu/pulse-runtime'
-import { AnthropicAdapter, createModelEffectExecutor, FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, OpenAICompatibleAdapter, runShell, toOpenAIMessages } from '@hunterzhu/pulse-adapters'
+import { AnthropicAdapter, createModelEffectExecutor, encodeSandboxCommand, FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, OpenAICompatibleAdapter, quoteWindowsArgument, runShell, decodeUtf8WithinByteLimit, toOpenAIMessages } from '@hunterzhu/pulse-adapters'
 import { defineTool } from '@hunterzhu/pulse-tool-sdk'
 
 const resume = { programId: 'context', programVersion: '1', step: 'start', locals: {} }
 
 describe('M1-3 context, models and adapters', () => {
+  it('retains truncation and usage without parsing or executing incomplete tool arguments', () => {
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: null, tool_calls: [{ function: { name: 'write', arguments: '{"path":' } }] }, finish_reason: 'length' }], usage: { prompt_tokens: 10, completion_tokens: 64 } })).toMatchObject({ finishReason: 'length', toolCalls: [], usage: { inputTokens: 10, outputTokens: 64 } })
+    expect(normalizeAnthropicResponse({ content: [{ type: 'tool_use', name: 'write', input: '{"path":' }], stop_reason: 'max_tokens' })).toMatchObject({ finishReason: 'length', toolCalls: [] })
+  })
+
+  it('reads a UTF-8 file in complete windows without losing bytes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulse-read-range-'))
+    try {
+      const source = 'A雪😀B'.repeat(10)
+      await writeFile(join(root, 'text.txt'), source)
+      const fs = new FilesystemTool(root)
+      let offset = 0; let output = ''
+      for (;;) {
+        const part = await fs.readRange('text.txt', 5, offset)
+        expect(part.content).not.toContain('�')
+        output += part.content
+        if (part.nextOffset === null) break
+        expect(part.nextOffset).toBeGreaterThan(offset)
+        offset = part.nextOffset
+      }
+      expect(output).toBe(source)
+      await expect(fs.readRange('text.txt', 5, 2)).rejects.toMatchObject({ code: 'INVALID_UTF8_OFFSET' })
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('keeps decoded shell output within its UTF-8 byte budget', () => {
+    const output = decodeUtf8WithinByteLimit(Buffer.from('雪雪'), 4)
+    expect(output).toBe('雪')
+    expect(Buffer.byteLength(output, 'utf8')).toBeLessThanOrEqual(4)
+  })
+
   it('keeps the stable prefix byte order while Lane history grows append-only', () => {
     const state = createRuntimeState()
     const { agent, root } = createAgent(state, 'goal', resume)
@@ -91,6 +122,11 @@ describe('M1-3 context, models and adapters', () => {
     expect(openaiBody.tools[0].function.parameters).toEqual(request.blocks[1].content[0].inputSchema)
     expect(openaiBody.tool_choice).toBe('required')
     expect(openaiBody.response_format.json_schema.schema).toEqual(schema)
+    fetchMock.mockClear()
+    await new OpenAICompatibleAdapter('deepseek', { provider: 'deepseek', defaultModel: 'deepseek-flash' }).executeAttempt({ request, signal: new AbortController().signal, outputSchema: schema })
+    const deepseekBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(deepseekBody.response_format).toEqual({ type: 'json_object' })
+    expect(deepseekBody.messages[0].content).toContain(JSON.stringify(schema))
     fetchMock.mockClear()
     await new AnthropicAdapter('anthropic', { provider: 'anthropic', defaultModel: 'fallback', maxOutputTokens: 1234, toolChoice: 'required' }).executeAttempt({ request, signal: new AbortController().signal, model: 'candidate', outputSchema: schema })
     const anthropicBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
@@ -182,6 +218,22 @@ describe('M1-3 context, models and adapters', () => {
     controller.abort()
     await expect(new AnthropicAdapter('cancelled-stream-anthropic', { provider: 'anthropic', defaultModel: 'stream-model' }).executeAttempt({ request, signal: controller.signal, onObservation: () => undefined })).rejects.toMatchObject({ code: 'PROVIDER_REQUEST_CANCELLED', retryable: false })
     vi.unstubAllGlobals()
+  })
+
+  it('delivers streamed text before the response body closes', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>
+    const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value } })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(stream, { headers: { 'content-type': 'text/event-stream' } })))
+    const chunks: string[] = []
+    const adapter = new OpenAICompatibleAdapter('live-stream', { provider: 'openai', defaultModel: 'test' })
+    const pending = adapter.executeAttempt({ request: { blocks: [] } as any, signal: new AbortController().signal, onObservation: (chunk) => chunks.push(chunk) })
+    try {
+      controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"first"}}]}\n\n'))
+      await vi.waitFor(() => expect(chunks).toEqual(['first']))
+      controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'))
+      controller.close()
+      expect((await pending).text).toBe('first')
+    } finally { vi.unstubAllGlobals() }
   })
 
   it('streams provider text as observations but only normalizes complete tool arguments', async () => {
@@ -287,6 +339,7 @@ describe('M1-3 context, models and adapters', () => {
 
   it('enforces filesystem sandbox and runs bounded shell output', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-m3-'))
+    const sibling = await mkdtemp(join(tmpdir(), 'pulse-m3-sibling-'))
     try {
       const filesystem = new FilesystemTool(root)
       await filesystem.write('nested/file.txt', 'ok')
@@ -295,8 +348,27 @@ describe('M1-3 context, models and adapters', () => {
       const result = await runShell(process.execPath, ['-e', 'process.stdout.write("hello")'], { maxOutputBytes: 3 })
       expect(result.stdout).toBe('hel')
       expect(result.truncated).toBe(true)
+      const unicode = await runShell(process.execPath, ['-e', 'process.stdout.write("雪雪")'], { maxOutputBytes: 4 })
+      expect(unicode.stdout).toBe('雪')
+      expect(Buffer.byteLength(unicode.stdout, 'utf8')).toBeLessThanOrEqual(4)
+      expect(unicode.truncated).toBe(true)
+      const argv = ['', 'two words', `quote'" ; $(touch ${join(root, 'injected')})`, 'line\nbreak', '雪']
+      const echoed = await runShell(process.execPath, ['-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))', ...argv], { cwd: root })
+      expect(JSON.parse(echoed.stdout)).toEqual(argv)
+      await expect(readFile(join(root, 'injected'), 'utf8')).rejects.toThrow()
+      const secretPath = join(sibling, 'secret.txt')
+      await writeFile(secretPath, 'outside workspace', 'utf8')
+      const isolated = await runShell(process.execPath, ['-e', 'const fs=require("node:fs");let result=[];for(const p of process.argv.slice(1)){try{result.push(fs.readFileSync(p,"utf8"))}catch(e){result.push(e.code||"blocked")};try{fs.writeFileSync(p,"changed");result.push("wrote")}catch(e){result.push(e.code||"blocked")}}process.stdout.write(JSON.stringify(result))', secretPath, join(sibling, 'new.txt')], { cwd: root })
+      const isolationResults = JSON.parse(isolated.stdout) as string[]
+      expect(isolationResults[0]).not.toBe('outside workspace')
+      expect(isolationResults[1]).not.toBe('wrote')
+      expect(isolationResults[2]).not.toBe('wrote')
+      expect(await readFile(secretPath, 'utf8')).toBe('outside workspace')
       expect(await readFile(join(root, 'nested/file.txt'), 'utf8')).toBe('ok')
-    } finally { await rm(root, { recursive: true, force: true }) }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+      await rm(sibling, { recursive: true, force: true })
+    }
   })
 
   it('classifies filesystem and shell validation failures as non-retryable', async () => {
@@ -310,8 +382,22 @@ describe('M1-3 context, models and adapters', () => {
       await expect(filesystem.read('file.txt', controller.signal)).rejects.toMatchObject({ code: 'ABORTED', retryable: false })
       await expect(runShell(process.execPath, [], { maxOutputBytes: -1 })).rejects.toMatchObject({ code: 'INVALID_SHELL_OUTPUT_LIMIT', retryable: false })
       await expect(runShell(process.execPath, [], { timeoutMs: -1 })).rejects.toMatchObject({ code: 'INVALID_SHELL_TIMEOUT', retryable: false })
-      await expect(runShell('__pulse_missing_command__')).rejects.toMatchObject({ code: 'ENOENT', retryable: false })
+      await expect(runShell('__pulse_missing_command__')).resolves.toMatchObject({ code: 127, timedOut: false, aborted: false })
     } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('encodes model argv without exposing values to shell parsing', () => {
+    const args = ['space value', `a'b;$(touch x)`, 'line\nbreak']
+    const posix = encodeSandboxCommand('/path/to/program', args, 'darwin')
+    expect(posix).toBe("exec '/path/to/program' 'space value' 'a'\\''b;$(touch x)' 'line\nbreak'")
+    const windows = encodeSandboxCommand('C:\\Program Files\\tool.exe', args, 'win32')
+    expect(windows).toMatch(/^powershell\.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand [A-Za-z0-9+/=]+$/)
+    expect(windows).not.toContain('touch')
+    expect(() => encodeSandboxCommand('tool', ['bad\0arg'], 'darwin')).toThrow('INVALID_SHELL_ARGUMENT')
+    expect(quoteWindowsArgument('')).toBe('""')
+    expect(quoteWindowsArgument('plain')).toBe('plain')
+    expect(quoteWindowsArgument('with space\\')).toBe('"with space\\\\"')
+    expect(quoteWindowsArgument('quote"value')).toBe('"quote\\"value"')
   })
 
   it('rejects sandbox symlink escapes for reads, listings, hashes, and writes', async () => {

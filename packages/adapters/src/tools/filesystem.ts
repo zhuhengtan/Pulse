@@ -47,12 +47,26 @@ export class FilesystemTool {
   }
   async read(path: string, signal?: AbortSignal): Promise<string> { if (signal?.aborted) throw filesystemError('ABORTED'); return readFile(await this.existing(path), 'utf8') }
   async readLimited(path: string, maxBytes: number, signal?: AbortSignal): Promise<FilesystemReadResult> {
+    const { content, truncated } = await this.readRange(path, maxBytes, 0, signal)
+    return { content, truncated }
+  }
+  async readRange(path: string, maxBytes: number, offset = 0, signal?: AbortSignal): Promise<FilesystemReadResult & { offset: number; nextOffset: number | null }> {
     if (signal?.aborted) throw filesystemError('ABORTED')
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 1_000_000 || !Number.isSafeInteger(offset) || offset < 0) throw filesystemError('INVALID_READ_RANGE')
     const handle = await open(await this.existing(path), 'r')
     try {
       const buffer = Buffer.alloc(maxBytes + 1)
-      const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, 0)
-      return { content: buffer.subarray(0, Math.min(bytesRead, maxBytes)).toString('utf8'), truncated: bytesRead > maxBytes }
+      const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, offset)
+      if (bytesRead && (buffer[0]! & 0xc0) === 0x80) throw filesystemError('INVALID_UTF8_OFFSET')
+      let end = Math.min(bytesRead, maxBytes)
+      if (bytesRead > maxBytes) {
+        // The byte after the window is a continuation: drop the partial codepoint.
+        while (end > 0 && (buffer[end]! & 0xc0) === 0x80) end--
+      }
+      if (end === 0 && bytesRead > 0) throw filesystemError('READ_WINDOW_TOO_SMALL')
+      const content = buffer.subarray(0, end).toString('utf8')
+      const truncated = bytesRead > end
+      return { content, truncated, offset, nextOffset: truncated ? offset + end : null }
     } finally { await handle.close() }
   }
   async list(path = '.', signal?: AbortSignal): Promise<string[]> { if (signal?.aborted) throw filesystemError('ABORTED'); return readdir(await this.existing(path)) }

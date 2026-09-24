@@ -1,5 +1,5 @@
 import { Box, Text, useInput } from 'ink';
-import TextInput from 'ink-text-input';
+import TextInput from './TextInput.js';
 import { useState } from 'react';
 import { theme } from '../theme.js';
 import type { AskRequest } from '../types.js';

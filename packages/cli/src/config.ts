@@ -24,6 +24,33 @@ export interface PulseCliModel {
   maxContextTokens?: number
   maxOutputTokens?: number
   reasoningEffort?: 'low' | 'medium' | 'high'
+  pricing?: { currency: string; inputPerMillion: number; outputPerMillion: number; version: string }
+}
+
+export type PulseModelTask = 'reason' | 'plan' | 'merge' | 'verify'
+
+export interface PulseCliMcpServer {
+  command: string
+  args?: string[]
+  cwd?: string
+  /** Explicit environment overrides; secret values should be sourced through provider-specific env mechanisms where possible. */
+  env?: Record<string, string>
+  /** Map child environment names to names of variables in Pulse's launch environment. */
+  envFrom?: Record<string, string>
+  timeoutMs?: number
+  /** Explicit trust decision for each remote tool; all unspecified tools remain external. */
+  toolPolicies?: Record<string, 'read' | 'write' | 'external'>
+}
+
+export interface PulseCliCapabilities {
+  /** IDs must be explicitly enabled; workspace config cannot enable host extensions. */
+  enabled?: string[]
+  /** Names of host-installed skills to load as untrusted instructions. */
+  skills?: string[]
+  /** Additional absolute roots explicitly trusted by the user for installed skills. */
+  trustedSkillRoots?: string[]
+  /** Host-level MCP processes; these are executable trusted configuration. */
+  mcpServers?: Record<string, PulseCliMcpServer>
 }
 
 export interface PulseCliConfig {
@@ -37,7 +64,12 @@ export interface PulseCliConfig {
   models?: Record<string, PulseCliModel>
   /** Active Pulse model display name. */
   activeModel?: string
+  /** Ordered model display names per task; later entries act as fallbacks. */
+  taskRouting?: Partial<Record<PulseModelTask, string[]>>
+  capabilities?: PulseCliCapabilities
   approvalMode?: 'read-only' | 'ask' | 'auto'
+  /** Parallelism is opt-in and only exposes tools explicitly classified read-only. */
+  executionMode?: 'serial' | 'parallel-read'
   maxTurns?: number
   /** Percent of maxContextTokens that triggers automatic history compaction. Clamped to 1–90. */
   autoCompactPercent?: number
@@ -67,6 +99,7 @@ export const defaultPulseConfig: PulseCliConfig = {
   },
   activeModel: 'mock',
   approvalMode: 'ask',
+  executionMode: 'serial',
   maxTurns: 32,
   autoCompactPercent: 90,
   allowNetwork: false,
@@ -124,8 +157,11 @@ export function sanitizeWorkspaceConfig(value: PulseCliConfig): PulseCliConfig {
   return {
     ...(value.cwd === undefined ? {} : { cwd: value.cwd }),
     ...(value.dataDir === undefined ? {} : { dataDir: value.dataDir }),
+    // Workspace configs cannot launch processes, select host skills, or enable installed capabilities.
     ...(providers === undefined || Object.keys(providers).length === 0 ? {} : { providers }),
     ...(value.activeModel === undefined ? {} : { activeModel: value.activeModel }),
+    // Workspace configs may select a model, but routing affects provider and
+    // data-sharing choices and therefore remains user-config-only.
     ...(value.models === undefined ? {} : {
       models: Object.fromEntries(Object.entries(value.models).flatMap(([name, model]) => {
         if (!model.provider || !model.modelCode) return []

@@ -38,17 +38,19 @@ describe('system prompt and instructions discovery', () => {
   })
 
   describe('buildSystemPrompt', () => {
-    it('generates standard engineering prompt with workspace and discipline sections', () => {
+    it('generates a general-purpose prompt with workspace and task-specific discipline', () => {
       const prompt = buildSystemPrompt({ workspace: '/test/workspace' })
       expect(prompt).toContain('You are Pulse')
+      expect(prompt).toContain('general-purpose task assistant')
+      expect(prompt).toContain('research, organize files')
       expect(prompt).toContain('/test/workspace')
-      expect(prompt).toContain('## Engineering & Investigation Discipline')
+      expect(prompt).toContain('## Investigation & Tool Safety')
+      expect(prompt).toContain('## Software Engineering Tasks')
       expect(prompt).toContain('## Task Execution Contract')
       expect(prompt).toContain('Work in bounded phases')
-      expect(prompt).toContain('Investigate first')
-      expect(prompt).toContain('Surgical, minimal changes')
-      expect(prompt).toContain('Autonomous command execution')
-      expect(prompt).toContain('On Windows, use native PowerShell commands')
+      expect(prompt).toContain('Ground answers about workspace files')
+      expect(prompt).toContain('make focused edits')
+      expect(prompt).toContain('On Windows, use native PowerShell via')
       expect(prompt).toContain('does not start a shell implicitly')
       expect(prompt).toContain('## Evidence-Based Verification')
       expect(prompt).toContain('## Output & Communication Style')

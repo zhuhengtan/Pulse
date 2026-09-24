@@ -1,16 +1,43 @@
-import { defineLaneProgram, type HistoryCompactionOptions, type LaneProgramDefinition, type StepContext, type InstructionView, type NextStepTarget, type StepInputs } from './program.js'
+import { defineLaneProgram, type HistoryCompactionOptions, type LaneProgramDefinition, type StepBuilder, type StepContext, type InstructionView, type NextStepTarget, type StepInputs } from './program.js'
 import type { LaneProgram } from '../scheduler/runtime.js'
-import type { Outcome, JsonValue } from '../core/types.js'
+import type { Outcome, JsonValue, ResultRef } from '../core/types.js'
 import type { ZodTypeAny } from 'zod'
 
 export interface ProgramRef { programId: string; programVersion: string; step?: string; locals?: JsonValue }
 
-export function defineReActLane(config: { id: string; version?: string; system?: string; toolSet?: string; task?: string; instruction: string | ((view: InstructionView<JsonValue>) => string); inputs?: (ctx: StepContext<JsonValue>) => StepInputs; toolAllow?: string[]; maxTurns?: number; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; toolApproval?: { prompt: string | ((calls: JsonValue, ctx: StepContext<JsonValue>) => string); onDenied?: (reason: string, ctx: StepContext<JsonValue>) => NextStepTarget<JsonValue> }; historyCompaction?: HistoryCompactionOptions }): LaneProgramDefinition {
+export interface ReActLaneConfig {
+  id: string
+  version?: string
+  system?: string
+  toolSet?: string
+  task?: string
+  instruction: string | ((view: InstructionView<JsonValue>) => string)
+  inputs?: (ctx: StepContext<JsonValue>) => StepInputs
+  toolAllow?: string[]
+  maxTurns?: number
+  /** Return a durable token when a new attempt should get a fresh turn budget. */
+  resetTurnsOnEntry?: (ctx: StepContext<JsonValue>) => string | number | undefined
+  outputSchema?: ZodTypeAny
+  requirements?: Record<string, JsonValue>
+  toolApproval?: { prompt: string | ((calls: JsonValue, ctx: StepContext<JsonValue>) => string); onDenied?: (reason: string, ctx: StepContext<JsonValue>) => NextStepTarget<JsonValue> }
+  historyCompaction?: HistoryCompactionOptions
+  /**
+   * Receives the final model result before the lane completes. Return a step
+   * name for a custom finish flow, or a complete/fail target to terminate.
+   * If omitted, the template retains its existing text/structured behavior.
+   */
+  onFinish?: (resultRef: ResultRef, ctx: StepContext<JsonValue>) => NextStepTarget<JsonValue>
+  /** Register custom steps referenced by `onFinish`. */
+  extend?: (builder: StepBuilder<JsonValue>) => void
+}
+
+export function defineReActLane(config: ReActLaneConfig): LaneProgramDefinition {
   return defineLaneProgram({ id: config.id, version: config.version ?? '1', ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSet: config.toolSet }), ...(config.historyCompaction === undefined ? {} : { historyCompaction: config.historyCompaction }) }, (builder) => {
-    const onFinish = config.outputSchema === undefined
+    const onFinish = config.onFinish ?? (config.outputSchema === undefined
       ? { text: (resultRef: string) => ({ complete: { value: { textRef: resultRef } } }) }
-      : { text: (resultRef: string) => ({ complete: { value: { textRef: resultRef } } }), structured: { schema: config.outputSchema, onParsed: (value: unknown) => ({ complete: { value: value as JsonValue } }) } }
-    builder.addReActLoopStep('react', { ...(config.task === undefined ? {} : { task: config.task }), instruction: config.instruction, ...(config.inputs === undefined ? {} : { inputs: config.inputs }), ...(config.toolAllow === undefined ? {} : { toolAllow: config.toolAllow }), ...(config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns }), ...(config.outputSchema === undefined ? {} : { outputSchema: config.outputSchema }), ...(config.requirements === undefined ? {} : { requirements: config.requirements }), ...(config.toolApproval === undefined ? {} : { toolApproval: config.toolApproval }), onFinish })
+      : { text: (resultRef: string) => ({ complete: { value: { textRef: resultRef } } }), structured: { schema: config.outputSchema, onParsed: (value: unknown) => ({ complete: { value: value as JsonValue } }) } })
+    builder.addReActLoopStep('react', { ...(config.task === undefined ? {} : { task: config.task }), instruction: config.instruction, ...(config.inputs === undefined ? {} : { inputs: config.inputs }), ...(config.toolAllow === undefined ? {} : { toolAllow: config.toolAllow }), ...(config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns }), ...(config.resetTurnsOnEntry === undefined ? {} : { resetTurnsOnEntry: config.resetTurnsOnEntry }), ...(config.outputSchema === undefined ? {} : { outputSchema: config.outputSchema }), ...(config.requirements === undefined ? {} : { requirements: config.requirements }), ...(config.toolApproval === undefined ? {} : { toolApproval: config.toolApproval }), onFinish })
+    config.extend?.(builder)
   })
 }
 

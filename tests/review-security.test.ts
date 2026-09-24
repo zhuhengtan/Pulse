@@ -87,6 +87,47 @@ describe('conversation and workspace path safety', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('continues searching after a hidden directory such as .git', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-search-git-'))
+    try {
+      await mkdir(join(directory, '.git'))
+      await writeFile(join(directory, 'visible.txt'), 'needle')
+      await expect(searchFiles(directory, 'needle')).resolves.toEqual([
+        { path: 'visible.txt', line: 1, text: 'needle' },
+      ])
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('skips hidden directories and node_modules while continuing to later entries', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-search-skips-'))
+    try {
+      await mkdir(join(directory, '.hidden'))
+      await writeFile(join(directory, '.hidden', 'hidden.txt'), 'needle')
+      await mkdir(join(directory, 'node_modules'))
+      await writeFile(join(directory, 'node_modules', 'dependency.txt'), 'needle')
+      await writeFile(join(directory, 'visible.txt'), 'needle')
+      await expect(searchFiles(directory, 'needle')).resolves.toEqual([
+        { path: 'visible.txt', line: 1, text: 'needle' },
+      ])
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('stops recursive traversal when the shared result limit is reached', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-search-limit-'))
+    const visited = { count: 0 }
+    const matched = { count: 99 }
+    try {
+      await mkdir(join(directory, 'nested'))
+      await writeFile(join(directory, 'nested', 'first.txt'), 'needle')
+      await writeFile(join(directory, 'nested', 'later.txt'), 'needle')
+      await expect(searchFiles(directory, 'needle', '.', 0, visited, matched)).resolves.toEqual([
+        { path: join('nested', 'first.txt'), line: 1, text: 'needle' },
+      ])
+      expect(matched.count).toBe(100)
+      expect(visited.count).toBe(2)
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('does not follow a symlink out of the workspace', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-within-'))
     const outside = await mkdtemp(join(tmpdir(), 'pulse-outside-'))

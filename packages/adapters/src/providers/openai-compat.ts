@@ -17,12 +17,22 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const streaming = params.onObservation !== undefined
     const { definitions: tools, aliases: toolNameAliases } = toolDefinitions(params.request)
     const includeReasoning = Boolean(this.config.reasoningEffort) && !this.reasoningUnsupported
-    const body: Record<string, unknown> = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), ...((params.maxOutputTokens ?? this.config.maxOutputTokens) === undefined ? {} : { max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens }), ...(includeReasoning ? { reasoning_effort: this.config.reasoningEffort } : {}), messages: toMessages(params.request), ...(tools.length ? { tools, ...(this.config.toolChoice === undefined ? {} : { tool_choice: this.config.toolChoice }) } : {}), ...(params.outputSchema === undefined ? {} : { response_format: { type: 'json_schema', json_schema: { name: 'pulse_output', strict: true, schema: params.outputSchema } } }), ...(streaming ? { stream: true, stream_options: { include_usage: true } } : {}) }
+    const messages = toMessages(params.request)
+    const deepSeekJsonMode = params.outputSchema !== undefined && this.config.provider === 'deepseek'
+    if (deepSeekJsonMode) messages.unshift({ role: 'system', content: `Return only a JSON object matching this schema. The application will validate the result:\n${JSON.stringify(params.outputSchema)}` })
+    const responseFormat = params.outputSchema === undefined ? undefined : deepSeekJsonMode
+      ? { type: 'json_object' }
+      : { type: 'json_schema', json_schema: { name: 'pulse_output', strict: true, schema: params.outputSchema } }
+    const body: Record<string, unknown> = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), ...((params.maxOutputTokens ?? this.config.maxOutputTokens) === undefined ? {} : { max_tokens: params.maxOutputTokens ?? this.config.maxOutputTokens }), ...(includeReasoning ? { reasoning_effort: this.config.reasoningEffort } : {}), messages, ...(tools.length ? { tools, ...(this.config.toolChoice === undefined ? {} : { tool_choice: this.config.toolChoice }) } : {}), ...(responseFormat === undefined ? {} : { response_format: responseFormat }), ...(streaming ? { stream: true, stream_options: { include_usage: true } } : {}) }
     try {
       const response = await fetch(`${this.baseURL.replace(/\/$/, '')}/chat/completions`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}), ...(this.config.extraHeaders ?? {}) }, body: JSON.stringify(body) })
       if (!response.ok) throw await providerHttpErrorFromResponse(response)
       if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeOpenAIResponse(await parseProviderJson(response), toolNameAliases)
-      const events = await consumeProviderSse(response)
+      const events = await consumeProviderSse(response, (event) => {
+        const delta = event.data?.choices?.[0]?.delta
+        if (typeof delta?.content === 'string') params.onObservation?.(delta.content)
+        if (typeof delta?.refusal === 'string') params.onObservation?.(delta.refusal)
+      })
       const content: string[] = []
       const refusals: string[] = []
       const toolCalls = new Map<number, StreamToolCall>()
@@ -32,8 +42,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         if (event.data === '[DONE]' || !event.data || typeof event.data !== 'object') continue
         const choice = event.data.choices?.[0]
         const delta = choice?.delta
-        if (typeof delta?.content === 'string') { content.push(delta.content); params.onObservation?.(delta.content) }
-        if (typeof delta?.refusal === 'string') { refusals.push(delta.refusal); params.onObservation?.(delta.refusal) }
+        if (typeof delta?.content === 'string') { content.push(delta.content) }
+        if (typeof delta?.refusal === 'string') { refusals.push(delta.refusal) }
         if (typeof choice?.finish_reason === 'string') finishReason = choice.finish_reason
         if (Array.isArray(delta?.tool_calls)) for (const call of delta.tool_calls) accumulateStreamToolCall(toolCalls, call)
         if (event.data.usage !== undefined) usage = event.data.usage

@@ -60,7 +60,16 @@ Pulse 只使用供应商表和模型表这套配置：模型的 `displayName` �
     }
   },
   "activeModel": "gpt5.6-a",
+  "taskRouting": {
+    "plan": ["gpt5.6-a", "gpt5.6-b"],
+    "verify": ["gpt5.6-b", "gpt5.6-a"]
+  },
+  "capabilities": {
+    "enabled": ["pdf", "spreadsheet", "skills"],
+    "skills": ["review"]
+  },
   "approvalMode": "ask",
+  "executionMode": "serial",
   "maxTurns": 32,
   "autoCompactPercent": 90,
   "allowNetwork": false
@@ -82,17 +91,28 @@ Provider 字段说明：
 - `providers`：供应商注册表，key 是供应商 code；`provider` 是适配器/协议 id，`apiKeyEnv` 只保存环境变量名。
 - `models`：全局模型注册表，key 或 `displayName` 是 Pulse 内显示名，`provider` 引用供应商 code，`modelCode` 是实际传给供应商的模型名。
 - `activeModel`：当前使用的 Pulse 模型显示名。交互界面中可用 `/model gpt5.6-a` 切换。
+- `taskRouting`：为 `reason`、`plan`、`merge`、`verify` 配置有序的模型显示名列表；按顺序尝试候选，失败时回退。没有配置的任务使用当前模型。只在用户级配置生效。
+- `capabilities.enabled`：显式启用已安装的宿主能力包。内置有 `pdf`、`spreadsheet`、`skills`；MCP 包名来自 `capabilities.mcpServers`。工作区配置不能启动进程或启用宿主扩展。
+- `capabilities.skills`：从 Pulse 用户级技能目录或显式信任的目录中加载的 `SKILL.md` 名称。技能内容只作为不可信参考文本，不执行脚本。
+- `capabilities.trustedSkillRoots`：可选的绝对目录列表，额外信任其中的技能目录；路径必须是绝对路径，符号链接会被拒绝。
+- `capabilities.mcpServers`：用户安装并信任的 MCP stdio 进程注册表，形如 `{"browser":{"command":"node","args":["/absolute/path/server.js"]}}`。只允许用户级配置，启用对应 ID 才会启动；远端工具仍走 Pulse 副作用审批。
 - `baseURL`：Provider API 根地址。DeepSeek 当前 OpenAI 格式地址是 `https://api.deepseek.com`。
 - `apiKeyEnv`：API Key 所在的环境变量名，值本身不会写进配置文件。
 - `maxContextTokens`：Pulse 本地路由使用的上下文窗口声明。
 - `maxOutputTokens`：每次模型响应的输出预算。
 - `reasoningEffort`：`low`、`medium` 或 `high`；是否被 Provider 接受由适配器处理。
+- MCP 诊断可用 `pulse mcp doctor [server-id]` 检查启动、握手和工具发现。`mcpServers.<id>.envFrom` 将 MCP 子进程环境变量映射到 Pulse 启动环境变量名，例如 `{ "envFrom": { "BROWSER_TOKEN": "BROWSER_MCP_TOKEN" } }`；只保存变量名，不把凭据写入配置。
+- `toolPolicies` 按远端原始工具名显式标记 `read`、`write` 或 `external`。未列出的工具默认 `external`；只读模式只允许显式标记为 `read` 的 MCP 工具。
+- `models.<name>.pricing` 可为本地费用估算提供 `{ currency, inputPerMillion, outputPerMillion, version }`。估算费用与 Provider 报告费用分开展示，并保留价格版本。
 - `toolChoice`：`auto`、`required`、`none`，或指定一个函数工具。
 - `approvalMode`：`ask` 每次副作用由你确认；`read-only` 禁止写入和 shell；`auto` 对 workspace 内的 `fs.write`、`fs.apply_patch`、`fs.move` 使用工具自身的 workspace 权限和路径校验直接执行，其他外部副作用再由独立的 Pulse safety reviewer 审查。审查回复必须整段就是 `APPROVE` 才会放行，`DENY`、解释句，以及「不允许」「不批准」都不会放行。
+- `executionMode`：`serial`（默认）或 `parallel-read`。并行模式最多拆成三个带依赖关系的只读 Lane；子 Lane 只允许宿主明确标记为 `read` 的工具，不能写文件、执行 shell 或递归拆分。无效计划或规划失败会退回串行主流程。可用 `--execution-mode parallel-read` 仅对当前调用启用。所有 Lane 共用 Run 时限和 `maxTurns` 对应的 LLM Effect 总预算，单个子 Lane 最多三轮；Provider 在一个 Effect 内部进行的 fallback/retry 和 token/费用仍不能由这个上限硬截断。
 - `systemPrompt`：自定义系统指令文本。也可通过 `--system-prompt` 或 `PULSE_SYSTEM_PROMPT` 注入。未加 `--trust-workspace` 时，工作区 `.pulse/config.json` 里的此项会被忽略。
 - `systemPromptFile`：从文件载入自定义系统指令。也可通过 `--system-prompt-file` 或 `PULSE_SYSTEM_PROMPT_FILE` 注入。未加 `--trust-workspace` 时，工作区配置不能指定这个路径。
 - `maxTurns`：一次 ReAct 运行允许的最大模型/工具轮数，默认 32，命令行可用 `--max-turns` 或 `PULSE_MAX_TURNS` 覆盖，最大 256。
 - `autoCompactPercent`：自动压缩阈值，按 `maxContextTokens` 的百分比估算。默认 90，可用 `--auto-compact-percent` 或 `PULSE_AUTO_COMPACT_PERCENT` 覆盖，超过 90 会降到 90，给摘要请求留出空间。达到阈值后，下一条消息发送前会调用已配置模型压缩历史，并在会话里留下 `[自动压缩]` 提示；原记录备份为 `messages.jsonl.bak`。估算会加上系统提示词的体积。更早内容如果已经只剩一条历史摘要，则不再重复压缩。摘要留在对话记录里，适配器会把它当作上下文，而不会并入系统提示词。`mock` provider 不会自动压缩。会话中也可以随时执行 `/compact` 手动压缩。
+
+定时任务通过 `pulse schedule add --every 1h --name "项目巡检" "任务内容"` 创建，`list`、`pause <id>`、`resume <id>`、`remove <id>` 管理。`pulse schedule daemon` 常驻轮询，`run-once` 只运行已到期任务。计划任务只允许 `read-only` 或明确配置的 `auto` 审批模式；执行记录保存在数据目录的 `scheduled-tasks.json` 中。它是前台 worker，操作系统登录启动服务尚需由部署环境单独配置。
 
 ## 系统提示词与规则自动发现
 

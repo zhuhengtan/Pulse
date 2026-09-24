@@ -55,6 +55,7 @@ export async function runResume(
     }
 
     const outcome = await run.outcome();
+    const taskOutcome = await run.taskOutcome();
 
     if (format === 'jsonl') {
       process.stdout.write(
@@ -63,6 +64,7 @@ export async function runResume(
           type: 'result',
           runId: run.id,
           status: outcome.status,
+          taskOutcome: taskOutcome ?? null,
           text: outcome.text ?? null,
           error: outcome.error ?? null,
         })}\n`
@@ -75,7 +77,8 @@ export async function runResume(
       process.stdout.write(`\n[${outcome.status}]\n`);
     }
 
-    return outcome.status === 'succeeded' ? 0 : outcome.status === 'cancelled' ? 3 : 1;
+    if (outcome.status === 'cancelled') return 3;
+    return outcome.status === 'succeeded' && (!taskOutcome || taskOutcome.status === 'accepted') ? 0 : 1;
   } catch (error) {
     process.stderr.write(`[错误] ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;

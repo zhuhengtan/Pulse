@@ -53,7 +53,7 @@ export async function parseProviderJson(response: Response): Promise<unknown> {
 }
 
 /** Read provider SSE frames without treating incomplete tool arguments as executable input. */
-export async function consumeProviderSse(response: Response): Promise<ProviderSseEvent[]> {
+export async function consumeProviderSse(response: Response, onEvent?: (event: ProviderSseEvent) => void): Promise<ProviderSseEvent[]> {
   if (!response.body) throw providerResponseError('PROVIDER_STREAM_BODY_MISSING')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
@@ -66,7 +66,9 @@ export async function consumeProviderSse(response: Response): Promise<ProviderSs
     const raw = dataLines.join('\n')
     dataLines = []
     const data = raw === '[DONE]' ? raw : (() => { try { return JSON.parse(raw) } catch { throw providerResponseError('PROVIDER_STREAM_INVALID_JSON') } })()
-    events.push({ ...(eventName === undefined ? {} : { event: eventName }), data })
+    const event = { ...(eventName === undefined ? {} : { event: eventName }), data }
+    events.push(event)
+    onEvent?.(event)
     eventName = undefined
   }
   const consumeLines = (text: string): void => {
@@ -98,8 +100,8 @@ export function normalizeOpenAIResponse(response: any, toolNameAliases?: Readonl
   if (!Array.isArray(root.choices) || root.choices.length === 0) throw providerResponseError('OpenAI response must contain at least one choice')
   const choice = providerRecord(root.choices[0], 'OpenAI choice')
   const message = providerRecord(choice.message, 'OpenAI message')
-  const toolCalls = message.tool_calls === undefined ? [] : normalizeOpenAIToolCalls(message.tool_calls, toolNameAliases)
-  const refusal = message.refusal === undefined ? undefined : requiredProviderString(message.refusal, 'OpenAI refusal')
+  const toolCalls = choice.finish_reason === 'length' || message.tool_calls === undefined ? [] : normalizeOpenAIToolCalls(message.tool_calls, toolNameAliases)
+  const refusal = message.refusal == null ? undefined : requiredProviderString(message.refusal, 'OpenAI refusal')
   const text = providerText(message.content, 'OpenAI message content')
   const finishReason = normalizeOpenAIFinishReason(choice.finish_reason, refusal, toolCalls.length > 0)
   const rawUsage = root.usage === undefined ? undefined : providerRecord(root.usage, 'OpenAI usage')
@@ -113,7 +115,7 @@ export function normalizeAnthropicResponse(response: any): LLMResult {
   const blocks = root.content
   const text = blocks.filter((block: any) => providerRecord(block, 'Anthropic content block').type === 'text').map((block: any) => requiredProviderString(providerRecord(block, 'Anthropic text block').text, 'Anthropic text block text')).join('')
   const toolBlocks = blocks.filter((block: any) => providerRecord(block, 'Anthropic content block').type === 'tool_use')
-  const toolCalls = toolBlocks.map((block: any, index: number) => {
+  const toolCalls = (root.stop_reason === 'max_tokens' ? [] : toolBlocks).map((block: any, index: number) => {
     const value = providerRecord(block, 'Anthropic tool block')
     return { toolCallId: `pulse-tool-${index + 1}`, name: requiredProviderString(value.name, 'Anthropic tool name'), input: parseJson(value.input) }
   })

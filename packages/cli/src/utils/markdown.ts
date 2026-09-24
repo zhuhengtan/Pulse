@@ -53,7 +53,7 @@ function renderToken(token: Token): string {
     }
     case 'codespan': {
       const t = token as Tokens.Codespan;
-      return chalk.bgGray.white(` ${t.text} `);
+      return chalk.hex(theme.accent)(t.text);
     }
     case 'strong': {
       const t = token as Tokens.Strong;

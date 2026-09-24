@@ -370,9 +370,30 @@ C0 先解决高风险接缝；C1 以后可边开发边试用，C5 才标记首�
 
 仍需在用户环境完成的验收：真实 OpenAI-compatible/Anthropic 请求、真实网页搜索结果和引用质量、SIGKILL 后跨进程恢复、升级回退、跨平台安装，以及真实任务中的 PDF/Office 等后续能力。
 
-## 12. 首版之后
+## 12. 首版之后与 Agent 成熟度路线
 
-后续按使用痛点增加：MCP 工具接入、PDF/Office 能力、浏览器任务、Skills、任务模板、主动多 Lane、后台运行与定时任务、完整 TUI、Web/桌面 UI。
+本轮在不做 Web/桌面 UI 的范围内完成了以下后续能力。完成代表实现和本机相应验证已落地，不代表所有系统、Provider 或外部服务均已验收。
+
+| 阶段 | 交付与状态 | 验收边界 |
+| --- | --- | --- |
+| A1：任务质量闭环 | 已实现固定 24 项评测集、隔离运行入口、JavaScript/Python 沙箱行为探针、Research URL 引用检查、运行与验收状态分离、Provider attempt 去重用量和价格版本估算 | `eval:validate`/dry run 通过；真实 Provider 的 72 轮和人工研究准确性评审未执行；费用上限只能在任务间按 Provider 报告值检查，单任务内为 best-effort |
+| A2：结果验收与修正 | 已实现持久 TaskRecord/TaskOutcome、ResultRef 证据核验、有界重规划和无进展停止 | Mock Host 重规划/验收测试通过；真实模型评审一致性仍需样本评估 |
+| A3：Shell 隔离 | 已接入 Anthropic Sandbox Runtime，联网默认关闭、文件范围限于工作区；启动失败时 fail-closed | macOS 当前主机的 30 项适配器测试通过；Linux/Windows 平台依赖与系统策略仍需 CI/实机验证 |
+| A4：可扩展能力 | 已实现 MCP stdio tools/list 与 tools/call、工具级显式副作用策略、`envFrom` 凭据引用、MCP 诊断命令、PDF/XLSX 只读工具、可信根内 Skill 指令加载 | 本机 fake MCP 协议测试通过；真实 Browser/Jarvis MCP 与受控站点 E2E 尚需用户服务和凭据 |
+| A5：模型治理 | 已实现按 reason/plan/merge/verify 路由模型候选、顺序回退及 Provider 模型代码转换 | 本地路由/Host 配置测试通过；外部 Provider 可用性和质量排序尚需真实调用观测 |
+| A6：后台任务 | 已实现持久 interval 任务、quarantine 故障隔离、显式人工恢复、工作目录和 `schedule` CLI；新增 `service install/status/start/stop/uninstall`，分别生成 LaunchAgent、systemd user unit 和 Windows 登录计划任务 | 本机 `service status` 未安装路径已检查；未注册服务。三平台安装/升级/日志轮转与 24 小时实测仍需 CI/实机验收 |
+
+2026-09-23 后续补齐：RunUsage 已持久化到 `usage.json`、最终 outcome、JSONL 和 TUI；支持 provider 成本与用户价格表估算分开表示。新增四个内置版本化模板。完整主动多 Lane、真实质量基线、三平台服务实装验收、Browser/Jarvis 真实 E2E，以及 TUI 计划/取消/用量汇总视图仍未完成，不应将整份成熟度计划标记为全部完成。
+
+完整 TUI、任务模板、主动多 Lane 规划仍不属于本轮实现范围；它们应建立在稳定的 TaskOutcome、路由与调度记录之上再评估。Web/桌面 UI 继续后置。
+
+### 本轮验证记录（2026-09-23）
+
+- `pnpm build`：通过。
+- `pnpm test`：94 个测试文件、642 项通过；需要本机 loopback 和 Unix socket 的集成测试在允许对应本地监听的环境中运行。
+- `pnpm eval:validate`：24 项评测任务结构有效；`pnpm eval:dry` 只验证数据，不产生质量基线。
+- `pnpm cli:pack` 与 `pnpm cli:verify-package -- --archive artifacts/cli/pulse-0.1.11.tar.gz`：通过。验证覆盖压缩包入口、完整依赖、Mock 任务、用户级安装、`schedule add/list` 与卸载保留数据。
+- 没有执行真实 Provider 评测、跨操作系统 SRT 验证、系统登录服务安装、提交、推送或发布。
 
 包发布、npm workspace 兼容、pnpm publish、GitHub Actions 和 GitHub Release 的操作见 [`docs/release.md`](./release.md)。
 

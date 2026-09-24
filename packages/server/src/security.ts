@@ -125,8 +125,8 @@ export async function assertPublicNetworkUrl(raw: string, allowHosts?: string[])
   return url
 }
 
-export async function searchFiles(root: string, query: string, directory = '.', depth = 0, visited = { count: 0 }): Promise<Array<{ path: string; line: number; text: string }>> {
-  if (depth > SEARCH_MAX_DEPTH || visited.count >= SEARCH_MAX_VISITED) return []
+export async function searchFiles(root: string, query: string, directory = '.', depth = 0, visited = { count: 0 }, matched = { count: 0 }): Promise<Array<{ path: string; line: number; text: string }>> {
+  if (depth > SEARCH_MAX_DEPTH || visited.count >= SEARCH_MAX_VISITED || matched.count >= SEARCH_MAX_RESULTS) return []
   const base = await within(root, directory)
   const baseStat = await lstat(base).catch(() => undefined)
   if (!baseStat || baseStat.isSymbolicLink() || !baseStat.isDirectory()) return []
@@ -134,12 +134,13 @@ export async function searchFiles(root: string, query: string, directory = '.', 
   const result: Array<{ path: string; line: number; text: string }> = []
   const needle = query.toLocaleLowerCase()
   for (const entry of entries) {
-    if (entry.name.startsWith('.') || entry.name === 'node_modules' || result.length >= SEARCH_MAX_RESULTS || visited.count >= SEARCH_MAX_VISITED) break
+    if (result.length >= SEARCH_MAX_RESULTS || visited.count >= SEARCH_MAX_VISITED || matched.count >= SEARCH_MAX_RESULTS) break
+    if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
     visited.count++
     const relativePath = directory === '.' ? entry.name : join(directory, entry.name)
     if (entry.isSymbolicLink()) continue
     if (entry.isDirectory()) {
-      result.push(...await searchFiles(root, query, relativePath, depth + 1, visited))
+      result.push(...await searchFiles(root, query, relativePath, depth + 1, visited, matched))
       continue
     }
     if (!entry.isFile()) continue
@@ -148,9 +149,13 @@ export async function searchFiles(root: string, query: string, directory = '.', 
     const file = await readFile(filePath).catch(() => undefined)
     if (!file || file.includes('\u0000') || file.byteLength > 1_000_000) continue
     const lines = file.toString('utf8').split(/\r?\n/)
-    lines.forEach((line, index) => {
-      if (line.toLocaleLowerCase().includes(needle) && result.length < SEARCH_MAX_RESULTS) result.push({ path: relativePath, line: index + 1, text: line.slice(0, 500) })
-    })
+    for (const [index, line] of lines.entries()) {
+      if (matched.count >= SEARCH_MAX_RESULTS) break
+      if (line.toLocaleLowerCase().includes(needle)) {
+        result.push({ path: relativePath, line: index + 1, text: line.slice(0, 500) })
+        matched.count++
+      }
+    }
   }
   return result.slice(0, SEARCH_MAX_RESULTS)
 }

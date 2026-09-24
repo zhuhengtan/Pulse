@@ -2,6 +2,7 @@ import { useMemo, useCallback } from 'react';
 import type { SlashCommand } from '../types.js';
 
 export interface SlashCommandDependencies {
+  onMouse?: (args: string) => void | Promise<void>;
   onHelp?: () => void | Promise<void>;
   onStatus?: () => void | Promise<void>;
   onTools?: () => void | Promise<void>;
@@ -26,6 +27,7 @@ export interface SlashCommandDependencies {
 export function useSlashCommands(deps: SlashCommandDependencies) {
   const commands = useMemo<SlashCommand[]>(
     () => [
+      { name: '/mouse', description: '滚轮和触控板滚动 [on|off]', execute: async (args) => deps.onMouse?.(args) },
       { name: '/help', aliases: ['/h'], description: '显示帮助信息', execute: async () => deps.onHelp?.() },
       { name: '/status', description: '查看状态', execute: async () => deps.onStatus?.() },
       { name: '/tools', description: '列出可用工具', execute: async () => deps.onTools?.() },

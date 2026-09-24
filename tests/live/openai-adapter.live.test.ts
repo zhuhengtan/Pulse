@@ -3,6 +3,7 @@ import { OpenAICompatibleAdapter } from '@hunterzhu/pulse-adapters'
 import type { LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 
 const apiKey = process.env.OPENAI_API_KEY
+const deepseekApiKey = process.env.DEEPSEEK_API_KEY
 const toolSmoke = process.env.PULSE_LIVE_TOOL_SMOKE === '1'
 const structuredSmoke = process.env.PULSE_LIVE_STRUCTURED_SMOKE === '1'
 const cancellationSmoke = process.env.PULSE_LIVE_CANCELLATION_SMOKE === '1'
@@ -73,7 +74,7 @@ describe.skipIf(!apiKey)('live OpenAI-compatible adapter', () => {
       prefixHash: 'live-structured-prefix', projectionHash: 'live-structured-projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'live-structured-smoke', privacy: 'public', privacyRefs: [],
     }
     const result = await adapter.executeAttempt({ request, signal: new AbortController().signal, outputSchema })
-    expect(result.structured).toEqual({ ok: true })
+    expect(JSON.parse(result.text)).toEqual({ ok: true })
     expect(result.finishReason).toBe('stop')
   }, 30_000)
 
@@ -97,5 +98,26 @@ describe.skipIf(!apiKey)('live OpenAI-compatible adapter', () => {
     const pending = adapter.executeAttempt({ request, signal: controller.signal })
     controller.abort()
     await expect(pending).rejects.toMatchObject({ code: 'PROVIDER_REQUEST_CANCELLED', retryable: false })
+  }, 30_000)
+})
+
+describe.skipIf(!deepseekApiKey)('live DeepSeek structured-output adapter', () => {
+  it('uses JSON mode and returns a locally validated structured response', async () => {
+    const adapter = new OpenAICompatibleAdapter('deepseek-live-structured', {
+      provider: 'deepseek',
+      apiKey: deepseekApiKey,
+      defaultModel: process.env.DEEPSEEK_MODEL ?? 'deepseek-flash',
+      baseURL: process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com/v1',
+      maxOutputTokens: 2048,
+    })
+    const outputSchema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false } as const
+    const request: LLMRequestProjection = {
+      contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'deepseek-live-structured', instruction: 'Return JSON with the boolean field ok set to true.', privacy: 'public', privacyRefs: [] },
+      blocks: [{ kind: 'system', content: 'You are a live DeepSeek structured-output smoke-test.' }, { kind: 'instruction', content: 'Return JSON with the boolean field ok set to true.' }],
+      prefixHash: 'deepseek-live-prefix', projectionHash: 'deepseek-live-projection', builderVersion: '1', policyVersion: '1', toolSetVersion: 'deepseek-live-structured', privacy: 'public', privacyRefs: [],
+    }
+    const result = await adapter.executeAttempt({ request, signal: new AbortController().signal, outputSchema })
+    expect(result.structured).toEqual({ ok: true })
+    expect(result.finishReason).toBe('stop')
   }, 30_000)
 })

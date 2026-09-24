@@ -187,7 +187,8 @@ export function useRun({
                 break;
               }
             }
-            setCurrentStep(describeFactStatus(event.data));
+            // Runtime facts are diagnostic data, not user-facing prose.
+            if (typeof event.data === 'string' && event.data.startsWith('human.input.')) setCurrentStep(describeFactStatus(event.data));
             break;
           case 'error':
             setError(String(event.data ?? '发生未知错误'));
@@ -204,6 +205,36 @@ export function useRun({
             setAskRequest(null);
             if (event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
               const completion = event.data as Record<string, unknown>;
+              const usage = completion.usage && typeof completion.usage === 'object' && !Array.isArray(completion.usage)
+                ? completion.usage as Record<string, unknown>
+                : undefined;
+              if (usage) {
+                const input = typeof usage.inputTokens === 'number' ? usage.inputTokens.toLocaleString() : '未知';
+                const output = typeof usage.outputTokens === 'number' ? usage.outputTokens.toLocaleString() : '未知';
+                const costs = Array.isArray(usage.providerCosts) ? usage.providerCosts.filter((item): item is { currency: string; amount: number } => Boolean(item && typeof item === 'object' && typeof (item as { currency?: unknown }).currency === 'string' && typeof (item as { amount?: unknown }).amount === 'number')) : [];
+                const estimate = usage.estimatedCost && typeof usage.estimatedCost === 'object' ? usage.estimatedCost as { currency?: unknown; amount?: unknown; pricingVersion?: unknown } : undefined;
+                const costLabel = costs.length ? costs.map((item) => `${item.amount} ${item.currency}`).join(', ') : estimate && typeof estimate.amount === 'number' ? `估算 ${estimate.amount} ${String(estimate.currency)} (价格 ${String(estimate.pricingVersion)})` : '费用未知';
+                addAssistantMessage({ id: `run-usage-${run.id}`, role: 'system', text: `用量：输入 ${input} · 输出 ${output} · ${costLabel}${usage.completeness === 'partial' ? ' · 数据不完整' : ''}`, createdAt: new Date().toISOString(), runId: run.id });
+              }
+              const taskOutcome = completion.taskOutcome && typeof completion.taskOutcome === 'object' && !Array.isArray(completion.taskOutcome)
+                ? completion.taskOutcome as Record<string, unknown>
+                : undefined;
+              if (taskOutcome && typeof taskOutcome.status === 'string') {
+                const labels: Record<string, string> = {
+                  accepted: '任务验收通过',
+                  incomplete: '任务未完成',
+                  unverifiable: '任务结果无法核验',
+                  failed: '任务执行失败',
+                  cancelled: '任务已取消',
+                };
+                addAssistantMessage({
+                  id: `task-outcome-${run.id}`,
+                  role: 'system',
+                  text: labels[taskOutcome.status] ?? `任务验收状态：${taskOutcome.status}`,
+                  createdAt: new Date().toISOString(),
+                  runId: run.id,
+                });
+              }
               const completionError = completion.error;
               if (completion.status === 'failed' && completionError && typeof completionError === 'object' && !Array.isArray(completionError)) {
                 const error = completionError as Record<string, unknown>;
