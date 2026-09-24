@@ -8,9 +8,6 @@ on:
 permissions:
   contents: read
 
-env:
-  PNPM_HOME: ${{ github.workspace }}/.pnpm-action/node_modules
-
 jobs:
   check:
     strategy:
@@ -23,7 +20,8 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 12.4.2
-          dest: ${{ github.workspace }}/.pnpm-action
+      - name: Allow pnpm toolchain in shell sandbox
+        run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_ENV, 'PNPM_HOME=' + require('node:path').join(require('node:os').homedir(), 'setup-pnpm') + require('node:os').EOL)"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
