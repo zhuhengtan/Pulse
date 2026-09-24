@@ -73,6 +73,8 @@ export interface PulseCliConfig {
   maxTurns?: number
   /** Percent of maxContextTokens that triggers automatic history compaction. Clamped to 1–90. */
   autoCompactPercent?: number
+  /** Explicit network destinations; workspace configuration cannot grant these. */
+  networkHosts?: string[]
   allowNetwork?: boolean
 }
 

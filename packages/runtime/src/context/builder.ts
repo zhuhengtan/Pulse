@@ -10,6 +10,7 @@ function stable(value: unknown): string {
 function hash(value: unknown): string { return createHash('sha256').update(stable(value)).digest('hex') }
 
 export interface ContextBuildInput {
+  explicitContext?: boolean
   agent: AgentRecord
   lane: LaneRecord
   resultRefs?: ResultRef[]
@@ -97,11 +98,11 @@ export class ContextBuilder {
       { kind: 'system' as const, content: input.system ?? '' },
       { kind: 'policy' as const, content: input.policy ?? {} },
       { kind: 'tools' as const, content: input.tools ?? {} },
-      { kind: 'global' as const, content: global },
+      { kind: 'global' as const, content: input.explicitContext ? {} : global },
       ...(conversation.length ? [{ kind: 'conversation' as const, content: structuredClone(conversation) as unknown as JsonValue }] : []),
-      { kind: 'history' as const, content: input.lane.context.history.map((record) => ({ seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), instruction: record.instruction, resultRefs: record.resultRefs, ...(record.resultSelection === undefined ? {} : { resultSelection: record.resultSelection }), ...(record.result === undefined ? {} : { result: record.result }), ...(record.findings === undefined ? {} : { findings: record.findings }), output: record.output, privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: record.privacyTaints as unknown as JsonValue }) })) },
+      { kind: 'history' as const, content: (input.explicitContext ? [] : input.lane.context.history).map((record) => ({ seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), instruction: record.instruction, resultRefs: record.resultRefs, ...(record.resultSelection === undefined ? {} : { resultSelection: record.resultSelection }), ...(record.result === undefined ? {} : { result: record.result }), ...(record.findings === undefined ? {} : { findings: record.findings }), output: record.output, privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: record.privacyTaints as unknown as JsonValue }) })) },
     ]
-    const blocks = [...prefixBlocks, { kind: 'lane' as const, content: input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: results.map((result) => {
+    const blocks = [...prefixBlocks, { kind: 'lane' as const, content: input.explicitContext ? {} : input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: results.map((result) => {
       const projected = projectResultValue(result)
       return { id: result.id, value: projected.value, ...(projected.summarized ? { summarized: true, ...(projected.originalBytes === undefined ? {} : { originalBytes: projected.originalBytes }) } : {}), ...(result.privacyTaints === undefined ? {} : { privacyTaints: result.privacyTaints.map((taint) => ({ path: [...taint.path], privacy: taint.privacy }) as unknown as JsonValue) }) }
     }) }, { kind: 'artifacts' as const, content: artifacts.map((artifact) => ({ ref: artifact.ref, mediaType: artifact.mediaType, sizeBytes: artifact.sizeBytes, contentHash: artifact.contentHash })) }, { kind: 'instruction' as const, content: input.instruction }]

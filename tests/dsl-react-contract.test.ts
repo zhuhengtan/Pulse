@@ -20,6 +20,73 @@ describe('DSL ReAct contract', () => {
     expect(toolRuns).toBe(0)
   })
 
+  it.each([false, true])('bounds truncation recovery without executing partial calls (repeat=%s)', async (repeat) => {
+    let calls = 0
+    let tools = 0
+    let finished = false
+    const program = defineLaneProgram({ id: 'recover-truncation', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', maxTurns: 4, maxTruncationRetries: 1, onFinish: () => { finished = true; return { complete: {} } } })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') tools++
+      calls++
+      if (calls === 1 || repeat) return { value: { text: 'partial', finishReason: 'length', toolCalls: [{ name: 'write', input: {} }] } }
+      expect(JSON.stringify(effect.input)).toContain('Runtime recovery notice')
+      return { value: { text: 'Concise final answer', finishReason: 'stop', toolCalls: [] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe(repeat ? 'failed' : 'succeeded')
+    expect(calls).toBe(2)
+    expect(tools).toBe(0)
+    expect(finished).toBe(!repeat)
+  })
+
+  it('does not let truncation recovery exceed maxTurns', async () => {
+    let calls = 0
+    const program = defineLaneProgram({ id: 'truncation-budget', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', maxTurns: 1, maxTruncationRetries: 1, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async () => { calls++; return { value: { text: '', finishReason: 'length', toolCalls: [] } } } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+    expect(calls).toBe(1)
+  })
+
+  it('serializes mutation batches in the runtime before requesting the next model turn', async () => {
+    let modelCalls = 0
+    let toolCalls = 0
+    const program = defineLaneProgram({ id: 'small-batches', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', maxTurns: 10, maxToolsPerTurn: 4, serialTools: ['write'], onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { toolCalls++; return { value: 'done' } }
+      modelCalls++
+      if (modelCalls === 1) return { value: { text: '', finishReason: 'tool_calls', toolCalls: [{ name: 'write', input: {} }, { name: 'write', input: {} }] } }
+      expect(toolCalls).toBe(2)
+      return { value: { text: 'done', finishReason: 'stop', toolCalls: [] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(toolCalls).toBe(2)
+  })
+
+  it.each([false, true])('stops queued mutations after a failure rather than executing dependent writes (nonzero exit=%s)', async (nonzeroExit) => {
+    let models = 0
+    let calls = 0
+    const program = defineLaneProgram({ id: 'queue-failure', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', maxTurns: 5, serialTools: ['write'], onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { calls++; return nonzeroExit ? { value: { code: 1, stderr: 'failed' } } : { status: 'failed', executionState: 'failed', error: { code: 'CONFLICT', message: 'changed' } } }
+      if (++models === 1) return { value: { text: '', finishReason: 'tool_calls', toolCalls: [{ name: 'write', input: { step: 1 } }, { name: 'write', input: { step: 2 } }] } }
+      expect(JSON.stringify(effect.input)).toContain('1 queued tool calls were NOT executed')
+      return { value: { text: 'blocked', finishReason: 'stop', toolCalls: [] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    await runtime.start(agentId).outcome()
+    expect(calls).toBe(1)
+  })
+
   it('returns failed tool outcomes to the model and stops repeated failures', async () => {
     const requests: any[] = []
     const program = defineLaneProgram({ id: 'failed-tools', version: '1' }, (builder) => {
@@ -36,6 +103,40 @@ describe('DSL ReAct contract', () => {
     expect(JSON.stringify(requests[1].inputs.conversation)).toContain('APPROVAL_DENIED')
     expect(JSON.stringify(requests[1].inputs.conversation)).toContain('Permission denied for web.fetch')
     expect(runtime.state.lanes.get(laneId)?.failure?.error.code).toBe('REPEATED_TOOL_FAILURE')
+  })
+
+  it('resets consecutive failure detection after successful independent work', async () => {
+    let models = 0
+    let tools = 0
+    const program = defineLaneProgram({ id: 'independent-progress', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', maxTurns: 10, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') {
+        if (++tools % 2) return { status: 'failed', executionState: 'failed', error: { code: 'ENOENT', message: 'missing' } }
+        return { value: { progress: tools } }
+      }
+      if (++models > 6) return { value: { text: 'Independent work done; missing item blocked', finishReason: 'stop', toolCalls: [] } }
+      return { value: { text: '', finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: {} }] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(tools).toBe(6)
+  })
+
+  it('stops immediately when the sandbox cannot initialize', async () => {
+    let calls = 0
+    const program = defineLaneProgram({ id: 'sandbox-blocker', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      calls++
+      if (effect.kind === 'tool') return { status: 'failed', executionState: 'failed', error: { code: 'SANDBOX_SETUP_FAILED', message: 'SANDBOX_SETUP_FAILED', retryable: false } }
+      return { value: { text: '', finishReason: 'tool_calls', toolCalls: [{ name: 'shell.exec', input: {} }] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'failed', error: { code: 'SANDBOX_SETUP_FAILED' } })
+    expect(calls).toBe(2)
   })
 
   it('nudges completion and bounds repeated unchanged successful reads', async () => {

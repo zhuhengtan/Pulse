@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { realpath, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promises as dns } from 'node:dns'
@@ -87,6 +87,20 @@ describe('conversation and workspace path safety', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('searches an explicitly selected file and preserves line numbers and limits', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-search-file-'))
+    try {
+      await writeFile(join(directory, 'README.md'), 'heading\n642 tests\n642 again\n')
+      await expect(searchFiles(directory, '642', 'README.md')).resolves.toEqual([
+        { path: 'README.md', line: 2, text: '642 tests' },
+        { path: 'README.md', line: 3, text: '642 again' },
+      ])
+      await expect(searchFiles(directory, '642', 'README.md', 0, { count: 0 }, { count: 99 })).resolves.toHaveLength(1)
+      await writeFile(join(directory, 'binary'), '642\u0000')
+      await expect(searchFiles(directory, '642', 'binary')).resolves.toEqual([])
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('continues searching after a hidden directory such as .git', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-search-git-'))
     try {
@@ -134,6 +148,9 @@ describe('conversation and workspace path safety', () => {
     try {
       await writeFile(join(outside, 'secret.txt'), 'secret-value')
       await symlink(outside, join(directory, 'escape'))
+      await expect(within(directory, directory)).resolves.toBe(await realpath(directory))
+      await expect(within(directory, outside)).rejects.toThrow('PATH_OUTSIDE_WORKSPACE')
+      await expect(within(directory, join(directory, 'escape'))).rejects.toThrow('PATH_OUTSIDE_WORKSPACE')
       await expect(within(directory, 'escape')).rejects.toThrow('PATH_OUTSIDE_WORKSPACE')
       await expect(within(directory, '../outside')).rejects.toThrow('PATH_OUTSIDE_WORKSPACE')
       await expect(searchFiles(directory, 'secret-value')).resolves.toEqual([])

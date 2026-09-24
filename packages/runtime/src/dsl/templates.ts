@@ -15,6 +15,9 @@ export interface ReActLaneConfig {
   inputs?: (ctx: StepContext<JsonValue>) => StepInputs
   toolAllow?: string[]
   maxTurns?: number
+  maxTruncationRetries?: number
+  maxToolsPerTurn?: number
+  serialTools?: string[]
   /** Return a durable token when a new attempt should get a fresh turn budget. */
   resetTurnsOnEntry?: (ctx: StepContext<JsonValue>) => string | number | undefined
   outputSchema?: ZodTypeAny
@@ -36,7 +39,7 @@ export function defineReActLane(config: ReActLaneConfig): LaneProgramDefinition 
     const onFinish = config.onFinish ?? (config.outputSchema === undefined
       ? { text: (resultRef: string) => ({ complete: { value: { textRef: resultRef } } }) }
       : { text: (resultRef: string) => ({ complete: { value: { textRef: resultRef } } }), structured: { schema: config.outputSchema, onParsed: (value: unknown) => ({ complete: { value: value as JsonValue } }) } })
-    builder.addReActLoopStep('react', { ...(config.task === undefined ? {} : { task: config.task }), instruction: config.instruction, ...(config.inputs === undefined ? {} : { inputs: config.inputs }), ...(config.toolAllow === undefined ? {} : { toolAllow: config.toolAllow }), ...(config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns }), ...(config.resetTurnsOnEntry === undefined ? {} : { resetTurnsOnEntry: config.resetTurnsOnEntry }), ...(config.outputSchema === undefined ? {} : { outputSchema: config.outputSchema }), ...(config.requirements === undefined ? {} : { requirements: config.requirements }), ...(config.toolApproval === undefined ? {} : { toolApproval: config.toolApproval }), onFinish })
+    builder.addReActLoopStep('react', { ...(config.task === undefined ? {} : { task: config.task }), instruction: config.instruction, ...(config.inputs === undefined ? {} : { inputs: config.inputs }), ...(config.toolAllow === undefined ? {} : { toolAllow: config.toolAllow }), ...(config.maxToolsPerTurn === undefined ? {} : { maxToolsPerTurn: config.maxToolsPerTurn }), ...(config.serialTools === undefined ? {} : { serialTools: config.serialTools }), ...(config.maxTruncationRetries === undefined ? {} : { maxTruncationRetries: config.maxTruncationRetries }), ...(config.maxTurns === undefined ? {} : { maxTurns: config.maxTurns }), ...(config.resetTurnsOnEntry === undefined ? {} : { resetTurnsOnEntry: config.resetTurnsOnEntry }), ...(config.outputSchema === undefined ? {} : { outputSchema: config.outputSchema }), ...(config.requirements === undefined ? {} : { requirements: config.requirements }), ...(config.toolApproval === undefined ? {} : { toolApproval: config.toolApproval }), onFinish })
     config.extend?.(builder)
   })
 }

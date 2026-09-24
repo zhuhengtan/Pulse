@@ -373,6 +373,20 @@ describe('M1-3 context, models and adapters', () => {
     }
   })
 
+  it('runs the installed development toolchain inside the sandbox by name', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulse toolchain 雪-'))
+    try {
+      for (const [command, args] of [['node', ['--version']], ['pnpm', ['--version']], ['git', ['init', '--quiet']], ['git', ['status', '--porcelain']]] as const) {
+        const result = await runShell(command, [...args], { cwd: root, timeoutMs: 30_000 })
+        expect(result.code, `${command}: ${result.stderr}`).toBe(0)
+        expect(result.stderr).not.toContain('Operation not permitted')
+      }
+      const child = await runShell('node', ['-e', 'const c=require("node:child_process").spawnSync("node",["--version"],{encoding:"utf8"});process.stdout.write(c.stdout||"");process.exit(c.status??1)'], { cwd: root })
+      expect(child.code, child.stderr).toBe(0)
+      expect(child.stdout).toMatch(/^v\d+/)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('classifies filesystem and shell validation failures as non-retryable', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-tool-errors-'))
     try {

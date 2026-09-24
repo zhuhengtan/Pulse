@@ -119,3 +119,16 @@ describe('mutation log and replay', () => {
     expect(log.size).toBe(0)
   })
 })
+
+
+it('preserves the append cursor when checkpoint truncation leaves newer transactions', () => {
+  const log = new MutationLog()
+  log.append('saved', [])
+  log.append('during-save-1', [])
+  log.append('during-save-2', [])
+  log.truncateThrough(1)
+  expect(log.append('after-save', []).seq).toBe(4)
+  const restored = MutationLog.fromSnapshot(JSON.parse(JSON.stringify(log.snapshot())))
+  expect(restored.entries.map((entry) => entry.seq)).toEqual([2, 3, 4])
+  expect(restored.append('after-restore', []).seq).toBe(5)
+})

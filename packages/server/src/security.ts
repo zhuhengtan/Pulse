@@ -7,6 +7,7 @@ export const CONVERSATION_ID = /^conv-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[
 const SEARCH_MAX_DEPTH = 8
 const SEARCH_MAX_VISITED = 2_000
 const SEARCH_MAX_RESULTS = 100
+const SEARCH_MAX_FILE_BYTES = 1_000_000
 
 export function isConversationId(id: string): boolean {
   return CONVERSATION_ID.test(id)
@@ -22,11 +23,10 @@ export function conversationDirectory(dataDir: string, id: string): string {
 }
 
 function lexicalWithin(root: string, path: string): string {
-  if (isAbsolute(path)) throw new Error('PATH_OUTSIDE_WORKSPACE')
   const base = resolve(root)
   const absolute = resolve(base, path)
   const rel = relative(base, absolute)
-  if (rel === '..' || rel.startsWith(`..${sep}`)) throw new Error('PATH_OUTSIDE_WORKSPACE')
+  if (isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) throw new Error('PATH_OUTSIDE_WORKSPACE')
   return absolute
 }
 
@@ -125,32 +125,132 @@ export async function assertPublicNetworkUrl(raw: string, allowHosts?: string[])
   return url
 }
 
-export async function searchFiles(root: string, query: string, directory = '.', depth = 0, visited = { count: 0 }, matched = { count: 0 }): Promise<Array<{ path: string; line: number; text: string }>> {
-  if (depth > SEARCH_MAX_DEPTH || visited.count >= SEARCH_MAX_VISITED || matched.count >= SEARCH_MAX_RESULTS) return []
+export type SearchMatch = {
+  path: string
+  line: number
+  text: string
+}
+
+export type SearchTruncationReason = 'depth' | 'visited' | 'results'
+
+/**
+ * Bounded workspace search statistics. `truncated` and `reason` separate
+ * "the workspace has no match" from "the search stopped before it finished".
+ */
+export interface WorkspaceSearchResult {
+  matches: SearchMatch[]
+  truncated: boolean
+  reason: SearchTruncationReason | null
+  visited: number
+  matched: number
+}
+
+interface SearchCounters {
+  count: number
+}
+
+interface SearchProgress {
+  truncated: boolean
+  reason: SearchTruncationReason | null
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error('SEARCH_ABORTED')
+}
+
+function markTruncated(progress: SearchProgress, reason: SearchTruncationReason): void {
+  progress.truncated = true
+  progress.reason = progress.reason ?? reason
+}
+
+/** Reads a file only after its size is known to be in budget, then rejects binary content. */
+async function readSearchableLines(filePath: string, size: number): Promise<string[] | undefined> {
+  if (size > SEARCH_MAX_FILE_BYTES) return undefined
+  const file = await readFile(filePath).catch(() => undefined)
+  if (!file || file.byteLength > SEARCH_MAX_FILE_BYTES || file.includes('\u0000')) return undefined
+  return file.toString('utf8').split(/\r?\n/)
+}
+
+async function collectMatches(
+  root: string,
+  query: string,
+  directory: string,
+  depth: number,
+  visited: SearchCounters,
+  matched: SearchCounters,
+  progress: SearchProgress,
+  signal: AbortSignal | undefined,
+): Promise<SearchMatch[]> {
+  throwIfAborted(signal)
+  if (depth > SEARCH_MAX_DEPTH) {
+    markTruncated(progress, 'depth')
+    return []
+  }
+  if (visited.count >= SEARCH_MAX_VISITED) {
+    markTruncated(progress, 'visited')
+    return []
+  }
+  if (matched.count >= SEARCH_MAX_RESULTS) {
+    markTruncated(progress, 'results')
+    return []
+  }
   const base = await within(root, directory)
+  throwIfAborted(signal)
   const baseStat = await lstat(base).catch(() => undefined)
-  if (!baseStat || baseStat.isSymbolicLink() || !baseStat.isDirectory()) return []
-  const entries = await readdir(base, { withFileTypes: true })
-  const result: Array<{ path: string; line: number; text: string }> = []
+  if (!baseStat || baseStat.isSymbolicLink()) return []
   const needle = query.toLocaleLowerCase()
+  if (baseStat.isFile()) {
+    visited.count++
+    const lines = await readSearchableLines(base, baseStat.size)
+    throwIfAborted(signal)
+    if (!lines) return []
+    const result: SearchMatch[] = []
+    for (const [index, line] of lines.entries()) {
+      if (matched.count >= SEARCH_MAX_RESULTS) {
+        markTruncated(progress, 'results')
+        break
+      }
+      if (line.toLocaleLowerCase().includes(needle)) {
+        result.push({ path: directory, line: index + 1, text: line.slice(0, 500) })
+        matched.count++
+      }
+    }
+    return result
+  }
+  if (!baseStat.isDirectory()) return []
+  const entries = await readdir(base, { withFileTypes: true })
+  throwIfAborted(signal)
+  const result: SearchMatch[] = []
   for (const entry of entries) {
-    if (result.length >= SEARCH_MAX_RESULTS || visited.count >= SEARCH_MAX_VISITED || matched.count >= SEARCH_MAX_RESULTS) break
+    if (matched.count >= SEARCH_MAX_RESULTS) {
+      markTruncated(progress, 'results')
+      break
+    }
+    if (visited.count >= SEARCH_MAX_VISITED) {
+      markTruncated(progress, 'visited')
+      break
+    }
     if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
     visited.count++
     const relativePath = directory === '.' ? entry.name : join(directory, entry.name)
     if (entry.isSymbolicLink()) continue
     if (entry.isDirectory()) {
-      result.push(...await searchFiles(root, query, relativePath, depth + 1, visited, matched))
+      result.push(...await collectMatches(root, query, relativePath, depth + 1, visited, matched, progress, signal))
       continue
     }
     if (!entry.isFile()) continue
     const filePath = await within(root, relativePath).catch(() => undefined)
     if (!filePath) continue
-    const file = await readFile(filePath).catch(() => undefined)
-    if (!file || file.includes('\u0000') || file.byteLength > 1_000_000) continue
-    const lines = file.toString('utf8').split(/\r?\n/)
+    const entryStat = await lstat(filePath).catch(() => undefined)
+    if (!entryStat || entryStat.isSymbolicLink()) continue
+    const lines = await readSearchableLines(filePath, entryStat.size)
+    throwIfAborted(signal)
+    if (!lines) continue
     for (const [index, line] of lines.entries()) {
-      if (matched.count >= SEARCH_MAX_RESULTS) break
+      if (matched.count >= SEARCH_MAX_RESULTS) {
+        markTruncated(progress, 'results')
+        break
+      }
       if (line.toLocaleLowerCase().includes(needle)) {
         result.push({ path: relativePath, line: index + 1, text: line.slice(0, 500) })
         matched.count++
@@ -158,6 +258,36 @@ export async function searchFiles(root: string, query: string, directory = '.', 
     }
   }
   return result.slice(0, SEARCH_MAX_RESULTS)
+}
+
+/**
+ * Backwards-compatible workspace search. Returns only the match array, exactly
+ * as before, while still honoring the shared depth/visit/result counters so
+ * callers that pass their own `visited`/`matched` objects keep working.
+ */
+export async function searchFiles(
+  root: string,
+  query: string,
+  directory = '.',
+  depth = 0,
+  visited: SearchCounters = { count: 0 },
+  matched: SearchCounters = { count: 0 },
+  signal?: AbortSignal,
+): Promise<SearchMatch[]> {
+  const progress: SearchProgress = { truncated: false, reason: null }
+  return collectMatches(root, query, directory, depth, visited, matched, progress, signal)
+}
+
+/**
+ * Workspace search with statistics. Consumers can tell an empty workspace from
+ * a truncated result and see why the traversal stopped.
+ */
+export async function searchWorkspace(root: string, query: string, directory = '.', signal?: AbortSignal): Promise<WorkspaceSearchResult> {
+  const visited: SearchCounters = { count: 0 }
+  const matched: SearchCounters = { count: 0 }
+  const progress: SearchProgress = { truncated: false, reason: null }
+  const matches = await collectMatches(root, query, directory, 0, visited, matched, progress, signal)
+  return { matches, truncated: progress.truncated, reason: progress.reason, visited: visited.count, matched: matched.count }
 }
 
 export function safeShellEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {

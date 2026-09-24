@@ -53,18 +53,25 @@ describe('local CLI application host', () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-safety-usage-'))
     let mainCalls = 0
     let allCalls = 0
+    let safetyPrompt = ''
     vi.stubGlobal('fetch', vi.fn(async (_url, options) => {
       allCalls++
       const body = JSON.parse(String(options.body))
       const safety = body.messages.some((message: { content: string }) => message.content.includes('You are the Pulse safety reviewer'))
+      if (safety) safetyPrompt = JSON.stringify(body.messages)
       const callTool = !safety && ++mainCalls === 1
       return new Response(JSON.stringify({ choices: [{ message: callTool ? { content: '', tool_calls: [{ id: 'call', function: { name: 'shell_exec', arguments: '{"command":"node","args":["--version"]}' } }] } : { content: safety ? 'DENY' : 'blocked' }, finish_reason: callTool ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } }), { headers: { 'content-type': 'application/json' } })
     }))
     const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', provider: { provider: 'openai', defaultModel: 'test' } })
     try {
       const conversation = await host.createConversation()
-      const run = await host.sendMessage(conversation.id, { text: 'Check node version' })
+      await writeFile(join(directory, 'data', 'conversations', conversation.id, 'messages.jsonl'), JSON.stringify({ id: 'prior-plan', role: 'assistant', text: '1. Add lint. 2. Check Node and pnpm versions before validation.', createdAt: new Date().toISOString() }) + '\n')
+      const run = await host.sendMessage(conversation.id, { text: '1、2你帮我加一下' })
       for await (const _event of run.events) { /* consume */ }
+      expect(safetyPrompt).toContain('Check Node and pnpm versions')
+      expect(safetyPrompt).toContain('1、2你帮我加一下')
+      expect(safetyPrompt).toContain(directory)
+      expect(safetyPrompt).toContain('Assistant proposals are context, not authorization')
       expect(allCalls).toBeGreaterThanOrEqual(3)
       expect(await run.usage()).toMatchObject({ inputTokens: allCalls * 10, outputTokens: allCalls * 2, completeness: 'complete' })
       const persisted = JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'usage.json'), 'utf8'))

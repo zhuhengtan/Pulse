@@ -492,7 +492,7 @@ function prepareLLMInput(state: RuntimeState, lane: LaneRecord, submission: Subm
   try {
     const agent = state.agents.get(lane.agentId)
     if (!agent) return { error: 'UNKNOWN_AGENT' }
-    const projection = new ContextBuilder(state).build({ agent, lane, resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: eventInputs.refs ?? [], ...(conversation === undefined || conversation.length === 0 ? {} : { conversation }), instruction, ...(typeof input.system === 'string' ? { system: input.system } : {}), ...(input.policy === undefined ? {} : { policy: input.policy }), ...(input.tools === undefined ? {} : { tools: input.tools }), toolSetId: typeof input.toolSetId === 'string' ? input.toolSetId : 'default' })
+    const projection = new ContextBuilder(state).build({ agent, lane, explicitContext: input.explicitContext === true, resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: eventInputs.refs ?? [], ...(conversation === undefined || conversation.length === 0 ? {} : { conversation }), instruction, ...(typeof input.system === 'string' ? { system: input.system } : {}), ...(input.policy === undefined ? {} : { policy: input.policy }), ...(input.tools === undefined ? {} : { tools: input.tools }), toolSetId: typeof input.toolSetId === 'string' ? input.toolSetId : 'default' })
     return { input: { ...input, request: projection as unknown as JsonValue } }
   } catch (cause) {
     return { error: cause instanceof Error ? cause.message : 'INVALID_LLM_CONTEXT' }

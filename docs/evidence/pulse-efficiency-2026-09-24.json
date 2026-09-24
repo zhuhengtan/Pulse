@@ -1,0 +1,523 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-24",
+  "platform": "macOS",
+  "limitations": [
+    "Single sequential sample per build, stochastic model; not a statistical performance benchmark.",
+    "Before/after samples can have different acceptance outcomes. Failed intermediate trials retained.",
+    "Provider monetary costs unavailable.",
+    "Timing includes CLI startup and, for repair samples, independent verification overhead.",
+    "Regression tests do not prove no quality regression on all tasks. No Windows/Linux live acceptance in this run."
+  ],
+  "regression": {
+    "files": 107,
+    "tests": 741,
+    "status": "passed"
+  },
+  "runs": [
+    {
+      "name": "before",
+      "code": 1,
+      "signal": null,
+      "elapsedMs": 49254,
+      "independentTestCode": 0,
+      "testUnchanged": true,
+      "conversationId": "conv-f2e0a2a5-f494-4406-9e5b-57ae7007939d",
+      "runId": "run-890a0e25-39d0-49c8-be95-464a0d301315",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "incomplete",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 110882,
+        "outputTokens": 7115,
+        "cachedInputTokens": 42368,
+        "durationMs": 42861,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelCalls": 13,
+      "models": [
+        "deepseek-flash"
+      ],
+      "tools": [
+        "shell.exec",
+        "fs.read",
+        "fs.read",
+        "fs.apply_patch",
+        "shell.exec",
+        "fs.read",
+        "fs.read",
+        "shell.exec",
+        "shell.exec",
+        "shell.exec"
+      ],
+      "writePaths": [
+        ".tmp/efficiency-fixture/sum.mjs"
+      ],
+      "stages": [
+        {
+          "id": "task-1",
+          "status": "passed",
+          "attempts": 1
+        },
+        {
+          "id": "task-2",
+          "status": "passed",
+          "attempts": 1
+        },
+        {
+          "id": "task-3",
+          "status": "blocked",
+          "attempts": 1
+        }
+      ],
+      "finalCitationCorrection": false,
+      "outcomePath": ".tmp/efficiency-evidence/before/conversations/conv-f2e0a2a5-f494-4406-9e5b-57ae7007939d/runs/run-890a0e25-39d0-49c8-be95-464a0d301315/outcome.json"
+    },
+    {
+      "name": "after",
+      "code": 0,
+      "signal": null,
+      "elapsedMs": 66578,
+      "independentTestCode": 0,
+      "testUnchanged": true,
+      "conversationId": "conv-e63e38a2-6ab6-4e3b-b4ac-3e6265b38546",
+      "runId": "run-88c9e619-a16b-4004-8d88-636c05ce31a7",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "accepted",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 98756,
+        "outputTokens": 11262,
+        "cachedInputTokens": 67328,
+        "durationMs": 59853,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelCalls": 18,
+      "models": [
+        "deepseek-flash"
+      ],
+      "tools": [
+        "fs.read",
+        "fs.read",
+        "shell.exec",
+        "task.evidence",
+        "fs.read",
+        "fs.apply_patch",
+        "fs.read",
+        "shell.exec",
+        "shell.exec",
+        "fs.read",
+        "task.audit",
+        "task.evidence",
+        "task.evidence",
+        "shell.exec",
+        "fs.read",
+        "shell.exec"
+      ],
+      "writePaths": [
+        ".tmp/efficiency-fixture/sum.mjs"
+      ],
+      "stages": [
+        {
+          "id": "t1",
+          "status": "passed",
+          "attempts": 1
+        },
+        {
+          "id": "t2",
+          "status": "passed",
+          "attempts": 1
+        },
+        {
+          "id": "t3",
+          "status": "passed",
+          "attempts": 1
+        }
+      ],
+      "finalCitationCorrection": false,
+      "outcomePath": ".tmp/efficiency-evidence/after/conversations/conv-e63e38a2-6ab6-4e3b-b4ac-3e6265b38546/runs/run-88c9e619-a16b-4004-8d88-636c05ce31a7/outcome.json"
+    },
+    {
+      "name": "after-final",
+      "code": 1,
+      "signal": null,
+      "elapsedMs": 45455,
+      "independentTestCode": 0,
+      "testUnchanged": true,
+      "conversationId": "conv-5cb87fde-d992-43c7-8ef3-6926d29b8dab",
+      "runId": "run-e8478af0-5834-4789-a983-e70657b1ec38",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "incomplete",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 74077,
+        "outputTokens": 7776,
+        "cachedInputTokens": 49792,
+        "durationMs": 40855,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelCalls": 14,
+      "models": [
+        "deepseek-flash"
+      ],
+      "tools": [
+        "fs.read",
+        "fs.read",
+        "shell.exec",
+        "fs.apply_patch",
+        "fs.read",
+        "task.audit",
+        "shell.exec",
+        "task.audit"
+      ],
+      "writePaths": [
+        ".tmp/efficiency-fixture/sum.mjs"
+      ],
+      "stages": [
+        {
+          "id": "stage-1",
+          "status": "passed",
+          "attempts": 1
+        },
+        {
+          "id": "stage-2",
+          "status": "passed",
+          "attempts": 1
+        },
+        {
+          "id": "stage-3",
+          "status": "passed",
+          "attempts": 1
+        }
+      ],
+      "finalCitationCorrection": false,
+      "outcomePath": ".tmp/efficiency-evidence/after-final/conversations/conv-5cb87fde-d992-43c7-8ef3-6926d29b8dab/runs/run-e8478af0-5834-4789-a983-e70657b1ec38/outcome.json"
+    },
+    {
+      "name": "after-verified",
+      "code": 1,
+      "signal": null,
+      "elapsedMs": 60257,
+      "independentTestCode": 0,
+      "testUnchanged": true,
+      "conversationId": "conv-3f014349-dee2-4ad5-a0e0-6d700d1f49ab",
+      "runId": "run-34094f85-4de0-4991-a3d2-a5254318c0e6",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "incomplete",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 78030,
+        "outputTokens": 10294,
+        "cachedInputTokens": 55552,
+        "durationMs": 54888,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelCalls": 15,
+      "models": [
+        "deepseek-flash"
+      ],
+      "tools": [
+        "fs.read",
+        "fs.read",
+        "shell.exec",
+        "fs.apply_patch",
+        "fs.read",
+        "shell.exec",
+        "shell.exec",
+        "shell.exec",
+        "shell.exec"
+      ],
+      "writePaths": [
+        ".tmp/efficiency-fixture/sum.mjs"
+      ],
+      "stages": [
+        {
+          "id": "stage-1",
+          "status": "passed",
+          "attempts": 1
+        },
+        {
+          "id": "stage-2",
+          "status": "passed",
+          "attempts": 1
+        },
+        {
+          "id": "stage-3",
+          "status": "passed",
+          "attempts": 1
+        }
+      ],
+      "finalCitationCorrection": false,
+      "outcomePath": ".tmp/efficiency-evidence/after-verified/conversations/conv-3f014349-dee2-4ad5-a0e0-6d700d1f49ab/runs/run-34094f85-4de0-4991-a3d2-a5254318c0e6/outcome.json"
+    },
+    {
+      "name": "after-complete",
+      "code": 0,
+      "signal": null,
+      "elapsedMs": 40117,
+      "independentTestCode": 0,
+      "testUnchanged": true,
+      "conversationId": "conv-cea6312a-13d7-4a50-b9a8-ccb19938f93b",
+      "runId": "run-5a901b4b-c406-49df-8fab-3f92fd1f0c34",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "accepted",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 81709,
+        "outputTokens": 6814,
+        "cachedInputTokens": 50688,
+        "durationMs": 35515,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelCalls": 14,
+      "models": [
+        "deepseek-flash"
+      ],
+      "tools": [
+        "fs.read",
+        "fs.read",
+        "shell.exec",
+        "fs.apply_patch",
+        "fs.read",
+        "shell.exec",
+        "fs.read",
+        "shell.exec",
+        "task.audit",
+        "fs.read",
+        "shell.exec"
+      ],
+      "writePaths": [
+        ".tmp/efficiency-fixture/sum.mjs"
+      ],
+      "stages": [
+        {
+          "id": "stage-1",
+          "status": "passed",
+          "attempts": 1
+        },
+        {
+          "id": "stage-2",
+          "status": "passed",
+          "attempts": 1
+        }
+      ],
+      "finalCitationCorrection": true,
+      "outcomePath": ".tmp/efficiency-evidence/after-complete/conversations/conv-cea6312a-13d7-4a50-b9a8-ccb19938f93b/runs/run-5a901b4b-c406-49df-8fab-3f92fd1f0c34/outcome.json"
+    },
+    {
+      "name": "initial",
+      "code": 0,
+      "elapsedMs": 13156,
+      "conversationId": "conv-b63943c1-f7ac-474f-8d2a-a4ccf70dd7c5",
+      "runId": "run-f4156140-1de8-48cb-883b-0a5b4f316903",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "accepted",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 16029,
+        "outputTokens": 1726,
+        "cachedInputTokens": 11648,
+        "durationMs": 11477,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelCalls": 5,
+      "models": [
+        "deepseek-flash"
+      ],
+      "tools": [
+        "fs.read",
+        "fs.read"
+      ],
+      "writePaths": [],
+      "stages": [
+        {
+          "id": "stage-1",
+          "status": "passed",
+          "attempts": 1
+        }
+      ],
+      "finalCitationCorrection": false,
+      "outcomePath": ".tmp/efficiency-evidence/continuation/conversations/conv-b63943c1-f7ac-474f-8d2a-a4ccf70dd7c5/runs/run-f4156140-1de8-48cb-883b-0a5b4f316903/outcome.json"
+    },
+    {
+      "name": "continue",
+      "code": 0,
+      "elapsedMs": 3581,
+      "conversationId": "conv-b63943c1-f7ac-474f-8d2a-a4ccf70dd7c5",
+      "runId": "run-c206b12a-00c4-46b5-8de8-a10bbb940635",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "accepted",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 2474,
+        "outputTokens": 513,
+        "cachedInputTokens": 896,
+        "durationMs": 2651,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelCalls": 1,
+      "models": [
+        "deepseek-flash"
+      ],
+      "tools": [
+        "task.recall"
+      ],
+      "writePaths": [],
+      "stages": [
+        {
+          "id": "stage-1",
+          "status": "passed",
+          "attempts": 0
+        }
+      ],
+      "finalCitationCorrection": false,
+      "outcomePath": ".tmp/efficiency-evidence/continuation/conversations/conv-b63943c1-f7ac-474f-8d2a-a4ccf70dd7c5/runs/run-c206b12a-00c4-46b5-8de8-a10bbb940635/outcome.json"
+    },
+    {
+      "name": "continue-again",
+      "code": 0,
+      "elapsedMs": 5378,
+      "conversationId": "conv-b63943c1-f7ac-474f-8d2a-a4ccf70dd7c5",
+      "runId": "run-af0c2cd7-b024-4d84-b33e-9336cf90330a",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "accepted",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 2513,
+        "outputTokens": 831,
+        "cachedInputTokens": 896,
+        "durationMs": 4248,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelCalls": 1,
+      "models": [
+        "deepseek-flash"
+      ],
+      "tools": [
+        "task.recall"
+      ],
+      "writePaths": [],
+      "stages": [
+        {
+          "id": "stage-1",
+          "status": "passed",
+          "attempts": 0
+        }
+      ],
+      "finalCitationCorrection": false,
+      "outcomePath": ".tmp/efficiency-evidence/continuation/conversations/conv-b63943c1-f7ac-474f-8d2a-a4ccf70dd7c5/runs/run-af0c2cd7-b024-4d84-b33e-9336cf90330a/outcome.json"
+    },
+    {
+      "name": "revalidate",
+      "code": 1,
+      "elapsedMs": 18942,
+      "conversationId": "conv-b63943c1-f7ac-474f-8d2a-a4ccf70dd7c5",
+      "runId": "run-405002aa-b1e0-4045-9c49-c4766359ddcf",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "incomplete",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 43154,
+        "outputTokens": 2784,
+        "cachedInputTokens": 30336,
+        "durationMs": 16642,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelCalls": 8,
+      "models": [
+        "deepseek-flash"
+      ],
+      "tools": [
+        "fs.read",
+        "fs.read",
+        "task.audit",
+        "task.history",
+        "task.audit"
+      ],
+      "writePaths": [],
+      "stages": [
+        {
+          "id": "stage-1",
+          "status": "passed",
+          "attempts": 1
+        },
+        {
+          "id": "stage-2",
+          "status": "blocked",
+          "attempts": 1
+        }
+      ],
+      "finalCitationCorrection": false,
+      "outcomePath": ".tmp/efficiency-evidence/continuation/conversations/conv-b63943c1-f7ac-474f-8d2a-a4ccf70dd7c5/runs/run-405002aa-b1e0-4045-9c49-c4766359ddcf/outcome.json"
+    },
+    {
+      "name": "cached-final",
+      "code": 0,
+      "elapsedMs": 35249,
+      "conversationId": "conv-b63943c1-f7ac-474f-8d2a-a4ccf70dd7c5",
+      "runId": "run-f34cb6d1-6920-4143-8a49-83c41f81d13a",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "accepted",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 81741,
+        "outputTokens": 5931,
+        "cachedInputTokens": 46464,
+        "durationMs": 31814,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelCalls": 10,
+      "models": [
+        "deepseek-flash"
+      ],
+      "tools": [
+        "task.recall",
+        "task.audit",
+        "task.history",
+        "task.audit",
+        "task.history",
+        "task.audit",
+        "task.audit",
+        "task.history",
+        "task.evidence",
+        "task.audit",
+        "task.audit"
+      ],
+      "writePaths": [],
+      "stages": [
+        {
+          "id": "stage-1",
+          "status": "passed",
+          "attempts": 0
+        },
+        {
+          "id": "stage-2",
+          "status": "passed",
+          "attempts": 1
+        }
+      ],
+      "finalCitationCorrection": false,
+      "outcomePath": ".tmp/efficiency-evidence/continuation/conversations/conv-b63943c1-f7ac-474f-8d2a-a4ccf70dd7c5/runs/run-f34cb6d1-6920-4143-8a49-83c41f81d13a/outcome.json"
+    }
+  ],
+  "sourceHashes": {
+    "packages/server/src/task-controller/program.ts": "5dcec6e5c9f4efddea4b573979c58ffddedd63073897e9243d20712c04364c30",
+    "packages/server/src/task-controller/state.ts": "5b0cf0171356070ef7bdaf6b19ed52b011d78f4d7bfacb81aa67e9418e441e95",
+    "packages/server/src/task-controller/checkpoint.ts": "783a2096db2dfd01c2fce53ae3a00b0d55cdf6fc2a84f5c22f715bf142448f4a",
+    "packages/server/src/index.ts": "bdc91c3896cf94fbf0dbe11ca3a515bbee88854935f2728eeb2f5dcca77952d2",
+    "packages/runtime/src/context/builder.ts": "8beae111b282f15f2ed0d7646fbd57bbcfc6091a3ec0d41440635248d702dd31",
+    "packages/runtime/src/dsl/program.ts": "044805379fd8a4caa0a1a3166cec14dc9093d96b02da8a84d6d1f6a09523dc3d",
+    "packages/runtime/src/transitions/validate.ts": "5c10ceb18b414ad7e0c3f290f80c999f340fe4a71fd040a63e8d010210623d95"
+  },
+  "baselineBundleHash": "4e0accadb19c7865aac377a0eafac8d39c6336447acf6c48ebfa21d56f9f9a6f"
+}

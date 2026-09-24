@@ -28,6 +28,46 @@ describe('task-level bounded replanning in LocalHost', () => {
     } finally { vi.unstubAllGlobals(); await host.close(); await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('persists and emits an assistant reply when execution fails', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-failure-reply-'))
+    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), maxTurns: 1, mockToolCalls: [{ name: 'fs.list', input: {} }] })
+    try {
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: '帮我检查项目' })
+      const texts: string[] = []
+      for await (const event of run.events) if (event.type === 'text') texts.push(String(event.data))
+      expect(await run.outcome()).toMatchObject({ status: 'failed' })
+      expect(texts).toHaveLength(1)
+      expect(texts[0]).toContain('本次任务未完成')
+      expect((await host.getConversationMessages(conversation.id)).at(-1)?.text).toBe(texts[0])
+    } finally { await host.close(); await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('does not execute tools for an explicit status question', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-status-turn-'))
+    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', mockToolCalls: [{ name: 'fs.write', input: { path: 'must-not-exist.txt', content: 'unexpected' } }] })
+    try {
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: '你把所有报错输出给我我看看怎么回事' })
+      await run.outcome()
+      await expect(readFile(join(directory, 'must-not-exist.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+      const snapshot = await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8')
+      const effects = JSON.parse(snapshot).state.state.effects.map((entry: [string, { kind: string }]) => entry[1])
+      expect(effects.some((effect: { kind: string }) => effect.kind === 'tool')).toBe(false)
+    } finally { await host.close(); await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('accepts the passed alias only with valid evidence for every criterion', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-passed-alias-'))
+    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), mockResponse: '你好', mockTaskAssessments: [{ status: 'passed', criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: ['result-1'], rationale: 'Response present.' }] }] })
+    try {
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: '说话' })
+      await run.outcome()
+      expect(await run.taskOutcome()).toMatchObject({ status: 'accepted' })
+    } finally { await host.close(); await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('replans a criterion failure once, then records separate accepted completion', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-task-replan-'))
     const host = createLocalHost({

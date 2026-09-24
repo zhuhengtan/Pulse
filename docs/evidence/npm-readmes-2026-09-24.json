@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-24",
+  "conversationId": "conv-58c20a4e-f703-4af8-aa6a-e4ebb27a9a9f",
+  "runs": [
+    {
+      "runId": "run-91eb8c9e-45cf-4010-a7f1-4cf457690bfb",
+      "status": "succeeded",
+      "taskStatus": "accepted",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 493548,
+        "outputTokens": 49219,
+        "cachedInputTokens": 315392,
+        "durationMs": 227501,
+        "providerCosts": [],
+        "completeness": "complete"
+      }
+    },
+    {
+      "runId": "run-2e182f28-370a-4e24-b4c1-c8e92f5ffadb",
+      "status": "succeeded",
+      "taskStatus": "incomplete",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 385815,
+        "outputTokens": 25396,
+        "cachedInputTokens": 165760,
+        "durationMs": 124275,
+        "providerCosts": [],
+        "completeness": "complete"
+      }
+    }
+  ],
+  "pulseWork": "Pulse wrote five package READMEs and added the README staging copy, after external API guidance.",
+  "reviewCorrections": [
+    "Removed unsupported MIT license claims",
+    "Clarified Zod 3 as an example dependency, not a peer dependency",
+    "Corrected SDK apiKey and explicit DeepSeek baseURL configuration; apiKeyEnv belongs to CLI config",
+    "Corrected documentation links and CLI setup/default-model wording"
+  ],
+  "interruption": {
+    "error": "INVALID_MUTATION_LOG",
+    "fix": "MutationLog.truncateThrough must set nextSequence to the final remaining sequence plus one",
+    "test": "Partial checkpoint truncation with concurrent newer entries, append, and restore; failed before fix and passes after"
+  },
+  "regression": {
+    "files": 107,
+    "tests": 742,
+    "status": "passed"
+  },
+  "examples": [
+    {
+      "name": "runtime",
+      "code": 0,
+      "stdout": "succeeded\n",
+      "stderr": ""
+    },
+    {
+      "name": "tool-sdk",
+      "code": 0,
+      "stdout": "{ text: 'Hello, Pulse!' }\n",
+      "stderr": ""
+    },
+    {
+      "name": "adapters",
+      "code": 0,
+      "stdout": "Hello, Pulse\n",
+      "stderr": ""
+    },
+    {
+      "name": "server",
+      "code": 0,
+      "stdout": "Hello, Pulse\n",
+      "stderr": ""
+    }
+  ],
+  "packageVerification": [
+    {
+      "package": "@hunterzhu/pulse-adapters",
+      "version": "0.2.0",
+      "readmeBytes": 1267,
+      "readmeHash": "746bb223fe130e3b2fc9d083b73819b9fd4e078730c0af061175dc461c019d1a",
+      "archive": ".tmp/npm-readme-task/packages/hunterzhu-pulse-adapters-0.2.0.tgz"
+    },
+    {
+      "package": "@hunterzhu/pulse-cli",
+      "version": "0.2.0",
+      "readmeBytes": 1552,
+      "readmeHash": "d999bb277119d899fc7f1dfc4cb3225fa47b9d0e7c7c6b664da68ef1f43f4a5a",
+      "archive": ".tmp/npm-readme-task/packages/hunterzhu-pulse-cli-0.2.0.tgz"
+    },
+    {
+      "package": "@hunterzhu/pulse-runtime",
+      "version": "0.2.0",
+      "readmeBytes": 1013,
+      "readmeHash": "db02b2f3b50345a8ec87e869bfa481aab38d2d70e0d7b5552f722911ae1ac665",
+      "archive": ".tmp/npm-readme-task/packages/hunterzhu-pulse-runtime-0.2.0.tgz"
+    },
+    {
+      "package": "@hunterzhu/pulse-server",
+      "version": "0.2.0",
+      "readmeBytes": 1296,
+      "readmeHash": "ec63e9877158ee5fa7acf12181e6af8e51c4e551547a53dc7c5671eab9bbadc6",
+      "archive": ".tmp/npm-readme-task/packages/hunterzhu-pulse-server-0.2.0.tgz"
+    },
+    {
+      "package": "@hunterzhu/pulse-tool-sdk",
+      "version": "0.2.0",
+      "readmeBytes": 1077,
+      "readmeHash": "69f123d7c6cb0b8a827c74133596afc223d863d68edd21890f7462df60de0ba8",
+      "archive": ".tmp/npm-readme-task/packages/hunterzhu-pulse-tool-sdk-0.2.0.tgz"
+    }
+  ],
+  "publication": "Not published. Actual release staging executed with npm publish intercepted and replaced by local npm pack; actual tarball README contents match package sources."
+}

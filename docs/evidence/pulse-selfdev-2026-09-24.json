@@ -1,0 +1,382 @@
+{
+  "date": "2026-09-24",
+  "platform": "macOS",
+  "provider": "configured DeepSeek",
+  "runs": [
+    {
+      "label": "pulse-controller-live-4",
+      "conversationId": "conv-75a36093-30ff-40d0-8188-e1a73f69ade7",
+      "runId": "run-65afa546-dfa3-40e3-b4c3-72a76b682727",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "incomplete",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 818217,
+        "outputTokens": 76140,
+        "cachedInputTokens": 154880,
+        "durationMs": 365321,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelBudget": 32,
+      "controllerCount": 32,
+      "stages": [
+        {
+          "id": "stage-1",
+          "status": "passed"
+        },
+        {
+          "id": "stage-2",
+          "status": "passed"
+        },
+        {
+          "id": "stage-3",
+          "status": "passed"
+        },
+        {
+          "id": "stage-4",
+          "status": "blocked"
+        }
+      ]
+    },
+    {
+      "label": "pulse-controller-live-5",
+      "conversationId": "conv-75a36093-30ff-40d0-8188-e1a73f69ade7",
+      "runId": "run-8e15121a-febf-457e-8a9a-b23ee61265be",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "accepted",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 461038,
+        "outputTokens": 36274,
+        "cachedInputTokens": 117248,
+        "durationMs": 168215,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelBudget": 24,
+      "controllerCount": 24,
+      "stages": [
+        {
+          "id": "task-1",
+          "status": "passed"
+        },
+        {
+          "id": "task-2",
+          "status": "passed"
+        },
+        {
+          "id": "task-3",
+          "status": "passed"
+        },
+        {
+          "id": "task-4",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "label": "pulse-usability-code",
+      "conversationId": "conv-69aca82a-25fb-4c13-8f9e-59387f14a1bf",
+      "runId": "run-72ff7e35-a982-45cd-80ff-6b816c576460",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "incomplete",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 27398,
+        "outputTokens": 1413,
+        "cachedInputTokens": 14976,
+        "durationMs": 9849,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelBudget": 26,
+      "controllerCount": 5,
+      "stages": [
+        {
+          "id": "stage-1-baseline",
+          "status": "blocked"
+        },
+        {
+          "id": "stage-2-patch",
+          "status": "blocked"
+        },
+        {
+          "id": "stage-3-verify-report",
+          "status": "blocked"
+        }
+      ]
+    },
+    {
+      "label": "pulse-usability-code-2",
+      "conversationId": "conv-69aca82a-25fb-4c13-8f9e-59387f14a1bf",
+      "runId": "run-493a9269-362a-46b3-8427-3238d4201360",
+      "runtimeStatus": "failed",
+      "taskStatus": "failed",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 3059,
+        "outputTokens": 578,
+        "cachedInputTokens": 768,
+        "durationMs": 2856,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelBudget": 26,
+      "controllerCount": 1,
+      "stages": []
+    },
+    {
+      "label": "pulse-usability-code-3",
+      "conversationId": "conv-69aca82a-25fb-4c13-8f9e-59387f14a1bf",
+      "runId": "run-f36d738d-7285-41e2-bb0d-88fbe0277754",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "incomplete",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 277022,
+        "outputTokens": 12106,
+        "cachedInputTokens": 84096,
+        "durationMs": 70390,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelBudget": 28,
+      "controllerCount": 21,
+      "stages": [
+        {
+          "id": "stage-1-baseline",
+          "status": "passed"
+        },
+        {
+          "id": "stage-2-patch",
+          "status": "passed"
+        },
+        {
+          "id": "stage-3-verify-report",
+          "status": "passed"
+        },
+        {
+          "id": "stage-4-boundary",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "label": "pulse-cancel-live",
+      "conversationId": "conv-202e3688-d641-4f5f-82cd-a2a20c4dc1d6",
+      "runId": "run-63121409-6b5e-424d-88bd-f7bf209092fd",
+      "runtimeStatus": "cancelled",
+      "taskStatus": "cancelled",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 1341,
+        "outputTokens": 426,
+        "cachedInputTokens": 768,
+        "durationMs": 2258,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelBudget": 12,
+      "controllerCount": 1,
+      "stages": [
+        {
+          "id": "stage-1-read-package",
+          "status": "running"
+        },
+        {
+          "id": "stage-2-read-readme",
+          "status": "pending"
+        },
+        {
+          "id": "stage-3-compare",
+          "status": "pending"
+        },
+        {
+          "id": "stage-4-verify-readonly",
+          "status": "pending"
+        }
+      ]
+    },
+    {
+      "label": "pulse-selfdev-search-summary",
+      "conversationId": "conv-e1ee0ebc-f311-4b80-81d5-d8204a4c1baf",
+      "runId": "run-bdd64a6c-4342-49fc-a9c2-9c913996af94",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "incomplete",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 553354,
+        "outputTokens": 25465,
+        "cachedInputTokens": 123008,
+        "durationMs": 127435,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelBudget": 28,
+      "controllerCount": 28,
+      "stages": [
+        {
+          "id": "stage-1",
+          "status": "passed"
+        },
+        {
+          "id": "stage-2",
+          "status": "passed"
+        },
+        {
+          "id": "stage-3",
+          "status": "blocked"
+        },
+        {
+          "id": "stage-4",
+          "status": "blocked"
+        },
+        {
+          "id": "stage-5",
+          "status": "blocked"
+        }
+      ]
+    },
+    {
+      "label": "pulse-selfdev-search-summary-2",
+      "conversationId": "conv-e1ee0ebc-f311-4b80-81d5-d8204a4c1baf",
+      "runId": "run-a737eb66-f16b-495e-899b-413c930fa567",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "incomplete",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 615335,
+        "outputTokens": 31107,
+        "cachedInputTokens": 157952,
+        "durationMs": 145720,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelBudget": 28,
+      "controllerCount": 28,
+      "stages": [
+        {
+          "id": "stage-1",
+          "status": "passed"
+        },
+        {
+          "id": "stage-2",
+          "status": "blocked"
+        },
+        {
+          "id": "stage-3",
+          "status": "blocked"
+        },
+        {
+          "id": "stage-4",
+          "status": "blocked"
+        }
+      ]
+    },
+    {
+      "label": "pulse-selfdev-search-summary-3",
+      "conversationId": "conv-e1ee0ebc-f311-4b80-81d5-d8204a4c1baf",
+      "runId": "run-23138cd3-95a1-48fc-bfee-a3817668ab4d",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "incomplete",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 424122,
+        "outputTokens": 26786,
+        "cachedInputTokens": 110208,
+        "durationMs": 135472,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelBudget": 24,
+      "controllerCount": 21,
+      "stages": [
+        {
+          "id": "stage-1",
+          "status": "passed"
+        },
+        {
+          "id": "stage-2",
+          "status": "passed"
+        },
+        {
+          "id": "stage-3",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "label": "pulse-selfdev-search-summary-4",
+      "conversationId": "conv-e1ee0ebc-f311-4b80-81d5-d8204a4c1baf",
+      "runId": "run-91ae9018-67c6-42ce-8674-3588a36a8520",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "incomplete",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 307155,
+        "outputTokens": 25350,
+        "cachedInputTokens": 100992,
+        "durationMs": 128736,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelBudget": 24,
+      "controllerCount": 19,
+      "stages": [
+        {
+          "id": "stage-1",
+          "status": "passed"
+        },
+        {
+          "id": "stage-2",
+          "status": "passed"
+        },
+        {
+          "id": "stage-3",
+          "status": "passed"
+        },
+        {
+          "id": "stage-4",
+          "status": "blocked"
+        }
+      ]
+    },
+    {
+      "label": "pulse-selfdev-search-summary-5",
+      "conversationId": "conv-e1ee0ebc-f311-4b80-81d5-d8204a4c1baf",
+      "runId": "run-7dbf47d3-723e-4930-be9c-f8b7ab90feae",
+      "runtimeStatus": "succeeded",
+      "taskStatus": "accepted",
+      "usage": {
+        "schemaVersion": 1,
+        "inputTokens": 408016,
+        "outputTokens": 25860,
+        "cachedInputTokens": 116096,
+        "durationMs": 126049,
+        "providerCosts": [],
+        "completeness": "complete"
+      },
+      "modelBudget": 24,
+      "controllerCount": 22,
+      "stages": [
+        {
+          "id": "s1",
+          "status": "passed"
+        },
+        {
+          "id": "s2",
+          "status": "passed"
+        },
+        {
+          "id": "s3",
+          "status": "passed"
+        },
+        {
+          "id": "s4",
+          "status": "passed"
+        }
+      ]
+    }
+  ]
+}

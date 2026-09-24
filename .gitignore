@@ -8,3 +8,4 @@ artifacts/cli/
 .env
 .env.*
 !.env.example
+.tmp

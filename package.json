@@ -29,7 +29,7 @@
     "test": "vitest run --exclude tests/live/**",
     "test:watch": "vitest",
     "test:live": "vitest run tests/live --passWithNoTests",
-    "check": "tsc -b --pretty false && vitest run"
+    "check": "tsc -b --pretty false && vitest run --exclude tests/live/**"
   },
   "devDependencies": {
     "@hunterzhu/pulse-cli": "workspace:*",

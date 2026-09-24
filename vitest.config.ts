@@ -1,6 +1,8 @@
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
+  // Keep Vite's config discovery inside the workspace when running in the sandbox.
+  css: { postcss: { plugins: [] } },
   resolve: {
     alias: {
       '@hunterzhu/pulse-runtime': new URL('./packages/runtime/src/index.ts', import.meta.url).pathname,

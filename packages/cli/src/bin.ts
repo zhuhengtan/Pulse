@@ -308,6 +308,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(configuredMaxTurns === undefined ? {} : { maxTurns: configuredMaxTurns }),
     ...(configuredAutoCompactPercent === undefined ? {} : { autoCompactPercent: Math.min(90, configuredAutoCompactPercent) }),
     ...(allowNetwork === undefined ? {} : { allowNetwork }),
+    ...(config.networkHosts === undefined ? {} : { networkHosts: config.networkHosts }),
     executionMode,
   }
 }

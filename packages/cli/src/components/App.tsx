@@ -223,6 +223,7 @@ export function App({
           maxTurns: hostOptions.maxTurns ?? 32,
           autoCompactPercent: hostOptions.autoCompactPercent ?? 90,
           allowNetwork: hostOptions.allowNetwork ?? false,
+          networkHosts: hostOptions.networkHosts ?? [],
         }, null, 2),
         createdAt: new Date().toISOString(),
       });

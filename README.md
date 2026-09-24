@@ -415,6 +415,6 @@ pulse --read-only schedule daemon
 
 ## 当前验证边界
 
-当前工作区已通过 94 个测试文件、642 项本地测试（不含 `tests/live/**`），其中包含 loopback Provider/Worker 与 SRT 集成测试；`pnpm build`、评测集验证和独立 CLI 包的解压、运行、安装、卸载验证也已通过。dry run 只证明评测数据集可用，不代表真实模型质量基线。
+当前工作区的测试结果以 `pnpm check` 的实际输出为准，不再固定具体数量（其范围不含 `tests/live/**`）；测试包含 loopback Provider/Worker 与 SRT 集成测试；`pnpm build`、评测集验证和独立 CLI 包的解压、运行、安装、卸载验证也已通过。dry run 只证明评测数据集可用，不代表真实模型质量基线。
 
 真实 Provider 凭证下的 Live Smoke、跨 Linux/Windows 的 SRT 实机验证、真实远程写系统的副作用对账、生产级多主机 Worker 故障注入、跨进程 Detached Agent scope 迁移、生产级隐私/权限审计，以及外部指标和 Token 成本接入仍需部署环境单独验收。Browser 与 Jarvis 是 MCP 能力接入点，需用户安装并显式配置服务；本仓库没有内置或模拟这些外部服务。

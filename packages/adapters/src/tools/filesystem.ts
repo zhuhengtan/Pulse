@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 
@@ -50,6 +50,30 @@ export class FilesystemTool {
     const { content, truncated } = await this.readRange(path, maxBytes, 0, signal)
     return { content, truncated }
   }
+  /** Resolve a one-based source line without confusing line numbers with byte offsets. */
+  async offsetForLine(path: string, startLine: number, signal?: AbortSignal): Promise<number> {
+    if (!Number.isSafeInteger(startLine) || startLine < 1) throw filesystemError('INVALID_START_LINE')
+    if (signal?.aborted) throw filesystemError('ABORTED')
+    if (startLine === 1) return 0
+    const handle = await open(await this.existing(path), 'r')
+    try {
+      const buffer = Buffer.alloc(64 * 1024)
+      let offset = 0
+      let line = 1
+      const scanLimit = 16 * 1024 * 1024
+      while (offset < scanLimit) {
+        if (signal?.aborted) throw filesystemError('ABORTED')
+        const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, scanLimit - offset), offset)
+        if (signal?.aborted) throw filesystemError('ABORTED')
+        if (!bytesRead) return offset
+        for (let index = 0; index < bytesRead; index++) {
+          if (buffer[index] === 10 && ++line === startLine) return offset + index + 1
+        }
+        offset += bytesRead
+      }
+      throw filesystemError('READ_LINE_SCAN_LIMIT')
+    } finally { await handle.close() }
+  }
   async readRange(path: string, maxBytes: number, offset = 0, signal?: AbortSignal): Promise<FilesystemReadResult & { offset: number; nextOffset: number | null }> {
     if (signal?.aborted) throw filesystemError('ABORTED')
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 1_000_000 || !Number.isSafeInteger(offset) || offset < 0) throw filesystemError('INVALID_READ_RANGE')
@@ -57,6 +81,7 @@ export class FilesystemTool {
     try {
       const buffer = Buffer.alloc(maxBytes + 1)
       const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, offset)
+      if (signal?.aborted) throw filesystemError('ABORTED')
       if (bytesRead && (buffer[0]! & 0xc0) === 0x80) throw filesystemError('INVALID_UTF8_OFFSET')
       let end = Math.min(bytesRead, maxBytes)
       if (bytesRead > maxBytes) {
@@ -92,15 +117,16 @@ export class FilesystemTool {
     await pipeline(createReadStream(await this.existing(path)), digest, signal === undefined ? {} : { signal })
     return digest.digest('hex')
   }
-  async writeIfUnchanged(path: string, content: string, expectedHash: string, signal?: AbortSignal): Promise<FilesystemWriteResult> {
+  async writeIfUnchanged(path: string, content: string, expectedHash: string | null, signal?: AbortSignal): Promise<FilesystemWriteResult> {
     if (signal?.aborted) throw filesystemError('ABORTED')
-    if (!/^[a-f0-9]{64}$/.test(expectedHash)) throw filesystemError('INVALID_FILE_BASELINE_HASH')
+    if (expectedHash !== null && !/^[a-f0-9]{64}$/.test(expectedHash)) throw filesystemError('INVALID_FILE_BASELINE_HASH')
     const target = await this.writable(path)
     return this.withLock(target, async () => {
       if (signal?.aborted) throw filesystemError('ABORTED')
-      let current: Buffer
-      try { current = await readFile(target) } catch (cause) { if ((cause as NodeJS.ErrnoException).code === 'ENOENT') throw filesystemError('FILE_BASELINE_MISSING'); throw filesystemCause(cause) }
-      const currentHash = createHash('sha256').update(current).digest('hex')
+      let current: Buffer | undefined
+      try { current = await readFile(target) } catch (cause) { if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw filesystemCause(cause) }
+      if (current === undefined && expectedHash !== null) throw filesystemError('FILE_BASELINE_MISSING')
+      const currentHash = current === undefined ? null : createHash('sha256').update(current).digest('hex')
       if (currentHash !== expectedHash) throw filesystemError('FILE_BASELINE_CONFLICT')
       const bytes = Buffer.byteLength(content, 'utf8')
       const temporary = `${target}.tmp-${process.pid}-${process.hrtime.bigint().toString()}`
@@ -108,10 +134,13 @@ export class FilesystemTool {
       try {
         handle = await open(temporary, 'wx', 0o600)
         await handle.writeFile(content, 'utf8')
+        if (current !== undefined) await handle.chmod((await lstat(target)).mode & 0o777)
         await handle.sync()
         await handle.close()
         handle = undefined
-        await rename(temporary, target)
+        if (signal?.aborted) throw filesystemError('ABORTED')
+        if (expectedHash === null) await link(temporary, target)
+        else await rename(temporary, target)
       } finally {
         if (handle) await handle.close().catch(() => undefined)
         await rm(temporary, { force: true }).catch(() => undefined)

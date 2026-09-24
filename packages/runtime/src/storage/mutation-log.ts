@@ -103,7 +103,8 @@ export class MutationLog {
     if (!Number.isInteger(seq) || seq < this.baseSequence || seq > this.lastSequence) throw new Error('INVALID_CHECKPOINT_WATERMARK')
     while (this.log[0] && this.log[0].seq <= seq) this.log.shift()
     this.baseSequence = seq
-    this.nextSequence = this.log[0]?.seq ?? seq + 1
+    // Transactions appended while the checkpoint was being saved remain live.
+    this.nextSequence = (this.log.at(-1)?.seq ?? seq) + 1
     this.validate()
   }
 

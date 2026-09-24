@@ -8,6 +8,7 @@ describe('persisted task state helpers', () => {
   })
 
   it('turns explicit list items into criteria and preserves overflow beyond the bounded list', () => {
+    expect(acceptanceCriteriaFromObjective('只改样例。1. 复现问题。2. 修复代码。3. 验证。').map((item) => item.description)).toEqual(['只改样例。', '1. 复现问题。', '2. 修复代码。', '3. 验证。'])
     const listed = acceptanceCriteriaFromObjective('- Find the sources\n- Summarize the findings')
     expect(listed).toEqual([
       { id: 'criterion-1', description: 'Find the sources' },

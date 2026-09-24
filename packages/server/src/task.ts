@@ -13,6 +13,8 @@ export interface TaskRecord {
   schemaVersion: 1
   runId: string
   objective: string
+  continuedFromRunId?: string
+  assessments?: TaskCriterionAssessment[]
   acceptanceCriteria: Array<{ id: string; description: string }>
   status: TaskRecordStatus
   replanCount: number
@@ -70,6 +72,8 @@ export function taskRecordFromGlobal(global: JsonValue): TaskRecord | undefined 
     schemaVersion: 1,
     runId: value.runId,
     objective: value.objective,
+    ...(typeof value.continuedFromRunId === 'string' ? { continuedFromRunId: value.continuedFromRunId } : {}),
+    ...(Array.isArray(value.assessments) ? { assessments: value.assessments.filter((item) => item && typeof item === 'object' && !Array.isArray(item) && typeof item.criterionId === 'string' && ['passed', 'not_met', 'unverifiable'].includes(String(item.status)) && typeof item.rationale === 'string' && Array.isArray(item.evidenceRefs)) as unknown as TaskCriterionAssessment[] } : {}),
     acceptanceCriteria: criteria,
     status,
     replanCount: typeof value.replanCount === 'number' && Number.isInteger(value.replanCount) ? Math.max(0, value.replanCount) : 0,
@@ -107,9 +111,28 @@ export function acceptanceCriteriaFromObjective(objective: string): Array<{ id: 
     .flatMap((text) => text.split(/(?<=[.!?;])\s+|(?<=[。！？；])\s*/))
     .map((text) => text.trim())
     .filter(Boolean)
-  const normalized = clauses.length ? clauses : [objective.trim()]
+  // Sentence splitting must not turn inline list numbers into standalone goals.
+  const merged: string[] = []
+  for (let index = 0; index < clauses.length; index++) {
+    const clause = clauses[index]!
+    if (/^\d+[.)、]$/.test(clause) && clauses[index + 1]) merged.push(`${clause} ${clauses[++index]}`)
+    else merged.push(clause)
+  }
+  const normalized = merged.length ? merged : [objective.trim()]
   const bounded = normalized.length <= 32
     ? normalized
     : [...normalized.slice(0, 31), `Additional requested conditions: ${normalized.slice(31).join('; ')}`]
   return bounded.map((description, index) => ({ id: `criterion-${index + 1}`, description }))
+}
+
+/** Deliberately narrow: unrelated new requests must not inherit authorization. */
+export function isTaskContinuation(text: string): boolean {
+  return /^(?:继续|接着|恢复(?:任务|执行)|continue(?:\b)|resume(?:\b))/i.test(text.trim())
+}
+
+export function continueTaskRecord(previous: TaskRecord, runId: string): TaskRecord {
+  return { schemaVersion: 1, runId, objective: previous.objective,
+    acceptanceCriteria: structuredClone(previous.acceptanceCriteria),
+    continuedFromRunId: previous.runId, assessments: structuredClone(previous.assessments ?? []),
+    status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] }
 }

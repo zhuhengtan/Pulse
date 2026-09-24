@@ -1,9 +1,10 @@
 import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
-import { dirname, parse, resolve, sep } from 'node:path'
-import { realpath } from 'node:fs/promises'
-import { spawn } from 'node:child_process'
+import { homedir, tmpdir } from 'node:os'
+import { basename, delimiter, dirname, join, parse, resolve, sep } from 'node:path'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
+import { execFile, spawn } from 'node:child_process'
+import { promisify } from 'node:util'
 import { SandboxManager, VENDORED_SRT_WIN_EXE, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 
 export interface ShellResult { code: number | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean; aborted: boolean }
@@ -20,6 +21,11 @@ function withSandboxLease<T>(work: () => Promise<T>): Promise<T> {
   const result = sandboxTail.then(work, work)
   sandboxTail = result.then(() => undefined, () => undefined)
   return result
+}
+
+/** Read-only prerequisite probe; never provisions accounts or changes permissions. */
+export async function checkShellSandbox(): Promise<{ errors: string[]; warnings: string[] }> {
+  return withSandboxLease(() => SandboxManager.checkDependenciesAsync())
 }
 
 function quotePosix(value: string): string {
@@ -91,7 +97,7 @@ export function encodeSandboxCommand(command: string, args: string[], platform: 
   return `exec ${[command, ...args].map(quotePosix).join(' ')}`
 }
 
-async function sandboxConfig(cwd: string): Promise<SandboxRuntimeConfig> {
+async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolchainRoots: string[] = [], scratch?: string): Promise<SandboxRuntimeConfig> {
   // Linux invokes this trusted helper *inside* the read-restricted namespace.
   // A user-local npm install otherwise hides it together with the home directory.
   const seccompPath = process.platform === 'linux'
@@ -111,11 +117,11 @@ async function sandboxConfig(cwd: string): Promise<SandboxRuntimeConfig> {
   // Reads default to the system toolchain plus this workspace. Writes are
   // limited to the workspace; srt adds only its required stdio/temp paths.
   return {
-    network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
+    network: { allowedDomains, deniedDomains: [], strictAllowlist: true },
     filesystem: {
       denyRead: [...denyRead],
-      allowRead: [cwd, ...(seccompPath ? [seccompPath] : [])],
-      allowWrite: [cwd],
+      allowRead: [cwd, ...toolchainRoots, ...(scratch ? [scratch] : []), ...(seccompPath ? [seccompPath] : [])],
+      allowWrite: [cwd, ...(scratch ? [scratch] : [])],
       denyWrite: [],
     },
     ...(seccompPath ? { seccomp: { applyPath: seccompPath } } : {}),
@@ -148,7 +154,7 @@ function shellEnvironment(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv
   ))
 }
 
-export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv } = {}): Promise<ShellResult> {
+export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[] } = {}): Promise<ShellResult> {
   const max = options.maxOutputBytes ?? 256 * 1024
   if (!Number.isFinite(max) || max < 0) return Promise.reject(shellError('INVALID_SHELL_OUTPUT_LIMIT'))
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0)) return Promise.reject(shellError('INVALID_SHELL_TIMEOUT'))
@@ -164,8 +170,46 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     } catch (cause) {
       throw shellError('INVALID_SHELL_CWD', false, cause)
     }
+    // Trust only the installation hosting Pulse, never arbitrary PATH directories.
+    const nodeExecutable = await realpath(process.execPath)
+    const nodeBin = dirname(nodeExecutable)
+    const installation = basename(nodeBin) === 'bin' ? dirname(nodeBin) : nodeBin
+    const toolchainRoots = installation !== homedir() && installation !== parse(installation).root ? [installation] : [nodeExecutable]
+    // PNPM_HOME is a host installation setting, never supplied by model argv.
+    let pnpmHome: string | undefined
+    if (process.env.PNPM_HOME) {
+      try {
+        const candidate = await realpath(process.env.PNPM_HOME)
+        if (candidate !== homedir() && candidate !== parse(candidate).root && !homedir().startsWith(candidate + sep)) {
+          pnpmHome = candidate
+          toolchainRoots.push(candidate)
+        }
+      } catch { /* stale installation settings do not grant access */ }
+    }
+    const scratch = await realpath(await mkdtemp(join(tmpdir(), 'pulse-shell-')))
+    try {
+    const baseEnv = shellEnvironment(options.env)
+    const pathKey = Object.keys(baseEnv).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH'
+    const executionEnv = { [pathKey]: [nodeBin, ...(pnpmHome ? [pnpmHome] : []), join(cwd, 'node_modules', '.bin'), baseEnv[pathKey] ?? ''].join(delimiter),
+      ...(process.platform === 'win32' ? {} : { HOME: scratch, TMPDIR: scratch, TMP: scratch, TEMP: scratch, XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }) }
+    let executable = command
+    let executableArgs = args
+    if (command === 'node') executable = nodeExecutable
+    if (process.platform === 'darwin' && command === 'git') {
+      // /usr/bin/git is an xcrun shim that writes outside TMPDIR. Resolve the
+      // installed tool through Apple's fixed locator before entering isolation.
+      const located = await promisify(execFile)('/usr/bin/xcrun', ['--find', 'git'], { timeout: 5000, env: baseEnv })
+      executable = located.stdout.trim()
+      if (!executable.startsWith('/')) throw shellError('GIT_TOOLCHAIN_NOT_FOUND')
+    }
+    if (process.platform === 'win32' && ['npm', 'npx', 'pnpm', 'pnpx', 'corepack'].includes(command)) {
+      const entry = command === 'npm' || command === 'npx' ? `npm/bin/${command}-cli.js` : command === 'corepack' ? 'corepack/dist/corepack.js' : 'pnpm/bin/pnpm.cjs'
+      for (const candidate of [join(nodeBin, 'node_modules', entry), join(nodeBin, 'node_modules', 'corepack', 'dist', `${command}.js`)]) {
+        try { const script = await realpath(candidate); executable = nodeExecutable; executableArgs = [script, ...(command === 'pnpx' && candidate.includes('pnpm.cjs') ? ['dlx'] : []), ...args]; break } catch { /* standalone executables remain supported by PATH */ }
+      }
+    }
     const invocationId = randomUUID()
-    const policy = await sandboxConfig(cwd)
+    const policy = await sandboxConfig(cwd, options.allowedDomains ?? [], toolchainRoots, scratch)
     let child: ReturnType<typeof spawn> | undefined
     const outputChunks = { stdout: [] as Buffer[], stderr: [] as Buffer[] }
     const outputBytes = { stdout: 0, stderr: 0 }
@@ -205,11 +249,14 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       return decodeUtf8WithinByteLimit(Buffer.concat(outputChunks[target]), max)
     }
 
+    let setupStage = 'reset'
     try {
       // reset first in case an earlier initialize failed part-way through.
       await SandboxManager.reset()
+      setupStage = 'initialize'
       await SandboxManager.initialize(policy, undefined, false)
-      const commandText = encodeSandboxCommand(command, args)
+      const commandText = encodeSandboxCommand(executable, executableArgs)
+      setupStage = 'wrap'
       const descriptor = await SandboxManager.wrapWithSandboxArgv(commandText, undefined, undefined, options.signal, cwd, { commandId: invocationId, commandText: 'shell.exec' })
       if (options.signal?.aborted) {
         SandboxManager.cleanupAfterCommand()
@@ -218,14 +265,22 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       }
       child = spawn(descriptor.argv[0]!, descriptor.argv.slice(1), {
         cwd,
-        env: shellEnvironment(options.env ?? descriptor.env),
+        env: { ...baseEnv, ...shellEnvironment(descriptor.env), ...executionEnv },
         shell: false,
         detached: process.platform !== 'win32',
         windowsHide: true,
       })
     } catch (cause) {
       try { await SandboxManager.reset() } catch { /* preserve the setup failure */ }
-      throw shellError('SANDBOX_SETUP_FAILED', false, cause)
+      // Persist only classified diagnostics, never raw subprocess output or credentials.
+      const message = cause instanceof Error ? cause.message : ''
+      const nativeCode = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
+      const reason = /windows-install|not provisioned/i.test(message) ? 'WINDOWS_SANDBOX_NOT_PROVISIONED'
+        : ['ENOENT', 'EACCES', 'EPERM'].includes(nativeCode) ? nativeCode : 'SANDBOX_INITIALIZATION_ERROR'
+      throw Object.assign(shellError('SANDBOX_SETUP_FAILED', false, cause), {
+        message: `SANDBOX_SETUP_FAILED (${setupStage}: ${reason})`,
+        details: { platform: process.platform, stage: setupStage, reason },
+      })
     }
 
     // This API has no stdin payload; deliver EOF to readers inside the sandbox.
@@ -269,5 +324,6 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         throw shellError('SANDBOX_CLEANUP_FAILED', false, cause)
       }
     })
+    } finally { await rm(scratch, { recursive: true, force: true }) }
   })
 }
