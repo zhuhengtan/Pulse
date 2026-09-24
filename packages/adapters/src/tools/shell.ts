@@ -41,6 +41,7 @@ export function quoteWindowsArgument(value: string): string {
 
 const powershellArgvRunner = String.raw`
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $payload = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PULSE_ARGV_JSON__'))
 $spec = ConvertFrom-Json -InputObject $payload
 $psi = [System.Diagnostics.ProcessStartInfo]::new()
@@ -51,12 +52,23 @@ $psi.CreateNoWindow = $true
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.RedirectStandardInput = $true
+$psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+$psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
 $child = [System.Diagnostics.Process]::new()
 $child.StartInfo = $psi
-if (-not $child.Start()) { exit 127 }
+try { if (-not $child.Start()) { exit 127 } }
+catch {
+  $cause = $_.Exception
+  while ($cause.InnerException) { $cause = $cause.InnerException }
+  [Console]::Error.WriteLine($cause.Message)
+  if ($cause -is [System.ComponentModel.Win32Exception] -and $cause.NativeErrorCode -in 2,3) { exit 127 }
+  exit 126
+}
 $outTask = $child.StandardOutput.ReadToEndAsync()
 $errTask = $child.StandardError.ReadToEndAsync()
 $inTask = [Console]::OpenStandardInput().CopyToAsync($child.StandardInput.BaseStream)
+$inTask.GetAwaiter().GetResult()
+$child.StandardInput.Close()
 $child.WaitForExit()
 try { [Console]::Out.Write([string]$outTask.GetAwaiter().GetResult()) } catch {}
 try { [Console]::Error.Write([string]$errTask.GetAwaiter().GetResult()) } catch {}
@@ -215,6 +227,9 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       try { await SandboxManager.reset() } catch { /* preserve the setup failure */ }
       throw shellError('SANDBOX_SETUP_FAILED', false, cause)
     }
+
+    // This API has no stdin payload; deliver EOF to readers inside the sandbox.
+    child.stdin?.end()
 
     return await new Promise<ShellResult>((resolve, reject) => {
       const cleanup = (): void => {

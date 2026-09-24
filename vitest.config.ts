@@ -13,6 +13,9 @@ export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
     pool: 'forks',
-    testTimeout: 10_000,
+    // Windows SRT provisions one OS sandbox account and stamps filesystem ACLs.
+    // Separate test processes must not race that machine-wide policy lifecycle.
+    fileParallelism: process.platform !== 'win32',
+    testTimeout: process.platform === 'win32' ? 120_000 : 10_000,
   },
 })
