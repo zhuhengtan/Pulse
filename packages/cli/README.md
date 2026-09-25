@@ -1,5 +1,7 @@
 # @hunterzhu/pulse-cli
 
+[简体中文](https://github.com/zhuhengtan/Pulse/blob/main/packages/cli/README.zh-CN.md)
+
 **A neural-signal like AI assistant for coding, research and file tasks.**
 
 Pulse runs in your project folder, keeps conversations on your machine, and can resume unfinished work. Requires Node.js 22+.
@@ -9,7 +11,7 @@ Pulse runs in your project folder, keeps conversations on your machine, and can 
 Install the CLI globally so the `pulse` command is on your `PATH`:
 
 ```bash
-npm install -g @hunterzhu/pulse-cli
+npm install -g @hunterzhu/pulse-cli --foreground-scripts
 pulse --version
 ```
 

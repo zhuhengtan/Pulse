@@ -1,5 +1,7 @@
 # @hunterzhu/pulse-server
 
+[简体中文](https://github.com/zhuhengtan/Pulse/blob/main/packages/server/README.zh-CN.md)
+
 Programmatic host that runs Pulse conversations locally inside your own process.
 
 ## Install

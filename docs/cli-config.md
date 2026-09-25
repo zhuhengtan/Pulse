@@ -1,5 +1,7 @@
 # CLI 配置
 
+[English](cli-config.en.md)
+
 默认配置文件位于当前用户的 home 目录下：
 
 ```text
@@ -10,6 +12,12 @@ Windows:     %USERPROFILE%\\.pulse\\config.json
 程序不会拼接固定的 Unix 路径，而是使用 Node.js `homedir()` 和 `path.join()` 计算实际路径。
 
 所有用户级运行文件都归于同一个 `.pulse` 根目录：
+
+要在 npm 安装时显示双语欢迎界面，请显式启用前台安装脚本：
+
+```bash
+npm install @hunterzhu/pulse-cli --foreground-scripts
+```
 
 ```text
 ~/.pulse/config.json  用户配置
@@ -66,7 +74,7 @@ Pulse 只使用供应商表和模型表这套配置：模型的 `displayName` �
   },
   "capabilities": {
     "enabled": ["pdf", "spreadsheet", "skills"],
-    "skills": ["review"]
+    "trustedSkillRoots": ["/absolute/path/to/.agents/skills"]
   },
   "approvalMode": "ask",
   "maxTurns": 32,
@@ -92,7 +100,7 @@ Provider 字段说明：
 - `activeModel`：当前使用的 Pulse 模型显示名。交互界面中可用 `/model gpt5.6-a` 切换。
 - `taskRouting`：为 `reason`、`plan`、`merge`、`verify` 配置有序的模型显示名列表；按顺序尝试候选，失败时回退。没有配置的任务使用当前模型。只在用户级配置生效。
 - `capabilities.enabled`：显式启用已安装的宿主能力包。内置有 `pdf`、`spreadsheet`、`skills`；MCP 包名来自 `capabilities.mcpServers`。工作区配置不能启动进程或启用宿主扩展。
-- `capabilities.skills`：从 Pulse 用户级技能目录或显式信任的目录中加载的 `SKILL.md` 名称。技能内容只作为不可信参考文本，不执行脚本。
+- `capabilities.skills`：可选的技能目录名白名单；省略时自动发现全部技能，空数组表示不开放任何技能。旧配置中的名称现在只限制可选范围，不会预先加载正文。
 - `capabilities.trustedSkillRoots`：可选的绝对目录列表，额外信任其中的技能目录；路径必须是绝对路径，符号链接会被拒绝。
 - `capabilities.mcpServers`：用户安装并信任的 MCP stdio 进程注册表，形如 `{"browser":{"command":"node","args":["/absolute/path/server.js"]}}`。只允许用户级配置，启用对应 ID 才会启动；远端工具仍走 Pulse 副作用审批。
 - `baseURL`：Provider API 根地址。DeepSeek 当前 OpenAI 格式地址是 `https://api.deepseek.com`。
@@ -138,3 +146,16 @@ Pulse 采用模块化系统提示词基座（参考 Claude Code、OpenAI Codex C
 模型可以使用 `ask.choice`、`ask.multi` 和 `ask.input` 向你发起交互。它们属于 `ask.*` 命名空间，分别对应单选、多选和文本输入。提问最多 2000 字、50 个选项。回答必须落在给出的选项里，单选列表到顶或到底后不会环绕。回答会作为下一轮模型上下文的一部分继续运行。
 
 当前适配器没有把 `temperature`、`top_p`、`presence_penalty` 等采样参数暴露为统一配置；Agent CLI 通常优先控制模型、推理强度、工具和权限，而不是覆盖采样参数。
+
+
+## 技能搜索与按需加载
+
+启用 `skills` 后，Pulse 扫描 `~/.pulse/skills`（受 `PULSE_HOME` 影响）及 `trustedSkillRoots` 中的 `<名称>/SKILL.md`。项目 `.agents/skills` 需要在用户级配置中列出绝对路径。扫描只检查目录名及文件元数据，并将名称保存到数据目录的 `skills-index.json`，不会读取或保存技能正文。启动及重新输入 `/` 时刷新索引；调用时重新检查目录和文件。符号链接及跨目录重名技能不进入候选列表。
+
+在输入框键入 `/` 可搜索命令和技能名称；继续输入名称片段进行筛选，使用 ↑/↓ 选择，Tab 补全，再输入任务并按 Enter：
+
+```text
+/review 检查当前改动
+```
+
+同名内置命令优先；技能可始终使用 `/skill:review 检查当前改动` 调用。只有提交的技能正文会加入当前任务上下文；下一条普通消息不会再次注入技能正文。任务运行期间需等待结束或 `/cancel` 后再调用技能。单个正文最多 64 KiB；目录索引不受原先 32 个已加载技能的限制。技能只提供不可信参考指令，不自动执行脚本或加载配套文件。

@@ -1,5 +1,7 @@
 # @hunterzhu/pulse-adapters
 
+[简体中文](https://github.com/zhuhengtan/Pulse/blob/main/packages/adapters/README.zh-CN.md)
+
 Provider and bridge adapters for Pulse — model providers plus filesystem, shell, and MCP bridges.
 
 ## Install

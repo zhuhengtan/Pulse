@@ -1,5 +1,7 @@
 # Pulse Runtime
 
+[English](README.en.md)
+
 Pulse 是一个面向多步骤 Agent 应用的可恢复运行时。它把 Agent 的执行拆成多个独立的 Lane，每条 Lane 由同步、纯函数 Step 推进；模型调用、工具调用、人工输入和子 Agent 都作为受 Runtime 管理的 Effect 执行。
 
 Pulse 关注的是执行语义：状态如何提交、并发如何调度、结果如何传递、取消和重试是否安全，以及模型换 Provider 后上下文是否仍然可重建。模型 Provider、工具和宿主 UI 都是可替换的适配层。
@@ -383,7 +385,7 @@ Agent 需要询问你时，会调用 `ask.choice`、`ask.multi` 或 `ask.input`�
 {
   "capabilities": {
     "enabled": ["pdf", "spreadsheet", "skills", "browser"],
-    "skills": ["review"],
+    "trustedSkillRoots": ["/absolute/path/to/.agents/skills"],
     "mcpServers": {
       "browser": { "command": "node", "args": ["/absolute/path/to/browser-mcp-server.js"] }
     }
@@ -391,7 +393,7 @@ Agent 需要询问你时，会调用 `ask.choice`、`ask.multi` 或 `ask.input`�
 }
 ```
 
-MCP 配置会启动本机进程，必须只填写自己信任的服务；服务工具按外部副作用处理并遵守当前审批模式。Skill 只读取用户级安装目录或显式信任的绝对目录中的 `SKILL.md`，内容作为不可信参考指令，不执行其中代码。浏览器与 Jarvis 目前是可接入的能力目录项，需要用户安装并配置对应 MCP 服务；Pulse 不会假装这些连接器已经存在。
+MCP 配置会启动本机进程，必须只填写自己信任的服务；服务工具按外部副作用处理并遵守当前审批模式。Skill 自动索引用户级安装目录及显式信任目录下的技能名称；输入 `/` 搜索、↑/↓ 选择、Tab 补全，用 `/技能名 任务` 调用时才读取 `SKILL.md` 加入当前任务上下文。索引仅保存名称，正文作为不可信参考指令，不执行其中代码。浏览器与 Jarvis 目前是可接入的能力目录项，需要用户安装并配置对应 MCP 服务；Pulse 不会假装这些连接器已经存在。
 
 持久化定时任务可由一个前台 Worker 处理：
 

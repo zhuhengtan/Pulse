@@ -1,24 +1,24 @@
 # @hunterzhu/pulse-tool-sdk
 
-[简体中文](https://github.com/zhuhengtan/Pulse/blob/main/packages/tool-sdk/README.zh-CN.md)
+[English](README.md)
 
-Define, register, and execute tools for Pulse agents with typed inputs and outputs.
+为 Pulse Agent 定义、注册并执行具有类型化输入和输出的工具。
 
-## Requirements
+## 要求
 
 - Node.js 22+
-- ESM only
-- Zod 3 for the example below
+- 仅支持 ESM
+- 以下示例需要 Zod 3
 
-## Install
+## 安装
 
 ```bash
 npm install @hunterzhu/pulse-tool-sdk zod@^3
 ```
 
-## Quick start
+## 快速开始
 
-Save as `example.mjs` and run `node example.mjs`.
+保存为 `example.mjs` 并运行 `node example.mjs`。
 
 ```js
 import { z } from 'zod';
@@ -41,9 +41,9 @@ console.log(await registry.execute('greet', { name: 'Pulse' }, new AbortControll
 // { text: 'Hello, Pulse!' }
 ```
 
-This example runs offline with no model or credentials.
+此示例离线运行，不需要模型或凭据。
 
-## Documentation
+## 文档
 
-- [Documentation](https://github.com/zhuhengtan/Pulse#readme)
-- [Source](https://github.com/zhuhengtan/Pulse/tree/main/packages/tool-sdk)
+- [文档](https://github.com/zhuhengtan/Pulse#readme)
+- [源码](https://github.com/zhuhengtan/Pulse/tree/main/packages/tool-sdk)

@@ -1,23 +1,23 @@
 # @hunterzhu/pulse-runtime
 
-[简体中文](https://github.com/zhuhengtan/Pulse/blob/main/packages/runtime/README.zh-CN.md)
+[English](README.md)
 
-The core agent runtime for Pulse: programs, lanes, agents, and outcomes.
+Pulse 的核心 Agent Runtime：提供 Programs、Lanes、Agents 和 Outcomes。
 
-## Requirements
+## 要求
 
 - Node.js 22+
-- ESM only
+- 仅支持 ESM
 
-## Install
+## 安装
 
 ```bash
 npm install @hunterzhu/pulse-runtime
 ```
 
-## Quick start
+## 快速开始
 
-Save as `example.mjs` and run `node example.mjs`.
+保存为 `example.mjs` 并运行 `node example.mjs`。
 
 ```js
 import { PulseRuntime, defineLaneProgram } from '@hunterzhu/pulse-runtime';
@@ -35,10 +35,9 @@ const outcome = await runtime.start(agentId).outcome();
 console.log(outcome.status); // "succeeded"
 ```
 
-This example runs offline with no model or credentials. Connecting real models and
-tools is described in the docs.
+此示例离线运行，不需要模型或凭据。真实模型和工具的连接方式见文档。
 
-## Documentation
+## 文档
 
-- [Documentation](https://github.com/zhuhengtan/Pulse#readme)
-- [Source](https://github.com/zhuhengtan/Pulse/tree/main/packages/runtime)
+- [文档](https://github.com/zhuhengtan/Pulse#readme)
+- [源码](https://github.com/zhuhengtan/Pulse/tree/main/packages/runtime)
