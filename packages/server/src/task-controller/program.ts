@@ -6,6 +6,10 @@ import { controllerFromGlobal, initialController, isReadOnlyInspectionCommand, n
 
 type Context = StepContext<JsonValue>
 const json = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue
+function workerTaskId(ctx: Context): string | undefined {
+  const locals = ctx.lane.resume.locals
+  return locals && typeof locals === 'object' && !Array.isArray(locals) && typeof (locals as Record<string, JsonValue>).taskControllerTaskId === 'string' ? (locals as Record<string, JsonValue>).taskControllerTaskId as string : undefined
+}
 function save(ctx: Context, state: TaskControllerState): void {
   for (const task of [...state.tasks, ...state.priorTasks]) for (const ref of [...task.evidenceRefs, ...(task.candidateRef ? [task.candidateRef] : [])]) ctx.results.summary(ref)
   ctx.commitGlobal({ ops: [{ op: 'set', path: ['taskController'], value: json(state) }], adoptImmediately: true })
@@ -14,20 +18,29 @@ function save(ctx: Context, state: TaskControllerState): void {
 function refsFromWait(ctx: Context): string[] {
   return ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).flatMap((item) => item.state === 'settled' && item.outcome.resultRef ? [item.outcome.resultRef] : []) : []
 }
+function structuredInputs(ctx: Context, name: string): Record<string, JsonValue> {
+  const locals = ctx.lane.resume.locals
+  if (!locals || typeof locals !== 'object' || Array.isArray(locals)) return {}
+  const sdk = (locals as Record<string, JsonValue>).$sdk
+  if (!sdk || typeof sdk !== 'object' || Array.isArray(sdk)) return {}
+  const inputs = (sdk as Record<string, JsonValue>)[`${name}Inputs`]
+  return inputs && typeof inputs === 'object' && !Array.isArray(inputs) ? inputs as Record<string, JsonValue> : {}
+}
 function stateOf(ctx: Context, readOnlyToolNames: readonly string[] = []): TaskControllerState {
   const state = controllerFromGlobal(ctx.global)
   if (!state) throw new Error('TASK_CONTROLLER_STATE_MISSING')
+  if (workerTaskId(ctx)) return state
   const step = ctx.lane.resume.step
   if (step.endsWith(':decode') && step !== 'recall:decode') {
     const keys = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).map((item) => item.target.id) : []
     const fresh = keys.filter((id) => !state.seenModelRefs.includes(id))
     state.usedTurns += fresh.length; state.seenModelRefs.push(...fresh)
-    if (step === 'work:decode') {
+    if (step === 'work:decode' || step === 'stage-worker:decode') {
       const active = state.tasks.find((task) => task.id === state.activeId)
       if (active) active.modelCalls = (active.modelCalls ?? 0) + fresh.length
     }
   }
-  if (step === 'work:tools') {
+  if (step === 'work:tools' || step === 'stage-worker:tools') {
     const active = state.tasks.find((task) => task.id === state.activeId)
     const refs = refsFromWait(ctx).filter((ref) => ctx.results.meta(ref)?.effectKind === 'tool')
     if (active) {
@@ -49,7 +62,7 @@ function stateOf(ctx: Context, readOnlyToolNames: readonly string[] = []): TaskC
   }
   return state
 }
-function dependencyEvidence(state: TaskControllerState): string[] {
+function dependencyEvidence(state: TaskControllerState, activeId = state.activeId): string[] {
   const refs = new Set<string>(); const seen = new Set<string>()
   const visit = (id: string): void => {
     if (seen.has(id)) return
@@ -58,8 +71,18 @@ function dependencyEvidence(state: TaskControllerState): string[] {
     if (task?.status !== 'passed') return
     task.evidenceRefs.forEach((ref) => refs.add(ref)); task.dependsOn.forEach(visit)
   }
-  state.tasks.find((task) => task.id === state.activeId)?.dependsOn.forEach(visit)
+  state.tasks.find((task) => task.id === activeId)?.dependsOn.forEach(visit)
   return [...refs]
+}
+function workerCompletion(ctx: Context, candidateRef?: string, status: 'ready' | 'blocked' = 'ready', note?: string, roundsOverride?: number, evidenceOverride?: string[], reviewedOverride?: boolean): { complete: { value: JsonValue; derivedFrom: string[] } } {
+  const local = ctx.laneState && typeof ctx.laneState === 'object' && !Array.isArray(ctx.laneState) ? ctx.laneState as Record<string, JsonValue> : {}
+  const refs = [...new Set([...ctx.history.flatMap((item) => item.resultRefs), ...refsFromWait(ctx), ...(Array.isArray(local.taskControllerEvidenceRefs) ? local.taskControllerEvidenceRefs.filter((item): item is string => typeof item === 'string') : []), ...(evidenceOverride ?? [])])]
+  const modelRefs = [...new Set([...refs.filter((item) => ctx.results.meta(item)?.effectKind === 'llm'), ...(candidateRef ? [candidateRef] : [])])]
+  const modelEffectIds = [...new Set([...(Array.isArray(local.taskControllerModelEffectIds) ? local.taskControllerModelEffectIds.filter((item): item is string => typeof item === 'string') : []), ...modelRefs.flatMap((ref) => { const producer = ctx.results.meta(ref)?.producer; return producer?.kind === 'effect' ? [producer.id] : [] })])]
+  const evidenceRefs = refs.filter((item) => ctx.results.meta(item)?.effectKind === 'tool')
+  const trackedCalls = typeof local.taskControllerModelCalls === 'number' ? local.taskControllerModelCalls : 0
+  const modelCalls = Math.max(trackedCalls, modelRefs.length, evidenceRefs.length ? 2 : 1)
+  return { complete: { value: { candidateRef: candidateRef ?? null, evidenceRefs, modelRefs, modelEffectIds, modelCalls, status, investigationRounds: roundsOverride ?? (typeof local.taskControllerInvestigationRounds === 'number' ? local.taskControllerInvestigationRounds : 0), progressReviewed: reviewedOverride ?? local.taskControllerProgressReviewed === true, ...(note === undefined ? {} : { note: note.slice(0, 500) }) }, derivedFrom: [...new Set([...(candidateRef ? [candidateRef] : []), ...evidenceRefs])] } }
 }
 function stageFailure(ctx: Context, code: string, message: string): string {
   const state = stateOf(ctx)
@@ -72,7 +95,7 @@ function stageFailure(ctx: Context, code: string, message: string): string {
 
 export interface TaskControllerProgramOptions {
   system: string
-  version?: '5' | '6'
+  version?: '5' | '6' | '7'
   resumePlan?: TaskControllerState
   reusableIds?: string[]
   toolNames: string[]
@@ -85,19 +108,51 @@ export interface TaskControllerProgramOptions {
 /** Host-owned policy, executed exclusively through Runtime steps and atomic commits. */
 export function buildTaskControllerProgram(options: TaskControllerProgramOptions) {
   const budget = Math.max(4, Math.min(256, Math.floor(options.maxTurns)))
+  const programVersion = options.version ?? '7'
+  const parallelStages = programVersion === '7'
   const currentInputs = (ctx: Context): ConversationMessage[] => {
     const state = controllerFromGlobal(ctx.global)
     const record = taskRecordFromGlobal(ctx.global as JsonValue)
     const contract: ConversationMessage = { role: 'user', content: JSON.stringify({ originalObjective: record?.objective, criteria: record?.acceptanceCriteria }) }
     return [contract, ...(options.conversation ?? []), { role: 'user', content: ctx.goal },
-      { role: 'user', content: JSON.stringify({ finalReviewErrors: state?.finalReviewErrors, usedTurns: state?.usedTurns, maxTurns: state?.maxTurns, priorStages: state?.priorTasks.map(({ id, goal, status, note, evidenceRefs }) => ({ id, goal, status, note, evidenceRefs })), activeStage: state?.tasks.find((task) => task.id === state.activeId), stages: state?.tasks.filter((task) => !ctx.lane.resume.step.startsWith('work') || task.id === state.activeId || state.tasks.find((active) => active.id === state.activeId)?.dependsOn.includes(task.id)).map(({ id, criterionIds, goal, check, status, note, evidenceRefs, investigationRounds, directedInvestigations }) => ({ id, criterionIds, goal, check, status, note, evidenceRefs, investigationRounds, directedInvestigations })) }) },
+      { role: 'user', content: JSON.stringify({ finalReviewErrors: state?.finalReviewErrors, usedTurns: state?.usedTurns, maxTurns: state?.maxTurns, priorStages: state?.priorTasks.map(({ id, goal, status, note, evidenceRefs }) => ({ id, goal, status, note, evidenceRefs })), activeStage: state?.tasks.find((task) => task.id === (workerTaskId(ctx) ?? state.activeId)), stages: state?.tasks.filter((task) => !ctx.lane.resume.step.startsWith('work') || task.id === (workerTaskId(ctx) ?? state.activeId) || state.tasks.find((active) => active.id === (workerTaskId(ctx) ?? state.activeId))?.dependsOn.includes(task.id)).map(({ id, criterionIds, goal, check, status, note, evidenceRefs, investigationRounds, directedInvestigations }) => ({ id, criterionIds, goal, check, status, note, evidenceRefs, investigationRounds, directedInvestigations })) }) },
       ...(state?.updates ?? []).map((content): ConversationMessage => ({ role: 'user', content }))]
   }
-  return defineLaneProgram({ id: 'pulse.assistant', version: options.version ?? '6', explicitContext: options.version !== '5', system: options.system, toolSet: 'pulse.default', historyCompaction: { summarizeTask: 'reason', keepRecentRounds: 4, instruction: 'Summarize completed evidence and constraints; do not turn blocked operations into completed work.' } }, (builder) => {
+  return defineLaneProgram({ id: 'pulse.assistant', version: programVersion, explicitContext: programVersion !== '5', system: options.system, toolSet: 'pulse.default', historyCompaction: { summarizeTask: 'reason', keepRecentRounds: 4, instruction: 'Summarize completed evidence and constraints; do not turn blocked operations into completed work.' } }, (builder) => {
     // Safe checkpoints include tool queue continuations and approval responses.
     // No in-flight write is replayed or assumed cancelled: this runs after settlement.
     builder.beforeStep((ctx, step) => {
       if (!controllerFromGlobal(ctx.global)) return undefined
+      if (workerTaskId(ctx)) {
+        if (step === 'work-stage-worker:decode' || step === 'work-stage-worker:tools' || step === 'progress-review-worker:decode') {
+          const modelRefs = step.endsWith(':decode') && ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies).map((item) => item.target.id) : []
+          const evidenceRefs = step.endsWith(':tools') ? refsFromWait(ctx).filter((ref) => ctx.results.meta(ref)?.effectKind === 'tool') : []
+          const readOnly = evidenceRefs.length > 0 && evidenceRefs.every((ref) => { const meta = ctx.results.meta(ref); return meta?.sideEffectPolicy === 'read' || (meta?.toolName !== undefined && (options.readOnlyToolNames ?? []).includes(meta.toolName)) || (meta?.toolName === 'shell.exec' && isReadOnlyInspectionCommand(meta.toolCommand)) })
+          let shouldReview = false
+          ctx.mutateLane((draft) => {
+            if (!draft || typeof draft !== 'object' || Array.isArray(draft)) return
+            const value = draft as Record<string, JsonValue>
+            if (modelRefs.length) value.taskControllerModelCalls = (typeof value.taskControllerModelCalls === 'number' ? value.taskControllerModelCalls : 0) + modelRefs.length
+            if (modelRefs.length) {
+              const previousModels = Array.isArray(value.taskControllerModelEffectIds) ? value.taskControllerModelEffectIds.filter((ref): ref is string => typeof ref === 'string') : []
+              value.taskControllerModelEffectIds = [...new Set([...previousModels, ...modelRefs])]
+            }
+            const previous = Array.isArray(value.taskControllerEvidenceRefs) ? value.taskControllerEvidenceRefs.filter((ref): ref is string => typeof ref === 'string') : []
+            if (evidenceRefs.length) value.taskControllerEvidenceRefs = [...new Set([...previous, ...evidenceRefs])]
+            if (evidenceRefs.length) {
+              const batch = [...evidenceRefs].sort().join(',')
+              if (batch !== value.taskControllerLastBatch) {
+                value.taskControllerLastBatch = batch
+                if (readOnly) value.taskControllerInvestigationRounds = (typeof value.taskControllerInvestigationRounds === 'number' ? value.taskControllerInvestigationRounds : 0) + 1
+                else value.taskControllerInvestigationRounds = 0
+              }
+            }
+            shouldReview = step.endsWith(':tools') && readOnly && typeof value.taskControllerInvestigationRounds === 'number' && value.taskControllerInvestigationRounds >= 4 && value.taskControllerProgressReviewed !== true
+          })
+          if (shouldReview) return { actions: [], next: 'progress-review-worker' }
+        }
+        return undefined
+      }
       const state = stateOf(ctx, options.readOnlyToolNames ?? [])
       const inputs = (ctx.humanInputs ?? []).flatMap((input) => {
         const value = input.value
@@ -106,8 +161,8 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
       })
       const fresh = inputs.filter((input) => !state.seenInputIds.includes(input.id))
       if (fresh.length) {
-        const active = state.tasks.find((task) => task.id === state.activeId)
-        if (active) {
+        const activeTasks = state.tasks.filter((task) => task.id === state.activeId || state.activeIds?.includes(task.id))
+        for (const active of activeTasks) {
           active.evidenceRefs = [...new Set([...active.evidenceRefs, ...refsFromWait(ctx)])]
           active.status = 'blocked'; active.note = 'Superseded at a safe checkpoint; inspect completed effects before replanning.'
         }
@@ -165,26 +220,160 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
           return 'plan'
         }
         state.tasks = plan.tasks.map((task) => ({ ...task, status: 'pending', attempts: 0, evidenceRefs: [], investigationRounds: 0, directedInvestigations: 0, progressReviewed: false, modelCalls: 0 }))
+        // A single stage has no scheduling opportunity to parallelize. Keep it
+        // on the controller lane so its progress counters, safe checkpoints,
+        // and verifier transitions remain one atomic state machine.
+        if (parallelStages && state.tasks.length === 1) {
+          const [only] = state.tasks
+          if (only) { only.status = 'running'; only.attempts = 1; state.activeId = only.id }
+          save(ctx, state)
+          return 'work'
+        }
         save(ctx, state)
         return 'dispatch'
       },
       onError: (error) => ({ fail: error }),
     })
-    builder.addStep('dispatch', (ctx) => {
+    if (!parallelStages) builder.addStep('dispatch', (ctx) => {
       const state = stateOf(ctx, options.readOnlyToolNames ?? [])
-      if (state.usedTurns >= state.maxTurns - 1) {
-        for (const task of state.tasks) if (task.status === 'pending') { task.status = 'blocked'; task.note = 'Total model budget exhausted.' }
-      }
+      if (state.usedTurns >= state.maxTurns - 1) for (const task of state.tasks) if (task.status === 'pending') { task.status = 'blocked'; task.note = 'Total model budget exhausted.' }
       const task = nextTask(state)
       if (!task) { delete state.activeId; save(ctx, state); return { actions: [], next: state.tasks.length > 0 && state.tasks.every((item) => item.status === 'passed') ? 'verify-task' : 'report', locals: {} } }
       task.status = 'running'; task.attempts++; state.activeId = task.id; save(ctx, state)
       return { actions: [], next: 'work', locals: {} }
     })
+    else builder.addDynamicForkStep('dispatch', {
+      lanes: (ctx) => {
+      const state = stateOf(ctx, options.readOnlyToolNames ?? [])
+      if (state.usedTurns >= state.maxTurns - 1) {
+        for (const task of state.tasks) if (task.status === 'pending') { task.status = 'blocked'; task.note = 'Total model budget exhausted.' }
+      }
+      const existingVerifier = state.tasks.find((task) => task.status === 'verifying')
+      if (existingVerifier) {
+        state.activeId = existingVerifier.id
+        save(ctx, state)
+        return { __dispatch_idle: { goal: 'Resume stage verification', program: { programId: 'pulse.assistant', programVersion, step: 'dispatch-idle', locals: {} } } }
+      }
+      delete state.activeId
+      const selected: typeof state.tasks = []
+      const maxParallel = Math.max(1, Math.min(4, state.maxTurns - state.usedTurns - 1))
+      while (selected.length < maxParallel) {
+        const task = nextTask(state)
+        if (!task) break
+        task.status = 'running'; task.attempts++; selected.push(task)
+      }
+      state.activeIds = selected.map((task) => task.id)
+      if (selected[0]) state.activeId = selected[0].id
+      save(ctx, state)
+      return selected.length ? Object.fromEntries(selected.map((task) => [task.id, {
+        goal: task.goal,
+        program: { programId: 'pulse.assistant', programVersion, step: 'work-stage-worker', locals: { taskControllerTaskId: task.id } },
+        inputResultRefs: dependencyEvidence(state, task.id),
+      }])) : { __dispatch_idle: { goal: 'No ready tasks', program: { programId: 'pulse.assistant', programVersion, step: 'dispatch-idle', locals: {} } } }
+      },
+      condition: 'settled',
+      onJoin: (outcomes, ctx) => {
+        const state = stateOf(ctx, options.readOnlyToolNames ?? [])
+        for (const [taskId, outcome] of outcomes) {
+          const task = state.tasks.find((item) => item.id === taskId)
+          if (!task || task.status !== 'running') continue
+          if (outcome.status !== 'succeeded' || !outcome.resultRef) {
+            task.status = 'blocked'; task.note = outcome.error?.message ?? outcome.reason ?? 'Stage worker failed.'
+            continue
+          }
+          const result = ctx.results.read(outcome.resultRef)
+          const workerResult = result && typeof result === 'object' && !Array.isArray(result) ? result as Record<string, JsonValue> : {}
+          const candidateRef = typeof workerResult.candidateRef === 'string' ? workerResult.candidateRef : undefined
+          const evidenceRefs = Array.isArray(workerResult.evidenceRefs) ? workerResult.evidenceRefs.filter((ref): ref is string => typeof ref === 'string') : []
+          const modelEffectIds = Array.isArray(workerResult.modelEffectIds) ? workerResult.modelEffectIds.filter((ref): ref is string => typeof ref === 'string') : []
+          const freshModelRefs = modelEffectIds.filter((ref) => !state.seenModelRefs.includes(ref))
+          state.seenModelRefs.push(...freshModelRefs)
+          const modelCalls = typeof workerResult.modelCalls === 'number' ? workerResult.modelCalls : freshModelRefs.length
+          state.usedTurns = Math.min(state.maxTurns, state.usedTurns + Math.max(freshModelRefs.length, modelCalls))
+          task.modelCalls = (task.modelCalls ?? 0) + Math.max(freshModelRefs.length, modelCalls)
+          if (candidateRef) task.candidateRef = candidateRef
+          else delete task.candidateRef
+          task.evidenceRefs = [...new Set(evidenceRefs)]
+          if (typeof workerResult.investigationRounds === 'number') task.investigationRounds = workerResult.investigationRounds
+          task.progressReviewed = workerResult.progressReviewed === true
+          if (workerResult.status === 'blocked') {
+            task.status = 'blocked'; task.note = typeof workerResult.note === 'string' ? workerResult.note.slice(0, 700) : 'Worker found a constraint preventing this stage.'
+            continue
+          }
+          task.status = candidateRef ? 'verifying' : 'blocked'
+          if (!candidateRef) task.note = 'Stage worker returned no candidate result.'
+        }
+        delete state.activeIds
+        const verifying = state.tasks.find((task) => task.status === 'verifying')
+        if (verifying) state.activeId = verifying.id
+        save(ctx, state)
+        if (verifying) return 'verify-stage'
+        if (state.tasks.length > 0 && state.tasks.every((task) => task.status === 'passed')) return 'verify-task'
+        if (!state.tasks.some((task) => task.status === 'pending' || task.status === 'running')) return 'report'
+        return 'dispatch'
+      },
+    })
+    builder.addStep('dispatch-idle', () => ({ actions: [{ type: 'complete', result: { idle: true } }], next: 'dispatch-idle' }))
+    builder.addReActLoopStep('work-stage-worker', {
+      task: 'reason',
+      instruction: 'Execute only this independent taskController stage. Submit up to four independent tool calls together. Different files may be edited concurrently; for multiple edits to one file, use fs.apply_patches with the same read hash and non-overlapping contexts. Use fs.apply_patch for a single small edit and fs.stage for large new files. Reuse verified evidence, stop exploring when sufficient, and return a concise stage report. Do not execute any other stage.',
+      inputs: (ctx) => {
+        const taskId = workerTaskId(ctx)
+        const state = controllerFromGlobal(ctx.global)
+        const task = state?.tasks.find((item) => item.id === taskId)
+        const prerequisites = dependencyEvidence(state ?? initialController(budget), taskId)
+        const local = ctx.laneState && typeof ctx.laneState === 'object' && !Array.isArray(ctx.laneState) ? ctx.laneState as Record<string, JsonValue> : {}
+        return { conversation: [...currentInputs(ctx), { role: 'user', content: JSON.stringify({ stage: task, dependencyEvidence: prerequisites, focusedNextAction: local.taskControllerNextAction ?? null }) }], results: [...new Set([...prerequisites, ...(Array.isArray(local.taskControllerEvidenceRefs) ? local.taskControllerEvidenceRefs.filter((ref): ref is string => typeof ref === 'string') : [])])] }
+      },
+      toolAllow: options.toolNames, scopeToolCallsToEffect: true, maxTurns: Math.max(1, Math.min(6, budget - 2)), maxTruncationRetries: 1, maxToolsPerTurn: 4,
+      ...(options.approvalMode === 'ask' ? { toolApproval: { prompt: 'Approve these calls only for the current stage.' } } : {}),
+      onFinish: (ref, ctx) => {
+        return workerCompletion(ctx, ref)
+      },
+      onMaxTurns: (ctx) => {
+        const candidate = [...new Set([...ctx.history.flatMap((item) => item.resultRefs), ...refsFromWait(ctx)])].reverse().find((ref) => ctx.results.meta(ref)?.effectKind === 'llm')
+        return workerCompletion(ctx, candidate)
+      },
+      onError: (error) => ({ fail: error }),
+    })
+    builder.addStructuredLLMStep('progress-review-worker', {
+      task: 'verify', selfCorrect: { maxRounds: 1 },
+      schema: z.object({ status: z.enum(['ready', 'continue', 'blocked']), evidenceRefs: z.array(z.string()).max(32), nextAction: z.string().max(500).optional(), note: z.string().max(500) }),
+      instruction: 'This is a bounded progress checkpoint for one independent stage after four read-only investigation rounds. Use only the stage goal/check and supplied settled evidence. Choose ready when evidence supports a final stage report, continue only for one specific missing fact and give a targeted nextAction, or blocked when the required information cannot be obtained. Never request broad exploration or repeat unchanged reads. Cite only supplied ResultRefs. Return concise JSON in the user language.',
+      inputs: (ctx) => {
+        const taskId = workerTaskId(ctx)
+        const task = controllerFromGlobal(ctx.global)?.tasks.find((item) => item.id === taskId)
+        const local = ctx.laneState && typeof ctx.laneState === 'object' && !Array.isArray(ctx.laneState) ? ctx.laneState as Record<string, JsonValue> : {}
+        const evidenceRefs = Array.isArray(local.taskControllerEvidenceRefs) ? local.taskControllerEvidenceRefs.filter((ref): ref is string => typeof ref === 'string') : []
+        return { conversation: [...currentInputs(ctx), { role: 'user', content: JSON.stringify({ stage: task, investigationRounds: local.taskControllerInvestigationRounds ?? 0 }) }], results: [...new Set([...dependencyEvidence(controllerFromGlobal(ctx.global) ?? initialController(budget), taskId), ...evidenceRefs])] }
+      },
+      onSuccess: (result, ctx) => {
+        const local = ctx.laneState && typeof ctx.laneState === 'object' && !Array.isArray(ctx.laneState) ? ctx.laneState as Record<string, JsonValue> : {}
+        const inputRefs = Array.isArray(structuredInputs(ctx, 'progress-review-worker').results) ? (structuredInputs(ctx, 'progress-review-worker').results as JsonValue[]).filter((ref): ref is string => typeof ref === 'string') : []
+        const allowed = new Set([...(Array.isArray(local.taskControllerEvidenceRefs) ? local.taskControllerEvidenceRefs.filter((ref): ref is string => typeof ref === 'string') : []), ...inputRefs])
+        const cited = result.evidenceRefs.filter((ref) => allowed.has(ref))
+        if (result.status === 'continue' && result.nextAction?.trim()) {
+          ctx.mutateLane((draft) => { if (draft && typeof draft === 'object' && !Array.isArray(draft)) { const value = draft as Record<string, JsonValue>; value.taskControllerNextAction = result.nextAction!.trim(); value.taskControllerInvestigationRounds = 0; value.taskControllerProgressReviewed = true } })
+          return 'work-stage-worker'
+        }
+        const candidate = [...new Set([...ctx.history.flatMap((item) => item.resultRefs)])].reverse().find((ref) => ctx.results.meta(ref)?.effectKind === 'llm')
+        ctx.mutateLane((draft) => { if (draft && typeof draft === 'object' && !Array.isArray(draft)) (draft as Record<string, JsonValue>).taskControllerProgressReviewed = true })
+        const rounds = Math.max(4, typeof local.taskControllerInvestigationRounds === 'number' ? local.taskControllerInvestigationRounds : 0)
+        const evidence = inputRefs.filter((ref) => ctx.results.meta(ref)?.effectKind === 'tool')
+        if (result.status === 'blocked') return workerCompletion(ctx, candidate, 'blocked', result.note, rounds, evidence, true)
+        if (result.status === 'ready' && cited.length > 0) return workerCompletion(ctx, candidate, 'ready', result.note, rounds, evidence, true)
+        return workerCompletion(ctx, candidate, 'blocked', 'Progress reviewer did not cite valid evidence or identify one focused next action.', rounds, evidence, true)
+      },
+      onError: (_error, ctx) => {
+        ctx.mutateLane((draft) => { if (draft && typeof draft === 'object' && !Array.isArray(draft)) (draft as Record<string, JsonValue>).taskControllerProgressReviewed = true })
+        return 'work-stage-worker'
+      },
+    })
     builder.addReActLoopStep('work', {
-      instruction: 'Execute ONLY the active taskController stage and its check, in small edits. Current user instructions and original constraints still apply. Each model turn may request at most ONE modifying tool operation; wait for its result before choosing the next chunk. Use fs.apply_patch for small changes to existing files; use fs.stage for large new files or necessary full rewrites, with each chunk no larger than 8192 bytes, and commit only after all chunks are staged. Reuse verified earlier stage evidence; do not reread unchanged ranges. If the active stage note contains a NEXT action, perform only that focused action. Use task.conversation for earlier assistant proposals referenced by the user. Use task.evidence only with exact ResultRefs listed in the active stage or dependency evidence; after RESULT_NOT_VISIBLE, never retry that ref. Use task.history for retained details rather than repeating tools. Use task.audit to attribute this run operations instead of assuming all git changes are yours. Use targeted search and bounded reads for exact edits. Search line numbers belong in fs.read startLine, never in its byte offset. For pure writing or analysis stages, stop investigating when supplied evidence is sufficient and put the requested deliverable itself in your final stage response. If asked for a commit message, include its literal title and body; do not merely report that one should be written. A missing user-facing deliverable is achievable work, not an external blocker. Check remaining total budget and finish the deliverable before polishing reports. Do not repeat completed writes. A known environment/permission blocker is not repairable by repeating the same test. Report a stage blocked only for an evidenced external or authorization blocker, then stop its tools so the controller can select independent work. Return a concise stage report with evidence refs when finished; do not execute the next stage. Do not expose private chain-of-thought.',
+      instruction: 'Execute only the active taskController stage and its check; current user instructions still apply. Submit up to four independent tool calls together. Different files may be edited concurrently; for multiple edits to the same file, use fs.apply_patches with one baseline hash and non-overlapping exact contexts, or re-read and replan after a conflict. Use fs.apply_patch for a single small existing-file edit and fs.stage for large new files or required full rewrites (chunks <=8192 bytes); commit staged content only when complete. Reuse verified evidence and do not repeat completed writes or unchanged reads. Use task.conversation for earlier assistant proposals. Use task.evidence only for ResultRefs visible in this stage or its dependency evidence; after RESULT_NOT_VISIBLE, never retry that ref. Use task.history for retained details and task.audit to attribute this run\'s operations. Prefer targeted search and bounded reads; fs.read startLine is one-based and offset is bytes. For pure writing or analysis, stop investigating once evidence is sufficient and deliver the requested result. Include literal commit-message text when asked. Check the remaining total budget and finish the deliverable before polishing reports. A known environment or permission blocker is not repairable by repeating the same test. Mark a stage blocked only for an evidenced external or authorization blocker, then stop its tools so the controller can select independent work. Return a concise stage report with evidence refs; do not execute the next stage or expose private chain-of-thought.',
       inputs: (ctx) => ({ conversation: currentInputs(ctx), results: dependencyEvidence(stateOf(ctx, options.readOnlyToolNames ?? [])), toolDiscovery: { limit: options.toolNames.length } }),
       toolAllow: options.toolNames, scopeToolCallsToEffect: true, maxTurns: Math.min(8, budget), maxTruncationRetries: 1, maxToolsPerTurn: 4,
-      serialTools: options.toolNames.filter((name) => !['fs.read', 'fs.list', 'fs.search', 'web.fetch', 'web.search'].includes(name)), stopAfterFirstSerialTool: true,
+      ...(!parallelStages ? { serialTools: options.toolNames.filter((name) => !['fs.read', 'fs.list', 'fs.search', 'web.fetch', 'web.search'].includes(name)), stopAfterFirstSerialTool: true } : {}),
       ...(options.approvalMode === 'ask' ? { toolApproval: { prompt: 'Approve these calls only for the current stage.' } } : {}),
       onMaxTurns: (ctx) => {
         const state = stateOf(ctx, options.readOnlyToolNames ?? [])

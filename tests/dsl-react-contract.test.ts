@@ -3,6 +3,53 @@ import { PulseRuntime, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 import { z } from 'zod'
 
 describe('DSL ReAct contract', () => {
+  it('submits independent tool calls together by default', async () => {
+    const started: string[] = []
+    let calls = 0
+    const program = defineLaneProgram({ id: 'default-parallel-effects', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', maxTurns: 4, maxToolsPerTurn: 4, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { started.push(String((effect.input as { name?: string }).name)); return { value: 'done' } }
+      if (++calls === 1) return { value: { text: '', finishReason: 'tool_calls', toolCalls: [{ name: 'read-a', input: {} }, { name: 'read-b', input: {} }] } }
+      expect(started).toEqual(['read-a', 'read-b'])
+      return { value: { text: 'done', finishReason: 'stop', toolCalls: [] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(started).toHaveLength(2)
+  })
+
+  it('prefers an exact underscore tool name over a dotted-name alias', async () => {
+    const executed: string[] = []
+    let models = 0
+    const program = defineLaneProgram({ id: 'exact-tool-name', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', toolAllow: ['foo.bar', 'foo_bar'], onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { executed.push(String((effect.input as { name?: string }).name)); return { value: 'done' } }
+      if (++models === 1) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'foo_bar', input: {} }] } }
+      return { value: { text: 'done', finishReason: 'stop' } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(executed).toEqual(['foo_bar'])
+  })
+
+  it('rejects an ambiguous underscore alias instead of dispatching either tool', async () => {
+    let tools = 0
+    const program = defineLaneProgram({ id: 'ambiguous-tool-alias', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', toolAllow: ['foo.bar_baz', 'foo_bar.baz'], onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { tools++; return { value: 'unexpected' } }
+      return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'foo_bar_baz', input: {} }] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'failed', error: { code: 'ACTION_TOOL_NOT_ALLOWED' } })
+    expect(tools).toBe(0)
+  })
+
   it('never accepts or executes a token-truncated response', async () => {
     let finished = false
     let toolRuns = 0

@@ -48,7 +48,6 @@ Options:
   --max-output-tokens <n>   maximum generated tokens (default 4096)
   --reasoning-effort <x>    low, medium, or high
   --max-turns <n>           maximum ReAct model/tool turns (default 32)
-  --execution-mode <mode>   serial (default) or parallel-read (up to three read-only lanes)
   --auto-compact-percent <n> compact automatically at this percent of the context window (1-90, default 90)
   --format <text|jsonl>     output format
   --resume                  enter the latest saved session
@@ -235,8 +234,6 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
         ? ('auto' as const)
         : requestedApprovalMode === 'ask' ? ('ask' as const) : config.approvalMode
   const allowNetwork = parsed.options['no-network'] === true ? false : parsed.options['allow-network'] === true || process.env.PULSE_ALLOW_NETWORK === '1' ? true : config.allowNetwork
-  const executionMode = option(parsed.options, 'execution-mode') ?? process.env.PULSE_EXECUTION_MODE ?? config.executionMode ?? 'serial'
-  if (executionMode !== 'serial' && executionMode !== 'parallel-read') throw new Error('INVALID_EXECUTION_MODE: expected serial or parallel-read')
 
   const capabilitySettings = config.capabilities ?? {}
   const skillRoots = capabilitySettings.trustedSkillRoots ?? []
@@ -309,7 +306,6 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(configuredAutoCompactPercent === undefined ? {} : { autoCompactPercent: Math.min(90, configuredAutoCompactPercent) }),
     ...(allowNetwork === undefined ? {} : { allowNetwork }),
     ...(config.networkHosts === undefined ? {} : { networkHosts: config.networkHosts }),
-    executionMode,
   }
 }
 

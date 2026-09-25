@@ -69,7 +69,6 @@ Pulse 只使用供应商表和模型表这套配置：模型的 `displayName` �
     "skills": ["review"]
   },
   "approvalMode": "ask",
-  "executionMode": "serial",
   "maxTurns": 32,
   "autoCompactPercent": 90,
   "allowNetwork": false
@@ -106,7 +105,7 @@ Provider 字段说明：
 - `models.<name>.pricing` 可为本地费用估算提供 `{ currency, inputPerMillion, outputPerMillion, version }`。估算费用与 Provider 报告费用分开展示，并保留价格版本。
 - `toolChoice`：`auto`、`required`、`none`，或指定一个函数工具。
 - `approvalMode`：`ask` 每次副作用由你确认；`read-only` 禁止写入和 shell；`auto` 对 workspace 内的 `fs.write`、`fs.apply_patch`、`fs.move` 使用工具自身的 workspace 权限和路径校验直接执行，其他外部副作用再由独立的 Pulse safety reviewer 审查。审查回复必须整段就是 `APPROVE` 才会放行，`DENY`、解释句，以及「不允许」「不批准」都不会放行。
-- `executionMode`：`serial`（默认）或 `parallel-read`。并行模式最多拆成三个带依赖关系的只读 Lane；子 Lane 只允许宿主明确标记为 `read` 的工具，不能写文件、执行 shell 或递归拆分。无效计划或规划失败会退回串行主流程。可用 `--execution-mode parallel-read` 仅对当前调用启用。所有 Lane 共用 Run 时限和 `maxTurns` 对应的 LLM Effect 总预算，单个子 Lane 最多三轮；Provider 在一个 Effect 内部进行的 fallback/retry 和 token/费用仍不能由这个上限硬截断。
+- Runtime 默认以事件驱动方式调度异步模型请求和工具调用。独立工具操作可并行提交；同一目标文件仍由路径级锁与基线哈希保护，冲突后应重新读取再规划。
 - `systemPrompt`：自定义系统指令文本。也可通过 `--system-prompt` 或 `PULSE_SYSTEM_PROMPT` 注入。未加 `--trust-workspace` 时，工作区 `.pulse/config.json` 里的此项会被忽略。
 - `systemPromptFile`：从文件载入自定义系统指令。也可通过 `--system-prompt-file` 或 `PULSE_SYSTEM_PROMPT_FILE` 注入。未加 `--trust-workspace` 时，工作区配置不能指定这个路径。
 - `maxTurns`：一次 ReAct 运行允许的最大模型/工具轮数，默认 32，命令行可用 `--max-turns` 或 `PULSE_MAX_TURNS` 覆盖，最大 256。

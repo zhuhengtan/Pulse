@@ -75,7 +75,7 @@ describe('local CLI application host', () => {
       const run = await host.sendMessage(conversation.id, { text: '1、2你帮我加一下' })
       for await (const _event of run.events) { /* consume */ }
       const safetyMessages = JSON.parse(safetyPrompt) as Array<{ role: string; content: string }>
-      const safetyUserContent = safetyMessages.find((message) => message.role === 'user')?.content ?? ''
+      const safetyUserContent = safetyMessages.find((message) => message.role === 'user' && message.content.startsWith('User request (untrusted context'))?.content ?? ''
       const requestStart = safetyUserContent.indexOf('): ') + 3
       const requestEnd = safetyUserContent.indexOf('\nTool:', requestStart)
       const safetyRequest = JSON.parse(safetyUserContent.slice(requestStart, requestEnd)) as { workspace: string }
@@ -110,56 +110,6 @@ describe('local CLI application host', () => {
       expect(JSON.parse(await readFile(outcomeFile, 'utf8')).usage).toMatchObject({ completeness: 'unavailable' })
       expect(JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'usage.json'), 'utf8'))).toMatchObject({ completeness: 'unavailable' })
       expect(JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'manifest.json'), 'utf8')).activeRunId).toBeUndefined()
-      await host.close()
-    } finally { await rm(directory, { recursive: true, force: true }) }
-  })
-
-  it('runs at most three opt-in read-only child lanes, joins their evidence, then continues serially', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-parallel-read-host-'))
-    try {
-      const host = createLocalHost({
-        cwd: directory,
-        dataDir: join(directory, 'data'),
-        executionMode: 'parallel-read',
-        mockResponse: 'Merged result from the main lane.',
-        mockParallelPlan: { tasks: [
-          { key: 'task-1', goal: 'Read the project overview.', dependsOn: [] },
-          { key: 'task-2', goal: 'Read package scripts after the overview.', dependsOn: [{ taskKey: 'task-1', required: false }] },
-          { key: 'task-3', goal: 'Read the test layout.', dependsOn: [] },
-        ] },
-      })
-      const conversation = await host.createConversation()
-      const run = await host.sendMessage(conversation.id, { text: 'Review the project structure.' })
-      const events = []
-      for await (const event of run.events) events.push(event)
-      const snapshot = await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8')
-      expect(snapshot).toContain('pulse.read-only-worker')
-      expect(snapshot).toContain('parallelRead')
-      expect(snapshot).toContain('Read the project overview.')
-      expect(snapshot).toContain('Read package scripts after the overview.')
-      expect(snapshot).toContain('Read the test layout.')
-      expect(events.filter((event) => event.type === 'fact').length).toBeGreaterThan(0)
-      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded' })
-      await host.close()
-    } finally { await rm(directory, { recursive: true, force: true }) }
-  })
-
-  it('applies one shared model-effect budget across parallel planning, workers, and the main lane', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pulse-parallel-budget-'))
-    try {
-      const host = createLocalHost({
-        cwd: directory,
-        dataDir: join(directory, 'data'),
-        executionMode: 'parallel-read',
-        maxTurns: 1,
-        mockParallelPlan: { tasks: [{ key: 'task-1', goal: 'Read the overview.', dependsOn: [] }] },
-      })
-      const conversation = await host.createConversation()
-      const run = await host.sendMessage(conversation.id, { text: 'Inspect the project.' })
-      for await (const _event of run.events) { /* drain */ }
-      const outcome = await run.outcome()
-      expect(outcome.status).toBe('failed')
-      expect(JSON.stringify(outcome)).toContain('PARALLEL_MODEL_EFFECT_BUDGET_EXHAUSTED')
       await host.close()
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
@@ -341,6 +291,29 @@ describe('local CLI application host', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('queues multiple ask requests from one model turn without dropping either response', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-ask-queue-'))
+    try {
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), mockToolCalls: [
+        { name: 'ask.choice', input: { prompt: 'First choice', options: ['one', 'two'] } },
+        { name: 'ask.choice', input: { prompt: 'Second choice', options: ['red', 'blue'] } },
+      ], mockAfterToolResponse: 'both choices received' })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'ask two independent questions' })
+      const prompts: string[] = []
+      for await (const event of run.events) {
+        if (event.type !== 'waiting') continue
+        const data = event.data as { effectId?: string; input?: { prompt?: string; options?: Array<{ value?: string }> } }
+        prompts.push(data.input?.prompt ?? '')
+        const selected = data.input?.options?.[0]?.value
+        await run.reply(data.effectId!, { value: selected })
+      }
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'both choices received' })
+      expect(prompts).toEqual(['First choice', 'Second choice'])
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('rejects an ask prompt that exceeds the tool schema', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-ask-large-'))
     try {
@@ -374,6 +347,46 @@ describe('local CLI application host', () => {
       await expect(artifactRun.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'recorded' })
       await expect(artifactHost.listArtifacts(artifactConversation.id)).resolves.toEqual([expect.objectContaining({ path: 'note.txt', hash: expectedHash, label: 'note', mediaType: 'text/plain' })])
       await host.close(); await artifactHost.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('applies same-file non-overlapping patches atomically against one baseline hash', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-patches-'))
+    try {
+      const original = 'alpha = old\nbeta = old\ngamma = keep\n'
+      await writeFile(join(directory, 'settings.txt'), original)
+      const expectedHash = createHash('sha256').update(original).digest('hex')
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', mockToolCalls: [{ name: 'fs.apply_patches', input: {
+        path: 'settings.txt', expectedHash,
+        patches: [{ find: 'alpha = old', replace: 'alpha = new' }, { find: 'beta = old', replace: 'beta = new' }],
+      } }], mockAfterToolResponse: 'patched together' })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'update both settings' })
+      for await (const _event of run.events) { /* drain */ }
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'patched together' })
+      await expect(readFile(join(directory, 'settings.txt'), 'utf8')).resolves.toBe('alpha = new\nbeta = new\ngamma = keep\n')
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('rejects overlapping same-file patches without partially writing', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-patches-overlap-'))
+    try {
+      const original = 'before after\n'
+      await writeFile(join(directory, 'settings.txt'), original)
+      const expectedHash = createHash('sha256').update(original).digest('hex')
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', mockToolCalls: [{ name: 'fs.apply_patches', input: {
+        path: 'settings.txt', expectedHash,
+        patches: [{ find: 'before after', replace: 'first' }, { find: 'after', replace: 'second' }],
+      } }], mockAfterToolResponse: 'should not continue' })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'apply conflicting changes' })
+      const events = []
+      for await (const event of run.events) events.push(event)
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded' })
+      expect(JSON.stringify(events)).toContain('PATCH_RANGES_OVERLAP')
+      await expect(readFile(join(directory, 'settings.txt'), 'utf8')).resolves.toBe(original)
+      await host.close()
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 

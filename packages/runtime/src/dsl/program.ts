@@ -1,13 +1,13 @@
 import { z, type ZodTypeAny } from 'zod'
 import type { LaneProgram, LaneStepContext } from '../scheduler/runtime.js'
 import { globalContextRef, laneContextRef } from '../core/types.js'
-import type { ContextDelta, ConversationMessage, JsonValue, LaneRecord, LaneStepOutput, ResultRef, ProvenanceRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec, WaitResolution, HumanInputRecord } from '../core/types.js'
+import type { ContextDelta, ConversationMessage, JsonValue, LaneRecord, LaneStepOutput, ResultRef, ProvenanceRef, RuntimeAction, RuntimeState, ResumeInput, HistoryRecord, ProgressWatchdogState, ContextOp, LaneId, PrivacyLabel, RuntimeError, MergeProposal, ResourceLockSpec, Outcome, ForkAction, ForkLaneSpec, WaitResolution, HumanInputRecord, EffectSubmission } from '../core/types.js'
 import { createDraftProxy } from './context-proxy.js'
 import type { ProgramRef } from './templates.js'
 import { assertDslInstructionSize, contentHash, stableSerialize } from '../context/builder.js'
 import type { RuntimeToolDiscoveryQuery } from '../tools/registry.js'
 
-export type NextStepTarget<TState = unknown> = string | { step: string } | { complete: { value?: JsonValue; privacy?: PrivacyLabel; children?: 'reject_if_active' | 'cancel' | 'await' } } | { fail: { code: string; message: string; retryable?: boolean; details?: JsonValue; privacy?: PrivacyLabel; derivedFrom?: ProvenanceRef[] } }
+export type NextStepTarget<TState = unknown> = string | { step: string } | { complete: { value?: JsonValue; privacy?: PrivacyLabel; derivedFrom?: ProvenanceRef[]; children?: 'reject_if_active' | 'cancel' | 'await' } } | { fail: { code: string; message: string; retryable?: boolean; details?: JsonValue; privacy?: PrivacyLabel; derivedFrom?: ProvenanceRef[] } }
 export type ScalarProjection<T> = T extends string | number | boolean | null ? T : T extends readonly unknown[] ? never : T extends object ? { [K in keyof T]: T[K] extends string | number | boolean | null ? T[K] : never } : never
 export interface InstructionView<TState> { goal: string; state: ScalarProjection<TState>; /** Read-only persisted Global Context for host-owned task metadata. */ global?: Readonly<JsonValue> }
 export interface StepInputs { results?: ResultRef[]; findings?: ResultRef[]; artifacts?: string[]; events?: string[]; conversation?: ConversationMessage[]; toolDiscovery?: RuntimeToolDiscoveryQuery }
@@ -25,7 +25,7 @@ export interface StepContext<TState = JsonValue> {
   watchdog?: ProgressWatchdogState
   resumeInput?: ResumeInput
   humanInputs?: readonly HumanInputRecord[]
-  results: { meta(ref: ResultRef): ResultMeta | undefined; summary(ref: ResultRef): JsonValue | undefined }
+  results: { meta(ref: ResultRef): ResultMeta | undefined; summary(ref: ResultRef): JsonValue | undefined; read(ref: ResultRef): JsonValue | undefined }
   mergeProposals: ReadonlyArray<MergeProposal>
   mutateLane(mutator: (draft: TState) => void): void
   proposeGlobal(delta: { ops: ContextOp[] | ((draft: Record<string, JsonValue>) => void); privacy?: PrivacyLabel }): void
@@ -56,7 +56,7 @@ type ErrorBoundaryHandler<TState> = (error: RuntimeError, ctx: StepContext<TStat
 function target(step: NextStepTarget, fallback: string): { step: string; action?: RuntimeAction } {
   if (typeof step === 'string') return { step }
   if ('step' in step) return { step: step.step }
-  if ('complete' in step) return { step: fallback, action: { type: 'complete', result: step.complete.value ?? null, ...(step.complete.privacy === undefined ? {} : { privacy: step.complete.privacy }), ...(step.complete.children === undefined ? {} : { children: step.complete.children }) } }
+  if ('complete' in step) return { step: fallback, action: { type: 'complete', result: step.complete.value ?? null, ...(step.complete.privacy === undefined ? {} : { privacy: step.complete.privacy }), ...(step.complete.derivedFrom === undefined ? {} : { derivedFrom: step.complete.derivedFrom }), ...(step.complete.children === undefined ? {} : { children: step.complete.children }) } }
   return { step: fallback, action: { type: 'fail', error: { code: step.fail.code, message: step.fail.message, ...(step.fail.retryable === undefined ? {} : { retryable: step.fail.retryable }), ...(step.fail.details === undefined ? {} : { details: step.fail.details }) }, ...(step.fail.privacy === undefined ? {} : { privacy: step.fail.privacy }), ...(step.fail.derivedFrom === undefined ? {} : { derivedFrom: step.fail.derivedFrom }) } }
 }
 function clone<T>(value: T): T { return structuredClone(value) }
@@ -315,7 +315,7 @@ function makeContext<TState>(context: LaneStepContext, initialState: TState): { 
   const ctx: StepContext<TState> = {
     lane: context.lane, goal: context.lane.goal, global, globalVersion, laneState: readonlyState, history, now: context.now, ...(context.lane.progressWatchdog === undefined ? {} : { watchdog: context.lane.progressWatchdog }), ...(context.resumeInput ? { resumeInput: context.resumeInput } : {}), ...(context.humanInputs?.length ? { humanInputs: context.humanInputs } : {}),
 
-    results: { meta: resultMeta, summary: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return resultMeta(ref)?.summary } },
+    results: { meta: resultMeta, summary: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return resultMeta(ref)?.summary }, read: (ref) => { if (context.state.results.has(ref) && resultVisible(context, ref)) derivedRefs.add(ref); return findResult(context, ref) } },
     mergeProposals: [...context.state.mergeProposals.values()].filter((proposal) => proposal.agentId === context.lane.agentId).map((proposal) => { for (const ref of proposal.delta.derivedFrom ?? []) derivedRefs.add(ref); return clone(proposal) }),
     mutateLane: (mutator) => { mutator((draftProxy?.draft ?? draft) as TState); const changes = draftProxy?.changes(); delta = { target: 'lane', baseVersion: context.lane.context.version, ops: changes?.ops.map((op) => op.op === 'set' ? { op: 'set' as const, path: op.path, value: asJson(op.value) } : op.op === 'append' ? { op: 'append' as const, path: op.path, value: asJson(op.value) } : { op: 'remove' as const, path: op.path }) ?? [] } },
     proposeGlobal: (value) => globalDelta({ ...value, proposal: true }),
@@ -534,7 +534,12 @@ export class StepBuilder<TState = JsonValue> {
       }
       if (finishReason === 'tool_calls') {
         if (turns >= maxTurns || toolCalls.length === 0) return maxTurnsReached()
-        const invalidTool = toolCalls.find((call) => { const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}; const toolName = typeof item.name === 'string' ? item.name : ''; return !toolName || (options.toolAllow !== undefined && !options.toolAllow.includes(toolName)) })
+        const canonicalToolName = (name: string): string | undefined => {
+          if (options.toolAllow === undefined || options.toolAllow.includes(name)) return name
+          const aliases = options.toolAllow.filter((allowed) => allowed.replaceAll('.', '_') === name)
+          return aliases.length === 1 ? aliases[0] : undefined
+        }
+        const invalidTool = toolCalls.find((call) => { const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}; const toolName = typeof item.name === 'string' ? item.name : ''; const canonical = canonicalToolName(toolName); return !toolName || canonical === undefined || (options.toolAllow !== undefined && !options.toolAllow.includes(canonical)) })
         if (invalidTool !== undefined) return fail({ code: 'ACTION_TOOL_NOT_ALLOWED', message: 'Model requested a tool outside the ReAct allow-list.', retryable: false })
         const resolution = waitResolution(ctx.resumeInput)
         const sourceEffectId = ref !== undefined && ctx.results.meta(ref)?.producer.kind === 'effect'
@@ -545,14 +550,15 @@ export class StepBuilder<TState = JsonValue> {
         const calls = toolCalls.map((call, index) => {
           const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}
           const originalId = typeof item.toolCallId === 'string' ? item.toolCallId : `call-${index + 1}`
-          const toolName = typeof item.name === 'string' ? item.name : ''
+          const rawToolName = typeof item.name === 'string' ? item.name : ''
+          const toolName = canonicalToolName(rawToolName)!
           return { originalId, toolName, toolCallId: options.scopeToolCallsToEffect ? `${name}:${sourceEffectId ?? 'turn'}:${turns}:${originalId}` : `${name}:${turns}:${originalId}`, input: item.input ?? {} }
         })
         const askCalls = calls.filter((call) => String(call.toolName).startsWith('ask.'))
         if (askCalls.length > 0) {
           if (askCalls.length !== calls.length) return fail({ code: 'ASK_MIXED_TOOL_CALLS', message: 'An ask interaction must be requested in a separate model turn from workspace tools.', retryable: false })
-          if (askCalls.length !== 1) return fail({ code: 'ASK_MULTIPLE_REQUESTS', message: 'Only one ask interaction may be requested at a time.', retryable: false })
-          const call = askCalls[0]!
+          const askEffects: Array<Record<string, JsonValue>> = []
+          for (const [askIndex, call] of askCalls.entries()) {
           const rawInput = call.input && typeof call.input === 'object' && !Array.isArray(call.input) ? call.input as Record<string, JsonValue> : {}
           const askType = call.toolName === 'ask.choice' ? 'choice' : call.toolName === 'ask.multi' ? 'multi' : call.toolName === 'ask.input' ? 'input' : undefined
           if (!askType) return fail({ code: 'ASK_TOOL_UNKNOWN', message: `Unknown ask tool ${String(call.toolName)}.`, retryable: false })
@@ -590,7 +596,7 @@ export class StepBuilder<TState = JsonValue> {
             }
           }
           const humanEffect = {
-            key: `${name}-ask-${turns}`,
+            key: `${name}-ask-${turns}-${askIndex + 1}`,
             ...(sourceEffectId === undefined ? {} : { llmEffectId: sourceEffectId }),
             ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }),
             ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}),
@@ -598,7 +604,9 @@ export class StepBuilder<TState = JsonValue> {
             concurrencyClass: 'none' as const,
             input: askInput,
           }
-          return { actions: [{ type: 'submit_effects', effects: [humanEffect], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:tools`, locals: clearPendingResult(ctx) }
+          askEffects.push(humanEffect as unknown as Record<string, JsonValue>)
+          }
+          return { actions: [{ type: 'submit_effects', effects: askEffects as unknown as EffectSubmission[], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:tools`, locals: clearPendingResult(ctx) }
         }
         const makeToolEffects = (approvedCalls: Array<{ originalId: JsonValue; toolName: JsonValue; toolCallId?: JsonValue; input: JsonValue }>): RuntimeAction => ({ type: 'submit_effects', effects: approvedCalls.map((call, index) => ({ key: `${name}-tool-${turns}-${index + 1}`, toolCallId: String(call.toolCallId ?? `${name}:${turns}:${String(call.originalId)}`), ...(sourceEffectId === undefined ? {} : { llmEffectId: sourceEffectId }), ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }), ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}), kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { toolCallId: String(call.toolCallId ?? `${name}:${turns}:${String(call.originalId)}`), name: String(call.toolName), arguments: call.input, ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }), ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}) } })), wait: { onUnsatisfied: 'resume_with_error' } })
         const dispatchTools = (action: RuntimeAction, locals: JsonValue) => {

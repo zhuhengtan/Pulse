@@ -776,6 +776,10 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
           const ownerCopy = laneCopy(owner)
           if (ownerCopy.visibleResultRefs) ownerCopy.visibleResultRefs.add(resultId)
           else ownerCopy.visibleResultRefs = new Set([resultId])
+          for (const source of action.derivedFrom ?? []) {
+            const ref = typeof source === 'string' ? (source.startsWith('result-') ? source : undefined) : source.kind === 'result' ? source.ref : undefined
+            if (ref) ownerCopy.visibleResultRefs.add(ref)
+          }
           mutations.push({ op: 'setLane', laneId: owner.id, record: ownerCopy })
         }
       }

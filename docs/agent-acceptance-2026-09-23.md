@@ -52,7 +52,7 @@ CLI 的 Runtime 取消可能先于底层工具停止，因此 CLI 一旦在执�
 - 用量：Provider attempt 元数据保留每次 fallback 的独立 attempt ID；RunUsage 写入 `usage.json` 和 `outcome.json`，随 JSONL 完成结果及 TUI 显示。配置模型价格可计算带版本的估算费用，缺失用量/费用仍明确未知。
 - 评测：24 项数据集增加 JavaScript/Python 沙箱行为检查和研究链接可追溯检查；真实评测强制 token 预算，限制每任务调用、输出 token 和时间；网络任务以外强制关闭网络。费用由 Provider 报告时在任务间检查；单次任务内无法严格预先截断费用，因此报告不声称费用硬上限已保证。
 - MCP/模板/服务：增加 `mcp doctor`、按远端工具名显式 `toolPolicies`、环境变量引用 `envFrom`，以及 4 个版本化任务模板和 `template list/show/run`。新增三平台用户服务命令和 CI OS 矩阵；没有安装或启动 OS 服务。
-- 主动只读并行 Lane 已加入可选 `executionMode: parallel-read`：规划最多三个含有向依赖的子任务；子 Lane 只能调用 Host 明确标为 `read` 的工具，不能递归拆分；规划错误时串行回退，Join 后将 ResultRef 和失败摘要交回主 Lane 并纳入验收证据。默认仍是 `serial`。共享 Run 时限、模型路由及以 `maxTurns` 为上限的 LLM Effect 总预算已接通，单 Lane 也有三轮上限；Provider 单 Effect 内部 fallback/retry 和实际 token/费用无法被当前 Runtime 硬截断，因此预算验收仍不完整。
+- 2026-09-25 开始将普通执行改为默认事件驱动并发：移除新启动流程的 `executionMode` 开关，允许独立工具调用同轮提交，并为 `fs.read`、`fs.write`、`fs.apply_patch` 增加路径级资源锁。不同任务阶段的并行调度及同文件非重叠 patch 合批仍未完成。
 - 仍未完成：Provider attempt 级跨 Lane 调用预算和 Token/费用耗尽测试；任务计划/取消整棵任务树/审批差异/服务状态的完整 TUI；多 Lane 质量与耗时对比；后台服务日志轮转和凭据环境保护；安装后真实 Browser/Jarvis E2E、真实 72 次 Provider 评测、三平台 shell/服务长测。以上仍阻止整份计划完成。
 - 后续本机验证：构建通过；最终全量回归 **96 个测试文件、664 项全部通过**（需要本机 loopback/隔离 socket 权限）；评测数据校验 24 项通过，dry-run 明确不产生质量基线；新增并行 Lane 及共享预算耗尽冒烟通过；重新打包后包内运行、Mock 任务、安装/卸载及用户数据保留通过，包位于 `/tmp/pulse-plan-final-artifacts4/pulse-0.1.11.tar.gz`。MCP doctor 在无启用服务时按预期提示未配置并返回非零；service status 在未安装时按预期报告未安装。行为 grader 的 code-01 沙箱冒烟在获取本地隔离 socket 权限后通过。
 

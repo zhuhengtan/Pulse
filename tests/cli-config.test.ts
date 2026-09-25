@@ -80,7 +80,6 @@ describe('ensurePulseUserConfig', () => {
         'gpt5.6-b': { displayName: 'gpt5.6-b', provider: 'deepseek', modelCode: 'deepseek-chat' },
       },
       activeModel: 'gpt5.6-b',
-      executionMode: 'parallel-read',
       taskRouting: { plan: ['gpt5.6-b'], verify: ['gpt5.6-b'] },
     })}\n`)
     try {
@@ -90,8 +89,7 @@ describe('ensurePulseUserConfig', () => {
       expect(options.provider).toMatchObject({ provider: 'deepseek', defaultModel: 'deepseek-chat' })
       expect(options.providerModels).toEqual({ 'gpt5.6-b': { provider: 'deepseek', model: 'deepseek-chat' } })
       expect(options.taskRouting).toEqual({ plan: ['gpt5.6-b'], verify: ['gpt5.6-b'] })
-      expect(options.executionMode).toBe('parallel-read')
-      await expect(hostOptions(parse(['--config', path, '--execution-mode', 'serial']))).resolves.toMatchObject({ executionMode: 'serial' })
+      expect(options).not.toHaveProperty('executionMode')
     } finally {
       if (previousHome === undefined) delete process.env.PULSE_HOME
       else process.env.PULSE_HOME = previousHome

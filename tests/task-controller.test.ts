@@ -14,6 +14,82 @@ function finalReview(runtime: PulseRuntime): { value: JsonValue } {
 }
 
 describe('Host task controller', () => {
+  it('uses v7 for new controllers while retaining sequential v6 construction for restoration', () => {
+    expect(buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('7')
+    expect(buildTaskControllerProgram({ system: 'test', version: '6', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('6')
+  })
+
+  it('keeps restored v6 controllers on the legacy root-lane work path', async () => {
+    const program = buildTaskControllerProgram({ system: 'test', version: '6', toolNames: [], approvalMode: 'auto', maxTurns: 16 })
+    let agentId = ''
+    let childWorkerCalls = 0
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [task('task-1'), task('task-2')] } }
+      if (effect.key?.startsWith('work-stage-worker')) childWorkerCalls++
+      if (effect.key?.startsWith('verify-stage')) {
+        const state = globalFor(runtime, agentId).taskController
+        return { value: { status: 'passed', evidenceRefs: [state.tasks.find((item: any) => item.id === state.activeId).candidateRef], note: 'Verified.' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      return { value: { text: 'legacy stage finished', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Resume legacy work', program, initialGlobal: initialGlobal(2) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(childWorkerCalls).toBe(0)
+    expect(globalFor(runtime, agentId).taskController.tasks.map((item: any) => item.status)).toEqual(['passed', 'passed'])
+  })
+
+  it('runs the ready dependency frontier as concurrent Runtime worker lanes', async () => {
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 24 })
+    let agentId = ''
+    const workerGoals: string[] = []
+    let releaseWorkers!: () => void
+    const bothWorkers = new Promise<void>((resolve) => { releaseWorkers = resolve })
+    let firstFrontier: string[] = []
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [task('task-1'), task('task-2'), task('task-3', ['task-1'])] } }
+      if (effect.key?.startsWith('work-stage-worker')) {
+        const goal = runtime.state.lanes.get(effect.ownerLaneId)?.goal ?? ''
+        workerGoals.push(goal)
+        if (workerGoals.length === 2) { firstFrontier = [...workerGoals]; releaseWorkers() }
+        await bothWorkers
+        return { value: { text: `finished ${goal}`, finishReason: 'stop' } }
+      }
+      if (effect.key?.startsWith('verify-stage')) {
+        const current = globalFor(runtime, agentId).taskController.tasks.find((item: any) => item.id === globalFor(runtime, agentId).taskController.activeId)
+        return { value: { status: 'passed', evidenceRefs: [current.candidateRef], note: 'Candidate verified.' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      return { value: { text: 'done', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Complete every stage', program, initialGlobal: initialGlobal(3) }).agentId
+    expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'succeeded' })
+    expect(firstFrontier.sort()).toEqual(['Implement task-1', 'Implement task-2'])
+    expect(workerGoals.sort()).toEqual(['Implement task-1', 'Implement task-2', 'Implement task-3'])
+    expect(globalFor(runtime, agentId).taskController.tasks.map((item: any) => item.status)).toEqual(['passed', 'passed', 'passed'])
+  })
+
+  it('retains evidence and model usage from blocked parallel workers', async () => {
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['read'], readOnlyToolNames: ['read'], approvalMode: 'auto', maxTurns: 24 })
+    let reads = 0
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { reads++; return { value: { content: `evidence-${reads}` } } }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [task('task-1'), task('task-2')] } }
+      if (effect.key?.startsWith('progress-review-worker')) {
+        const results = ((effect.input as any)?.inputs?.results ?? []) as string[]
+        return { value: { status: 'blocked', evidenceRefs: results, note: 'External information is unavailable.' } }
+      }
+      return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: {} }] } }
+    } })
+    const { agentId } = runtime.createAgent({ goal: 'Inspect two independent areas', program, initialGlobal: initialGlobal(2) })
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    const state = globalFor(runtime, agentId).taskController
+    expect(state.tasks.map((item: any) => item.status)).toEqual(['blocked', 'blocked'])
+    expect(state.tasks.every((item: any) => item.evidenceRefs.length === 4)).toBe(true)
+    expect(state.tasks.every((item: any) => item.modelCalls >= 5)).toBe(true)
+    expect(state.usedTurns).toBeGreaterThanOrEqual(11)
+  })
+
   it('keeps a pure writing task accepted when its verified stage has evidence but final review omits citations', async () => {
     let agentId = ''
     const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
@@ -100,18 +176,25 @@ describe('Host task controller', () => {
 
   it('continues independent stages after a blocked stage and skips its dependent stage', async () => {
     const executed: string[] = []
-    let modelStage = ''
-    let calls = 0
+    const stageByLane = new Map<string, string>()
+    const callsByLane = new Map<string, number>()
     const program = buildTaskControllerProgram({ system: 'test', toolNames: ['read'], approvalMode: 'auto', maxTurns: 24 })
     let agentId = ''
     const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
-      if (effect.kind === 'tool') { executed.push(modelStage); return { value: { content: 'evidence' } } }
+      if (effect.kind === 'tool') { executed.push(stageByLane.get(effect.ownerLaneId) ?? 'unknown'); return { value: { content: 'evidence' } } }
       if (effect.key?.startsWith('plan')) return { value: { tasks: [task('task-1'), task('task-2', ['task-1']), task('task-3')] } }
       const state = globalFor(runtime, agentId).taskController
       if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
       if (effect.key?.startsWith('verify-stage')) return { value: { status: state.activeId === 'task-1' ? 'blocked' : 'passed', evidenceRefs: state.tasks.find((item: any) => item.id === state.activeId).evidenceRefs, note: state.activeId === 'task-1' ? 'Requires permission' : 'Verified' } }
-      if (modelStage !== state.activeId) { modelStage = state.activeId; calls = 0 }
-      return { value: ++calls === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: {} }] } : { text: 'stage done', finishReason: 'stop' } }
+      if (effect.key?.startsWith('work-stage-worker')) {
+        const lane = runtime.state.lanes.get(effect.ownerLaneId)
+        const taskId = String(lane?.goal.match(/task-\d+/)?.[0] ?? '')
+        stageByLane.set(effect.ownerLaneId, taskId)
+        const calls = (callsByLane.get(effect.ownerLaneId) ?? 0) + 1
+        callsByLane.set(effect.ownerLaneId, calls)
+        return { value: calls === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: {} }] } : { text: 'stage done', finishReason: 'stop' } }
+      }
+      return { value: { text: 'stage done', finishReason: 'stop' } }
     } })
     agentId = runtime.createAgent({ goal: 'Implement all tasks', program, initialGlobal: initialGlobal(3) }).agentId
     const outcome = await runtime.start(agentId).outcome()
@@ -151,8 +234,9 @@ describe('Host task controller', () => {
       const state = globalFor(runtime, agentId).taskController
       if (key.startsWith('progress-review')) {
         progressReviews++
-        expect(state.tasks[0].investigationRounds).toBe(4)
-        return { value: { status: 'ready', evidenceRefs: state.tasks[0].evidenceRefs, note: 'Evidence is sufficient.' } }
+        const results = ((effect.input as any)?.inputs?.results ?? []) as string[]
+        expect(results).toHaveLength(4)
+        return { value: { status: 'ready', evidenceRefs: results, note: 'Evidence is sufficient.' } }
       }
       if (key.startsWith('verify-stage')) return { value: { status: 'passed', evidenceRefs: state.tasks[0].evidenceRefs, note: 'Verified evidence.' } }
       if (key.startsWith('verify-task')) return finalReview(runtime)
@@ -270,7 +354,7 @@ describe('Host task controller', () => {
 })
 
 describe('task controller interruption', () => {
-  it('discards queued writes after steering, keeps completed evidence, and replans within the same budget', async () => {
+  it('finishes already-dispatched independent writes after steering, then replans within the same budget', async () => {
     let entered!: () => void
     const toolEntered = new Promise<void>((resolve) => { entered = resolve })
     let finishTool!: () => void
@@ -304,16 +388,16 @@ describe('task controller interruption', () => {
     runtime.tick()
     finishTool()
     expect(await outcome).toMatchObject({ status: 'succeeded' })
-    expect(executed).toEqual(['write', 'read'])
+    expect(executed).toEqual(['write', 'write', 'read'])
     const state = globalFor(runtime, agentId).taskController
     expect(state.revision).toBe(2)
-    expect(state.priorTasks[0].evidenceRefs).toHaveLength(1)
+    expect(state.priorTasks[0].evidenceRefs).toHaveLength(2)
     expect(state.usedTurns).toBeGreaterThan(4)
     const restored = new PulseRuntime({ persistence: runtime.exportPersistence(), programs: [program] })
     expect(globalFor(restored, agentId).taskController).toEqual(state)
   })
 
-  it('cancels the task without dispatching queued writes', async () => {
+  it('cancels every write already dispatched in the current independent batch', async () => {
     let entered!: () => void
     const toolEntered = new Promise<void>((resolve) => { entered = resolve })
     let writes = 0
@@ -332,7 +416,7 @@ describe('task controller interruption', () => {
     await toolEntered
     await session.cancel('USER_REQUESTED')
     expect(await outcome).toMatchObject({ status: 'cancelled' })
-    expect(writes).toBe(1)
+    expect(writes).toBe(2)
   })
 })
 

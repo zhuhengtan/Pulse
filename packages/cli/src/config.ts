@@ -68,8 +68,6 @@ export interface PulseCliConfig {
   taskRouting?: Partial<Record<PulseModelTask, string[]>>
   capabilities?: PulseCliCapabilities
   approvalMode?: 'read-only' | 'ask' | 'auto'
-  /** Parallelism is opt-in and only exposes tools explicitly classified read-only. */
-  executionMode?: 'serial' | 'parallel-read'
   maxTurns?: number
   /** Percent of maxContextTokens that triggers automatic history compaction. Clamped to 1–90. */
   autoCompactPercent?: number
@@ -101,7 +99,6 @@ export const defaultPulseConfig: PulseCliConfig = {
   },
   activeModel: 'mock',
   approvalMode: 'ask',
-  executionMode: 'serial',
   maxTurns: 32,
   autoCompactPercent: 90,
   allowNetwork: false,

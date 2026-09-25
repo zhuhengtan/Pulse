@@ -36,6 +36,7 @@ export interface TaskControllerState {
   finalReviewErrors?: string[]
   finalReview?: Array<{ criterionId: string; status: 'passed' | 'not_met' | 'unverifiable'; evidenceRefs: string[]; rationale: string }>
   activeId?: string
+  activeIds?: string[]
 }
 export function initialController(maxTurns: number): TaskControllerState {
   return { schemaVersion: 1, revision: 1, tasks: [], priorTasks: [], seenInputIds: [], updates: [], seenModelRefs: [], usedTurns: 0, maxTurns, }
@@ -51,7 +52,7 @@ const controllerSchema = z.object({
   schemaVersion: z.literal(1), revision: z.number().int().positive(),
   tasks: z.array(controlledTaskSchema).max(8), priorTasks: z.array(controlledTaskSchema).max(32),
   seenInputIds: z.array(z.string()), updates: z.array(z.string()), seenModelRefs: z.array(z.string()),
-  usedTurns: z.number().int().min(0), maxTurns: z.number().int().min(4).max(256), activeId: z.string().optional(),
+  usedTurns: z.number().int().min(0), maxTurns: z.number().int().min(4).max(256), activeId: z.string().optional(), activeIds: z.array(z.string()).max(8).optional(),
   planErrors: z.array(z.string()).max(2).optional(),
   finalReviewErrors: z.array(z.string()).max(1).optional(),
   finalReview: z.array(z.object({ criterionId: z.string(), status: z.enum(['passed', 'not_met', 'unverifiable']), evidenceRefs: z.array(z.string()), rationale: z.string() })).optional(),
@@ -106,7 +107,7 @@ export function nextTask(state: TaskControllerState): ControlledTask | undefined
 export function reviseController(state: TaskControllerState, inputs: Array<{ id: string; text: string }>): TaskControllerState {
   const fresh = inputs.filter((input) => !state.seenInputIds.includes(input.id))
   if (!fresh.length) return state
-  const { activeId: _activeId, finalReview: _review, planErrors: _planErrors, ...rest } = state
+  const { activeId: _activeId, activeIds: _activeIds, finalReview: _review, planErrors: _planErrors, ...rest } = state
   return { ...rest, revision: state.revision + 1,
     priorTasks: [...state.priorTasks, ...state.tasks].slice(-32), tasks: [],
     seenInputIds: [...state.seenInputIds, ...fresh.map((input) => input.id)],

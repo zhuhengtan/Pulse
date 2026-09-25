@@ -90,8 +90,8 @@ export async function createCheckpoint(runtime: PulseRuntime, root: string, runI
       }
       // External calls and commands may depend on state outside the workspace.
       // They are never automatically cached as fresh checks.
-      if (result?.privacy !== 'public' || result.privacyTaints?.length || effect?.outcome?.status !== 'succeeded' || !['fs.read','fs.write','fs.apply_patch'].includes(input.name)) { valid = false; break }
-      if (['fs.read','fs.write','fs.apply_patch'].includes(input.name)) {
+      if (result?.privacy !== 'public' || result.privacyTaints?.length || effect?.outcome?.status !== 'succeeded' || !['fs.read','fs.write','fs.apply_patch','fs.apply_patches'].includes(input.name)) { valid = false; break }
+      if (['fs.read','fs.write','fs.apply_patch','fs.apply_patches'].includes(input.name)) {
         const path = value.path
         if (typeof path !== 'string' || typeof value.hash !== 'string' || await fileHash(root, path) !== value.hash) { valid = false; break }
         fileHashes[path] = value.hash

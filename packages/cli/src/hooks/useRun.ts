@@ -41,8 +41,14 @@ export function useRun({
   const [isRunning, setIsRunning] = useState(false);
   const [currentStep, setCurrentStep] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
-  const [askRequest, setAskRequest] = useState<AskRequest | null>(null);
+  const [pendingInteractions, setPendingInteractions] = useState<Array<{ kind: 'approval'; request: ApprovalRequest } | { kind: 'ask'; request: AskRequest }>>([]);
+  const enqueueInteraction = useCallback((item: { kind: 'approval'; request: ApprovalRequest } | { kind: 'ask'; request: AskRequest }) => {
+    setPendingInteractions((current) => current.some((entry) => entry.request.effectId === item.request.effectId) ? current : [...current, item]);
+  }, []);
+  const removeInteraction = useCallback((effectId: string) => setPendingInteractions((current) => current.filter((entry) => entry.request.effectId !== effectId)), []);
+  const activeInteraction = pendingInteractions[0];
+  const approvalRequest = activeInteraction?.kind === 'approval' ? activeInteraction.request : null;
+  const askRequest = activeInteraction?.kind === 'ask' ? activeInteraction.request : null;
   const [approvalSubmitting, setApprovalSubmitting] = useState(false);
   const [lanes, setLanes] = useState<LaneDisplay[]>([]);
 
@@ -181,8 +187,7 @@ export function useRun({
                     return typeof item.label === 'string' && typeof item.value === 'string' ? [{ label: item.label, value: item.value }] : [];
                   })
                 : undefined;
-              setApprovalRequest(null);
-              setAskRequest({
+              enqueueInteraction({ kind: 'ask', request: {
                 effectId,
                 toolName: typeof input.toolName === 'string' ? input.toolName : `ask.${input.type}`,
                 type: input.type,
@@ -192,12 +197,11 @@ export function useRun({
                 ...(typeof input.max === 'number' ? { max: input.max } : {}),
                 ...(typeof input.placeholder === 'string' ? { placeholder: input.placeholder } : {}),
                 ...(typeof input.defaultValue === 'string' ? { defaultValue: input.defaultValue } : {}),
-              });
+              } });
               setCurrentStep('等待你的回答...');
               addProgress(`waiting:${effectId}`, '等待你的回答…');
               break;
             }
-            setAskRequest(null);
             const tools = Array.isArray(input.tools)
               ? input.tools.flatMap((tool) => {
                   if (!tool || typeof tool !== 'object' || Array.isArray(tool)) return [];
@@ -212,14 +216,14 @@ export function useRun({
                 })
               : [];
             const firstTool = tools[0];
-            setApprovalRequest({
+            enqueueInteraction({ kind: 'approval', request: {
               effectId,
               toolName: tools.length === 1 ? firstTool!.name : `${tools.length || 1} 个系统操作`,
               toolArgs: firstTool?.input ?? {},
               prompt: typeof input.prompt === 'string' ? input.prompt : '是否批准执行？',
               ...(typeof input.digest === 'string' ? { digest: input.digest } : {}),
               ...(tools.length ? { tools } : {}),
-            });
+            } });
             setCurrentStep('等待用户审批...');
             addProgress(`approval:${effectId}`, `等待审批 · ${tools.map((tool) => tool.name).join('、') || '系统操作'}`);
             break;
@@ -277,16 +281,14 @@ export function useRun({
             setError(String(event.data ?? '发生未知错误'));
             setIsRunning(false);
             setCurrentStep(null);
-            setApprovalRequest(null);
-            setAskRequest(null);
+            setPendingInteractions([]);
             setLanes([]);
             break;
           case 'complete':
             addProgress('finished', event.data && typeof event.data === 'object' && !Array.isArray(event.data) && (event.data as Record<string, unknown>).status === 'succeeded' ? '任务处理完成。' : '任务已结束。');
             setIsRunning(false);
             setCurrentStep(null);
-            setApprovalRequest(null);
-            setAskRequest(null);
+            setPendingInteractions([]);
             if (event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
               const completion = event.data as Record<string, unknown>;
               const accepted = completion.status === 'succeeded' && (!completion.taskOutcome || (typeof completion.taskOutcome === 'object' && completion.taskOutcome !== null && (completion.taskOutcome as Record<string, unknown>).status === 'accepted'));
@@ -340,14 +342,13 @@ export function useRun({
         }
       }
     },
-    [addAssistantMessage]
+    [addAssistantMessage, enqueueInteraction]
   );
 
   const finishRun = useCallback(() => {
     setIsRunning(false);
     setCurrentStep(null);
-    setApprovalRequest(null);
-    setAskRequest(null);
+    setPendingInteractions([]);
     runRef.current = null;
   }, []);
 
@@ -410,7 +411,7 @@ export function useRun({
     setApprovalSubmitting(true);
     try {
       await runRef.current.reply(effectId, { approved, ...(approved ? {} : { reason: reason || '拒绝执行' }) });
-      setApprovalRequest(null);
+      removeInteraction(effectId);
       setCurrentStep('审批已提交，正在继续...');
       setError(null);
     } catch (e) {
@@ -419,14 +420,14 @@ export function useRun({
     } finally {
       setApprovalSubmitting(false);
     }
-  }, [approvalSubmitting]);
+  }, [approvalSubmitting, removeInteraction]);
 
   const replyAsk = useCallback(async (effectId: string, value: Record<string, unknown>) => {
     if (!effectId || !runRef.current || approvalSubmitting) return;
     setApprovalSubmitting(true);
     try {
       await runRef.current.reply(effectId, value as never);
-      setAskRequest(null);
+      removeInteraction(effectId);
       setCurrentStep('回答已提交，正在继续...');
       setError(null);
     } catch (e) {
@@ -435,7 +436,7 @@ export function useRun({
     } finally {
       setApprovalSubmitting(false);
     }
-  }, [approvalSubmitting]);
+  }, [approvalSubmitting, removeInteraction]);
 
   const cancelRun = useCallback(async () => {
     if (runRef.current) {
