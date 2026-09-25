@@ -16,6 +16,7 @@ import { runServiceCommand } from './commands/service.js'
 import { runTemplateCommand } from './commands/template.js'
 import { runMcpDoctor } from './commands/mcp.js'
 import { isSameModulePath } from './utils/is-main-module.js'
+import { formatVersionOutput, shouldUseColor } from './presentation.js'
 
 const packageManifest = createRequire(import.meta.url)('../package.json') as { version: string }
 export const version = packageManifest.version
@@ -316,7 +317,9 @@ export async function main(): Promise<number> {
     return 0
   }
   if (parsed.options.version || parsed.options.v) {
-    process.stdout.write(`${version}\n`)
+    process.stdout.write(formatVersionOutput(version, {
+      color: parsed.options['no-color'] !== true && shouldUseColor(process.env, process.stdout.isTTY === true),
+    }))
     return 0
   }
 

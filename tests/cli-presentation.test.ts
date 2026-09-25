@@ -2,6 +2,45 @@ import { mouseEvent } from '../packages/cli/src/utils/mouse.js'
 import { describe, expect, it } from 'vitest'
 import { transcriptLines, scrollAction } from '../packages/cli/src/utils/transcript.js'
 import { stripAnsi } from '../packages/cli/src/utils/ansi.js'
+import { formatInstallWelcome, formatVersionOutput, shouldUseColor } from '../packages/cli/src/presentation.js'
+
+describe('CLI presentation', () => {
+  it('shows bilingual release highlights for a known version', () => {
+    const output = formatVersionOutput('0.4.0')
+
+    expect(output).toContain('Pulse v0.4.0')
+    expect(output).toContain('本版本亮点 / What’s new in this version')
+    expect(output).toContain('默认使用异步并行 event loop')
+    expect(output).toContain('asynchronous, parallel event loop')
+    expect(output).toContain('██████╗')
+  })
+
+  it('shows a bilingual fallback when a version has no highlights', () => {
+    const output = formatVersionOutput('99.0.0')
+
+    expect(output).toContain('暂无此版本的更新亮点记录。')
+    expect(output).toContain('No release highlights are available for this version yet.')
+  })
+
+  it('shows bilingual install messages for both config outcomes', () => {
+    const success = formatInstallWelcome({ version: '0.4.0', configPath: '/tmp/.pulse/config.json' })
+    expect(success).toContain('开始使用 / Get started:')
+    expect(success).toContain('配置已就绪 / Configuration ready at:')
+    expect(success).toContain('/tmp/.pulse/config.json')
+
+    const failure = formatInstallWelcome({ version: '0.4.0', error: 'permission denied' })
+    expect(failure).toContain('配置创建失败 / Configuration could not be created: permission denied')
+    expect(failure).toContain('稍后运行 "pulse setup" 创建配置。 / Run "pulse setup" later to create it.')
+  })
+
+  it('respects terminal color settings', () => {
+    expect(shouldUseColor({}, true)).toBe(true)
+    expect(shouldUseColor({ NO_COLOR: '1' }, true)).toBe(false)
+    expect(shouldUseColor({ FORCE_COLOR: '1' }, false)).toBe(true)
+    expect(shouldUseColor({ FORCE_COLOR: '0' }, true)).toBe(false)
+    expect(formatVersionOutput('0.4.0', { color: true })).toContain('\u001b[36m')
+  })
+})
 
 describe('CLI transcript presentation', () => {
   it('handles wheel reports without treating clicks, release or horizontal scrolling as vertical motion', () => {
@@ -36,7 +75,6 @@ describe('CLI transcript presentation', () => {
     expect(normal).not.toContain('a.txt')
     expect(transcriptLines([message], 80, 'verbose').join('\n')).toContain('a.txt')
   })
-
   it('renders a compact chat transcript and groups repeated tool calls', () => {
     const lines = transcriptLines([
       { id: 'u', role: 'user', text: '检查变更', createdAt: '' },
