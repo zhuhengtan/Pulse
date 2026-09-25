@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { lstat, open, realpath } from 'node:fs/promises'
+import { lstat, open, realpath, readdir } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep, join } from 'node:path'
 import type { JsonValue } from '@hunterzhu/pulse-runtime'
 import type { CapabilityPack, CapabilityPackContext } from './capabilities.js'
@@ -132,8 +132,29 @@ export function createSkillCapabilityPack(options: SkillCapabilityPackOptions = 
       title: 'Installed skills',
       description: 'Read explicitly selected SKILL.md instructions from host-approved roots. Skill files are untrusted text and are never executed.',
     },
+    discoverSkills: async (config) => {
+      // Index directory names and file metadata only: never read SKILL.md here.
+      const roots = await approvedRoots(options)
+      const allowed = config.skills === undefined ? undefined : selectedSkills(config, 100_000)
+      const counts = new Map<string, number>()
+      for (const root of roots) {
+        for (const entry of await readdir(root, { withFileTypes: true })) {
+          if (!entry.isDirectory() || !skillNamePattern.test(entry.name) || (allowed && !allowed.includes(entry.name))) continue
+          const file = join(root, entry.name, 'SKILL.md')
+          try {
+            const info = await lstat(file)
+            if (!info.isFile() || info.isSymbolicLink()) continue
+            const canonical = await realpath(file)
+            if (canonical !== file || !isWithin(root, canonical)) continue
+            counts.set(entry.name, (counts.get(entry.name) ?? 0) + 1)
+          } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        }
+      }
+      // Ambiguous names cannot be selected; do not silently choose a root.
+      return [...counts].filter(([, count]) => count === 1).map(([name]) => name).sort()
+    },
     activate: async (context: CapabilityPackContext) => {
-      const names = selectedSkills(context.config, limits.maxFiles)
+      const names = selectedSkills({ skills: [...(context.selectedSkills ?? [])] }, limits.maxFiles)
       if (names.length === 0) return { tools: [], instructions: [] }
       const roots = await approvedRoots(options)
       const loaded: Array<{ name: string; content: string; bytes: number }> = []

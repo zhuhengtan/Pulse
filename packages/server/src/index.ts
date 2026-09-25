@@ -834,7 +834,30 @@ export class LocalHost {
     await mkdir(dirname(this.dataDir), { recursive: true })
     await rename(legacy, this.dataDir)
   }
-  async init(): Promise<void> { await this.migrateLegacyData(); await mkdir(this.dataDir, { recursive: true }); if (this.usesDefaultDataDir || this.options.logDir !== undefined || process.env.PULSE_LOG_DIR !== undefined) await mkdir(this.logDir, { recursive: true }); await stat(this.root) }
+  async init(): Promise<void> { await this.migrateLegacyData(); await mkdir(this.dataDir, { recursive: true }); if (this.usesDefaultDataDir || this.options.logDir !== undefined || process.env.PULSE_LOG_DIR !== undefined) await mkdir(this.logDir, { recursive: true }); await stat(this.root); await this.listSkills() }
+  /** Refresh and persist names only; the cache is never an authority for paths or content. */
+  async listSkills(): Promise<string[]> {
+    const names = new Set<string>()
+    for (const pack of this.options.capabilityPacks ?? []) {
+      if (!this.options.enabledCapabilityPacks?.includes(pack.manifest.id) || !pack.discoverSkills) continue
+      for (const name of await pack.discoverSkills(this.options.capabilityConfig ?? {})) names.add(name)
+    }
+    const skills = [...names].sort()
+    await mkdir(this.dataDir, { recursive: true })
+    const temporary = join(this.dataDir, `skills-index.${randomUUID()}.tmp`)
+    try {
+      await writeFile(temporary, JSON.stringify({ schemaVersion: 1, skills }), { mode: 0o600 })
+      await rename(temporary, join(this.dataDir, 'skills-index.json'))
+    } finally { await rm(temporary, { force: true }) }
+    return skills
+  }
+  private async selectedSkillsFor(text: string): Promise<string[]> {
+    const match = /^\/(?:skill:)?([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?=\s|$)/.exec(text.trim())
+    if (!match) return []
+    const names = await this.listSkills()
+    if (!names.includes(match[1]!)) throw new Error(`SKILL_NOT_FOUND:${match[1]}`)
+    return [match[1]!]
+  }
   private conversationDir(id: string): string { return conversationDirectory(this.dataDir, id) }
   private manifestPath(id: string): string { return join(this.conversationDir(id), 'manifest.json') }
   private messagesPath(id: string): string { return join(this.conversationDir(id), 'messages.jsonl') }
@@ -1027,13 +1050,13 @@ export class LocalHost {
     }
   }
   private async appendMessage(id: string, message: StoredMessage): Promise<void> { await writeFile(this.messagesPath(id), `${JSON.stringify(message)}\n`, { flag: 'a' }) }
-  private async runtimeFor(conversationId: string, runId: string, cwd: string, userIntent = '', controlled = false): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController }> {
+  private async runtimeFor(conversationId: string, runId: string, cwd: string, userIntent = '', controlled = false, skillInput = ''): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController }> {
     const registry = new ToolRegistry({ workspaceRoots: [cwd], allowNetwork: this.options.allowNetwork === true, ...(this.options.networkHosts === undefined ? {} : { networkHosts: this.options.networkHosts }) })
     registerBuiltIns(registry, cwd, this.options.approvalMode ?? 'ask', this.options.allowNetwork === true, (toolCallId) => this.approvedToolCalls.get(runId)?.has(toolCallId) === true, this.options.networkHosts)
     const capabilityRegistry = new CapabilityPackRegistry()
     for (const pack of this.options.capabilityPacks ?? []) capabilityRegistry.register(pack)
     const capabilityController = new AbortController()
-    const capabilities = await capabilityRegistry.activate(this.options.enabledCapabilityPacks ?? [], { workspaceRoot: cwd, config: this.options.capabilityConfig ?? {}, signal: capabilityController.signal })
+    const capabilities = await capabilityRegistry.activate(this.options.enabledCapabilityPacks ?? [], { workspaceRoot: cwd, config: this.options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: await this.selectedSkillsFor(skillInput) })
     try { registerCapabilityTools(registry, capabilities, this.options.approvalMode ?? 'ask') } catch (error) { capabilityController.abort(); await capabilities.dispose(); throw error }
     try {
     const provider = providerFromOptions(this.options)
@@ -1105,7 +1128,8 @@ export class LocalHost {
     const capabilityRegistry = new CapabilityPackRegistry()
     for (const pack of this.options.capabilityPacks ?? []) capabilityRegistry.register(pack)
     const capabilityController = new AbortController()
-    const capabilities = await capabilityRegistry.activate(this.options.enabledCapabilityPacks ?? [], { workspaceRoot: cwd, config: this.options.capabilityConfig ?? {}, signal: capabilityController.signal })
+    const skillInput = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8')).goal ?? ''
+    const capabilities = await capabilityRegistry.activate(this.options.enabledCapabilityPacks ?? [], { workspaceRoot: cwd, config: this.options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: await this.selectedSkillsFor(skillInput) })
     try { registerCapabilityTools(registry, capabilities, this.options.approvalMode ?? 'ask') } catch (error) { capabilityController.abort(); await capabilities.dispose(); throw error }
     try {
     const provider = providerFromOptions(this.options)
@@ -1298,7 +1322,7 @@ export class LocalHost {
       if (conversation.length === 0) manifest.title = input.text.length > 50 ? input.text.slice(0, 50) + '...' : input.text;
       if (reuse) await writeFile(join(this.runDir(conversationId, runId), 'reuse-checkpoint.json'), JSON.stringify(reuse))
       const systemPrompt = await this.resolveSystemPrompt(manifest.cwd, input.text, conversation)
-      activated = await this.runtimeFor(conversationId, runId, manifest.cwd, safetyReviewContext(manifest.cwd, goal, conversation), controlled)
+      activated = await this.runtimeFor(conversationId, runId, manifest.cwd, safetyReviewContext(manifest.cwd, goal, conversation), controlled, input.text)
       const { runtime, registry, capabilities, capabilityController } = activated
       const runPrompt = this.withCapabilityInstructions(systemPrompt, capabilities.instructions)
       // Explicit status-only turns must not resume the previous operation.

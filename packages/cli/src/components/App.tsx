@@ -20,6 +20,7 @@ import { useTokenStats } from '../hooks/useTokenStats.js';
 import { useSlashCommands } from '../hooks/useSlashCommands.js';
 import { copyToClipboard, isCopyShortcut } from '../utils/clipboard.js';
 import { emptyInputHistory, navigateInputHistory, rememberInput } from '../utils/inputHistory.js';
+import { skillSuggestions } from '../utils/slashCompletion.js';
 import type { AppMode } from '../types.js';
 
 export interface AppProps {
@@ -41,6 +42,8 @@ export function App({
   const { stdout } = useStdout();
   const [terminalRows, setTerminalRows] = useState(stdout.rows || 24);
   useEffect(() => { const resize = () => setTerminalRows(stdout.rows || 24); stdout.on('resize', resize); return () => { stdout.off('resize', resize); }; }, [stdout]);
+  const [skillNames, setSkillNames] = useState<string[]>([]);
+  const [skillError, setSkillError] = useState<string | null>(null);
   const [mode, setMode] = useState<AppMode>('chat');
   const [mouseEnabled, setMouseEnabled] = useState(true);
   const [selectedText, setSelectedText] = useState('');
@@ -57,6 +60,10 @@ export function App({
   const startedResume = useRef(false);
 
   const { host, error: hostError, ready: hostReady } = useHost(hostOptions);
+  const refreshSkills = useCallback(() => {
+    if (host) void host.listSkills().then(names => { setSkillNames(names); setSkillError(null); }, error => setSkillError(String(error)));
+  }, [host]);
+  useEffect(refreshSkills, [refreshSkills]);
 
   const {
     conversation,
@@ -170,7 +177,7 @@ export function App({
     })();
   }, [hostReady, conversation, initialTask, isRunning, addUserMessage, addAssistantMessage, createConversation, sendMessage]);
 
-  const { executeCommand, isSlashCommand } = useSlashCommands({
+  const { commands, executeCommand, isSlashCommand } = useSlashCommands({
     onMouse: (arg) => setMouseEnabled((current) => arg === 'off' ? false : arg === 'on' ? true : !current),
     onCopy: async () => {
       if (selectedText) { await copySelectedText(); return }
@@ -478,6 +485,21 @@ export function App({
       if (isSlashCommand(text)) {
         const handled = await executeCommand(text);
         if (!handled) {
+          const token = text.split(/\s+/)[0]!.slice(1).replace(/^skill:/, '');
+          let currentSkills = skillNames;
+          try { if (host) { currentSkills = await host.listSkills(); setSkillNames(currentSkills); setSkillError(null); } }
+          catch (error) { setSkillError(String(error)); return; }
+          if (currentSkills.includes(token)) {
+            if (isRunning) {
+              addAssistantMessage({ id: `skill-busy-${Date.now()}`, role: 'system', text: '请等当前任务完成，或使用 /cancel 后再调用技能。', createdAt: new Date().toISOString() });
+              return;
+            }
+            const target = conversation ?? await createConversation();
+            if (!target) return;
+            addUserMessage(text);
+            await sendMessage(text, target.id);
+            return;
+          }
           addAssistantMessage({
             id: `command-${Date.now()}`,
             role: 'system',
@@ -492,7 +514,7 @@ export function App({
         await sendMessage(text, target.id);
       }
     },
-    [isSlashCommand, executeCommand, conversation, createConversation, addUserMessage, sendMessage]
+    [isSlashCommand, executeCommand, conversation, createConversation, addUserMessage, sendMessage, skillNames, isRunning, addAssistantMessage, host]
   );
 
   useInput((input, key) => {
@@ -641,8 +663,11 @@ export function App({
           onReply={(value) => void replyAsk(askRequest.effectId, value)}
         />
       ) : (
-        <Box marginTop={1}>
+        <Box marginTop={1} flexDirection="column">
+          {skillError && <Text color="red">技能索引失败：{skillError}</Text>}
           <InputArea
+            suggestions={[...commands, ...skillSuggestions(skillNames, commands.flatMap(command => [command, ...(command.aliases ?? []).map(name => ({ name, description: command.description }))]))]}
+            onSearchSkills={refreshSkills}
             onSubmit={(txt) => void handleSubmit(txt)}
             onRememberInput={rememberUserInput}
             onNavigateHistory={navigateUserInputHistory}

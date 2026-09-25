@@ -38,6 +38,7 @@ const COMMANDS = [
       { name: '/model [name]', desc: '切换模型' },
       { name: '/thinking [level]', desc: '设置模型思考深度 (low/medium/high/off)' },
       { name: '/compact', desc: '手动压缩历史；默认在上下文 90% 时自动压缩' },
+      { name: '/skill:名称 任务', desc: '按需加载技能；输入 / 搜索，↑↓ 选择，Tab 补全' },
       { name: '/config', desc: '查看当前运行时配置' },
     ],
   },

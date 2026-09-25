@@ -7,7 +7,7 @@ import { wrapCapabilityInstructions } from '../packages/server/src/index.js'
 
 async function activate(root: string, selected: string[], options: Parameters<typeof createSkillCapabilityPack>[0] = {}) {
   const pack = createSkillCapabilityPack({ trustedRoots: [root], ...options })
-  return pack.activate({ workspaceRoot: root, config: { skills: selected }, signal: new AbortController().signal })
+  return pack.activate({ workspaceRoot: root, config: {}, selectedSkills: selected, signal: new AbortController().signal })
 }
 
 describe('host-installed Skill capability pack', () => {
@@ -75,7 +75,7 @@ describe('host-installed Skill capability pack', () => {
       await writeFile(join(first, 'same', 'SKILL.md'), 'one')
       await writeFile(join(second, 'same', 'SKILL.md'), 'two')
       const pack = createSkillCapabilityPack({ trustedRoots: [first, second] })
-      await expect(pack.activate({ workspaceRoot: first, config: { skills: ['same'] }, signal: new AbortController().signal })).rejects.toThrow('SKILL_AMBIGUOUS:same')
+      await expect(pack.activate({ workspaceRoot: first, config: {}, selectedSkills: ['same'], signal: new AbortController().signal })).rejects.toThrow('SKILL_AMBIGUOUS:same')
     } finally {
       await rm(first, { recursive: true, force: true })
       await rm(second, { recursive: true, force: true })

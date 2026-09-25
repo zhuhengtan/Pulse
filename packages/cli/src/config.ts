@@ -45,7 +45,7 @@ export interface PulseCliMcpServer {
 export interface PulseCliCapabilities {
   /** IDs must be explicitly enabled; workspace config cannot enable host extensions. */
   enabled?: string[]
-  /** Names of host-installed skills to load as untrusted instructions. */
+  /** Optional discovery allow-list of skill directory names; omitted discovers all. Bodies load only on invocation. */
   skills?: string[]
   /** Additional absolute roots explicitly trusted by the user for installed skills. */
   trustedSkillRoots?: string[]

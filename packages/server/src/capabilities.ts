@@ -18,6 +18,7 @@ export interface CapabilityPackContext {
   workspaceRoot: string
   config: Readonly<Record<string, JsonValue>>
   signal: AbortSignal
+  selectedSkills?: readonly string[]
 }
 
 export interface CapabilityPackActivation {
@@ -32,6 +33,7 @@ export interface CapabilityPackActivation {
  */
 export interface CapabilityPack {
   manifest: CapabilityPackManifest
+  discoverSkills?(config: Readonly<Record<string, JsonValue>>): Promise<string[]>
   activate(context: CapabilityPackContext): Promise<CapabilityPackActivation>
 }
 

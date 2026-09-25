@@ -1,9 +1,12 @@
 import { Box, Text, useInput } from 'ink';
 import TextInput from './TextInput.js';
 import { useState } from 'react';
+import { searchSlashSuggestions, type SlashSuggestion } from '../utils/slashCompletion.js';
 import { theme } from '../theme.js';
 
 interface Props {
+  suggestions?: SlashSuggestion[];
+  onSearchSkills?: () => void;
   onSubmit: (text: string) => void;
   onRememberInput: (text: string) => void;
   onNavigateHistory: (direction: 'up' | 'down', currentValue: string) => string | undefined;
@@ -12,13 +15,27 @@ interface Props {
   placeholder?: string;
 }
 
-export function InputArea({ onSubmit, onRememberInput, onNavigateHistory, disabled, focus = true, placeholder }: Props) {
+export function InputArea({ onSubmit, onRememberInput, onNavigateHistory, disabled, focus = true, placeholder, suggestions = [], onSearchSkills }: Props) {
   const [value, setValue] = useState('');
+  const [completionRevision, setCompletionRevision] = useState(0);
+  const [selected, setSelected] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
+  const matches = dismissed ? [] : searchSlashSuggestions(value, suggestions);
+  const chosen = Math.min(selected, Math.max(0, matches.length - 1));
+  const changeValue = (next: string) => {
+    if (next.startsWith('/') && !value.startsWith('/')) onSearchSkills?.();
+    setSelected(0); setDismissed(false); setValue(next);
+  };
   const [accumulatedLines, setAccumulatedLines] = useState<string[]>([]);
   useInput((input, key) => {
     if (disabled || !focus) return;
     if (key.ctrl || key.meta || key.pageUp || key.pageDown) return;
 
+    if (matches.length && !accumulatedLines.length) {
+      if (key.escape) { setDismissed(true); return; }
+      if (key.upArrow || key.downArrow) { setSelected(Math.max(0, Math.min(matches.length - 1, chosen + (key.upArrow ? -1 : 1)))); return; }
+      if (key.tab) { setValue(`${matches[chosen]!.name} `); setCompletionRevision(revision => revision + 1); setSelected(0); return; }
+    }
     if (key.return) {
       if (key.shift) {
         setAccumulatedLines((current) => [...current, value]);
@@ -41,7 +58,7 @@ export function InputArea({ onSubmit, onRememberInput, onNavigateHistory, disabl
   const restoreInput = (text: string) => {
     const lines = text.split('\n');
     setAccumulatedLines(lines.slice(0, -1));
-    setValue(lines.at(-1) ?? '');
+    changeValue(lines.at(-1) ?? '');
   };
 
   const handleSubmit = (text: string) => {
@@ -66,6 +83,16 @@ export function InputArea({ onSubmit, onRememberInput, onNavigateHistory, disabl
 
   return (
     <Box flexDirection="column">
+      {matches.length > 0 && accumulatedLines.length === 0 && (
+        <Box flexDirection="column">
+          {matches.slice(Math.max(0, chosen - 5), Math.max(0, chosen - 5) + 6).map(item => (
+            <Text key={item.name} color={item === matches[chosen] ? theme.primary : theme.dim}>
+              {item === matches[chosen] ? '› ' : '  '}{item.name}  {item.description}
+            </Text>
+          ))}
+          <Text dimColor>↑↓ 选择 · Tab 补全 · 输入任务后 Enter 发送 · Esc 收起（{matches.length} 项）</Text>
+        </Box>
+      )}
       {accumulatedLines.map((line, idx) => (
         <Box key={idx}>
           <Text color={promptColor}>{promptChar} </Text>
@@ -78,9 +105,10 @@ export function InputArea({ onSubmit, onRememberInput, onNavigateHistory, disabl
           <Text color={theme.dim}>{placeholder || '处理中...'}</Text>
         ) : (
           <TextInput
+            key={completionRevision}
             focus={focus}
             value={value}
-            onChange={setValue}
+            onChange={changeValue}
             placeholder={placeholder || ''}
           />
         )}

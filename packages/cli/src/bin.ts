@@ -296,7 +296,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(taskRouting === undefined ? {} : { taskRouting }),
     capabilityPacks,
     enabledCapabilityPacks,
-    capabilityConfig: { skills: skillNames },
+    capabilityConfig: capabilitySettings.skills === undefined ? {} : { skills: skillNames },
     activeProviderCode: providerName,
     activeModel: activeModelName,
     ...(mockResponse === undefined ? {} : { mockResponse }),
