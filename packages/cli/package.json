@@ -1,7 +1,8 @@
 {
   "name": "@hunterzhu/pulse-cli",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "A local-first AI task assistant for coding, research, and file workflows.",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "keywords": [
     "ai",
     "agent",
@@ -27,7 +28,7 @@
     "scripts"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "pnpm --dir ../.. changelog:sync && tsc -p tsconfig.json",
     "postinstall": "node ./scripts/postinstall.mjs"
   },
   "publishConfig": {
