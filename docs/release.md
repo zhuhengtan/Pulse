@@ -4,10 +4,10 @@ Pulse 使用 pnpm monorepo 管理 `packages/*`，根目录同时声明了 npm `w
 
 ## 版本与检查
 
-所有可发布包保持同一版本。修改版本号：
+所有可发布包保持同一版本。发布前先在根目录的 [中文更新日志](../CHANGELOG.md) 和 [English changelog](../CHANGELOG.en.md) 分别补齐目标版本说明；两个文件共同为 `pulse --version` 提供版本亮点。随后修改版本号并运行完整本地 CI：
 
 ```bash
-pnpm release:version 0.2.1
+pnpm release:version 0.4.1 # replace with the target version
 pnpm ci:local
 ```
 

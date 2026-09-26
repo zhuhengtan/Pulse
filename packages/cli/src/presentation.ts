@@ -1,3 +1,5 @@
+import { releaseHighlights } from './release-highlights.generated.js'
+
 export interface PresentationOptions {
   color?: boolean
 }
@@ -10,13 +12,6 @@ const bannerLines = [
   '██║     ╚██████╔╝███████╗███████║███████╗',
   '╚═╝      ╚═════╝ ╚══════╝╚══════╝╚══════╝',
 ]
-
-const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
-  '0.4.0': [{
-    zh: '默认使用异步并行 event loop，让模型请求、工具调用等副作用并发推进。',
-    en: 'Uses an asynchronous, parallel event loop by default so model requests, tool calls, and other effects can progress concurrently.',
-  }],
-}
 
 function paint(code: string, enabled: boolean, value: string): string {
   return enabled ? `\u001b[${code}m${value}\u001b[0m` : value

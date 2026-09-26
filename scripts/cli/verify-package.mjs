@@ -23,8 +23,8 @@ if (!windowsInstall.includes('pulse.cmd') || !windowsInstall.includes('REM Pulse
 }
 const packageManifest = JSON.parse(await readFile(join(directory, 'pulse/app/node_modules/@hunterzhu/pulse-cli/package.json'), 'utf8'))
 const versionCheck = spawnSync(process.execPath, [bin, '--version'], { encoding: 'utf8' })
-if (versionCheck.status !== 0 || versionCheck.stdout.trim() !== packageManifest.version) {
-  console.error(`CLI version mismatch: expected ${packageManifest.version}, received ${versionCheck.stdout.trim()}`)
+if (versionCheck.status !== 0 || !versionCheck.stdout.includes(`Pulse v${packageManifest.version}`) || !versionCheck.stdout.includes('What’s new in this version')) {
+  console.error(`CLI version page mismatch: expected Pulse v${packageManifest.version} and bilingual release heading`)
   if (versionCheck.error) console.error(`CLI spawn failed: ${versionCheck.error.message}`)
   if (versionCheck.stderr) console.error(versionCheck.stderr.trim())
   process.exit(versionCheck.status ?? 1)
@@ -83,7 +83,7 @@ const install = installer('install')
 if (install.status !== 0) throw new Error(`package install failed: ${install.stderr || install.stdout}`)
 const installedLauncher = join(installRoot, 'bin', windows ? 'pulse.cmd' : 'pulse')
 const installedVersion = launch(['--version'], { ...process.env, PULSE_HOME: installRoot })
-if (installedVersion.status !== 0 || installedVersion.stdout.trim() !== packageManifest.version) throw new Error('installed package launcher failed version check')
+if (installedVersion.status !== 0 || !installedVersion.stdout.includes(`Pulse v${packageManifest.version}`) || !installedVersion.stdout.includes('What’s new in this version')) throw new Error('installed package launcher failed version page check')
 const scheduleEnv = { ...process.env, PULSE_HOME: installRoot, PULSE_CONFIG: configPath, PULSE_DATA_DIR: join(installRoot, 'data') }
 const scheduled = launch(['schedule', 'add', '--every', '1h', '--name', 'Package smoke', 'Say hello'], scheduleEnv)
 if (scheduled.status !== 0) throw new Error(`installed scheduler add command failed: ${scheduled.stderr || scheduled.stdout}`)
