@@ -9,6 +9,10 @@ export const changelogPaths = {
 }
 export const generatedPath = join(repo, 'packages/cli/src/release-highlights.generated.ts')
 
+export function normalizeLineEndings(source) {
+  return source.replace(/\r\n/g, '\n')
+}
+
 function parseLocaleChangelog(source, locale) {
   const sections = new Map()
   const headings = [...source.matchAll(/^## \[([^\]]+)\].*$/gm)]

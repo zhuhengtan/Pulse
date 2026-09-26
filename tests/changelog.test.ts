@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
-import { changelogPaths, generatedPath, parseChangelog, renderHighlightsModule } from '../scripts/release/changelog.mjs'
+import { changelogPaths, generatedPath, normalizeLineEndings, parseChangelog, renderHighlightsModule } from '../scripts/release/changelog.mjs'
 
 describe('release changelog', () => {
   it('provides bilingual highlights for the current CLI version from the changelog', async () => {
@@ -15,7 +15,11 @@ describe('release changelog', () => {
       zh: '默认使用异步并行 event loop，让模型请求、工具调用等副作用并发推进。',
       en: 'Uses an asynchronous, parallel event loop by default so model requests, tool calls, and other effects can progress concurrently.',
     }])
-    expect(await readFile(generatedPath, 'utf8')).toBe(renderHighlightsModule(sections))
+    expect(normalizeLineEndings(await readFile(generatedPath, 'utf8'))).toBe(renderHighlightsModule(sections))
+  })
+
+  it('normalizes Windows CRLF checkout line endings before comparing generated files', () => {
+    expect(normalizeLineEndings('first\r\nsecond\r\n')).toBe('first\nsecond\n')
   })
 
   it('rejects missing version entries and mismatched localized entry counts', () => {

@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { changelogPaths, generatedPath, parseChangelog, renderHighlightsModule } from './changelog.mjs'
+import { changelogPaths, generatedPath, normalizeLineEndings, parseChangelog, renderHighlightsModule } from './changelog.mjs'
 
 const repo = fileURLToPath(new URL('../../', import.meta.url))
 const packageNames = ['runtime', 'tool-sdk', 'adapters', 'server', 'cli']
@@ -18,7 +18,7 @@ const currentNotes = changelogSections.get(version)
 if (!currentNotes?.length) throw new Error(`RELEASE_CHANGELOG_MISSING:${version}`)
 if (currentNotes.some(({ zh, en }) => !zh || !en)) throw new Error(`RELEASE_CHANGELOG_BILINGUAL_INCOMPLETE:${version}`)
 const expectedGenerated = renderHighlightsModule(changelogSections)
-const actualGenerated = await readFile(generatedPath, 'utf8').catch(() => '')
+const actualGenerated = normalizeLineEndings(await readFile(generatedPath, 'utf8').catch(() => ''))
 if (actualGenerated !== expectedGenerated) throw new Error('RELEASE_CHANGELOG_GENERATED_STALE: run pnpm changelog:sync')
 for (const { name, data } of manifests) {
   if (!data.publishConfig || data.publishConfig.access !== 'public') throw new Error(`RELEASE_PUBLIC_CONFIG_MISSING:${name}`)
