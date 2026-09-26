@@ -2,6 +2,8 @@
 
 [简体中文](https://github.com/zhuhengtan/Pulse/blob/main/packages/cli/README.zh-CN.md)
 
+[Changelog](https://github.com/zhuhengtan/Pulse/blob/main/CHANGELOG.en.md)
+
 **A neural-signal like AI assistant for coding, research and file tasks.**
 
 Pulse runs in your project folder, keeps conversations on your machine, and can resume unfinished work. Requires Node.js 22+.
@@ -50,6 +52,10 @@ pulse --read-only
 ```
 
 See `pulse --help` for all options.
+
+## License
+
+This package is licensed under [PolyForm Noncommercial 1.0.0](./LICENSE). Commercial use requires separate permission. This is a source-available noncommercial license, not an OSI-approved open-source license.
 
 ## Links
 

@@ -2,6 +2,10 @@
 
 [English](README.en.md)
 
+[更新日志](CHANGELOG.md) · [English changelog](CHANGELOG.en.md)
+
+Pulse 源码及发布包采用 [PolyForm Noncommercial 1.0.0](./LICENSE)：允许非商业用途的使用、修改和分发；商业用途需要另行获得许可。该协议不是 OSI 认可的开源许可证。第三方依赖仍遵循各自的许可证。
+
 Pulse 是一个面向多步骤 Agent 应用的可恢复运行时。它把 Agent 的执行拆成多个独立的 Lane，每条 Lane 由同步、纯函数 Step 推进；模型调用、工具调用、人工输入和子 Agent 都作为受 Runtime 管理的 Effect 执行。
 
 Pulse 关注的是执行语义：状态如何提交、并发如何调度、结果如何传递、取消和重试是否安全，以及模型换 Provider 后上下文是否仍然可重建。模型 Provider、工具和宿主 UI 都是可替换的适配层。

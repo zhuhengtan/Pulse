@@ -47,3 +47,7 @@ Read credentials from the environment; never hard-code them.
 
 - [Documentation](https://github.com/zhuhengtan/Pulse#readme)
 - [Source](https://github.com/zhuhengtan/Pulse/tree/main/packages/server)
+
+## License
+
+This package is licensed under [PolyForm Noncommercial 1.0.0](./LICENSE). Commercial use requires separate permission. This is a source-available noncommercial license, not an OSI-approved open-source license.

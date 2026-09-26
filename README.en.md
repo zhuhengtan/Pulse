@@ -2,6 +2,10 @@
 
 [简体中文](README.md)
 
+[Changelog](CHANGELOG.en.md) · [中文更新日志](CHANGELOG.md)
+
+Pulse source code and published packages are licensed under [PolyForm Noncommercial 1.0.0](./LICENSE). It permits use, modification, and distribution for noncommercial purposes; commercial use requires separate permission. It is a source-available noncommercial license, not an OSI-approved open-source license. Third-party dependencies remain under their respective licenses.
+
 Pulse is a recoverable runtime for multi-step Agent applications. It splits Agent execution into independent Lanes, each advanced by synchronous, pure-function Steps. Model calls, tool calls, human input, and child Agents are all Effects managed by the Runtime.
 
 Pulse focuses on execution semantics: how state is committed, how concurrency is scheduled, how results are passed, whether cancellation and retries are safe, and whether context can be rebuilt after switching model Providers. Model Providers, tools, and host UIs are replaceable adapters.

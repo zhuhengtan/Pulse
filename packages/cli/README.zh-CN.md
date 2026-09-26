@@ -2,6 +2,8 @@
 
 [English](README.md)
 
+[更新日志](https://github.com/zhuhengtan/Pulse/blob/main/CHANGELOG.md)
+
 **面向编程、研究与文件工作的 AI 助手。**
 
 Pulse 在项目目录中运行，将对话保存在本机，并可恢复未完成的工作。需要 Node.js 22+。
@@ -46,6 +48,10 @@ pulse --read-only
 ```
 
 运行 `pulse --help` 查看全部选项。
+
+## 许可证
+
+此包采用 [PolyForm Noncommercial 1.0.0](./LICENSE)。商业用途需要另行获得许可。这是源码可见的非商业许可证，不是 OSI 认可的开源许可证。
 
 ## 链接
 

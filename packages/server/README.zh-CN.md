@@ -43,3 +43,7 @@ try {
 
 - [文档](https://github.com/zhuhengtan/Pulse#readme)
 - [源码](https://github.com/zhuhengtan/Pulse/tree/main/packages/server)
+
+## 许可证
+
+此包采用 [PolyForm Noncommercial 1.0.0](./LICENSE)。商业用途需要另行获得许可。这是源码可见的非商业许可证，不是 OSI 认可的开源许可证。
