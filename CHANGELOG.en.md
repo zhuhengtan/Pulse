@@ -2,6 +2,13 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.4.3] - 2026-09-29
+
+### Added
+
+- OpenAI-compatible requests send the configured reasoning effort, and o1/o3 models use `max_completion_tokens`. If one model rejects that parameter, only that model is disabled and the request is retried.
+- The DeepSeek protocol still uses JSON object mode with schema guidance. Other protocols keep JSON schema even when the model name contains deepseek.
+
 ## [0.4.2] - 2026-09-29
 
 ### Fixed

@@ -2,6 +2,13 @@
 
 本文件记录 Pulse 各版本的中文更新内容，也是 `pulse --version` 版本亮点的来源。英文版本见 [CHANGELOG.en.md](CHANGELOG.en.md)。历史版本说明根据 Git tag 和提交记录整理；早期版本为概括性摘要。
 
+## [0.4.3] - 2026-09-29
+
+### 新增
+
+- OpenAI 兼容接口会按配置发送 reasoning effort；o1 与 o3 系列改用 `max_completion_tokens`。某个模型拒绝该参数时，只停用这一模型并重试。
+- DeepSeek 协议仍使用 JSON object 和 schema 提示。其他协议即使模型名包含 deepseek，也继续使用 JSON schema。
+
 ## [0.4.2] - 2026-09-29
 
 ### 修复

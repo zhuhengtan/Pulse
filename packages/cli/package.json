@@ -1,6 +1,6 @@
 {
   "name": "@hunterzhu/pulse-cli",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "A local-first AI task assistant for coding, research, and file workflows.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "keywords": [

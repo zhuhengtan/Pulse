@@ -1,5 +1,15 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.4.3": [
+    {
+      "zh": "OpenAI 兼容接口会按配置发送 reasoning effort；o1 与 o3 系列改用 `max_completion_tokens`。某个模型拒绝该参数时，只停用这一模型并重试。",
+      "en": "OpenAI-compatible requests send the configured reasoning effort, and o1/o3 models use `max_completion_tokens`. If one model rejects that parameter, only that model is disabled and the request is retried."
+    },
+    {
+      "zh": "DeepSeek 协议仍使用 JSON object 和 schema 提示。其他协议即使模型名包含 deepseek，也继续使用 JSON schema。",
+      "en": "The DeepSeek protocol still uses JSON object mode with schema guidance. Other protocols keep JSON schema even when the model name contains deepseek."
+    }
+  ],
   "0.4.2": [
     {
       "zh": "阶段验收要求每条引用都有效；涉及文件、命令或测试的阶段必须有成功的工具证据，纯写作阶段仍可凭候选结果通过。",
