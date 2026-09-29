@@ -1,8 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, defineLaneProgram } from '@hunterzhu/pulse-runtime'
+import { PulseRuntime, defineLaneProgram, normalizeModelToolInput } from '@hunterzhu/pulse-runtime'
 import { z } from 'zod'
 
 describe('DSL ReAct contract', () => {
+  it('unwraps model tool envelopes into the manifest arguments', () => {
+    expect(normalizeModelToolInput('fs.write', { input: { path: 'src/id.js', content: 'ok' } })).toEqual({ path: 'src/id.js', content: 'ok' })
+    expect(normalizeModelToolInput('fs.list', { args: { path: '.' } })).toEqual({ path: '.' })
+    expect(normalizeModelToolInput('shell.exec', { command: 'node', args: ['--version'] })).toEqual({ command: 'node', args: ['--version'] })
+    expect(normalizeModelToolInput('shell.exec', { args: { executable: 'bash', argv: ['-lc', 'node --version'], cwd: '.' } })).toEqual({ command: 'bash', args: ['-lc', 'node --version'], cwd: '.' })
+    expect(normalizeModelToolInput('fs.stage', { title: 'src/greet.js', content: 'ok' })).toEqual({ path: 'src/greet.js', content: 'ok' })
+    expect(normalizeModelToolInput('fs.stage', { path: 'src/greet.js', title: 'ignore', content: 'ok' })).toEqual({ path: 'src/greet.js', title: 'ignore', content: 'ok' })
+    expect(normalizeModelToolInput('shell.exec', { command: 'node --version' })).toEqual({ command: 'node', args: ['--version'] })
+    expect(normalizeModelToolInput('shell.exec', { command: 'node -e "console.log(1 && 2)"' })).toEqual({ command: 'node', args: ['-e', 'console.log(1 && 2)'] })
+    expect(normalizeModelToolInput('shell.exec', { command: "node -e 'console.log(1)'" })).toEqual({ command: 'node', args: ['-e', 'console.log(1)'] })
+    expect(normalizeModelToolInput('shell.exec', { command: ['node', '--test'] })).toEqual({ command: 'node', args: ['--test'] })
+    expect(normalizeModelToolInput('shell.exec', { command: 'ls && find . | head' })).toEqual({ command: 'ls && find . | head' })
+  })
+
   it('submits independent tool calls together by default', async () => {
     const started: string[] = []
     let calls = 0
@@ -240,6 +254,31 @@ describe('DSL ReAct contract', () => {
     expect(runtime.state.results.get(resultRef!)?.value).toEqual({ passed: true })
   })
 
+  it('executes the tool call on the last permitted turn and accepts the following answer', async () => {
+    const executed: unknown[] = []
+    let models = 0
+    const program = defineLaneProgram({ id: 'react-last-tool-turn', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', {
+        instruction: 'write',
+        maxTurns: 1,
+        onFinish: { text: () => 'done' },
+      })
+      builder.addStep('done', () => ({ actions: [{ type: 'complete', result: { done: true } }], next: 'done' }))
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') {
+        executed.push((effect.input as { arguments?: unknown }).arguments)
+        return { value: { path: 'src/greet.js', committed: true } }
+      }
+      if (++models === 1) return { value: { text: '', finishReason: 'tool_calls', toolCalls: [{ toolCallId: 'call-1', name: 'fs.stage', input: { title: 'src/greet.js', content: 'ok' } }] } }
+      return { value: { text: 'wrote greet.js', finishReason: 'stop', toolCalls: [] } }
+    } })
+    const { agentId } = runtime.createAgent('write greet', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(executed).toEqual([{ path: 'src/greet.js', content: 'ok' }])
+    expect(models).toBe(2)
+  })
+
   it('routes an exhausted loop to a structured MAX_TURNS_REACHED error', async () => {
     const program = defineLaneProgram({ id: 'react-max-turns', version: '1' }, (builder) => {
       builder.addReActLoopStep('reason', {
@@ -364,6 +403,40 @@ describe('DSL ReAct contract', () => {
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
     expect(llm).toBe(4)
     expect(turns).toEqual([1, 2, 3, 1])
+  })
+
+  it('returns invalid tool arguments to the model instead of failing the lane', async () => {
+    const requests: unknown[] = []
+    let tools = 0
+    let llm = 0
+    const program = defineLaneProgram({ id: 'react-invalid-tool-input', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', {
+        instruction: 'write the file',
+        toolAllow: ['fs.stage'],
+        maxTurns: 4,
+        onFinish: () => ({ complete: { value: { ok: true } } }),
+      })
+    })
+    const runtime = new PulseRuntime({
+      effectSubmissionPreparer: (submission) => {
+        if (submission.kind !== 'tool') return submission
+        const input = submission.input as { arguments?: { operation?: string } }
+        if (input.arguments?.operation === undefined) throw Object.assign(new Error('Input does not match the manifest for tool fs.stage.'), { code: 'INVALID_TOOL_INPUT', retryable: false })
+        return submission
+      },
+      effectExecutor: async (effect) => {
+        if (effect.kind === 'tool') { tools += 1; return { value: { committed: true } } }
+        llm += 1
+        requests.push(structuredClone(effect.input))
+        if (llm === 1) return { value: { text: '', finishReason: 'tool_calls', toolCalls: [{ name: 'fs.stage', input: { path: 'src/id.js', content: 'module.exports = {}\n' } }] } }
+        return { value: { text: 'done', finishReason: 'stop', toolCalls: [] } }
+      },
+    })
+    const { agentId } = runtime.createAgent('invalid stage input', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(tools).toBe(0)
+    expect(JSON.stringify(requests[1])).toContain('was not executed')
+    expect(JSON.stringify(requests[1])).toContain('fs.stage accepts path and content')
   })
 
 })

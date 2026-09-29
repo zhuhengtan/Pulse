@@ -39,7 +39,7 @@ describe('task-level bounded replanning in LocalHost', () => {
 
   it('persists and emits an assistant reply when execution fails', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-failure-reply-'))
-    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), maxTurns: 1, mockToolCalls: [{ name: 'fs.list', input: {} }] })
+    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), mockFinishReason: 'error' })
     try {
       const conversation = await host.createConversation()
       const run = await host.sendMessage(conversation.id, { text: '帮我检查项目' })

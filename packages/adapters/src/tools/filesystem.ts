@@ -27,7 +27,13 @@ function pidAlive(pid: number): boolean {
 
 export class FilesystemTool {
   constructor(readonly root: string, private readonly lockTimeoutMs = 30_000) {}
-  private safe(path: string): string { const target = resolve(this.root, path); if (isAbsolute(path) || relative(resolve(this.root), target).startsWith('..')) throw filesystemError('PATH_OUTSIDE_SANDBOX'); return target }
+  private safe(path: string): string {
+    const root = resolve(this.root)
+    const target = resolve(root, path)
+    const within = relative(root, target)
+    if (within.startsWith('..') || isAbsolute(within)) throw filesystemError('PATH_OUTSIDE_SANDBOX')
+    return target
+  }
   private async existing(path: string): Promise<string> {
     const target = this.safe(path)
     const [root, resolved] = await Promise.all([realpath(this.root), realpath(target)])
@@ -94,7 +100,10 @@ export class FilesystemTool {
       return { content, truncated, offset, nextOffset: truncated ? offset + end : null }
     } finally { await handle.close() }
   }
-  async list(path = '.', signal?: AbortSignal): Promise<string[]> { if (signal?.aborted) throw filesystemError('ABORTED'); return readdir(await this.existing(path)) }
+  async list(path = '.', signal?: AbortSignal): Promise<string[]> {
+    if (signal?.aborted) throw filesystemError('ABORTED')
+    return readdir(await this.existing(path))
+  }
   async write(path: string, content: string, signal?: AbortSignal): Promise<void> { if (signal?.aborted) throw filesystemError('ABORTED'); await writeFile(await this.writable(path), content, 'utf8') }
   async move(source: string, destination: string, expectedHash?: string, signal?: AbortSignal): Promise<{ hash: string; bytes: number }> {
     if (signal?.aborted) throw filesystemError('ABORTED')

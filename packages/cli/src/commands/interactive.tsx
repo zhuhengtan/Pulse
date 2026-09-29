@@ -4,6 +4,7 @@ import { App } from '../components/App.js';
 import { createLocalHost } from '@hunterzhu/pulse-server';
 import type { LocalHostOptions } from '@hunterzhu/pulse-server';
 import { closePendingHosts } from '../hooks/useHost.js';
+import { runOneShot } from './run.js';
 
 export async function findResumeConversation(options: LocalHostOptions): Promise<string | undefined> {
   const host = createLocalHost(options);
@@ -20,9 +21,17 @@ export async function runInteractive(
   options: LocalHostOptions,
   conversationId?: string | undefined,
   initialTask?: string | undefined,
-  version = '0.1.4',
+  version = '0.4.1',
   resumeLatest = false,
 ): Promise<number> {
+  if (!process.stdin.isTTY) {
+    if (initialTask) {
+      return runOneShot(options, initialTask, 'text', version);
+    }
+    process.stderr.write('交互模式需要 TTY 终端。非交互执行请使用 "pulse run <task>"。\n');
+    return 1;
+  }
+
   const selectedConversationId = resumeLatest
     ? await findResumeConversation(options)
     : conversationId;

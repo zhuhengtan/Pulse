@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { PulseRuntime, type JsonValue } from '@hunterzhu/pulse-runtime'
 import { buildTaskControllerProgram } from '../packages/server/src/task-controller/program.js'
-import { initialController, isReadOnlyInspectionCommand, nextTask, reviseController, validatePlan } from '../packages/server/src/task-controller/state.js'
+import { initialController, isReadOnlyInspectionCommand, nextTask, reviseController, stageRequiresToolEvidence, validatePlan } from '../packages/server/src/task-controller/state.js'
 
 const task = (id: string, dependsOn: string[] = []) => ({ id, goal: `Implement ${id}`, check: 'Read and verify result', dependsOn, criterionIds: [id.replace('task-', 'criterion-')] })
 const initialGlobal = (count: number): JsonValue => ({ taskRecord: { schemaVersion: 1, runId: 'test', objective: 'Complete the checklist', acceptanceCriteria: Array.from({ length: count }, (_, index) => ({ id: `criterion-${index + 1}`, description: `Requirement ${index + 1}` })), status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] } })
@@ -128,8 +128,11 @@ describe('Host task controller', () => {
     state.usedTurns = 8
     state.tasks = [task('task-1'), task('task-2', ['task-1']), task('task-3')].map((item) => ({ ...item, status: 'pending', attempts: 0, evidenceRefs: [] }))
     state.tasks[0]!.status = 'blocked'
+    state.tasks[0]!.note = 'Requires permission'
     expect(nextTask(state)?.id).toBe('task-3')
     expect(state.tasks[1]!.status).toBe('blocked')
+    expect(state.tasks[1]!.note).toBe('Requires permission')
+    expect(JSON.stringify(state.tasks)).not.toContain('Required dependency is blocked')
     const revised = reviseController(state, [{ id: 'human-1', text: 'Do not modify file A' }])
     expect(revised.revision).toBe(2)
     expect(revised.usedTurns).toBe(8)
@@ -174,6 +177,77 @@ describe('Host task controller', () => {
     expect(globalFor(runtime, agentId).taskController.usedTurns).toBe(exitCode === 0 || expectedFailure ? 5 : 4)
   })
 
+  it('does not accept a stage when an unknown ref is cited alongside valid tool evidence', async () => {
+    let workCalls = 0
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['shell.exec'], approvalMode: 'auto', maxTurns: 16 })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { code: 0, stdout: 'pass 1\nfail 0' } }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [{ id: 'task-1', goal: '运行 node --test', check: 'node --test 退出码为 0', dependsOn: [], criterionIds: ['criterion-1'] }] } }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      if (effect.key?.startsWith('verify-stage')) {
+        const refs = [...runtime.state.results.values()].filter((result) => result.producer?.kind === 'effect' && runtime.state.effects.get(result.producer.id)?.kind === 'tool').map((result) => result.id)
+        return { value: { status: 'passed', evidenceRefs: [...refs, 'result-missing'], note: '测试已通过' } }
+      }
+      return { value: ++workCalls === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'shell.exec', input: { command: 'node', args: ['--test'] } }] } : { text: 'done', finishReason: 'stop' } }
+    } })
+    const { agentId } = runtime.createAgent({ goal: '运行 node --test', program, initialGlobal: initialGlobal(1) })
+    const outcome = await runtime.start(agentId).outcome()
+    if (outcome.status === 'failed') throw new Error(JSON.stringify(outcome))
+    expect(globalFor(runtime, agentId).taskOutcome.status).toBe('incomplete')
+    expect(globalFor(runtime, agentId).taskController.tasks[0].status).toBe('blocked')
+  })
+
+  it('requires tool evidence for files and commands, not for versions or abbreviations', () => {
+    expect(stageRequiresToolEvidence('创建 src/greet.js', 'node --test 通过')).toBe(true)
+    expect(stageRequiresToolEvidence('运行测试', 'pytest 必须通过')).toBe(true)
+    expect(stageRequiresToolEvidence('检查构建', 'cargo test')).toBe(true)
+    expect(stageRequiresToolEvidence('运行检查', 'go test ./...')).toBe(true)
+    expect(stageRequiresToolEvidence('说明 1.2 节的设计', '概括 e.g. 架构取舍')).toBe(false)
+    expect(stageRequiresToolEvidence('Write a commit message from the supplied changes', 'Return a title and concise bullets')).toBe(false)
+  })
+
+  it('does not pass a file stage from candidate text alone', async () => {
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['fs.write'], approvalMode: 'auto', maxTurns: 12 })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { path: 'src/greet.js' } }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [{ id: 'task-1', goal: '创建 src/greet.js', check: 'node --test 通过', dependsOn: [], criterionIds: ['criterion-1'] }] } }
+      if (effect.key?.startsWith('verify-stage')) {
+        const state = globalFor(runtime, [...runtime.state.agents.keys()][0]!).taskController
+        const active = state.tasks.find((item: { id: string }) => item.id === state.activeId)
+        return { value: { status: 'passed', evidenceRefs: active?.candidateRef ? [active.candidateRef] : [], note: '文件已写好' } }
+      }
+      return { value: { text: '已写入 src/greet.js', finishReason: 'stop', toolCalls: [] } }
+    } })
+    const { agentId } = runtime.createAgent({ goal: '创建 src/greet.js', program, initialGlobal: initialGlobal(1) })
+    const outcome = await runtime.start(agentId).outcome()
+    if (outcome.status === 'failed') throw new Error(JSON.stringify(outcome))
+    expect(globalFor(runtime, agentId).taskController.tasks[0].status).toBe('blocked')
+    expect(globalFor(runtime, agentId).taskOutcome.status).toBe('incomplete')
+  })
+
+  it('repairs one malformed stage verification instead of blocking completed work', async () => {
+    let verify = 0
+    let workCalls = 0
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['fs.write'], approvalMode: 'auto', maxTurns: 16 })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { path: 'src/greet.js', bytes: 10, hash: 'a'.repeat(64) } }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [task('task-1')] } }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      if (effect.key?.startsWith('verify-stage')) {
+        verify++
+        if (verify === 1) return { value: '' }
+        const refs = [...runtime.state.results.values()].filter((result) => result.producer?.kind === 'effect' && runtime.state.effects.get(result.producer.id)?.kind === 'tool').map((result) => result.id)
+        return { value: { status: 'passed', evidenceRefs: refs, note: '文件已写入' } }
+      }
+      return { value: ++workCalls === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.write', input: { path: 'src/greet.js', content: 'ok' } }] } : { text: 'wrote greet.js', finishReason: 'stop' } }
+    } })
+    const { agentId } = runtime.createAgent({ goal: '创建 src/greet.js', program, initialGlobal: initialGlobal(1) })
+    const outcome = await runtime.start(agentId).outcome()
+    if (outcome.status === 'failed') throw new Error(JSON.stringify(outcome))
+    expect(globalFor(runtime, agentId).taskOutcome.status).toBe('accepted')
+    expect(verify).toBe(2)
+  })
+
   it('continues independent stages after a blocked stage and skips its dependent stage', async () => {
     const executed: string[] = []
     const stageByLane = new Map<string, string>()
@@ -201,7 +275,14 @@ describe('Host task controller', () => {
     if (outcome.status === 'failed') throw new Error(JSON.stringify(outcome))
     expect(outcome).toMatchObject({ status: 'succeeded' })
     expect(executed).toEqual(['task-1', 'task-3'])
-    expect(globalFor(runtime, agentId).taskController.tasks.map((item: any) => item.status)).toEqual(['blocked', 'blocked', 'passed'])
+    const controller = globalFor(runtime, agentId).taskController
+    expect(controller.tasks.map((item: any) => item.status)).toEqual(['blocked', 'blocked', 'passed'])
+    expect(controller.tasks[1].note).toBe('Requires permission')
+    const agent = runtime.state.agents.get(agentId)!
+    const report = JSON.stringify(runtime.state.results.get(runtime.state.lanes.get(agent.rootLaneId)!.resultRef!)?.value)
+    expect(report).not.toContain('Required dependency is blocked')
+    expect(report).toContain('Requires permission')
+    expect(report).toContain('These later stages did not start')
     expect(globalFor(runtime, agentId).taskOutcome.status).toBe('incomplete')
   })
 

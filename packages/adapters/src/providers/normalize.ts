@@ -100,10 +100,30 @@ export function normalizeOpenAIResponse(response: any, toolNameAliases?: Readonl
   if (!Array.isArray(root.choices) || root.choices.length === 0) throw providerResponseError('OpenAI response must contain at least one choice')
   const choice = providerRecord(root.choices[0], 'OpenAI choice')
   const message = providerRecord(choice.message, 'OpenAI message')
-  const toolCalls = choice.finish_reason === 'length' || message.tool_calls === undefined ? [] : normalizeOpenAIToolCalls(message.tool_calls, toolNameAliases)
+  const nativeToolCalls = choice.finish_reason === 'length' || message.tool_calls === undefined ? [] : normalizeOpenAIToolCalls(message.tool_calls, toolNameAliases)
   const refusal = message.refusal == null ? undefined : requiredProviderString(message.refusal, 'OpenAI refusal')
-  const text = providerText(message.content, 'OpenAI message content')
-  const finishReason = normalizeOpenAIFinishReason(choice.finish_reason, refusal, toolCalls.length > 0)
+  let text = providerText(message.content, 'OpenAI message content')
+  let finishReason = normalizeOpenAIFinishReason(choice.finish_reason, refusal, nativeToolCalls.length > 0)
+  let toolCalls = nativeToolCalls
+  if (provider === 'deepseek' && (finishReason === 'stop' || nativeToolCalls.length > 0)) {
+    const recovered = recoverDeepSeekDsml(text, toolNameAliases, nativeToolCalls.length === 0)
+    text = recovered.text
+    if (nativeToolCalls.length === 0 && recovered.truncated) {
+      toolCalls = []
+      finishReason = 'length'
+    } else if (nativeToolCalls.length === 0 && recovered.calls.length > 0) {
+      toolCalls = recovered.calls.map((call, index) => ({ toolCallId: `pulse-tool-${index + 1}`, providerToolCallId: `dsml-${index + 1}`, providerToolName: call.providerToolName, providerToolArguments: call.providerToolArguments, name: call.name, input: call.input }))
+      finishReason = 'tool_calls'
+    }
+  }
+  if (provider === 'deepseek' && nativeToolCalls.length === 0 && finishReason === 'stop' && toolCalls.length === 0) {
+    const jsonCalls = recoverDeepSeekJsonToolCalls(text, toolNameAliases)
+    if (jsonCalls !== undefined) {
+      text = ''
+      toolCalls = jsonCalls.map((call, index) => ({ toolCallId: `pulse-tool-${index + 1}`, providerToolCallId: `json-${index + 1}`, providerToolName: call.providerToolName, providerToolArguments: call.providerToolArguments, name: call.name, input: call.input }))
+      finishReason = 'tool_calls'
+    }
+  }
   const rawUsage = root.usage === undefined ? undefined : providerRecord(root.usage, 'OpenAI usage')
   const promptDetails = rawUsage?.prompt_tokens_details === undefined ? undefined : providerRecord(rawUsage.prompt_tokens_details, 'OpenAI prompt token details')
   const usage = normalizeUsage(rawUsage === undefined ? undefined : { ...rawUsage, cached_tokens: rawUsage.cached_tokens ?? promptDetails?.cached_tokens ?? rawUsage.cache_read_input_tokens, reasoning_tokens: rawUsage.completion_tokens_details?.reasoning_tokens ?? rawUsage.reasoning_tokens }, { input: 'prompt_tokens', output: 'completion_tokens', cached: 'cached_tokens', reasoning: 'reasoning_tokens' }, 'OpenAI')
@@ -111,6 +131,176 @@ export function normalizeOpenAIResponse(response: any, toolNameAliases?: Readonl
   const measuredUsage = usage === undefined ? undefined : { ...usage, visibleOutputChars: text.length }
   return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason, ...(measuredUsage === undefined ? {} : { usage: measuredUsage }), ...(provider !== 'deepseek' || reasoningContent === undefined ? {} : { providerContinuation: { provider, reasoningContent } }) }
 }
+
+/** DeepSeek V4/V4.1 may emit DSML tool markup in content instead of tool_calls. One or more U+FF5C bars are accepted. */
+function recoverDeepSeekDsml(text: string, toolNameAliases: ReadonlyMap<string, string> | undefined, parseCalls: boolean): { text: string; calls: Array<{ providerToolName: string; name: string; input: unknown; providerToolArguments: string }>; truncated: boolean } {
+  const blocks = takeDsmlBlocks(text)
+  if (!blocks.changed) return { text, calls: [], truncated: false }
+  if (blocks.truncated || !parseCalls) return { text: blocks.text, calls: [], truncated: blocks.truncated }
+  const calls: Array<{ providerToolName: string; name: string; input: unknown; providerToolArguments: string }> = []
+  for (const inner of blocks.inners) {
+    const parsed = parseDsmlInvokes(inner, toolNameAliases)
+    if (parsed === undefined) return { text: blocks.text, calls: [], truncated: true }
+    calls.push(...parsed)
+  }
+  return { text: blocks.text, calls, truncated: false }
+}
+
+function takeDsmlBlocks(text: string): { text: string; inners: string[]; truncated: boolean; changed: boolean } {
+  const inners: string[] = []
+  let cursor = 0
+  let cleaned = ''
+  let changed = false
+  while (cursor < text.length) {
+    const open = nextDsmlMatch(DSML_BLOCK_OPEN, text, cursor)
+    if (open === undefined) break
+    const close = nextDsmlMatch(DSML_BLOCK_CLOSE, text, open.end)
+    const nested = nextDsmlMatch(DSML_BLOCK_OPEN, text, open.end)
+    cleaned += text.slice(cursor, open.start)
+    changed = true
+    if (close === undefined || (nested !== undefined && nested.start < close.start)) {
+      return { text: cleaned.trim(), inners: [], truncated: true, changed: true }
+    }
+    inners.push(text.slice(open.end, close.start))
+    cursor = close.end
+  }
+  if (!changed) return { text, inners, truncated: false, changed: false }
+  cleaned += text.slice(cursor)
+  return { text: cleaned.trim(), inners, truncated: false, changed: true }
+}
+
+function parseDsmlInvokes(inner: string, toolNameAliases?: ReadonlyMap<string, string>): Array<{ providerToolName: string; name: string; input: unknown; providerToolArguments: string }> | undefined {
+  const opened = countDsmlTags(DSML_INVOKE_OPEN, inner)
+  if (opened !== countDsmlTags(DSML_INVOKE_CLOSE, inner)) return undefined
+  const calls: Array<{ providerToolName: string; name: string; input: unknown; providerToolArguments: string }> = []
+  const invoke = new RegExp(DSML_INVOKE_PATTERN.source, 'g')
+  let match: RegExpExecArray | null
+  while ((match = invoke.exec(inner)) !== null) {
+    const providerToolName = requiredProviderString(match[1], 'OpenAI tool name')
+    const parameters = parseDsmlParameters(match[2] ?? '')
+    if (parameters === undefined) return undefined
+    calls.push({ providerToolName, name: toolNameAliases?.get(providerToolName) ?? providerToolName, input: parameters, providerToolArguments: JSON.stringify(parameters) })
+  }
+  return calls.length === opened ? calls : undefined
+}
+
+function parseDsmlParameters(body: string): Record<string, unknown> | undefined {
+  const opened = countDsmlTags(DSML_PARAMETER_OPEN, body)
+  if (opened !== countDsmlTags(DSML_PARAMETER_CLOSE, body)) return undefined
+  const input: Record<string, unknown> = {}
+  const parameter = new RegExp(DSML_PARAMETER_PATTERN.source, 'g')
+  let match: RegExpExecArray | null
+  while ((match = parameter.exec(body)) !== null) {
+    const name = requiredProviderString(match[1], 'OpenAI tool name')
+    if (match[2] === 'true') input[name] = match[3] ?? ''
+    else {
+      const parsed = parseDsmlJson(match[3] ?? '')
+      if (parsed === undefined) return undefined
+      input[name] = parsed
+    }
+  }
+  return Object.keys(input).length === opened ? input : undefined
+}
+
+function parseDsmlJson(value: string): unknown | undefined {
+  try { return JSON.parse(value) } catch { return undefined }
+}
+
+/** DeepSeek sometimes writes only JSON tool objects instead of tool_calls. Each object needs an explicit tool name; argument-shaped JSON and trailing prose stay text. */
+function recoverDeepSeekJsonToolCalls(text: string, toolNameAliases?: ReadonlyMap<string, string>): Array<{ providerToolName: string; name: string; input: Record<string, unknown>; providerToolArguments: string }> | undefined {
+  const leading = takeLeadingJsonValues(text.trim())
+  if (leading === undefined || leading.values.length === 0 || leading.rest.trim().length > 0) return undefined
+  const objects = leading.values.filter((value) => !isEmptyJsonValue(value))
+  if (objects.length === 0) return undefined
+  if (objects.length === 1 && objects[0] && typeof objects[0] === 'object' && !Array.isArray(objects[0])) {
+    const batch = (objects[0] as Record<string, unknown>).tool_calls ?? (objects[0] as Record<string, unknown>).toolCalls
+    if (Array.isArray(batch)) {
+      const calls = batch.map((item) => jsonToolCall(item, toolNameAliases))
+      return calls.every((call) => call !== undefined) && calls.length > 0 ? calls as Array<{ providerToolName: string; name: string; input: Record<string, unknown>; providerToolArguments: string }> : undefined
+    }
+  }
+  const calls = objects.map((value) => jsonToolCall(value, toolNameAliases))
+  return calls.every((call) => call !== undefined) ? calls as Array<{ providerToolName: string; name: string; input: Record<string, unknown>; providerToolArguments: string }> : undefined
+}
+
+function isEmptyJsonValue(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length === 0
+  return value !== null && typeof value === 'object' && Object.keys(value).length === 0
+}
+
+function jsonToolCall(value: unknown, toolNameAliases?: ReadonlyMap<string, string>): { providerToolName: string; name: string; input: Record<string, unknown>; providerToolArguments: string } | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const named = typeof record.tool === 'string' && record.tool.length > 0 ? record.tool : typeof record.name === 'string' && record.name.length > 0 ? record.name : undefined
+  const providerToolName = named
+  if (providerToolName === undefined) return undefined
+  const raw = record.arguments ?? record.input ?? record.parameters
+  const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? { ...(raw as Record<string, unknown>) } : { ...record }
+  if (raw === undefined) {
+    delete input.tool
+    delete input.name
+  }
+  return { providerToolName, name: toolNameAliases?.get(providerToolName) ?? providerToolName, input, providerToolArguments: JSON.stringify(input) }
+}
+
+function takeLeadingJsonValues(text: string): { values: unknown[]; rest: string } | undefined {
+  if (!text.startsWith('{') && !text.startsWith('[')) return undefined
+  const values: unknown[] = []
+  let cursor = 0
+  while (cursor < text.length) {
+    while (cursor < text.length && /\s/.test(text[cursor]!)) cursor++
+    if (cursor >= text.length) break
+    if (text[cursor] !== '{' && text[cursor] !== '[') break
+    const end = jsonValueEnd(text, cursor)
+    if (end === undefined) return undefined
+    try { values.push(JSON.parse(text.slice(cursor, end))) } catch { return undefined }
+    cursor = end
+  }
+  return values.length > 0 ? { values, rest: text.slice(cursor) } : undefined
+}
+
+function jsonValueEnd(text: string, start: number): number | undefined {
+  const opening = text[start]
+  if (opening !== '{' && opening !== '[') return undefined
+  const stack: string[] = []
+  let inString = false
+  let escaped = false
+  for (let index = start; index < text.length; index++) {
+    const char = text[index]!
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"') { inString = true; continue }
+    if (char === '{' || char === '[') stack.push(char === '{' ? '}' : ']')
+    else if (char === '}' || char === ']') {
+      if (stack.pop() !== char) return undefined
+      if (stack.length === 0) return index + 1
+    }
+  }
+  return undefined
+}
+
+function countDsmlTags(pattern: RegExp, value: string): number {
+  return value.match(new RegExp(pattern.source, 'g'))?.length ?? 0
+}
+
+function nextDsmlMatch(pattern: RegExp, value: string, from: number): { start: number; end: number } | undefined {
+  const match = new RegExp(pattern.source, 'g').exec(value.slice(from))
+  return match === null ? undefined : { start: from + match.index, end: from + match.index + match[0].length }
+}
+
+const DSML_BLOCK_OPEN = /<\uFF5C+DSML\uFF5C+\s*(?:tool_calls|calls)>/
+const DSML_BLOCK_CLOSE = /<\/\uFF5C+DSML\uFF5C+\s*(?:tool_calls|calls)>/
+const DSML_INVOKE_OPEN = /<\uFF5C+DSML\uFF5C+\s*invoke\b/
+const DSML_INVOKE_CLOSE = /<\/\uFF5C+DSML\uFF5C+\s*invoke>/
+const DSML_INVOKE_PATTERN = /<\uFF5C+DSML\uFF5C+\s*invoke\s+name="([^"]+)"\s*\/?>([\s\S]*?)<\/\uFF5C+DSML\uFF5C+\s*invoke>/
+const DSML_PARAMETER_OPEN = /<\uFF5C+DSML\uFF5C+\s*parameter\b/
+const DSML_PARAMETER_CLOSE = /<\/\uFF5C+DSML\uFF5C+\s*parameter>/
+const DSML_PARAMETER_PATTERN = /<\uFF5C+DSML\uFF5C+\s*parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>([\s\S]*?)<\/\uFF5C+DSML\uFF5C+\s*parameter>/
+
 export function normalizeAnthropicResponse(response: any): LLMResult {
   const root = providerRecord(response, 'Anthropic response')
   if (!Array.isArray(root.content)) throw providerResponseError('Anthropic response content must be an array')

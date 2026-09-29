@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
-import { ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliModel, type PulseCliProviderProfile } from './config.js'
+import { defaultPulseConfig, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliModel, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
 import { runOneShot } from './commands/run.js'
 import { runDoctor } from './commands/doctor.js'
@@ -62,6 +62,12 @@ Options:
   --system-prompt-file <path> load custom system instructions from file
   --mock-response <text>    deterministic response for local debugging
   --mock-task-assessment <json> deterministic verifier result for local debugging
+  --mock-stage-assessment <json> deterministic stage verifier results for local debugging
+  --mock-parallel-plan <json> deterministic task or read-only split plan for local debugging
+  --mock-tool-calls <json>  deterministic tool calls for local debugging
+  --mock-after-tool-response <text> deterministic response after tool execution
+  --task-controller         force the multi-stage task controller
+  --no-task-controller      keep a single ReAct loop
   --live                    doctor: make one real provider request
   --no-color                disable terminal styling
   --help, -h                show this help
@@ -131,19 +137,43 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   if (explicitConfig === undefined && process.env.PULSE_CONFIG === undefined) {
     await ensurePulseUserConfig()
   }
-  const config = (
+  const loaded = (
     await loadPulseConfig(requestedCwd ?? process.cwd(), explicitConfig, parsed.options['trust-workspace'] === true)
   ).value
+  // A missing user config still has to answer usage errors and list sessions.
+  const config: PulseCliConfig = loaded.activeModel || loaded.models || loaded.providers ? loaded : { ...defaultPulseConfig, ...loaded }
 
-  const requestedModel = option(parsed.options, 'model') ?? process.env.PULSE_MODEL ?? config.activeModel
+  const mockResponse = option(parsed.options, 'mock-response')
+  const mockTaskAssessment = option(parsed.options, 'mock-task-assessment')
+  const mockStageAssessment = option(parsed.options, 'mock-stage-assessment')
+  const mockToolCallsOption = option(parsed.options, 'mock-tool-calls')
+  const mockAfterToolResponse = option(parsed.options, 'mock-after-tool-response')
+  const mockParallelPlanOption = option(parsed.options, 'mock-parallel-plan')
+  const hasMockDemand = mockResponse !== undefined || mockTaskAssessment !== undefined || mockStageAssessment !== undefined || mockToolCallsOption !== undefined || mockAfterToolResponse !== undefined || mockParallelPlanOption !== undefined
+
+  const cliModel = option(parsed.options, 'model')
+  const requestedModel = cliModel ?? (hasMockDemand ? 'mock' : process.env.PULSE_MODEL ?? config.activeModel)
+
+  const effectiveModels: Record<string, PulseCliModel> = { ...(config.models ?? {}) }
+  const effectiveProviders: Record<string, PulseCliProviderProfile> = { ...(config.providers ?? {}) }
+
+  if (requestedModel === 'mock' || (hasMockDemand && cliModel === undefined)) {
+    if (!effectiveModels.mock) {
+      effectiveModels.mock = { displayName: 'mock', provider: 'mock', modelCode: 'mock', maxContextTokens: 32_000, maxOutputTokens: 4_096, reasoningEffort: 'medium' }
+    }
+    if (!effectiveProviders.mock) {
+      effectiveProviders.mock = { provider: 'mock', name: 'Mock' }
+    }
+  }
+
   const configuredModelEntry = requestedModel === undefined
     ? undefined
-    : Object.entries(config.models ?? {}).find(([name, item]) => name === requestedModel || item.displayName === requestedModel)
+    : Object.entries(effectiveModels).find(([name, item]) => name === requestedModel || item.displayName === requestedModel)
   if (!configuredModelEntry) throw new Error(`UNKNOWN_MODEL_DISPLAY_NAME:${requestedModel ?? '(missing)'}`)
   const [, modelSelection] = configuredModelEntry
   const activeModelName = modelSelection.displayName
   const providerName = modelSelection.provider
-  const profile = config.providers?.[providerName]
+  const profile = effectiveProviders[providerName]
   if (!profile) throw new Error(`MODEL_PROVIDER_NOT_FOUND:${providerName}`)
   const model = modelSelection.modelCode
   if (modelSelection.pricing && (!/^[A-Z]{3}$/.test(modelSelection.pricing.currency) || !Number.isFinite(modelSelection.pricing.inputPerMillion) || modelSelection.pricing.inputPerMillion < 0 || !Number.isFinite(modelSelection.pricing.outputPerMillion) || modelSelection.pricing.outputPerMillion < 0 || !modelSelection.pricing.version.trim())) throw new Error(`INVALID_MODEL_PRICING:${activeModelName}`)
@@ -176,7 +206,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(configuredReasoningEffort === undefined ? {} : { reasoningEffort: configuredReasoningEffort }),
     ...(configuredToolChoice === undefined ? {} : { toolChoice: configuredToolChoice }),
   }
-  const providerProfiles = Object.fromEntries(Object.entries(config.providers ?? {}).flatMap(([name, item]: [string, PulseCliProviderProfile]) => {
+  const providerProfiles = Object.fromEntries(Object.entries(effectiveProviders).flatMap(([name, item]: [string, PulseCliProviderProfile]) => {
     if (!item.provider) throw new Error(`PROVIDER_PROTOCOL_REQUIRED:${name}`)
     const adapterProvider = item.provider
     const itemKeyEnv = item.apiKeyEnv ?? (adapterProvider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
@@ -192,8 +222,8 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     }]]
   }))
   const modelDisplayNames = new Set<string>()
-  const providerModels = Object.fromEntries(Object.entries(config.models ?? {}).flatMap(([name, item]: [string, PulseCliModel]) => {
-    if (!config.providers?.[item.provider]) throw new Error(`MODEL_PROVIDER_NOT_FOUND:${item.provider}`)
+  const providerModels = Object.fromEntries(Object.entries(effectiveModels).flatMap(([name, item]: [string, PulseCliModel]) => {
+    if (!effectiveProviders[item.provider]) throw new Error(`MODEL_PROVIDER_NOT_FOUND:${item.provider}`)
     const displayName = item.displayName.trim()
     if (!displayName) throw new Error(`MODEL_DISPLAY_NAME_REQUIRED:${name}`)
     if (modelDisplayNames.has(displayName)) throw new Error(`DUPLICATE_MODEL_DISPLAY_NAME:${displayName}`)
@@ -215,8 +245,6 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   }
   const cwd = requestedCwd ?? expandHome(config.cwd)
   const dataDir = expandHome(option(parsed.options, 'data-dir') ?? process.env.PULSE_DATA_DIR ?? config.dataDir)
-  const mockResponse = option(parsed.options, 'mock-response')
-  const mockTaskAssessment = option(parsed.options, 'mock-task-assessment')
   let mockTaskAssessments: LocalHostOptions['mockTaskAssessments'] | undefined
   if (mockTaskAssessment !== undefined) {
     try {
@@ -225,6 +253,38 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
       mockTaskAssessments = value as NonNullable<LocalHostOptions['mockTaskAssessments']>
     } catch {
       throw new Error('INVALID_MOCK_TASK_ASSESSMENT: expected a non-empty JSON array of assessment objects')
+    }
+  } else if (hasMockDemand) {
+    mockTaskAssessments = [{ status: 'accepted', criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: ['AUTO'], rationale: 'Accepted by mock verifier.' }] }]
+  }
+  let mockStageAssessments: LocalHostOptions['mockStageAssessments'] | undefined
+  if (mockStageAssessment !== undefined) {
+    try {
+      const value = JSON.parse(mockStageAssessment) as unknown
+      if (!Array.isArray(value) || value.length === 0 || value.some((item) => !item || typeof item !== 'object' || Array.isArray(item))) throw new Error('INVALID')
+      mockStageAssessments = value as NonNullable<LocalHostOptions['mockStageAssessments']>
+    } catch {
+      throw new Error('INVALID_MOCK_STAGE_ASSESSMENT: expected a non-empty JSON array of stage assessment objects')
+    }
+  }
+  let mockToolCalls: LocalHostOptions['mockToolCalls'] | undefined
+  if (mockToolCallsOption !== undefined) {
+    try {
+      const value = JSON.parse(mockToolCallsOption) as unknown
+      if (!Array.isArray(value) || value.some((item) => !item || typeof item !== 'object' || Array.isArray(item))) throw new Error('INVALID')
+      mockToolCalls = value as NonNullable<LocalHostOptions['mockToolCalls']>
+    } catch {
+      throw new Error('INVALID_MOCK_TOOL_CALLS: expected a JSON array of tool call objects')
+    }
+  }
+  let mockParallelPlan: LocalHostOptions['mockParallelPlan'] | undefined
+  if (mockParallelPlanOption !== undefined) {
+    try {
+      const value = JSON.parse(mockParallelPlanOption) as unknown
+      if (!value || typeof value !== 'object') throw new Error('INVALID')
+      mockParallelPlan = value as NonNullable<LocalHostOptions['mockParallelPlan']>
+    } catch {
+      throw new Error('INVALID_MOCK_PARALLEL_PLAN: expected a JSON object')
     }
   }
   const requestedApprovalMode = option(parsed.options, 'approval-mode') ?? process.env.PULSE_APPROVAL_MODE
@@ -286,7 +346,10 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     }
   }
 
+  const explicitTaskController = parsed.options['task-controller'] === true ? true : parsed.options['no-task-controller'] === true ? false : mockParallelPlanOption !== undefined ? true : undefined
+
   return {
+    ...(explicitTaskController === undefined ? {} : { taskController: explicitTaskController }),
     ...(cwd === undefined ? {} : { cwd }),
     ...(dataDir === undefined ? {} : { dataDir }),
     ...(systemPrompt && systemPrompt.trim().length > 0 ? { systemPrompt: systemPrompt.trim() } : {}),
@@ -302,6 +365,10 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     activeModel: activeModelName,
     ...(mockResponse === undefined ? {} : { mockResponse }),
     ...(mockTaskAssessments === undefined ? {} : { mockTaskAssessments }),
+    ...(mockStageAssessments === undefined ? {} : { mockStageAssessments }),
+    ...(mockToolCalls === undefined ? {} : { mockToolCalls }),
+    ...(mockAfterToolResponse === undefined ? {} : { mockAfterToolResponse }),
+    ...(mockParallelPlan === undefined ? {} : { mockParallelPlan }),
     ...(approvalMode === undefined ? {} : { approvalMode }),
     ...(configuredMaxTurns === undefined ? {} : { maxTurns: configuredMaxTurns }),
     ...(configuredAutoCompactPercent === undefined ? {} : { autoCompactPercent: Math.min(90, configuredAutoCompactPercent) }),
@@ -344,21 +411,56 @@ export async function main(): Promise<number> {
   if (parsed.command === 'mcp' && parsed.positionals[0] === 'doctor') return runMcpDoctor(options, parsed.positionals.slice(1))
   if (parsed.command === 'template') return runTemplateCommand(options, parsed.positionals, option(parsed.options, 'format') ?? 'text', version)
 
+async function readPipedStdin(): Promise<string> {
+  if (process.stdin.isTTY) return ''
+  return new Promise<string>((resolve) => {
+    let data = ''
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(idle)
+      process.stdin.pause()
+      resolve(data.trim())
+    }
+    // An open stdin with no bytes must not block a command that already has a task.
+    const idle = setTimeout(finish, 250)
+    process.stdin.setEncoding('utf8')
+    process.stdin.on('data', (chunk) => {
+      data += chunk
+      clearTimeout(idle)
+    })
+    process.stdin.on('end', finish)
+    process.stdin.on('error', finish)
+    if (process.stdin.readableEnded) finish()
+  })
+}
+
   if (parsed.command === 'run') {
-    const task = parsed.positionals.join(' ').trim()
+    let task = parsed.positionals.join(' ').trim()
+    if (!task && !process.stdin.isTTY) {
+      task = await readPipedStdin()
+    } else if (task && !process.stdin.isTTY) {
+      const piped = await readPipedStdin()
+      if (piped) task = `${task}\n\n${piped}`
+    }
     if (!task) throw new Error('TASK_REQUIRED')
     return runOneShot(options, task, option(parsed.options, 'format') ?? 'text', version)
   }
 
   if (parsed.command === 'resume') {
     const id = parsed.positionals.shift()
-    const task = parsed.positionals.join(' ').trim()
+    let task = parsed.positionals.join(' ').trim()
+    if (!task && !process.stdin.isTTY) {
+      task = await readPipedStdin()
+    }
     if (!id) throw new Error('RESUME_REQUIRES_ID')
     return runResume(options, id, task || undefined, option(parsed.options, 'format') ?? 'text', version)
   }
 
   // 默认启动交互式 Ink 界面
-  return runInteractive(options, undefined, undefined, version, parsed.options.resume === true)
+  const initialTask = parsed.positionals.join(' ').trim() || undefined
+  return runInteractive(options, undefined, initialTask, version, parsed.options.resume === true)
 }
 
 if (process.argv[1] && isSameModulePath(process.argv[1], fileURLToPath(import.meta.url))) {

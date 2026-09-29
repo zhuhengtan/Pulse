@@ -80,8 +80,11 @@ export interface LocalHostOptions {
   mockResponse?: string
   mockToolCalls?: Array<{ name: string; input?: JsonValue; toolCallId?: string }>
   mockAfterToolResponse?: string
+  mockFinishReason?: 'stop' | 'length' | 'error' | 'refusal'
   /** Structured verifier responses for deterministic LocalHost integration tests and demos. */
   mockTaskAssessments?: JsonValue[]
+  /** Structured stage verifier responses for deterministic stage execution tests. */
+  mockStageAssessments?: JsonValue[]
   /** Structured read-only split plans for deterministic parallel lane tests and demos. */
   mockParallelPlan?: JsonValue
   /** Assistant responses queued after each verifier decision that requests a replan. */
@@ -249,11 +252,11 @@ const json = (value: unknown): JsonValue => {
 function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: ApprovalMode, allowNetwork = false, isApprovedToolCall: (toolCallId: string) => boolean = () => false, networkHosts?: string[]): void {
   const fsTool = new FilesystemTool(root)
   registry.register(defineTool({
-    name: 'fs.list', description: 'List files in the workspace.', tags: ['files', 'read'], input: z.object({ path: z.string().default('.') }), output: z.object({ path: z.string(), entries: z.array(z.string()) }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ path }) => { const safePath = path ?? '.'; return { path: safePath, entries: await fsTool.list(safePath) } }, summarize: (output) => ({ path: output.path ?? '.', entries: output.entries.slice(0, 100) }),
+    name: 'fs.list', description: 'List files in the workspace. ENOENT means the path does not exist; an empty entry list means the directory exists and has no entries.', tags: ['files', 'read'], input: z.object({ path: z.string().default('.') }), output: z.object({ path: z.string(), entries: z.array(z.string()) }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ path }) => { const safePath = path ?? '.'; return { path: safePath, entries: await fsTool.list(safePath) } }, summarize: (output) => ({ path: output.path ?? '.', entries: output.entries.slice(0, 100) }),
   }))
   const editor = new StagedEditor(fsTool)
   registry.register(defineTool({
-    name: 'fs.stage', description: 'For large new files or explicitly required rewrites: begin a durable draft, append at most 8192 UTF-8 bytes per call using its revision, inspect after interruption, then commit with the final revision and byte count. The target is untouched until commit. Prefer fs.apply_patch for local edits. Validate syntax/tests after commit.', tags: ['files', 'write'], input: stageInput,
+    name: 'fs.stage', description: 'Create a file or stage a large rewrite. A new file of at most 8192 bytes takes path and content and is written immediately. Larger files use operation begin, append (at most 8192 bytes with the current revision), inspect, then commit; the target stays untouched until commit. Put the workspace path in path. Prefer fs.write for a small new file and fs.apply_patch for a local edit.', tags: ['files', 'write'], input: stageInput,
     output: z.object({ draftId: z.string(), target: z.string(), revision: z.string(), bytes: z.number(), contentHash: z.string(), committed: z.boolean() }), sideEffectPolicy: 'write', retrySafety: 'unsafe', defaultTimeoutMs: writeToolTimeoutMs, permissions: { workspaceRoots: [root] },
     execute: async (input, context) => { if (approvalMode === 'read-only') throw new Error('WRITE_DISABLED_READ_ONLY'); if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:fs.stage'); return editor.execute(input, context.signal) }, summarize: (output) => output,
   }))
@@ -609,16 +612,86 @@ class ScriptedMockAdapter implements ProviderAdapter {
   readonly name = 'Mock Provider'
   private readonly base = new MockAdapter()
   private planPending: boolean
-  constructor(private readonly assessments: JsonValue[], private readonly parallelPlan?: JsonValue) { this.planPending = parallelPlan !== undefined }
+  constructor(
+    private readonly assessments: JsonValue[],
+    private readonly parallelPlan?: JsonValue,
+    private readonly stageAssessments: JsonValue[] = [],
+  ) { this.planPending = parallelPlan !== undefined }
   enqueue(result: Parameters<MockAdapter['enqueue']>[0]): void { this.base.enqueue(result) }
   async executeAttempt(params: Parameters<ProviderAdapter['executeAttempt']>[0]) {
-    if (params.outputSchema !== undefined && this.planPending) {
+    const schemaObj = params.outputSchema && typeof params.outputSchema === 'object' && !Array.isArray(params.outputSchema) ? (params.outputSchema as Record<string, any>) : undefined
+    const schemaProps = schemaObj?.properties && typeof schemaObj.properties === 'object' ? (schemaObj.properties as Record<string, any>) : undefined
+
+    const taskItemProps = schemaProps?.tasks && typeof schemaProps.tasks === 'object' ? (schemaProps.tasks as { items?: { properties?: Record<string, unknown> } }).items?.properties : undefined
+    const schemaWantsTaskPlan = taskItemProps?.criterionIds !== undefined || taskItemProps?.check !== undefined
+    const schemaWantsReadPlan = taskItemProps?.key !== undefined && !schemaWantsTaskPlan
+    const planRecord = this.parallelPlan && typeof this.parallelPlan === 'object' && !Array.isArray(this.parallelPlan) ? this.parallelPlan as { tasks?: unknown } : undefined
+    const planTasks = Array.isArray(planRecord?.tasks) ? planRecord.tasks : []
+    const planTask = planTasks[0] && typeof planTasks[0] === 'object' && !Array.isArray(planTasks[0]) ? planTasks[0] as { id?: unknown; criterionIds?: unknown; key?: unknown } : undefined
+    const valueIsTaskPlan = typeof planTask?.id === 'string' && Array.isArray(planTask.criterionIds)
+    const valueIsReadPlan = typeof planTask?.key === 'string' && !valueIsTaskPlan
+    if (this.planPending && this.parallelPlan !== undefined && ((schemaWantsTaskPlan && valueIsTaskPlan) || (schemaWantsReadPlan && valueIsReadPlan))) {
       this.planPending = false
-      return { text: '', structured: structuredClone(this.parallelPlan!), toolCalls: [], finishReason: 'stop' as const }
+      return { text: '', structured: structuredClone(this.parallelPlan), toolCalls: [], finishReason: 'stop' as const }
     }
-    if (params.outputSchema !== undefined && this.assessments.length > 0) {
-      const assessment = this.assessments.shift()!
-      return { text: '', structured: structuredClone(assessment), toolCalls: [], finishReason: 'stop' as const }
+
+    const globalBlock = (params.request as { blocks?: Array<{ kind?: string; content?: { taskRecord?: { acceptanceCriteria?: Array<{ id: string }>; candidateResultRef?: string; evidenceRefs?: string[] } } }> })?.blocks?.find((b) => b.kind === 'global')
+    const candidateRef = globalBlock?.content?.taskRecord?.candidateResultRef
+    const knownEvidence = globalBlock?.content?.taskRecord?.evidenceRefs ?? []
+    const contextRefs = Array.isArray((params.request as any)?.contextSpec?.resultRefs) ? ((params.request as any).contextSpec.resultRefs as string[]) : []
+    const validRefs = [...new Set([...contextRefs, ...(candidateRef ? [candidateRef] : []), ...knownEvidence])].filter(Boolean)
+    const autoRefs = validRefs.length > 0 ? validRefs : ['result-1']
+
+    const isStageVerify = schemaProps?.expectedFailureRefs !== undefined || (schemaProps?.status && Array.isArray(schemaProps.status.enum) && schemaProps.status.enum.includes('needs_work'))
+    if (isStageVerify && this.stageAssessments.length > 0) {
+      const rawStage = structuredClone(this.stageAssessments.shift()!) as Record<string, JsonValue>
+      const stageRefs = contextRefs.length > 0 ? [contextRefs[contextRefs.length - 1]!] : [...new Set([...(candidateRef ? [candidateRef] : []), ...knownEvidence])].filter(Boolean)
+      const expand = (refs: JsonValue | undefined): JsonValue | undefined => Array.isArray(refs) && refs.includes('AUTO') ? refs.flatMap((ref) => ref === 'AUTO' ? (stageRefs.length > 0 ? stageRefs : autoRefs) : [ref]) : refs
+      if ('evidenceRefs' in rawStage) rawStage.evidenceRefs = expand(rawStage.evidenceRefs) ?? rawStage.evidenceRefs
+      if ('expectedFailureRefs' in rawStage) rawStage.expectedFailureRefs = expand(rawStage.expectedFailureRefs) ?? rawStage.expectedFailureRefs
+      return { text: '', structured: rawStage, toolCalls: [], finishReason: 'stop' as const }
+    }
+
+    if (params.outputSchema !== undefined && schemaProps?.criteria && this.assessments.length > 0) {
+      const raw = this.assessments.shift() ?? {
+        status: 'accepted',
+        criteria: [],
+      }
+      const assessment = structuredClone(raw) as Record<string, JsonValue>
+      if (assessment && typeof assessment === 'object' && Array.isArray(assessment.criteria)) {
+        const criteriaItems = assessment.criteria as Array<Record<string, JsonValue>>
+        const taskCriteria = globalBlock?.content?.taskRecord?.acceptanceCriteria ?? []
+        if (taskCriteria.length > criteriaItems.length && criteriaItems.some((c: Record<string, JsonValue>) => Array.isArray(c?.evidenceRefs) && (c.evidenceRefs as string[]).includes('AUTO'))) {
+          const autoTemplate = criteriaItems.find((c: Record<string, JsonValue>) => Array.isArray(c?.evidenceRefs) && (c.evidenceRefs as string[]).includes('AUTO')) ?? criteriaItems[0]!
+          assessment.criteria = taskCriteria.map((c) => {
+            const existing = criteriaItems.find((item: Record<string, JsonValue>) => item?.criterionId === c.id)
+            if (existing) {
+              if (Array.isArray(existing.evidenceRefs) && (existing.evidenceRefs as string[]).includes('AUTO')) {
+                existing.evidenceRefs = autoRefs
+              }
+              return existing
+            }
+            return {
+              ...autoTemplate,
+              criterionId: c.id,
+              evidenceRefs: autoRefs,
+            }
+          })
+        } else {
+          for (const item of criteriaItems) {
+            if (item && item.evidenceRefs && Array.isArray(item.evidenceRefs) && (item.evidenceRefs as string[]).includes('AUTO')) {
+              item.evidenceRefs = autoRefs
+            }
+          }
+        }
+      }
+      if (schemaProps && !('status' in schemaProps) && 'status' in assessment) {
+        delete assessment.status
+      }
+      if (schemaProps && 'status' in schemaProps && !('status' in assessment)) {
+        assessment.status = 'accepted'
+      }
+      return { text: '', structured: assessment, toolCalls: [], finishReason: 'stop' as const }
     }
     return this.base.executeAttempt()
   }
@@ -626,17 +699,21 @@ class ScriptedMockAdapter implements ProviderAdapter {
 
 function providerFromOptions(options: LocalHostOptions): { adapter: ProviderAdapter; model: { id: string; providerId: string; tasks: string[]; priority: number; capabilities: ModelCapabilities; adapter: ProviderAdapter } } {
   const config = options.provider ?? { provider: 'mock', defaultModel: 'mock' }
-  const adapter: ProviderAdapter | (ProviderAdapter & { enqueue: (result: Parameters<MockAdapter['enqueue']>[0]) => void }) = config.provider === 'mock' && ((options.mockTaskAssessments?.length ?? 0) > 0 || options.mockParallelPlan !== undefined)
-    ? new ScriptedMockAdapter([...(options.mockTaskAssessments ?? [])], options.mockParallelPlan)
+  const adapter: ProviderAdapter | (ProviderAdapter & { enqueue: (result: Parameters<MockAdapter['enqueue']>[0]) => void }) = config.provider === 'mock' && ((options.mockTaskAssessments?.length ?? 0) > 0 || options.mockParallelPlan !== undefined || (options.mockStageAssessments?.length ?? 0) > 0)
+    ? new ScriptedMockAdapter([...(options.mockTaskAssessments ?? [])], options.mockParallelPlan, [...(options.mockStageAssessments ?? [])])
     : createProviderAdapter(config)
   if (config.provider === 'mock' && 'enqueue' in adapter) {
     const enqueue = (result: Parameters<MockAdapter['enqueue']>[0]): void => (adapter as ProviderAdapter & { enqueue: (value: Parameters<MockAdapter['enqueue']>[0]) => void }).enqueue(result)
     const toolCalls = options.mockToolCalls ?? []
-    if (toolCalls.length) enqueue({ text: '', toolCalls: toolCalls.map((call, index) => ({ toolCallId: call.toolCallId ?? `mock-call-${index + 1}`, name: call.name, input: call.input ?? {} })), finishReason: 'tool_calls' })
-    enqueue({ text: options.mockAfterToolResponse ?? options.mockResponse ?? process.env.PULSE_MOCK_RESPONSE ?? 'Mock provider is ready. Configure a real provider for model-generated answers.', toolCalls: [], finishReason: 'stop' })
-    for (const [index] of (options.mockTaskAssessments ?? []).entries()) {
-      const replanResponse = options.mockReplanResponses?.[index]
-      if (replanResponse !== undefined) enqueue({ text: replanResponse, toolCalls: [], finishReason: 'stop' })
+    if (options.mockFinishReason === 'error' || options.mockFinishReason === 'refusal' || options.mockFinishReason === 'length') {
+      enqueue({ text: '', toolCalls: [], finishReason: options.mockFinishReason })
+    } else {
+      if (toolCalls.length) enqueue({ text: '', toolCalls: toolCalls.map((call, index) => ({ toolCallId: call.toolCallId ?? `mock-call-${index + 1}`, name: call.name, input: call.input ?? {} })), finishReason: 'tool_calls' })
+      enqueue({ text: options.mockAfterToolResponse ?? options.mockResponse ?? process.env.PULSE_MOCK_RESPONSE ?? 'Mock provider is ready. Configure a real provider for model-generated answers.', toolCalls: [], finishReason: 'stop' })
+      for (const [index] of (options.mockTaskAssessments ?? []).entries()) {
+        const replanResponse = options.mockReplanResponses?.[index]
+        if (replanResponse !== undefined) enqueue({ text: replanResponse, toolCalls: [], finishReason: 'stop' })
+      }
     }
   }
   const local = config.provider === 'mock' || config.provider === 'ollama'
@@ -1442,7 +1519,8 @@ export class LocalHost {
             const tasks = Array.isArray(progress.tasks) ? progress.tasks as Array<Record<string, JsonValue>> : []
             const active = tasks.find((task) => task.status === 'running' || task.status === 'verifying')
             const zh = detectResponseLanguage(runtime.state.agents.get(session.agentId)?.goal ?? '') === 'zh-CN'
-            const text = active ? `${zh ? '当前阶段' : 'Current stage'} ${active.id}: ${String(active.goal).slice(0, 100)} (${active.status})${typeof active.modelCalls === 'number' ? ` · ${zh ? '阶段调用' : 'stage calls'} ${active.modelCalls}` : ''}${typeof active.investigationRounds === 'number' && active.investigationRounds > 0 ? ` · ${zh ? '连续调查' : 'investigation'} ${active.investigationRounds}${typeof active.directedInvestigations === 'number' && active.directedInvestigations > 0 ? `+${active.directedInvestigations}` : ''}` : ''}` : `${zh ? '阶段进度' : 'Stage progress'}: ${tasks.filter((task) => task.status === 'passed').length}/${tasks.length}, ${tasks.filter((task) => task.status === 'blocked').length} ${zh ? '项受阻' : 'blocked'}`
+            const blockedCount = tasks.filter((task) => task.status === 'blocked' && task.cascadeBlocked !== true).length
+            const text = active ? `${zh ? '当前阶段' : 'Current stage'} ${active.id}: ${String(active.goal).slice(0, 100)} (${active.status})${typeof active.modelCalls === 'number' ? ` · ${zh ? '阶段调用' : 'stage calls'} ${active.modelCalls}` : ''}${typeof active.investigationRounds === 'number' && active.investigationRounds > 0 ? ` · ${zh ? '连续调查' : 'investigation'} ${active.investigationRounds}${typeof active.directedInvestigations === 'number' && active.directedInvestigations > 0 ? `+${active.directedInvestigations}` : ''}` : ''}` : `${zh ? '阶段进度' : 'Stage progress'}: ${tasks.filter((task) => task.status === 'passed').length}/${tasks.length}, ${blockedCount} ${zh ? '项受阻' : 'blocked'}`
             yield { schemaVersion: 1, type: 'notice', conversationId, runId, seq, data: { kind: 'task_progress', text, ...progress } }
           }
           continue

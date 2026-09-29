@@ -97,6 +97,85 @@ describe('M1-3 context, models and adapters', () => {
     expect(normalizeAnthropicResponse({ content: [{ type: 'refusal', text: 'not allowed' }], stop_reason: 'refusal' })).toMatchObject({ finishReason: 'refusal', refusal: 'not allowed' })
   })
 
+  it('recovers DeepSeek DSML tool calls from message content', () => {
+    const bar = '\uFF5C'
+    const doubled = `${bar}${bar}DSML${bar}${bar}`
+    const single = `${bar}DSML${bar}`
+    const live = [
+      '我先实际检索代码库。',
+      '',
+      `<${doubled} calls>`,
+      `<${doubled} invoke name="fs.list">`,
+      `<${doubled} parameter name="path" string="true">.</${doubled} parameter>`,
+      `</${doubled} invoke>`,
+      `<${doubled} invoke name="shell.exec">`,
+      `<${doubled} parameter name="command" string="true">rg</${doubled} parameter>`,
+      `<${doubled} parameter name="args" string="false">["-n","--hidden"]</${doubled} parameter>`,
+      `</${doubled} invoke>`,
+      `</${doubled} calls>`,
+    ].join('\n')
+    const recovered = normalizeOpenAIResponse({ choices: [{ message: { content: live }, finish_reason: 'stop' }] }, undefined, 'deepseek')
+    expect(recovered.finishReason).toBe('tool_calls')
+    expect(recovered.text).toBe('我先实际检索代码库。')
+    expect(recovered.toolCalls).toEqual([
+      { toolCallId: 'pulse-tool-1', providerToolCallId: 'dsml-1', providerToolName: 'fs.list', providerToolArguments: '{"path":"."}', name: 'fs.list', input: { path: '.' } },
+      { toolCallId: 'pulse-tool-2', providerToolCallId: 'dsml-2', providerToolName: 'shell.exec', providerToolArguments: '{"command":"rg","args":["-n","--hidden"]}', name: 'shell.exec', input: { command: 'rg', args: ['-n', '--hidden'] } },
+    ])
+    const official = `<${single} calls>\n<${single} invoke name="fs.list">\n<${single} parameter name="path" string="true">README.md</${single} parameter>\n</${single} invoke>\n</${single} calls>`
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: official }, finish_reason: 'stop' }] }, undefined, 'deepseek').toolCalls[0]).toMatchObject({ name: 'fs.list', input: { path: 'README.md' } })
+    const v4 = `<${single}tool_calls>\n<${single}invoke name="fs_list">\n<${single}parameter name="path" string="true">README.md</${single}parameter>\n</${single}invoke>\n</${single}tool_calls>`
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: v4 }, finish_reason: 'stop' }] }, new Map([['fs_list', 'fs.list']]), 'deepseek').toolCalls[0]).toMatchObject({ providerToolName: 'fs_list', name: 'fs.list', input: { path: 'README.md' } })
+    const unclosed = `prefix\n<${single} calls>\n<${single} invoke name="fs.list">`
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: unclosed }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'length', toolCalls: [], text: 'prefix' })
+    const untouched = normalizeOpenAIResponse({ choices: [{ message: { content: live }, finish_reason: 'stop' }] })
+    expect(untouched.finishReason).toBe('stop')
+    expect(untouched.toolCalls).toEqual([])
+    expect(untouched.text).toContain(`<${doubled} calls>`)
+    const native = normalizeOpenAIResponse({ choices: [{ message: { content: live, tool_calls: [{ id: 'provider-id', function: { name: 'fs.list', arguments: '{"path":"src"}' } }] }, finish_reason: 'tool_calls' }] }, undefined, 'deepseek')
+    expect(native.text).toBe('我先实际检索代码库。')
+    expect(native.toolCalls).toEqual([{ toolCallId: 'pulse-tool-1', providerToolCallId: 'provider-id', providerToolName: 'fs.list', providerToolArguments: '{"path":"src"}', name: 'fs.list', input: { path: 'src' } }])
+    const invalid = `<${single} calls>\n<${single} invoke name="shell.exec">\n<${single} parameter name="args" string="false">[</${single} parameter>\n</${single} invoke>\n</${single} calls>`
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: invalid }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'length', toolCalls: [] })
+    const selfClosing = [
+      `<${doubled} calls>`,
+      `<${doubled} invoke name="fs.list" />`,
+      `<${doubled} parameter name="path" string="true">.</${doubled} parameter>`,
+      `</${doubled} invoke>`,
+      `</${doubled} calls>`,
+    ].join('\n')
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: selfClosing }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({
+      finishReason: 'tool_calls',
+      text: '',
+      toolCalls: [{ name: 'fs.list', input: { path: '.' } }],
+    })
+    const jsonTools = '{"tool":"fs.read","path":"."}\n\n{"tool":"fs_stage","path":"src/id.js","content":"module.exports = {}\\n"}'
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: jsonTools }, finish_reason: 'stop' }] }, new Map([['fs_stage', 'fs.stage']]), 'deepseek')).toMatchObject({
+      finishReason: 'tool_calls',
+      text: '',
+      toolCalls: [
+        { providerToolCallId: 'json-1', name: 'fs.read', input: { path: '.' } },
+        { providerToolCallId: 'json-2', providerToolName: 'fs_stage', name: 'fs.stage', input: { path: 'src/id.js', content: 'module.exports = {}\n' } },
+      ],
+    })
+    const prose = `先说明一下。\n{"tool":"fs.read","path":"."}`
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: prose }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'stop', toolCalls: [], text: prose })
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: jsonTools }, finish_reason: 'stop' }] }).toolCalls).toEqual([])
+    const argumentObjects = '{"path":"src/greet.js","content":"module.exports = {}\\n"}\n\n{"command":"node","args":["--test"]}'
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: argumentObjects }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'stop', toolCalls: [], text: argumentObjects })
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: '{"path":"."}' }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'stop', toolCalls: [], text: '{"path":"."}' })
+    const simulated = '{"tool":"fs.write","path":"test/greet.test.js","content":"ok\\n"}\n\n<system>Tool ran without output or errors</system>'
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: simulated }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'stop', toolCalls: [], text: simulated })
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: '{"path":"src/greet.js","content":"x"}\n先不要写' }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'stop', toolCalls: [] })
+    const paddedCommand = '[]\n{}\n{"command":"node","args":["--test"]}'
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: paddedCommand }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'stop', toolCalls: [], text: paddedCommand })
+    const toolCallsObject = JSON.stringify({ tool_calls: [{ name: 'fs.stage', arguments: { path: 'src/id.js', content: 'module.exports = {}\n' } }] })
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: toolCallsObject }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({
+      finishReason: 'tool_calls',
+      text: '',
+      toolCalls: [{ name: 'fs.stage', input: { path: 'src/id.js', content: 'module.exports = {}\n' } }],
+    })
+  })
+
   it('round-trips native OpenAI tool exchanges and DeepSeek continuation without exposing reasoning as text', () => {
     const state = createRuntimeState()
     const { agent, root } = createAgent(state, 'goal', resume)
@@ -454,12 +533,20 @@ describe('M1-3 context, models and adapters', () => {
     try {
       const filesystem = new FilesystemTool(root)
       await expect(filesystem.read('../outside.txt')).rejects.toMatchObject({ code: 'PATH_OUTSIDE_SANDBOX', retryable: false })
+      await writeFile(join(root, 'inside.txt'), 'ok')
+      await expect(filesystem.read(join(root, 'inside.txt'))).resolves.toBe('ok')
+      await expect(filesystem.list(root)).resolves.toContain('inside.txt')
+      await expect(filesystem.read('/etc/passwd')).rejects.toMatchObject({ code: 'PATH_OUTSIDE_SANDBOX', retryable: false })
+      await expect(filesystem.list('missing-dir')).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(filesystem.list('../outside')).rejects.toMatchObject({ code: 'PATH_OUTSIDE_SANDBOX', retryable: false })
       await expect(filesystem.writeIfUnchanged('file.txt', 'content', 'invalid')).rejects.toMatchObject({ code: 'INVALID_FILE_BASELINE_HASH', retryable: false })
       const controller = new AbortController()
       controller.abort()
       await expect(filesystem.read('file.txt', controller.signal)).rejects.toMatchObject({ code: 'ABORTED', retryable: false })
       await expect(runShell(process.execPath, [], { maxOutputBytes: -1 })).rejects.toMatchObject({ code: 'INVALID_SHELL_OUTPUT_LIMIT', retryable: false })
       await expect(runShell(process.execPath, [], { timeoutMs: -1 })).rejects.toMatchObject({ code: 'INVALID_SHELL_TIMEOUT', retryable: false })
+      await expect(runShell('ls && find . | head')).rejects.toMatchObject({ code: 'SHELL_SYNTAX_UNSUPPORTED', message: expect.stringContaining('does not start a shell') })
+      await expect(runShell('bash', ['-lc', 'node --version'])).rejects.toMatchObject({ code: 'SHELL_SYNTAX_UNSUPPORTED' })
       await expect(runShell('__pulse_missing_command__')).resolves.toMatchObject({ code: 127, timedOut: false, aborted: false })
     } finally { await rm(root, { recursive: true, force: true }) }
   })

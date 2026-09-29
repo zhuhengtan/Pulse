@@ -1,5 +1,4 @@
 import { createLocalHost, type LocalHostOptions, type AssistantEvent, type RunHandle } from '@hunterzhu/pulse-server';
-import { runInteractive } from './interactive.js';
 import { bindRunSignals } from './signals.js';
 
 function writeEvent(event: AssistantEvent, format: string): void {
@@ -23,13 +22,8 @@ export async function runOneShot(
   options: LocalHostOptions,
   task: string,
   format = 'text',
-  version = '0.1.4'
+  version = '0.4.1'
 ): Promise<number> {
-  // 如果在交互式终端且没有指定 jsonl，启动交互式 Ink 界面直接执行任务
-  if (process.stdout.isTTY && format !== 'jsonl') {
-    return runInteractive(options, undefined, task, version);
-  }
-
   const host = createLocalHost(options);
   let activeRun: RunHandle | undefined;
   const unbindSignals = bindRunSignals(host, () => activeRun);
@@ -82,6 +76,9 @@ export async function runOneShot(
 
     if (outcome.status === 'cancelled') return 3;
     return outcome.status === 'succeeded' && (!taskOutcome || taskOutcome.status === 'accepted') ? 0 : 1;
+  } catch (error) {
+    process.stderr.write(`\n[错误] ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
   } finally {
     unbindSignals();
     await host.close();

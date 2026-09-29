@@ -2,19 +2,24 @@ import { describe, expect, it } from 'vitest'
 import { OpenAICompatibleAdapter } from '@hunterzhu/pulse-adapters'
 import type { LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 
-const apiKey = process.env.OPENAI_API_KEY
+const openaiApiKey = process.env.OPENAI_API_KEY
 const deepseekApiKey = process.env.DEEPSEEK_API_KEY
+const activeKey = deepseekApiKey ?? openaiApiKey
+const activeProvider = deepseekApiKey ? 'deepseek' : 'openai'
+const activeModel = deepseekApiKey ? (process.env.DEEPSEEK_MODEL ?? 'deepseek-chat') : (process.env.OPENAI_MODEL ?? 'gpt-4o-mini')
+const activeBaseURL = deepseekApiKey ? (process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com/v1') : process.env.OPENAI_BASE_URL
+
 const toolSmoke = process.env.PULSE_LIVE_TOOL_SMOKE === '1'
 const structuredSmoke = process.env.PULSE_LIVE_STRUCTURED_SMOKE === '1'
 const cancellationSmoke = process.env.PULSE_LIVE_CANCELLATION_SMOKE === '1'
 
-describe.skipIf(!apiKey)('live OpenAI-compatible adapter', () => {
+describe.skipIf(!activeKey)('live OpenAI-compatible adapter', () => {
   it('performs one minimal request and normalizes the response', async () => {
     const adapter = new OpenAICompatibleAdapter('openai-live', {
-      provider: 'openai',
-      apiKey,
-      defaultModel: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
-      baseURL: process.env.OPENAI_BASE_URL,
+      provider: activeProvider,
+      apiKey: activeKey,
+      defaultModel: activeModel,
+      baseURL: activeBaseURL,
       maxOutputTokens: 16,
     })
     const request: LLMRequestProjection = {
@@ -35,10 +40,10 @@ describe.skipIf(!apiKey)('live OpenAI-compatible adapter', () => {
 
   it.skipIf(!toolSmoke)('forces and normalizes a real tool call', async () => {
     const adapter = new OpenAICompatibleAdapter('openai-live-tool', {
-      provider: 'openai',
-      apiKey,
-      defaultModel: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
-      baseURL: process.env.OPENAI_BASE_URL,
+      provider: activeProvider,
+      apiKey: activeKey,
+      defaultModel: activeModel,
+      baseURL: activeBaseURL,
       maxOutputTokens: 64,
       toolChoice: 'required',
     })
@@ -58,10 +63,10 @@ describe.skipIf(!apiKey)('live OpenAI-compatible adapter', () => {
 
   it.skipIf(!structuredSmoke)('requests and validates a real structured response', async () => {
     const adapter = new OpenAICompatibleAdapter('openai-live-structured', {
-      provider: 'openai',
-      apiKey,
-      defaultModel: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
-      baseURL: process.env.OPENAI_BASE_URL,
+      provider: activeProvider,
+      apiKey: activeKey,
+      defaultModel: activeModel,
+      baseURL: activeBaseURL,
       maxOutputTokens: 64,
     })
     const outputSchema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false } as const
@@ -80,10 +85,10 @@ describe.skipIf(!apiKey)('live OpenAI-compatible adapter', () => {
 
   it.skipIf(!cancellationSmoke)('cancels an in-flight real provider request', async () => {
     const adapter = new OpenAICompatibleAdapter('openai-live-cancel', {
-      provider: 'openai',
-      apiKey,
-      defaultModel: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
-      baseURL: process.env.OPENAI_BASE_URL,
+      provider: activeProvider,
+      apiKey: activeKey,
+      defaultModel: activeModel,
+      baseURL: activeBaseURL,
       maxOutputTokens: 256,
     })
     const controller = new AbortController()

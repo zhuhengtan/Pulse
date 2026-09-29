@@ -84,6 +84,15 @@ export function validatePlan(tasks: PlannedTask[], criterionIds: string[]): void
   }
   tasks.forEach((task) => walk(task.id))
 }
+const TOOL_RUNNER = /\b(?:node|npm|pnpm|yarn|bun|pytest|cargo|vitest|jest|make|python3?|pip3?|ruby|gradle|mvn|dotnet|gcc|clang|tsc|eslint|ruff)\b|\bgo\s+test\b/i
+const WORKSPACE_FILE = /(?:^|[\s`'"(])(?:\.{1,2}\/|[\w.-]+\/)[\w.-]+\.[A-Za-z][A-Za-z0-9]{0,7}\b|\b(?!node\.js\b)[\w.-]+\.(?:js|jsx|ts|tsx|mjs|cjs|py|go|rs|java|md|json|ya?ml|toml|css|html|vue|svelte|sh|sql|cpp|hpp|cs|rb|php|swift|kt|txt|lock|c|h)\b/i
+
+/** Implementation, file, and command stages need settled tool evidence. Versions and abbreviations do not. */
+export function stageRequiresToolEvidence(goal: string, check: string): boolean {
+  const text = `${goal}\n${check}`
+  return TOOL_RUNNER.test(text) || WORKSPACE_FILE.test(text)
+}
+
 /** Conservative allowlist for shell commands that inspect state without writing it. */
 export function isReadOnlyInspectionCommand(command: string | undefined): boolean {
   if (!command || /[|<>;`$\n\r]/.test(command)) return false
@@ -91,15 +100,36 @@ export function isReadOnlyInspectionCommand(command: string | undefined): boolea
   if (!segments.length) return false
   return segments.every((segment) => /^(?:git\s+(?:status|diff|log|show|branch|rev-parse|ls-files|diff-tree)\b|(?:pwd|ls|rg|grep|find|cat|sed|head|tail|wc)\b)(?!.*(?:\s(?:--output|--exec|--delete|-exec|-delete)\b))/.test(segment))
 }
-/** Block dependent tasks, but keep unrelated tasks eligible. */
+/** A stage that never ran because one of its dependencies is already blocked. */
+export function isCascadeBlocked(task: ControlledTask, tasks: readonly ControlledTask[]): boolean {
+  return task.status === 'blocked' && task.attempts === 0 && task.dependsOn.some((id) => tasks.find((item) => item.id === id)?.status === 'blocked')
+}
+
+/** The stage that actually failed, walking past dependents that only inherited that failure. */
+export function rootBlockedDependency(task: ControlledTask, tasks: readonly ControlledTask[]): ControlledTask | undefined {
+  const direct = task.dependsOn.map((id) => tasks.find((item) => item.id === id)).find((item) => item?.status === 'blocked')
+  if (!direct) return undefined
+  return isCascadeBlocked(direct, tasks) ? rootBlockedDependency(direct, tasks) ?? direct : direct
+}
+
+function inheritedBlockNote(blocker: ControlledTask, tasks: readonly ControlledTask[]): string {
+  const root = isCascadeBlocked(blocker, tasks) ? rootBlockedDependency(blocker, tasks) ?? blocker : blocker
+  const reason = root.note?.trim()
+  return (reason && reason.length > 0 ? reason : root.goal).slice(0, 700)
+}
+
+/** Skip dependents of a blocked stage, and keep unrelated stages eligible. */
 export function nextTask(state: TaskControllerState): ControlledTask | undefined {
   let changed = true
   while (changed) {
     changed = false
     for (const task of state.tasks) {
-      if (task.status === 'pending' && task.dependsOn.some((id) => state.tasks.find((item) => item.id === id)?.status === 'blocked')) {
-        task.status = 'blocked'; task.note = 'Required dependency is blocked.'; changed = true
-      }
+      if (task.status !== 'pending') continue
+      const blocker = task.dependsOn.map((id) => state.tasks.find((item) => item.id === id)).find((item) => item?.status === 'blocked')
+      if (!blocker) continue
+      task.status = 'blocked'
+      task.note = inheritedBlockNote(blocker, state.tasks)
+      changed = true
     }
   }
   return state.tasks.find((task) => task.status === 'pending' && task.dependsOn.every((id) => state.tasks.find((item) => item.id === id)?.status === 'passed'))

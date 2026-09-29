@@ -28,10 +28,10 @@
     "release:publish": "pnpm build && pnpm release:check && pnpm publish -r --access public --no-git-checks",
     "release:npm-publish": "pnpm build && pnpm release:check && node scripts/release/npm-publish.mjs",
     "release:npm-dry-run": "pnpm build && pnpm release:check && NPM_DRY_RUN=1 node scripts/release/npm-publish.mjs",
-    "test": "vitest run --exclude tests/live/**",
+    "test": "vitest run --exclude 'tests/live/**'",
     "test:watch": "vitest",
     "test:live": "vitest run tests/live --passWithNoTests",
-    "check": "tsc -b --pretty false && vitest run --exclude tests/live/**"
+    "check": "tsc -b --pretty false && vitest run --exclude 'tests/live/**'"
   },
   "devDependencies": {
     "@hunterzhu/pulse-cli": "workspace:*",

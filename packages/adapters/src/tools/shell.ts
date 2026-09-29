@@ -166,11 +166,18 @@ function shellEnvironment(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv
   ))
 }
 
+function shellLaunchesCommand(command: string, args: string[]): boolean {
+  const base = basename(command).toLowerCase()
+  if (!['sh', 'bash', 'zsh', 'dash', 'fish', 'ksh', 'cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe'].includes(base)) return false
+  return args.some((arg) => /^(?:-lc|-c|-command|\/c)$/i.test(arg))
+}
+
 export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[] } = {}): Promise<ShellResult> {
   const max = options.maxOutputBytes ?? 256 * 1024
   if (!Number.isFinite(max) || max < 0) return Promise.reject(shellError('INVALID_SHELL_OUTPUT_LIMIT'))
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0)) return Promise.reject(shellError('INVALID_SHELL_TIMEOUT'))
   if (!command || typeof command !== 'string' || !Array.isArray(args) || args.some((arg) => typeof arg !== 'string')) return Promise.reject(shellError('INVALID_SHELL_ARGUMENT'))
+  if (/&&|\|\||[|&;<>\n`]|\$\(/.test(command) || shellLaunchesCommand(command, args)) return Promise.reject(Object.assign(shellError('SHELL_SYNTAX_UNSUPPORTED'), { message: 'shell.exec does not start a shell. Pass the executable in command and each argument in args. Do not put &&, pipes, redirects, command substitution, or sh -c in command.' }))
   try { encodeSandboxCommand(command, args) } catch (error) { return Promise.reject(error) }
 
   return withSandboxLease(async () => {

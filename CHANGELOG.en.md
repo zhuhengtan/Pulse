@@ -2,6 +2,16 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.4.2] - 2026-09-29
+
+### Fixed
+
+- Stage acceptance requires every cited reference to be valid. Stages that touch files, commands, or tests need successful tool evidence, while pure writing stages can still pass on the candidate result.
+- DeepSeek recovery no longer treats unnamed JSON as a file write or shell command. Trailing text stays text, and invalid DSML parameters are treated as truncation.
+- Staged writes and commits reject `.pulse` paths. Listing a missing directory returns ENOENT, while an existing empty directory still returns an empty list.
+- Command splitting respects quotes. Commands launched through shells such as `sh -c` or `bash -c` are rejected.
+- `pulse resume` returns to the interactive screen on a terminal. A non-interactive run that already has a task no longer waits on idle stdin, and explicit mock flags can override `PULSE_MODEL`.
+
 ## [0.4.1] - 2026-09-26
 
 ### Added

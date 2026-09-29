@@ -207,6 +207,91 @@ function collectResumeResultRefs(input: ResumeInput | undefined, refs: Set<Prove
   }
 }
 
+/** Models often wrap the real arguments, put a path in title, or pack a shell command line into one string. */
+export function normalizeModelToolInput(toolName: string, input: unknown): JsonValue {
+  const unwrapped = aliasTitleToPath(toolName, unwrapToolEnvelope(input))
+  if (toolName !== 'shell.exec' || !unwrapped || typeof unwrapped !== 'object' || Array.isArray(unwrapped)) return unwrapped
+  return normalizeShellInput(unwrapped as Record<string, JsonValue>)
+}
+
+function aliasTitleToPath(toolName: string, input: JsonValue): JsonValue {
+  if (!toolName.startsWith('fs.') || !input || typeof input !== 'object' || Array.isArray(input)) return input
+  const record = input as Record<string, JsonValue>
+  if (typeof record.path === 'string' && record.path.length > 0) return input
+  if (typeof record.title !== 'string' || record.title.trim().length === 0) return input
+  const path = record.title.trim()
+  const copy: Record<string, JsonValue> = { ...record, path }
+  delete copy.title
+  return copy
+}
+
+function normalizeShellInput(record: Record<string, JsonValue>): JsonValue {
+  const extras = { ...(typeof record.cwd === 'string' ? { cwd: record.cwd } : {}), ...(typeof record.timeoutMs === 'number' ? { timeoutMs: record.timeoutMs } : {}) }
+  const declaredArgs = Array.isArray(record.args) ? record.args.filter((item): item is string => typeof item === 'string') : []
+  if (Array.isArray(record.command) && record.command.length > 0 && record.command.every((item) => typeof item === 'string')) {
+    const command = record.command[0]
+    if (typeof command !== 'string' || command.length === 0) return record
+    const rest = record.command.slice(1).filter((item): item is string => typeof item === 'string')
+    const args = [...rest, ...declaredArgs]
+    return { command, ...(args.length ? { args } : {}), ...extras }
+  }
+  if (typeof record.command === 'string') {
+    const split = splitPlainCommand(record.command)
+    if (!split) return record
+    const args = [...split.args, ...declaredArgs]
+    return { command: split.command, ...(args.length ? { args } : {}), ...extras }
+  }
+  const executable = typeof record.executable === 'string' ? record.executable : undefined
+  const argv = Array.isArray(record.argv) ? record.argv : Array.isArray(record.args) ? record.args : undefined
+  if (executable && argv && argv.every((item) => typeof item === 'string')) return { command: executable, args: argv, ...extras }
+  return record
+}
+
+/** A command line with no unquoted shell syntax is an executable plus arguments. */
+function splitPlainCommand(command: string): { command: string; args: string[] } | undefined {
+  const parts = tokenizeCommand(command)
+  const executable = parts?.[0]
+  if (!parts || !executable || parts.length < 2) return undefined
+  return { command: executable, args: parts.slice(1) }
+}
+
+function tokenizeCommand(command: string): string[] | undefined {
+  const parts: string[] = []
+  let current = ''
+  let quote: '"' | "'" | undefined
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index]!
+    if (quote) {
+      if (char === quote) quote = undefined
+      else if (char === '\\' && quote === '"' && index + 1 < command.length) current += command[++index]
+      else current += char
+      continue
+    }
+    if (char === '"' || char === "'") { quote = char; continue }
+    if (/\s/.test(char)) {
+      if (current) { parts.push(current); current = '' }
+      continue
+    }
+    if (/[|&;<>`\n]/.test(char) || (char === '$' && command[index + 1] === '(')) return undefined
+    current += char
+  }
+  if (quote) return undefined
+  if (current) parts.push(current)
+  return parts.length > 0 ? parts : undefined
+}
+
+function unwrapToolEnvelope(input: unknown): JsonValue {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return (input ?? {}) as JsonValue
+  const record = input as Record<string, unknown>
+  const keys = Object.keys(record)
+  const key = keys[0]
+  if (keys.length === 1 && key !== undefined && (key === 'input' || key === 'arguments' || key === 'args' || key === 'parameters')) {
+    const inner = record[key]
+    if (inner && typeof inner === 'object' && !Array.isArray(inner)) return inner as JsonValue
+  }
+  return input as JsonValue
+}
+
 /** Return a wait resolution even when the scheduler wrapped it in a control error. */
 function waitResolution(input: ResumeInput | undefined): import('../core/types.js').WaitResolution | undefined {
   if (!input) return undefined
@@ -429,8 +514,35 @@ export class StepBuilder<TState = JsonValue> {
     const resultRefsFromWait = (ctx: StepContext<TState>): ResultRef[] => { const resolution = waitResolution(ctx.resumeInput); return resolution === undefined ? [] : Object.values(resolution.dependencies).flatMap((dependency) => dependency.state === 'settled' && dependency.outcome.resultRef ? [dependency.outcome.resultRef] : []) }
     const instruction = (ctx: StepContext<TState>): string => boundedInstruction(typeof options.instruction === 'string' ? options.instruction : options.instruction({ goal: ctx.goal, state: scalarProjection(ctx.laneState) as ScalarProjection<TState>, global: ctx.global }))
     const submitModel = (ctx: StepContext<TState>, turn: number, inputs: StepInputs = {}): LaneStepOutput => { const resultRefs = [...new Set(inputs.results ?? [])]; const findingRefs = [...new Set(inputs.findings ?? [])]; const artifactRefs = [...new Set(inputs.artifacts ?? [])]; const dataRefs: ProvenanceRef[] = [...resultRefs, ...findingRefs, ...artifactRefs.map((ref) => ({ kind: 'artifact' as const, ref }))]; const requirements = { ...(options.requirements ?? {}), ...(options.toolAllow === undefined ? {} : { toolCalling: true }) }; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { ...(resultRefs.length ? { results: resultRefs } : {}), ...(findingRefs.length ? { findings: findingRefs } : {}), ...(artifactRefs.length ? { artifacts: artifactRefs } : {}), ...(inputs.events?.length ? { events: [...new Set(inputs.events)] } : {}), ...(inputs.conversation?.length ? { conversation: inputs.conversation as unknown as JsonValue } : {}) }, turn, ...(inputs.toolDiscovery === undefined ? {} : { toolDiscovery: inputs.toolDiscovery as JsonValue }), ...(options.outputSchema === undefined ? {} : { outputSchema: zodJsonSchema(options.outputSchema) }), ...(Object.keys(requirements).length ? { requirements } : {}) }), ...(dataRefs.length ? { derivedFrom: dataRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn, inputs) }, locals: writeTurns(ctx, turn, inputs) } }
+    const invalidInputRecovery = (ctx: StepContext<TState>): LaneStepOutput | { next: NextStepTarget<TState> } | undefined => {
+      const input = ctx.resumeInput
+      if (!input || input.type !== 'control_error' || input.error.code !== 'INVALID_TOOL_INPUT') return undefined
+      const message = input.error.message.slice(0, 1000)
+      const failureKey = `${name}ToolFailure`
+      const signature = contentHash([{ code: 'INVALID_TOOL_INPUT', message }])
+      const prior = sdkLocals(ctx.lane.resume.locals)[failureKey] as { signature?: string; count?: number } | undefined
+      const count = prior?.signature === signature ? (prior.count ?? 0) + 1 : 1
+      if (count >= 3) {
+        const error = { code: 'REPEATED_TOOL_FAILURE', message: `The same tool failure repeated three times: ${message}`, retryable: false }
+        return { next: options.onError ? options.onError(error, ctx) : { fail: error } }
+      }
+      const hint = message.includes('tool fs.stage')
+        ? ' fs.stage accepts path and content for a new file of at most 8192 bytes, or operation begin, inspect, append, or commit. Put the workspace path in path.'
+        : message.includes('tool shell.exec')
+          ? ' shell.exec command is the executable alone; put each flag in args, for example {"command":"node","args":["--test"]}.'
+          : ''
+      const previous = readInputs(ctx)
+      const current = options.inputs?.(ctx) ?? {}
+      const notice = `Runtime tool input notice: the previous tool call was not executed. ${message}${hint} Submit a corrected call that matches the tool schema, or choose a different authorized tool. Do not repeat the same arguments.`
+      const inputs: StepInputs = { ...current, ...previous, conversation: [...(current.conversation ?? []), { role: 'user', content: notice }] }
+      const output = submitModel(ctx, readTurns(ctx) + 1, inputs)
+      const locals = output.locals as Record<string, JsonValue>
+      return { ...output, next: `${name}:decode`, locals: { ...locals, $sdk: { ...sdkLocals(locals), [failureKey]: { signature, count, observations: [{ code: 'INVALID_TOOL_INPUT', message }] }, [`${name}QueuedTools`]: [], [`${name}StopAfterSerial`]: false } } }
+    }
     this.handlers.set(name, (ctx) => { const resetToken = options.resetTurnsOnEntry?.(ctx); const priorToken = sdkLocals(ctx.lane.resume.locals)[resetTokenKey]; const reset = resetToken !== undefined && priorToken !== resetToken; const turn = (reset ? 0 : readTurns(ctx)) + 1; const inputs = options.inputs?.(ctx) ?? {}; const output = submitModel(ctx, turn, inputs); const locals = writeTurns(ctx, turn, inputs, resetToken); return { ...output, next: `${name}:decode`, locals } })
     this.handlers.set(`${name}:tools`, (ctx) => {
+      const recovered = invalidInputRecovery(ctx)
+      if (recovered) return recovered
       const turn = readTurns(ctx)
       const previous = readInputs(ctx)
       const current = options.inputs?.(ctx) ?? {}
@@ -491,6 +603,8 @@ export class StepBuilder<TState = JsonValue> {
       return { ...output, next: `${name}:decode`, locals: { ...locals, $sdk: { ...sdkLocals(locals), [queuedKey]: [], [stopAfterSerialKey]: false, [failureKey]: nextFailure, [progressKey]: { hashes: [...hashes].slice(-128), repeats } } } }
     })
     this.handlers.set(`${name}:decode`, (ctx) => {
+      const recovered = invalidInputRecovery(ctx)
+      if (recovered) return recovered
       const turns = readTurns(ctx)
       const ref = resultRefFromWait(ctx)
       const value = ref ? readResult(ctx, ref) ?? null : null
@@ -533,14 +647,33 @@ export class StepBuilder<TState = JsonValue> {
         return { actions: [], next: '$compact:summarize', locals: { ...locals, $sdk: { ...sdk, compactPending: true, compactReturnStep: `${name}:decode`, [pendingResultKey]: ref } } }
       }
       if (finishReason === 'tool_calls') {
-        if (turns >= maxTurns || toolCalls.length === 0) return maxTurnsReached()
+        // The last permitted turn may still carry the write that finishes the stage.
+        // A further tool request after that batch is the actual turn limit.
+        if (toolCalls.length === 0 || turns > maxTurns) return maxTurnsReached()
         const canonicalToolName = (name: string): string | undefined => {
           if (options.toolAllow === undefined || options.toolAllow.includes(name)) return name
           const aliases = options.toolAllow.filter((allowed) => allowed.replaceAll('.', '_') === name)
           return aliases.length === 1 ? aliases[0] : undefined
         }
         const invalidTool = toolCalls.find((call) => { const item = call && typeof call === 'object' && !Array.isArray(call) ? call as Record<string, JsonValue> : {}; const toolName = typeof item.name === 'string' ? item.name : ''; const canonical = canonicalToolName(toolName); return !toolName || canonical === undefined || (options.toolAllow !== undefined && !options.toolAllow.includes(canonical)) })
-        if (invalidTool !== undefined) return fail({ code: 'ACTION_TOOL_NOT_ALLOWED', message: 'Model requested a tool outside the ReAct allow-list.', retryable: false })
+        if (invalidTool !== undefined) {
+          const item = invalidTool && typeof invalidTool === 'object' && !Array.isArray(invalidTool) ? invalidTool as Record<string, JsonValue> : {}
+          const requested = typeof item.name === 'string' && item.name.length > 0 ? item.name : '(unnamed)'
+          const allowed = (options.toolAllow ?? []).join(', ')
+          const message = `Tool ${requested} is not available.${allowed ? ` Available tools: ${allowed}.` : ''}`
+          const failureKey = `${name}ToolFailure`
+          const signature = contentHash([{ code: 'ACTION_TOOL_NOT_ALLOWED', message }])
+          const prior = sdkLocals(ctx.lane.resume.locals)[failureKey] as { signature?: string; count?: number } | undefined
+          const count = prior?.signature === signature ? (prior.count ?? 0) + 1 : 1
+          if (count >= 3) return fail({ code: 'ACTION_TOOL_NOT_ALLOWED', message, retryable: false })
+          const previous = readInputs(ctx)
+          const current = options.inputs?.(ctx) ?? {}
+          const notice = `Runtime tool notice: the previous tool call was not executed. ${message} Choose an available tool. Do not invent tool names.`
+          const inputs: StepInputs = { ...current, ...previous, conversation: [...(current.conversation ?? []), { role: 'user', content: notice }] }
+          const output = submitModel(ctx, turns + 1, inputs)
+          const locals = output.locals as Record<string, JsonValue>
+          return { ...output, next: `${name}:decode`, locals: { ...locals, $sdk: { ...sdkLocals(locals), [failureKey]: { signature, count, observations: [{ code: 'ACTION_TOOL_NOT_ALLOWED', message }] } } } }
+        }
         const resolution = waitResolution(ctx.resumeInput)
         const sourceEffectId = ref !== undefined && ctx.results.meta(ref)?.producer.kind === 'effect'
           ? ctx.results.meta(ref)?.producer.id
@@ -552,7 +685,7 @@ export class StepBuilder<TState = JsonValue> {
           const originalId = typeof item.toolCallId === 'string' ? item.toolCallId : `call-${index + 1}`
           const rawToolName = typeof item.name === 'string' ? item.name : ''
           const toolName = canonicalToolName(rawToolName)!
-          return { originalId, toolName, toolCallId: options.scopeToolCallsToEffect ? `${name}:${sourceEffectId ?? 'turn'}:${turns}:${originalId}` : `${name}:${turns}:${originalId}`, input: item.input ?? {} }
+          return { originalId, toolName, toolCallId: options.scopeToolCallsToEffect ? `${name}:${sourceEffectId ?? 'turn'}:${turns}:${originalId}` : `${name}:${turns}:${originalId}`, input: normalizeModelToolInput(toolName, item.input ?? {}) }
         })
         const askCalls = calls.filter((call) => String(call.toolName).startsWith('ask.'))
         if (askCalls.length > 0) {
@@ -658,7 +791,8 @@ export class StepBuilder<TState = JsonValue> {
         }
         return dispatchTools(makeToolEffects(calls), clearPendingResult(ctx))
       }
-      if (turns > maxTurns) return maxTurnsReached()
+      // The answer after a tool batch started on the last permitted turn is still that turn's result.
+      if (turns > maxTurns + 1) return maxTurnsReached()
       if (options.outputSchema) {
         const outputValue = record?.structured === undefined ? value : record.structured
         const parsed = options.outputSchema.safeParse(outputValue)

@@ -23,20 +23,28 @@ const stageCommand = z.discriminatedUnion('operation', [
 // Providers require an object at the root of a tool JSON schema. Validate the
 // operation-specific required fields separately before any filesystem action.
 export const stageInput = z.object({
-  operation: z.enum(['begin', 'inspect', 'append', 'commit']),
+  operation: z.enum(['begin', 'inspect', 'append', 'commit']).optional(),
   path: z.string().optional(), expectedHash: hash.optional(), draftId: draftId.optional(),
   revision: hash.optional(), content: z.string().max(EDIT_BYTES).optional(),
   expectedBytes: z.number().int().min(0).max(MAX_DRAFT_BYTES).optional(),
 })
 const draftSchema = z.object({ version: z.literal(1), path: z.string(), baseline: hash.nullable(), content: z.string(), committed: z.boolean() })
+const pulsePath = (path: string): boolean => path.replaceAll('\\', '/').split('/').includes('.pulse')
 
 /** Each revision is durable. Incomplete drafts never touch their target file. */
 export class StagedEditor {
   constructor(private readonly files: FilesystemTool) {}
   async execute(raw: z.infer<typeof stageInput>, signal?: AbortSignal) {
+    if (raw.operation === undefined) {
+      if (typeof raw.path !== 'string' || raw.path.length === 0 || typeof raw.content !== 'string') throw editingError('INVALID_STAGE_INPUT', 'fs.stage requires operation, or path and content for a new file of at most 8192 bytes.')
+      if (pulsePath(raw.path)) throw editingError('INVALID_DRAFT_TARGET', 'Draft targets cannot modify Pulse configuration or draft storage.')
+      boundedEdit(raw.content)
+      const saved = await this.files.writeIfUnchanged(raw.path, raw.content, null, signal)
+      return { draftId: randomUUID(), target: raw.path, revision: saved.hash, bytes: saved.bytes, contentHash: saved.hash, committed: true }
+    }
     const input = stageCommand.parse(raw)
     if (input.operation === 'begin') {
-      if (input.path.replaceAll('\\', '/').split('/').includes('.pulse')) throw editingError('INVALID_DRAFT_TARGET', 'Draft targets cannot modify Pulse configuration or draft storage.')
+      if (pulsePath(input.path)) throw editingError('INVALID_DRAFT_TARGET', 'Draft targets cannot modify Pulse configuration or draft storage.')
       const baseline = await this.files.hash(input.path, signal).catch((error) => {
         if (error.code === 'ENOENT') return null
         throw error
@@ -61,6 +69,7 @@ export class StagedEditor {
       draft.content += input.content
     }
     if (input.operation === 'commit') {
+      if (pulsePath(draft.path)) throw editingError('INVALID_DRAFT_TARGET', 'Draft targets cannot modify Pulse configuration or draft storage.')
       if (Buffer.byteLength(draft.content) !== input.expectedBytes) throw editingError('DRAFT_SIZE_MISMATCH', 'Inspect the draft and confirm the complete byte count before committing.')
       if (!draft.committed) {
         // A crash after target commit but before checkpoint is safe to reconcile.

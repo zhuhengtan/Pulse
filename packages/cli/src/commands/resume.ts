@@ -24,9 +24,9 @@ export async function runResume(
   conversationId: string,
   task?: string | undefined,
   format = 'text',
-  version = '0.1.4'
+  version = '0.4.1'
 ): Promise<number> {
-  // 如果在交互式终端且没有指定 jsonl，启动交互式 Ink 界面直接继续会话
+  // 交互式终端进入 Ink 界面；jsonl 保持非交互输出
   if (process.stdout.isTTY && format !== 'jsonl') {
     return runInteractive(options, conversationId, task, version);
   }

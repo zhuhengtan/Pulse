@@ -1,5 +1,27 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.4.2": [
+    {
+      "zh": "阶段验收要求每条引用都有效；涉及文件、命令或测试的阶段必须有成功的工具证据，纯写作阶段仍可凭候选结果通过。",
+      "en": "Stage acceptance requires every cited reference to be valid. Stages that touch files, commands, or tests need successful tool evidence, while pure writing stages can still pass on the candidate result."
+    },
+    {
+      "zh": "DeepSeek 不再把未命名 JSON 当成文件写入或命令执行；回复后的附加文本保持为正文，损坏的 DSML 参数按截断处理。",
+      "en": "DeepSeek recovery no longer treats unnamed JSON as a file write or shell command. Trailing text stays text, and invalid DSML parameters are treated as truncation."
+    },
+    {
+      "zh": "暂存写入和提交会拒绝 `.pulse` 路径；列出不存在的目录会返回 ENOENT，已存在的空目录仍返回空列表。",
+      "en": "Staged writes and commits reject `.pulse` paths. Listing a missing directory returns ENOENT, while an existing empty directory still returns an empty list."
+    },
+    {
+      "zh": "命令拆分能识别引号；通过 `sh -c`、`bash -c` 等启动器执行的命令会被拒绝。",
+      "en": "Command splitting respects quotes. Commands launched through shells such as `sh -c` or `bash -c` are rejected."
+    },
+    {
+      "zh": "`pulse resume` 在终端重新进入交互界面；已有任务的非交互运行不再因空闲标准输入一直等待，显式 mock 参数可以覆盖 `PULSE_MODEL`。",
+      "en": "`pulse resume` returns to the interactive screen on a terminal. A non-interactive run that already has a task no longer waits on idle stdin, and explicit mock flags can override `PULSE_MODEL`."
+    }
+  ],
   "0.4.1": [
     {
       "zh": "新增按需发现与调用 Skill 的能力，减少无关指令进入任务上下文。",
