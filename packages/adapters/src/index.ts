@@ -1,3 +1,4 @@
+export * from './providers/canonical/index.js'
 export * from './providers/types.js'
 export * from './providers/normalize.js'
 export * from './providers/mock.js'
