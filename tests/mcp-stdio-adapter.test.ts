@@ -42,7 +42,9 @@ describe('MCP stdio adapter', () => {
   })
 
   it('rejects a tool call that exceeds its timeout and closes the child', async () => {
-    const client = new McpStdioClient({ ...fixture('hang'), timeoutMs: 100, shutdownTimeoutMs: 100 })
+    // Child startup can exceed 100 ms under the full cross-platform suite.
+    // The behavior under test keeps its independent 50 ms call deadline below.
+    const client = new McpStdioClient({ ...fixture('hang'), timeoutMs: 1_000, shutdownTimeoutMs: 100 })
     clients.push(client)
     await client.connect()
 

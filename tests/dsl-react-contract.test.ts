@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { PulseRuntime, defineLaneProgram, normalizeModelToolInput } from '@hunterzhu/pulse-runtime'
+import { PulseRuntime, defineLaneProgram, looksLikeUnexecutedToolRequest, normalizeModelToolInput } from '@hunterzhu/pulse-runtime'
 import { z } from 'zod'
 
 describe('DSL ReAct contract', () => {
   it('unwraps model tool envelopes into the manifest arguments', () => {
     expect(normalizeModelToolInput('fs.write', { input: { path: 'src/id.js', content: 'ok' } })).toEqual({ path: 'src/id.js', content: 'ok' })
     expect(normalizeModelToolInput('fs.list', { args: { path: '.' } })).toEqual({ path: '.' })
+    expect(normalizeModelToolInput('fs.search', { path: 'packages', pattern: 'PENDING' })).toEqual({ path: 'packages', query: 'PENDING' })
+    expect(normalizeModelToolInput('fs.search', { query: 'approve', pattern: 'PENDING' })).toEqual({ query: 'approve', pattern: 'PENDING' })
     expect(normalizeModelToolInput('shell.exec', { command: 'node', args: ['--version'] })).toEqual({ command: 'node', args: ['--version'] })
     expect(normalizeModelToolInput('shell.exec', { args: { executable: 'bash', argv: ['-lc', 'node --version'], cwd: '.' } })).toEqual({ command: 'bash', args: ['-lc', 'node --version'], cwd: '.' })
     expect(normalizeModelToolInput('fs.stage', { title: 'src/greet.js', content: 'ok' })).toEqual({ path: 'src/greet.js', content: 'ok' })
@@ -15,6 +17,12 @@ describe('DSL ReAct contract', () => {
     expect(normalizeModelToolInput('shell.exec', { command: "node -e 'console.log(1)'" })).toEqual({ command: 'node', args: ['-e', 'console.log(1)'] })
     expect(normalizeModelToolInput('shell.exec', { command: ['node', '--test'] })).toEqual({ command: 'node', args: ['--test'] })
     expect(normalizeModelToolInput('shell.exec', { command: 'ls && find . | head' })).toEqual({ command: 'ls && find . | head' })
+  })
+
+  it('recognizes standalone provider tool-call envelopes without mistaking prose for calls', () => {
+    expect(looksLikeUnexecutedToolRequest('{"toolCalls":[{"name":"fs.list","input":{"path":"src"}}]}')).toBe(true)
+    expect(looksLikeUnexecutedToolRequest('｜｜DSML｜｜ calls>')).toBe(true)
+    expect(looksLikeUnexecutedToolRequest('The review is complete; the example above is illustrative.')).toBe(false)
   })
 
   it('submits independent tool calls together by default', async () => {
@@ -64,6 +72,61 @@ describe('DSL ReAct contract', () => {
     expect(tools).toBe(0)
   })
 
+  it('runs the valid calls when another tool in the same batch is unavailable', async () => {
+    const executed: string[] = []
+    let models = 0
+    let followUp = ''
+    const program = defineLaneProgram({ id: 'partial-tool-batch', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', toolAllow: ['fs.read'], onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { executed.push(String((effect.input as { name?: string }).name)); return { value: 'contents' } }
+      models++
+      if (models === 1) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.read', input: { path: 'a.ts' } }, { name: 'filesystem.list_directory', input: {} }] } }
+      followUp = JSON.stringify((effect.input as { inputs?: { conversation?: unknown } }).inputs?.conversation ?? effect.input)
+      return { value: { text: 'done', finishReason: 'stop' } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(executed).toEqual(['fs.read'])
+    expect(followUp).toContain('filesystem.list_directory')
+    expect(followUp).toContain('were not executed')
+  })
+
+  it('asks again when a stop response only contains unexecuted tool-call text', async () => {
+    const executed: string[] = []
+    let models = 0
+    const program = defineLaneProgram({ id: 'text-tool-fallback', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', toolAllow: ['fs.read'], onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { executed.push(String((effect.input as { name?: string }).name)); return { value: 'contents' } }
+      models++
+      if (models === 1) return { value: { text: 'fs.read\n```json\n{"path":"a.ts"}\n```', finishReason: 'stop', toolCalls: [] } }
+      if (models === 2) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.read', input: { path: 'a.ts' } }] } }
+      return { value: { text: 'done', finishReason: 'stop' } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(executed).toEqual(['fs.read'])
+    expect(models).toBe(3)
+  })
+
+  it('finishes prose examples without asking the model to execute them', async () => {
+    let models = 0
+    const program = defineLaneProgram({ id: 'prose-example', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'Explain tool syntax', toolAllow: ['fs.write'], onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      expect(effect.kind).toBe('llm')
+      models++
+      return { value: { text: 'Example only; do not execute:\n[{"tool":"fs.write","args":{"path":"a.txt","content":"demo"}}]', finishReason: 'stop', toolCalls: [] } }
+    } })
+    const { agentId } = runtime.createAgent('Explain tool syntax', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(models).toBe(1)
+  })
+
   it('never accepts or executes a token-truncated response', async () => {
     let finished = false
     let toolRuns = 0
@@ -93,6 +156,7 @@ describe('DSL ReAct contract', () => {
       calls++
       if (calls === 1 || repeat) return { value: { text: 'partial', finishReason: 'length', toolCalls: [{ name: 'write', input: {} }] } }
       expect(JSON.stringify(effect.input)).toContain('Runtime recovery notice')
+      expect(JSON.stringify(effect.input)).toContain('fs.apply_patch')
       return { value: { text: 'Concise final answer', finishReason: 'stop', toolCalls: [] } }
     } })
     const { agentId } = runtime.createAgent('work', program)
@@ -111,6 +175,146 @@ describe('DSL ReAct contract', () => {
     const { agentId } = runtime.createAgent('work', program)
     expect((await runtime.start(agentId).outcome()).status).toBe('failed')
     expect(calls).toBe(1)
+  })
+
+  it('asks the model to split an existing-file rewrite into a local patch', async () => {
+    const executed: string[] = []
+    let models = 0
+    const program = defineLaneProgram({ id: 'split-rewrite', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', toolAllow: ['fs.write', 'fs.apply_patch'], maxTurns: 4, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { executed.push(String((effect.input as { name?: string }).name)); return { value: { path: 'a.ts', replacements: 1, bytes: 3, hash: 'abc' } } }
+      models++
+      if (models === 1) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.write', input: { path: 'a.ts', content: 'entire file', expectedHash: 'a'.repeat(64) } }] } }
+      if (models === 2) {
+        const prompt = JSON.stringify(effect.input)
+        expect(prompt).toContain('fs.apply_patch')
+        expect(prompt).toContain('Do not write or stage the whole file')
+        return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.apply_patch', input: { path: 'a.ts', find: 'old', replace: 'new' } }] } }
+      }
+      return { value: { text: 'patched', finishReason: 'stop', toolCalls: [] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(executed).toEqual(['fs.apply_patch'])
+  })
+
+  it('merges same-file patches into one atomic batch', async () => {
+    const executed: Array<{ name: string; arguments: unknown }> = []
+    let models = 0
+    const hash = 'b'.repeat(64)
+    const program = defineLaneProgram({ id: 'merge-patches', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', toolAllow: ['fs.apply_patch', 'fs.apply_patches'], maxTurns: 4, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') {
+        const input = effect.input as { name: string; arguments: unknown }
+        executed.push({ name: input.name, arguments: input.arguments })
+        return { value: { path: 'a.ts', replacements: 2, bytes: 3, hash: 'abc' } }
+      }
+      models++
+      if (models === 1) return { value: { finishReason: 'tool_calls', toolCalls: [
+        { name: 'fs.apply_patch', input: { path: 'a.ts', find: 'alpha', replace: 'one', expectedHash: hash } },
+        { name: 'fs.apply_patch', input: { path: 'a.ts', find: 'beta', replace: 'two', expectedHash: hash } },
+      ] } }
+      return { value: { text: 'patched', finishReason: 'stop', toolCalls: [] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(executed).toEqual([{ name: 'fs.apply_patches', arguments: expect.objectContaining({ path: 'a.ts', expectedHash: hash, patches: [{ find: 'alpha', replace: 'one' }, { find: 'beta', replace: 'two' }] }) }])
+  })
+
+  it('preserves allowed patches when the batch tool is not allowed', async () => {
+    const executed: Array<{ name: string; arguments: unknown }> = []
+    let models = 0
+    const hash = 'b'.repeat(64)
+    const program = defineLaneProgram({ id: 'merge-patches', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', toolAllow: ['fs.apply_patch'], maxTurns: 4, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') {
+        const input = effect.input as { name: string; arguments: unknown }
+        executed.push({ name: input.name, arguments: input.arguments })
+        return { value: { path: 'a.ts', replacements: 2, bytes: 3, hash: 'abc' } }
+      }
+      models++
+      if (models === 1) return { value: { finishReason: 'tool_calls', toolCalls: [
+        { name: 'fs.apply_patch', input: { path: 'a.ts', find: 'alpha', replace: 'one', expectedHash: hash } },
+        { name: 'fs.apply_patch', input: { path: 'a.ts', find: 'beta', replace: 'two', expectedHash: hash } },
+      ] } }
+      return { value: { text: 'patched', finishReason: 'stop', toolCalls: [] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(executed.map((call) => call.name)).toEqual(['fs.apply_patch', 'fs.apply_patch'])
+  })
+
+  it('asks the model to stream a large new file in small chunks', async () => {
+    const executed: string[] = []
+    let models = 0
+    const program = defineLaneProgram({ id: 'stream-create', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', toolAllow: ['fs.write', 'fs.stage'], maxTurns: 4, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { executed.push(String((effect.input as { name?: string }).name)); return { value: { draftId: 'draft', committed: false, bytes: 0 } } }
+      models++
+      if (models === 1) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.write', input: { path: 'new.ts', content: 'x'.repeat(3000) } }] } }
+      if (models === 2) {
+        const prompt = JSON.stringify(effect.input)
+        expect(prompt).toContain('fs.stage')
+        expect(prompt).toContain('2048')
+        return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.stage', input: { operation: 'begin', path: 'new.ts' } }] } }
+      }
+      return { value: { text: 'streaming', finishReason: 'stop', toolCalls: [] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(executed).toEqual(['fs.stage'])
+  })
+
+  it('refuses another read once the stage must edit a file', async () => {
+    const executed: string[] = []
+    let models = 0
+    const program = defineLaneProgram({ id: 'require-edit', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', toolAllow: ['fs.read', 'fs.apply_patch'], blockReadOnlyTools: () => true, maxTurns: 4, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { executed.push(String((effect.input as { name?: string }).name)); return { value: { path: 'a.ts', replacements: 1, bytes: 3, hash: 'abc' } } }
+      models++
+      if (models === 1 || models === 2) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.read', input: { path: 'a.ts' } }] } }
+      if (models === 3) {
+        expect(JSON.stringify(effect.input)).toContain('this stage still has no file edit')
+        return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.apply_patch', input: { path: 'a.ts', find: 'old', replace: 'new' } }] } }
+      }
+      return { value: { text: 'edited', finishReason: 'stop', toolCalls: [] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(executed).toEqual(['fs.read', 'fs.apply_patch'])
+  })
+
+  it('allows one baseline test after reading before requiring the edit', async () => {
+    const executed: string[] = []
+    let models = 0
+    const program = defineLaneProgram({ id: 'baseline-before-edit', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'work', toolAllow: ['fs.read', 'shell.exec', 'fs.apply_patch'], blockReadOnlyTools: () => true, maxTurns: 6, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') {
+        const name = String((effect.input as { name?: string }).name)
+        executed.push(name)
+        return name === 'shell.exec' ? { value: { code: 1, stdout: '', stderr: 'baseline failure' } } : { value: { path: 'a.ts', content: 'source', hash: 'abc' } }
+      }
+      models++
+      if (models === 1) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.read', input: { path: 'a.ts' } }] } }
+      if (models === 2) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'shell.exec', input: { command: 'node', args: ['--test'] } }] } }
+      if (models === 3) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.apply_patch', input: { path: 'a.ts', find: 'old', replace: 'new' } }] } }
+      return { value: { text: 'edited', finishReason: 'stop', toolCalls: [] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(executed).toEqual(['fs.read', 'shell.exec', 'fs.apply_patch'])
   })
 
   it('serializes mutation batches in the runtime before requesting the next model turn', async () => {

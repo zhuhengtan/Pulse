@@ -1,0 +1,51 @@
+{
+  "date": "2026-10-01",
+  "scope": "Pulse workflow controller and ReAct runtime; existing dirty changes preserved",
+  "changes": [
+    {
+      "area": "acceptance",
+      "details": [
+        "Final unverifiable review results no longer pass an otherwise completed criterion.",
+        "An actionable final not_met result can reopen planning even when all prior stages passed.",
+        "Negative checks can accept an explicit non-zero exit when the verifier omitted the auxiliary citation field, but only when the stage goal/check declares a negative expectation."
+      ]
+    },
+    {
+      "area": "delivery",
+      "details": [
+        "Final task outcome retains a candidate result reference.",
+        "Final text includes a clean stage deliverable summary and filters raw tool/result dumps."
+      ]
+    },
+    {
+      "area": "continuity",
+      "details": [
+        "CLI resume task prompts explicitly inherit the prior task record.",
+        "Execution-summary follow-ups use a read-only response criterion instead of rerunning the original mutation plan."
+      ]
+    },
+    {
+      "area": "investigation",
+      "details": [
+        "A baseline test command may run after an initial read before an edit is required.",
+        "Chinese and English inspection, validation, and negated no-write phrases are classified as read-only unless an explicit edit action is present.",
+        "Standalone JSON toolCalls and full-width DSML provider envelopes are detected as unexecuted tool requests."
+      ]
+    }
+  ],
+  "verification": {
+    "typescript": "npx tsc -b passed",
+    "tests": { "files": 115, "passed": 869, "failed": 0, "command": "npm test -- --exclude 'tests/live/**'" },
+    "real_model": [
+      { "scenario": "single-file bugfix", "status": "accepted", "independentTests": "3/3 passed" },
+      { "scenario": "cross-run execution summary", "status": "accepted", "evidenceGapsReported": true },
+      { "scenario": "read-only code review", "status": "accepted", "durationMs": 128984, "filesChanged": false, "reportDelivered": true },
+      { "scenario": "multi-file feature creation", "status": "cancelled_at_bounded_180s", "independentChecks": "passed", "remainingRisk": "complex creation still needs adaptive stage budgeting and more efficient plan convergence" }
+    ],
+    "limits": [
+      "Real-model checks used the configured DeepSeek model in isolated synthetic workspaces.",
+      "No matched Codex A/B benchmark was run.",
+      "The multi-file scenario was bounded to 64 turns and 180 seconds for this audit."
+    ]
+  }
+}

@@ -1,0 +1,205 @@
+{
+  "date": "2026-10-03",
+  "task": "Fix multi-file feature workflow exceeding 180 seconds after code generation",
+  "scope": "Existing dirty checkout preserved; no commit, push, or release",
+  "fixture": {
+    "prompt": "实现一个无依赖 Node.js 配置解析小工具。1. 创建 src/config.js，导出 parseConfig(text)，忽略空行和以 # 开头的注释，按第一个 = 切分，去掉键和值两端空白，值保留为字符串，重复键以后者为准，没有 = 或键为空则抛出 Error。2. 创建 src/cli.js，从第一个命令行参数读取 UTF-8 文件，将结果 JSON 输出到 stdout，错误时退出码非零。3. 创建 test/config.test.js 覆盖上述正常和异常规则并运行 node --test。请实际完成并验证，不安装依赖。",
+    "initialFiles": {
+      "sample.conf": "# test\n mode = local \n token = a=b \nmode=prod\n"
+    },
+    "model": "deepseek-flash",
+    "maxTurns": 64,
+    "maxRuntimeMs": 180000,
+    "maxOutputTokens": 8192,
+    "approvalMode": "auto",
+    "workspaceNetwork": false
+  },
+  "causesAndFixes": [
+    "Worker tool definitions were absent: snapshots show 0 before and 18 after adding toolDiscovery.",
+    "Preserve settled evidence across worker attempts; distinguish edit, verify, and report corrections.",
+    "Accept already-verified dependency negative checks downstream, while rejecting new failing checks.",
+    "Final verification accepts supplied candidate refs for response delivery without replacing tool proof.",
+    "Prefer direct small-file creation; use current revision and bytes for staged commits; uncommitted drafts are not completed file edits.",
+    "Allow eight worker rounds instead of six within the unchanged total and wall-clock budgets.",
+    "Checkpoint validation-only stages after two shell-tool rounds, since test timing changes defeat output-hash repeat detection.",
+    "Recover the progress reviewer result from the current wait in explicit-context workers."
+  ],
+  "baseline": {
+    "label": "before changes",
+    "elapsedMs": 181139,
+    "runtimeStatus": "cancelled",
+    "acceptance": "cancelled",
+    "modelCalls": 33,
+    "outputTokens": 32251,
+    "criterionStatuses": [
+      "unverifiable",
+      "unverifiable",
+      "unverifiable",
+      "unverifiable",
+      "unverifiable"
+    ],
+    "independentSmokeExitCode": 0,
+    "sampleUnchanged": true,
+    "reportDelivered": false,
+    "runId": "run-d6127603-c0a6-4bc6-838a-c2d660230efd",
+    "rawReport": "/private/var/folders/59/r7_hdx094xg8l6jqrdff2f_r0000gn/T/pulse-workflow-audit-5sWhvw/report.json"
+  },
+  "intermediateRuns": [
+    {
+      "label": "before dependency evidence fix",
+      "elapsedMs": 181776,
+      "runtimeStatus": "cancelled",
+      "acceptance": "cancelled",
+      "modelCalls": 41,
+      "outputTokens": 27478,
+      "criterionStatuses": [
+        "unverifiable",
+        "unverifiable",
+        "unverifiable",
+        "unverifiable",
+        "unverifiable"
+      ],
+      "independentSmokeExitCode": 0,
+      "sampleUnchanged": true,
+      "reportDelivered": false,
+      "runId": "run-5aabb241-f476-4cb4-89f8-7ae6fad57b86",
+      "rawReport": "/private/var/folders/59/r7_hdx094xg8l6jqrdff2f_r0000gn/T/pulse-workflow-audit-GE9gua/report.json"
+    },
+    {
+      "label": "before staging guidance fix",
+      "elapsedMs": 182709,
+      "runtimeStatus": "cancelled",
+      "acceptance": "cancelled",
+      "modelCalls": 44,
+      "outputTokens": 24059,
+      "criterionStatuses": [
+        "unverifiable",
+        "unverifiable",
+        "unverifiable",
+        "unverifiable",
+        "unverifiable"
+      ],
+      "independentSmokeExitCode": 0,
+      "sampleUnchanged": true,
+      "reportDelivered": false,
+      "runId": "run-b1395a50-4f62-4aff-8225-d2e240060f63",
+      "rawReport": "/private/var/folders/59/r7_hdx094xg8l6jqrdff2f_r0000gn/T/pulse-workflow-audit-IZMisA/report.json"
+    },
+    {
+      "label": "before committed-draft guard and validation checkpoint",
+      "elapsedMs": 103441,
+      "runtimeStatus": "succeeded",
+      "acceptance": "accepted",
+      "modelCalls": 32,
+      "outputTokens": 14314,
+      "criterionStatuses": [
+        "passed",
+        "passed",
+        "passed",
+        "passed",
+        "passed"
+      ],
+      "independentSmokeExitCode": 0,
+      "sampleUnchanged": true,
+      "reportDelivered": true,
+      "runId": "run-f339b2ca-7ad0-4b19-801d-e123bac3482e",
+      "rawReport": "/private/var/folders/59/r7_hdx094xg8l6jqrdff2f_r0000gn/T/pulse-workflow-audit-ytXsYg/report.json"
+    },
+    {
+      "label": "before validation checkpoint",
+      "elapsedMs": 186794,
+      "runtimeStatus": "cancelled",
+      "acceptance": "cancelled",
+      "modelCalls": 61,
+      "outputTokens": 22385,
+      "criterionStatuses": [
+        "unverifiable",
+        "unverifiable",
+        "unverifiable",
+        "unverifiable",
+        "unverifiable"
+      ],
+      "independentSmokeExitCode": 0,
+      "sampleUnchanged": true,
+      "reportDelivered": false,
+      "runId": "run-bef44df8-b8dd-4b57-a2a8-5f9c8d04a37f",
+      "rawReport": "/private/var/folders/59/r7_hdx094xg8l6jqrdff2f_r0000gn/T/pulse-workflow-audit-Nkh8uA/report.json"
+    }
+  ],
+  "finalRuns": [
+    {
+      "label": "final version run 1",
+      "elapsedMs": 98009,
+      "runtimeStatus": "succeeded",
+      "acceptance": "accepted",
+      "modelCalls": 24,
+      "outputTokens": 10218,
+      "criterionStatuses": [
+        "passed",
+        "passed",
+        "passed",
+        "passed",
+        "passed"
+      ],
+      "independentSmokeExitCode": 0,
+      "sampleUnchanged": true,
+      "reportDelivered": true,
+      "runId": "run-46cbff8b-80e0-48d0-9872-5f0268571752",
+      "rawReport": "/private/var/folders/59/r7_hdx094xg8l6jqrdff2f_r0000gn/T/pulse-workflow-audit-grZE6M/report.json",
+      "independentBehavioralOracle": "passed",
+      "generatedTests": {
+        "passed": 7,
+        "failed": 0
+      },
+      "dependenciesInstalled": false
+    },
+    {
+      "label": "final version run 2",
+      "elapsedMs": 135123,
+      "runtimeStatus": "succeeded",
+      "acceptance": "accepted",
+      "modelCalls": 34,
+      "outputTokens": 13626,
+      "criterionStatuses": [
+        "passed",
+        "passed",
+        "passed",
+        "passed",
+        "passed"
+      ],
+      "independentSmokeExitCode": 0,
+      "sampleUnchanged": true,
+      "reportDelivered": true,
+      "runId": "run-be5be92d-e333-4c59-a841-7e281aad5d85",
+      "rawReport": "/private/var/folders/59/r7_hdx094xg8l6jqrdff2f_r0000gn/T/pulse-workflow-audit-Yc0Uae/report.json",
+      "independentBehavioralOracle": "passed",
+      "generatedTests": {
+        "passed": 10,
+        "failed": 0
+      },
+      "dependenciesInstalled": false
+    }
+  ],
+  "verification": {
+    "typescript": "npx tsc -b passed",
+    "diff": "git diff --check passed",
+    "nonLive": {
+      "command": "npm test -- --exclude 'tests/live/**'",
+      "files": 115,
+      "passed": 874,
+      "failed": 0
+    },
+    "behavioralOracle": "docs/evidence/2026-10-03/check-config-feature.mjs"
+  },
+  "sourceSha256": {
+    "packages/server/src/task-controller/program.ts": "eb260e0aca024bae9b17bf1afbbb21ac56d864a9ccf4548ec5cf724da99503be",
+    "packages/server/src/task-controller/state.ts": "af3d056fad2d7dab8109529991a80053d698deb77cc7327a4aef160127c28ec6",
+    "packages/server/src/index.ts": "02970ea78446c3581b28509b079c93d51f2be5eaf659f83a67ec97b402d46c29",
+    "tests/task-controller.test.ts": "cafe94f8c7f1e010e4474ebe3ff5d6c3af8bc4d295a2637b285ebf60ec35ab04"
+  },
+  "limits": [
+    "Synthetic three-file feature, not a matched Codex benchmark.",
+    "Live model latency and planning vary; these runs do not guarantee every feature completes within 180 seconds.",
+    "The independent smoke normalizes own enumerable entries because the task does not prescribe the result object prototype."
+  ]
+}

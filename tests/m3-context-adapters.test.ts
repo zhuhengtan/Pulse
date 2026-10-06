@@ -159,6 +159,43 @@ describe('M1-3 context, models and adapters', () => {
     })
     const prose = `先说明一下。\n{"tool":"fs.read","path":"."}`
     expect(normalizeOpenAIResponse({ choices: [{ message: { content: prose }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'stop', toolCalls: [], text: prose })
+    const markdownTools = [
+      'fs.read',
+      '```json',
+      '{"path":"/tmp/runtime.ts"}',
+      '```',
+      '',
+      'fs.search',
+      '```json',
+      '{"path":"/tmp","query":"approve"}',
+      '```',
+    ].join('\n')
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: markdownTools }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({
+      finishReason: 'tool_calls',
+      text: '',
+      toolCalls: [
+        { providerToolCallId: 'json-1', name: 'fs.read', input: { path: '/tmp/runtime.ts' } },
+        { providerToolCallId: 'json-2', name: 'fs.search', input: { path: '/tmp', query: 'approve' } },
+      ],
+    })
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: markdownTools }, finish_reason: 'stop' }] }).toolCalls).toEqual([])
+    const narrated = `先看这个例子。\n${markdownTools}`
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: narrated }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'stop', toolCalls: [], text: narrated })
+    const trailingBatch = [
+      'I have most of the picture. Let me gather the remaining specifics.',
+      '',
+      '[',
+      '  {"id":"call-1","tool":"fs.search","args":{"path":"/tmp/packages","pattern":"PENDING"}},',
+      '  {"id":"call-2","tool":"fs.read","args":{"path":"/tmp/api.ts","offset":3000}}',
+      ']',
+    ].join('\n')
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: trailingBatch }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'stop', text: trailingBatch, toolCalls: [] })
+    const example = 'This is an example only; do not execute:\n[{"tool":"fs.write","args":{"path":"example.txt","content":"demo"}}]'
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: example }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'stop', text: example, toolCalls: [] })
+    const bareBatch = '[{"tool":"fs.read","args":{"path":"a.ts"}}]'
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: bareBatch }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'tool_calls', toolCalls: [{ name: 'fs.read', input: { path: 'a.ts' } }] })
+    const trailingProse = `${trailingBatch}\n先不要执行。`
+    expect(normalizeOpenAIResponse({ choices: [{ message: { content: trailingProse }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'stop', toolCalls: [], text: trailingProse })
     expect(normalizeOpenAIResponse({ choices: [{ message: { content: jsonTools }, finish_reason: 'stop' }] }).toolCalls).toEqual([])
     const argumentObjects = '{"path":"src/greet.js","content":"module.exports = {}\\n"}\n\n{"command":"node","args":["--test"]}'
     expect(normalizeOpenAIResponse({ choices: [{ message: { content: argumentObjects }, finish_reason: 'stop' }] }, undefined, 'deepseek')).toMatchObject({ finishReason: 'stop', toolCalls: [], text: argumentObjects })

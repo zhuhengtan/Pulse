@@ -182,6 +182,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const maxOutputTokens = option(parsed.options, 'max-output-tokens') ?? process.env.PULSE_MAX_OUTPUT_TOKENS
   const reasoningEffort = option(parsed.options, 'reasoning-effort') ?? process.env.PULSE_REASONING_EFFORT
   const maxTurns = option(parsed.options, 'max-turns') ?? process.env.PULSE_MAX_TURNS
+  const maxRuntimeMs = option(parsed.options, 'max-runtime-ms') ?? process.env.PULSE_MAX_RUNTIME_MS
   const autoCompactPercent = option(parsed.options, 'auto-compact-percent') ?? process.env.PULSE_AUTO_COMPACT_PERCENT
   const apiKeyEnv = profile.apiKeyEnv ?? (profile.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
   const apiKey = process.env[apiKeyEnv]
@@ -195,6 +196,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const configuredReasoningEffort = reasoningEffort === 'low' || reasoningEffort === 'medium' || reasoningEffort === 'high' ? reasoningEffort : modelSelection.reasoningEffort ?? profile.reasoningEffort
   const configuredToolChoice = profile.toolChoice
   const configuredMaxTurns = parsePositiveInteger(maxTurns) ?? config.maxTurns
+  const configuredMaxRuntimeMs = parsePositiveInteger(maxRuntimeMs) ?? config.maxRuntimeMs
   const configuredAutoCompactPercent = parsePositiveInteger(autoCompactPercent) ?? config.autoCompactPercent
   const provider = {
     provider: profile.provider,
@@ -371,6 +373,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(mockParallelPlan === undefined ? {} : { mockParallelPlan }),
     ...(approvalMode === undefined ? {} : { approvalMode }),
     ...(configuredMaxTurns === undefined ? {} : { maxTurns: configuredMaxTurns }),
+    ...(configuredMaxRuntimeMs === undefined ? {} : { maxRuntimeMs: configuredMaxRuntimeMs }),
     ...(configuredAutoCompactPercent === undefined ? {} : { autoCompactPercent: Math.min(90, configuredAutoCompactPercent) }),
     ...(allowNetwork === undefined ? {} : { allowNetwork }),
     ...(config.networkHosts === undefined ? {} : { networkHosts: config.networkHosts }),

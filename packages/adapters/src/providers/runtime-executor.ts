@@ -30,6 +30,41 @@ class SlotPool {
   get(key: string): AsyncSlot { let slot = this.slots.get(key); if (!slot) { slot = new AsyncSlot(this.limits[key] ?? Number.POSITIVE_INFINITY); this.slots.set(key, slot) }; return slot }
 }
 
+function jsonCandidates(text: string): unknown[] {
+  const found: unknown[] = []
+  const push = (value: string): void => {
+    try {
+      const parsed = JSON.parse(value)
+      found.push(parsed)
+      if (typeof parsed === 'string' && parsed !== value) push(parsed)
+    } catch { /* keep scanning */ }
+  }
+  const trimmed = text.trim()
+  if (trimmed) push(trimmed)
+  for (let start = 0; start < text.length; start++) {
+    if (text[start] !== '{') continue
+    let depth = 0
+    let inString = false
+    let escaped = false
+    for (let end = start; end < text.length; end++) {
+      const char = text[end]
+      if (inString) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') inString = false
+        continue
+      }
+      if (char === '"') inString = true
+      else if (char === '{') depth++
+      else if (char === '}') {
+        depth--
+        if (depth === 0) { push(text.slice(start, end + 1)); start = end; break }
+      }
+    }
+  }
+  return found
+}
+
 function toJson(value: unknown, seen = new Set<object>()): JsonValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
   if (typeof value === 'number') { if (!Number.isFinite(value)) throw new Error('LLM_OUTPUT_NOT_SERIALIZABLE'); return value }
@@ -116,13 +151,15 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
         if (output.finishReason === 'length' && input.outputSchema !== undefined) throw Object.assign(new OutputValidationError('adapter', 'OUTPUT_TRUNCATED', 'Model output reached its token limit; incomplete output was rejected.', { outputTokens: output.usage?.outputTokens ?? null, reasoningTokens: output.usage?.reasoningTokens ?? null, visibleOutputChars: output.text.length, maxOutputTokens: routeRequirements.maxOutputTokens ?? config.requirements?.maxOutputTokens ?? null }), { retryable: false })
         if (output.finishReason === 'refusal') { recordFeedback('refused', 0); throw new OutputValidationError('adapter', 'MODEL_REFUSAL', output.refusal ?? 'Provider refused the request.') }
         if (input.outputSchema !== undefined) {
-          const candidateValue = output.structured ?? output.text
-          if (!validateJsonSchema(candidateValue, input.outputSchema)) {
-            lastSchemaViolation = toJson(candidateValue)
+          const candidates = output.structured === undefined ? jsonCandidates(output.text) : [output.structured, ...jsonCandidates(output.text)]
+          const matched = candidates.find((candidate) => validateJsonSchema(candidate, input.outputSchema as JsonValue))
+          if (matched === undefined) {
+            lastSchemaViolation = toJson(candidates[0] ?? output.text)
             failedForSchema = true
             recordFeedback('schema_rejected', 0)
             throw new OutputValidationError('structured', 'OUTPUT_SCHEMA_VIOLATION', 'Provider output did not match the declared schema')
           }
+          output.structured = matched as LLMResult['structured']
         }
         failedForSchema = false
         recordFeedback('succeeded', 1)

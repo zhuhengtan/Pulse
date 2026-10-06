@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { PulseRuntime, type JsonValue } from '@hunterzhu/pulse-runtime'
 import { buildTaskControllerProgram } from '../packages/server/src/task-controller/program.js'
-import { initialController, isReadOnlyInspectionCommand, nextTask, reviseController, stageRequiresToolEvidence, validatePlan } from '../packages/server/src/task-controller/state.js'
+import { initialController, isReadOnlyInspectionCommand, nextTask, reviseController, stageRequiresFileChange, stageRequiresToolEvidence, validatePlan } from '../packages/server/src/task-controller/state.js'
 
 const task = (id: string, dependsOn: string[] = []) => ({ id, goal: `Implement ${id}`, check: 'Read and verify result', dependsOn, criterionIds: [id.replace('task-', 'criterion-')] })
 const initialGlobal = (count: number): JsonValue => ({ taskRecord: { schemaVersion: 1, runId: 'test', objective: 'Complete the checklist', acceptanceCriteria: Array.from({ length: count }, (_, index) => ({ id: `criterion-${index + 1}`, description: `Requirement ${index + 1}` })), status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] } })
@@ -14,6 +14,196 @@ function finalReview(runtime: PulseRuntime): { value: JsonValue } {
 }
 
 describe('Host task controller', () => {
+  it('checkpoints repeated validation despite changing test durations', async () => {
+    let agentId = ''
+    let checks = 0
+    let checkpoints = 0
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['shell.exec'], approvalMode: 'auto', maxTurns: 24 })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { code: 0, stdout: `All tests passed in ${++checks} ms` } }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [
+        { id: 'task-1', goal: 'Run tests', check: 'Tests pass', dependsOn: [], criterionIds: ['criterion-1'] },
+        { id: 'task-2', goal: 'Summarize results', check: 'Response delivered', dependsOn: ['task-1'], criterionIds: ['criterion-2'] },
+      ] } }
+      const state = globalFor(runtime, agentId).taskController
+      if (effect.key?.startsWith('progress-review-worker')) {
+        checkpoints++
+        return { value: { status: 'ready', evidenceRefs: (effect.input as any).inputs.results, note: 'Tests passed; stop rerunning them.' } }
+      }
+      if (effect.key?.startsWith('verify-stage')) {
+        const active = state.tasks.find((t: any) => t.id === state.activeId)
+        return { value: { status: 'passed', evidenceRefs: active.evidenceRefs.length ? active.evidenceRefs : [active.candidateRef], note: 'Verified' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      return { value: state.tasks[0].status === 'running' ? { finishReason: 'tool_calls', toolCalls: [{ name: 'shell.exec', input: { command: 'node', args: ['--test'] } }] } : { text: 'All tests passed', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Validate and summarize', program, initialGlobal: initialGlobal(2) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(globalFor(runtime, agentId).taskOutcome.status, JSON.stringify(globalFor(runtime, agentId).taskController)).toBe('accepted')
+    expect(checks).toBe(2)
+    expect(checkpoints).toBe(1)
+  })
+
+  it('requires a staged draft to be committed before accepting file creation', async () => {
+    let agentId = ''
+    let committed = false
+    let reviews = 0
+    let workCalls = 0
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['fs.stage'], approvalMode: 'auto', maxTurns: 24 })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') {
+        committed = (effect.input as any).arguments.operation === 'commit'
+        return { value: { committed, bytes: 50 } }
+      }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [{ ...task('task-1'), goal: 'Create src/config.js' }] } }
+      const state = globalFor(runtime, agentId).taskController
+      if (effect.key?.startsWith('verify-stage')) {
+        reviews++
+        return { value: { status: 'passed', evidenceRefs: state.tasks[0].evidenceRefs, note: 'Created' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      workCalls++
+      if (workCalls === 1 || state.tasks[0].attempts > 1 && !committed) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.stage', input: { operation: workCalls === 1 ? 'begin' : 'commit', path: 'src/config.js' } }] } }
+      return { value: { text: 'File ready', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Create file', program, initialGlobal: initialGlobal(1) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(reviews).toBe(2)
+    expect(committed).toBe(true)
+    expect(globalFor(runtime, agentId).taskOutcome.status).toBe('accepted')
+  })
+
+  it.each([0, 1])('retains accepted dependency negative checks without masking a new failed check (exit=%s)', async (exitCode) => {
+    let agentId = ''
+    const turns = new Map<string, number>()
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['shell.exec'], approvalMode: 'auto', maxTurns: 16 })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      const state = agentId ? globalFor(runtime, agentId).taskController : undefined
+      if (effect.kind === 'tool') return { value: { code: (effect.input as any).arguments.args[0] === 'negative' ? 1 : exitCode, stdout: 'check result' } }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [
+        { id: 'task-1', goal: 'Verify CLI negative test', check: 'Expected nonzero exit', dependsOn: [], criterionIds: ['criterion-1'] },
+        { id: 'task-2', goal: 'Run unit tests', check: 'All tests pass', dependsOn: ['task-1'], criterionIds: ['criterion-2'] },
+      ] } }
+      if (effect.key?.startsWith('verify-stage')) {
+        const active = state.tasks.find((t: any) => t.id === state.activeId)
+        return { value: { status: 'passed', evidenceRefs: state.tasks.flatMap((t: any) => t.evidenceRefs), ...(active.id === 'task-1' ? { expectedFailureRefs: active.evidenceRefs } : {}), note: 'Checked' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      const active = state.tasks.find((t: any) => t.status === 'running')
+      const count = (turns.get(effect.ownerLaneId) ?? 0) + 1
+      turns.set(effect.ownerLaneId, count)
+      return { value: count === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'shell.exec', input: { command: 'node', args: [active.id === 'task-1' ? 'negative' : '--test'] } }] } : { text: 'Checks completed', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Verify feature', program, initialGlobal: initialGlobal(2) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(globalFor(runtime, agentId).taskOutcome.status).toBe(exitCode === 0 ? 'accepted' : 'incomplete')
+    if (exitCode === 0) expect(globalFor(runtime, agentId).taskController.goalRecoveries).toBe(0)
+  })
+
+  it('supplies worker tool schemas and preserves writes across verification-only retries', async () => {
+    const toolNames = ['fs.write', 'shell.exec']
+    const program = buildTaskControllerProgram({ system: 'test', toolNames, approvalMode: 'auto', maxTurns: 32 })
+    let agentId = ''
+    let writes = 0
+    let checks = 0
+    let reviews = 0
+    let finalReviews = 0
+    const turns = new Map<string, number>()
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') {
+        if ((effect.input as any).name === 'fs.write') { writes++; return { value: { path: 'src/config.js', bytes: 30 } } }
+        checks++
+        return { value: { code: 0, stdout: 'checks passed' } }
+      }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [
+        { id: 'task-1', goal: 'Create src/config.js', check: 'Run the check', dependsOn: [], criterionIds: ['criterion-1'] },
+        { id: 'task-2', goal: 'Report results', check: 'Summarize verification', dependsOn: ['task-1'], criterionIds: ['criterion-2'] },
+      ] } }
+      const state = globalFor(runtime, agentId).taskController
+      if (effect.key?.startsWith('verify-stage')) {
+        const active = state.tasks.find((item: any) => item.id === state.activeId)
+        if (active.id === 'task-1' && reviews++ === 0) return { value: { status: 'needs_work', correctionKind: 'verify', evidenceRefs: active.evidenceRefs, note: 'File is correct; run its check.' } }
+        return { value: { status: 'passed', evidenceRefs: active.evidenceRefs.length ? active.evidenceRefs : [active.candidateRef], note: 'Verified' } }
+      }
+      if (effect.key?.startsWith('verify-task')) {
+        finalReviews++
+        const review = finalReview(runtime) as any
+        // These candidate refs were explicitly supplied for response verification.
+        for (const criterion of review.value.criteria) criterion.evidenceRefs.push(state.tasks[0].candidateRef)
+        return review
+      }
+      expect(effect.key).toMatch(/^work-stage-worker/)
+      expect((effect.input as any).toolDiscovery).toEqual({ limit: toolNames.length })
+      const active = state.tasks.find((item: any) => item.status === 'running')
+      const n = (turns.get(effect.ownerLaneId) ?? 0) + 1
+      turns.set(effect.ownerLaneId, n)
+      if (active.id === 'task-1' && n === 1) return { value: { finishReason: 'tool_calls', toolCalls: [active.attempts === 1
+        ? { name: 'fs.write', input: { path: 'src/config.js', content: 'exports.value = 1' } }
+        : { name: 'shell.exec', input: { command: 'node', args: ['--test'] } }] } }
+      return { value: { text: 'Deliverable verified', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Create and verify a feature', program, initialGlobal: initialGlobal(2) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    const state = globalFor(runtime, agentId)
+    expect(state.taskOutcome.status).toBe('accepted')
+    expect(state.taskController.tasks[0].attempts).toBe(2)
+    expect(state.taskController.tasks[0].evidenceRefs).toHaveLength(2)
+    expect(writes).toBe(1)
+    expect(checks).toBe(1)
+    expect(finalReviews).toBe(1)
+  })
+
+  it.each([
+    ['Review src/index.ts', 'Report bugs without modifying files'],
+    ['审查 src/index.ts 的实现', '不要修改文件'],
+    ['Read src/index.ts', 'Describe the implementation'],
+    ['运行 tests/runtime.test.ts', '测试通过'],
+    ['Inspect src/index.ts', 'Verify the patch'],
+    ['审查 src/index.ts 的实现', '报告缺陷'],
+    ['Review the create function', 'Report bugs'],
+  ])('does not require an edit for a read-only stage: %s', (goal, check) => {
+    expect(stageRequiresFileChange(goal, check)).toBe(false)
+  })
+  it.each([
+    ['用内联 node 命令复现问题，不创建任何文件', '给出复现输出与修复建议'],
+    ['汇总 code review 报告', '确认未修改任何文件'],
+    ['用内联命令验证行为', '确认未创建任何文件'],
+    ['输出代码审查报告', '报告完成且无文件改动'],
+    ['读取 src/list.js 全文，记录分页参数约定与数组是否被就地修改，标注可疑行号。', '给出完整内容摘要与行号'],
+    ['用临时内联 node 命令验证页码约定以及函数是否原地修改调用方传入的数组', 'node 命令输出显示行为'],
+  ])('treats negated create and review requirements as read-only', (goal, check) => {
+    expect(stageRequiresFileChange(goal, check)).toBe(false)
+  })
+  it.each(['Implement the feature', '修改 src/index.ts', 'Fix the regression', 'Inspect and fix src/index.ts', '定位并修复问题'])('requires explicit edits: %s', (goal) => {
+    expect(stageRequiresFileChange(goal, 'Verify with tests')).toBe(true)
+  })
+
+  it('keeps a review read-only after verifier feedback with edit tools available', async () => {
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['fs.read', 'fs.apply_patch'], approvalMode: 'auto', maxTurns: 24 })
+    let agentId = ''
+    let workCalls = 0
+    let reviews = 0
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') {
+        expect((effect.input as { name: string }).name).toBe('fs.read')
+        return { value: { path: 'src/index.ts', content: 'source' } }
+      }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [{ id: 'task-1', goal: 'Review src/index.ts', check: 'Report bugs without modifying files', dependsOn: [], criterionIds: ['criterion-1'] }] } }
+      if (effect.key?.startsWith('verify-stage')) {
+        reviews++
+        return { value: { status: reviews === 1 ? 'needs_work' : 'passed', evidenceRefs: globalFor(runtime, agentId).taskController.tasks[0].evidenceRefs, note: 'Explain the source evidence.' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      workCalls++
+      return { value: workCalls % 2 === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.read', input: { path: 'src/index.ts' } }] } : { text: 'Review findings', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Review only', program, initialGlobal: initialGlobal(1) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(globalFor(runtime, agentId).taskOutcome.status).toBe('accepted')
+    expect(workCalls).toBe(4)
+    expect(reviews).toBe(2)
+  })
+
   it('uses v7 for new controllers while retaining sequential v6 construction for restoration', () => {
     expect(buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('7')
     expect(buildTaskControllerProgram({ system: 'test', version: '6', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('6')
@@ -90,7 +280,7 @@ describe('Host task controller', () => {
     expect(state.usedTurns).toBeGreaterThanOrEqual(11)
   })
 
-  it('keeps a pure writing task accepted when its verified stage has evidence but final review omits citations', async () => {
+  it('keeps a pure writing task incomplete when final review cannot verify it', async () => {
     let agentId = ''
     const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
       if (effect.kind === 'tool') return { value: {} }
@@ -105,7 +295,7 @@ describe('Host task controller', () => {
     const program = buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 12 })
     agentId = runtime.createAgent({ goal: 'Write a commit message', program, initialGlobal: initialGlobal(1) }).agentId
     expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'succeeded' })
-    expect(globalFor(runtime, agentId).taskOutcome).toMatchObject({ status: 'accepted', criteria: [{ status: 'passed', evidenceRefs: [expect.any(String)] }] })
+    expect(globalFor(runtime, agentId).taskOutcome).toMatchObject({ status: 'incomplete', criteria: [{ status: 'unverifiable', evidenceRefs: [expect.any(String)] }] })
   })
 
   it('rejects cycles, unknown dependencies and omitted original requirements', () => {
@@ -174,7 +364,29 @@ describe('Host task controller', () => {
     if (outcome.status === 'failed') throw new Error(JSON.stringify(outcome))
     expect(outcome).toMatchObject({ status: 'succeeded' })
     expect(globalFor(runtime, agentId).taskOutcome.status).toBe(exitCode === 0 || expectedFailure ? 'accepted' : 'incomplete')
-    expect(globalFor(runtime, agentId).taskController.usedTurns).toBe(exitCode === 0 || expectedFailure ? 5 : 4)
+    expect(globalFor(runtime, agentId).taskController.usedTurns).toBe(exitCode === 0 || expectedFailure ? 5 : 7)
+    expect(globalFor(runtime, agentId).taskController.goalRecoveries).toBe(exitCode === 0 || expectedFailure ? 0 : 1)
+  })
+
+  it('accepts an explicitly negative check when the verifier omits the auxiliary failure refs', async () => {
+    let agentId = ''
+    let workCalls = 0
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['shell.exec'], approvalMode: 'auto', maxTurns: 16 })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { code: 1, stdout: '', stderr: 'missing file' } }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [{ id: 'task-1', goal: '运行缺失文件负向测试', check: '命令应以非零退出码失败', dependsOn: [], criterionIds: ['criterion-1'] }] } }
+      if (effect.key?.startsWith('verify-stage')) {
+        const refs = globalFor(runtime, agentId).taskController.tasks[0].evidenceRefs
+        return { value: { status: 'passed', evidenceRefs: refs, note: '负向测试按预期返回非零退出码' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      workCalls++
+      return { value: workCalls === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'shell.exec', input: { command: 'node', args: ['missing.js'] } }] } : { text: 'negative test complete', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: '验证缺失文件必须失败', program, initialGlobal: initialGlobal(1) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(globalFor(runtime, agentId).taskOutcome, JSON.stringify(globalFor(runtime, agentId))).toMatchObject({ status: 'accepted' })
+    expect(globalFor(runtime, agentId).taskController.goalRecoveries).toBe(0)
   })
 
   it('does not accept a stage when an unknown ref is cited alongside valid tool evidence', async () => {
@@ -385,6 +597,43 @@ describe('Host task controller', () => {
     expect(state.directedInvestigations).toBeLessThanOrEqual(2)
   })
 
+  it('asks for another edit after a rejected patch instead of rereading the file', async () => {
+    let reads = 0
+    let patches = 0
+    let workCalls = 0
+    let stageReviews = 0
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['read', 'fs.apply_patch'], approvalMode: 'auto', maxTurns: 24 })
+    let agentId = ''
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') {
+        const name = (effect.input as { name?: string }).name
+        if (name === 'read') reads++
+        if (name === 'fs.apply_patch') patches++
+        return { value: { path: 'apps/server/src/runtime.ts', hash: 'a'.repeat(64) } }
+      }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [{ id: 'task-1', goal: '修改 apps/server/src/runtime.ts', check: 'autoReviewCandidates 不写入', dependsOn: [], criterionIds: ['criterion-1'] }] } }
+      const state = globalFor(runtime, agentId).taskController
+      if (effect.key?.startsWith('verify-stage')) {
+        stageReviews++
+        const refs = state.tasks[0].evidenceRefs
+        return { value: stageReviews === 1 ? { status: 'needs_work', evidenceRefs: refs, note: 'The early return left the old loop in place.' } : { status: 'passed', evidenceRefs: refs, note: 'Edited.' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      workCalls++
+      if (workCalls === 1) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: { path: 'apps/server/src/runtime.ts' } }] } }
+      if (workCalls === 2) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.apply_patch', input: { path: 'apps/server/src/runtime.ts', find: 'return', replace: 'return' } }] } }
+      if (workCalls === 3) return { value: { text: 'stage report', finishReason: 'stop' } }
+      if (workCalls === 4) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: { path: 'apps/server/src/runtime.ts' } }] } }
+      if (workCalls === 5) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.apply_patch', input: { path: 'apps/server/src/runtime.ts', find: 'loop', replace: '' } }] } }
+      return { value: { text: 'stage report', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Fix automatic approval', program, initialGlobal: initialGlobal(1) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(reads).toBe(1)
+    expect(patches).toBe(2)
+    expect(stageReviews).toBe(2)
+  })
+
   it('turns a needs-work review into the next concrete stage action', async () => {
     let workCalls = 0
     let stageReviews = 0
@@ -407,10 +656,119 @@ describe('Host task controller', () => {
     } })
     agentId = runtime.createAgent({ goal: 'Implement and verify the copy feature', program, initialGlobal: initialGlobal(1) }).agentId
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
-    expect(workCalls).toBe(3)
-    expect(stageReviews).toBe(2)
+    expect(workCalls).toBeGreaterThanOrEqual(3)
+    expect(stageReviews).toBeGreaterThanOrEqual(2)
     expect(JSON.stringify(retryConversation)).toContain('NEXT: Implement the missing deliverable for this stage')
     expect(JSON.stringify(retryConversation)).toContain('Verifier finding: Add a /copy command')
+    expect(globalFor(runtime, agentId).taskController.goalRecoveries).toBeGreaterThan(0)
+  })
+
+  it('retries an achievable stage correction while turn budget remains', async () => {
+    let stageReviews = 0
+    let workCalls = 0
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['read'], approvalMode: 'auto', maxTurns: 16 })
+    let agentId = ''
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { content: 'source evidence' } }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [task('task-1')] } }
+      const state = globalFor(runtime, agentId).taskController
+      if (effect.key?.startsWith('verify-stage')) {
+        stageReviews++
+        const refs = state.tasks[0].evidenceRefs
+        return { value: stageReviews < 3 ? { status: 'needs_work', evidenceRefs: refs, note: 'Read the status field before finishing.' } : { status: 'passed', evidenceRefs: refs, note: 'Status field is recorded.' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      workCalls++
+      if (workCalls % 2 === 1) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: { path: `source-${workCalls}.ts` } }] } }
+      return { value: { text: 'stage report', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Find the approval status field', program, initialGlobal: initialGlobal(1) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(stageReviews).toBe(3)
+    expect(globalFor(runtime, agentId).taskController.tasks[0].status).toBe('passed')
+  })
+
+  it('replans a different approach when a tool failure leaves the goal unmet', async () => {
+    let plans = 0
+    let workCalls = 0
+    let reusedPriorEvidence = false
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['read'], approvalMode: 'auto', maxTurns: 24 })
+    let agentId = ''
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { content: 'memory status field' } }
+      if (effect.key?.startsWith('plan')) {
+        plans++
+        const recovered = plans > 1
+        return { value: { tasks: [{ id: 'task-1', goal: recovered ? 'Read the candidate type from packages/memory' : 'Search with an invalid fs.search pattern', check: 'Record the status field', dependsOn: [], criterionIds: ['criterion-1'] }] } }
+      }
+      const state = globalFor(runtime, agentId).taskController
+      if (effect.key?.startsWith('verify-stage')) {
+        const refs = state.tasks[0].evidenceRefs
+        const failed = state.tasks[0].goal.includes('invalid')
+        return { value: failed ? { status: 'blocked', evidenceRefs: refs, note: 'fs.search failed: INVALID_TOOL_INPUT pattern is not query.' } : { status: 'passed', evidenceRefs: refs, note: 'Status field recorded.' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      if (effect.kind === 'llm' && plans > 1) {
+        const supplied = ((effect.input as { inputs?: { results?: string[] } }).inputs?.results ?? [])
+        const prior = globalFor(runtime, agentId).taskController.priorTasks.flatMap((task: { evidenceRefs?: string[] }) => task.evidenceRefs ?? [])
+        if (prior.some((ref: string) => supplied.includes(ref))) reusedPriorEvidence = true
+      }
+      workCalls++
+      return { value: workCalls % 2 === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: { path: 'packages/memory/src/index.ts' } }] } : { text: 'stage report', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Add automatic approval', program, initialGlobal: initialGlobal(1) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(plans).toBe(2)
+    expect(reusedPriorEvidence).toBe(true)
+    expect(globalFor(runtime, agentId).taskController.goalRecoveries).toBe(1)
+    expect(globalFor(runtime, agentId).taskOutcome.status).toBe('accepted')
+    expect(globalFor(runtime, agentId).taskController.updates[0]).toContain('fs.search failed')
+  })
+
+  it('does not replan when the unmet goal is an external permission block', async () => {
+    let plans = 0
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['read'], approvalMode: 'auto', maxTurns: 16 })
+    let agentId = ''
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { content: 'evidence' } }
+      if (effect.key?.startsWith('plan')) { plans++; return { value: { tasks: [task('task-1')] } } }
+      const state = globalFor(runtime, agentId).taskController
+      if (effect.key?.startsWith('verify-stage')) return { value: { status: 'blocked', evidenceRefs: state.tasks[0].evidenceRefs, note: 'Requires permission' } }
+      return { value: { text: 'stage report', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Implement task', program, initialGlobal: initialGlobal(1) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(plans).toBe(1)
+    expect(globalFor(runtime, agentId).taskController.goalRecoveries).toBe(0)
+    expect(globalFor(runtime, agentId).taskOutcome.status).toBe('incomplete')
+  })
+
+  it('replans when the unmet step is a local Ollama path', async () => {
+    let plans = 0
+    let workCalls = 0
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: ['read'], approvalMode: 'auto', maxTurns: 24 })
+    let agentId = ''
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { content: 'ollama review' } }
+      if (effect.key?.startsWith('plan')) {
+        plans++
+        return { value: { tasks: [{ id: 'task-1', goal: plans > 1 ? 'Apply the review through local Ollama' : 'Locate the approval entry', check: 'Candidates are reviewed', dependsOn: [], criterionIds: ['criterion-1'] }] } }
+      }
+      const state = globalFor(runtime, agentId).taskController
+      if (effect.key?.startsWith('verify-stage')) {
+        const refs = state.tasks[0].evidenceRefs
+        const locatedOnly = state.tasks[0].goal.includes('Locate')
+        return { value: locatedOnly ? { status: 'blocked', evidenceRefs: refs, note: '外部接口不可用，自动审批应走本机 Ollama。' } : { status: 'passed', evidenceRefs: refs, note: 'Reviewed through local Ollama.' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      workCalls++
+      return { value: workCalls % 2 === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: { path: 'runtime.ts' } }] } : { text: 'stage report', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Add automatic approval', program, initialGlobal: initialGlobal(1) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(plans).toBe(2)
+    expect(globalFor(runtime, agentId).taskController.goalRecoveries).toBe(1)
+    expect(globalFor(runtime, agentId).taskOutcome.status).toBe('accepted')
   })
 
   it.each(['passed', 'not_met'])('verifies settled evidence at the stage limit and respects final review (%s)', async (finalStatus) => {

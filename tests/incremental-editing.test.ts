@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm, writeFile, stat, chmod } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -7,26 +7,31 @@ import { FilesystemTool } from '@hunterzhu/pulse-adapters'
 import { StagedEditor, boundedEdit } from '../packages/server/src/editing.js'
 
 describe('incremental file editing', () => {
-  it('keeps the original intact until a complete draft is committed, including after restart', async () => {
+  it('streams a new file in chunks and refuses to rewrite an existing file', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-draft-'))
     try {
       const files = new FilesystemTool(root)
       await writeFile(join(root, 'file.ts'), 'original')
-      await chmod(join(root, 'file.ts'), 0o755)
       const editor = new StagedEditor(files)
-      let draft = await editor.execute({ operation: 'begin', path: 'file.ts', expectedHash: await files.hash('file.ts') })
-      draft = await editor.execute({ operation: 'append', draftId: draft.draftId, revision: draft.revision, content: 'a'.repeat(8000) })
+      await expect(editor.execute({ operation: 'begin', path: 'file.ts', expectedHash: await files.hash('file.ts') })).rejects.toMatchObject({ code: 'EXISTING_FILE_NEEDS_PATCH' })
       expect(await files.read('file.ts')).toBe('original')
+      let draft = await editor.execute({ operation: 'begin', path: 'new.ts' })
+      const chunk = 'a'.repeat(2048)
+      draft = await editor.execute({ operation: 'append', draftId: draft.draftId, revision: draft.revision, content: chunk })
+      await expect(editor.execute({ operation: 'append', draftId: draft.draftId, revision: draft.revision, content: 'b'.repeat(2049) })).rejects.toMatchObject({ code: 'CREATE_TOO_LARGE' })
+      await expect(files.read('new.ts')).rejects.toMatchObject({ code: 'ENOENT' })
       const restored = new StagedEditor(new FilesystemTool(root))
       const saved = await restored.execute({ operation: 'inspect', draftId: draft.draftId })
       expect(saved).toEqual(draft)
-      draft = await restored.execute({ operation: 'append', draftId: draft.draftId, revision: saved.revision, content: '雪'.repeat(2000) })
+      const tail = '雪'.repeat(400)
+      draft = await restored.execute({ operation: 'append', draftId: draft.draftId, revision: saved.revision, content: tail })
       await expect(restored.execute({ operation: 'commit', draftId: draft.draftId, revision: draft.revision, expectedBytes: 1 })).rejects.toMatchObject({ code: 'DRAFT_SIZE_MISMATCH' })
-      expect(await files.read('file.ts')).toBe('original')
-      const result = await restored.execute({ operation: 'commit', draftId: draft.draftId, revision: draft.revision, expectedBytes: 14000 })
+      await expect(files.read('new.ts')).rejects.toMatchObject({ code: 'ENOENT' })
+      const bytes = Buffer.byteLength(chunk + tail)
+      const result = await restored.execute({ operation: 'commit', draftId: draft.draftId, revision: draft.revision, expectedBytes: bytes })
       expect(result.committed).toBe(true)
-      expect(await files.read('file.ts')).toBe('a'.repeat(8000) + '雪'.repeat(2000))
-      if (process.platform !== 'win32') expect((await stat(join(root, 'file.ts'))).mode & 0o777).toBe(0o755)
+      expect(await files.read('new.ts')).toBe(chunk + tail)
+      expect(await files.read('file.ts')).toBe('original')
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 

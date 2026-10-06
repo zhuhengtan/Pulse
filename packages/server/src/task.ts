@@ -130,6 +130,11 @@ export function isTaskContinuation(text: string): boolean {
   return /^(?:继续|接着|恢复(?:任务|执行)|continue(?:\b)|resume(?:\b))/i.test(text.trim())
 }
 
+/** A follow-up that asks for the previous run's factual work log rather than new mutations. */
+export function isExecutionSummaryFollowup(text: string): boolean {
+  return /(?:上一轮|上一次|刚才|之前|已完成|刚完成|改了什么|修改了什么|哪些文件|根因|验证(?:命令|结果)?|运行了什么|操作记录|执行记录|what did (?:you|we) change|previous run|work log|verification)/i.test(text.trim())
+}
+
 export function continueTaskRecord(previous: TaskRecord, runId: string): TaskRecord {
   return { schemaVersion: 1, runId, objective: previous.objective,
     acceptanceCriteria: structuredClone(previous.acceptanceCriteria),

@@ -400,10 +400,11 @@ describe('AI CLI scenarios end-to-end tests', () => {
     temporaryDirectories.push(directory)
     const dataDir = join(directory, 'data')
 
+    // Text-only mock responses prove writing stages, not filesystem mutations.
     const parallelPlan = {
       tasks: [
-        { id: 'stage-1', goal: '创建项目说明文档', check: '说明文档编写完成', dependsOn: [], criterionIds: ['criterion-1'] },
-        { id: 'stage-2', goal: '创建配置文件', check: '配置文件内容准备完毕', dependsOn: ['stage-1'], criterionIds: ['criterion-2'] },
+        { id: 'stage-1', goal: '起草项目介绍', check: '回复包含项目用途说明', dependsOn: [], criterionIds: ['criterion-1'] },
+        { id: 'stage-2', goal: '起草配置说明', check: '回复包含配置建议', dependsOn: ['stage-1'], criterionIds: ['criterion-2'] },
       ],
     }
 
@@ -411,8 +412,8 @@ describe('AI CLI scenarios end-to-end tests', () => {
       {
         status: 'accepted',
         criteria: [
-          { criterionId: 'criterion-1', status: 'passed', evidenceRefs: ['AUTO'], rationale: 'README.md exists.' },
-          { criterionId: 'criterion-2', status: 'passed', evidenceRefs: ['AUTO'], rationale: 'config.json exists.' },
+          { criterionId: 'criterion-1', status: 'passed', evidenceRefs: ['AUTO'], rationale: 'Project introduction is supplied in the response.' },
+          { criterionId: 'criterion-2', status: 'passed', evidenceRefs: ['AUTO'], rationale: 'Configuration guidance is supplied in the response.' },
         ],
       },
     ]
@@ -424,7 +425,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
 
     const multiStageRes = await runCli([
       'run',
-      '1. 创建项目说明文档\n2. 创建配置文件',
+      '1. 起草项目介绍\n2. 起草配置说明',
       '--data-dir',
       dataDir,
       '--cwd',
@@ -439,7 +440,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
       '--mock-task-assessment',
       JSON.stringify(taskAssessments),
       '--mock-response',
-      '多阶段工程初始化完成。',
+      '项目用途：演示多阶段流程。配置建议：使用本地默认配置。',
     ])
 
     expect(multiStageRes.code).toBe(0)

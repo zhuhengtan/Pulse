@@ -69,6 +69,8 @@ export interface PulseCliConfig {
   capabilities?: PulseCliCapabilities
   approvalMode?: 'read-only' | 'ask' | 'auto'
   maxTurns?: number
+  /** Wall-clock limit for one run. Unset keeps the server default of 15 minutes. */
+  maxRuntimeMs?: number
   /** Percent of maxContextTokens that triggers automatic history compaction. Clamped to 1–90. */
   autoCompactPercent?: number
   /** Explicit network destinations; workspace configuration cannot grant these. */

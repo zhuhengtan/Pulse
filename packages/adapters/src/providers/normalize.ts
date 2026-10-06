@@ -206,21 +206,66 @@ function parseDsmlJson(value: string): unknown | undefined {
   try { return JSON.parse(value) } catch { return undefined }
 }
 
-/** DeepSeek sometimes writes only JSON tool objects instead of tool_calls. Each object needs an explicit tool name; argument-shaped JSON and trailing prose stay text. */
+/** DeepSeek sometimes writes tool calls as JSON or markdown fences instead of tool_calls. A bare object still needs an explicit tool name. Argument-shaped JSON, a single tool object after prose, and any trailing prose stay text. */
 function recoverDeepSeekJsonToolCalls(text: string, toolNameAliases?: ReadonlyMap<string, string>): Array<{ providerToolName: string; name: string; input: Record<string, unknown>; providerToolArguments: string }> | undefined {
-  const leading = takeLeadingJsonValues(text.trim())
+  const trimmed = text.trim()
+  return recoverStrictJsonToolCalls(trimmed, toolNameAliases) ?? recoverMarkdownToolFences(trimmed, toolNameAliases)
+}
+
+function recoverStrictJsonToolCalls(text: string, toolNameAliases?: ReadonlyMap<string, string>): Array<{ providerToolName: string; name: string; input: Record<string, unknown>; providerToolArguments: string }> | undefined {
+  const leading = takeLeadingJsonValues(text)
   if (leading === undefined || leading.values.length === 0 || leading.rest.trim().length > 0) return undefined
   const objects = leading.values.filter((value) => !isEmptyJsonValue(value))
   if (objects.length === 0) return undefined
+  if (objects.length === 1 && Array.isArray(objects[0]) && objects[0].every((item) => argumentObject(item) !== undefined)) return toolCallsFrom(objects[0], toolNameAliases)
   if (objects.length === 1 && objects[0] && typeof objects[0] === 'object' && !Array.isArray(objects[0])) {
     const batch = (objects[0] as Record<string, unknown>).tool_calls ?? (objects[0] as Record<string, unknown>).toolCalls
-    if (Array.isArray(batch)) {
-      const calls = batch.map((item) => jsonToolCall(item, toolNameAliases))
-      return calls.every((call) => call !== undefined) && calls.length > 0 ? calls as Array<{ providerToolName: string; name: string; input: Record<string, unknown>; providerToolArguments: string }> : undefined
-    }
+    if (Array.isArray(batch)) return toolCallsFrom(batch, toolNameAliases)
   }
-  const calls = objects.map((value) => jsonToolCall(value, toolNameAliases))
-  return calls.every((call) => call !== undefined) ? calls as Array<{ providerToolName: string; name: string; input: Record<string, unknown>; providerToolArguments: string }> : undefined
+  return toolCallsFrom(objects, toolNameAliases)
+}
+
+/** A message that is only `tool.name` headings followed by JSON fences is a tool batch, not a finished answer. */
+function recoverMarkdownToolFences(text: string, toolNameAliases?: ReadonlyMap<string, string>): Array<{ providerToolName: string; name: string; input: Record<string, unknown>; providerToolArguments: string }> | undefined {
+  const lines = text.split(/\r?\n/)
+  const calls: Array<{ providerToolName: string; name: string; input: Record<string, unknown>; providerToolArguments: string }> = []
+  let index = 0
+  const skipBlank = (): void => { while (index < lines.length && lines[index]!.trim() === '') index++ }
+  skipBlank()
+  if (index >= lines.length) return undefined
+  while (index < lines.length) {
+    skipBlank()
+    if (index >= lines.length) break
+    const providerToolName = lines[index]!.trim()
+    if (!/^[A-Za-z][\w-]*(?:\.[\w-]+)+$/.test(providerToolName)) return undefined
+    index++
+    if (lines[index]?.trim() !== '```json' && lines[index]?.trim() !== '```') return undefined
+    index++
+    const body: string[] = []
+    while (index < lines.length && lines[index]!.trim() !== '```') body.push(lines[index++]!)
+    if (index >= lines.length) return undefined
+    index++
+    let parsed: unknown
+    try { parsed = JSON.parse(body.join('\n')) } catch { return undefined }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    const input = parsed as Record<string, unknown>
+    calls.push({ providerToolName, name: toolNameAliases?.get(providerToolName) ?? providerToolName, input, providerToolArguments: JSON.stringify(input) })
+  }
+  return calls.length > 0 ? calls : undefined
+}
+
+function toolCallsFrom(values: unknown[], toolNameAliases?: ReadonlyMap<string, string>): Array<{ providerToolName: string; name: string; input: Record<string, unknown>; providerToolArguments: string }> | undefined {
+  const calls = values.map((value) => jsonToolCall(value, toolNameAliases))
+  return calls.every((call) => call !== undefined) && calls.length > 0 ? calls as Array<{ providerToolName: string; name: string; input: Record<string, unknown>; providerToolArguments: string }> : undefined
+}
+
+function argumentObject(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const named = typeof record.tool === 'string' && record.tool.length > 0 ? record.tool : typeof record.name === 'string' && record.name.length > 0 ? record.name : undefined
+  const raw = record.arguments ?? record.input ?? record.parameters ?? record.args
+  if (named === undefined || !raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  return raw as Record<string, unknown>
 }
 
 function isEmptyJsonValue(value: unknown): boolean {
@@ -234,7 +279,7 @@ function jsonToolCall(value: unknown, toolNameAliases?: ReadonlyMap<string, stri
   const named = typeof record.tool === 'string' && record.tool.length > 0 ? record.tool : typeof record.name === 'string' && record.name.length > 0 ? record.name : undefined
   const providerToolName = named
   if (providerToolName === undefined) return undefined
-  const raw = record.arguments ?? record.input ?? record.parameters
+  const raw = record.arguments ?? record.input ?? record.parameters ?? record.args
   const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? { ...(raw as Record<string, unknown>) } : { ...record }
   if (raw === undefined) {
     delete input.tool

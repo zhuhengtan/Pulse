@@ -58,6 +58,15 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     expect(called).toBe(false)
   })
 
+  it.each([{ structured: undefined }, { structured: [{ ok: true }] }])('publishes the recovered value that passed the output schema (%j)', async ({ structured }) => {
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'model', providerId: 'provider', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 1 })
+    const providers = new Map<string, ProviderAdapter>([['provider', { id: 'provider', name: 'test', executeAttempt: async () => ({ text: '[{"ok":true}]', ...(structured === undefined ? {} : { structured }), toolCalls: [], finishReason: 'stop' }) }]])
+    const executor = createModelEffectExecutor({ router: new ModelRouter(registry), providers })
+    const effect = { id: 'recover', agentId: 'agent', ownerLaneId: 'lane', kind: 'llm', input: { task: 'reason', request: projection, outputSchema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } } }, attemptId: 'attempt', attemptNo: 1 } as unknown as EffectRecord
+    await expect(executor(effect, new AbortController().signal)).resolves.toMatchObject({ executionState: 'succeeded', value: { ok: true } })
+  })
+
   it('rewrites provider-native tool ids to the logical Effect id', async () => {
     const registry = new InMemoryModelRegistry()
     registry.register({ id: 'tool-model', providerId: 'tool-provider', tasks: ['reason'], capabilities: { local: true, toolCalling: true, maxContextTokens: 4096 }, priority: 1 })

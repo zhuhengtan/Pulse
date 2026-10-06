@@ -38,7 +38,7 @@ export async function runResume(
   try {
     await host.init();
     const run = task
-      ? await host.sendMessage(conversationId, { text: task, format: format === 'jsonl' ? 'jsonl' : 'text' })
+      ? await host.sendMessage(conversationId, { text: task, continueTask: true, format: format === 'jsonl' ? 'jsonl' : 'text' })
       : await host.resumeRun(conversationId);
     activeRun = run;
 
