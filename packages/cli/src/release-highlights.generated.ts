@@ -1,5 +1,27 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.4.4": [
+    {
+      "zh": "多阶段任务获得完整工具定义，并保留重试和依赖阶段的验收证据；补验证或补报告不再强制重复修改文件。",
+      "en": "Multi-stage tasks receive complete tool definitions and retain verified evidence across retries and dependencies; verification or report corrections no longer force redundant file edits."
+    },
+    {
+      "zh": "验证阶段增加进度检查点，减少重复运行已完成检查；新文件优先小步创建，未提交草稿不能算作完成。",
+      "en": "Added validation progress checkpoints to reduce repeated completed checks; new files favor small creation steps, and uncommitted drafts do not count as finished work."
+    },
+    {
+      "zh": "最终验收不再将无法验证的结果视为成功，缺失交付可恢复处理，最终报告保留实际交付内容。",
+      "en": "Final acceptance no longer treats unverifiable results as success, missing deliverables can recover, and final reports retain the actual delivered content."
+    },
+    {
+      "zh": "改善 DeepSeek 工具调用与结构化输出恢复、只读任务识别以及修改前基线测试流程。",
+      "en": "Improved DeepSeek tool-call and structured-output recovery, read-only task recognition, and baseline testing before edits."
+    },
+    {
+      "zh": "`pulse resume` 继承原任务，追问上轮结果时保留只读语义；支持通过 `--max-runtime-ms`、环境变量或配置设置运行时限。",
+      "en": "`pulse resume` inherits the original task and keeps previous-run summaries read-only; runtime limits can be set through `--max-runtime-ms`, an environment variable, or configuration."
+    }
+  ],
   "0.4.3": [
     {
       "zh": "OpenAI 兼容接口会按配置发送 reasoning effort；o1 与 o3 系列改用 `max_completion_tokens`。某个模型拒绝该参数时，只停用这一模型并重试。",

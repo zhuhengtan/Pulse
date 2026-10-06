@@ -2,6 +2,16 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.4.4] - 2026-10-07
+
+### Fixed
+
+- Multi-stage tasks receive complete tool definitions and retain verified evidence across retries and dependencies; verification or report corrections no longer force redundant file edits.
+- Added validation progress checkpoints to reduce repeated completed checks; new files favor small creation steps, and uncommitted drafts do not count as finished work.
+- Final acceptance no longer treats unverifiable results as success, missing deliverables can recover, and final reports retain the actual delivered content.
+- Improved DeepSeek tool-call and structured-output recovery, read-only task recognition, and baseline testing before edits.
+- `pulse resume` inherits the original task and keeps previous-run summaries read-only; runtime limits can be set through `--max-runtime-ms`, an environment variable, or configuration.
+
 ## [0.4.3] - 2026-09-29
 
 ### Added
