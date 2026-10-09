@@ -204,8 +204,9 @@ describe('Host task controller', () => {
     expect(reviews).toBe(2)
   })
 
-  it('uses v7 for new controllers while retaining sequential v6 construction for restoration', () => {
-    expect(buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('7')
+  it('uses v8 for new controllers while retaining sequential v6 construction for restoration', () => {
+    expect(buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('8')
+    expect(buildTaskControllerProgram({ system: 'test', version: '7', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('7')
     expect(buildTaskControllerProgram({ system: 'test', version: '6', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('6')
   })
 
@@ -498,8 +499,30 @@ describe('Host task controller', () => {
     expect(globalFor(runtime, agentId).taskOutcome.status).toBe('incomplete')
   })
 
-  it('bounds a stage that keeps requesting tools and does not declare completion', async () => {
+  it('stops a stage that keeps requesting tools at the stage loop instead of the run-wide call count', async () => {
     const program = buildTaskControllerProgram({ system: 'test', toolNames: ['read'], approvalMode: 'auto', maxTurns: 5 })
+    let calls = 0
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { changing: calls } }
+      calls++
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [task('task-1')] } }
+      if (effect.key?.startsWith('verify')) return { value: { status: 'blocked', evidenceRefs: [], note: 'permission denied' } }
+      return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: {} }] } }
+    } })
+    const { agentId } = runtime.createAgent({ goal: 'work', program, initialGlobal: initialGlobal(1) })
+    const outcome = await runtime.start(agentId).outcome()
+    if (outcome.status === 'failed') throw new Error(JSON.stringify(outcome))
+    expect(outcome).toMatchObject({ status: 'succeeded' })
+    expect(calls).toBeGreaterThan(5)
+    expect(calls).toBeLessThanOrEqual(12)
+    const controller = globalFor(runtime, agentId).taskController
+    expect(controller.usedTurns).toBeGreaterThan(controller.maxTurns)
+    expect(controller.tasks.map((item: { note?: string }) => item.note ?? '').join('\n')).not.toContain('Total model budget exhausted')
+    expect(globalFor(runtime, agentId).taskOutcome.status).toBe('incomplete')
+  })
+
+  it('keeps the shared model-call ceiling for a restored v7 controller', async () => {
+    const program = buildTaskControllerProgram({ system: 'test', version: '7', toolNames: ['read'], approvalMode: 'auto', maxTurns: 5 })
     let calls = 0
     const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
       if (effect.kind === 'tool') return { value: { changing: calls } }

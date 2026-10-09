@@ -18,8 +18,10 @@ does not add an external scheduler loop or a second mutable task database.
    exits only when the verifier identifies them as `expectedFailureRefs`; this
    does not make a failed post-fix test successful.
 4. Block dependent stages when their prerequisite is blocked; independent work
-   can continue. All stages share the total model budget. Replanning does not
-   reset the budget.
+   can continue. Program version 8 does not stop the run because a model-call
+   count is reached. Versions 5–7 still share one model-call budget, and
+   replanning does not reset that budget. Restored snapshots keep the program
+   version they were started with.
 5. Independently review the original criteria after every stage passes. Only
    complete, evidenced acceptance produces `taskOutcome.status = accepted`.
    Runtime success alone does not mean the task was accepted.
@@ -54,8 +56,11 @@ file is an export, not an independently editable source of truth. A new run in
 the conversation retains the original task contract but may replan; it is not
 the same operation as restoring an interrupted Runtime snapshot.
 
-The Host enforces the total model-effect budget, including compaction; the
-controller's progress counter tracks planning, work and verification decodes.
+The Host enforces the model-effect budget, including compaction calls, only
+while restoring a version 5–7 controller. A version 8 run records the same
+progress counter for planning, work and verification decodes, but that counter
+does not end the task. Stage shape stays at most eight stages, and the process
+wall clock stays in place.
 `task_progress` notices feed both JSONL and the existing TUI notice stream.
 
 ## Verification and limits

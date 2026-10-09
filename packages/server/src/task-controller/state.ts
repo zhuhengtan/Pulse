@@ -161,9 +161,9 @@ function recoveryKey(state: TaskControllerState): string {
   return [...new Set([...roots, ...finalFailures])].sort().join('\n').slice(0, 800)
 }
 
-export function unmetGoalCanChangeApproach(state: TaskControllerState): boolean {
+export function unmetGoalCanChangeApproach(state: TaskControllerState, options?: { enforceTurnBudget?: boolean }): boolean {
   if (state.goalRecoveries >= usefulGoalRecoveries) return false
-  if (state.usedTurns >= state.maxTurns - 2) return false
+  if (options?.enforceTurnBudget !== false && state.usedTurns >= state.maxTurns - 2) return false
   if (state.tasks.length === 0) return false
   const key = recoveryKey(state)
   if (!key || key === state.lastRecoveryKey) return false

@@ -91,7 +91,7 @@ describe('efficient task continuation', () => {
       expect(text).toContain('NEVER modify tests')
       expect(text).toContain('Earlier agreed design remains available')
       expect(text).toContain(initial.taskRecord.objective)
-      expect(text).toContain('maxTurns')
+      expect(text).not.toContain('maxTurns')
       expect(text).toContain('usedTurns')
       expect(text).toContain('priorStages')
       expect(text).not.toContain('bulkbulk')
