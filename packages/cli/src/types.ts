@@ -32,12 +32,25 @@ export interface DisplayMessage {
   tokenStats?: TokenStatsData | undefined
 }
 
+/** Bounded settlement summary. File bodies stay out of this object. */
+export interface ToolCallPreview {
+  bytes?: number | undefined
+  lines?: number | undefined
+  truncated?: boolean | undefined
+  matched?: number | undefined
+  locations?: string[] | undefined
+  exitCode?: number | null | undefined
+  output?: string | undefined
+  replacements?: number | undefined
+}
+
 /** 工具调用展示数据 */
 export interface ToolCallDisplay {
   id: string
   name: string
   arguments?: Record<string, unknown> | undefined
   result?: unknown
+  preview?: ToolCallPreview | undefined
   status: 'running' | 'succeeded' | 'failed' | 'cancelled'
   durationMs?: number | undefined
 }

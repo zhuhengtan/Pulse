@@ -29,7 +29,7 @@ export function ApprovalPrompt({ request, isFocused = false, inputMode = false, 
         {previews.map((preview, index) => (
           <Box key={`${preview.name}-${index}`} flexDirection="column" paddingLeft={1}>
             <Text color={theme.tool} bold>{preview.name}</Text>
-            <Text color={theme.dim}>{preview.body}</Text>
+            <Text>{preview.body}</Text>
           </Box>
         ))}
       </Box>

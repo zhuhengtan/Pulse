@@ -77,8 +77,10 @@ describe('CLI transcript roles', () => {
       { id: 't1', name: 'fs.search', status: 'running', arguments: {} },
       { id: 't2', name: 'fs.read', status: 'succeeded', arguments: {} },
     ] }], 80).join('\n').replace(/\u001b\[[0-9;]*m/g, '')
-    expect(lines).toContain('fs.search · 正在调用')
-    expect(lines).toContain('fs.read · 已完成')
+    expect(lines).toContain('◐')
+    expect(lines).toContain('搜索')
+    expect(lines).toContain('●')
+    expect(lines).toContain('读取')
   })
 })
 

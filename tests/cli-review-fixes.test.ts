@@ -6,7 +6,7 @@ describe('approval preview', () => {
   it('shows the write path, length, and a truncation notice', () => {
     const content = 'a'.repeat(1_200)
     const preview = describeApprovalTool({ name: 'fs.write', input: { path: 'notes/secret.txt', content } })
-    expect(preview.body).toContain('路径: notes/secret.txt')
+    expect(preview.body).toContain('notes/secret.txt')
     expect(preview.body).toContain('1200 个字符')
     expect(preview.truncated).toBe(true)
     expect(preview.body).toContain('批准会执行完整内容')
@@ -18,7 +18,7 @@ describe('approval preview', () => {
       name: 'fs.apply_patch',
       input: { path: 'src/app.ts', find: 'old', replace: 'new', all: false },
     })
-    expect(preview.body).toContain('路径: src/app.ts')
+    expect(preview.body).toContain('src/app.ts')
     expect(preview.body).toContain('- old')
     expect(preview.body).toContain('+ new')
     expect(preview.truncated).toBe(false)

@@ -1,10 +1,21 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { LocalHost, RunHandle } from '@hunterzhu/pulse-server';
 import type { ApprovalRequest, AskRequest, DisplayMessage, LaneDisplay, ToolCallDisplay } from '../types.js';
+import { runningToolCalls, toolCallFromObservation } from '../utils/tool-view.js';
 
-function toolStatus(value: unknown): ToolCallDisplay['status'] {
-  if (value === 'succeeded' || value === 'failed' || value === 'running' || value === 'cancelled') return value;
-  return 'running';
+/** Running snapshots must not erase a settled call or replace known arguments with an empty object. */
+export function mergeToolCall(current: ToolCallDisplay | undefined, next: ToolCallDisplay, source: 'running' | 'settled'): ToolCallDisplay {
+  if (!current) return next;
+  if (source === 'running' && current.status !== 'running') return current;
+  const hasNextArgs = next.arguments !== undefined && Object.keys(next.arguments).length > 0;
+  return {
+    ...current,
+    ...next,
+    arguments: hasNextArgs ? next.arguments : current.arguments,
+    ...(next.preview === undefined && current.preview !== undefined ? { preview: current.preview } : {}),
+    ...(next.result === undefined && current.result !== undefined ? { result: current.result } : {}),
+    status: source === 'running' ? 'running' : next.status,
+  };
 }
 
 export function describeFactStatus(data: unknown): string {
@@ -146,26 +157,17 @@ export function useRun({
             addAssistantMessage({ ...assistantMessage, toolCalls: assistantMessage.toolCalls?.map((call) => ({ ...call })) });
             break;
           case 'observation': {
-            const obs = event.data as Record<string, unknown> | undefined;
-            if (obs && typeof obs === 'object' && typeof obs.tool === 'string') {
-              const id = String(obs.toolCallId ?? obs.tool);
-              const nextCall: ToolCallDisplay = {
-                id,
-                name: obs.tool,
-                arguments: obs.args && typeof obs.args === 'object' && !Array.isArray(obs.args)
-                  ? obs.args as Record<string, unknown>
-                  : {},
-                status: toolStatus(obs.status),
-                ...(obs.result === undefined ? {} : { result: obs.result }),
-              };
+            const nextCall = toolCallFromObservation(event.data);
+            if (nextCall) {
               const calls = assistantMessage.toolCalls ?? [];
-              const index = calls.findIndex((call) => call.id === id);
+              const index = calls.findIndex((call) => call.id === nextCall.id);
+              const merged = mergeToolCall(index >= 0 ? calls[index] : undefined, nextCall, 'settled');
               assistantMessage.toolCalls = index >= 0
-                ? calls.map((call, callIndex) => callIndex === index ? { ...call, ...nextCall } : call)
-                : [...calls, nextCall];
+                ? calls.map((call, callIndex) => callIndex === index ? merged : call)
+                : [...calls, merged];
               addAssistantMessage({ ...assistantMessage, toolCalls: assistantMessage.toolCalls.map((call) => ({ ...call })) });
-              setCurrentStep(nextCall.status === 'succeeded' ? `已完成 ${nextCall.name}，正在整理结果…` : nextCall.status === 'failed' ? `${nextCall.name} 未成功，正在处理错误…` : `正在执行 ${nextCall.name}…`);
-              addProgress(`tool-result:${id}:${nextCall.status}`, `${nextCall.status === 'succeeded' ? '已完成' : nextCall.status === 'cancelled' ? '已取消' : '执行失败'} · ${nextCall.name}`);
+              setCurrentStep(merged.status === 'succeeded' ? `已完成 ${merged.name}，正在整理结果…` : merged.status === 'failed' ? `${merged.name} 未成功，正在处理错误…` : `正在执行 ${merged.name}…`);
+              addProgress(`tool-result:${merged.id}:${merged.status}`, `${merged.status === 'succeeded' ? '已完成' : merged.status === 'cancelled' ? '已取消' : '执行失败'} · ${merged.name}`);
             }
             break;
           }
@@ -245,26 +247,30 @@ export function useRun({
                 }));
                 const activeLanes = (fact.lanes as Array<Record<string, unknown>>).filter((lane) => typeof lane.status === 'string' && !['succeeded', 'failed', 'cancelled'].includes(lane.status));
                 const active = activeLanes.find((lane) => lane.activityKind === 'tool') ?? activeLanes[0];
+                const running = runningToolCalls(fact);
+                if (running.length) {
+                  let calls = assistantMessage.toolCalls ?? [];
+                  for (const nextCall of running) {
+                    const index = calls.findIndex((call) => call.id === nextCall.id);
+                    const merged = mergeToolCall(index >= 0 ? calls[index] : undefined, nextCall, 'running');
+                    calls = index >= 0
+                      ? calls.map((call, callIndex) => callIndex === index ? merged : call)
+                      : [...calls, merged];
+                  }
+                  assistantMessage.toolCalls = calls;
+                  addAssistantMessage({ ...assistantMessage, toolCalls: calls.map((call) => ({ ...call })) });
+                }
                 if (active && typeof active.goal === 'string') {
-                  const toolName = active.activityKind === 'tool' && typeof active.activity === 'string' ? active.activity : undefined;
+                  const latest = running.at(-1);
+                  const toolName = latest?.name ?? (active.activityKind === 'tool' && typeof active.activity === 'string' ? active.activity : undefined);
                   const activity = toolName ? `正在调用工具 · ${toolName}` : typeof active.activity === 'string'
                     ? active.activity === 'llm' ? '正在分析需求和已有证据…' : '正在处理任务…'
                     : '正在处理任务…';
                   setCurrentStep(`${activity}：${active.goal}`);
                   const activityId = toolName
-                    ? (typeof active.activityEffectId === 'string' ? active.activityEffectId : active.id)
+                    ? (typeof active.activityEffectId === 'string' ? active.activityEffectId : latest?.id ?? active.id)
                     : active.activity === 'llm' ? 'analysis' : `${active.id}:${active.status}`;
                   addProgress(`activity:${activityId}`, activity);
-                  if (toolName && typeof active.activityToolCallId === 'string') {
-                    const id = active.activityToolCallId;
-                    const calls = assistantMessage.toolCalls ?? [];
-                    const index = calls.findIndex((call) => call.id === id);
-                    const nextCall: ToolCallDisplay = { id, name: toolName, status: 'running', arguments: {} };
-                    assistantMessage.toolCalls = index >= 0
-                      ? calls.map((call, callIndex) => callIndex === index ? { ...call, ...nextCall } : call)
-                      : [...calls, nextCall];
-                    addAssistantMessage({ ...assistantMessage, toolCalls: assistantMessage.toolCalls.map((call) => ({ ...call })) });
-                  }
                 }
                 break;
               }

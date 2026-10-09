@@ -1,8 +1,9 @@
 import { createLocalHost, type LocalHostOptions, type AssistantEvent, type RunHandle } from '@hunterzhu/pulse-server';
+import { consumeToolEvent } from '../utils/tool-view.js';
 import { runInteractive } from './interactive.js';
 import { bindRunSignals } from './signals.js';
 
-function writeEvent(event: AssistantEvent, format: string): void {
+function writeEvent(event: AssistantEvent, format: string, printed: Set<string>): void {
   if (format === 'jsonl') {
     process.stdout.write(`${JSON.stringify(event)}\n`);
     return;
@@ -17,6 +18,8 @@ function writeEvent(event: AssistantEvent, format: string): void {
   } else if (event.type === 'error') {
     process.stderr.write(`\n[错误] ${String(event.data ?? '')}\n`);
   }
+  const toolLines = consumeToolEvent(event, printed, process.stderr.columns || 80);
+  if (toolLines.length) process.stderr.write(`${toolLines.join('\n')}\n`);
 }
 
 export async function runResume(
@@ -44,9 +47,10 @@ export async function runResume(
 
     let streamedText = false;
     let approvalCancelled = false;
+    const printedTools = new Set<string>();
     for await (const event of run.events) {
       if (event.type === 'text') streamedText = true;
-      writeEvent(event, format);
+      writeEvent(event, format, printedTools);
       if (event.type === 'waiting' && !approvalCancelled) {
         approvalCancelled = true;
         process.stderr.write('\n[错误] 此运行处于非交互模式，无法请求工具审批；运行已取消。\n');
