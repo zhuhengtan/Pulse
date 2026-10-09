@@ -57,10 +57,22 @@ the conversation retains the original task contract but may replan; it is not
 the same operation as restoring an interrupted Runtime snapshot.
 
 The Host enforces the model-effect budget, including compaction calls, only
-while restoring a version 5–7 controller. A version 8 run records the same
+while restoring a version 5–7 controller. Version 8 and 9 runs record the same
 progress counter for planning, work and verification decodes, but that counter
 does not end the task. Stage shape stays at most eight stages, and the process
 wall clock stays in place.
+
+Version 9 does not place the whole conversation or every stage into each model
+request, and it does not take an arbitrary page of that history. The original
+objective, acceptance criteria, current goal, and active stage are the point.
+The surface grows from that point along dependency links, attached evidence,
+and records that cite those ids or paths. A farther record cannot jump ahead
+of a closer one. If a ring does not fit, its remainder stays in that ring's
+order. The next expansion starts at one id already on that surface, through
+`task.surface`. An offset into `task.conversation` or `task.history` is not a
+way to sample the large history. `task.evidence` still reads one known
+ResultRef. Versions 5–8 keep the previous full injection. Code search stays
+on `fs.search`.
 `task_progress` notices feed both JSONL and the existing TUI notice stream.
 
 ## Verification and limits

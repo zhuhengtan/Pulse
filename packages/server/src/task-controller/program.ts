@@ -2,7 +2,8 @@ import { z } from 'zod'
 import { defineLaneProgram, type ConversationMessage, type JsonValue, type StepContext } from '@hunterzhu/pulse-runtime'
 import { taskRecordFromGlobal, taskRecordJson, type TaskOutcome } from '../task.js'
 import { detectResponseLanguage } from '../language.js'
-import { controllerFromGlobal, initialController, isCascadeBlocked, isReadOnlyInspectionCommand, maxStageAttempts, nextTask, planSchema, recoverUnmetGoal, rootBlockedDependency, reviseController, stageRequiresFileChange, stageRequiresToolEvidence, unmetGoalCanChangeApproach, validatePlan, type TaskControllerState } from './state.js'
+import { buildContextGraph, expandContextSurface, type SurfaceTask } from './context-page.js'
+import { controllerFromGlobal, initialController, isCascadeBlocked, isReadOnlyInspectionCommand, maxStageAttempts, nextTask, planSchema, recoverUnmetGoal, rootBlockedDependency, reviseController, stageRequiresFileChange, stageRequiresToolEvidence, unmetGoalCanChangeApproach, validatePlan, type ControlledTask, type TaskControllerState } from './state.js'
 
 type Context = StepContext<JsonValue>
 const json = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue
@@ -143,7 +144,7 @@ function stageFailure(ctx: Context, code: string, message: string): string {
 
 export interface TaskControllerProgramOptions {
   system: string
-  version?: '5' | '6' | '7' | '8'
+  version?: '5' | '6' | '7' | '8' | '9'
   resumePlan?: TaskControllerState
   reusableIds?: string[]
   toolNames: string[]
@@ -156,19 +157,42 @@ export interface TaskControllerProgramOptions {
 /** Host-owned policy, executed exclusively through Runtime steps and atomic commits. */
 export function buildTaskControllerProgram(options: TaskControllerProgramOptions) {
   const budget = Math.max(4, Math.min(256, Math.floor(options.maxTurns)))
-  const programVersion = options.version ?? '8'
-  const parallelStages = programVersion === '7' || programVersion === '8'
-  const enforceTurnBudget = programVersion !== '8'
+  const programVersion = options.version ?? '9'
+  const parallelStages = programVersion === '7' || programVersion === '8' || programVersion === '9'
+  const enforceTurnBudget = programVersion !== '8' && programVersion !== '9'
+  const selectiveContext = programVersion === '9'
   const stageTurnLimit = enforceTurnBudget ? Math.max(1, Math.min(8, budget - 2)) : 8
   const controllerStageTurnLimit = enforceTurnBudget ? Math.min(8, budget) : 8
   const canEditFiles = options.toolNames.some((name) => ['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.stage'].includes(name))
+  const stageSummary = (task: ControlledTask) => [task.goal, task.check, task.note].filter((item): item is string => typeof item === 'string' && item.length > 0).join('\n')
   const currentInputs = (ctx: Context): ConversationMessage[] => {
     const state = controllerFromGlobal(ctx.global)
     const record = taskRecordFromGlobal(ctx.global as JsonValue)
     const contract: ConversationMessage = { role: 'user', content: JSON.stringify({ originalObjective: record?.objective, criteria: record?.acceptanceCriteria }) }
-    return [contract, ...(options.conversation ?? []), { role: 'user', content: ctx.goal },
-      { role: 'user', content: JSON.stringify({ finalReviewErrors: state?.finalReviewErrors, usedTurns: state?.usedTurns, ...(enforceTurnBudget ? { maxTurns: state?.maxTurns } : {}), priorStages: state?.priorTasks.map(({ id, goal, status, note, evidenceRefs }) => ({ id, goal, status, note, evidenceRefs })), activeStage: state?.tasks.find((task) => task.id === (workerTaskId(ctx) ?? state.activeId)), stages: state?.tasks.filter((task) => !ctx.lane.resume.step.startsWith('work') || task.id === (workerTaskId(ctx) ?? state.activeId) || state.tasks.find((active) => active.id === (workerTaskId(ctx) ?? state.activeId))?.dependsOn.includes(task.id)).map(({ id, criterionIds, goal, check, status, note, evidenceRefs, investigationRounds, directedInvestigations }) => ({ id, criterionIds, goal, check, status, note, evidenceRefs, investigationRounds, directedInvestigations })) }) },
-      ...(state?.updates ?? []).map((content): ConversationMessage => ({ role: 'user', content }))]
+    const updates = (state?.updates ?? []).map((content): ConversationMessage => ({ role: 'user', content }))
+    if (!selectiveContext) {
+      return [contract, ...(options.conversation ?? []), { role: 'user', content: ctx.goal },
+        { role: 'user', content: JSON.stringify({ finalReviewErrors: state?.finalReviewErrors, usedTurns: state?.usedTurns, ...(enforceTurnBudget ? { maxTurns: state?.maxTurns } : {}), priorStages: state?.priorTasks.map(({ id, goal, status, note, evidenceRefs }) => ({ id, goal, status, note, evidenceRefs })), activeStage: state?.tasks.find((task) => task.id === (workerTaskId(ctx) ?? state.activeId)), stages: state?.tasks.filter((task) => !ctx.lane.resume.step.startsWith('work') || task.id === (workerTaskId(ctx) ?? state.activeId) || state.tasks.find((active) => active.id === (workerTaskId(ctx) ?? state.activeId))?.dependsOn.includes(task.id)).map(({ id, criterionIds, goal, check, status, note, evidenceRefs, investigationRounds, directedInvestigations }) => ({ id, criterionIds, goal, check, status, note, evidenceRefs, investigationRounds, directedInvestigations })) }) },
+        ...updates]
+    }
+    const activeId = workerTaskId(ctx) ?? state?.activeId
+    const active = state?.tasks.find((task) => task.id === activeId)
+    const stages = [...(state?.priorTasks ?? []), ...(state?.tasks ?? [])].filter((task) => task.id !== activeId)
+    const evidenceText = new Map<string, string>()
+    for (const task of [...stages, ...(active ? [active] : [])]) {
+      for (const ref of task.evidenceRefs) {
+        if (evidenceText.has(ref)) continue
+        const summary = ctx.results.summary(ref)
+        if (summary === undefined) continue
+        evidenceText.set(ref, typeof summary === 'string' ? summary : JSON.stringify(summary))
+      }
+    }
+    const toSurface = (task: ControlledTask): SurfaceTask => ({ id: task.id, text: stageSummary(task), criterionIds: task.criterionIds, dependsOn: task.dependsOn, evidenceRefs: task.evidenceRefs })
+    const graph = buildContextGraph({ criterionIds: record?.acceptanceCriteria.map((criterion) => criterion.id) ?? [], stages: stages.map(toSurface), ...(active ? { active: toSurface(active) } : {}), evidenceText, conversation: (options.conversation ?? []).map((message) => message.content) })
+    const surface = expandContextSurface(graph.anchor, graph.nodes)
+    return [contract, { role: 'user', content: ctx.goal },
+      { role: 'user', content: JSON.stringify({ usedTurns: state?.usedTurns, activeStage: active ? { id: active.id, goal: active.goal, check: active.check, status: active.status, note: active.note } : null, contextSurface: surface, contextSurfaceNote: 'Context grows from the active stage, or from the acceptance criteria before a stage exists, along dependencies and evidence. A farther record stays behind a closer one. If this ring does not fit, remaining ids are the next points on that same ring. Call task.surface with one id already on this surface or in remaining. Do not request an offset page of the conversation or history.' }) },
+      ...updates]
   }
   const reopenRejectedEdit = (ctx: Context): void => {
     const state = controllerFromGlobal(ctx.global)

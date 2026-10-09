@@ -204,8 +204,9 @@ describe('Host task controller', () => {
     expect(reviews).toBe(2)
   })
 
-  it('uses v8 for new controllers while retaining sequential v6 construction for restoration', () => {
-    expect(buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('8')
+  it('uses v9 for new controllers while retaining earlier program versions for restoration', () => {
+    expect(buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('9')
+    expect(buildTaskControllerProgram({ system: 'test', version: '8', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('8')
     expect(buildTaskControllerProgram({ system: 'test', version: '7', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('7')
     expect(buildTaskControllerProgram({ system: 'test', version: '6', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('6')
   })

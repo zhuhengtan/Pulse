@@ -1,5 +1,7 @@
 import { createCheckpoint, validateCheckpoint, operationAudit, textWindow, checkpointReceipt, type Checkpoint } from './task-controller/checkpoint.js'
 import { buildTaskControllerProgram } from './task-controller/program.js'
+import { buildContextGraph, expandFromReachedPoint, type SurfaceTask } from './task-controller/context-page.js'
+import { controllerFromGlobal } from './task-controller/state.js'
 import { boundedEdit, editingError, stageInput, StagedEditor, STREAM_BYTES } from './editing.js'
 import { fetchText, readPublicPage, parseSearchResults } from './web.js'
 import { createHash, randomUUID } from 'node:crypto'
@@ -759,23 +761,98 @@ function isBoundedWorkspaceWrite(toolName: string): boolean {
   return toolName === 'fs.stage' || toolName === 'fs.write' || toolName === 'fs.apply_patch' || toolName === 'fs.apply_patches' || toolName === 'fs.move'
 }
 
+function isActiveEffectState(state: string): boolean {
+  return state === 'queued' || state === 'running' || state === 'retry_wait' || state === 'reconcile_required'
+}
+
+function displayArguments(value: unknown): JsonValue {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const out: Record<string, JsonValue> = {}
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'expectedHash' || key === 'hash') continue
+    if (typeof item === 'string') out[key] = item.length > 8_192 ? item.slice(0, 8_192) : item
+    else if (item === null || typeof item === 'number' || typeof item === 'boolean') out[key] = item
+    else if (Array.isArray(item)) out[key] = item.slice(0, 16) as JsonValue
+    else if (typeof item === 'object') out[key] = item as JsonValue
+  }
+  return out
+}
+
+function effectActivity(effect: { id: string; kind: string; state: string; toolCallId?: string; input?: JsonValue }): JsonValue {
+  const effectInput = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : undefined
+  const name = typeof effectInput?.name === 'string' ? effectInput.name : effect.kind
+  return {
+    activity: name,
+    activityEffectId: effect.id,
+    activityState: effect.state,
+    activityKind: effect.kind,
+    ...(effect.kind === 'tool' ? { activityToolCallId: effect.toolCallId ?? effect.id, activityArguments: displayArguments(effectInput?.arguments) } : {}),
+  }
+}
+
+function clipPreviewText(value: string): { text: string; truncated: boolean } {
+  const clean = value.replace(/\u001B\[[0-9;]*[A-Za-z]/g, '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+  const rows = clean.split('\n')
+  let text = rows.slice(0, 8).join('\n')
+  const truncated = rows.length > 8 || text.length > 600
+  if (text.length > 600) text = text.slice(0, 600)
+  return { text, truncated }
+}
+
+function asRecord(value: JsonValue | undefined): Record<string, JsonValue> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  return value as Record<string, JsonValue>
+}
+
+function toolPreview(name: string, value: JsonValue | undefined): JsonValue | undefined {
+  const record = asRecord(value)
+  if (!record) return undefined
+  if (name === 'fs.read' || name === 'web.fetch') {
+    const content = typeof record.content === 'string' ? record.content : typeof record.text === 'string' ? record.text : ''
+    return { bytes: Buffer.byteLength(content), lines: content.length === 0 ? 0 : content.split('\n').length, truncated: record.truncated === true || record.sourceTruncated === true }
+  }
+  if (name === 'fs.search' || name === 'web.search') {
+    const matches = Array.isArray(record.matches) ? record.matches : Array.isArray(record.results) ? record.results : []
+    const locations = matches.slice(0, 5).flatMap((item) => {
+      const row = asRecord(item as JsonValue)
+      if (!row) return []
+      if (typeof row.path === 'string' && typeof row.line === 'number') return [`${row.path}:${row.line}`]
+      if (typeof row.url === 'string') return [typeof row.title === 'string' ? `${row.title} ${row.url}` : row.url]
+      return []
+    })
+    return { matched: typeof record.matched === 'number' ? record.matched : matches.length, truncated: record.truncated === true, locations }
+  }
+  if (name === 'fs.list') {
+    const entries = Array.isArray(record.entries) ? record.entries.filter((item): item is string => typeof item === 'string') : []
+    return { matched: entries.length, locations: entries.slice(0, 5) }
+  }
+  if (name === 'fs.write' || name === 'fs.apply_patch' || name === 'fs.apply_patches') {
+    return { ...(typeof record.bytes === 'number' ? { bytes: record.bytes } : {}), ...(typeof record.replacements === 'number' ? { replacements: record.replacements } : {}) }
+  }
+  if (name === 'shell.exec') {
+    const stdout = typeof record.stdout === 'string' ? record.stdout : ''
+    const stderr = typeof record.stderr === 'string' ? record.stderr : ''
+    const clipped = clipPreviewText(stdout.trim() ? stdout : stderr)
+    return { exitCode: typeof record.code === 'number' || record.code === null ? record.code : null, ...(clipped.text ? { output: clipped.text } : {}), truncated: record.truncated === true || clipped.truncated }
+  }
+  return undefined
+}
+
 function laneSnapshot(runtime: PulseRuntime): JsonValue {
   return {
     type: 'lane.snapshot',
     lanes: [...runtime.state.lanes.values()].map((lane) => {
-      const activeEffect = [...lane.ownedEffectIds]
+      const activeEffects = [...lane.ownedEffectIds]
         .map((effectId) => runtime.state.effects.get(effectId))
-        .find((effect) => effect && (effect.state === 'queued' || effect.state === 'running' || effect.state === 'retry_wait' || effect.state === 'reconcile_required'))
-      const effectInput = activeEffect?.input && typeof activeEffect.input === 'object' && !Array.isArray(activeEffect.input)
-        ? activeEffect.input as Record<string, JsonValue>
-        : undefined
+        .filter((effect): effect is NonNullable<typeof effect> => effect !== undefined && isActiveEffectState(effect.state))
+      const activities = activeEffects.map((effect) => effectActivity(effect))
+      const primary = activities[0] && typeof activities[0] === 'object' && !Array.isArray(activities[0]) ? activities[0] as Record<string, JsonValue> : undefined
       return {
         id: lane.id,
         status: lane.status,
         goal: lane.goal.slice(0, 240),
-        ...(typeof effectInput?.name === 'string' ? { activity: effectInput.name } : activeEffect ? { activity: activeEffect.kind } : {}),
-        ...(activeEffect === undefined ? {} : { activityEffectId: activeEffect.id, activityState: activeEffect.state, activityKind: activeEffect.kind }),
-        ...(activeEffect?.kind === 'tool' ? { activityToolCallId: activeEffect.toolCallId ?? activeEffect.id } : {}),
+        ...(primary ?? {}),
+        ...(activities.length ? { activities } : {}),
       }
     }),
   } as JsonValue
@@ -890,6 +967,8 @@ export class LocalHost {
   private activeProviderName: string | undefined
   private activeModelName: string | undefined
   private readonly approvedToolCalls = new Map<string, Set<string>>()
+  /** Conversation snapshot used to grow a context surface from a reached point. */
+  private readonly surfaceConversations = new Map<string, ConversationMessage[]>()
   private readonly active = new Map<string, { runtime: PulseRuntime; session: PulseSession; conversationId: string; runId: string; capabilities: ActiveCapabilityPacks; capabilityController: AbortController }>()
   private readonly conversationLocks = new Map<string, Awaited<ReturnType<typeof open>>>()
   constructor(options: LocalHostOptions = {}) {
@@ -1185,6 +1264,57 @@ export class LocalHost {
       if (stageId && valid) return { valid: true, reusableIds: valid.reusableIds, ...textWindow(JSON.stringify(valid.evidence[stageId] ?? []), offset) }
       return valid ? checkpointReceipt(valid) : { valid: false, reusableIds: [] }
     }, summarize: (value) => JSON.parse(JSON.stringify(value)) as JsonValue }))
+    registry.register(defineTool({
+      name: 'task.surface',
+      description: 'Expand context from one point already on the current context surface. Pass a stage id, evidence ref, path, or remaining id from that surface. Returns the next neighborhood along structural links. This is not an offset or a page of the conversation.',
+      input: z.object({ point: z.string().min(1).max(200) }),
+      output: z.object({
+        point: z.string(),
+        contextSurface: z.object({
+          hits: z.array(z.object({ source: z.enum(['conversation', 'stage', 'evidence']), id: z.string(), ring: z.number().int(), text: z.string() })),
+          remaining: z.array(z.object({ source: z.enum(['conversation', 'stage', 'evidence']), id: z.string(), ring: z.number().int() })),
+        }),
+      }),
+      sideEffectPolicy: 'read',
+      execute: async ({ point }, context) => {
+        const currentRuntime = runtime()
+        const lane = currentRuntime.state.lanes.get(context.laneId)
+        if (!lane || lane.agentId !== context.agentId) throw new Error('SURFACE_NOT_VISIBLE')
+        let agent = currentRuntime.state.agents.get(context.agentId)
+        let global: JsonValue | undefined
+        while (agent) {
+          global = agent.globalVersions.get(agent.latestGlobalVersion)
+          if (controllerFromGlobal(global ?? {})) break
+          agent = agent.parentAgentId ? currentRuntime.state.agents.get(agent.parentAgentId) : undefined
+          global = undefined
+        }
+        const state = controllerFromGlobal(global ?? {})
+        if (!state) throw new Error('SURFACE_NOT_VISIBLE')
+        const locals = lane.resume.locals
+        const workerId = locals && typeof locals === 'object' && !Array.isArray(locals) && typeof (locals as Record<string, JsonValue>).taskControllerTaskId === 'string' ? (locals as Record<string, JsonValue>).taskControllerTaskId as string : undefined
+        const activeId = workerId ?? state.activeId
+        const active = state.tasks.find((task) => task.id === activeId)
+        const stages = [...state.priorTasks, ...state.tasks].filter((task) => task.id !== activeId)
+        const evidenceText = new Map<string, string>()
+        for (const task of [...stages, ...(active ? [active] : [])]) {
+          for (const ref of task.evidenceRefs) {
+            if (evidenceText.has(ref)) continue
+            const result = currentRuntime.state.results.get(ref)
+            const visible = lane.visibleResultRefs === undefined || lane.visibleResultRefs.has(ref)
+            if (!result || !visible || result.privacy !== 'public' || result.privacyTaints?.length) continue
+            const summary = result.summary ?? result.value
+            if (summary === undefined) continue
+            evidenceText.set(ref, typeof summary === 'string' ? summary : JSON.stringify(summary))
+          }
+        }
+        const toSurface = (task: typeof stages[number]): SurfaceTask => ({ id: task.id, text: [task.goal, task.check, task.note].filter((item): item is string => typeof item === 'string' && item.length > 0).join('\n'), criterionIds: task.criterionIds, dependsOn: task.dependsOn, evidenceRefs: task.evidenceRefs })
+        const record = taskRecordFromGlobal(global ?? {})
+        const stored = this.surfaceConversations.get(runId) ?? (await this.getConversationMessages(conversationId)).map((message) => ({ role: message.role, content: message.text }))
+        const graph = buildContextGraph({ criterionIds: record?.acceptanceCriteria.map((criterion) => criterion.id) ?? [], stages: stages.map(toSurface), ...(active ? { active: toSurface(active) } : {}), evidenceText, conversation: stored.map((message) => message.content) })
+        return { point, contextSurface: expandFromReachedPoint(graph.anchor, graph.nodes, point) }
+      },
+      summarize: (value) => JSON.parse(JSON.stringify(value)) as JsonValue,
+    }))
   }
   private async resolveSystemPrompt(workspace: string, languageHint?: string, conversation: ConversationMessage[] = []): Promise<string> {
     const instructions = await loadProjectInstructions(workspace)
@@ -1199,6 +1329,7 @@ export class LocalHost {
     })
   }
   private async restoreRuntimeFor(conversationId: string, runId: string, cwd: string, conversation: ConversationMessage[] = [], systemPrompt?: string): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController }> {
+    this.surfaceConversations.set(runId, conversation)
     const registry = new ToolRegistry({ workspaceRoots: [cwd], allowNetwork: this.options.allowNetwork === true, ...(this.options.networkHosts === undefined ? {} : { networkHosts: this.options.networkHosts }) })
     registerBuiltIns(registry, cwd, this.options.approvalMode ?? 'ask', this.options.allowNetwork === true, (toolCallId) => this.approvedToolCalls.get(runId)?.has(toolCallId) === true, this.options.networkHosts)
     const capabilityRegistry = new CapabilityPackRegistry()
@@ -1233,10 +1364,10 @@ export class LocalHost {
     const legacyProgram = buildProgram(registry.list().map((tool) => tool.name), prompt, conversation, false, this.options.maxTurns ?? 32, '1')(this.options.approvalMode ?? 'ask')
     const toolVersions = Object.fromEntries(registry.list().map((tool) => [tool.name, tool.version]))
     const savedControllerVersion = typeof savedInput.controllerVersion === 'string' ? savedInput.controllerVersion : undefined
-    const modelEffectBudget = savedInput.taskController === true && savedControllerVersion !== '8' ? Math.max(1, Math.floor(savedMaxTurns)) : undefined
+    const modelEffectBudget = savedInput.taskController === true && savedControllerVersion !== '8' && savedControllerVersion !== '9' ? Math.max(1, Math.floor(savedMaxTurns)) : undefined
     const executeModelEffect = createModelEffectExecutor({ router, providers })
     const runLlm = (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens })
-    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), maxRuntimeMs: this.options.maxRuntimeMs ?? 15 * 60_000, programs: [legacyProgram, version2Program, program, workerProgram, ...(['5', '6', '7', '8'] as const).map((version) => buildTaskControllerProgram({ ...(savedReuse ? { resumePlan: savedReuse.controller, reusableIds: savedReuse.reusableIds } : {}), version, system: prompt, toolNames, conversation, approvalMode: this.options.approvalMode ?? 'ask', maxTurns: savedMaxTurns }))], models, modelRouter: router, toolVersions, builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { if (modelEffectBudget !== undefined) assertParallelModelEffectBudget(runtimeRef, modelEffectBudget); return executeModelEffect(effect, signal, observe) } if (effect.kind === 'tool') return approvedToolExecutor(registry, provider, this.options.approvalMode, reviewContext, this.options.activeModel ?? provider.model.id, runLlm)(effect, signal, observe); throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), maxRuntimeMs: this.options.maxRuntimeMs ?? 15 * 60_000, programs: [legacyProgram, version2Program, program, workerProgram, ...(['5', '6', '7', '8', '9'] as const).map((version) => buildTaskControllerProgram({ ...(savedReuse ? { resumePlan: savedReuse.controller, reusableIds: savedReuse.reusableIds } : {}), version, system: prompt, toolNames, conversation, approvalMode: this.options.approvalMode ?? 'ask', maxTurns: savedMaxTurns }))], models, modelRouter: router, toolVersions, builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { if (modelEffectBudget !== undefined) assertParallelModelEffectBudget(runtimeRef, modelEffectBudget); return executeModelEffect(effect, signal, observe) } if (effect.kind === 'tool') return approvedToolExecutor(registry, provider, this.options.approvalMode, reviewContext, this.options.activeModel ?? provider.model.id, runLlm)(effect, signal, observe); throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     runtimeRef = runtime
     const budget = historyBudget(provider.model.capabilities)
     runtime.state.historySoftTokens = budget.historySoftTokens
@@ -1348,6 +1479,7 @@ export class LocalHost {
     })().finally(async () => {
       this.active.delete(runId)
       this.approvedToolCalls.delete(runId)
+      this.surfaceConversations.delete(runId)
       activeEntry?.capabilityController.abort()
       try { await activeEntry?.capabilities.dispose() } finally { await this.releaseConversationLock(conversationId) }
     })
@@ -1396,10 +1528,11 @@ export class LocalHost {
       const goal = input.text
       const summaryFollowup = inheritedTask !== undefined && isExecutionSummaryFollowup(goal)
       const controlled = !isStatusOnlyTurn(goal) && (this.options.taskController ?? (this.options.provider?.provider !== undefined && this.options.provider.provider !== 'mock' && (!isBareTaskContinuation(goal) || inheritedTask !== undefined)))
-      const now = new Date().toISOString(); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal: input.text, taskController: controlled, ...(controlled ? { controllerVersion: '8' } : {}), maxTurns: this.options.maxTurns ?? 32, cwd: manifest.cwd, provider: this.options.provider?.provider ?? 'mock', approvalMode: this.options.approvalMode ?? 'ask', createdAt: now }, null, 2))
+      const now = new Date().toISOString(); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal: input.text, taskController: controlled, ...(controlled ? { controllerVersion: '9' } : {}), maxTurns: this.options.maxTurns ?? 32, cwd: manifest.cwd, provider: this.options.provider?.provider ?? 'mock', approvalMode: this.options.approvalMode ?? 'ask', createdAt: now }, null, 2))
       if (conversation.length === 0) manifest.title = input.text.length > 50 ? input.text.slice(0, 50) + '...' : input.text;
       if (reuse) await writeFile(join(this.runDir(conversationId, runId), 'reuse-checkpoint.json'), JSON.stringify(reuse))
       const systemPrompt = await this.resolveSystemPrompt(manifest.cwd, input.text, conversation)
+      this.surfaceConversations.set(runId, conversation)
       activated = await this.runtimeFor(conversationId, runId, manifest.cwd, safetyReviewContext(manifest.cwd, goal, conversation), input.text)
       const { runtime, registry, capabilities, capabilityController } = activated
       const runPrompt = this.withCapabilityInstructions(systemPrompt, capabilities.instructions)
@@ -1417,12 +1550,14 @@ export class LocalHost {
       if (active) {
         await active.session.cancel('HOST_SETUP_FAILED').catch(() => undefined)
         this.active.delete(runId)
+        this.surfaceConversations.delete(runId)
         active.capabilityController.abort()
         await active.capabilities.dispose().catch(() => undefined)
       } else if (activated) {
+        this.surfaceConversations.delete(runId)
         activated.capabilityController.abort()
         await activated.capabilities.dispose().catch(() => undefined)
-      }
+      } else this.surfaceConversations.delete(runId)
       await this.releaseConversationLock(conversationId)
       throw error
     }
@@ -1452,7 +1587,7 @@ export class LocalHost {
       return this.makeRunHandle(conversationId, runId, runtime, session)
     } catch (error) {
       const active = this.active.get(runId)
-      if (active) { active.capabilityController.abort(); await active.capabilities.dispose().catch(() => undefined); this.active.delete(runId) }
+      if (active) { active.capabilityController.abort(); await active.capabilities.dispose().catch(() => undefined); this.active.delete(runId); this.surfaceConversations.delete(runId) }
       else if (restored) { restored.capabilityController.abort(); await restored.capabilities.dispose().catch(() => undefined) }
       if (error instanceof Error && error.message === 'RESTORED_AGENT_NOT_FOUND') {
         const current = await this.readManifest(conversationId).catch(() => undefined)
@@ -1498,7 +1633,8 @@ export class LocalHost {
         ? 'cancelled'
         : 'failed'
     const args = input.arguments && typeof input.arguments === 'object' && !Array.isArray(input.arguments) ? input.arguments : {}
-    return { effectId, tool: input.name, toolCallId: effect.toolCallId ?? effectId, args, status, ...(outcome.error === undefined ? commandFailed ? { result: { code: 'SHELL_COMMAND_FAILED', exitCode: shell?.code ?? null, stderr: shell?.stderr ?? '', timedOut: shell?.timedOut ?? false, aborted: shell?.aborted ?? false } } : {} : { result: outcome.error }) }
+    const preview = toolPreview(input.name, value)
+    return { effectId, tool: input.name, toolCallId: effect.toolCallId ?? effectId, args, status, ...(preview === undefined ? {} : { preview }), ...(outcome.error === undefined ? commandFailed ? { result: { code: 'SHELL_COMMAND_FAILED', exitCode: shell?.code ?? null, stderr: shell?.stderr ?? '', timedOut: shell?.timedOut ?? false, aborted: shell?.aborted ?? false } } : {} : { result: outcome.error }) }
   }
   private async *projectEvents(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, finish: () => Promise<Outcome & { text?: string }>, taskOutcome: () => TaskOutcome | undefined, contextNotice?: string): AsyncIterable<AssistantEvent> {
     let seq = 0
