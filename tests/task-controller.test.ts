@@ -14,6 +14,30 @@ function finalReview(runtime: PulseRuntime): { value: JsonValue } {
 }
 
 describe('Host task controller', () => {
+  it('repairs a final citation from explicit feedback without repeating work', async () => {
+    let agentId = ''
+    let finalReviews = 0
+    let workCalls = 0
+    const program = buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 32 })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [{ id: 'explain', goal: 'Explain the design', check: 'Response delivered', criterionIds: ['criterion-1'], dependsOn: [] }] } }
+      const state = globalFor(runtime, agentId).taskController
+      if (effect.key?.startsWith('verify-stage')) return { value: { status: 'passed', evidenceRefs: [state.tasks[0].candidateRef], note: 'Response exists' } }
+      if (effect.key?.startsWith('verify-task')) {
+        finalReviews++
+        const feedback = JSON.stringify((effect.input as any).request).includes('Previous verification cited unavailable refs: missing-ref')
+        return { value: { criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: feedback ? state.tasks[0].evidenceRefs : ['missing-ref'], rationale: 'Response exists' }] } }
+      }
+      workCalls++
+      return { value: { text: 'The design uses local storage.', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Explain the design', program, initialGlobal: initialGlobal(1) }).agentId
+    expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'succeeded' })
+    expect(globalFor(runtime, agentId).taskOutcome.status).toBe('accepted')
+    expect(finalReviews).toBe(2)
+    expect(workCalls).toBe(1)
+  })
+
   it('checkpoints repeated validation despite changing test durations', async () => {
     let agentId = ''
     let checks = 0

@@ -81,7 +81,7 @@ describe('efficient task continuation', () => {
       if (effect.key?.startsWith('verify-stage')) return { value: { status: 'passed', evidenceRefs: refs, note: 'done' } }
       return { value: ++work === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.read', input: {} }] } : { text: 'done', finishReason: 'stop' } }
     } })
-    const program = buildTaskControllerProgram({ system: 'system policy', toolNames: ['fs.read'], approvalMode: 'auto', maxTurns: 16, conversation: [{ role: 'assistant', content: 'Earlier agreed design remains available' }, { role: 'user', content: 'NEVER modify tests' }, { role: 'assistant', content: 'Latest answer' }] })
+    const program = buildTaskControllerProgram({ system: 'system policy', toolNames: ['fs.read'], approvalMode: 'auto', maxTurns: 16, conversation: [{ role: 'assistant', content: 'OLD_BULK'.repeat(20000) }, { role: 'assistant', content: 'Earlier agreed design remains available' }, { role: 'user', content: 'NEVER modify tests' }, { role: 'assistant', content: 'Latest answer' }] })
     const { agentId } = runtime.createAgent({ goal: 'Read source', program, initialGlobal: { ...initial, irrelevant: 'bulk'.repeat(20000) } })
     expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'succeeded' })
     for (const request of requests) {
@@ -91,8 +91,10 @@ describe('efficient task continuation', () => {
       expect(text).toContain(initial.taskRecord.objective)
       expect(text).toContain('contextSurface')
       expect(text).toContain('Read source')
-      expect(text).not.toContain('NEVER modify tests')
-      expect(text).not.toContain('Earlier agreed design remains available')
+      expect(text).toContain('NEVER modify tests')
+      expect(text).toContain('Earlier agreed design remains available')
+      expect(text).toContain('Latest answer')
+      expect(text).not.toContain('OLD_BULK')
       expect(text).not.toContain('maxTurns')
       expect(text).toContain('usedTurns')
       expect(text).not.toContain('priorStages')

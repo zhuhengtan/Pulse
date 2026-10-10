@@ -165,6 +165,13 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
   const controllerStageTurnLimit = enforceTurnBudget ? Math.min(8, budget) : 8
   const canEditFiles = options.toolNames.some((name) => ['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.stage'].includes(name))
   const stageSummary = (task: ControlledTask) => [task.goal, task.check, task.note].filter((item): item is string => typeof item === 'string' && item.length > 0).join('\n')
+  // User requirements and the latest exchange are the conversational contract.
+  // Keep their roles and full text; older assistant detail stays on the graph.
+  const conversation = options.conversation ?? []
+  const latestAssistant = conversation.findLastIndex((message) => message.role === 'assistant')
+  const latestUser = conversation.findLastIndex((message) => message.role === 'user')
+  const latestProposal = conversation.findLastIndex((message, index) => message.role === 'assistant' && index < latestUser)
+  const conversationContract = conversation.filter((message, index) => message.role !== 'assistant' || index === latestAssistant || index === latestProposal)
   const currentInputs = (ctx: Context): ConversationMessage[] => {
     const state = controllerFromGlobal(ctx.global)
     const record = taskRecordFromGlobal(ctx.global as JsonValue)
@@ -188,10 +195,10 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
       }
     }
     const toSurface = (task: ControlledTask): SurfaceTask => ({ id: task.id, text: stageSummary(task), criterionIds: task.criterionIds, dependsOn: task.dependsOn, evidenceRefs: task.evidenceRefs })
-    const graph = buildContextGraph({ criterionIds: record?.acceptanceCriteria.map((criterion) => criterion.id) ?? [], stages: stages.map(toSurface), ...(active ? { active: toSurface(active) } : {}), evidenceText, conversation: (options.conversation ?? []).map((message) => message.content) })
+    const graph = buildContextGraph({ criterionIds: record?.acceptanceCriteria.map((criterion) => criterion.id) ?? [], anchorText: [record?.objective, ctx.goal, ...(record?.acceptanceCriteria.map((criterion) => criterion.description) ?? [])].join('\n'), stages: stages.map(toSurface), ...(active ? { active: toSurface(active) } : {}), evidenceText, conversation: conversation.map((message) => message.content) })
     const surface = expandContextSurface(graph.anchor, graph.nodes)
-    return [contract, { role: 'user', content: ctx.goal },
-      { role: 'user', content: JSON.stringify({ usedTurns: state?.usedTurns, activeStage: active ? { id: active.id, goal: active.goal, check: active.check, status: active.status, note: active.note } : null, contextSurface: surface, contextSurfaceNote: 'Context grows from the active stage, or from the acceptance criteria before a stage exists, along dependencies and evidence. A farther record stays behind a closer one. If this ring does not fit, remaining ids are the next points on that same ring. Call task.surface with one id already on this surface or in remaining. Do not request an offset page of the conversation or history.' }) },
+    return [contract, ...conversationContract, { role: 'user', content: ctx.goal },
+      { role: 'user', content: JSON.stringify({ finalReviewErrors: state?.finalReviewErrors, usedTurns: state?.usedTurns, activeStage: active ? { id: active.id, goal: active.goal, check: active.check, status: active.status, note: active.note } : null, contextSurface: surface, contextSurfaceNote: 'User requirements and the latest assistant proposal above remain conversation context, subject to the current request. Older assistant detail grows from the active stage, or from the acceptance criteria before a stage exists, along dependencies and evidence. A farther record stays behind a closer one. If this ring does not fit, remaining ids are the next points on that same ring. Call task.surface with one id already on this surface, a previous expansion, or in remaining. Do not request an offset page of the conversation or history.' }) },
       ...updates]
   }
   const reopenRejectedEdit = (ctx: Context): void => {

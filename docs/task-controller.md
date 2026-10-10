@@ -63,7 +63,11 @@ does not end the task. Stage shape stays at most eight stages, and the process
 wall clock stays in place.
 
 Version 9 does not place the whole conversation or every stage into each model
-request, and it does not take an arbitrary page of that history. The original
+request, and it does not take an arbitrary page of that history. User turns,
+context notes, and the latest exchange (the proposal before the latest user
+turn and the latest assistant reply) remain explicit conversation context with
+their original roles and complete text. Older assistant detail is retrieved
+through the structural graph. The original
 objective, acceptance criteria, current goal, and active stage are the point.
 The surface grows from that point along dependency links, attached evidence,
 and records that cite those ids or paths. A farther record cannot jump ahead
@@ -71,7 +75,11 @@ of a closer one. If a ring does not fit, its remainder stays in that ring's
 order. The next expansion starts at one id already on that surface, through
 `task.surface`. An offset into `task.conversation` or `task.history` is not a
 way to sample the large history. `task.evidence` still reads one known
-ResultRef. Versions 5–8 keep the previous full injection. Code search stays
+ResultRef. Paths in the objective and stage text also seed the graph before
+tool evidence exists. A lane can continue from points returned by its earlier
+successful expansions; the Host reads those public receipts from durable
+Runtime results, so this also works after restoration without a separate
+progress store. Versions 5–8 keep the previous full injection. Code search stays
 on `fs.search`.
 `task_progress` notices feed both JSONL and the existing TUI notice stream.
 

@@ -44,39 +44,43 @@ export interface SurfaceTask {
 
 const PATH_PATTERN = /[A-Za-z0-9_./\\-]{3,}\.[A-Za-z0-9]+/g
 
-/** Build the structural graph. Conversation enters only by citing an id or path already in the catalog. */
-export function buildContextGraph(input: { criterionIds: readonly string[]; stages: readonly SurfaceTask[]; active?: SurfaceTask; evidenceText: ReadonlyMap<string, string>; conversation: readonly string[] }): { nodes: ContextNode[]; anchor: string[] } {
+/** Historical assistant detail enters by citing an id or path already in the catalog. */
+export function buildContextGraph(input: { criterionIds: readonly string[]; stages: readonly SurfaceTask[]; active?: SurfaceTask; anchorText?: string; evidenceText: ReadonlyMap<string, string>; conversation: readonly string[] }): { nodes: ContextNode[]; anchor: string[] } {
   const stages = input.active ? [...input.stages, input.active] : [...input.stages]
+  const paths = (text: string) => text.match(PATH_PATTERN) ?? []
   const identifiers = new Set<string>([...input.criterionIds, ...stages.flatMap((task) => [task.id, ...task.criterionIds, ...task.dependsOn, ...task.evidenceRefs])])
   const evidenceOwners = new Map<string, string[]>()
   for (const task of stages) for (const ref of task.evidenceRefs) evidenceOwners.set(ref, [...(evidenceOwners.get(ref) ?? []), task.id])
-  for (const text of input.evidenceText.values()) for (const path of text.match(PATH_PATTERN) ?? []) identifiers.add(path)
+  for (const text of [...stages.map((task) => task.text), input.anchorText ?? '', ...input.evidenceText.values()]) for (const path of paths(text)) identifiers.add(path)
   const mentioned = (text: string) => [...identifiers].filter((identifier) => identifier.length >= 2 && text.includes(identifier))
   const nodes: ContextNode[] = [
-    ...input.stages.map((task): ContextNode => ({ source: 'stage', id: task.id, text: task.text, links: [task.id, ...task.criterionIds, ...task.dependsOn, ...task.evidenceRefs] })),
+    ...input.stages.map((task): ContextNode => ({ source: 'stage', id: task.id, text: task.text, links: [task.id, ...task.criterionIds, ...task.dependsOn, ...task.evidenceRefs, ...paths(task.text)] })),
     ...[...input.evidenceText].map(([ref, text]): ContextNode => ({ source: 'evidence', id: ref, text, links: [ref, ...(evidenceOwners.get(ref) ?? []), ...mentioned(text)] })),
-    ...input.conversation.map((text, index): ContextNode => ({ source: 'conversation', id: `message-${index}`, text, links: mentioned(text) })),
+    ...input.conversation.map((text, index): ContextNode => ({ source: 'conversation', id: `message-${index}`, text, links: [`message-${index}`, ...mentioned(text)] })),
   ]
-  const anchor = input.active ? [input.active.id, ...input.active.criterionIds, ...input.active.dependsOn, ...input.active.evidenceRefs] : [...input.criterionIds]
+  const anchor = [...(input.active ? [input.active.id, ...input.active.criterionIds, ...input.active.dependsOn, ...input.active.evidenceRefs, ...paths(input.active.text)] : input.criterionIds), ...paths(input.anchorText ?? '')]
   return { nodes, anchor }
 }
 
 /** Points already on the surface grown from the anchor. A new expansion must start at one of these. */
-export function reachedSurfacePoints(anchorLinks: readonly string[], nodes: readonly ContextNode[]): Set<string> {
-  const surface = expandContextSurface(anchorLinks, nodes)
+export function reachedSurfacePoints(anchorLinks: readonly string[], nodes: readonly ContextNode[], previousSurfaces: readonly ContextSurface[] = []): Set<string> {
+  const surfaces = [expandContextSurface(anchorLinks, nodes), ...previousSurfaces]
   const points = new Set(anchorLinks.filter((link) => link.length > 0))
-  for (const hit of surface.hits) {
-    points.add(hit.id)
-    const node = nodes.find((item) => item.source === hit.source && item.id === hit.id)
-    for (const link of node?.links ?? []) if (link.length > 0) points.add(link)
+  for (const surface of surfaces) {
+    for (const hit of surface.hits) {
+      const node = nodes.find((item) => item.source === hit.source && item.id === hit.id)
+      if (!node) continue
+      points.add(node.id)
+      for (const link of node.links) if (link.length > 0) points.add(link)
+    }
+    for (const item of surface.remaining) if (nodes.some((node) => node.source === item.source && node.id === item.id)) points.add(item.id)
   }
-  for (const item of surface.remaining) points.add(item.id)
   return points
 }
 
 /** Expand from one point that the current surface already reached. Any other id is rejected. */
-export function expandFromReachedPoint(anchorLinks: readonly string[], nodes: readonly ContextNode[], point: string): ContextSurface {
-  if (!reachedSurfacePoints(anchorLinks, nodes).has(point)) throw new Error('POINT_NOT_REACHED')
+export function expandFromReachedPoint(anchorLinks: readonly string[], nodes: readonly ContextNode[], point: string, previousSurfaces: readonly ContextSurface[] = []): ContextSurface {
+  if (!reachedSurfacePoints(anchorLinks, nodes, previousSurfaces).has(point)) throw new Error('POINT_NOT_REACHED')
   return expandContextSurface([point], nodes)
 }
 

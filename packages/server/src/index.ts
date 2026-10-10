@@ -1,6 +1,6 @@
 import { createCheckpoint, validateCheckpoint, operationAudit, textWindow, checkpointReceipt, type Checkpoint } from './task-controller/checkpoint.js'
 import { buildTaskControllerProgram } from './task-controller/program.js'
-import { buildContextGraph, expandFromReachedPoint, type SurfaceTask } from './task-controller/context-page.js'
+import { buildContextGraph, expandFromReachedPoint, type ContextSurface, type SurfaceTask } from './task-controller/context-page.js'
 import { controllerFromGlobal } from './task-controller/state.js'
 import { boundedEdit, editingError, stageInput, StagedEditor, STREAM_BYTES } from './editing.js'
 import { fetchText, readPublicPage, parseSearchResults } from './web.js'
@@ -1264,16 +1264,17 @@ export class LocalHost {
       if (stageId && valid) return { valid: true, reusableIds: valid.reusableIds, ...textWindow(JSON.stringify(valid.evidence[stageId] ?? []), offset) }
       return valid ? checkpointReceipt(valid) : { valid: false, reusableIds: [] }
     }, summarize: (value) => JSON.parse(JSON.stringify(value)) as JsonValue }))
+    const surfaceSchema = z.object({
+      hits: z.array(z.object({ source: z.enum(['conversation', 'stage', 'evidence']), id: z.string(), ring: z.number().int(), text: z.string() })),
+      remaining: z.array(z.object({ source: z.enum(['conversation', 'stage', 'evidence']), id: z.string(), ring: z.number().int() })),
+    })
     registry.register(defineTool({
       name: 'task.surface',
       description: 'Expand context from one point already on the current context surface. Pass a stage id, evidence ref, path, or remaining id from that surface. Returns the next neighborhood along structural links. This is not an offset or a page of the conversation.',
       input: z.object({ point: z.string().min(1).max(200) }),
       output: z.object({
         point: z.string(),
-        contextSurface: z.object({
-          hits: z.array(z.object({ source: z.enum(['conversation', 'stage', 'evidence']), id: z.string(), ring: z.number().int(), text: z.string() })),
-          remaining: z.array(z.object({ source: z.enum(['conversation', 'stage', 'evidence']), id: z.string(), ring: z.number().int() })),
-        }),
+        contextSurface: surfaceSchema,
       }),
       sideEffectPolicy: 'read',
       execute: async ({ point }, context) => {
@@ -1310,8 +1311,20 @@ export class LocalHost {
         const toSurface = (task: typeof stages[number]): SurfaceTask => ({ id: task.id, text: [task.goal, task.check, task.note].filter((item): item is string => typeof item === 'string' && item.length > 0).join('\n'), criterionIds: task.criterionIds, dependsOn: task.dependsOn, evidenceRefs: task.evidenceRefs })
         const record = taskRecordFromGlobal(global ?? {})
         const stored = this.surfaceConversations.get(runId) ?? (await this.getConversationMessages(conversationId)).map((message) => ({ role: message.role, content: message.text }))
-        const graph = buildContextGraph({ criterionIds: record?.acceptanceCriteria.map((criterion) => criterion.id) ?? [], stages: stages.map(toSurface), ...(active ? { active: toSurface(active) } : {}), evidenceText, conversation: stored.map((message) => message.content) })
-        return { point, contextSurface: expandFromReachedPoint(graph.anchor, graph.nodes, point) }
+        const graph = buildContextGraph({ criterionIds: record?.acceptanceCriteria.map((criterion) => criterion.id) ?? [], anchorText: [record?.objective, lane.goal, ...(record?.acceptanceCriteria.map((criterion) => criterion.description) ?? [])].join('\n'), stages: stages.map(toSurface), ...(active ? { active: toSurface(active) } : {}), evidenceText, conversation: stored.map((message) => message.content) })
+        // Successful expansions are already durable Runtime results. Reuse only
+        // this lane's public tool receipts, including after restoring a run.
+        const previousSurfaces: ContextSurface[] = []
+        for (const effectId of lane.ownedEffectIds) {
+          const effect = currentRuntime.state.effects.get(effectId)
+          if (effect?.kind !== 'tool' || effect.outcome?.status !== 'succeeded' || asRecord(effect.input)?.name !== 'task.surface') continue
+          const ref = effect.outcome.resultRef
+          const result = ref ? currentRuntime.state.results.get(ref) : undefined
+          if (!result || lane.visibleResultRefs !== undefined && !lane.visibleResultRefs.has(result.id) || result.privacy !== 'public' || result.privacyTaints?.length) continue
+          const parsed = surfaceSchema.safeParse(asRecord(result.value)?.contextSurface)
+          if (parsed.success) previousSurfaces.push(parsed.data)
+        }
+        return { point, contextSurface: expandFromReachedPoint(graph.anchor, graph.nodes, point, previousSurfaces) }
       },
       summarize: (value) => JSON.parse(JSON.stringify(value)) as JsonValue,
     }))

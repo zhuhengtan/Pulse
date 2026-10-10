@@ -105,10 +105,10 @@ function renderToolCall(call: ToolCallDisplay, options: { verbosity?: Verbosity;
   const detail = detailLines(call, width)
   const extra = options.verbosity === 'verbose' && call.result !== undefined ? resultLines(call.result, width) : []
   const lines = [...header, ...detail.lines, ...extra]
-  const jsonClipped = detail.jsonClipped
+  const truncated = detail.truncated
   return {
     lines,
-    truncated: detail.shownChars < source.length || jsonClipped,
+    truncated: detail.shownChars < source.length || truncated,
     totalChars: source.length,
     shownChars: detail.shownChars,
   }
@@ -138,13 +138,13 @@ function targetText(call: ToolCallDisplay): string {
   return text(args, 'path')
 }
 
-function detailLines(call: ToolCallDisplay, width: number): { lines: string[]; shownChars: number; jsonClipped: boolean } {
+function detailLines(call: ToolCallDisplay, width: number): { lines: string[]; shownChars: number; truncated: boolean } {
   const args = call.arguments ?? {}
   const failure = failureText(call)
   const failed = failure ? fit(`  └ ${failure}`, width) : []
-  if (call.name === 'fs.apply_patch' || call.name === 'fs.apply_patches' || call.name === 'fs.write') {
+  if (call.name === 'fs.apply_patch' || call.name === 'fs.apply_patches' || isContentWrite(call)) {
     const diff = editLines(call, width)
-    return { lines: [...diff.lines, ...failed], shownChars: diff.shownChars, jsonClipped: false }
+    return { lines: [...diff.lines, ...failed], shownChars: diff.shownChars, truncated: diff.truncated }
   }
   const lines: string[] = []
   if (call.name === 'shell.exec') {
@@ -155,24 +155,27 @@ function detailLines(call: ToolCallDisplay, width: number): { lines: string[]; s
     if (failed.length) lines.push(...failed)
     else if (call.status === 'succeeded' && !output) lines.push(...fit('  └ 已完成', width))
     if (call.preview?.truncated) lines.push(...fit(chalk.dim('  └ 输出已截断'), width))
-    return { lines, shownChars: editableText(args).length, jsonClipped: false }
+    return { lines, shownChars: editableText(args).length, truncated: false }
   }
-  if (failed.length) return { lines: failed, shownChars: editableText(args).length, jsonClipped: false }
+  if (failed.length) return { lines: failed, shownChars: editableText(args).length, truncated: false }
   const summary = summaryLine(call)
   if (summary) lines.push(...fit(`  └ ${summary}`, width))
   for (const location of call.preview?.locations ?? []) lines.push(...fit(chalk.dim(`    ${stripTerminalControls(location)}`), width))
-  if (call.name === 'fs.stage' && text(args, 'content')) return { lines, shownChars: 0, jsonClipped: false }
   if (!lines.length && call.name !== 'fs.read' && call.name !== 'fs.search' && call.name !== 'fs.list' && call.name !== 'fs.stage' && call.name !== 'fs.move' && call.name !== 'web.fetch' && call.name !== 'web.search') {
     const dumped = dumpArgs(args)
-    if (dumped.clipped) return { lines: fit(chalk.dim(dumped.text), width), shownChars: 0, jsonClipped: true }
-    if (dumped.text && dumped.text !== '{}') return { lines: fit(chalk.dim(dumped.text), width), shownChars: editableText(args).length, jsonClipped: false }
+    if (dumped.clipped) return { lines: fit(chalk.dim(dumped.text), width), shownChars: 0, truncated: true }
+    if (dumped.text && dumped.text !== '{}') return { lines: fit(chalk.dim(dumped.text), width), shownChars: editableText(args).length, truncated: false }
   }
-  return { lines, shownChars: editableText(args).length, jsonClipped: false }
+  return { lines, shownChars: editableText(args).length, truncated: false }
 }
 
-function editLines(call: ToolCallDisplay, width: number): { lines: string[]; shownChars: number } {
+function isContentWrite(call: ToolCallDisplay): boolean {
+  return call.name === 'fs.write' || call.name === 'fs.stage' && typeof call.arguments?.content === 'string'
+}
+
+function editLines(call: ToolCallDisplay, width: number): { lines: string[]; shownChars: number; truncated: boolean } {
   const args = call.arguments ?? {}
-  const hunks = call.name === 'fs.write'
+  const hunks = isContentWrite(call)
     ? [{ find: '', replace: text(args, 'content') }]
     : call.name === 'fs.apply_patches'
       ? patches(args)
@@ -184,12 +187,12 @@ function editLines(call: ToolCallDisplay, width: number): { lines: string[]; sho
   if (args.all === true) rendered.push(...fit(chalk.dim('  └ 全部匹配'), width))
   for (const [index, hunk] of hunks.entries()) {
     if (index > 0) rendered.push(chalk.dim('    @@'))
-    const ops = hunk.find === '' && call.name === 'fs.write'
+    const ops = hunk.find === '' && isContentWrite(call)
       ? hunk.replace.split('\n').map((line, lineIndex) => ({ op: '+' as const, text: line, line: lineIndex + 1 }))
       : diffLines(hunk.find, hunk.replace)
     const window = windowOps(ops)
     hidden += window.hidden
-    for (const op of ops) if (!window.shown.includes(op)) omittedChars += op.text.length
+    for (const op of ops) if (!window.shown.includes(op)) omittedChars += op.text.length + 1
     for (const op of window.shown) {
       const visible = clipLine(stripTerminalControls(op.text))
       if (visible.clipped) omittedChars += Math.max(0, stripTerminalControls(op.text).length - lineWidth)
@@ -200,7 +203,7 @@ function editLines(call: ToolCallDisplay, width: number): { lines: string[]; sho
     }
   }
   if (hidden > 0) rendered.push(...fit(chalk.dim(`    … 还有 ${hidden} 行`), width))
-  return { lines: rendered, shownChars: Math.max(0, source.length - omittedChars) }
+  return { lines: rendered, shownChars: Math.max(0, source.length - omittedChars), truncated: hidden > 0 || omittedChars > 0 }
 }
 
 function summaryLine(call: ToolCallDisplay): string {
@@ -239,7 +242,7 @@ function resultLines(result: unknown, width: number): string[] {
 }
 
 function diffStat(call: ToolCallDisplay): string {
-  if (call.name !== 'fs.apply_patch' && call.name !== 'fs.apply_patches' && call.name !== 'fs.write') return ''
+  if (call.name !== 'fs.apply_patch' && call.name !== 'fs.apply_patches' && !isContentWrite(call)) return ''
   const counts = countEdits(call)
   if (counts.add === 0 && counts.del === 0) return ''
   return `${chalk.green(`+${counts.add}`)} ${chalk.red(`−${counts.del}`)}`
@@ -247,11 +250,11 @@ function diffStat(call: ToolCallDisplay): string {
 
 function countEdits(call: ToolCallDisplay): { add: number; del: number } {
   const args = call.arguments ?? {}
-  const hunks = call.name === 'fs.write'
+  const hunks = isContentWrite(call)
     ? [{ find: '', replace: text(args, 'content') }]
     : call.name === 'fs.apply_patches' ? patches(args) : [{ find: text(args, 'find'), replace: text(args, 'replace') }]
   return hunks.reduce((sum, hunk) => {
-    if (call.name === 'fs.write') return { add: sum.add + hunk.replace.split('\n').filter((line) => line.length > 0).length, del: sum.del }
+    if (isContentWrite(call)) return { add: sum.add + hunk.replace.split('\n').filter((line) => line.length > 0).length, del: sum.del }
     for (const op of diffLines(hunk.find, hunk.replace)) {
       if (op.op === '+') sum.add += 1
       if (op.op === '-') sum.del += 1
@@ -261,12 +264,27 @@ function countEdits(call: ToolCallDisplay): { add: number; del: number } {
 }
 
 function diffLines(before: string, after: string): DiffOp[] {
-  const left = before.split('\n')
-  const right = after.split('\n')
+  return diffLineArrays(before.split('\n'), after.split('\n'))
+}
+
+function diffLineArrays(left: string[], right: string[]): DiffOp[] {
   if (left.length * right.length > 20_000) {
+    // Trim shared edges before the quadratic diff so a long fragment with one
+    // tail edit still displays that edit, rather than an unrelated prefix.
+    let prefix = 0
+    while (prefix < left.length && prefix < right.length && left[prefix] === right[prefix]) prefix++
+    let suffix = 0
+    while (suffix < left.length - prefix && suffix < right.length - prefix && left[left.length - suffix - 1] === right[right.length - suffix - 1]) suffix++
+    if (prefix || suffix) return [
+      ...left.slice(0, prefix).map((text, index) => ({ op: ' ' as const, text, line: index + 1 })),
+      ...diffLineArrays(left.slice(prefix, left.length - suffix), right.slice(prefix, right.length - suffix)).map((op) => ({ ...op, line: op.line + prefix })),
+      ...left.slice(left.length - suffix).map((text, index) => ({ op: ' ' as const, text, line: left.length - suffix + index + 1 })),
+    ]
+    // A linear fallback retains every operation; only the display window clips
+    // them, so hidden lines and the approval truncation warning stay accurate.
     return [
-      ...left.slice(0, 12).map((text, index) => ({ op: '-' as const, text, line: index + 1 })),
-      ...right.slice(0, 12).map((text, index) => ({ op: '+' as const, text, line: index + 1 })),
+      ...left.map((text, index) => ({ op: '-' as const, text, line: index + 1 })),
+      ...right.map((text, index) => ({ op: '+' as const, text, line: index + 1 })),
     ]
   }
   const scores = Array.from({ length: left.length + 1 }, () => Array<number>(right.length + 1).fill(0))

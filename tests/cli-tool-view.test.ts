@@ -10,6 +10,34 @@ function visible(calls: Parameters<typeof renderToolCalls>[0]): string {
 }
 
 describe('CLI tool diff view', () => {
+  it('warns that a long patch has hidden changes, including a tail-only edit', () => {
+    const find = Array.from({ length: 150 }, (_, index) => `line-${index}`).join('\n')
+    const preview = describeApprovalTool({ name: 'fs.apply_patch', input: { path: 'app.ts', find, replace: find.replace('line-149', 'tail-change') } })
+    expect(preview.truncated).toBe(true)
+    expect(preview.body).toContain('批准会执行完整内容')
+    expect(preview.body).toContain('还有')
+    expect(preview.body).toContain('│+ tail-change')
+    const replaced = describeApprovalTool({ name: 'fs.apply_patch', input: { path: 'app.ts', find, replace: find.replaceAll('line-', 'new-') } })
+    expect(replaced.truncated).toBe(true)
+    expect(replaced.body).toContain('批准会执行完整内容')
+    const emptyLines = describeApprovalTool({ name: 'fs.apply_patch', input: { path: 'app.ts', find: '\n'.repeat(150), replace: `${'\n'.repeat(149)}tail` } })
+    expect(emptyLines.truncated).toBe(true)
+  })
+
+  it.each([
+    { path: 'out.txt', content: 'short file' },
+    { operation: 'append', draftId: 'a-draft', revision: 'a-revision', content: 'short chunk' },
+  ])('shows staged write content for approval and in the transcript: $content', (input) => {
+    const preview = describeApprovalTool({ name: 'fs.stage', input })
+    expect(preview.truncated).toBe(false)
+    expect(preview.body).toContain(`│+ ${input.content}`)
+    const transcript = visible([{ id: 'stage', name: 'fs.stage', status: 'succeeded', arguments: input }])
+    expect(transcript).toContain(input.content)
+    const long = describeApprovalTool({ name: 'fs.stage', input: { ...input, content: 'a'.repeat(200) } })
+    expect(long.truncated).toBe(true)
+    expect(long.body).toContain('批准会执行完整内容')
+  })
+
   it('renders a patch as a colored line diff and hides the baseline hash', () => {
     const lines = renderToolCalls([{
       id: 'patch',
