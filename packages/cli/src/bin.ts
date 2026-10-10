@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
+import { assertJarvisApiUrl, createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
 import { defaultPulseConfig, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliModel, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
 import { runOneShot } from './commands/run.js'
@@ -68,6 +68,12 @@ Options:
   --mock-after-tool-response <text> deterministic response after tool execution
   --task-controller         force the multi-stage task controller
   --no-task-controller      keep a single ReAct loop
+  --jarvis                  enable Jarvis cognitive memory architecture
+  --no-jarvis               disable Jarvis cognitive memory architecture
+  --jarvis-url <url>        Jarvis API base URL (default http://127.0.0.1:7330)
+  --jarvis-token <token>    bearer token for the Jarvis API
+  --jarvis-budget <n>       context token budget sent to Jarvis (default 4000)
+  --jarvis-allow-remote     allow a Jarvis URL that is not loopback
   --live                    doctor: make one real provider request
   --no-color                disable terminal styling
   --help, -h                show this help
@@ -80,6 +86,25 @@ export interface Parsed {
   positionals: string[]
   options: Record<string, string | boolean>
 }
+
+const knownBooleanFlags = new Set([
+  'resume',
+  'read-only',
+  'auto-approve',
+  'allow-network',
+  'no-network',
+  'trust-workspace',
+  'task-controller',
+  'no-task-controller',
+  'live',
+  'no-color',
+  'help',
+  'version',
+  'force',
+  'jarvis',
+  'no-jarvis',
+  'jarvis-allow-remote',
+])
 
 export function parse(argv: string[]): Parsed {
   const options: Record<string, string | boolean> = {}
@@ -101,6 +126,10 @@ export function parse(argv: string[]): Parsed {
       if (!key) continue
       if (inline !== undefined) {
         options[key] = inline
+        continue
+      }
+      if (knownBooleanFlags.has(key)) {
+        options[key] = true
         continue
       }
       const next = forwarded[index + 1]
@@ -350,6 +379,33 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
 
   const explicitTaskController = parsed.options['task-controller'] === true ? true : parsed.options['no-task-controller'] === true ? false : mockParallelPlanOption !== undefined ? true : undefined
 
+  const explicitJarvis = parsed.options['jarvis'] === true
+    ? true
+    : parsed.options['no-jarvis'] === true
+      ? false
+      : process.env.PULSE_JARVIS_ENABLED !== undefined
+        ? process.env.PULSE_JARVIS_ENABLED === '1' || process.env.PULSE_JARVIS_ENABLED.toLowerCase() === 'true'
+        : config.jarvis?.enabled
+  const jarvisUrl = option(parsed.options, 'jarvis-url') ?? process.env.PULSE_JARVIS_API_URL ?? config.jarvis?.apiUrl
+  const jarvisToken = option(parsed.options, 'jarvis-token') ?? process.env.PULSE_JARVIS_TOKEN ?? config.jarvis?.token
+  const jarvisBudget = parsePositiveInteger(option(parsed.options, 'jarvis-budget') ?? process.env.PULSE_JARVIS_BUDGET) ?? config.jarvis?.contextTokenBudget
+  const jarvisAutoCandidate = config.jarvis?.autoCandidate ?? true
+  const jarvisAllowRemote = parsed.options['jarvis-allow-remote'] === true
+    || process.env.PULSE_JARVIS_ALLOW_REMOTE === '1'
+    || process.env.PULSE_JARVIS_ALLOW_REMOTE?.toLowerCase() === 'true'
+    || config.jarvis?.allowRemote === true
+  const jarvisEnabled = explicitJarvis ?? false
+  if (jarvisEnabled) assertJarvisApiUrl(jarvisUrl ?? 'http://127.0.0.1:7330', jarvisAllowRemote)
+
+  const jarvis = {
+    enabled: jarvisEnabled,
+    ...(jarvisUrl ? { apiUrl: jarvisUrl } : {}),
+    ...(jarvisToken ? { token: jarvisToken } : {}),
+    ...(jarvisBudget ? { contextTokenBudget: jarvisBudget } : {}),
+    autoCandidate: jarvisAutoCandidate,
+    allowRemote: jarvisAllowRemote,
+  }
+
   return {
     ...(explicitTaskController === undefined ? {} : { taskController: explicitTaskController }),
     ...(cwd === undefined ? {} : { cwd }),
@@ -377,6 +433,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(configuredAutoCompactPercent === undefined ? {} : { autoCompactPercent: Math.min(90, configuredAutoCompactPercent) }),
     ...(allowNetwork === undefined ? {} : { allowNetwork }),
     ...(config.networkHosts === undefined ? {} : { networkHosts: config.networkHosts }),
+    jarvis,
   }
 }
 

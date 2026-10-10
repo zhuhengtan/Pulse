@@ -48,13 +48,17 @@ import { buildSystemPrompt, loadProjectInstructions, type BuildSystemPromptOptio
 import { continueTaskRecord, isExecutionSummaryFollowup, isTaskContinuation, acceptanceCriteriaFromObjective, hasTaskProgress, maxTaskReplans, taskRecordFromGlobal, taskRecordJson, type TaskOutcome, type TaskRecord, type TaskCriterionAssessment } from './task.js'
 import { createHostModelRouting, type HostModelTask } from './model-routing.js'
 import { CapabilityPackRegistry, type ActiveCapabilityPacks, type CapabilityPack } from './capabilities.js'
+import { JarvisClient, jarvisResultForRun, type CandidateMemoryInput, type PulseJarvisConfig } from './jarvis/index.js'
+import { JarvisRun } from './jarvis/run.js'
+import { jarvisMemoryTitle } from './jarvis/privacy.js'
 export { CapabilityPackRegistry, createMcpCapabilityPack, createPdfCapabilityPack, createSpreadsheetCapabilityPack, referenceCapabilityPackCatalog, type ActiveCapabilityPacks, type CapabilityPack, type CapabilityPackManifest } from './capabilities.js'
 export { createSkillCapabilityPack, defaultSkillRoot, type SkillCapabilityPackOptions } from './skill-pack.js'
+export { assertJarvisApiUrl, JarvisClient, jarvisResultForRun, type CandidateMemoryInput, type CloseSessionInput, type JarvisContextPackage, type JarvisSession, type PulseJarvisConfig } from './jarvis/index.js'
 export { ScheduledTaskStore, ScheduledTaskWorker, MIN_SCHEDULED_TASK_INTERVAL_MS, MAX_SCHEDULED_TASK_INTERVAL_MS, type ScheduledTask, type CreateScheduledTaskInput, type ScheduledTaskExecutor, type ScheduledTaskWorkerRunSummary } from './scheduled-tasks.js'
 export { maxTaskReplans, type TaskAttempt, type TaskCriterionAssessment, type TaskOutcome, type TaskRecord, type TaskRecordStatus } from './task.js'
 
 export { legacyPulseDataPath, pulseDataPath, pulseHomePath, pulseLogPath } from './paths.js'
-export { buildSystemPrompt, loadProjectInstructions, MAX_INSTRUCTION_BYTES, type BuildSystemPromptOptions, type DiscoveredInstructions } from './prompt.js'
+export { buildSystemPrompt, loadProjectInstructions, MAX_INSTRUCTION_BYTES, MAX_JARVIS_CONTEXT_CHARS, type BuildSystemPromptOptions, type DiscoveredInstructions } from './prompt.js'
 
 export type ApprovalMode = 'read-only' | 'ask' | 'auto'
 export interface LocalHostOptions {
@@ -103,6 +107,8 @@ export interface LocalHostOptions {
    * Values above 90 are clamped so the summary request still has room.
    */
   autoCompactPercent?: number
+  jarvis?: PulseJarvisConfig
+  jarvisClient?: JarvisClient
 }
 export interface CreateConversationInput { cwd?: string; title?: string }
 export interface ArtifactSummary { path: string; hash: string; bytes: number; mediaType?: string; label?: string; runId: string }
@@ -966,10 +972,11 @@ export class LocalHost {
   private readonly options: LocalHostOptions
   private activeProviderName: string | undefined
   private activeModelName: string | undefined
+  private readonly jarvisClient: JarvisClient | undefined
   private readonly approvedToolCalls = new Map<string, Set<string>>()
   /** Conversation snapshot used to grow a context surface from a reached point. */
   private readonly surfaceConversations = new Map<string, ConversationMessage[]>()
-  private readonly active = new Map<string, { runtime: PulseRuntime; session: PulseSession; conversationId: string; runId: string; capabilities: ActiveCapabilityPacks; capabilityController: AbortController }>()
+  private readonly active = new Map<string, { runtime: PulseRuntime; session: PulseSession; conversationId: string; runId: string; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; jarvis?: JarvisRun; finish?: () => Promise<Outcome & { text?: string }> }>()
   private readonly conversationLocks = new Map<string, Awaited<ReturnType<typeof open>>>()
   constructor(options: LocalHostOptions = {}) {
     this.root = resolve(options.cwd ?? process.cwd())
@@ -980,6 +987,7 @@ export class LocalHost {
     this.options = options
     this.activeProviderName = options.activeProviderCode ?? options.provider?.provider
     this.activeModelName = options.activeModel ?? options.provider?.defaultModel
+    this.jarvisClient = options.jarvisClient ?? (options.jarvis?.enabled ? new JarvisClient(options.jarvis) : undefined)
   }
   private async migrateLegacyData(): Promise<void> {
     if (!this.shouldMigrateLegacyData) return
@@ -1329,7 +1337,7 @@ export class LocalHost {
       summarize: (value) => JSON.parse(JSON.stringify(value)) as JsonValue,
     }))
   }
-  private async resolveSystemPrompt(workspace: string, languageHint?: string, conversation: ConversationMessage[] = []): Promise<string> {
+  private async resolveSystemPrompt(workspace: string, languageHint?: string, conversation: ConversationMessage[] = [], jarvisContext?: string): Promise<string> {
     const instructions = await loadProjectInstructions(workspace)
     const textForLang = languageHint ?? conversation.filter((m) => m.role === 'user').at(-1)?.content ?? ''
     const lang = detectResponseLanguage(textForLang)
@@ -1339,6 +1347,7 @@ export class LocalHost {
       projectInstructions: instructions.projectRules,
       userInstructions: instructions.userRules,
       responseLanguage: lang,
+      jarvisContext,
     })
   }
   private async restoreRuntimeFor(conversationId: string, runId: string, cwd: string, conversation: ConversationMessage[] = [], systemPrompt?: string): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController }> {
@@ -1391,6 +1400,7 @@ export class LocalHost {
   private withCapabilityInstructions(prompt: string, instructions: string[]): string { return wrapCapabilityInstructions(prompt, instructions) }
   private makeRunHandle(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, contextNotice?: string): RunHandle {
     const activeEntry = this.active.get(runId)
+    activeEntry?.jarvis?.observe(runtime, session, activeEntry.capabilityController.signal)
     let finalized: Promise<Outcome & { text?: string }> | undefined
     let finalTaskOutcome: TaskOutcome | undefined
     const currentTaskOutcome = (fallbackRuntimeStatus?: Outcome['status']): TaskOutcome | undefined => {
@@ -1486,6 +1496,29 @@ export class LocalHost {
       if (taskGlobal && typeof taskGlobal === 'object' && !Array.isArray(taskGlobal) && taskGlobal.taskController) await writeFile(join(this.runDir(conversationId, runId), 'task-controller.json'), JSON.stringify(taskGlobal.taskController, null, 2))
       if (exportedTask) await writeFile(join(this.runDir(conversationId, runId), 'task-record.json'), JSON.stringify({ ...exportedTask, ...(taskOutcome ? { assessments: taskOutcome.criteria } : {}) }, null, 2))
       if (taskOutcome) await writeFile(join(this.runDir(conversationId, runId), 'task-outcome.json'), JSON.stringify(taskOutcome, null, 2))
+      if (activeEntry?.jarvis) {
+        const jarvisResult = jarvisResultForRun(outcome.status, taskOutcome?.status)
+        const passed = taskOutcome?.criteria?.filter((c) => c.status === 'passed') ?? []
+        const failed = taskOutcome?.criteria?.filter((c) => c.status !== 'passed') ?? []
+        const decisions = passed.map((c) => `${c.criterionId}: ${c.rationale}`.slice(0, 1000))
+        const failures = failed.map((c) => `${c.criterionId}: ${c.rationale}`.slice(0, 1000))
+        const nextSteps = failed.map((c) => `Verify or complete ${c.criterionId}`.slice(0, 500))
+        const candidate: CandidateMemoryInput | undefined = this.options.jarvis?.autoCandidate !== false && jarvisResult === 'success' && exportedTask
+          ? {
+            scope: 'project',
+            kind: 'workflow',
+            title: jarvisMemoryTitle(`Task: ${exportedTask.objective}`),
+            content: `Objective: ${exportedTask.objective}\nOutcome: ${text ?? 'Completed successfully'}${decisions.length ? `\nDecisions: ${decisions.join('; ')}` : ''}`.slice(0, 5000),
+            sourceRefs: [`pulse:run:${runId}`],
+          } : undefined
+        await activeEntry.jarvis.close(runtime, {
+          result: jarvisResult,
+          summary: (text ?? exportedTask?.objective ?? 'Pulse run completed').slice(0, 5000),
+          decisions,
+          failures,
+          nextSteps,
+        }, candidate).catch(() => undefined)
+      }
       await writeFile(join(this.runDir(conversationId, runId), 'operations.json'), JSON.stringify(operationAudit(runtime), null, 2))
       if (taskGlobal) { const prior = await readFile(join(this.runDir(conversationId, runId), 'reuse-checkpoint.json'), 'utf8').then((text) => JSON.parse(text) as Checkpoint).catch(() => undefined); const checkpoint = await createCheckpoint(runtime, (await this.readManifest(conversationId)).cwd, runId, taskGlobal, prior); if (checkpoint) await writeFile(join(this.runDir(conversationId, runId), 'checkpoint.json'), JSON.stringify(checkpoint)) }
       return { ...outcome, ...(text === undefined ? {} : { text }) }
@@ -1497,12 +1530,14 @@ export class LocalHost {
       try { await activeEntry?.capabilities.dispose() } finally { await this.releaseConversationLock(conversationId) }
     })
     const events = this.projectEvents(conversationId, runId, runtime, session, finish, () => finalTaskOutcome ?? currentTaskOutcome(), contextNotice)
+    if (activeEntry) activeEntry.finish = finish
     return { id: runId, conversationId, events, outcome: finish, usage: async () => { await finish(); return runUsage(runtime, this.options.modelPricing) }, taskOutcome: async () => { await finish(); return finalTaskOutcome ?? currentTaskOutcome() }, cancel: async (reason = 'USER_REQUESTED') => { activeEntry?.capabilityController.abort(); await session.cancel(reason) }, reply: async (effectId, value) => { const effect = runtime.state.effects.get(effectId); validateAskReply(effect?.input, value); const approved = value && typeof value === 'object' && !Array.isArray(value) && (value as Record<string, JsonValue>).approved === true; if (approved && effect?.kind === 'human' && effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input)) { const calls = (effect.input as Record<string, JsonValue>).tools; if (Array.isArray(calls)) { const approvedIds = this.approvedToolCalls.get(runId) ?? new Set<string>(); this.approvedToolCalls.set(runId, approvedIds); for (const call of calls) if (call && typeof call === 'object' && !Array.isArray(call) && typeof (call as Record<string, JsonValue>).toolCallId === 'string') approvedIds.add((call as Record<string, JsonValue>).toolCallId as string) } } await session.reply(effectId, value) }, submitHumanInput: async (text, targetEffectId) => { if (!text.trim()) throw new Error('MESSAGE_REQUIRED'); const inputId = `human-${randomUUID()}`; const rootAgent = runtime.state.agents.get(session.agentId); const taskGlobal = rootAgent?.globalVersions.get(rootAgent.latestGlobalVersion); const steer = targetEffectId === undefined && !text.trim().startsWith('/') && taskGlobal && typeof taskGlobal === 'object' && !Array.isArray(taskGlobal) && taskGlobal.taskController; await session.submitHumanInput(inputId, { text, ...(steer ? { command: 'steer' } : {}) }, targetEffectId); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text, runId, createdAt: new Date().toISOString() }) } }
   }
   async sendMessage(conversationId: string, input: UserMessageInput): Promise<RunHandle> {
     if (!input.text.trim()) throw new Error('MESSAGE_REQUIRED')
     const runId = `run-${randomUUID()}`; await this.acquireConversationLock(conversationId, runId)
     let activated: Awaited<ReturnType<LocalHost['runtimeFor']>> | undefined
+    let jarvis: JarvisRun | undefined
     try {
       const manifest = await this.readManifest(conversationId); if (manifest.activeRunId) throw new Error('CONVERSATION_BUSY')
       const contextNotice = await this.maybeCompactConversationLocked(conversationId)
@@ -1544,7 +1579,14 @@ export class LocalHost {
       const now = new Date().toISOString(); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal: input.text, taskController: controlled, ...(controlled ? { controllerVersion: '9' } : {}), maxTurns: this.options.maxTurns ?? 32, cwd: manifest.cwd, provider: this.options.provider?.provider ?? 'mock', approvalMode: this.options.approvalMode ?? 'ask', createdAt: now }, null, 2))
       if (conversation.length === 0) manifest.title = input.text.length > 50 ? input.text.slice(0, 50) + '...' : input.text;
       if (reuse) await writeFile(join(this.runDir(conversationId, runId), 'reuse-checkpoint.json'), JSON.stringify(reuse))
-      const systemPrompt = await this.resolveSystemPrompt(manifest.cwd, input.text, conversation)
+      if (this.jarvisClient) {
+        try {
+          jarvis = await JarvisRun.open(this.jarvisClient, join(this.runDir(conversationId, runId), 'jarvis.json'), manifest.cwd, input.text, this.options.jarvis?.contextTokenBudget ?? 4000)
+        } catch {
+          // Gracefully continue without Jarvis session if client errors
+        }
+      }
+      const systemPrompt = await this.resolveSystemPrompt(manifest.cwd, input.text, conversation, jarvis?.context)
       this.surfaceConversations.set(runId, conversation)
       activated = await this.runtimeFor(conversationId, runId, manifest.cwd, safetyReviewContext(manifest.cwd, goal, conversation), input.text)
       const { runtime, registry, capabilities, capabilityController } = activated
@@ -1556,9 +1598,16 @@ export class LocalHost {
       const program = controlled ? buildTaskControllerProgram({ ...(reuse ? { resumePlan: reuse.controller, reusableIds: reuse.reusableIds } : {}), system: runPrompt, toolNames, readOnlyToolNames, conversation, approvalMode: this.options.approvalMode ?? 'ask', maxTurns: this.options.maxTurns ?? 32 }) : buildProgram(toolNames, runPrompt, conversation, true, this.options.maxTurns ?? 32, '3')(this.options.approvalMode ?? 'ask')
       runtime.register(program); runtime.setHumanInputProgram(program); const initialTask: TaskRecord = summaryFollowup
         ? { schemaVersion: 1, runId, objective: goal, continuedFromRunId: inheritedTask!.runId, acceptanceCriteria: [{ id: 'criterion-1', description: '根据上一轮真实执行记录回答当前追问，不重复修改文件' }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] }
-        : inheritedTask ? continueTaskRecord(inheritedTask, runId) : { schemaVersion: 1, runId, objective: goal, acceptanceCriteria: acceptanceCriteriaFromObjective(goal), status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] }; await writeFile(join(this.runDir(conversationId, runId), 'task-record.json'), JSON.stringify(initialTask, null, 2)); const { agentId } = runtime.createAgent({ goal, program, initialGlobal: { taskRecord: taskRecordJson(initialTask) } }); const session = runtime.start(agentId); this.active.set(runId, { runtime, session, conversationId, runId, capabilities, capabilityController }); manifest.activeRunId = runId; manifest.runs.push(runId); manifest.updatedAt = now; await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
+        : inheritedTask ? continueTaskRecord(inheritedTask, runId) : { schemaVersion: 1, runId, objective: goal, acceptanceCriteria: acceptanceCriteriaFromObjective(goal), status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] }; await writeFile(join(this.runDir(conversationId, runId), 'task-record.json'), JSON.stringify(initialTask, null, 2)); const { agentId } = runtime.createAgent({ goal, program, initialGlobal: { taskRecord: taskRecordJson(initialTask) } }); const session = runtime.start(agentId); this.active.set(runId, { runtime, session, conversationId, runId, capabilities, capabilityController, ...(jarvis ? { jarvis } : {}) }); manifest.activeRunId = runId; manifest.runs.push(runId); manifest.updatedAt = now; await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
       return this.makeRunHandle(conversationId, runId, runtime, session, contextNotice)
     } catch (error) {
+      if (jarvis) {
+        await jarvis.close(undefined, {
+          result: 'failure',
+          summary: 'Pulse run setup failed before the session could start.',
+          failures: [(error instanceof Error ? error.message : 'setup failed').slice(0, 500)],
+        }).catch(() => undefined)
+      }
       const active = this.active.get(runId)
       if (active) {
         await active.session.cancel('HOST_SETUP_FAILED').catch(() => undefined)
@@ -1586,7 +1635,10 @@ export class LocalHost {
     try {
       const conversation = (await this.getConversationMessages(conversationId)).map((message): ConversationMessage => ({ role: message.role, content: message.text }))
       const lastUserMsg = conversation.filter((m) => m.role === 'user').at(-1)?.content
-      const systemPrompt = await this.resolveSystemPrompt(manifest.cwd, lastUserMsg, conversation)
+      const jarvis = this.jarvisClient
+        ? await JarvisRun.open(this.jarvisClient, join(this.runDir(conversationId, runId), 'jarvis.json'), manifest.cwd, lastUserMsg ?? manifest.title, this.options.jarvis?.contextTokenBudget ?? 4000, true).catch(() => undefined)
+        : undefined
+      const systemPrompt = await this.resolveSystemPrompt(manifest.cwd, lastUserMsg, conversation, jarvis?.context)
       const activated = await this.restoreRuntimeFor(conversationId, runId, manifest.cwd, conversation, systemPrompt)
       restored = activated
       const { runtime, registry, capabilities, capabilityController } = activated
@@ -1596,7 +1648,7 @@ export class LocalHost {
       const agent = [...runtime.state.agents.values()].find((candidate) => candidate.parentAgentId === undefined)
       if (!agent) throw new Error('RESTORED_AGENT_NOT_FOUND')
       const session = runtime.start(agent.id)
-      this.active.set(runId, { runtime, session, conversationId, runId, capabilities, capabilityController })
+      this.active.set(runId, { runtime, session, conversationId, runId, capabilities, capabilityController, ...(jarvis ? { jarvis } : {}) })
       return this.makeRunHandle(conversationId, runId, runtime, session)
     } catch (error) {
       const active = this.active.get(runId)
@@ -1747,6 +1799,8 @@ export class LocalHost {
     for (const active of running) active.capabilityController.abort()
     await Promise.allSettled(running.map(async (active) => {
       await active.runtime.shutdown()
+      const root = active.runtime.state.agents.get(active.session.agentId)
+      if (active.jarvis && active.finish && root && ['succeeded', 'failed', 'cancelled'].includes(root.state ?? '')) { await active.finish(); return }
       await active.capabilities.dispose()
     }))
     this.active.clear()

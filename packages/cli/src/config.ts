@@ -76,6 +76,22 @@ export interface PulseCliConfig {
   /** Explicit network destinations; workspace configuration cannot grant these. */
   networkHosts?: string[]
   allowNetwork?: boolean
+  jarvis?: PulseCliJarvisConfig
+}
+
+export interface PulseCliJarvisConfig {
+  /** Master switch to enable or disable Jarvis cognitive memory architecture. */
+  enabled?: boolean
+  /** Base URL of the running Jarvis server. Defaults to http://127.0.0.1:7330 */
+  apiUrl?: string
+  /** Optional bearer token if Jarvis requires auth. */
+  token?: string
+  /** Max token budget for dynamic context package built by Jarvis. Defaults to 4000. */
+  contextTokenBudget?: number
+  /** Whether to automatically record candidate memories upon task completion. Defaults to true. */
+  autoCandidate?: boolean
+  /** Allow an API URL that is not loopback. Defaults to false. */
+  allowRemote?: boolean
 }
 
 export const defaultPulseConfig: PulseCliConfig = {
@@ -104,6 +120,13 @@ export const defaultPulseConfig: PulseCliConfig = {
   maxTurns: 32,
   autoCompactPercent: 90,
   allowNetwork: false,
+  jarvis: {
+    enabled: false,
+    apiUrl: 'http://127.0.0.1:7330',
+    contextTokenBudget: 4_000,
+    autoCandidate: true,
+    allowRemote: false,
+  },
 }
 
 export function defaultPulseConfigPath(): string {
@@ -146,7 +169,7 @@ function asConfig(value: unknown): PulseCliConfig | undefined {
   return value as PulseCliConfig
 }
 
-/** Workspace files must not escalate approval, network, provider credentials, or the system prompt. */
+/** Workspace files must not escalate approval, network, provider credentials, the system prompt, or the Jarvis endpoint. */
 export function sanitizeWorkspaceConfig(value: PulseCliConfig): PulseCliConfig {
   const providers = value.providers === undefined ? undefined : Object.fromEntries(Object.entries(value.providers).flatMap(([name, profile]) => {
     const safe = {
