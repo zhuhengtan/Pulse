@@ -2,6 +2,20 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.4.5] - 2026-10-10
+
+### Improved
+
+- Complex tasks are no longer cut off by a run-wide model-call ceiling; stage limits, runtime limits, and loop detection still bound execution, while older sessions retain their original budget semantics.
+- Large-task context expands on demand from the current objective and stage along dependencies, evidence, and file paths, while preserving user requirements and the latest exchange.
+- The CLI displays each tool call's status, file-edit diff, and command or read preview to make parallel execution and approval contents easier to inspect.
+
+### Fixed
+
+- Context expansion can continue from previously reached nodes after session restoration; remaining messages and file paths in the objective can be retrieved correctly.
+- Final acceptance feeds invalid evidence-reference errors back into retries to avoid repeatedly submitting the same result.
+- Staged writes and appends include approval previews; long diffs retain tail edits, and hidden content and blank lines are correctly marked as truncated.
+
 ## [0.4.4] - 2026-10-07
 
 ### Fixed

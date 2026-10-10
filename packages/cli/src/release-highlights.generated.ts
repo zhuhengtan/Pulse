@@ -1,5 +1,31 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.4.5": [
+    {
+      "zh": "复杂任务不再受全局模型调用次数上限截断，继续通过阶段、运行时限和循环检测控制执行；旧会话保持原有预算语义。",
+      "en": "Complex tasks are no longer cut off by a run-wide model-call ceiling; stage limits, runtime limits, and loop detection still bound execution, while older sessions retain their original budget semantics."
+    },
+    {
+      "zh": "大任务上下文从当前目标和阶段出发，沿依赖、证据和文件路径按需展开，同时保留用户要求及最近对话。",
+      "en": "Large-task context expands on demand from the current objective and stage along dependencies, evidence, and file paths, while preserving user requirements and the latest exchange."
+    },
+    {
+      "zh": "CLI 展示每次工具调用的状态、文件修改 diff 和命令或读取预览，便于查看并行执行与审批内容。",
+      "en": "The CLI displays each tool call's status, file-edit diff, and command or read preview to make parallel execution and approval contents easier to inspect."
+    },
+    {
+      "zh": "上下文展开支持继续访问此前已到达的节点，并在恢复会话后保留展开范围；剩余消息和目标中的文件路径可以正确检索。",
+      "en": "Context expansion can continue from previously reached nodes after session restoration; remaining messages and file paths in the objective can be retrieved correctly."
+    },
+    {
+      "zh": "最终验收引用无效证据时，将具体错误反馈给重试，避免重复提交相同结果。",
+      "en": "Final acceptance feeds invalid evidence-reference errors back into retries to avoid repeatedly submitting the same result."
+    },
+    {
+      "zh": "暂存写入和追加内容可在审批中预览；长 diff 保留尾部修改，隐藏内容和空行正确标记为截断。",
+      "en": "Staged writes and appends include approval previews; long diffs retain tail edits, and hidden content and blank lines are correctly marked as truncated."
+    }
+  ],
   "0.4.4": [
     {
       "zh": "多阶段任务获得完整工具定义，并保留重试和依赖阶段的验收证据；补验证或补报告不再强制重复修改文件。",
