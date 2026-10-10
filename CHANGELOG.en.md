@@ -2,6 +2,19 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.4.6] - 2026-10-10
+
+### Added
+
+- Jarvis sessions, project context, execution events, and candidate memories can be enabled through CLI flags, environment variables, or user configuration; integration is off by default and execution continues independently if the service is unavailable.
+
+### Fixed
+
+- Tool events send only execution identifiers, tool names, and statuses to keep credentials in arguments, file contents, and outputs out of memory; outbound text redacts common credential forms.
+- Persist each run's Jarvis session, context, and recorded events so restored runs retain context without replaying recorded events.
+- Event recording no longer depends on UI consumption, and completion waits for the current run's writes; concurrent runs do not wait for each other's memory writes.
+- Candidate memory titles are normalized to a single line and capped in length; only accepted tasks are recorded as successful, and workspace configuration cannot enable Jarvis or override its endpoint.
+
 ## [0.4.5] - 2026-10-10
 
 ### Improved

@@ -1,5 +1,27 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.4.6": [
+    {
+      "zh": "支持通过 CLI、环境变量或用户配置启用 Jarvis 会话、项目上下文、执行事件和候选记忆；默认关闭，服务不可用时继续独立运行。",
+      "en": "Jarvis sessions, project context, execution events, and candidate memories can be enabled through CLI flags, environment variables, or user configuration; integration is off by default and execution continues independently if the service is unavailable."
+    },
+    {
+      "zh": "工具事件仅发送执行标识、工具名称和状态，避免参数、文件内容和输出中的凭据进入记忆；发送的文本增加常见凭据脱敏。",
+      "en": "Tool events send only execution identifiers, tool names, and statuses to keep credentials in arguments, file contents, and outputs out of memory; outbound text redacts common credential forms."
+    },
+    {
+      "zh": "持久化每次运行的 Jarvis 会话、上下文和已记录事件，恢复运行时保留上下文并避免重放已记录事件。",
+      "en": "Persist each run's Jarvis session, context, and recorded events so restored runs retain context without replaying recorded events."
+    },
+    {
+      "zh": "事件记录不再依赖界面消费，结束前等待本次运行的写入完成；并行运行不会互相等待记忆写入。",
+      "en": "Event recording no longer depends on UI consumption, and completion waits for the current run's writes; concurrent runs do not wait for each other's memory writes."
+    },
+    {
+      "zh": "候选记忆标题统一为单行并限制长度；仅验收通过的任务可记录为成功，工作区配置不能启用 Jarvis 或覆盖其端点。",
+      "en": "Candidate memory titles are normalized to a single line and capped in length; only accepted tasks are recorded as successful, and workspace configuration cannot enable Jarvis or override its endpoint."
+    }
+  ],
   "0.4.5": [
     {
       "zh": "复杂任务不再受全局模型调用次数上限截断，继续通过阶段、运行时限和循环检测控制执行；旧会话保持原有预算语义。",
