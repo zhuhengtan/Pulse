@@ -248,6 +248,10 @@ WantedBy=default.target
       return result.status === 0 ? 0 : 1
     } else if (platform === 'linux') {
       const unit = 'pulse-h5.service'
+      if (action === 'status' && (await access(join(home, '.config', 'systemd', 'user', unit)).then(() => false, () => true))) {
+        process.stdout.write('Pulse H5 守护服务未安装。\n')
+        return 0
+      }
       const verb = action === 'status' ? 'status' : action === 'stop' ? 'stop' : 'disable'
       const result = spawnSync('systemctl', ['--user', verb, ...(action === 'uninstall' ? ['--now'] : []), unit], { encoding: 'utf8' })
       if (action === 'uninstall') {

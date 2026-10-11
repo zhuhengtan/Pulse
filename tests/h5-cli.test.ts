@@ -41,12 +41,21 @@ describe('H5 CLI Command', () => {
     expect(code).toBe(0)
   })
 
-  it('reports status cleanly when launchd service is not installed', async () => {
+  it.each(['darwin', 'linux', 'win32'])('reports uninstalled or unsupported service status on %s', async (platform) => {
     const dir = await mkdtemp(join(tmpdir(), 'h5-cli-test-'))
     temporaryDirectories.push(dir)
-
-    const code = await runH5Command({ dataDir: dir, root: dir }, ['status'])
-    expect(code).toBe(0)
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    const originalHome = process.env.PULSE_HOME
+    try {
+      Object.defineProperty(process, 'platform', { value: platform })
+      process.env.PULSE_HOME = dir
+      const code = await runH5Command({ dataDir: dir, cwd: dir }, ['status'])
+      expect(code).toBe(platform === 'win32' ? 1 : 0)
+    } finally {
+      Object.defineProperty(process, 'platform', originalPlatform)
+      if (originalHome === undefined) delete process.env.PULSE_HOME
+      else process.env.PULSE_HOME = originalHome
+    }
   })
 
   it('rejects unknown subcommands without starting a server', async () => {
