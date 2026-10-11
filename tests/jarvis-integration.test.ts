@@ -22,9 +22,9 @@ describe('Jarvis 3-tier memory integration', () => {
       const context = await client.buildContext('sess-1', 'test task')
       expect(context).toBeUndefined()
 
-      await expect(client.recordEvent('sess-1', 'action', 'tool execution')).resolves.toBeUndefined()
-      await expect(client.recordCandidate('sess-1', { title: 'Fact', content: 'Details' })).resolves.toBeUndefined()
-      await expect(client.closeSession('sess-1', { result: 'success', summary: 'Done' })).resolves.toBeUndefined()
+      await expect(client.recordEvent('sess-1', 'action', 'tool execution')).rejects.toThrow()
+      await expect(client.recordCandidate('sess-1', { title: 'Fact', content: 'Details' })).rejects.toThrow()
+      await expect(client.closeSession('sess-1', { result: 'success', summary: 'Done' })).rejects.toThrow()
     })
 
     it('accepts loopback Jarvis URLs and rejects remote endpoints unless explicitly allowed', () => {
@@ -332,9 +332,10 @@ describe('Jarvis 3-tier memory integration', () => {
           return { text: 'Accepted context' }
         },
         async recordEvent() {},
-        async recordCandidate(_id: string, candidate: { title: string }) {
+        async recordCandidate(sessionId: string, candidate: { title: string; sourceRefs?: string[] }) {
           expect(candidate.title).not.toMatch(/[\r\n]/)
           expect(candidate.title.length).toBeLessThanOrEqual(200)
+          expect(candidate.sourceRefs).toEqual([sessionId])
           order.push('candidate')
         },
         async closeSession(_id: string, input: { result: string }) {
@@ -424,7 +425,7 @@ describe('Jarvis 3-tier memory integration', () => {
       const opened = vi.fn(async (workspace: string) => ({ id: 'durable-session', projectId: 'project', workspace }))
       const built = vi.fn(async () => ({ text: 'UNIQUE_JARVIS_CONTEXT_MARKER' }))
       const closed = vi.fn(async () => {})
-      const client = { openSession: opened, buildContext: built, async recordEvent(_id: string, _type: string, content: string) { events.push(JSON.parse(content)) }, async recordCandidate() {}, closeSession: closed } as unknown as JarvisClient
+      const client = { openSession: opened, buildContext: built, async recordEvent(_id: string, type: string, content: string) { if (type === 'action') events.push(JSON.parse(content)) }, async recordCandidate() {}, closeSession: closed } as unknown as JarvisClient
       await writeFile(join(tempDir, 'note.txt'), 'hello')
       let modelTurn = 0
       vi.stubGlobal('fetch', vi.fn(async () => {
@@ -461,7 +462,7 @@ describe('Jarvis 3-tier memory integration', () => {
         expect(opened).toHaveBeenCalledTimes(1)
         expect(built).toHaveBeenCalledTimes(1)
         expect(closed).toHaveBeenCalledOnce()
-        expect(closed).toHaveBeenCalledWith('durable-session', expect.any(Object))
+        expect(closed).toHaveBeenCalledWith('durable-session', expect.any(Object), 'pulse:close')
         expect(events.filter((event) => event.tool === 'fs.read')).toHaveLength(1)
         expect(new Set(events.map((event) => event.effectId)).size).toBe(events.length)
         expect(JSON.parse(await readFile(bindingPath, 'utf8')).closed).toBe(true)

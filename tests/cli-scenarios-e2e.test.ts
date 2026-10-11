@@ -36,6 +36,7 @@ function runCli(
       cwd: options?.cwd ?? process.cwd(),
       env: {
         ...process.env,
+        PULSE_JARVIS_ENABLED: '0',
         ...(options?.env ?? {}),
       },
       stdio: ['pipe', 'pipe', 'pipe'],

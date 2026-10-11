@@ -77,6 +77,13 @@ export interface PulseCliConfig {
   networkHosts?: string[]
   allowNetwork?: boolean
   jarvis?: PulseCliJarvisConfig
+  frontModel?: {
+    enabled?: boolean
+    provider?: string
+    model?: string
+    baseURL?: string
+    timeoutMs?: number
+  }
 }
 
 export interface PulseCliJarvisConfig {

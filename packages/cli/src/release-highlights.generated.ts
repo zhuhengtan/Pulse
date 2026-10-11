@@ -1,5 +1,31 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.4.7": [
+    {
+      "zh": "新增 H5 手机助理：支持扫码配对、设备管理、实时会话与工具审批，以及 macOS 和 Linux 后台服务。",
+      "en": "Added an H5 mobile assistant with QR pairing, device management, live conversations, tool approvals, and background services on macOS and Linux."
+    },
+    {
+      "zh": "支持本地 Ollama 即时回复与任务意图整理，并结合最近对话处理澄清回答。",
+      "en": "Added local Ollama instant replies and structured task briefs that use recent dialogue to interpret clarification answers."
+    },
+    {
+      "zh": "Jarvis 事件、候选记忆和会话关闭增加持久化待发送队列及幂等请求标识，失败后可恢复重试，收到确认后才推进状态。",
+      "en": "Jarvis events, candidate memories, and session completion use a durable outbox and idempotency keys; failed writes can be retried after restoration, and state advances only after acknowledgement."
+    },
+    {
+      "zh": "执行中的用户补充输入可记录为 Jarvis 观察事件；候选记忆使用 Jarvis 可解析的会话来源。",
+      "en": "Mid-run user input is recorded as Jarvis observation events; candidate memories reference sessions that Jarvis can resolve as evidence."
+    },
+    {
+      "zh": "H5 默认端口改为 7332，避免与 Jarvis MCP 冲突；后台服务保留自定义端口并拒绝随机端口。",
+      "en": "Changed the default H5 port to 7332 to avoid conflicts with Jarvis MCP; background services preserve custom ports and reject random ports."
+    },
+    {
+      "zh": "修复手机页事件与审批流程、会话工作目录限制、Host 校验和标题转义；网络服务默认保持人工审批。",
+      "en": "Fixed mobile event and approval flows, session workspace restrictions, Host validation, and title escaping; network services keep manual approval by default."
+    }
+  ],
   "0.4.6": [
     {
       "zh": "支持通过 CLI、环境变量或用户配置启用 Jarvis 会话、项目上下文、执行事件和候选记忆；默认关闭，服务不可用时继续独立运行。",

@@ -15,6 +15,7 @@ import { runScheduledCommand } from './commands/scheduled.js'
 import { runServiceCommand } from './commands/service.js'
 import { runTemplateCommand } from './commands/template.js'
 import { runMcpDoctor } from './commands/mcp.js'
+import { runH5Command } from './commands/h5.js'
 import { isSameModulePath } from './utils/is-main-module.js'
 import { formatVersionOutput, shouldUseColor } from './presentation.js'
 
@@ -34,6 +35,8 @@ Usage:
   pulse sessions [options]                list saved conversations
   pulse resume <conversation-id> [task]    continue or recover a conversation
   pulse doctor [options]                  check local configuration
+  pulse h5 [start|qr|devices|revoke|install|status|stop|uninstall]
+                                          mobile web assistant and launchd daemon
   pulse schedule <add|list|pause|resume|remove|daemon> [options]
                                           manage recurring tasks (daemon requires read-only or auto approval)
   pulse service <install|status|start|stop|uninstall>
@@ -146,7 +149,7 @@ export function parse(argv: string[]): Parsed {
       options[key] = true
       continue
     }
-  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp'].includes(arg)) {
+  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp', 'h5'].includes(arg)) {
       command = arg
     } else {
       positionals.push(arg)
@@ -434,6 +437,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(allowNetwork === undefined ? {} : { allowNetwork }),
     ...(config.networkHosts === undefined ? {} : { networkHosts: config.networkHosts }),
     jarvis,
+    ...(config.frontModel ? { frontModel: config.frontModel } : {}),
   }
 }
 
@@ -468,6 +472,7 @@ export async function main(): Promise<number> {
     return runScheduledCommand(options, parsed.positionals, parsed.options)
   }
   if (parsed.command === 'service') return runServiceCommand(options, parsed.positionals)
+  if (parsed.command === 'h5') return runH5Command(options, parsed.positionals, parsed.options)
   if (parsed.command === 'mcp' && parsed.positionals[0] === 'doctor') return runMcpDoctor(options, parsed.positionals.slice(1))
   if (parsed.command === 'template') return runTemplateCommand(options, parsed.positionals, option(parsed.options, 'format') ?? 'text', version)
 

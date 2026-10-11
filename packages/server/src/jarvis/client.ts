@@ -55,15 +55,16 @@ export class JarvisClient {
     }
   }
 
-  async recordEvent(sessionId: string, type: 'observation' | 'action' | 'result' | 'system', content: string): Promise<void> {
+  async recordEvent(sessionId: string, type: 'observation' | 'action' | 'result' | 'system', content: string, idempotencyKey?: string): Promise<void> {
     try {
-      await this.request('/v1/events', { sessionId, type, content: this.safeText(content) }, this.contextTimeoutMs)
+      await this.request('/v1/events', { sessionId, type, content: this.safeText(content) }, this.contextTimeoutMs, idempotencyKey)
     } catch (error) {
       this.warnFailure('recordEvent', error)
+      throw error
     }
   }
 
-  async recordCandidate(sessionId: string, candidate: CandidateMemoryInput): Promise<void> {
+  async recordCandidate(sessionId: string, candidate: CandidateMemoryInput, idempotencyKey?: string): Promise<void> {
     try {
       await this.request('/v1/memory/candidates', {
         sessionId,
@@ -72,13 +73,14 @@ export class JarvisClient {
         title: jarvisMemoryTitle(this.safeText(candidate.title)),
         content: this.safeText(candidate.content),
         sourceRefs: candidate.sourceRefs ?? [],
-      }, this.contextTimeoutMs)
+      }, this.contextTimeoutMs, idempotencyKey)
     } catch (error) {
       this.warnFailure('recordCandidate', error)
+      throw error
     }
   }
 
-  async closeSession(sessionId: string, input: CloseSessionInput): Promise<void> {
+  async closeSession(sessionId: string, input: CloseSessionInput, idempotencyKey?: string): Promise<void> {
     try {
       await this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/close`, {
         result: input.result,
@@ -86,11 +88,15 @@ export class JarvisClient {
         decisions: (input.decisions ?? []).map((text) => this.safeText(text)),
         failures: (input.failures ?? []).map((text) => this.safeText(text)),
         nextSteps: (input.nextSteps ?? []).map((text) => this.safeText(text)),
-      }, this.contextTimeoutMs)
+      }, this.contextTimeoutMs, idempotencyKey)
     } catch (error) {
       this.warnFailure('closeSession', error)
+      throw error
     }
   }
+
+  /** Apply the same outbound redaction before putting retry payloads on disk. */
+  redactText(text: string): string { return this.safeText(text) }
 
   private safeText(text: string): string {
     return redactJarvisText(this.token ? text.split(this.token).join('[REDACTED]') : text)
@@ -106,12 +112,13 @@ export class JarvisClient {
     }
   }
 
-  private async request<T>(path: string, body: unknown, timeoutMs = this.timeoutMs): Promise<T> {
+  private async request<T>(path: string, body: unknown, timeoutMs = this.timeoutMs, idempotencyKey?: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
+        ...(idempotencyKey ? { 'idempotency-key': idempotencyKey } : {}),
       },
       body: JSON.stringify(body),
       redirect: 'error',

@@ -2,6 +2,20 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.4.7] - 2026-10-11
+
+### Added
+
+- Added an H5 mobile assistant with QR pairing, device management, live conversations, tool approvals, and background services on macOS and Linux.
+- Added local Ollama instant replies and structured task briefs that use recent dialogue to interpret clarification answers.
+
+### Fixed
+
+- Jarvis events, candidate memories, and session completion use a durable outbox and idempotency keys; failed writes can be retried after restoration, and state advances only after acknowledgement.
+- Mid-run user input is recorded as Jarvis observation events; candidate memories reference sessions that Jarvis can resolve as evidence.
+- Changed the default H5 port to 7332 to avoid conflicts with Jarvis MCP; background services preserve custom ports and reject random ports.
+- Fixed mobile event and approval flows, session workspace restrictions, Host validation, and title escaping; network services keep manual approval by default.
+
 ## [0.4.6] - 2026-10-10
 
 ### Added

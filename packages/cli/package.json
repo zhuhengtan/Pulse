@@ -1,6 +1,6 @@
 {
   "name": "@hunterzhu/pulse-cli",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "A local-first AI task assistant for coding, research, and file workflows.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "keywords": [
@@ -44,10 +44,12 @@
     "ink-spinner": "^5.0.0",
     "ink-text-input": "^6.0.0",
     "marked": "^14.0.0",
+    "qrcode": "^1.5.4",
     "react": "^19.0.0",
     "wrap-ansi": "10.0.2"
   },
   "devDependencies": {
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.0.0"
   }
 }

@@ -51,11 +51,16 @@ import { CapabilityPackRegistry, type ActiveCapabilityPacks, type CapabilityPack
 import { JarvisClient, jarvisResultForRun, type CandidateMemoryInput, type PulseJarvisConfig } from './jarvis/index.js'
 import { JarvisRun } from './jarvis/run.js'
 import { jarvisMemoryTitle } from './jarvis/privacy.js'
+import { processFrontModel, heuristicFastAck, type FrontModelConfig, type FrontModelBrief, type FrontModelResult } from './front-model.js'
+export { processFrontModel, heuristicFastAck, sanitizeFrontModelResult, type FrontModelConfig, type FrontModelBrief, type FrontModelResult } from './front-model.js'
 export { CapabilityPackRegistry, createMcpCapabilityPack, createPdfCapabilityPack, createSpreadsheetCapabilityPack, referenceCapabilityPackCatalog, type ActiveCapabilityPacks, type CapabilityPack, type CapabilityPackManifest } from './capabilities.js'
 export { createSkillCapabilityPack, defaultSkillRoot, type SkillCapabilityPackOptions } from './skill-pack.js'
 export { assertJarvisApiUrl, JarvisClient, jarvisResultForRun, type CandidateMemoryInput, type CloseSessionInput, type JarvisContextPackage, type JarvisSession, type PulseJarvisConfig } from './jarvis/index.js'
 export { ScheduledTaskStore, ScheduledTaskWorker, MIN_SCHEDULED_TASK_INTERVAL_MS, MAX_SCHEDULED_TASK_INTERVAL_MS, type ScheduledTask, type CreateScheduledTaskInput, type ScheduledTaskExecutor, type ScheduledTaskWorkerRunSummary } from './scheduled-tasks.js'
 export { maxTaskReplans, type TaskAttempt, type TaskCriterionAssessment, type TaskOutcome, type TaskRecord, type TaskRecordStatus } from './task.js'
+export { H5Server, DEFAULT_H5_PORT, type H5ServerOptions } from './h5/server.js'
+export { H5AuthStore, type H5DeviceRecord, type PairingCodeInfo } from './h5/auth.js'
+export { getLocalNetworkIp, hostHeaderHostname, isAllowedH5Host, isLoopbackIp } from './h5/network.js'
 
 export { legacyPulseDataPath, pulseDataPath, pulseHomePath, pulseLogPath } from './paths.js'
 export { buildSystemPrompt, loadProjectInstructions, MAX_INSTRUCTION_BYTES, MAX_JARVIS_CONTEXT_CHARS, type BuildSystemPromptOptions, type DiscoveredInstructions } from './prompt.js'
@@ -109,6 +114,7 @@ export interface LocalHostOptions {
   autoCompactPercent?: number
   jarvis?: PulseJarvisConfig
   jarvisClient?: JarvisClient
+  frontModel?: FrontModelConfig
 }
 export interface CreateConversationInput { cwd?: string; title?: string }
 export interface ArtifactSummary { path: string; hash: string; bytes: number; mediaType?: string; label?: string; runId: string }
@@ -978,6 +984,7 @@ export class LocalHost {
   private readonly surfaceConversations = new Map<string, ConversationMessage[]>()
   private readonly active = new Map<string, { runtime: PulseRuntime; session: PulseSession; conversationId: string; runId: string; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; jarvis?: JarvisRun; finish?: () => Promise<Outcome & { text?: string }> }>()
   private readonly conversationLocks = new Map<string, Awaited<ReturnType<typeof open>>>()
+  private jarvisRecovery: Promise<void> | undefined
   constructor(options: LocalHostOptions = {}) {
     this.root = resolve(options.cwd ?? process.cwd())
     this.usesDefaultDataDir = options.dataDir === undefined && process.env.PULSE_DATA_DIR === undefined
@@ -998,7 +1005,26 @@ export class LocalHost {
     await mkdir(dirname(this.dataDir), { recursive: true })
     await rename(legacy, this.dataDir)
   }
-  async init(): Promise<void> { await this.migrateLegacyData(); await mkdir(this.dataDir, { recursive: true }); if (this.usesDefaultDataDir || this.options.logDir !== undefined || process.env.PULSE_LOG_DIR !== undefined) await mkdir(this.logDir, { recursive: true }); await stat(this.root); await this.listSkills() }
+  async init(): Promise<void> { await this.migrateLegacyData(); await mkdir(this.dataDir, { recursive: true }); if (this.usesDefaultDataDir || this.options.logDir !== undefined || process.env.PULSE_LOG_DIR !== undefined) await mkdir(this.logDir, { recursive: true }); await stat(this.root); await this.listSkills(); await (this.jarvisRecovery ??= this.retryJarvisCompletions().finally(() => { this.jarvisRecovery = undefined })) }
+  private async retryJarvisForConversation(conversationId: string): Promise<void> {
+    if (!this.jarvisClient) return
+    const manifest = await this.readManifest(conversationId)
+    for (const runId of manifest.runs) {
+      if (runId === manifest.activeRunId) continue
+      await JarvisRun.retryCompletion(this.jarvisClient, join(this.runDir(conversationId, runId), 'jarvis.json'))
+    }
+  }
+  private async retryJarvisCompletions(): Promise<void> {
+    if (!this.jarvisClient) return
+    const entries = await readdir(join(this.dataDir, 'conversations'), { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      if (!entry.isDirectory() || this.conversationLocks.has(entry.name)) continue
+      try { await this.acquireConversationLock(entry.name, 'jarvis-recovery') } catch { continue }
+      try { await this.retryJarvisForConversation(entry.name) }
+      catch { break } // An unavailable service must not delay every conversation in the backlog.
+      finally { await this.releaseConversationLock(entry.name) }
+    }
+  }
   /** Refresh and persist names only; the cache is never an authority for paths or content. */
   async listSkills(): Promise<string[]> {
     const names = new Set<string>()
@@ -1398,7 +1424,7 @@ export class LocalHost {
     } catch (error) { capabilityController.abort(); await capabilities.dispose().catch(() => undefined); throw error }
   }
   private withCapabilityInstructions(prompt: string, instructions: string[]): string { return wrapCapabilityInstructions(prompt, instructions) }
-  private makeRunHandle(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, contextNotice?: string): RunHandle {
+  private makeRunHandle(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, contextNotice?: string, frontAck?: string): RunHandle {
     const activeEntry = this.active.get(runId)
     activeEntry?.jarvis?.observe(runtime, session, activeEntry.capabilityController.signal)
     let finalized: Promise<Outcome & { text?: string }> | undefined
@@ -1509,7 +1535,7 @@ export class LocalHost {
             kind: 'workflow',
             title: jarvisMemoryTitle(`Task: ${exportedTask.objective}`),
             content: `Objective: ${exportedTask.objective}\nOutcome: ${text ?? 'Completed successfully'}${decisions.length ? `\nDecisions: ${decisions.join('; ')}` : ''}`.slice(0, 5000),
-            sourceRefs: [`pulse:run:${runId}`],
+            sourceRefs: [activeEntry.jarvis.sessionId],
           } : undefined
         await activeEntry.jarvis.close(runtime, {
           result: jarvisResult,
@@ -1529,9 +1555,29 @@ export class LocalHost {
       activeEntry?.capabilityController.abort()
       try { await activeEntry?.capabilities.dispose() } finally { await this.releaseConversationLock(conversationId) }
     })
-    const events = this.projectEvents(conversationId, runId, runtime, session, finish, () => finalTaskOutcome ?? currentTaskOutcome(), contextNotice)
+    const events = this.projectEvents(conversationId, runId, runtime, session, finish, () => finalTaskOutcome ?? currentTaskOutcome(), contextNotice, frontAck)
     if (activeEntry) activeEntry.finish = finish
-    return { id: runId, conversationId, events, outcome: finish, usage: async () => { await finish(); return runUsage(runtime, this.options.modelPricing) }, taskOutcome: async () => { await finish(); return finalTaskOutcome ?? currentTaskOutcome() }, cancel: async (reason = 'USER_REQUESTED') => { activeEntry?.capabilityController.abort(); await session.cancel(reason) }, reply: async (effectId, value) => { const effect = runtime.state.effects.get(effectId); validateAskReply(effect?.input, value); const approved = value && typeof value === 'object' && !Array.isArray(value) && (value as Record<string, JsonValue>).approved === true; if (approved && effect?.kind === 'human' && effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input)) { const calls = (effect.input as Record<string, JsonValue>).tools; if (Array.isArray(calls)) { const approvedIds = this.approvedToolCalls.get(runId) ?? new Set<string>(); this.approvedToolCalls.set(runId, approvedIds); for (const call of calls) if (call && typeof call === 'object' && !Array.isArray(call) && typeof (call as Record<string, JsonValue>).toolCallId === 'string') approvedIds.add((call as Record<string, JsonValue>).toolCallId as string) } } await session.reply(effectId, value) }, submitHumanInput: async (text, targetEffectId) => { if (!text.trim()) throw new Error('MESSAGE_REQUIRED'); const inputId = `human-${randomUUID()}`; const rootAgent = runtime.state.agents.get(session.agentId); const taskGlobal = rootAgent?.globalVersions.get(rootAgent.latestGlobalVersion); const steer = targetEffectId === undefined && !text.trim().startsWith('/') && taskGlobal && typeof taskGlobal === 'object' && !Array.isArray(taskGlobal) && taskGlobal.taskController; await session.submitHumanInput(inputId, { text, ...(steer ? { command: 'steer' } : {}) }, targetEffectId); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text, runId, createdAt: new Date().toISOString() }) } }
+    return { id: runId, conversationId, events, outcome: finish, usage: async () => { await finish(); return runUsage(runtime, this.options.modelPricing) }, taskOutcome: async () => { await finish(); return finalTaskOutcome ?? currentTaskOutcome() }, cancel: async (reason = 'USER_REQUESTED') => { activeEntry?.capabilityController.abort(); await session.cancel(reason) }, reply: async (effectId, value) => { const effect = runtime.state.effects.get(effectId); validateAskReply(effect?.input, value); const approved = value && typeof value === 'object' && !Array.isArray(value) && (value as Record<string, JsonValue>).approved === true; if (approved && effect?.kind === 'human' && effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input)) { const calls = (effect.input as Record<string, JsonValue>).tools; if (Array.isArray(calls)) { const approvedIds = this.approvedToolCalls.get(runId) ?? new Set<string>(); this.approvedToolCalls.set(runId, approvedIds); for (const call of calls) if (call && typeof call === 'object' && !Array.isArray(call) && typeof (call as Record<string, JsonValue>).toolCallId === 'string') approvedIds.add((call as Record<string, JsonValue>).toolCallId as string) } } const replyText = value && typeof value === 'object' && !Array.isArray(value) && typeof value.text === 'string' ? value.text : undefined; const recording = replyText ? activeEntry?.jarvis?.recordUserInput(replyText, `reply:${effectId}`).catch(() => undefined) : undefined; await session.reply(effectId, value); await recording }, submitHumanInput: async (text, targetEffectId) => { if (!text.trim()) throw new Error('MESSAGE_REQUIRED'); const inputId = `human-${randomUUID()}`; const recording = activeEntry?.jarvis?.recordUserInput(text, inputId).catch(() => undefined); const rootAgent = runtime.state.agents.get(session.agentId); const taskGlobal = rootAgent?.globalVersions.get(rootAgent.latestGlobalVersion); const steer = targetEffectId === undefined && !text.trim().startsWith('/') && taskGlobal && typeof taskGlobal === 'object' && !Array.isArray(taskGlobal) && taskGlobal.taskController; await session.submitHumanInput(inputId, { text, ...(steer ? { command: 'steer' } : {}) }, targetEffectId); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text, runId, createdAt: new Date().toISOString() }); await recording } }
+  }
+  private clarificationHandle(conversationId: string, runId: string, question: string): RunHandle {
+    const outcome = { status: 'succeeded' as const, text: question }
+    const usage: RunUsage = { schemaVersion: 1, inputTokens: null, outputTokens: null, cachedInputTokens: null, reasoningTokens: null, visibleOutputChars: question.length, modelCalls: 0, truncationEvents: 0, durationMs: 0, providerCosts: [], completeness: 'unavailable' }
+    const finish = async () => outcome
+    const events = (async function* (): AsyncIterable<AssistantEvent> {
+      yield { schemaVersion: 1, type: 'text', conversationId, runId, seq: 1, data: question }
+      yield { schemaVersion: 1, type: 'complete', conversationId, runId, seq: 2, data: { status: 'succeeded' } }
+    })()
+    return {
+      id: runId,
+      conversationId,
+      events,
+      outcome: finish,
+      usage: async () => usage,
+      taskOutcome: async () => undefined,
+      cancel: async () => undefined,
+      reply: async () => { throw new Error('RUN_NOT_ACTIVE') },
+      submitHumanInput: async () => { throw new Error('RUN_NOT_ACTIVE') },
+    }
   }
   async sendMessage(conversationId: string, input: UserMessageInput): Promise<RunHandle> {
     if (!input.text.trim()) throw new Error('MESSAGE_REQUIRED')
@@ -1540,6 +1586,7 @@ export class LocalHost {
     let jarvis: JarvisRun | undefined
     try {
       const manifest = await this.readManifest(conversationId); if (manifest.activeRunId) throw new Error('CONVERSATION_BUSY')
+      await this.retryJarvisForConversation(conversationId).catch(() => undefined)
       const contextNotice = await this.maybeCompactConversationLocked(conversationId)
       const previous = await readFile(this.messagesPath(conversationId), 'utf8').catch(() => '')
       const conversation = parseStoredMessages(previous).map((message): ConversationMessage => ({ role: message.role, content: message.text }))
@@ -1586,6 +1633,29 @@ export class LocalHost {
           // Gracefully continue without Jarvis session if client errors
         }
       }
+      const frontResult = this.options.frontModel?.enabled
+        ? await processFrontModel(input.text, jarvis?.context, this.options.frontModel, conversation)
+        : undefined
+      const clarification = frontResult?.brief?.needsClarification ? frontResult.brief.clarificationQuestion?.trim() : ''
+      if (clarification) {
+        await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'assistant', text: clarification, runId, createdAt: new Date().toISOString() })
+        manifest.runs.push(runId)
+        manifest.updatedAt = new Date().toISOString()
+        await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
+        await writeFile(join(this.runDir(conversationId, runId), 'outcome.json'), JSON.stringify({ schemaVersion: 1, status: 'succeeded', text: clarification, completedAt: manifest.updatedAt }, null, 2))
+        if (jarvis) await jarvis.close(undefined, { result: 'success', summary: clarification.slice(0, 500) }).catch(() => undefined)
+        await this.releaseConversationLock(conversationId)
+        return this.clarificationHandle(conversationId, runId, clarification)
+      }
+      if (frontResult?.brief && !frontResult.brief.needsClarification) {
+        const requirements = frontResult.brief.requirements.filter((item) => item.trim())
+        const briefContent = [
+          `[Assistant Front Brief - reference only, user's direct words take precedence]`,
+          `Intent: ${frontResult.brief.intent}`,
+          requirements.length > 0 ? `Requirements: ${requirements.join('; ')}` : '',
+        ].filter(Boolean).join('\n')
+        conversation.push({ role: 'user', content: briefContent })
+      }
       const systemPrompt = await this.resolveSystemPrompt(manifest.cwd, input.text, conversation, jarvis?.context)
       this.surfaceConversations.set(runId, conversation)
       activated = await this.runtimeFor(conversationId, runId, manifest.cwd, safetyReviewContext(manifest.cwd, goal, conversation), input.text)
@@ -1599,7 +1669,7 @@ export class LocalHost {
       runtime.register(program); runtime.setHumanInputProgram(program); const initialTask: TaskRecord = summaryFollowup
         ? { schemaVersion: 1, runId, objective: goal, continuedFromRunId: inheritedTask!.runId, acceptanceCriteria: [{ id: 'criterion-1', description: '根据上一轮真实执行记录回答当前追问，不重复修改文件' }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] }
         : inheritedTask ? continueTaskRecord(inheritedTask, runId) : { schemaVersion: 1, runId, objective: goal, acceptanceCriteria: acceptanceCriteriaFromObjective(goal), status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] }; await writeFile(join(this.runDir(conversationId, runId), 'task-record.json'), JSON.stringify(initialTask, null, 2)); const { agentId } = runtime.createAgent({ goal, program, initialGlobal: { taskRecord: taskRecordJson(initialTask) } }); const session = runtime.start(agentId); this.active.set(runId, { runtime, session, conversationId, runId, capabilities, capabilityController, ...(jarvis ? { jarvis } : {}) }); manifest.activeRunId = runId; manifest.runs.push(runId); manifest.updatedAt = now; await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
-      return this.makeRunHandle(conversationId, runId, runtime, session, contextNotice)
+      return this.makeRunHandle(conversationId, runId, runtime, session, contextNotice, frontResult?.instantResponse)
     } catch (error) {
       if (jarvis) {
         await jarvis.close(undefined, {
@@ -1701,8 +1771,12 @@ export class LocalHost {
     const preview = toolPreview(input.name, value)
     return { effectId, tool: input.name, toolCallId: effect.toolCallId ?? effectId, args, status, ...(preview === undefined ? {} : { preview }), ...(outcome.error === undefined ? commandFailed ? { result: { code: 'SHELL_COMMAND_FAILED', exitCode: shell?.code ?? null, stderr: shell?.stderr ?? '', timedOut: shell?.timedOut ?? false, aborted: shell?.aborted ?? false } } : {} : { result: outcome.error }) }
   }
-  private async *projectEvents(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, finish: () => Promise<Outcome & { text?: string }>, taskOutcome: () => TaskOutcome | undefined, contextNotice?: string): AsyncIterable<AssistantEvent> {
+  private async *projectEvents(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, finish: () => Promise<Outcome & { text?: string }>, taskOutcome: () => TaskOutcome | undefined, contextNotice?: string, frontAck?: string): AsyncIterable<AssistantEvent> {
     let seq = 0
+    if (frontAck) {
+      seq++
+      yield { schemaVersion: 1, type: 'notice', conversationId, runId, seq, data: { kind: 'front_ack', text: frontAck } }
+    }
     if (contextNotice) {
       seq++
       yield { schemaVersion: 1, type: 'notice', conversationId, runId, seq, data: { kind: 'context_compacted', text: contextNotice } }

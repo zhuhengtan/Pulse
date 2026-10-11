@@ -1,6 +1,6 @@
 {
   "name": "@hunterzhu/pulse-server",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "license": "PolyForm-Noncommercial-1.0.0",
   "repository": {
     "type": "git",
@@ -20,6 +20,10 @@
     "@hunterzhu/pulse-adapters": "workspace:*",
     "@hunterzhu/pulse-runtime": "workspace:*",
     "@hunterzhu/pulse-tool-sdk": "workspace:*",
+    "qrcode": "^1.5.4",
     "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.6"
   }
 }
