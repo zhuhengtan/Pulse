@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -23,7 +23,15 @@ if (!windowsInstall.includes('pulse.cmd') || !windowsInstall.includes('REM Pulse
   throw new Error('Windows installer scripts are missing managed pulse.cmd support')
 }
 const packageManifest = JSON.parse(await readFile(join(directory, 'pulse/app/node_modules/@hunterzhu/pulse-cli/package.json'), 'utf8'))
-const versionCheck = spawnSync(process.execPath, [bin, '--version'], { encoding: 'utf8' })
+// Basic CLI commands must work even when this platform has no PTY native addon.
+const ptyPath = join(directory, 'pulse/app/node_modules/@hunterzhu/pulse-server/node_modules/node-pty')
+await rename(ptyPath, `${ptyPath}.disabled`)
+let versionCheck
+try {
+  versionCheck = spawnSync(process.execPath, [bin, '--version'], { encoding: 'utf8' })
+} finally {
+  await rename(`${ptyPath}.disabled`, ptyPath)
+}
 if (versionCheck.status !== 0 || !versionCheck.stdout.includes(`Pulse v${packageManifest.version}`) || !versionCheck.stdout.includes('What’s new in this version')) {
   console.error(`CLI version page mismatch: expected Pulse v${packageManifest.version} and bilingual release heading`)
   if (versionCheck.error) console.error(`CLI spawn failed: ${versionCheck.error.message}`)

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import type { Duplex } from 'node:stream'
 import { createRequire } from 'node:module'
 import { promisify } from 'node:util'
-import * as pty from 'node-pty'
+import type * as pty from 'node-pty'
 import { WebSocket, WebSocketServer } from 'ws'
 import QRCode from 'qrcode'
 import type { JsonValue } from '@hunterzhu/pulse-runtime'
@@ -51,13 +51,20 @@ const KEEP_SECRET = '__PULSE_KEEP_SECRET__'
 const require = createRequire(import.meta.url)
 
 async function ensurePtyHelperExecutable(): Promise<void> {
-  if (process.platform === 'win32') return
+  // Only Darwin's native implementation executes spawn-helper.
+  if (process.platform !== 'darwin') return
   const packageRoot = resolve(dirname(require.resolve('node-pty')), '..')
-  const helper = join(packageRoot, 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper')
-  const info = await stat(helper)
-  if (!info.isFile()) throw new Error('PTY_HELPER_MISSING')
-  // Some package mirrors extract the published helper without its executable bit.
-  if ((info.mode & 0o111) === 0) await chmod(helper, 0o755)
+  // Match node-pty's native loader so source builds use their own helper too.
+  for (const directory of ['build/Release', 'build/Debug', `prebuilds/${process.platform}-${process.arch}`]) {
+    try { require(join(packageRoot, directory, 'pty.node')) } catch { continue }
+    const helper = join(packageRoot, directory, 'spawn-helper')
+    const info = await stat(helper)
+    if (!info.isFile()) throw new Error('PTY_HELPER_MISSING')
+    // Some package mirrors extract the published helper without its executable bit.
+    if ((info.mode & 0o111) === 0) await chmod(helper, 0o755)
+    return
+  }
+  throw new Error('PTY_HELPER_MISSING')
 }
 
 function configVersion(raw: string): string { return createHash('sha256').update(raw).digest('hex') }
@@ -830,10 +837,12 @@ export class H5Server {
       const project = await this.projects.get(projectId)
       if (!project?.available) { res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'PROJECT_UNAVAILABLE' })); return }
       const id = randomUUID()
-      const shell = process.platform === 'win32' ? (process.env.ComSpec || 'powershell.exe') : process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash'
+      const shell = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash'
       try {
+        // A missing native terminal must not prevent the CLI or H5 server from starting.
+        const pty = await import('node-pty')
         await ensurePtyHelperExecutable()
-        const child = pty.spawn(shell, process.platform === 'win32' ? ['-NoLogo'] : ['-l'], {
+        const child = pty.spawn(shell, process.platform === 'win32' ? [] : ['-l'], {
           name: 'xterm-256color', cwd: project.cwd, cols: 100, rows: 28,
           env: { ...safeShellEnv(), TERM: 'xterm-256color', COLORTERM: 'truecolor' },
         })

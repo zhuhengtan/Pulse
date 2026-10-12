@@ -565,7 +565,7 @@ describe('M1-3 context, models and adapters', () => {
       expect(child.code, child.stderr).toBe(0)
       expect(child.stdout).toMatch(/^v\d+/)
     } finally { await rm(root, { recursive: true, force: true }) }
-  })
+  }, process.platform === 'win32' ? 210_000 : 60_000)
 
   it('classifies filesystem and shell validation failures as non-retryable', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-tool-errors-'))

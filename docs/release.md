@@ -39,6 +39,8 @@ pnpm ci:local
 
 这个入口与 GitHub CI 共用，依次执行类型检查、非 Live 测试、评测集和发布配置检查、构建、CLI 初始化、打包、解压运行、安装/卸载及三个开发启动入口。遇到失败立即停止；使用临时 Pulse 配置和数据目录，不会发布版本。压缩包保留在 `artifacts/cli/`。
 
+`ci:local` 会先运行 `pnpm native:prepare`，显式执行已允许的 `node-pty` 构建脚本；Linux 没有上游预编译包，需要 C/C++ 编译工具链。仅执行 `--ignore-scripts` 安装不能验证本地终端能力。
+
 平台依赖需提前准备：macOS 使用系统沙箱；Linux 需要 `bubblewrap`、`ripgrep`、`socat`，并允许非特权用户命名空间；Windows 需要 PowerShell 7，并用管理员权限执行一次 `pnpm --filter @hunterzhu/pulse-adapters exec srt windows-install`。Windows 的 `TEMP`/`TMP` 应指向沙箱账户可访问的目录，例如 `C:\pulse-ci-temp`，不要使用用户私有目录；GitHub runner 已自动配置。检查脚本不会安装或卸载本机沙箱服务。
 
 本地验证当前操作系统。macOS 不能代替 Windows 的权限、文件锁与网络隔离验证；Docker 也不能提供 Windows 内核。日常改动先跑本地检查，发布前再让云端矩阵验证同一提交的三个平台。

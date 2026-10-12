@@ -32,6 +32,7 @@ const node = (script, ...args) => run(process.execPath, [join(repo, script), ...
 
 try {
   console.log(`Checking ${process.platform} with Node ${process.version}; temporary Pulse home: ${home}`)
+  pnpm('native:prepare')
   pnpm('web:build')
   pnpm('check')
   pnpm('eval:validate')
