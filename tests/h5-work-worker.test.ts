@@ -1,4 +1,4 @@
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,7 +30,19 @@ describe('H5 work worker IPC', () => {
     for await (const event of handle.events) events.push(event)
     expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'text', conversationId, runId: handle.id, data: 'from worker' })]))
     await expect(handle.outcome()).resolves.toEqual({ status: 'succeeded' })
+    expect(await readFile(join(dataDir, 'worker-cleanup-complete.txt'), 'utf8')).toBe('closed')
     await expect(handle.usage()).resolves.toMatchObject({ modelCalls: 1, outputTokens: 2 })
+  })
+
+  it('rejects delivery when a worker reports success but exits with a cleanup failure', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'pulse-worker-cleanup-'))
+    temporaryDirectories.push(dataDir)
+    const handle = await startH5WorkWorker({
+      entry: fileURLToPath(new URL('./fixtures/h5-work-worker.mjs', import.meta.url)),
+      dataDir,
+      approvalMode: 'ask',
+    }, { conversationId: 'conv-cleanup-failure', text: 'fail during cleanup' })
+    await expect(handle.outcome()).rejects.toThrow('WORKER_EXITED:1')
   })
 
   it('runs an actual Pulse CLI work session in a separate process using the shared config and data directory', async () => {

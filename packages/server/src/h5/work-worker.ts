@@ -113,6 +113,7 @@ class RemoteWorkRun {
   private readonly configured: Promise<void>
   private readonly started: Promise<WorkerStarted>
   private readonly settled: Promise<WorkerSettled>
+  private readonly closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }>
   private startRequestId = randomUUID()
   private settledValue: WorkerSettled | undefined
   readonly handle: RunHandle
@@ -122,14 +123,16 @@ class RemoteWorkRun {
     this.configured = new Promise<void>((resolve, reject) => { this.configuredResolve = resolve; this.configuredReject = reject })
     this.started = new Promise<WorkerStarted>((resolve, reject) => { this.startedResolve = resolve; this.startedReject = reject })
     this.settled = new Promise<WorkerSettled>((resolve, reject) => { this.settledResolve = resolve; this.settledReject = reject })
+    this.closed = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })))
     void this.ready.catch(() => undefined)
     void this.configured.catch(() => undefined)
     void this.started.catch(() => undefined)
     void this.settled.catch(() => undefined)
     const startupTimer = setTimeout(() => this.fail(new Error('WORKER_START_TIMEOUT')), timeoutMs)
     child.on('message', raw => this.onMessage(raw, startupTimer))
-    child.once('error', error => this.fail(new Error(`WORKER_PROCESS_ERROR:${error.message}`)))
+    child.once('error', error => { clearTimeout(startupTimer); this.fail(new Error(`WORKER_PROCESS_ERROR:${error.message}`)) })
     child.once('exit', (code, signal) => {
+      clearTimeout(startupTimer)
       if (!this.settledValue) this.fail(new Error(`WORKER_EXITED:${signal ?? code ?? 'unknown'}`))
     })
     const self = this
@@ -137,7 +140,14 @@ class RemoteWorkRun {
       get id() { return self.runId },
       conversationId,
       events: this.events,
-      outcome: async () => (await this.settled).outcome,
+      outcome: async () => {
+        const settled = await this.settled
+        // Windows keeps a process's cwd locked until it exits. Delivery may
+        // remove the worktree, so wait for host cleanup and process closure.
+        const closed = await this.closed
+        if (closed.code !== 0) throw new Error(`WORKER_EXITED:${closed.signal ?? closed.code ?? 'unknown'}`)
+        return settled.outcome
+      },
       usage: async () => (await this.settled).usage,
       taskOutcome: async () => (await this.settled).taskOutcome,
       cancel: async reason => { await this.rpc('cancel', [reason]) },
@@ -150,10 +160,11 @@ class RemoteWorkRun {
       },
       submitHumanInput: async (text, targetEffectId) => { await this.rpc('submitHumanInput', [text, targetEffectId]) },
       shutdown: async () => {
-        if (this.settledValue || !this.child.connected) return
-        await this.rpc('cancel', ['H5_SERVER_SHUTDOWN'], 2_000).catch(() => undefined)
-        await Promise.race([this.settled.catch(() => undefined), new Promise(resolve => setTimeout(resolve, 3_000))])
-        if (this.child.connected && !this.settledValue) this.child.kill('SIGTERM')
+        if (!this.settledValue && this.child.connected) await this.rpc('cancel', ['H5_SERVER_SHUTDOWN'], 2_000).catch(() => undefined)
+        const timer = setTimeout(() => {
+          if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGTERM')
+        }, 3_000)
+        try { await this.closed } finally { clearTimeout(timer) }
       },
     }
     this.runId = ''

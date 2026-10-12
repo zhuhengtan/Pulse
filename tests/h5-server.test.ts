@@ -371,7 +371,9 @@ describe('H5Server End-to-End', () => {
       expect(savedConfig.jarvis.token).toBe('jarvis-secret')
       expect(savedConfig.capabilities.mcpServers.demo.env.ACCESS_TOKEN).toBe('mcp-secret')
       expect(savedConfig.customField.kept).toBe(false)
-      expect((await lstat(`${configPath}.bak`)).mode & 0o777).toBe(0o600)
+      expect(JSON.parse(await readFile(`${configPath}.bak`, 'utf8'))).toEqual(originalConfig)
+      // Windows file modes do not represent NTFS ACL permissions.
+      if (process.platform !== 'win32') expect((await lstat(`${configPath}.bak`)).mode & 0o777).toBe(0o600)
       const conflict = await fetch(`${baseUrl}/api/config`, { method: 'PUT', headers: localHeaders, body: JSON.stringify({ version: config.version, config: candidate }) })
       expect(conflict.status).toBe(409)
       const invalid = await fetch(`${baseUrl}/api/config/validate`, { method: 'POST', headers: localHeaders, body: JSON.stringify({ config: { invalid: true } }) })

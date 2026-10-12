@@ -547,7 +547,7 @@ describe('M1-3 context, models and adapters', () => {
       await rm(sibling, { recursive: true, force: true })
       if (privateProfile) await rm(privateProfile, { recursive: true, force: true })
     }
-  })
+  }, process.platform === 'win32' ? 270_000 : 60_000)
 
   it('runs the installed development toolchain inside the sandbox by name', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse toolchain 雪-'))

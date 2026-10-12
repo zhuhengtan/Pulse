@@ -1,3 +1,6 @@
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 process.on('message', (message) => {
   if (message?.schemaVersion === 1 && message.type === 'configure') {
     process.send({ schemaVersion: 1, type: 'configured' })
@@ -9,7 +12,13 @@ process.on('message', (message) => {
   process.send({ schemaVersion: 1, type: 'event', event: { schemaVersion: 1, type: 'complete', conversationId: message.conversationId, runId: 'run-worker-fixture', seq: 2, data: { status: 'succeeded' } } })
   const settle = setTimeout(() => {
     process.send({ schemaVersion: 1, type: 'settled', outcome: { status: 'succeeded' }, usage: { schemaVersion: 1, inputTokens: 1, outputTokens: 2, cachedInputTokens: null, reasoningTokens: null, visibleOutputChars: 11, modelCalls: 1, truncationEvents: 0, durationMs: 10, providerCosts: [], completeness: 'complete' } })
-    process.disconnect()
+    // Model cleanup that still owns files after publishing the outcome.
+    setTimeout(() => {
+      const dataDir = process.argv[process.argv.indexOf('--data-dir') + 1]
+      writeFileSync(join(dataDir, 'worker-cleanup-complete.txt'), 'closed')
+      if (message.text === 'fail during cleanup') process.exitCode = 1
+      process.disconnect()
+    }, 150)
   }, 250)
   process.on('message', (rpc) => {
     if (rpc?.schemaVersion !== 1 || rpc.type !== 'rpc') return

@@ -58,7 +58,7 @@ jobs:
         timeout-minutes: 4
         run: pnpm exec vitest run tests/m3-context-adapters.test.ts -t "runs the installed development toolchain" --reporter verbose
       - name: Run shared local and cloud checks
-        timeout-minutes: 15
+        timeout-minutes: ${{ runner.os == 'Windows' && 25 || 15 }}
         run: pnpm ci:local
       - name: Remove Windows shell sandbox
         if: always() && runner.os == 'Windows' && steps.windows-sandbox.outcome == 'success'

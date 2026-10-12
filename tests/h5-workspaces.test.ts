@@ -17,6 +17,8 @@ async function repository(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'pulse-workspace-test-'))
   roots.push(root)
   await git(root, 'init', '--quiet')
+  // Fixture assertions compare exact bytes, independent of the user's Git defaults.
+  await git(root, 'config', 'core.autocrlf', 'false')
   await git(root, 'config', 'user.name', 'Pulse Test')
   await git(root, 'config', 'user.email', 'pulse-test@localhost')
   await writeFile(join(root, 'code.txt'), 'base one\nbase two\n')
