@@ -3,7 +3,7 @@ import { readFile, rename, writeFile } from 'node:fs/promises'
 import { z } from 'zod'
 import type { PulseRuntime, PulseSession } from '@hunterzhu/pulse-runtime'
 import type { JarvisClient } from './client.js'
-import type { CandidateMemoryInput, CloseSessionInput } from './types.js'
+import type { CandidateMemoryInput, CloseSessionInput, JarvisContextPackage } from './types.js'
 import { redactJarvisText } from './privacy.js'
 import { MAX_JARVIS_CONTEXT_CHARS } from '../prompt.js'
 
@@ -18,6 +18,7 @@ const candidateSchema = z.object({
 })
 const bindingSchema = z.object({
   schemaVersion: z.literal(1), sessionId: z.string().min(1), context: z.string().optional(),
+  contextPackage: z.unknown().optional(),
   recordedEffectIds: z.array(z.string()), closed: z.boolean().default(false),
   pendingEvents: z.array(z.object({ id: z.string(), type: z.enum(['observation', 'action', 'result', 'system']), content: z.string(), effectId: z.string().optional() })).default([]),
   completion: z.object({ input: closeInputSchema, candidate: candidateSchema.optional(), candidateRecorded: z.boolean().default(false) }).optional(),
@@ -37,6 +38,7 @@ export class JarvisRun {
   }
 
   get context(): string | undefined { return this.binding.context }
+  get contextPackage(): JarvisContextPackage | undefined { return this.binding.contextPackage as JarvisContextPackage | undefined }
   get sessionId(): string { return this.binding.sessionId }
 
   static async open(client: JarvisClient, path: string, workspace: string, task: string, tokenBudget: number, restore = false): Promise<JarvisRun | undefined> {
@@ -49,7 +51,7 @@ export class JarvisRun {
     try {
       const pkg = await client.buildContext(session.id, task, tokenBudget).catch(() => undefined)
       const context = typeof pkg?.text === 'string' ? pkg.text.slice(0, MAX_JARVIS_CONTEXT_CHARS) : undefined
-      const run = new JarvisRun(client, path, { schemaVersion: 1, sessionId: session.id, ...(context ? { context } : {}), recordedEffectIds: [], closed: false, pendingEvents: [] })
+      const run = new JarvisRun(client, path, { schemaVersion: 1, sessionId: session.id, ...(context ? { context } : {}), ...(pkg ? { contextPackage: pkg } : {}), recordedEffectIds: [], closed: false, pendingEvents: [] })
       await run.persist()
       return run
     } catch (error) {

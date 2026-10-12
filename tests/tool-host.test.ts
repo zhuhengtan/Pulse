@@ -11,6 +11,13 @@ import { tmpdir } from 'node:os'
 const point = (id: string, step: string) => ({ programId: id, programVersion: '1', step, locals: {} })
 
 describe('Tool SDK to Runtime Effect host', () => {
+  it('uses the normalized JSON output as the Runtime result', async () => {
+    const registry = new ToolRegistry()
+    registry.register(defineTool({ name: 'clean-output', description: 'returns a clean JSON projection', input: z.object({}), output: z.unknown(), normalize: (value) => JSON.parse(JSON.stringify(value)) as { text: string }, execute: () => ({ text: 'Jarvis result', omitted: undefined }) }))
+    const effect = { id: 'effect-clean-output', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'clean-output', kind: 'tool', concurrencyClass: 'tool', input: { name: 'clean-output', arguments: {} }, attemptId: 'attempt-clean-output', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as EffectRecord
+    await expect(createToolEffectExecutor(registry)(effect, new AbortController().signal)).resolves.toMatchObject({ value: { text: 'Jarvis result' }, executionState: 'succeeded' })
+  })
+
   it('preserves a non-retryable ToolError and prevents duplicate attempts', async () => {
     let calls = 0
     const registry = new ToolRegistry()

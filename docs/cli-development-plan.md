@@ -111,6 +111,8 @@ CLI 不直接修改 Runtime state、不自己重试副作用、不把全部历�
 
 开发环境约定：
 
+- Pulse Web 调试时，在两个终端分别运行 `pnpm web:dev:server` 和 `pnpm web:dev`。前端地址为 `http://127.0.0.1:5173`，默认代理到仅监听回环的隔离后端 `127.0.0.1:7333`；模型与服务商配置沿用 Pulse CLI 的解析顺序（`PULSE_CONFIG`、`PULSE_HOME`、`~/.pulse/config.json`），聊天和配对数据仍隔离保存在仓库忽略目录 `.pulse-dev/h5/data/`，不连接日常 H5 服务。可用 `PULSE_H5_TARGET` 和 `PULSE_WEB_DEV_PORT` 覆盖代理目标与后端端口。
+
 - 固定并记录实际验收的 Node 最低版本和 pnpm 版本，提供首次安装依赖的命令；所有入口先做必要的版本与文件检查。
 - `cli:dev`、`cli:debug` 默认使用仓库内 `.pulse-dev/` 的独立配置和数据目录；该目录加入忽略规则。通过显式配置才能接入正式数据，开发调试不能自动读写日常会话。
 - 提供不含密钥的配置示例、环境变量示例，以及 Mock 模式，保证没有外部服务凭据也能启动并调试基本链路。

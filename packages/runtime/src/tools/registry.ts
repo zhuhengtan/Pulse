@@ -50,7 +50,7 @@ export interface RuntimeToolDefinition {
   summarize?(output: unknown): JsonValue
 }
 
-export interface RuntimeToolDiscoveryQuery { text?: string; tags?: string[]; sideEffectPolicy?: RuntimeToolManifest['sideEffectPolicy']; concurrencyClass?: RuntimeToolManifest['concurrencyClass']; limit?: number }
+export interface RuntimeToolDiscoveryQuery { text?: string; tags?: string[]; exclude?: string[]; sideEffectPolicy?: RuntimeToolManifest['sideEffectPolicy']; concurrencyClass?: RuntimeToolManifest['concurrencyClass']; limit?: number }
 export interface RuntimeToolDiscoveryResult { manifest: RuntimeToolManifest; score: number }
 export interface RuntimeToolSetSnapshot { id: string; version: string; tools: RuntimeToolManifest[] }
 export interface RuntimeToolRegistryPolicy { allow?: string[]; deny?: string[]; workspaceRoots?: string[]; networkHosts?: string[]; allowNetwork?: boolean }
@@ -124,6 +124,7 @@ function validateDiscoveryQuery(query: unknown): asserts query is RuntimeToolDis
   const value = query as Record<string, unknown>
   if (value.text !== undefined && typeof value.text !== 'string') throw Object.assign(new Error('Invalid tool discovery query text.'), { code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false })
   if (value.tags !== undefined && (!Array.isArray(value.tags) || value.tags.some((tag) => typeof tag !== 'string'))) throw Object.assign(new Error('Invalid tool discovery query tags.'), { code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false })
+  if (value.exclude !== undefined && (!Array.isArray(value.exclude) || value.exclude.some((name) => typeof name !== 'string' || name.length === 0))) throw Object.assign(new Error('Invalid tool discovery exclusions.'), { code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false })
   if (value.sideEffectPolicy !== undefined && !['none', 'read', 'write', 'external'].includes(String(value.sideEffectPolicy))) throw Object.assign(new Error('Invalid tool discovery side-effect policy.'), { code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false })
   if (value.concurrencyClass !== undefined && !['llm', 'tool', 'agent', 'none'].includes(String(value.concurrencyClass))) throw Object.assign(new Error('Invalid tool discovery concurrency class.'), { code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false })
   if (value.limit !== undefined && (!Number.isInteger(value.limit) || (value.limit as number) < 0)) throw Object.assign(new Error('Invalid tool discovery limit.'), { code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false })
@@ -184,7 +185,9 @@ export class RuntimeToolRegistry {
     validateDiscoveryQuery(query)
     const terms = (query.text ?? '').toLocaleLowerCase().split(/[^a-z0-9_:-]+/).filter(Boolean)
     const requestedTags = new Set((query.tags ?? []).map((tag) => tag.toLocaleLowerCase()))
+    const excludedNames = new Set(query.exclude ?? [])
     const results = this.list().flatMap((manifest) => {
+      if (excludedNames.has(manifest.name)) return []
       if (query.sideEffectPolicy !== undefined && manifest.sideEffectPolicy !== query.sideEffectPolicy) return []
       if (query.concurrencyClass !== undefined && manifest.concurrencyClass !== query.concurrencyClass) return []
       const tags = (manifest.tags ?? []).map((tag) => tag.toLocaleLowerCase())

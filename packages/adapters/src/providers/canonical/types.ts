@@ -51,7 +51,7 @@ export interface CanonicalStructuredOutput {
 }
 
 export interface CanonicalReasoningConfig {
-  effort?: 'low' | 'medium' | 'high'
+  effort?: 'low' | 'medium' | 'high' | 'none'
   budgetTokens?: number
   enabled?: boolean
 }

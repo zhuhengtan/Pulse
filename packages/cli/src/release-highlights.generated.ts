@@ -1,5 +1,39 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.5.0": [
+    {
+      "zh": "新增独立 Web 工作台，统一助理聊天、项目工作会话、历史记录、设置与本地终端。",
+      "en": "Added a standalone Web workbench for assistant chats, project work sessions, history, settings, and local terminals."
+    },
+    {
+      "zh": "项目任务使用独立工作进程和 Git 工作区，继承当前项目改动，验收通过后合入结果；非 Git 项目使用互斥锁串行执行。",
+      "en": "Project tasks run in separate worker processes and Git worktrees that inherit current project edits and merge accepted results; non-Git projects use exclusive locks for serial execution."
+    },
+    {
+      "zh": "支持助理调用项目、工作会话及 Jarvis 工具，跟踪任务状态，并通过持久化消息队列恢复中断交互。",
+      "en": "The assistant can invoke project, work-session, and Jarvis tools, track task status, and recover interrupted interactions through a persistent message inbox."
+    },
+    {
+      "zh": "多个澄清问题可分组一次回答；Jarvis 检索结果按当前请求筛选后进入执行上下文。",
+      "en": "Related clarification questions can be answered as one group; retrieved Jarvis context is selected for the current request before execution."
+    },
+    {
+      "zh": "工作区交付比较任务起始快照，正确合入已提交成果，并支持解决冲突后重试；非 Git 失败重试保留共享目录锁语义。",
+      "en": "Workspace delivery compares against the task's starting snapshot, merges already committed results, and supports retries after conflict resolution; non-Git retries retain shared-directory locking."
+    },
+    {
+      "zh": "Jarvis 同步保留观察与结果事件类型，兼容旧队列；队列满时保留未送达和待审核记录，明确拒绝无法接纳的新请求。",
+      "en": "Jarvis synchronization preserves observation and result event types and supports older queues; full queues retain undelivered writes and candidates under review, explicitly rejecting new requests that cannot be accepted."
+    },
+    {
+      "zh": "改善 H5 实时消息、工具审批、设备认证和工作进程配置传递，打包时包含完整 Web 资源。",
+      "en": "Improved H5 live messages, tool approvals, device authentication, and worker configuration transfer, and included the complete Web assets in packages."
+    },
+    {
+      "zh": "修复任务接收确认和服务状态提示，兼容已有运行记录及工具定义。",
+      "en": "Fixed task acknowledgement and service status messages while retaining compatibility with existing run records and tool definitions."
+    }
+  ],
   "0.4.7": [
     {
       "zh": "新增 H5 手机助理：支持扫码配对、设备管理、实时会话与工具审批，以及 macOS 和 Linux 后台服务。",

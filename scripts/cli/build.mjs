@@ -3,6 +3,9 @@ import { fileURLToPath } from 'node:url'
 
 const repo = fileURLToPath(new URL('../../', import.meta.url))
 const compiler = fileURLToPath(new URL('../../node_modules/typescript/bin/tsc', import.meta.url))
+const pnpm = spawnSync(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['web:build'], { cwd: repo, stdio: 'inherit', shell: process.platform === 'win32' })
+if (pnpm.error) throw pnpm.error
+if (pnpm.status !== 0) process.exit(pnpm.status ?? 1)
 const changelog = spawnSync(process.execPath, [fileURLToPath(new URL('../release/sync-cli-highlights.mjs', import.meta.url))], { cwd: repo, stdio: 'inherit' })
 if (changelog.error) throw changelog.error
 if (changelog.status !== 0) process.exit(changelog.status ?? 1)

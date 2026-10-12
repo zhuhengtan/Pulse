@@ -1,5 +1,6 @@
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -62,6 +63,49 @@ const task = spawnSync(process.execPath, [bin, 'run', 'say hello', '--mock-respo
 if (task.status !== 0) {
   console.error(task.stderr || task.stdout.slice(-4_000))
   process.exit(task.status ?? 1)
+}
+
+const h5Environment = {
+  ...process.env,
+  PULSE_HOME: join(directory, 'h5-home'),
+  PULSE_CONFIG: configPath,
+  PULSE_DATA_DIR: join(directory, 'h5-data'),
+}
+const probe = createNetServer()
+await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(0, '127.0.0.1', resolve) })
+const h5Port = probe.address().port
+await new Promise((resolve, reject) => probe.close(error => error ? reject(error) : resolve()))
+const h5 = spawn(process.execPath, [bin, 'h5', 'start', '--port', String(h5Port)], { env: h5Environment, stdio: ['ignore', 'pipe', 'pipe'] })
+let h5Output = ''
+let h5Error = ''
+h5.stdout.setEncoding('utf8').on('data', (chunk) => { h5Output += chunk })
+h5.stderr.setEncoding('utf8').on('data', (chunk) => { h5Error += chunk })
+try {
+  const deadline = Date.now() + 10_000
+  let port
+  while (!port && Date.now() < deadline) {
+    port = Number(h5Output.match(/电脑本机管理页: http:\/\/localhost:(\d+)\/pair/)?.[1]) || undefined
+    if (port) break
+    if (h5.exitCode !== null) throw new Error(`packaged H5 exited before startup: ${h5Error || h5Output}`)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  if (!port) throw new Error(`packaged H5 did not report a listening port: ${h5Error || h5Output}`)
+  const response = await fetch(`http://127.0.0.1:${port}/`)
+  if (!response.ok) throw new Error(`packaged H5 root failed: HTTP ${response.status}`)
+  const html = await response.text()
+  const script = html.match(/src="([^"]+\.js)"/)?.[1]
+  const style = html.match(/href="([^"]+\.css)"/)?.[1]
+  if (!script || !style || !html.includes('<div id="root"></div>')) throw new Error('packaged H5 index is missing its React entry assets')
+  for (const asset of [script, style]) {
+    const assetResponse = await fetch(new URL(asset, `http://127.0.0.1:${port}`))
+    if (!assetResponse.ok) throw new Error(`packaged H5 asset failed: ${asset} (HTTP ${assetResponse.status})`)
+  }
+  console.log('packaged H5 startup and static assets verified')
+} finally {
+  if (h5.exitCode === null) {
+    h5.kill('SIGTERM')
+    await new Promise((resolve) => h5.once('exit', resolve))
+  }
 }
 
 console.log('package verification passed')

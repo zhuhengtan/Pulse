@@ -80,7 +80,11 @@ function buildProviderHistory(state: RuntimeState, history: LaneRecord['context'
       const providerName = typeof call.providerToolName === 'string' ? call.providerToolName : name
       const providerArguments = typeof call.providerToolArguments === 'string' ? call.providerToolArguments : JSON.stringify(call.input ?? {})
       if (typeof runtimeId !== 'string' || typeof providerId !== 'string' || !providerId || typeof name !== 'string' || !name || typeof providerName !== 'string' || !providerName || typeof providerArguments !== 'string') return undefined
-      const correlation = state.toolCallCorrelations.get(runtimeId)
+      const directCorrelation = state.toolCallCorrelations.get(runtimeId)
+      const matchingCorrelations = directCorrelation || typeof record.effectId !== 'string'
+        ? []
+        : [...state.toolCallCorrelations.values()].filter((candidate) => candidate.llmEffectId === record.effectId && (candidate.toolCallId === runtimeId || candidate.toolCallId.endsWith(`:${runtimeId}`)))
+      const correlation = directCorrelation ?? (matchingCorrelations.length === 1 ? matchingCorrelations[0] : undefined)
       if (!correlation?.resultRef || (visible !== undefined && !visible.has(correlation.resultRef))) { incomplete = true; break }
       const result = state.results.get(correlation.resultRef)
       if (!result) { incomplete = true; break }

@@ -8,6 +8,8 @@ export interface H5DeviceRecord {
   name: string
   createdAt: string
   lastUsedAt: string
+  /** Scope is assigned by the server at credential issuance, never by device metadata. */
+  scope?: 'local' | 'paired'
 }
 
 export interface PairingCodeInfo {
@@ -41,7 +43,7 @@ export class H5AuthStore {
         this.devices = parsed.filter(
           (d): d is H5DeviceRecord =>
             Boolean(d && typeof d.id === 'string' && typeof d.tokenHash === 'string')
-        )
+        ).map(device => ({ ...device, scope: device.scope === 'local' ? 'local' : 'paired' }))
       }
     } catch {
       this.devices = []
@@ -105,8 +107,28 @@ export class H5AuthStore {
       name: deviceName.slice(0, 80),
       createdAt: now,
       lastUsedAt: now,
+      scope: 'paired',
     }
 
+    this.devices.push(device)
+    await this.persist()
+    return { device, token }
+  }
+
+  async getOrCreateLocalDevice(existingToken?: string): Promise<{ device: H5DeviceRecord; token: string }> {
+    await this.init()
+    const existing = await this.authenticateToken(existingToken)
+    if (existing && existing.scope === 'local') return { device: existing, token: existingToken! }
+    const token = randomBytes(32).toString('hex')
+    const now = new Date().toISOString()
+    const device: H5DeviceRecord = {
+      id: `dev-${randomUUID()}`,
+      tokenHash: this.hashToken(token),
+      name: 'Pulse 本机浏览器',
+      createdAt: now,
+      lastUsedAt: now,
+      scope: 'local',
+    }
     this.devices.push(device)
     await this.persist()
     return { device, token }

@@ -48,6 +48,7 @@ export type EffectExecutor = (effect: Readonly<EffectRecord>, signal: AbortSigna
 export interface EffectHandle { id: string; status(): EffectState; requestCancel(reason: string): void }
 export type HostCommand =
   | { type: 'reply'; agentId: string; effectId: string; value: JsonValue }
+  | { type: 'reply_batch'; agentId: string; groupId: string; answers: Array<{ effectId: string; value: JsonValue }> }
   | { type: 'human_input'; agentId: string; inputId: string; value: JsonValue; targetEffectId?: string }
   | { type: 'cancel'; agentId: string; reason: string }
   | { type: 'cancel_effect'; agentId: string; effectId: string; reason: string }
@@ -244,6 +245,16 @@ function validateHostCommand(command: unknown): asserts command is HostCommand {
   if (value.type === 'reply') {
     if (typeof value.agentId !== 'string' || value.agentId.length === 0 || typeof value.effectId !== 'string' || value.effectId.length === 0) throw new Error('INVALID_HOST_COMMAND')
     try { strictJsonValue(value.value) } catch { throw new Error('INVALID_HOST_COMMAND_VALUE') }
+    return
+  }
+  if (value.type === 'reply_batch') {
+    if (typeof value.agentId !== 'string' || value.agentId.length === 0 || typeof value.groupId !== 'string' || value.groupId.length === 0 || !Array.isArray(value.answers) || value.answers.length === 0) throw new Error('INVALID_HOST_COMMAND')
+    const seen = new Set<string>()
+    for (const answer of value.answers) {
+      if (!answer || typeof answer !== 'object' || typeof answer.effectId !== 'string' || answer.effectId.length === 0 || seen.has(answer.effectId)) throw new Error('INVALID_HOST_COMMAND')
+      seen.add(answer.effectId)
+      try { strictJsonValue(answer.value) } catch { throw new Error('INVALID_HOST_COMMAND_VALUE') }
+    }
     return
   }
   if (value.type === 'human_input') {
@@ -1336,7 +1347,7 @@ export class PulseRuntime {
   enqueueHostCommand(command: HostCommand): boolean {
     validateHostCommand(command)
     const eventId = `host-command-${this.hostCommandSeq}`
-    const urgent = command.type === 'human_input' || command.type === 'reply' || command.type === 'cancel' || command.type === 'cancel_effect'
+    const urgent = command.type === 'human_input' || command.type === 'reply' || command.type === 'reply_batch' || command.type === 'cancel' || command.type === 'cancel_effect'
     if (!this.enqueueFact(command, eventId, urgent)) return false
     this.hostCommandSeq++
     return true
@@ -1611,6 +1622,29 @@ export class PulseRuntime {
         const effect = this.state.effects.get(envelope.fact.effectId)
         if (effect?.agentId === envelope.fact.agentId && effect.kind === 'human' && !effect.outcome) commandApplied = this.completeEffect(envelope.fact.effectId, { value: envelope.fact.value }, 'succeeded', undefined, [{ op: 'appendEvent', event: { type: 'command.applied', data: { eventId: envelope.eventId } } }])
         else { this.rejectHostCommand(envelope.eventId, effect?.agentId !== envelope.fact.agentId ? 'EFFECT_NOT_OWNED' : 'EFFECT_NOT_REPLYABLE'); commandApplied = true }
+      } else if (envelope.fact.type === 'reply_batch') {
+        const batch = envelope.fact
+        const wait = this.state.waits.get(batch.groupId)
+        const expected = wait?.state === 'pending' ? wait.spec.dependencies.flatMap((dependency) => 'kind' in dependency.target && dependency.target.kind === 'effect' ? [dependency.target.id] : []) : []
+        const supplied = batch.answers.map((answer) => answer.effectId)
+        const validGroup = wait !== undefined && wait.state === 'pending' && this.state.lanes.get(wait.laneId)?.agentId === batch.agentId
+          && expected.length === supplied.length && expected.every((effectId) => supplied.includes(effectId))
+        const validEffects = validGroup && batch.answers.every((answer) => {
+          const effect = this.state.effects.get(answer.effectId)
+          return effect?.agentId === batch.agentId && effect?.kind === 'human' && effect.ownerLaneId === wait!.laneId && !effect.outcome
+        })
+        if (!validEffects) {
+          this.rejectHostCommand(envelope.eventId, validGroup ? 'EFFECT_NOT_REPLYABLE' : 'INTERACTION_GROUP_MISMATCH')
+          commandApplied = true
+        } else {
+          // All members are checked against the persisted WaitRecord before any
+          // reply is applied, so retries cannot submit only part of a question batch.
+          for (const [index, answer] of batch.answers.entries()) {
+            const extra = index === batch.answers.length - 1 ? [{ op: 'appendEvent' as const, event: { type: 'command.applied' as const, data: { eventId: envelope.eventId, groupId: batch.groupId } } }] : []
+            if (!this.completeEffect(answer.effectId, { value: answer.value }, 'succeeded', undefined, extra)) break
+          }
+          commandApplied = true
+        }
       } else if (envelope.fact.type === 'cancel') commandApplied = this.cancelAgent(envelope.fact.agentId, envelope.fact.reason, [{ op: 'appendEvent', event: { type: 'command.applied', data: { eventId: envelope.eventId } } }], `host-command:${envelope.eventId}`)
       else if (envelope.fact.type === 'cancel_effect') {
         const effect = this.state.effects.get(envelope.fact.effectId)

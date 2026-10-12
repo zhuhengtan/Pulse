@@ -32,6 +32,14 @@ describe('Runtime tool registry', () => {
     expect(() => registry.compileToolSet('invalid', { limit: -1 })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false }))
   })
 
+  it('excludes completed tools from a dynamic tool-set snapshot', () => {
+    const registry = new RuntimeToolRegistry()
+    registry.register(echo)
+    registry.register(defineTool({ name: 'other', description: 'other tool', input: z.object({}), output: z.object({ ok: z.boolean() }), execute: () => ({ ok: true }) }))
+    expect(registry.compileToolSet('dynamic', { exclude: ['echo'] }).tools.map((tool) => tool.name)).toEqual(['other'])
+    expect(() => registry.discover({ exclude: [''] })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false }))
+  })
+
   it('rejects malformed manifest contracts in both Runtime and Tool SDK registries', () => {
     const malformed = { ...echo, manifest: { ...echo.manifest, name: 'malformed', inputSchema: [], locks: [{ resource: 'workspace', mode: 'invalid' }], permissions: { workspaceRoots: 'not-an-array' } } }
     expect(() => new RuntimeToolRegistry().register(malformed)).toThrow('INVALID_TOOL_MANIFEST:malformed')

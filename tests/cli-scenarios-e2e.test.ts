@@ -1,5 +1,6 @@
 import { describe, expect, it, afterEach } from 'vitest'
 import { spawn } from 'node:child_process'
+import { mkdtempSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -31,11 +32,14 @@ function runCli(
     timeout?: number
   }
 ): Promise<RunResult> {
+  const configHome = mkdtempSync(join(tmpdir(), 'pulse-e2e-config-'))
+  temporaryDirectories.push(configHome)
   return new Promise((resolveResult, reject) => {
     const child = spawn(process.execPath, [cliBinPath, ...args], {
       cwd: options?.cwd ?? process.cwd(),
       env: {
         ...process.env,
+        PULSE_HOME: configHome,
         PULSE_JARVIS_ENABLED: '0',
         ...(options?.env ?? {}),
       },

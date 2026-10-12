@@ -55,6 +55,7 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
     const isActive = displayName === options.activeModel && selection.provider === activeCode
     const maxContextTokens = selection.maxContextTokens ?? profile.maxContextTokens ?? options.activeProvider.maxContextTokens ?? 32_000
     const maxOutputTokens = selection.maxOutputTokens ?? profile.maxOutputTokens ?? options.activeProvider.maxOutputTokens ?? 4_096
+    const requestedReasoning = selection.reasoningEffort ?? profile.reasoningEffort ?? 'medium'
     candidates.push({
       id: displayName,
       providerId: selection.provider,
@@ -63,7 +64,7 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
       capabilities: {
         toolCalling: true,
         structuredOutput: true,
-        reasoning: selection.reasoningEffort ?? profile.reasoningEffort ?? 'medium',
+        reasoning: requestedReasoning === 'none' ? 'low' : requestedReasoning,
         maxContextTokens,
         maxOutputTokens,
         local: localProvider(profile.provider),

@@ -14,6 +14,7 @@ try {
   for (const name of order) {
     const source = join(repo, `packages/${name}`); const target = join(stage, name)
     await mkdir(target, { recursive: true }); await cp(join(source, 'dist'), join(target, 'dist'), { recursive: true })
+    if (name === 'server') await cp(join(repo, 'packages/web/dist'), join(target, 'dist/web'), { recursive: true })
     await cp(join(source, 'README.md'), join(target, 'README.md'))
     if (name === 'cli') await cp(join(source, 'scripts'), join(target, 'scripts'), { recursive: true })
     const data = structuredClone(manifests.get(name))

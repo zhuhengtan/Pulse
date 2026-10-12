@@ -1,12 +1,21 @@
 {
   "name": "@hunterzhu/pulse-server",
-  "version": "0.4.7",
+  "version": "0.5.0",
   "license": "PolyForm-Noncommercial-1.0.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/zhuhengtan/Pulse"
   },
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.ts"
+    }
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
@@ -20,10 +29,13 @@
     "@hunterzhu/pulse-adapters": "workspace:*",
     "@hunterzhu/pulse-runtime": "workspace:*",
     "@hunterzhu/pulse-tool-sdk": "workspace:*",
+    "node-pty": "^1.1.0",
     "qrcode": "^1.5.4",
+    "ws": "^8.21.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@types/qrcode": "^1.5.6"
+    "@types/qrcode": "^1.5.6",
+    "@types/ws": "^8.18.2"
   }
 }

@@ -107,6 +107,18 @@ export class PulseSession {
       throw new Error('HOST_COMMAND_NOT_ENQUEUED')
     }
   }
+  async replyBatch(groupId: string, answers: Array<{ effectId: string; value: JsonValue }>): Promise<void> {
+    const wait = this.runtime.state.waits.get(groupId)
+    const expected = wait?.state === 'pending' ? wait.spec.dependencies.flatMap((dependency) => 'kind' in dependency.target && dependency.target.kind === 'effect' ? [dependency.target.id] : []) : []
+    const supplied = answers.map((answer) => answer.effectId)
+    if (!wait || wait.state !== 'pending' || !this.ownsAgent(this.runtime.state.lanes.get(wait.laneId)?.agentId ?? '') || expected.length !== supplied.length || expected.some((id) => !supplied.includes(id))) throw new Error('INTERACTION_GROUP_MISMATCH')
+    for (const answer of answers) {
+      const effect = this.runtime.state.effects.get(answer.effectId)
+      if (!effect || effect.agentId !== this.agentId) throw new Error('EFFECT_NOT_OWNED')
+      if (effect.kind !== 'human' || effect.outcome || effect.ownerLaneId !== wait.laneId) throw new Error('EFFECT_NOT_REPLYABLE')
+    }
+    if (!this.runtime.enqueueHostCommand({ type: 'reply_batch', agentId: this.agentId, groupId, answers: structuredClone(answers) })) throw new Error('HOST_COMMAND_NOT_ENQUEUED')
+  }
   /** Submit a human message while the agent is still running. The scheduler
    * records it immediately; targetEffectId is optional for direct replies to
    * a waiting Human Effect. */

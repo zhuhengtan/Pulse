@@ -28,10 +28,13 @@ export interface JarvisActiveGoal {
 
 export interface JarvisMemoryRecord {
   id: string
+  revision?: number
   scope: 'global' | 'project'
+  projectId?: string
   kind: 'preference' | 'fact' | 'constraint' | 'decision' | 'identity' | 'workflow'
   title: string
   content: string
+  status?: 'candidate' | 'active' | 'archived'
 }
 
 export interface JarvisContextPackage {
@@ -40,6 +43,7 @@ export interface JarvisContextPackage {
   activeGoal?: JarvisActiveGoal
   memories?: JarvisMemoryRecord[]
   recentEvents?: Array<{ id: string; type: string; content: string }>
+  profileDigest?: string
 }
 
 export interface CandidateMemoryInput {

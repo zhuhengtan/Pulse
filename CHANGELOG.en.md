@@ -2,6 +2,22 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.5.0] - 2026-10-12
+
+### Added
+
+- Added a standalone Web workbench for assistant chats, project work sessions, history, settings, and local terminals.
+- Project tasks run in separate worker processes and Git worktrees that inherit current project edits and merge accepted results; non-Git projects use exclusive locks for serial execution.
+- The assistant can invoke project, work-session, and Jarvis tools, track task status, and recover interrupted interactions through a persistent message inbox.
+- Related clarification questions can be answered as one group; retrieved Jarvis context is selected for the current request before execution.
+
+### Fixed
+
+- Workspace delivery compares against the task's starting snapshot, merges already committed results, and supports retries after conflict resolution; non-Git retries retain shared-directory locking.
+- Jarvis synchronization preserves observation and result event types and supports older queues; full queues retain undelivered writes and candidates under review, explicitly rejecting new requests that cannot be accepted.
+- Improved H5 live messages, tool approvals, device authentication, and worker configuration transfer, and included the complete Web assets in packages.
+- Fixed task acknowledgement and service status messages while retaining compatibility with existing run records and tool definitions.
+
 ## [0.4.7] - 2026-10-11
 
 ### Added

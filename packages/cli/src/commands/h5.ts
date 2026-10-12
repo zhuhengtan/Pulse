@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import QRCode from 'qrcode'
-import { createLocalHost, H5Server, H5AuthStore, DEFAULT_H5_PORT, type LocalHostOptions } from '@hunterzhu/pulse-server'
+import { createLocalHost, H5Server, H5AuthStore, DEFAULT_H5_PORT, runH5WorkWorker, type LocalHostOptions } from '@hunterzhu/pulse-server'
 
 const serviceId = 'com.hunterzhu.pulse.h5'
 
@@ -28,7 +28,7 @@ function quoteSystemd(value: string): string {
   return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%')}"`
 }
 
-const h5Actions = new Set(['start', 'daemon', 'qr', 'devices', 'revoke', 'install', 'status', 'stop', 'uninstall'])
+const h5Actions = new Set(['start', 'daemon', 'qr', 'devices', 'revoke', 'install', 'status', 'stop', 'uninstall', 'work-worker'])
 
 /** Network H5 keeps ask/read-only unless this command explicitly requests auto. */
 export function h5RuntimeOptions(
@@ -56,7 +56,8 @@ export function h5DaemonArguments(executable: string, entry: string, port: numbe
 export async function runH5Command(
   options: LocalHostOptions,
   args: string[],
-  cliOptions: Record<string, string | boolean> = {}
+  cliOptions: Record<string, string | boolean> = {},
+  configuration?: { path: string; prepare: (candidatePath: string) => Promise<LocalHostOptions> }
 ): Promise<number> {
   const [action = 'start', targetId] = args
   if (!h5Actions.has(action)) {
@@ -76,6 +77,17 @@ export async function runH5Command(
   const data = options.dataDir ?? process.env.PULSE_DATA_DIR ?? join(home, '.pulse', 'data')
   const cwd = options.cwd ?? process.cwd()
   const platform = process.platform
+
+  // Internal child process. The parent sends the task over versioned IPC so
+  // prompts and credentials never appear in the process argument list.
+  if (action === 'work-worker') {
+    if (!targetId || !/^conv-[0-9a-f-]{36}$/i.test(targetId)) {
+      process.stderr.write('工作进程会话标识无效。\n')
+      return 1
+    }
+    const host = createLocalHost(h5RuntimeOptions(options, cliOptions))
+    return runH5WorkWorker(host, targetId)
+  }
 
   // 1. Devices list
   if (action === 'devices') {
@@ -278,7 +290,20 @@ WantedBy=default.target
     process.stderr.write('H5 网络服务已将审批模式从 auto 降为 ask。若确需自动批准，请显式传入 --approval-mode auto。\n')
   }
   const host = createLocalHost(runtimeOptions)
-  const server = new H5Server(host, { dataDir: data, port: port ?? DEFAULT_H5_PORT })
+  const server = new H5Server(host, {
+    dataDir: data,
+    port: port ?? DEFAULT_H5_PORT,
+    ...(process.env.PULSE_H5_HOST ? { host: process.env.PULSE_H5_HOST } : {}),
+    ...(configuration ? { configuration } : {}),
+    workWorker: {
+      entry: fileURLToPath(new URL('../bin.js', import.meta.url)),
+      dataDir: data,
+      ...(configuration ? { configPath: configuration.path } : {}),
+      approvalMode: runtimeOptions.approvalMode,
+      trustWorkspace: cliOptions['trust-workspace'] === true,
+      cwd,
+    },
+  })
   const started = await server.start()
 
   if (!isDaemon) {

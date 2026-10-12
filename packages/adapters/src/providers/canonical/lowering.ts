@@ -12,7 +12,7 @@ export interface LoweringParams {
   model?: string | undefined
   outputSchema?: JsonValue | undefined
   maxOutputTokens?: number | undefined
-  reasoningEffort?: 'low' | 'medium' | 'high' | undefined
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'none' | undefined
   toolChoice?: ProviderToolChoice | undefined
   stream?: boolean | undefined
 }

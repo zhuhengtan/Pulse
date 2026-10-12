@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertJarvisApiUrl, createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
-import { defaultPulseConfig, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliModel, type PulseCliProviderProfile } from './config.js'
+import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliModel, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
 import { runOneShot } from './commands/run.js'
 import { runDoctor } from './commands/doctor.js'
@@ -270,6 +270,8 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
       ...(item.reasoningEffort === undefined ? {} : { reasoningEffort: item.reasoningEffort }),
     }]]
   }))
+  const assistantModelName = config.assistantModel ?? activeModelName
+  if (!providerModels[assistantModelName]) throw new Error(`UNKNOWN_ASSISTANT_MODEL:${assistantModelName}`)
   const taskRouting = config.taskRouting
   for (const [task, models] of Object.entries(taskRouting ?? {})) {
     if (!Array.isArray(models) || models.length === 0 || models.some((model) => typeof model !== 'string' || !providerModels[model])) {
@@ -424,6 +426,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     capabilityConfig: capabilitySettings.skills === undefined ? {} : { skills: skillNames },
     activeProviderCode: providerName,
     activeModel: activeModelName,
+    assistantModel: assistantModelName,
     ...(mockResponse === undefined ? {} : { mockResponse }),
     ...(mockTaskAssessments === undefined ? {} : { mockTaskAssessments }),
     ...(mockStageAssessments === undefined ? {} : { mockStageAssessments }),
@@ -438,6 +441,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(config.networkHosts === undefined ? {} : { networkHosts: config.networkHosts }),
     jarvis,
     ...(config.frontModel ? { frontModel: config.frontModel } : {}),
+    ...(config.approvalReview?.model ? { approvalReview: { provider: config.approvalReview.provider ?? 'ollama', model: config.approvalReview.model, baseURL: config.approvalReview.baseURL ?? 'http://127.0.0.1:11434', timeoutMs: Math.max(1_000, Math.min(60_000, config.approvalReview.timeoutMs ?? 15_000)) } } : {}),
   }
 }
 
@@ -472,7 +476,11 @@ export async function main(): Promise<number> {
     return runScheduledCommand(options, parsed.positionals, parsed.options)
   }
   if (parsed.command === 'service') return runServiceCommand(options, parsed.positionals)
-  if (parsed.command === 'h5') return runH5Command(options, parsed.positionals, parsed.options)
+  if (parsed.command === 'h5') {
+    const configPath = expandHome(option(parsed.options, 'config') ?? process.env.PULSE_CONFIG) ?? defaultPulseConfigPath()
+    const prepare = (candidatePath: string) => hostOptions({ ...parsed, options: { ...parsed.options, config: candidatePath } })
+    return runH5Command(options, parsed.positionals, parsed.options, { path: configPath, prepare })
+  }
   if (parsed.command === 'mcp' && parsed.positionals[0] === 'doctor') return runMcpDoctor(options, parsed.positionals.slice(1))
   if (parsed.command === 'template') return runTemplateCommand(options, parsed.positionals, option(parsed.options, 'format') ?? 'text', version)
 

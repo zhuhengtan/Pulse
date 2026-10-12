@@ -1,5 +1,5 @@
 import { createServer } from 'node:http'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -115,6 +115,69 @@ describe('processFrontModel', () => {
     }, '回退')
     expect(result.instantResponse).toBe('收到')
     expect(result.brief?.requirements).toEqual([])
+  })
+
+  it('sanitizes the current-turn Jarvis selection without requiring a non-empty result', () => {
+    const selected = sanitizeFrontModelResult({ instantResponse: '收到', brief: { intent: '检查项目约定', needsClarification: false, contextSelection: { refs: ['memory/relevant', 'memory/relevant', 'memory/forged'], summary: '使用项目约定。' } } }, '回退')
+    expect(selected.brief?.contextSelection).toEqual({ refs: ['memory/relevant', 'memory/forged'], summary: '使用项目约定。' })
+    const empty = sanitizeFrontModelResult({ instantResponse: '收到', brief: { intent: '简单问候', needsClarification: false, contextSelection: { refs: [], summary: '' } } }, '回退')
+    expect(empty.brief?.contextSelection).toEqual({ refs: [], summary: '' })
+  })
+
+  it('passes only cited Jarvis items to the primary model and persists the selected sources', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'front-model-jarvis-selection-'))
+    let frontPrompt = ''
+    const ollama = createServer((req, res) => {
+      let body = ''
+      req.on('data', chunk => { body += chunk })
+      req.on('end', () => {
+        frontPrompt = JSON.parse(body).prompt as string
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ response: JSON.stringify({ instantResponse: '收到', brief: { intent: '遵循 Pulse 项目约定', requirements: [], profileHints: [], needsClarification: false, contextSelection: { refs: ['memory/pulse-style'], summary: '项目采用蓝色强调色和独立 packages/web 前端。' } } }) }))
+      })
+    })
+    await new Promise<void>((resolve, reject) => { ollama.once('error', reject); ollama.listen(0, '127.0.0.1', resolve) })
+    const port = (ollama.address() as { port: number }).port
+    const mockClient = {
+      async openSession(workspace: string) { return { id: 'selection-session', projectId: 'pulse', workspace } },
+      async buildContext() {
+        return {
+          text: 'FULL RAW PACKAGE MUST NOT REACH THE PRIMARY MODEL',
+          memories: [
+            { id: 'pulse-style', scope: 'project', kind: 'constraint', title: 'UI', content: '项目采用蓝色强调色和独立 packages/web 前端。' },
+            { id: 'other-project-secret', scope: 'project', kind: 'fact', title: 'Other project', content: 'UNSELECTED OTHER PROJECT DETAIL' },
+          ],
+          profileDigest: '用户偏好简体中文',
+          recentEvents: [{ id: 'irrelevant-event', type: 'result', content: 'UNSELECTED RECENT EVENT' }],
+        }
+      },
+      async recordEvent() {}, async recordCandidate() {}, async closeSession() {},
+    }
+    const host = createLocalHost({
+      cwd: dir, dataDir: join(dir, 'data'), jarvis: { enabled: true }, jarvisClient: mockClient as never,
+      provider: { provider: 'mock' }, mockResponse: '已按项目约定处理',
+      frontModel: { enabled: true, model: 'selection-fixture', baseURL: `http://127.0.0.1:${port}`, timeoutMs: 2000 },
+    })
+    try {
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: '调整聊天页样式，遵循项目约定' })
+      for await (const _event of run.events) { /* Drain the completed run. */ }
+      expect((await run.outcome()).text).toContain('已按项目约定处理')
+      expect(frontPrompt).toContain('memory/pulse-style')
+      expect(frontPrompt).toContain('UNSELECTED OTHER PROJECT DETAIL')
+      const runtime = await readFile(join(dir, 'data', 'conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8')
+      expect(runtime).toContain('项目采用蓝色强调色和独立 packages/web 前端。')
+      expect(runtime).not.toContain('UNSELECTED OTHER PROJECT DETAIL')
+      expect(runtime).not.toContain('UNSELECTED RECENT EVENT')
+      expect(runtime).not.toContain('FULL RAW PACKAGE MUST NOT REACH THE PRIMARY MODEL')
+      const selection = JSON.parse(await readFile(join(dir, 'data', 'conversations', conversation.id, 'runs', run.id, 'jarvis-context-selection.json'), 'utf8')) as { status: string; refs: string[]; context: string }
+      expect(selection).toMatchObject({ status: 'curated', refs: ['memory/pulse-style'] })
+      expect(selection.context).toContain('memory/pulse-style')
+    } finally {
+      await host.close()
+      await new Promise<void>(resolve => ollama.close(() => resolve()))
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   it('asks the clarification question without starting the main run', async () => {

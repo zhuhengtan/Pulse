@@ -314,6 +314,35 @@ describe('local CLI application host', () => {
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 
+  it('submits a complete ask group through one persisted runtime reply command', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-ask-batch-'))
+    try {
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), mockToolCalls: [
+        { name: 'ask.choice', input: { prompt: 'First choice', options: ['one', 'two'] } },
+        { name: 'ask.multi', input: { prompt: 'Optional extras', options: ['red', 'blue'], min: 0, max: 2 } },
+      ], mockAfterToolResponse: 'answers received' })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'ask two questions' })
+      let submitted = false
+      for await (const event of run.events) {
+        if (event.type !== 'waiting' || submitted) continue
+        const groups = await run.pendingInteractions()
+        expect(groups).toHaveLength(1)
+        expect(groups[0]?.items).toHaveLength(2)
+        const group = groups[0]!
+        await expect(run.replyBatch(group.groupId, [{ effectId: group.items[0]!.effectId, value: { value: 'one' } }])).rejects.toThrow('INTERACTION_GROUP_MISMATCH')
+        await run.replyBatch(group.groupId, [
+          { effectId: group.items[0]!.effectId, value: { value: 'one' } },
+          { effectId: group.items[1]!.effectId, value: { values: [] } },
+        ])
+        submitted = true
+      }
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'answers received' })
+      expect(submitted).toBe(true)
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
   it('rejects an ask prompt that exceeds the tool schema', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-ask-large-'))
     try {

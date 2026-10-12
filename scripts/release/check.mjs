@@ -25,4 +25,7 @@ for (const { name, data } of manifests) {
   if (name !== 'cli' && !(await readFile(join(repo, `packages/${name}/dist/index.js`)).catch(() => undefined))) throw new Error(`RELEASE_BUILD_MISSING:${name}`)
   if (name === 'cli' && !(await readFile(join(repo, 'packages/cli/dist/bin.js')).catch(() => undefined))) throw new Error('RELEASE_BUILD_MISSING:cli')
 }
+for (const path of ['packages/web/dist/index.html', 'packages/server/dist/web/index.html']) {
+  if (!(await readFile(join(repo, path), 'utf8').catch(() => undefined))) throw new Error(`RELEASE_WEB_ASSET_MISSING:${path}`)
+}
 console.log(`Release check passed for ${version} (${packageNames.length} packages; bilingual changelog verified).`)

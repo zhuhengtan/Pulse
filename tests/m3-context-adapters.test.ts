@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { z } from 'zod'
 import { ContextBuilder, InMemoryModelRegistry, ModelFallbackController, ModelRouter, OutputValidationError, PulseRuntime, appendHistory, createAgent, createRuntimeState, modelFallbackError, stableSerialize, validateActionToolCalls, validateAdapterResult, validateStructuredOutput, MemoryStorage } from '@hunterzhu/pulse-runtime'
 import { AnthropicAdapter, createModelEffectExecutor, encodeSandboxCommand, FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, OpenAICompatibleAdapter, quoteWindowsArgument, runShell, decodeUtf8WithinByteLimit, toOpenAIMessages } from '@hunterzhu/pulse-adapters'
-import { defineTool } from '@hunterzhu/pulse-tool-sdk'
+import { defineTool, zodToJsonSchema } from '@hunterzhu/pulse-tool-sdk'
 
 const resume = { programId: 'context', programVersion: '1', step: 'start', locals: {} }
 
@@ -451,6 +451,8 @@ describe('M1-3 context, models and adapters', () => {
 
   it('fails closed when a Tool schema cannot be represented in JSON Schema', () => {
     expect(() => defineTool({ name: 'unsupported', description: 'unsupported', input: z.date(), output: z.string(), execute: (input) => input.toISOString() })).toThrow('UNSUPPORTED_SCHEMA_TYPE:ZodDate')
+    expect(zodToJsonSchema(z.unknown())).toEqual({})
+    expect(zodToJsonSchema(z.any())).toEqual({})
     const schema = z.object({ kind: z.literal('ok'), value: z.number().int().min(1) }).strict()
     const tool = defineTool({ name: 'strict', description: 'strict', input: schema, output: z.string(), execute: () => 'ok' })
     expect(tool.manifest.inputSchema).toEqual({ type: 'object', properties: { kind: { const: 'ok' }, value: { type: 'integer', minimum: 1 } }, required: ['kind', 'value'], additionalProperties: false })

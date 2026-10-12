@@ -13,7 +13,7 @@ export interface ReActLaneConfig {
   task?: string
   instruction: string | ((view: InstructionView<JsonValue>) => string)
   inputs?: (ctx: StepContext<JsonValue>) => StepInputs
-  toolAllow?: string[]
+  toolAllow?: string[] | ((ctx: StepContext<JsonValue>) => string[])
   maxTurns?: number
   maxTruncationRetries?: number
   maxToolsPerTurn?: number

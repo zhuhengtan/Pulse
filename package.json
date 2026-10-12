@@ -6,13 +6,13 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "ci:local": "node scripts/ci/local.mjs",
-    "build": "pnpm changelog:sync && tsc -b",
+    "build": "pnpm web:build && pnpm changelog:sync && tsc -b",
     "cli:build": "node scripts/cli/build.mjs",
     "cli:dev": "node scripts/cli/dev.mjs",
     "cli:watch": "node scripts/cli/watch.mjs",
     "cli:debug": "node scripts/cli/debug.mjs",
     "cli:start": "node scripts/cli/start.mjs",
-    "cli:pack": "node scripts/cli/pack.mjs",
+    "cli:pack": "pnpm web:build && node scripts/cli/pack.mjs",
     "cli:run-package": "node scripts/cli/run-package.mjs",
     "cli:verify-package": "node scripts/cli/verify-package.mjs",
     "cli:install": "node scripts/cli/install.mjs",
@@ -31,7 +31,10 @@
     "test": "vitest run --exclude 'tests/live/**'",
     "test:watch": "vitest",
     "test:live": "vitest run tests/live --passWithNoTests",
-    "check": "tsc -b --pretty false && vitest run --exclude 'tests/live/**'"
+    "check": "pnpm web:build && tsc -b --pretty false && pnpm --filter @hunterzhu/pulse-web check && pnpm --filter @hunterzhu/pulse-web test && node scripts/ci/test.mjs",
+    "web:dev": "pnpm --filter @hunterzhu/pulse-web dev",
+    "web:dev:server": "node scripts/web/dev-server.mjs",
+    "web:build": "pnpm --filter @hunterzhu/pulse-web build && node scripts/web/stage.mjs"
   },
   "devDependencies": {
     "@hunterzhu/pulse-cli": "workspace:*",

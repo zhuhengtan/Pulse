@@ -1,0 +1,295 @@
+import { useEffect, useMemo, useState } from 'react'
+import { Button, Card, Input, InputNumber, Select, Switch } from 'antd'
+import { ApiError, apiJson, jsonRequest } from './transport.js'
+import { Icon } from './Icon.js'
+import type { PulseWebTransport } from './transport.js'
+
+type JsonObject = Record<string, unknown>
+interface ConfigEnvelope { path: string; version: string; config: JsonObject; sources: Record<string, unknown>; environment: Record<string, boolean>; backupAvailable: boolean; active?: { model?: string; provider?: string } }
+interface Category { id: string; label: string; description: string; paths: string[] }
+
+const categories: Category[] = [
+  { id: 'appearance', label: '外观', description: '仅保存在此浏览器。', paths: [] },
+  { id: 'models', label: '模型与服务商', description: '供应商地址、API Key 环境变量名、模型代码、能力、价格及当前模型。密钥只读取环境变量状态。', paths: ['providers', 'models', 'activeModel', 'assistantModel'] },
+  { id: 'routing', label: '模型路由', description: '按任务配置首选模型和回退顺序。', paths: ['taskRouting'] },
+  { id: 'front', label: '即时预回复', description: '预回复模型独立于主模型配置。', paths: ['frontModel'] },
+  { id: 'approval', label: '审批与代审', description: '全局审批模式和独立的审批复核模型；会话代审仍在各对话中单独设置。', paths: ['approvalMode', 'approvalReview'] },
+  { id: 'jarvis', label: 'Jarvis', description: '记忆服务、连接地址、上下文预算和候选记忆策略。访问令牌会脱敏。', paths: ['jarvis'] },
+  { id: 'tools', label: '工具与技能', description: '已启用能力、技能选择及受信任的技能目录。', paths: ['capabilities.enabled', 'capabilities.skills', 'capabilities.trustedSkillRoots'] },
+  { id: 'mcp', label: 'MCP', description: '服务命令和参数会启动本机进程。环境变量值默认保留为脱敏占位。', paths: ['capabilities.mcpServers'] },
+  { id: 'network', label: '网络', description: '网络访问开关和允许访问的主机列表。', paths: ['allowNetwork', 'networkHosts'] },
+  { id: 'instructions', label: '指令', description: '系统提示词及其文件来源。', paths: ['systemPrompt', 'systemPromptFile'] },
+  { id: 'runtime', label: '运行与存储', description: '工作目录、数据目录、运行轮数和自动压缩阈值。数据目录变更需重启后生效。', paths: ['cwd', 'dataDir', 'maxTurns', 'maxRuntimeMs', 'autoCompactPercent'] },
+  { id: 'archive', label: '归档对话', description: '搜索、恢复或永久删除已归档对话。', paths: [] },
+  { id: 'advanced', label: '高级配置', description: '完整 JSON 草稿、校验、变更预览与备份恢复。', paths: [] },
+]
+
+const defaultAppearance = { theme: 'system', interfaceScale: 'standard', codeScale: 'standard' }
+const configLabels: Record<string, string> = {
+  providers: '服务商配置', models: '模型配置', activeModel: '当前模型', assistantModel: '助理聊天模型', taskRouting: '模型路由',
+  frontModel: '即时预回复', enabled: '启用', provider: '服务商', model: '模型', baseURL: '服务地址', timeoutMs: '超时时间（毫秒）',
+  approvalMode: '审批模式', approvalReview: '审批复核模型', cwd: '工作目录', dataDir: '数据目录', maxTurns: '最大执行轮数',
+  maxRuntimeMs: '单次运行时限（毫秒）', autoCompactPercent: '自动压缩阈值（%）', allowNetwork: '允许网络访问', networkHosts: '允许访问的主机',
+  systemPrompt: '系统指令', systemPromptFile: '系统指令文件', jarvis: 'Jarvis 配置', apiUrl: '服务地址', token: '访问令牌',
+  contextTokenBudget: '上下文预算（Token）', autoCandidate: '自动记录候选记忆', allowRemote: '允许远程连接',
+  capabilities: '能力配置', mcpServers: 'MCP 服务', skills: '可用技能', trustedSkillRoots: '受信任的技能目录', command: '启动命令',
+  args: '命令参数', env: '环境变量', envFrom: '环境变量引用', toolPolicies: '工具权限',
+  name: '名称', apiKeyEnv: 'API Key 环境变量', maxContextTokens: '上下文上限', maxOutputTokens: '输出上限', reasoningEffort: '推理强度',
+  modelCode: '模型代码', displayName: '显示名称', pricing: '价格', currency: '货币', inputPerMillion: '每百万输入 Token 价格',
+  outputPerMillion: '每百万输出 Token 价格', version: '价格版本', reason: '推理任务', plan: '规划任务', merge: '汇总任务', verify: '验收任务',
+}
+
+function getPath(value: JsonObject, path: string): unknown {
+  return path.split('.').reduce<unknown>((current, key) => current && typeof current === 'object' && !Array.isArray(current) ? (current as JsonObject)[key] : undefined, value)
+}
+
+function setPath(source: JsonObject, path: string, next: unknown): JsonObject {
+  const keys = path.split('.')
+  const root = structuredClone(source)
+  let current = root
+  for (const key of keys.slice(0, -1)) {
+    const existing = current[key]
+    if (!existing || typeof existing !== 'object' || Array.isArray(existing)) current[key] = {}
+    current = current[key] as JsonObject
+  }
+  current[keys.at(-1)!] = next
+  return root
+}
+
+function deepEqual(a: unknown, b: unknown): boolean { return JSON.stringify(a) === JSON.stringify(b) }
+function describeValidationError(detail?: string): string {
+  const route = detail?.match(/^INVALID_TASK_MODEL_ROUTE:(.+)$/)
+  if (route) {
+    const taskNames: Record<string, string> = { reason: '推理', plan: '规划', merge: '汇总', verify: '验收' }
+    const task = route[1] ?? ''
+    return `“${taskNames[task] ?? task}”模型路由无效，请选择已登记的模型。`
+  }
+  const duplicateRoute = detail?.match(/^DUPLICATE_TASK_MODEL_ROUTE_CANDIDATE:(.+)$/)
+  if (duplicateRoute) {
+    const taskNames: Record<string, string> = { reason: '推理', plan: '规划', merge: '汇总', verify: '验收' }
+    const task = duplicateRoute[1] ?? ''
+    return `“${taskNames[task] ?? task}”路由中有重复模型，请移除重复项。`
+  }
+  const mcp = detail?.match(/^INVALID_MCP_SERVER_CONFIG:(.+)$/)
+  if (mcp) return `MCP 服务“${mcp[1]}”配置不完整，请检查命令和参数。`
+  const policy = detail?.match(/^INVALID_MCP_TOOL_POLICY:(.+)$/)
+  if (policy) return `MCP 服务“${policy[1]}”的工具权限无效，请重新选择权限。`
+  const env = detail?.match(/^INVALID_MCP_ENV_REFERENCE:(.+)$/)
+  if (env) return `MCP 服务“${env[1]}”的环境变量引用格式无效。`
+  const requiredEnv = detail?.match(/^MCP_ENVIRONMENT_REQUIRED:([^:]+):(.+)$/)
+  if (requiredEnv) return `MCP 服务“${requiredEnv[1]}”需要环境变量“${requiredEnv[2]}”，请设置或移除该引用。`
+  if (detail?.startsWith('UNKNOWN_MODEL_DISPLAY_NAME:')) return '默认模型或任务路由引用了未登记的模型，请重新选择。'
+  if (detail?.startsWith('MODEL_PROVIDER_NOT_FOUND:')) return '有模型引用了不存在的服务商，请为该模型重新选择服务商。'
+  if (detail?.startsWith('PROVIDER_PROTOCOL_REQUIRED:')) return '有服务商未选择协议类型。'
+  if (detail?.startsWith('DUPLICATE_MODEL_DISPLAY_NAME:')) return '模型显示名称重复，请使用不同名称。'
+  if (detail?.startsWith('INVALID_MODEL_PRICING:')) return '模型价格配置无效，请检查货币代码和价格数值。'
+  if (detail === 'SKILL_TRUSTED_ROOT_MUST_BE_ABSOLUTE') return '受信任技能目录必须使用绝对路径。'
+  if (detail === 'INVALID_ENABLED_CAPABILITY_LIST') return '能力列表包含无效或重复项目。'
+  if (detail === 'INVALID_SKILL_SELECTION') return '技能列表格式无效。'
+  return '请检查当前分类中的必填项、格式和模型引用。'
+}
+
+export function SettingsPage({ transport, canEditConfig, onClose, onOpenArchive }: { transport: PulseWebTransport; canEditConfig: boolean; onClose: () => void; onOpenArchive?: () => void }) {
+  const [categoryId, setCategoryId] = useState('appearance')
+  const [envelope, setEnvelope] = useState<ConfigEnvelope>()
+  const [draft, setDraft] = useState<JsonObject>()
+  const [advancedText, setAdvancedText] = useState('')
+  const [advancedError, setAdvancedError] = useState('')
+  const [requestError, setRequestError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [dirty, setDirty] = useState(false)
+  const [mobileDetail, setMobileDetail] = useState(false)
+  const [appearance, setAppearance] = useState(() => {
+    try { return { ...defaultAppearance, ...JSON.parse(localStorage.getItem('pulse-web-appearance') ?? '{}') } }
+    catch { return defaultAppearance }
+  })
+  const selectedCategory = categories.find(item => item.id === categoryId) ?? categories[0]!
+
+  const load = async () => {
+    setRequestError('')
+    if (!canEditConfig) return
+    try {
+      const value = await apiJson<ConfigEnvelope>(transport, '/api/config')
+      setEnvelope(value); setDraft(value.config); setAdvancedText(JSON.stringify(value.config, null, 2)); setDirty(false)
+    } catch (error) { setRequestError(error instanceof ApiError && error.status === 403 ? '只有本机管理会话可以读取完整配置。' : '配置暂时无法加载，请检查本机 Pulse 连接。') }
+  }
+  useEffect(() => { void load() }, [canEditConfig, transport])
+  useEffect(() => {
+    const listener = (event: BeforeUnloadEvent) => { if (dirty) { event.preventDefault(); event.returnValue = '' } }
+    window.addEventListener('beforeunload', listener)
+    return () => window.removeEventListener('beforeunload', listener)
+  }, [dirty])
+
+  const configChanged = (next: JsonObject) => {
+    setDraft(next); setAdvancedText(JSON.stringify(next, null, 2)); setAdvancedError(''); setDirty(true)
+  }
+  const setField = (path: string, value: unknown) => { if (draft) configChanged(setPath(draft, path, value)) }
+  const changedPaths = useMemo(() => {
+    if (!envelope || !draft) return []
+    return [...new Set([...Object.keys(envelope.config), ...Object.keys(draft)])].filter(key => !deepEqual(envelope.config[key], draft[key]))
+  }, [envelope, draft])
+
+  const save = async () => {
+    if (!envelope || !draft || saving) return
+    setSaving(true); setRequestError('')
+    try {
+      const validation = await apiJson<{ valid: boolean; restartRequired: string[] }>(transport, '/api/config/validate', jsonRequest('POST', { config: draft }))
+      if (!validation.valid) throw new Error('配置校验未通过。')
+      const result = await apiJson<{ ok: boolean; path: string; version: string; applied: boolean; restartRequired: string[]; config: JsonObject }>(transport, '/api/config', jsonRequest('PUT', { version: envelope.version, config: draft }))
+      setEnvelope(current => current ? { ...current, path: result.path, version: result.version, config: result.config, backupAvailable: true } : current)
+      setDraft(result.config); setAdvancedText(JSON.stringify(result.config, null, 2)); setDirty(false)
+      const status = result.restartRequired.length ? `已保存；${result.restartRequired.join('、')}将在重启后生效。` : result.applied ? '已保存并应用于新任务。' : '已保存；配置将在服务重启后生效。'
+      window.dispatchEvent(new CustomEvent('pulse-toast', { detail: status }))
+    } catch (error) {
+      const message = error instanceof ApiError && error.status === 409
+        ? '配置文件已被外部修改。为避免覆盖新内容，请重新加载后再编辑。'
+        : error instanceof ApiError && error.status === 400
+          ? `配置校验未通过：${describeValidationError(error.detail)}`
+          : error instanceof Error ? error.message : '保存失败；原文件保持不变。'
+      setRequestError(message)
+    } finally { setSaving(false) }
+  }
+  const restore = async () => {
+    if (!envelope || !window.confirm('用上一份备份替换当前配置？')) return
+    setSaving(true)
+    try {
+      const result = await apiJson<{ version: string; config: JsonObject }>(transport, '/api/config/restore', jsonRequest('POST', { version: envelope.version }))
+      setEnvelope(current => current ? { ...current, version: result.version, config: result.config, backupAvailable: true } : current)
+      setDraft(result.config); setAdvancedText(JSON.stringify(result.config, null, 2)); setDirty(false)
+      window.dispatchEvent(new CustomEvent('pulse-toast', { detail: '已恢复备份配置。' }))
+    } catch (error) { setRequestError(error instanceof ApiError && error.status === 409 ? '配置已被外部修改，请重新加载后再恢复。' : '备份无法恢复；当前配置保持不变。') }
+    finally { setSaving(false) }
+  }
+  const cancelChanges = () => {
+    if (dirty && !window.confirm('放弃所有未保存修改？')) return
+    setRequestError('')
+    if (envelope) { setDraft(envelope.config); setAdvancedText(JSON.stringify(envelope.config, null, 2)); setAdvancedError(''); setDirty(false) }
+  }
+
+  const selectCategory = (id: string) => { setCategoryId(id); setMobileDetail(true) }
+  const setAppearanceValue = (key: string, value: string) => {
+    const next = { ...appearance, [key]: value }; setAppearance(next); localStorage.setItem('pulse-web-appearance', JSON.stringify(next))
+    document.documentElement.dataset.theme = next.theme
+    document.documentElement.dataset.interfaceScale = next.interfaceScale
+    document.documentElement.dataset.codeScale = next.codeScale
+  }
+  useEffect(() => {
+    document.documentElement.dataset.theme = appearance.theme
+    document.documentElement.dataset.interfaceScale = appearance.interfaceScale
+    document.documentElement.dataset.codeScale = appearance.codeScale
+  }, [appearance])
+
+  return <main className={`settings-shell ${mobileDetail ? 'settings-mobile-detail' : ''}`}>
+    <aside className="settings-nav">
+      <div className="settings-nav-header"><button className="icon-button" onClick={() => { if (dirty && !window.confirm('放弃未保存修改并返回聊天？')) return; onClose() }} aria-label="返回聊天"><Icon name="back"/></button><strong>设置</strong></div>
+      <nav aria-label="设置分类">{categories.map(category => <button key={category.id} className={category.id === categoryId ? 'active' : ''} onClick={() => selectCategory(category.id)}><span>{category.label}</span>{category.id === 'advanced' && dirty && <i />}</button>)}</nav>
+    </aside>
+    <section className="settings-content">
+      <header className="settings-content-header"><button className="settings-back" onClick={() => setMobileDetail(false)}><Icon name="back"/> 分类</button><div><h1>{selectedCategory.label}</h1><p>{selectedCategory.description}</p></div><button className="icon-button settings-close" onClick={() => { if (dirty && !window.confirm('放弃未保存修改并返回聊天？')) return; onClose() }} aria-label="返回聊天"><Icon name="close"/></button></header>
+      {requestError && <div className="settings-alert" role="alert">{requestError}{requestError.includes('外部修改') && <button onClick={() => void load()}>重新加载</button>}</div>}
+      {categoryId === 'appearance' && <Card className="settings-card" bordered><SettingSelect label="主题" value={appearance.theme} options={['system', 'light', 'dark']} labels={['跟随系统', '浅色', '深色']} onChange={value => setAppearanceValue('theme', value)} /><SettingSelect label="界面字号" value={appearance.interfaceScale} options={['compact', 'standard', 'large']} labels={['较小', '标准', '较大']} onChange={value => setAppearanceValue('interfaceScale', value)} /><SettingSelect label="代码字号" value={appearance.codeScale} options={['compact', 'standard', 'large']} labels={['较小', '标准', '较大']} onChange={value => setAppearanceValue('codeScale', value)} /></Card>}
+      {categoryId === 'archive' && <Card className="settings-card" bordered><p>归档聊天可以恢复到原项目；永久删除不可撤销。</p><Button type="primary" onClick={onOpenArchive}>打开归档对话</Button></Card>}
+      {categoryId !== 'appearance' && categoryId !== 'archive' && !canEditConfig && <div className="settings-card">完整后台配置只在本机管理页开放。手机仍可更改外观并管理归档对话。</div>}
+      {categoryId !== 'appearance' && categoryId !== 'archive' && canEditConfig && <>
+        {categoryId === 'advanced' ? <div className="settings-card advanced-editor"><div className="settings-meta"><strong>配置文件</strong><code>{envelope?.path ?? '正在读取…'}</code><span>API Key 仅通过环境变量提供。已保存的 Jarvis 与 MCP 环境变量以“保留已保存值”显示；替换为新值或删除对应字段即可修改。</span></div><textarea aria-label="完整配置 JSON" spellCheck={false} value={advancedText} onChange={event => { const text = event.target.value; setAdvancedText(text); try { const parsed = JSON.parse(text) as unknown; if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('顶层必须是 JSON 对象'); setDraft(parsed as JsonObject); setAdvancedError(''); setDirty(!deepEqual(parsed, envelope?.config)) } catch (error) { setAdvancedError(error instanceof Error ? error.message : 'JSON 格式错误') } }} /><div className="json-actions"><button onClick={() => setAdvancedText(JSON.stringify(draft ?? {}, null, 2))}>格式化草稿</button><button disabled={!envelope?.backupAvailable || saving} onClick={() => void restore()}>恢复上一份备份</button></div>{advancedError && <p className="settings-error">{advancedError}</p>}{changedPaths.length > 0 && <details className="change-preview"><summary>变更预览（{changedPaths.length} 个顶层字段）</summary><pre>{changedPaths.map(key => `${key}: ${JSON.stringify(envelope?.config[key]) ?? '（新增）'} → ${JSON.stringify(draft?.[key]) ?? '（删除）'}`).join('\n')}</pre></details>}</div> : <div className="settings-card">
+          <div className="settings-meta"><strong>配置文件</strong><code>{envelope?.path ?? '正在读取…'}</code><span>修改保存在同一份 JSON 草稿中，保存后用于新任务。旧任务继续使用启动时配置。</span></div>
+          {draft && categoryId === 'models' ? <ModelsEditor config={draft} envStatus={envelope?.environment ?? {}} onChange={configChanged} /> : draft && categoryId === 'routing' ? <RoutingEditor config={draft} onChange={configChanged} /> : draft && categoryId === 'mcp' ? <McpEditor config={draft} onChange={configChanged} /> : draft && categoryId === 'tools' ? <ToolsEditor config={draft} onChange={configChanged} /> : draft && categoryId === 'network' ? <NetworkEditor config={draft} onChange={configChanged} /> : draft && categoryId === 'instructions' ? <InstructionsEditor config={draft} onChange={configChanged} /> : draft && ['front','approval','jarvis','runtime'].includes(categoryId) ? <FeatureEditor category={categoryId} config={draft} onChange={configChanged} /> : selectedCategory.paths.map(path => <ConfigField key={path} path={path} value={draft ? getPath(draft, path) : undefined} envStatus={envelope?.environment ?? {}} disabled={!draft || saving} onChange={value => setField(path, value)} />)}
+          {categoryId === 'models' && draft && <div className="settings-meta"><strong>当前生效模型</strong><span>{envelope?.active?.provider && envelope?.active?.model ? `${envelope.active.provider} · ${envelope.active.model}` : '当前配置尚未提供实际生效模型信息'}</span><small>来源覆盖：{Object.keys(envelope?.sources ?? {}).join('、') || '未检测到环境覆盖'}</small></div>}
+          {categoryId === 'runtime' && <p className="restart-note">工作目录或数据目录属于启动设置，保存后需重启 Pulse 才会完全生效。</p>}
+        </div>}
+        <footer className="settings-actions"><span>{dirty ? '有未保存的修改' : envelope ? '所有修改已保存' : ''}</span><button disabled={!dirty || saving || Boolean(advancedError)} onClick={cancelChanges}>取消修改</button><button className="settings-primary" disabled={!dirty || saving || Boolean(advancedError)} onClick={() => void save()}>{saving ? '正在校验并保存…' : '保存全部'}</button></footer>
+      </>}
+    </section>
+  </main>
+}
+
+function SettingSelect({ label, value, options, labels, onChange }: { label: string; value: string; options: string[]; labels: string[]; onChange: (value: string) => void }) {
+  return <label className="settings-row"><span>{label}</span><Select value={value} options={options.map((option, index) => ({ value: option, label: labels[index] }))} onChange={onChange} /></label>
+}
+
+function ConfigField({ path, value, envStatus, disabled, onChange }: { path: string; value: unknown; envStatus: Record<string, boolean>; disabled: boolean; onChange: (value: unknown) => void }) {
+  const [text, setText] = useState(value === undefined ? '' : JSON.stringify(value, null, 2))
+  const [error, setError] = useState('')
+  useEffect(() => setText(value === undefined ? '' : JSON.stringify(value, null, 2)), [value])
+  const label = path.split('.').at(-1) ?? path
+  const pretty = configLabels[path] ?? configLabels[label] ?? label.replace(/[A-Z]/g, letter => ` ${letter.toLowerCase()}`).replace(/^./, letter => letter.toUpperCase())
+  if (typeof value === 'boolean') return <label className="settings-row"><span>{pretty}</span><Switch checked={value} disabled={disabled} onChange={onChange} /></label>
+  if (typeof value === 'string') return <label className="settings-input-row"><span>{pretty}{path.endsWith('apiKeyEnv') && <small>{envStatus[value] ? '环境变量已设置' : '环境变量未设置'}</small>}</span><Input value={value} disabled={disabled} onChange={event => onChange(event.target.value)} /></label>
+  if (typeof value === 'number') return <label className="settings-input-row"><span>{pretty}</span><InputNumber value={value} disabled={disabled} onChange={next => next !== null && onChange(next)} /></label>
+  return <label className="settings-json-row"><span>{pretty}<small>该字段包含复杂结构，可在高级配置中编辑；此处保留未知配置。</small></span><Input.TextArea spellCheck={false} value={text} disabled={disabled} onChange={event => { setText(event.target.value); try { const parsed = event.target.value.trim() ? JSON.parse(event.target.value) : undefined; onChange(parsed); setError('') } catch { setError('JSON 格式错误，修正后会加入当前草稿。') } }} />{error && <small className="settings-error">{error}</small>}</label>
+}
+
+type Obj = Record<string, any>
+function asObject(value: unknown): Obj { return value && typeof value === 'object' && !Array.isArray(value) ? value as Obj : {} }
+function updateObject(config: Obj, path: string, value: unknown, onChange: (next: Obj) => void) { onChange(setPath(config, path, value)) }
+function TextControl({ label, value, hint, placeholder, onChange }: { label: string; value: unknown; hint?: string; placeholder?: string; onChange: (value: string) => void }) { return <label className="field-control"><span>{label}{hint && <small>{hint}</small>}</span><Input value={typeof value === 'string' ? value : ''} placeholder={placeholder} onChange={event => onChange(event.target.value)} /></label> }
+function NumberControl({ label, value, unit, min, max, onChange }: { label: string; value: unknown; unit?: string; min?: number; max?: number; onChange: (value: number) => void }) { return <label className="field-control"><span>{label}</span><div className="number-control"><InputNumber<number> {...(min === undefined ? {} : { min })} {...(max === undefined ? {} : { max })} value={typeof value === 'number' ? value : null} onChange={next => next !== null && onChange(Number(next))} />{unit && <small>{unit}</small>}</div></label> }
+function SelectControl({ label, value, options, onChange }: { label: string; value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void }) { return <label className="field-control"><span>{label}</span><Select value={value} options={options} onChange={onChange} /></label> }
+function ToggleControl({ label, description, checked, onChange }: { label: string; description: string; checked: boolean; onChange: (value: boolean) => void }) { return <label className="toggle-control"><span><strong>{label}</strong><small>{description}</small></span><Switch checked={checked} onChange={onChange} /></label> }
+function ArrayControl({ label, value, onChange, placeholder = '输入内容' }: { label: string; value: unknown; onChange: (value: string[]) => void; placeholder?: string }) {
+  const items = Array.isArray(value) ? value.filter(item => typeof item === 'string') as string[] : []
+  return <section className="array-control"><header><strong>{label}</strong><button type="button" onClick={() => onChange([...items, ''])}>添加</button></header>{items.length ? items.map((item, index) => <div className="array-row" key={`${index}-${item}`}><input value={item} placeholder={placeholder} onChange={event => onChange(items.map((entry, i) => i === index ? event.target.value : entry))} /><button type="button" aria-label={`删除${label}第 ${index + 1} 项`} onClick={() => onChange(items.filter((_, i) => i !== index))}>删除</button></div>) : <p className="editor-empty">尚未添加。点击“添加”创建第一项。</p>}</section>
+}
+function ModelsEditor({ config, envStatus, onChange }: { config: Obj; envStatus: Record<string, boolean>; onChange: (next: Obj) => void }) {
+  const providers = asObject(config.providers), models = asObject(config.models)
+  const patch = (path: string, value: unknown) => updateObject(config, path, value, onChange)
+  const addProvider = () => { let id = `provider-${Object.keys(providers).length + 1}`; while (providers[id]) id += '-new'; patch(`providers.${id}`, { provider: 'openai-compatible', name: '新服务商', baseURL: '', apiKeyEnv: '' }) }
+  const addModel = () => { let id = `model-${Object.keys(models).length + 1}`; while (models[id]) id += '-new'; patch(`models.${id}`, { displayName: '新模型', provider: Object.keys(providers)[0] ?? '', modelCode: '' }) }
+  const referencedModels = (id: string) => Object.entries(models).filter(([, model]) => asObject(model).provider === id).map(([key]) => key)
+  const referencedRoutes = (id: string) => Object.entries(asObject(config.taskRouting)).filter(([, list]) => Array.isArray(list) && list.includes(id)).map(([task]) => task)
+  return <div className="specialized-editor">
+    <section className="editor-section"><header className="editor-section-head"><div><h2>服务商</h2><p>管理模型服务连接。API 密钥通过环境变量读取，Pulse 不保存密钥值。</p></div><button type="button" className="settings-secondary" onClick={addProvider}>＋ 添加服务商</button></header>
+      {Object.entries(providers).map(([id, raw]) => { const provider = asObject(raw); return <article className="config-entity" key={id}><header><div><strong>{provider.name || id}</strong><small>{id} · {provider.provider || '未设置类型'}</small></div><button type="button" className="settings-danger" disabled={referencedModels(id).length > 0} title={referencedModels(id).length ? `被模型引用：${referencedModels(id).join('、')}` : '删除服务商'} onClick={() => { const next = { ...providers }; delete next[id]; patch('providers', next) }}>删除</button></header><div className="field-grid"><TextControl label="显示名称" value={provider.name} onChange={value => patch(`providers.${id}.name`, value)} /><SelectControl label="协议类型" value={provider.provider ?? ''} options={['openai-compatible','openai','deepseek','anthropic','ollama','mock'].map(value => ({ value, label: value }))} onChange={value => patch(`providers.${id}.provider`, value)} /><TextControl label="服务地址" value={provider.baseURL} placeholder="https://api.example.com/v1" onChange={value => patch(`providers.${id}.baseURL`, value)} /><TextControl label="API Key 环境变量" value={provider.apiKeyEnv} hint={provider.apiKeyEnv ? envStatus[provider.apiKeyEnv] ? '环境变量已设置' : '环境变量未设置' : '此服务商无需密钥'} placeholder="PROVIDER_API_KEY" onChange={value => patch(`providers.${id}.apiKeyEnv`, value)} />{typeof provider.maxContextTokens === 'number' && <NumberControl label="默认上下文上限" value={provider.maxContextTokens} unit="tokens" min={1} onChange={value => patch(`providers.${id}.maxContextTokens`, value)} />}{typeof provider.maxOutputTokens === 'number' && <NumberControl label="默认输出上限" value={provider.maxOutputTokens} unit="tokens" min={1} onChange={value => patch(`providers.${id}.maxOutputTokens`, value)} />}</div>{referencedModels(id).length > 0 && <small className="field-note">当前被模型使用：{referencedModels(id).join('、')}</small>}</article> })}
+      {!Object.keys(providers).length && <p className="editor-empty">暂无服务商配置。</p>}
+    </section>
+    <section className="editor-section"><header className="editor-section-head"><div><h2>模型</h2><p>模型名称用于路由和选择；模型代码是发送给服务商的实际 ID。</p></div><button type="button" className="settings-secondary" onClick={addModel}>＋ 添加模型</button></header>
+      <label className="field-control active-model-field"><span>默认模型<small>用于没有单独任务路由的请求</small></span><select value={config.activeModel ?? ''} onChange={event => patch('activeModel', event.target.value)}>{Object.entries(models).map(([id, model]) => <option key={id} value={id}>{asObject(model).displayName || id} · {id}</option>)}</select></label>
+      <label className="field-control active-model-field"><span>助理聊天模型<small>聊天模式专用；留空时跟随默认模型</small></span><select value={typeof config.assistantModel === 'string' ? config.assistantModel : ''} onChange={event => patch('assistantModel', event.target.value || undefined)}><option value="">跟随默认模型</option>{Object.entries(models).map(([id, model]) => <option key={id} value={id}>{asObject(model).displayName || id} · {id}</option>)}</select></label>
+      {Object.entries(models).map(([id, raw]) => { const model = asObject(raw), refs = referencedRoutes(id), usedByAssistant = config.assistantModel === id; return <article className="config-entity" key={id}><header><div><strong>{model.displayName || id}</strong><small>{id} · {model.modelCode || '模型代码未设置'}</small></div><button type="button" className="settings-danger" disabled={usedByAssistant || config.activeModel === id || refs.length > 0} title={usedByAssistant ? '助理聊天正在使用此模型' : config.activeModel === id ? '当前默认模型不能删除' : refs.length ? `被任务路由引用：${refs.join('、')}` : '删除模型'} onClick={() => { const next = { ...models }; delete next[id]; patch('models', next) }}>删除</button></header><div className="field-grid"><TextControl label="显示名称" value={model.displayName} onChange={value => patch(`models.${id}.displayName`, value)} /><SelectControl label="所属服务商" value={model.provider ?? ''} options={[{ value: '', label: '请选择服务商' }, ...Object.keys(providers).map(key => ({ value: key, label: `${providers[key]?.name ?? key} · ${key}` }))]} onChange={value => patch(`models.${id}.provider`, value)} /><TextControl label="模型代码" value={model.modelCode} onChange={value => patch(`models.${id}.modelCode`, value)} /><SelectControl label="推理强度" value={model.reasoningEffort ?? 'medium'} options={['low','medium','high'].map(value => ({ value, label: value === 'low' ? '低' : value === 'high' ? '高' : '中' }))} onChange={value => patch(`models.${id}.reasoningEffort`, value)} /><NumberControl label="上下文上限" value={model.maxContextTokens} unit="tokens" min={1} onChange={value => patch(`models.${id}.maxContextTokens`, value)} /><NumberControl label="输出上限" value={model.maxOutputTokens} unit="tokens" min={1} onChange={value => patch(`models.${id}.maxOutputTokens`, value)} /><NumberControl label="每百万输入价格" value={model.pricing?.inputPerMillion} unit={model.pricing?.currency ?? 'USD'} min={0} onChange={value => patch(`models.${id}.pricing.inputPerMillion`, value)} /><NumberControl label="每百万输出价格" value={model.pricing?.outputPerMillion} unit={model.pricing?.currency ?? 'USD'} min={0} onChange={value => patch(`models.${id}.pricing.outputPerMillion`, value)} /></div>{refs.length > 0 && <small className="field-note">任务路由引用：{refs.join('、')} · 移除引用后可删除</small>}</article> })}
+    </section>
+  </div>
+}
+function RoutingEditor({ config, onChange }: { config: Obj; onChange: (next: Obj) => void }) {
+  const models = asObject(config.models), routing = asObject(config.taskRouting)
+  const tasks = [{ id: 'reason', label: '推理' }, { id: 'plan', label: '规划' }, { id: 'merge', label: '汇总' }, { id: 'verify', label: '验收' }]
+  const setList = (task: string, value: string[]) => onChange(setPath(config, `taskRouting.${task}`, value))
+  return <div className="specialized-editor routing-editor">{tasks.map(task => { const list = Array.isArray(routing[task.id]) ? routing[task.id] as string[] : []; return <section className="route-card" key={task.id}><header><div><h2>{task.label}</h2><p>按顺序尝试；首个模型为首选，其余为故障回退。</p></div><button type="button" className="settings-secondary" onClick={() => setList(task.id, [...list, ''])}>＋ 添加模型</button></header>{list.length ? list.map((modelId, index) => <div className="route-row" key={`${index}-${modelId}`}><span className="route-rank">{index === 0 ? '首选' : `回退 ${index}`}</span><select value={modelId} onChange={event => setList(task.id, list.map((item, i) => i === index ? event.target.value : item))}><option value="">选择模型</option>{Object.entries(models).map(([id, model]) => <option value={id} key={id}>{asObject(model).displayName || id} · {id}</option>)}</select><button type="button" disabled={index === 0} aria-label="上移" onClick={() => { const next = [...list]; [next[index - 1], next[index]] = [next[index]!, next[index - 1]!]; setList(task.id, next) }}>↑</button><button type="button" disabled={index === list.length - 1} aria-label="下移" onClick={() => { const next = [...list]; [next[index + 1], next[index]] = [next[index]!, next[index + 1]!]; setList(task.id, next) }}>↓</button><button type="button" className="settings-danger" aria-label="移除路由模型" onClick={() => setList(task.id, list.filter((_, i) => i !== index))}>移除</button></div>) : <p className="editor-empty">使用默认模型；添加后可指定首选和回退顺序。</p>}</section> })}</div>
+}
+function McpEditor({ config, onChange }: { config: Obj; onChange: (next: Obj) => void }) {
+  const capabilities = asObject(config.capabilities), servers = asObject(capabilities.mcpServers)
+  const patch = (id: string, key: string, value: unknown) => onChange(setPath(config, `capabilities.mcpServers.${id}.${key}`, value))
+  const patchMap = (id: string, key: 'env' | 'envFrom' | 'toolPolicies', name: string, value: string | undefined) => { const current = { ...asObject(asObject(servers[id])[key]) }; if (value === undefined) delete current[name]; else current[name] = value; patch(id, key, current) }
+  const add = () => { let id = `server-${Object.keys(servers).length + 1}`; while (servers[id]) id += '-new'; onChange(setPath(config, `capabilities.mcpServers.${id}`, { command: '', args: [], timeoutMs: 30000, env: {}, envFrom: {}, toolPolicies: {} })) }
+  return <div className="specialized-editor"><header className="editor-section-head"><div><h2>MCP 服务</h2><p>每个服务会启动一个本机进程。环境值仅在保存后由后台使用。</p></div><button type="button" className="settings-secondary" onClick={add}>＋ 添加服务</button></header>{Object.entries(servers).map(([id, raw]) => { const server = asObject(raw); return <article className="config-entity" key={id}><header><div><strong>{id}</strong><small>{server.command || '尚未设置启动命令'}</small></div><button type="button" className="settings-danger" onClick={() => { const next = { ...servers }; delete next[id]; onChange(setPath(config, 'capabilities.mcpServers', next)) }}>删除服务</button></header><div className="field-grid"><TextControl label="启动命令" value={server.command} onChange={value => patch(id, 'command', value)} /><TextControl label="工作目录" value={server.cwd} placeholder="留空使用 Pulse 工作目录" onChange={value => patch(id, 'cwd', value)} /><NumberControl label="启动超时" value={server.timeoutMs} unit="毫秒" min={1000} max={300000} onChange={value => patch(id, 'timeoutMs', value)} /></div><ArrayControl label="命令参数" value={server.args} placeholder="--option" onChange={value => patch(id, 'args', value)} /><MapControl title="环境变量" value={server.env} onChange={(key, value) => patchMap(id, 'env', key, value)} secret /><MapControl title="环境变量引用" value={server.envFrom} onChange={(key, value) => patchMap(id, 'envFrom', key, value)} /><MapControl title="工具权限" value={server.toolPolicies} onChange={(key, value) => patchMap(id, 'toolPolicies', key, value)} options={['read','write','external']} /></article> })}{!Object.keys(servers).length && <p className="editor-empty">尚未登记 MCP 服务。</p>}</div>
+}
+function MapControl({ title, value, onChange, secret = false, options }: { title: string; value: unknown; onChange: (key: string, value: string | undefined) => void; secret?: boolean; options?: string[] }) {
+  const entries = Object.entries(asObject(value))
+  const add = () => { let index = entries.length + 1, key = `NEW_${index}`; while (Object.prototype.hasOwnProperty.call(asObject(value), key)) key = `NEW_${++index}`; onChange(key, '') }
+  return <section className="map-control"><header><strong>{title}</strong><button type="button" onClick={add}>添加</button></header>{entries.map(([key, val]) => { const retained = secret && val === '__PULSE_KEEP_SECRET__'; return <div className="map-row" key={key}><input aria-label={`${title}变量名`} value={key} readOnly /><div>{options ? <select value={String(val)} onChange={event => onChange(key, event.target.value)}>{options.map(option => <option key={option}>{option}</option>)}</select> : <><input type={secret ? 'password' : 'text'} autoComplete="new-password" placeholder={secret ? retained ? '已保存值会保留；输入新值可替换' : '输入环境变量值' : '值或源环境变量名'} value={retained ? '' : String(val)} onChange={event => onChange(key, event.target.value)} />{retained && <small className="secret-hint">已保存 · 留空保留</small>}</>}</div><button type="button" className="settings-danger" aria-label={`删除${title} ${key}`} onClick={() => onChange(key, undefined)}>删除</button></div> })}</section>
+}
+function ToolsEditor({ config, onChange }: { config: Obj; onChange: (next: Obj) => void }) {
+  const caps = asObject(config.capabilities), enabled = Array.isArray(caps.enabled) ? caps.enabled as string[] : []
+  const known = [...new Set(['pdf','spreadsheet','browser','skills',...Object.keys(asObject(caps.mcpServers)),...enabled])]; const descriptions: Record<string,string> = { pdf:'读取工作区内 PDF 文档。', spreadsheet:'读取工作区内电子表格。', browser:'使用已安装的浏览器能力。', skills:'按需加载可信技能指引。', mcp:'连接本机登记的 MCP 服务。' }
+  const toggle = (id: string, checked: boolean) => onChange(setPath(config, 'capabilities.enabled', checked ? [...new Set([...enabled,id])] : enabled.filter(item => item !== id)))
+  return <div className="specialized-editor"><section className="editor-section"><header className="editor-section-head"><div><h2>工具能力</h2><p>关闭能力会阻止新任务使用该工具。当前安装的扩展以配置的能力 ID 为准。</p></div></header>{known.map(id => <ToggleControl key={id} label={id} description={descriptions[id] ?? (id === 'mcp' || asObject(caps.mcpServers)[id] ? `连接已登记的 MCP 服务“${id}”。` : '已配置的宿主扩展能力。')} checked={enabled.includes(id)} onChange={value => toggle(id, value)} />)}</section><ArrayControl label="技能选择" value={caps.skills} placeholder="技能名称（留空表示自动发现）" onChange={value => onChange(setPath(config, 'capabilities.skills', value))} /><ArrayControl label="受信任的技能目录" value={caps.trustedSkillRoots} placeholder="绝对目录路径" onChange={value => onChange(setPath(config, 'capabilities.trustedSkillRoots', value))} /></div>
+}
+function NetworkEditor({ config, onChange }: { config: Obj; onChange: (next: Obj) => void }) { return <div className="specialized-editor"><ToggleControl label="允许网络访问" description="允许工具连接下方明确列出的主机。" checked={Boolean(config.allowNetwork)} onChange={value => onChange({ ...config, allowNetwork: value })} /><ArrayControl label="允许访问的主机" value={config.networkHosts} placeholder="example.com" onChange={value => onChange({ ...config, networkHosts: value })} /></div> }
+function SecretControl({ label, value, onChange }: { label: string; value: unknown; onChange: (value: string | undefined) => void }) { const retained = value === '__PULSE_KEEP_SECRET__'; return <label className="field-control secret-control"><span>{label}<small>{retained ? '当前有已保存值；留空保留，输入新值替换。' : '令牌不会回显到页面。'}</small></span><div className="secret-input"><Input.Password autoComplete="new-password" value={retained ? '' : typeof value === 'string' ? value : ''} placeholder={retained ? '已保存的访问令牌' : '输入访问令牌'} onChange={event => onChange(event.target.value)} /><Button danger disabled={!retained && !value} onClick={() => onChange(undefined)}>删除</Button></div></label> }
+function InstructionsEditor({ config, onChange }: { config: Obj; onChange: (next: Obj) => void }) { return <div className="specialized-editor"><label className="prompt-editor"><span><strong>系统指令</strong><small>作为 Pulse 的基础工作指引。不要在此填写 API 密钥或认证信息。</small></span><textarea rows={12} value={typeof config.systemPrompt === 'string' ? config.systemPrompt : ''} onChange={event => onChange({ ...config, systemPrompt: event.target.value })} placeholder="输入系统指令" /></label><TextControl label="指令文件路径" hint="配置文件与指令文件同时存在时，由运行配置规则决定实际来源。" value={config.systemPromptFile} onChange={value => onChange({ ...config, systemPromptFile: value })} /></div> }
+function FeatureEditor({ category, config, onChange }: { category: string; config: Obj; onChange: (next: Obj) => void }) {
+  const patch = (path: string, value: unknown) => onChange(setPath(config, path, value))
+  if (category === 'front') {
+    const front = asObject(config.frontModel), providers = asObject(config.providers), models = asObject(config.models)
+    return <div className="specialized-editor"><ToggleControl label="启用即时预回复" description="在正式任务开始前生成简短回复。此模型独立于主模型。" checked={Boolean(front.enabled)} onChange={value => patch('frontModel.enabled', value)} /><section className="editor-section"><h2>预回复模型</h2><p>为预回复单独选择服务商和模型。</p><div className="field-grid"><SelectControl label="服务商" value={front.provider ?? ''} options={[{value:'',label:'选择服务商'},...Object.keys(providers).map(id=>({value:id,label:`${providers[id]?.name ?? id} · ${id}`}))]} onChange={value=>patch('frontModel.provider',value)} /><SelectControl label="模型" value={front.model ?? ''} options={[{value:'',label:'选择模型'},...Object.entries(models).map(([id,item])=>({value:id,label:`${asObject(item).displayName ?? id} · ${id}`}))]} onChange={value=>patch('frontModel.model',value)} /><TextControl label="服务地址覆盖" hint="留空时使用所选服务商的地址。" value={front.baseURL} onChange={value=>patch('frontModel.baseURL',value)} /><NumberControl label="超时时间" value={front.timeoutMs ?? 15000} unit="毫秒" min={1000} max={120000} onChange={value=>patch('frontModel.timeoutMs',value)} /></div></section></div>
+  }
+  if (category === 'approval') {
+    const review = asObject(config.approvalReview), providers = asObject(config.providers), models = asObject(config.models)
+    return <div className="specialized-editor"><section className="editor-section"><h2>全局审批模式</h2><p>仅影响新任务的工具审批；会话级代审可在聊天中单独切换。</p><div className="option-cards">{[{id:'read-only',title:'只读',copy:'拒绝会修改工作区的操作。'},{id:'ask',title:'逐项询问',copy:'需要写入或执行操作时等待你确认。'},{id:'auto',title:'自动执行',copy:'按配置的策略执行工具操作。'}].map(item=><button type="button" key={item.id} className={`choice-card ${config.approvalMode===item.id?'selected':''}`} onClick={()=>patch('approvalMode',item.id)}><strong>{item.title}</strong><span>{item.copy}</span></button>)}</div></section><section className="editor-section"><h2>审批复核模型</h2><p>代审只处理当前会话的工具批准；业务问题、风险不明和模型错误会转回人工。</p><div className="field-grid"><SelectControl label="服务商" value={review.provider ?? 'ollama'} options={[{value:'ollama',label:'Ollama'}]} onChange={value=>patch('approvalReview.provider',value)} /><SelectControl label="模型" value={review.model ?? ''} options={[{value:'',label:'填写本地模型名称'},...Object.entries(models).map(([id,item])=>({value:asObject(item).modelCode ?? id,label:`${asObject(item).displayName ?? id} · ${id}`}))]} onChange={value=>patch('approvalReview.model',value)} /><TextControl label="服务地址" value={review.baseURL ?? 'http://127.0.0.1:11434'} onChange={value=>patch('approvalReview.baseURL',value)} /><NumberControl label="超时时间" value={review.timeoutMs ?? 15000} unit="毫秒" min={1000} max={60000} onChange={value=>patch('approvalReview.timeoutMs',value)} /></div></section></div>
+  }
+  if (category === 'jarvis') {
+    const jarvis = asObject(config.jarvis)
+    return <div className="specialized-editor"><ToggleControl label="连接 Jarvis 记忆服务" description="开启后，任务准备阶段会查询并筛选相关记忆。" checked={Boolean(jarvis.enabled)} onChange={value=>patch('jarvis.enabled',value)} /><section className="editor-section"><h2>连接与上下文</h2><div className="field-grid"><TextControl label="服务地址" value={jarvis.apiUrl ?? 'http://127.0.0.1:7330'} onChange={value=>patch('jarvis.apiUrl',value)} /><SecretControl label="访问令牌" value={jarvis.token} onChange={value=>patch('jarvis.token',value)} /><NumberControl label="上下文预算" value={jarvis.contextTokenBudget ?? 4000} unit="tokens" min={256} max={32000} onChange={value=>patch('jarvis.contextTokenBudget',value)} /></div><ToggleControl label="允许远程连接" description="仅在 Jarvis 服务部署在其他设备时开启。" checked={Boolean(jarvis.allowRemote)} onChange={value=>patch('jarvis.allowRemote',value)} /><ToggleControl label="自动记录候选记忆" description="任务结束时生成候选记录，仍需审核后才会进入长期记忆。" checked={jarvis.autoCandidate !== false} onChange={value=>patch('jarvis.autoCandidate',value)} /></section></div>
+  }
+  if (category === 'runtime') return <div className="specialized-editor"><section className="editor-section"><h2>工作区与存储</h2><p>目录设置在服务重启后生效；修改数据目录不会在线迁移现有记录。</p><div className="field-grid"><TextControl label="默认工作目录" value={config.cwd} onChange={value=>patch('cwd',value)} /><TextControl label="数据目录" value={config.dataDir} onChange={value=>patch('dataDir',value)} /></div><div className="restart-note">更改数据目录后需重启 Pulse 才会生效。</div></section><section className="editor-section"><h2>任务限制</h2><div className="field-grid"><NumberControl label="最大执行轮数" value={config.maxTurns ?? 32} unit="轮" min={1} max={200} onChange={value=>patch('maxTurns',value)} /><NumberControl label="单次运行时限" value={config.maxRuntimeMs ?? 900000} unit="毫秒" min={1000} max={86400000} onChange={value=>patch('maxRuntimeMs',value)} /><NumberControl label="自动压缩阈值" value={config.autoCompactPercent ?? 90} unit="%" min={1} max={90} onChange={value=>patch('autoCompactPercent',value)} /></div></section></div>
+  return null
+}

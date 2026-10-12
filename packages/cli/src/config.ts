@@ -64,6 +64,8 @@ export interface PulseCliConfig {
   models?: Record<string, PulseCliModel>
   /** Active Pulse model display name. */
   activeModel?: string
+  /** Dedicated model for the persistent Pulse assistant chat; defaults to activeModel. */
+  assistantModel?: string
   /** Ordered model display names per task; later entries act as fallbacks. */
   taskRouting?: Partial<Record<PulseModelTask, string[]>>
   capabilities?: PulseCliCapabilities
@@ -80,6 +82,12 @@ export interface PulseCliConfig {
   frontModel?: {
     enabled?: boolean
     provider?: string
+    model?: string
+    baseURL?: string
+    timeoutMs?: number
+  }
+  approvalReview?: {
+    provider?: 'ollama'
     model?: string
     baseURL?: string
     timeoutMs?: number

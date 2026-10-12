@@ -12,6 +12,7 @@ describe('explicit dynamic tool discovery', () => {
     expect(registry.discover({ text: 'read file', tags: ['readonly'] }).map((item) => item.manifest.name)).toEqual(['read_file'])
     expect(registry.discover({ tags: ['filesystem'], sideEffectPolicy: 'write' }).map((item) => item.manifest.name)).toEqual(['write_file'])
     expect(registry.discover({ text: 'file', limit: 2 }).map((item) => item.manifest.name)).toEqual(['read_file', 'write_file'])
+    expect(registry.compileToolSet('dynamic', { exclude: ['read_file'] }).tools.map((item) => item.name)).toEqual(['search_web', 'write_file'])
     expect(registry.list().find((manifest) => manifest.name === 'read_file')?.tags).toEqual(['filesystem', 'readonly'])
   })
 
@@ -19,6 +20,7 @@ describe('explicit dynamic tool discovery', () => {
     const registry = new ToolRegistry()
     expect(() => registry.discover({ text: 1 as never })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false }))
     expect(() => registry.discover({ tags: ['ok', 1 as never] })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false }))
+    expect(() => registry.discover({ exclude: [''] })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false }))
     expect(() => registry.compileToolSet('invalid', { limit: -1 })).toThrowError(expect.objectContaining({ code: 'INVALID_TOOL_DISCOVERY_QUERY', retryable: false }))
   })
 })

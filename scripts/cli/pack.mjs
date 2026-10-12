@@ -23,6 +23,7 @@ for (const name of ['cli', 'server', 'runtime', 'adapters', 'tool-sdk']) {
   const target = join(stage, 'pulse/app/node_modules', packageName)
   await mkdir(target, { recursive: true })
   await cp(join(source, 'dist'), join(target, 'dist'), { recursive: true })
+  if (name === 'server') await cp(join(repo, 'packages/web/dist'), join(target, 'dist/web'), { recursive: true })
   await cp(join(source, 'package.json'), join(target, 'package.json'))
 }
 await cp(join(repo, 'node_modules/zod'), join(stage, 'pulse/app/node_modules/zod'), { recursive: true, dereference: true })

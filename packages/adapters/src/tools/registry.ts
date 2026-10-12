@@ -72,7 +72,7 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
     const summary = detailed.summary === undefined ? undefined : toJson(detailed.summary)
     let value: JsonValue
     let artifact: EffectArtifactOutput | undefined
-    try { value = toJson(detailed.output) } catch { value = null; artifact = artifactOutput(detailed.output) }
+    try { value = toJson(detailed.normalized ?? detailed.output) } catch { value = null; artifact = artifactOutput(detailed.output) }
     return { value, ...(detailed.normalized === undefined ? {} : { normalized: toJson(detailed.normalized) }), ...(artifact === undefined ? {} : { artifact }), ...(summary === undefined ? {} : { summary }), sideEffectState: isSideEffectful(definition.manifest.sideEffectPolicy) ? 'applied' : 'none', executionState: 'succeeded', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length, ...(artifact === undefined ? {} : { artifactMediaType: artifact.mediaType }) }, ...(observations.length ? { observations } : {}) }
   }
 }

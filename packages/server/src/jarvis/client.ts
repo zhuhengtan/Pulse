@@ -1,6 +1,6 @@
 import { assertJarvisApiUrl } from './endpoint.js'
 import { jarvisMemoryTitle, redactJarvisText } from './privacy.js'
-import type { CandidateMemoryInput, CloseSessionInput, JarvisContextPackage, JarvisSession, PulseJarvisConfig } from './types.js'
+import type { CandidateMemoryInput, CloseSessionInput, JarvisContextPackage, JarvisMemoryRecord, JarvisSession, PulseJarvisConfig } from './types.js'
 
 export class JarvisClient {
   private readonly baseUrl: string
@@ -27,19 +27,42 @@ export class JarvisClient {
     }
   }
 
-  async openSession(workspace: string, task: string, client = 'pulse'): Promise<JarvisSession | undefined> {
+  async openSession(workspace: string, task: string, client = 'pulse', mode: 'work' | 'unassigned' = 'work'): Promise<JarvisSession | undefined> {
     try {
       const res = await this.request<{ session: JarvisSession }>('/v1/sessions', {
         client,
         workspace,
         task: this.safeText(task),
-        mode: 'work',
+        mode,
       })
       return res?.session
     } catch (error) {
       this.warnFailure('openSession', error)
       return undefined
     }
+  }
+
+  async retrieveContext(task: string, tokenBudget = 4000, workspace?: string): Promise<JarvisContextPackage | undefined> {
+    try {
+      return await this.request<JarvisContextPackage>('/v1/context/retrieve', {
+        task: this.safeText(task), tokenBudget, client: 'pulse', ...(workspace ? { workspace } : {}),
+      }, this.contextTimeoutMs)
+    } catch (error) { this.warnFailure('retrieveContext', error); return undefined }
+  }
+
+  async searchMemory(projectId: string, query: string, limit = 10): Promise<JarvisMemoryRecord[]> {
+    const params = new URLSearchParams({ projectId, query: this.safeText(query), limit: String(Math.max(1, Math.min(50, limit))) })
+    return this.get<JarvisMemoryRecord[]>(`/v1/memory/search?${params.toString()}`)
+  }
+
+  async getMemory(id: string): Promise<JarvisMemoryRecord | undefined> {
+    try { return await this.get<JarvisMemoryRecord>(`/v1/memory/${encodeURIComponent(id)}`) }
+    catch (error) { if (error instanceof Error && error.message.includes('Jarvis HTTP 404')) return undefined; throw error }
+  }
+
+  async listCandidates(projectId?: string): Promise<JarvisMemoryRecord[]> {
+    const query = projectId ? `?${new URLSearchParams({ projectId }).toString()}` : ''
+    return this.get<JarvisMemoryRecord[]>(`/v1/memory/candidates${query}`)
   }
 
   async buildContext(sessionId: string, task: string, tokenBudget = 4000): Promise<JarvisContextPackage | undefined> {
@@ -55,18 +78,18 @@ export class JarvisClient {
     }
   }
 
-  async recordEvent(sessionId: string, type: 'observation' | 'action' | 'result' | 'system', content: string, idempotencyKey?: string): Promise<void> {
+  async recordEvent(sessionId: string, type: 'observation' | 'action' | 'result' | 'system', content: string, idempotencyKey?: string): Promise<{ id?: string }> {
     try {
-      await this.request('/v1/events', { sessionId, type, content: this.safeText(content) }, this.contextTimeoutMs, idempotencyKey)
+      return await this.request<{ id?: string }>('/v1/events', { sessionId, type, content: this.safeText(content) }, this.contextTimeoutMs, idempotencyKey)
     } catch (error) {
       this.warnFailure('recordEvent', error)
       throw error
     }
   }
 
-  async recordCandidate(sessionId: string, candidate: CandidateMemoryInput, idempotencyKey?: string): Promise<void> {
+  async recordCandidate(sessionId: string, candidate: CandidateMemoryInput, idempotencyKey?: string): Promise<{ id?: string; revision?: number; status?: string }> {
     try {
-      await this.request('/v1/memory/candidates', {
+      return await this.request<{ id?: string; revision?: number; status?: string }>('/v1/memory/candidates', {
         sessionId,
         scope: candidate.scope ?? 'project',
         kind: candidate.kind ?? 'fact',
@@ -128,5 +151,11 @@ export class JarvisClient {
       throw new Error(`Jarvis HTTP ${res.status}: ${res.statusText}`)
     }
     return (await res.json()) as T
+  }
+
+  private async get<T>(path: string): Promise<T> {
+    const res = await fetch(`${this.baseUrl}${path}`, { headers: { ...(this.token ? { authorization: `Bearer ${this.token}` } : {}) }, redirect: 'error', signal: AbortSignal.timeout(this.contextTimeoutMs) })
+    if (!res.ok) throw new Error(`Jarvis HTTP ${res.status}: ${res.statusText}`)
+    return await res.json() as T
   }
 }
