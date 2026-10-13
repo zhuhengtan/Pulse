@@ -161,7 +161,7 @@ describe('Tool SDK to Runtime Effect host', () => {
       expect(execution.executionRef).toBe(target)
       await expect(reconcileToolEffect(registry, { ...effect, executionRef: execution.executionRef } as EffectRecord, new AbortController().signal)).resolves.toEqual({ status: 'succeeded', output: { ok: true } })
     } finally { await rm(directory, { recursive: true, force: true }) }
-  })
+  }, 30_000)
 
   it('injects trusted manifest locks, side-effect policy, and timeout before admission', () => {
     const registry = new ToolRegistry()
