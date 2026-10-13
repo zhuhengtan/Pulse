@@ -144,9 +144,11 @@ describe('Tool SDK to Runtime Effect host', () => {
     try {
       const target = join(directory, 'result.txt')
       const registry = new ToolRegistry()
+      let markAbortListenerReady!: () => void
+      const abortListenerReady = new Promise<void>((resolve) => { markAbortListenerReady = resolve })
       registry.register(defineTool({ name: 'write-file', description: 'write a file', input: z.object({ path: z.string(), content: z.string() }), output: z.object({ ok: z.boolean() }), sideEffectPolicy: 'write', executionRef: ({ path }) => path, reconcile: async (executionRef) => {
         try { await readFile(String(executionRef), 'utf8'); return { status: 'succeeded', output: { ok: true } } } catch { return { status: 'unknown' } }
-      }, execute: async ({ path, content }, context) => { await writeFile(path, content, 'utf8'); await new Promise<void>((_resolve, reject) => { context.signal.addEventListener('abort', () => reject(new Error('cancelled after write')), { once: true }) }); return { ok: true } } }))
+      }, execute: async ({ path, content }, context) => { await writeFile(path, content, 'utf8'); await new Promise<void>((_resolve, reject) => { context.signal.addEventListener('abort', () => reject(new Error('cancelled after write')), { once: true }); markAbortListenerReady() }); return { ok: true } } }))
       const controller = new AbortController()
       const executor = createToolEffectExecutor(registry)
       const effect = { id: 'effect-file', agentId: 'agent-1', ownerLaneId: 'lane-1', key: 'write-file', kind: 'tool', concurrencyClass: 'tool', input: { name: 'write-file', arguments: { path: target, content: 'durable' } }, attemptId: 'attempt-1', attemptNo: 1, state: 'running', executionState: 'running', sideEffectState: 'none' } as unknown as EffectRecord
@@ -156,6 +158,7 @@ describe('Tool SDK to Runtime Effect host', () => {
         await new Promise((resolve) => setTimeout(resolve, 5))
       }
       expect(await readFile(target, 'utf8')).toBe('durable')
+      await abortListenerReady
       controller.abort()
       const execution = await pending
       expect(execution.executionRef).toBe(target)
