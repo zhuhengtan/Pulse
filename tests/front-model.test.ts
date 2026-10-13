@@ -97,6 +97,23 @@ describe('processFrontModel', () => {
     }
   })
 
+  it('uses the selected non-Ollama provider model for instant pre-replies', async () => {
+    let request: Record<string, any> | undefined
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (_input, init) => {
+      request = JSON.parse(String(init?.body))
+      return Response.json({ choices: [{ message: { content: JSON.stringify({ instantResponse: '我马上查看。', brief: { intent: '查看问题', requirements: [], profileHints: [], needsClarification: false } }) }, finish_reason: 'stop' }] })
+    }) as typeof fetch
+    try {
+      const result = await processFrontModel('帮我检查问题', undefined, { enabled: true, provider: 'openai-compatible', model: 'same-model', baseURL: 'http://provider.invalid/v1', apiKey: 'fixture-key', timeoutMs: 2_000 })
+      expect(result.instantResponse).toBe('我马上查看。')
+      expect(request).toMatchObject({ model: 'same-model' })
+      expect(request?.messages?.[0]?.content).toContain('帮我检查问题')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('gracefully degrades to heuristic ack when Ollama times out or errors', async () => {
     const res = await processFrontModel('帮我写个脚本', undefined, {
       enabled: true,

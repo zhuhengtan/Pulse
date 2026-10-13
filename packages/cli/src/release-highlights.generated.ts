@@ -1,5 +1,23 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.5.1": [
+    {
+      "zh": "模型目录按供应商管理，支持不同供应商登记同名模型；默认模型、助理聊天、任务路由、即时预回复和审批复核统一选择已登记模型。",
+      "en": "Models are managed under providers, allowing different providers to register the same model name; defaults, assistant chat, task routing, instant replies, and approval review all select registered models."
+    },
+    {
+      "zh": "项目侧栏支持组织会话与项目，并完善工作区信任边界及模型配置迁移。",
+      "en": "Added project sidebar organization and improved workspace trust boundaries and model configuration migration."
+    },
+    {
+      "zh": "即时预回复按所选供应商模型读取协议与连接配置；审批复核继续限制为本机 Ollama，并在异常时交回人工。",
+      "en": "Instant replies use the selected provider's protocol and connection settings; approval review remains restricted to local Ollama and falls back to human review on errors."
+    },
+    {
+      "zh": "改善 Jarvis 经验记录、上下文筛选和持久化交付流程。",
+      "en": "Improved Jarvis experience recording, context filtering, and durable delivery workflows."
+    }
+  ],
   "0.5.0": [
     {
       "zh": "新增独立 Web 工作台，统一助理聊天、项目工作会话、历史记录、设置与本地终端。",

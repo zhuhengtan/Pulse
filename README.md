@@ -338,9 +338,7 @@ npx @hunterzhu/pulse-cli resume <conversation-id> "继续处理上次的问题"
 
 ### 配置模型 Provider
 
-编辑用户配置文件。供应商和模型分开注册，模型显示名可以避免不同供应商的同名模型冲突：
-
-旧版单 `provider` 配置不再读取。已有配置可以先运行 `npx @hunterzhu/pulse-cli setup --force` 生成新模板，再填入下面的供应商、模型和环境变量名。
+编辑用户配置文件。模型嵌套在供应商下；模型引用使用 `供应商ID/模型ID`，因此不同供应商可以拥有同名模型。旧版顶层 `models` 配置会在读取时兼容，并在保存后转为嵌套结构。
 
 ```json
 {
@@ -349,21 +347,19 @@ npx @hunterzhu/pulse-cli resume <conversation-id> "继续处理上次的问题"
       "name": "OpenAI",
       "provider": "openai-compatible",
       "baseURL": "https://api.openai.com/v1",
-      "apiKeyEnv": "OPENAI_API_KEY"
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "models": { "gpt5.6-a": { "displayName": "gpt5.6-a", "modelCode": "gpt-5.6" } }
     },
     "deepseek": {
       "name": "DeepSeek",
       "provider": "deepseek",
       "baseURL": "https://api.deepseek.com",
-      "apiKeyEnv": "DEEPSEEK_API_KEY"
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "models": { "gpt5.6-b": { "displayName": "gpt5.6-b", "modelCode": "deepseek-chat" } }
     }
   },
-  "models": {
-    "gpt5.6-a": { "displayName": "gpt5.6-a", "provider": "openai", "modelCode": "gpt-5.6" },
-    "gpt5.6-b": { "displayName": "gpt5.6-b", "provider": "deepseek", "modelCode": "deepseek-chat" }
-  },
-  "activeModel": "gpt5.6-a",
-  "taskRouting": { "plan": ["gpt5.6-a", "gpt5.6-b"], "verify": ["gpt5.6-b", "gpt5.6-a"] },
+  "activeModel": "openai/gpt5.6-a",
+  "taskRouting": { "plan": ["openai/gpt5.6-a", "deepseek/gpt5.6-b"], "verify": ["deepseek/gpt5.6-b", "openai/gpt5.6-a"] },
   "approvalMode": "ask",
   "maxTurns": 32,
   "autoCompactPercent": 90,
@@ -383,7 +379,7 @@ npx @hunterzhu/pulse-cli
 
 Agent 需要询问你时，会调用 `ask.choice`、`ask.multi` 或 `ask.input`。CLI 会显示对应的单选、多选或文本输入卡片，回答会回到同一轮任务中。
 
-`taskRouting` 为规划、执行、合并和验收分别配置有序模型候选；某个候选调用失败时会尝试下一项，未配置的任务沿用当前模型。工具和技能扩展只从用户级配置读取，不接受工作区 `.pulse/config.json` 注入进程。可以显式启用 PDF/XLSX 读取、已安装 Skill 指令或受信任的 MCP stdio 服务：
+`taskRouting` 为规划、执行、合并和验收分别配置有序的 `供应商ID/模型ID` 候选；某个候选调用失败时会尝试下一项，未配置的任务沿用当前模型。工具和技能扩展只从用户级配置读取，不接受工作区 `.pulse/config.json` 注入进程。可以显式启用 PDF/XLSX 读取、已安装 Skill 指令或受信任的 MCP stdio 服务：
 
 ```json
 {

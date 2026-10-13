@@ -9,6 +9,8 @@ export const MAX_INSTRUCTION_BYTES = 16_384
 
 /** Cap retrieved Jarvis text so a context package cannot fill the system prompt. */
 export const MAX_JARVIS_CONTEXT_CHARS = 16_384
+export const JARVIS_MEMORY_GUIDANCE = `## Jarvis memory writes
+Task reports, logs, test counts and acceptance rationales belong in jarvis.record evidence, not in durable memory. Use jarvis.remember only for one reusable conclusion with necessary conditions, preferably 30–160 characters and at most 360. Split independent conclusions; preserve negations, exceptions, scope and uncertainty. Do not copy the final answer, task summary or repeated background/scope/verification boilerplate. Keep the user's original words as event evidence when recording preferences. If there is no durable conclusion, submit no candidate. A queued candidate is pending review, not active long-term memory.`
 
 export interface BuildSystemPromptOptions {
   workspace: string
@@ -199,6 +201,7 @@ ${userInstructions}`
   }
 
   // 7.5. Jarvis Cognitive Context
+  if (options.toolNames?.some(name => name.startsWith('jarvis.'))) sections.push(JARVIS_MEMORY_GUIDANCE)
   const jarvisContext = options.jarvisContext?.trim()
   if (jarvisContext) {
     sections.push(

@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createHash, randomUUID } from 'node:crypto'
+import { normalizeModelConfig, parseModelSelectionId } from '../model-config.js'
 import { execFile } from 'node:child_process'
 import { access, chmod, copyFile, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { extname, basename, dirname, join, relative, resolve, sep } from 'node:path'
@@ -192,7 +193,8 @@ export class H5Server {
 
   private async validateConfigCandidate(config: Record<string, unknown>): Promise<{ text: string; options: LocalHostOptions }> {
     if (!this.configuration) throw new Error('CONFIGURATION_UNAVAILABLE')
-    const text = `${JSON.stringify(config, null, 2)}\n`
+    const normalizedConfig = normalizeModelConfig(config)
+    const text = `${JSON.stringify(normalizedConfig, null, 2)}\n`
     const temporary = `${this.configuration.path}.${randomUUID()}.validate.tmp`
     await mkdir(dirname(this.configuration.path), { recursive: true })
     try {
@@ -904,15 +906,17 @@ export class H5Server {
       if (!localAdmin) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'LOCAL_ADMIN_REQUIRED' })); return }
       if (!this.configuration) { res.writeHead(501, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'CONFIGURATION_UNAVAILABLE' })); return }
       const raw = await this.configText()
-      const parsed = this.parseConfig(raw)
+      const parsed = normalizeModelConfig(this.parseConfig(raw))
       const envNames = new Set<string>()
       for (const profile of Object.values(parsed.providers && typeof parsed.providers === 'object' ? parsed.providers as Record<string, unknown> : {})) {
         if (profile && typeof profile === 'object' && typeof (profile as Record<string, unknown>).apiKeyEnv === 'string') envNames.add((profile as Record<string, unknown>).apiKeyEnv as string)
       }
       const modelId = typeof parsed.assistantModel === 'string' ? parsed.assistantModel : typeof parsed.activeModel === 'string' ? parsed.activeModel : undefined
-      const model = modelId && parsed.models && typeof parsed.models === 'object' ? (parsed.models as Record<string, unknown>)[modelId] : undefined
+      const selection = typeof modelId === 'string' ? parseModelSelectionId(modelId) : undefined
+      const providerId = selection?.providerId
+      const models = providerId && parsed.providers && typeof parsed.providers === 'object' ? (parsed.providers as Record<string, Record<string, unknown>>)[providerId]?.models : undefined
+      const model = selection && models && typeof models === 'object' ? (models as Record<string, unknown>)[selection.modelId] : undefined
       const modelRecord = model && typeof model === 'object' && !Array.isArray(model) ? model as Record<string, unknown> : undefined
-      const providerId = typeof modelRecord?.provider === 'string' ? modelRecord.provider : undefined
       const profile = providerId && parsed.providers && typeof parsed.providers === 'object' ? (parsed.providers as Record<string, unknown>)[providerId] : undefined
       const profileRecord = profile && typeof profile === 'object' && !Array.isArray(profile) ? profile as Record<string, unknown> : undefined
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
@@ -951,7 +955,7 @@ export class H5Server {
           if (configVersion(await this.configText()) !== body.version) throw new Error('CONFIG_VERSION_CONFLICT')
           await this.replaceConfig(prepared.text)
           const applied = this.host.applyLiveOptions(prepared.options)
-          return { path: this.configuration!.path, version: configVersion(prepared.text), applied: applied.applied, restartRequired: applied.restartRequired, config: maskConfigSecrets(candidate) }
+          return { path: this.configuration!.path, version: configVersion(prepared.text), applied: applied.applied, restartRequired: applied.restartRequired, config: maskConfigSecrets(JSON.parse(prepared.text) as Record<string, unknown>) }
         })
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ ok: true, ...result }))
       } catch (error) {
@@ -974,7 +978,7 @@ export class H5Server {
           if (configVersion(await this.configText()) !== body.version) throw new Error('CONFIG_VERSION_CONFLICT')
           await this.replaceConfig(prepared.text)
           const applied = this.host.applyLiveOptions(prepared.options)
-          return { path: this.configuration!.path, version: configVersion(prepared.text), applied: applied.applied, restartRequired: applied.restartRequired, config: maskConfigSecrets(candidate) }
+          return { path: this.configuration!.path, version: configVersion(prepared.text), applied: applied.applied, restartRequired: applied.restartRequired, config: maskConfigSecrets(JSON.parse(prepared.text) as Record<string, unknown>) }
         })
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ ok: true, ...result }))
       } catch (error) {
@@ -1132,7 +1136,7 @@ export class H5Server {
       const list: ConversationSummary[] = []
       for (const conversation of all.filter(item => item.id !== this.assistantInbox.conversationId)) {
         let current = conversation
-        if (!current.projectId && !current.archivedAt) {
+        if (!current.projectId && !current.projectUnassigned && !current.archivedAt) {
           const project = await this.projects.findByCwd(current.cwd)
           if (project) current = await this.host.updateConversationOrganization(current.id, { projectId: project.id })
         }
@@ -1155,7 +1159,7 @@ export class H5Server {
       const projectId = typeof body.projectId === 'string' ? body.projectId : undefined
       const project = projectId ? await this.projects.get(projectId) : undefined
       if (projectId && !project) { res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'PROJECT_NOT_FOUND' })); return }
-      const created = await this.host.createConversation({ title, ...(project ? { cwd: project.cwd, projectId: project.id } : {}) })
+      const created = await this.host.createConversation({ title, ...(project ? { cwd: project.cwd, projectId: project.id } : { projectId: null }) })
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(created.summary))
       return

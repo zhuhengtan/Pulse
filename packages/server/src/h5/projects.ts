@@ -75,6 +75,7 @@ export class H5ProjectCatalog {
     await this.load()
     let changed = false
     for (const conversation of conversations) {
+      if (conversation.projectUnassigned) continue
       const canonical = await realpath(resolve(conversation.cwd)).catch(() => resolve(conversation.cwd))
       if (this.projects.some(project => project.cwd === canonical)) continue
       const base = canonical.split(/[\\/]/).filter(Boolean).at(-1) || '工作区'

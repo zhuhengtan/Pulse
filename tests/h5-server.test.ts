@@ -169,6 +169,38 @@ describe('H5Server End-to-End', () => {
     }
   })
 
+  it.each([false, true])('validates concise Jarvis memory writes in assistant chat (overlong: %s)', async (overlong) => {
+    const dir = await mkdtemp(join(tmpdir(), 'h5-assistant-remember-'))
+    temporaryDirectories.push(dir)
+    const rule = overlong ? '长'.repeat(361) : '来源不完整或项目归属不明确时，不得自动提升候选。'
+    const candidates: any[] = []
+    const evidence: string[] = []
+    const jarvisClient = {
+      redactText: (text: string) => text,
+      openSession: async () => ({ id: 'session-remember', projectId: 'unassigned', workspace: dir }),
+      buildContext: async () => ({ session: { projectId: 'unassigned' }, text: '' }),
+      recordEvent: async (_session: string, _type: string, content: string) => { evidence.push(content); return { id: 'event-user-rule' } },
+      recordCandidate: async (_session: string, input: any) => { candidates.push(input); return { id: 'memory-rule', status: 'candidate' } },
+    } as unknown as JarvisClient
+    const host = createLocalHost({ cwd: dir, dataDir: dir, jarvisClient, provider: { provider: 'mock', defaultModel: 'mock' }, providerProfiles: { mock: { provider: 'mock', defaultModel: 'mock' } }, providerModels: { mock: { provider: 'mock', model: 'mock' } }, activeModel: 'mock', assistantModel: 'mock', approvalMode: 'auto',
+      mockToolCalls: [{ name: 'jarvis.remember', input: { title: '审核条件', content: rule, kind: 'constraint', scope: 'global' } }], mockAfterToolResponse: '已提交待审核。' })
+    try {
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: `请调用 jarvis.remember 记住这条规则：${rule}`, assistantChat: true })
+      await run.outcome()
+      await host.close() // Wait for the durable outbox to finish delivery.
+      if (overlong) expect(candidates).toEqual([])
+      else {
+        expect(candidates).toHaveLength(1)
+        expect(candidates[0]).toMatchObject({ content: rule, sourceRefs: ['event-user-rule'] })
+        expect(evidence.join('\n')).toContain(rule)
+      }
+      const saved = JSON.parse(await readFile(join(dir, 'conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8')) as any
+      const model = saved.state.state.effects.find(([, effect]: any) => effect.kind === 'llm')[1]
+      expect(JSON.stringify(model.input)).toContain('one reusable conclusion with necessary conditions')
+    } finally { await host.close() }
+  })
+
   it('lets direct assistant chat read workspace files without exposing write or shell tools', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'h5-assistant-readonly-'))
     temporaryDirectories.push(dir)
@@ -835,6 +867,54 @@ describe('H5Server End-to-End', () => {
     expect(history[0]).toMatchObject({ id: 'old', text: '已验收的最终答案', restored: true })
     expect(history[1]).toMatchObject({ id: 'unknown', text: '无法确认的旧回复', legacy: true })
     await host.close()
+  })
+
+  it('migrates legacy model configuration on save and preserves qualified selections after reload', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'h5-model-catalog-'))
+    temporaryDirectories.push(dir)
+    const configPath = join(dir, 'config.json')
+    const originalConfig = {
+      providers: { deepseek: { provider: 'deepseek', name: 'DeepSeek', baseURL: 'https://api.deepseek.com' } },
+      models: { flash: { displayName: 'same', provider: 'deepseek', modelCode: 'deepseek-flash' } },
+      activeModel: 'flash',
+      assistantModel: 'flash',
+      frontModel: { enabled: true, provider: 'ollama', model: 'qwen3.5:4b', baseURL: 'http://127.0.0.1:11434' },
+      approvalReview: { provider: 'ollama', model: 'qwen3.5:4b', baseURL: 'http://127.0.0.1:11434' },
+    }
+    await writeFile(configPath, JSON.stringify(originalConfig), { mode: 0o600 })
+    let preparedConfig: Record<string, any> | undefined
+    const host = createLocalHost({ cwd: dir, dataDir: dir, provider: { provider: 'mock', defaultModel: 'mock' }, providerProfiles: { mock: { provider: 'mock', defaultModel: 'mock' } }, providerModels: { mock: { provider: 'mock', model: 'mock' } }, activeModel: 'mock', assistantModel: 'mock' })
+    const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1', configuration: { path: configPath, prepare: async candidate => {
+      preparedConfig = JSON.parse(await readFile(candidate, 'utf8')) as Record<string, any>
+      return { cwd: dir, dataDir: dir }
+    } } })
+    const info = await server.start()
+    const baseUrl = `http://127.0.0.1:${info.port}`
+    try {
+      const local = await fetch(`${baseUrl}/api/session/local`, { method: 'POST', headers: { Origin: baseUrl } })
+      const cookie = local.headers.get('set-cookie') ?? ''
+      const headers = { Cookie: cookie, Origin: baseUrl, 'Content-Type': 'application/json' }
+      const first = await fetch(`${baseUrl}/api/config`, { headers }).then(response => response.json()) as { version: string; config: Record<string, any> }
+      expect(first.config.activeModel).toBe('deepseek/flash')
+      expect(first.config.providers.deepseek.models.flash.modelCode).toBe('deepseek-flash')
+      expect(first.config.providers.ollama.models['qwen3.5:4b'].modelCode).toBe('qwen3.5:4b')
+      expect(first.config.frontModel).toEqual({ enabled: true, model: 'ollama/qwen3.5:4b' })
+      expect(first.config.approvalReview).toEqual({ model: 'ollama/qwen3.5:4b' })
+
+      const saved = await fetch(`${baseUrl}/api/config`, { method: 'PUT', headers, body: JSON.stringify({ version: first.version, config: first.config }) })
+      expect(saved.status).toBe(200)
+      expect(preparedConfig).not.toHaveProperty('models')
+      expect(preparedConfig?.activeModel).toBe('deepseek/flash')
+      expect(JSON.parse(await readFile(configPath, 'utf8'))).toMatchObject({ activeModel: 'deepseek/flash', frontModel: { model: 'ollama/qwen3.5:4b' }, approvalReview: { model: 'ollama/qwen3.5:4b' } })
+      expect(JSON.parse(await readFile(`${configPath}.bak`, 'utf8'))).toEqual(originalConfig)
+
+      const reloaded = await fetch(`${baseUrl}/api/config`, { headers }).then(response => response.json()) as { config: Record<string, any> }
+      expect(reloaded.config.providers.deepseek.models.flash.modelCode).toBe('deepseek-flash')
+      expect(reloaded.config.activeModel).toBe('deepseek/flash')
+    } finally {
+      await server.stop()
+      await host.close()
+    }
   })
 })
 

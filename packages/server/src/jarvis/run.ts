@@ -8,7 +8,7 @@ import { redactJarvisText } from './privacy.js'
 import { MAX_JARVIS_CONTEXT_CHARS } from '../prompt.js'
 
 const closeInputSchema = z.object({
-  result: z.enum(['success', 'failure', 'partial']), summary: z.string(),
+  result: z.enum(['success', 'failure', 'partial']), summary: z.string(), details: z.string().optional(), extractMemory: z.boolean().optional(),
   decisions: z.array(z.string()).default([]), failures: z.array(z.string()).default([]), nextSteps: z.array(z.string()).default([]),
 })
 const candidateSchema = z.object({
@@ -149,7 +149,7 @@ export class JarvisRun {
     return this.closing ??= (async () => {
       await this.enqueue(async () => {
         this.binding.completion ??= {
-          input: closeInputSchema.parse({ ...input, summary: this.safeText(input.summary), decisions: input.decisions?.map((text) => this.safeText(text)), failures: input.failures?.map((text) => this.safeText(text)), nextSteps: input.nextSteps?.map((text) => this.safeText(text)) }),
+          input: closeInputSchema.parse({ ...input, summary: this.safeText(input.summary), ...(input.details === undefined ? {} : { details: this.safeText(input.details) }), decisions: input.decisions?.map((text) => this.safeText(text)), failures: input.failures?.map((text) => this.safeText(text)), nextSteps: input.nextSteps?.map((text) => this.safeText(text)) }),
           ...(candidate ? { candidate: { ...candidate, title: this.safeText(candidate.title), content: this.safeText(candidate.content) } } : {}), candidateRecorded: false,
         }
         await this.persist()

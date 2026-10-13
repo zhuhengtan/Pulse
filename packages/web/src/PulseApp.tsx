@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import type { CSSProperties, FormEvent, KeyboardEvent } from 'react'
 import { ApiError, apiJson, browserTransport, jsonRequest } from './transport.js'
 import type { ConversationList, MessageList, PulseWebTransport, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebLane, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from './transport.js'
-import { Select } from 'antd'
+import { Dropdown, Select } from 'antd'
 import { MessageBubble } from './MessageBubble.js'
 import { copyText } from './clipboard.js'
 import { SettingsPage } from './SettingsPage.js'
@@ -48,6 +48,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const [editingId, setEditingId] = useState<string>()
   const [editingTitle, setEditingTitle] = useState('')
   const [menuId, setMenuId] = useState<string>()
+  const menuIdRef = useRef(menuId)
+  menuIdRef.current = menuId
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [effectiveModel, setEffectiveModel] = useState<string>()
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -230,7 +232,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     const first = document.querySelector<HTMLButtonElement>('.drawer .new-button')
     first?.focus()
     const key = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') { setDrawerOpen(false); drawerTrigger.current?.focus(); return }
+      if (event.key === 'Escape') { if (menuIdRef.current) { setMenuId(undefined); return }; setDrawerOpen(false); drawerTrigger.current?.focus(); return }
       if (event.key !== 'Tab') return
       const drawer = document.querySelector<HTMLElement>('.drawer')
       const focusable = drawer ? [...drawer.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]')] : []
@@ -693,35 +695,51 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     } catch { setToast('删除失败；运行中的任务可能尚未结束。') }
   }
 
-  const moveConversation = async (conversation: WebConversation) => {
+  const setProjectCollapsed = (projectId: string, collapsed: boolean) => {
+    setCollapsedProjectIds(current => {
+      const next = collapsed ? [...new Set([...current, projectId])] : current.filter(id => id !== projectId)
+      window.localStorage.setItem('pulse-web-collapsed-projects', JSON.stringify(next))
+      return next
+    })
+  }
+
+  const moveConversation = async (conversation: WebConversation, project?: WebProject) => {
     if (conversation.activeRunId) { setToast('运行中或待恢复的对话不能移动。'); return }
-    const choices = projects.filter(project => project.id !== conversation.projectId)
-    const numbered = [...(conversation.projectId ? [{ id: undefined, name: '未分组' }] : []), ...choices.map(project => ({ id: project.id, name: project.name }))]
-    if (!numbered.length) { setToast('没有可移动到的其他项目。'); return }
-    const selection = window.prompt(`输入目标序号：\n${numbered.map((item, index) => `${index + 1}. ${item.name}`).join('\n')}`)
-    if (!selection) return
-    const target = numbered[Number(selection) - 1]
-    if (!target) { setToast('目标序号无效。'); return }
     try {
-      const updated = await apiJson<WebConversation>(transport, `/api/conversations/${encodeURIComponent(conversation.id)}`, jsonRequest('PATCH', { projectId: target.id ?? null }))
+      const updated = await apiJson<WebConversation>(transport, `/api/conversations/${encodeURIComponent(conversation.id)}`, jsonRequest('PATCH', { projectId: project?.id ?? null }))
       setConversations(items => items.map(item => item.id === conversation.id ? updated : item)); setMenuId(undefined)
+      if (updated.projectId) { setProjectCollapsed('projects', false); setProjectCollapsed(updated.projectId, false) }
       if (selectedId === conversation.id) { setSelectedProjectId(updated.projectId); if (updated.projectId) window.localStorage.setItem('pulse-web-project', updated.projectId); else window.localStorage.removeItem('pulse-web-project') }
-      setToast(`对话已移动到${target.name}。`)
+      setToast(`对话已移动到${project?.name ?? '未分组'}。`)
     } catch (error) { setToast(error instanceof ApiError && error.status === 409 ? '对话仍有运行或待恢复任务，不能移动。' : '移动对话失败。') }
   }
 
   const activeInteraction = surfaceMode === 'chat'
     ? workInteractions[0] ?? [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'interaction' }> => item.kind === 'interaction')
     : [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'interaction' }> => item.kind === 'interaction')
-  const visibleConversations = useMemo(() => conversations.filter(item => (!selectedProjectId || item.projectId === selectedProjectId) && `${item.title} ${item.cwd} ${projects.find(project => project.id === item.projectId)?.name ?? ''}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())), [conversations, projects, query, selectedProjectId])
-  const pinnedConversations = visibleConversations.filter(item => item.pinned)
+  const visibleConversations = useMemo(() => conversations.filter(item => `${item.title} ${item.cwd} ${projects.find(project => project.id === item.projectId)?.name ?? ''}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())), [conversations, projects, query])
   const orderedProjects = useMemo(() => [...projects].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))), [projects])
-  const groupedHistory = useMemo(() => groupConversations(visibleConversations.filter(item => !item.pinned)), [visibleConversations])
+  const ungroupedConversations = visibleConversations.filter(item => !projects.some(project => project.id === item.projectId))
+  const pinnedConversations = ungroupedConversations.filter(item => item.pinned)
+  const groupedHistory = groupConversations(ungroupedConversations.filter(item => !item.pinned))
   const conversationRows = (items: WebConversation[]) => items.map(conversation => <div key={conversation.id} className={`history-row ${conversation.id === selectedId ? 'selected' : ''}`}>
     {editingId === conversation.id ? <form className="rename-form" onSubmit={event => { event.preventDefault(); void renameConversation(conversation) }}><input value={editingTitle} autoFocus maxLength={80} onChange={event => setEditingTitle(event.target.value)} aria-label="对话标题" /><button aria-label="保存标题">✓</button><button type="button" aria-label="取消重命名" onClick={() => setEditingId(undefined)}>×</button></form> : <>
-      <button className="history-item" title={conversation.title} onClick={() => void openConversation(conversation)}><span>{conversation.title || '新对话'}</span>{!selectedProjectId && conversation.projectId && <small className="history-project-badge">{projects.find(project => project.id === conversation.projectId)?.name ?? '项目'}</small>}{conversation.activeRunId && <i aria-label="运行状态待确认" />}</button>
-      <button className="row-menu-button" aria-label={`对话操作：${conversation.title}`} aria-expanded={menuId === conversation.id} onClick={() => setMenuId(menuId === conversation.id ? undefined : conversation.id)}><Icon name="more"/></button>
-      {menuId === conversation.id && <div className="row-menu"><button onClick={() => void renameConversation(conversation)}>重命名</button><button onClick={() => void togglePinned(conversation)}>{conversation.pinned ? '取消置顶' : '置顶'}</button><button disabled={Boolean(conversation.activeRunId)} onClick={() => void moveConversation(conversation)}>移动到项目…</button><button disabled={Boolean(conversation.activeRunId)} onClick={() => void archiveConversation(conversation)}>归档</button><button className="danger" disabled={Boolean(conversation.activeRunId)} onClick={() => void deleteConversation(conversation)}>删除</button></div>}
+      <button className="history-item" title={conversation.title} onClick={() => void openConversation(conversation)}><span>{conversation.title || '新对话'}</span>{conversation.pinned && <small className="history-pin" aria-label="已置顶">置顶</small>}{conversation.activeRunId && <i aria-label="运行状态待确认" />}</button>
+      <Dropdown destroyOnHidden trigger={['click']} open={menuId === conversation.id} onOpenChange={open => setMenuId(open ? conversation.id : undefined)} menu={{
+        triggerSubMenuAction: 'click',
+        items: [
+          { key: 'rename', label: '重命名', onClick: () => void renameConversation(conversation) },
+          { key: 'pin', label: conversation.pinned ? '取消置顶' : '置顶', onClick: () => void togglePinned(conversation) },
+          { key: 'move', label: '移动到项目', disabled: Boolean(conversation.activeRunId) || !projects.some(project => project.id !== conversation.projectId) && !conversation.projectId, children: [
+            ...(conversation.projectId ? [{ key: 'ungrouped', label: '未分组', onClick: () => void moveConversation(conversation) }] : []),
+            ...orderedProjects.filter(project => project.id !== conversation.projectId).map(project => ({ key: project.id, label: project.name, disabled: !project.available, onClick: () => void moveConversation(conversation, project) })),
+          ] },
+          { type: 'divider' },
+          { key: 'archive', label: '归档', disabled: Boolean(conversation.activeRunId), onClick: () => void archiveConversation(conversation) },
+          { key: 'delete', label: '删除', danger: true, disabled: Boolean(conversation.activeRunId), onClick: () => void deleteConversation(conversation) },
+        ],
+        onClick: () => setMenuId(undefined),
+      }}><button className="row-menu-button" aria-label={`对话操作：${conversation.title}`} aria-expanded={menuId === conversation.id}><Icon name="more"/></button></Dropdown>
     </>}
   </div>)
   const history = <aside className="history" aria-label="历史对话">
@@ -729,12 +747,33 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     <div className="history-primary"><button onClick={() => selectProject(undefined)}><Icon name="home"/> <span>全部对话</span></button></div>
     <label className="history-search"><Icon name="search"/><input ref={searchRef} value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索对话" aria-label="搜索对话" /><kbd>⌘ K</kbd></label>
     <div className="history-list">
-      <section className="project-nav-group"><header><button className="project-nav-heading" aria-expanded={!collapsedProjectIds.includes('projects')} onClick={() => setCollapsedProjectIds(current => { const next = current.includes('projects') ? current.filter(id => id !== 'projects') : [...current, 'projects']; window.localStorage.setItem('pulse-web-collapsed-projects', JSON.stringify(next)); return next })}><Icon className={collapsedProjectIds.includes('projects') ? 'is-collapsed' : ''} name="chevron"/> 项目</button><button className="project-add" disabled={!sessionCapabilities.localAdmin} title="添加本机项目" onClick={() => void createProject()}><Icon name="plus"/></button></header>{!collapsedProjectIds.includes('projects') && <>
-        {orderedProjects.map((project, index) => <div className={`project-nav-row ${selectedProjectId === project.id ? 'selected' : ''}`} key={project.id}><button title={project.cwd} onClick={() => selectProject(project.id)}><span className="project-glyph"><Icon name="folder"/></span><span>{project.name}</span>{project.pinned && <small>已置顶</small>}{!project.available && <small>不可用</small>}</button><button className="project-menu-button" title="项目操作" onClick={() => setMenuId(menuId === project.id ? undefined : project.id)}><Icon name="more"/></button>{menuId === project.id && <div className="row-menu"><button onClick={() => void renameProject(project)}>重命名</button><button onClick={() => void toggleProjectPinned(project)}>{project.pinned ? '取消置顶' : '置顶项目'}</button><button disabled={index === 0} onClick={() => void reorderProject(project, -1)}>上移</button><button disabled={index === orderedProjects.length - 1} onClick={() => void reorderProject(project, 1)}>下移</button><button onClick={() => void removeProject(project)}>移除并归档</button></div>}</div>)}
+      <section className="project-nav-group"><header><button className="project-nav-heading" aria-expanded={!collapsedProjectIds.includes('projects') || Boolean(query.trim())} onClick={() => setProjectCollapsed('projects', !collapsedProjectIds.includes('projects'))}><Icon className={collapsedProjectIds.includes('projects') && !query.trim() ? 'is-collapsed' : ''} name="chevron"/> 项目</button><button className="project-add" disabled={!sessionCapabilities.localAdmin} title="添加本机项目" onClick={() => void createProject()}><Icon name="plus"/></button></header>{(!collapsedProjectIds.includes('projects') || query.trim()) && <>
+        {orderedProjects.map((project, index) => {
+          const items = visibleConversations.filter(item => item.projectId === project.id).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)))
+          if (query.trim() && !items.length && !project.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())) return null
+          const expanded = !collapsedProjectIds.includes(project.id) || Boolean(query.trim())
+          return <section className="project-history" key={project.id} aria-label={`${project.name}项目对话`}>
+            <div className={`project-nav-row ${selectedProjectId === project.id ? 'selected' : ''}`}>
+              <button title={project.cwd} aria-label={`${expanded ? '折叠' : '展开'}项目：${project.name}`} aria-expanded={expanded} onClick={() => setProjectCollapsed(project.id, expanded)}><Icon className={`project-chevron ${expanded ? '' : 'is-collapsed'}`} name="chevron"/><span className="project-glyph"><Icon name="folder"/></span><span className="project-name">{project.name}</span>{!project.available && <small>不可用</small>}<small className="project-count">{items.length}</small></button>
+              <button className="project-new-button" aria-label={`在${project.name}中新建对话`} disabled={!project.available} onClick={() => { setProjectCollapsed(project.id, false); selectProject(project.id) }}><Icon name="plus"/></button>
+              <Dropdown destroyOnHidden trigger={['click']} open={menuId === project.id} onOpenChange={open => setMenuId(open ? project.id : undefined)} menu={{ items: [
+                { key: 'rename', label: '重命名', onClick: () => void renameProject(project) },
+                { key: 'pin', label: project.pinned ? '取消置顶' : '置顶项目', onClick: () => void toggleProjectPinned(project) },
+                { key: 'up', label: '上移', disabled: index === 0, onClick: () => void reorderProject(project, -1) },
+                { key: 'down', label: '下移', disabled: index === orderedProjects.length - 1, onClick: () => void reorderProject(project, 1) },
+                { type: 'divider' },
+                { key: 'remove', label: '移除并归档', danger: true, onClick: () => void removeProject(project) },
+              ], onClick: () => setMenuId(undefined) }}><button className="project-menu-button" aria-label={`项目操作：${project.name}`} aria-expanded={menuId === project.id}><Icon name="more"/></button></Dropdown>
+            </div>
+            {expanded && <div className="project-conversations">{conversationRows(items)}{!items.length && <p className="project-empty">{query.trim() ? '没有匹配的对话' : '暂无对话'}</p>}</div>}
+          </section>
+        })}
         {projects.length === 0 && <p className="history-empty">还没有登记项目</p>}
       </>}</section>
-      {pinnedConversations.length > 0 && <section className="history-group"><h2>已置顶</h2>{conversationRows(pinnedConversations)}</section>}
-      {groupedHistory.map(group => <section className="history-group" key={group.label}><h2>{group.label}</h2>{conversationRows(group.items)}</section>)}
+      {ungroupedConversations.length > 0 && <section className="ungrouped-history" aria-label="未分组对话"><h2>未分组</h2>
+        {pinnedConversations.length > 0 && <section className="history-group"><h2>已置顶</h2>{conversationRows(pinnedConversations)}</section>}
+        {groupedHistory.map(group => <section className="history-group" key={group.label}><h2>{group.label}</h2>{conversationRows(group.items)}</section>)}
+      </section>}
       {!loading && visibleConversations.length === 0 && <p className="history-empty">{query ? '没有匹配的对话' : '还没有对话'}</p>}
     </div>
     <div className="history-foot"><button onClick={() => { setArchiveOpen(true); setSettingsOpen(false); setDrawerOpen(false) }}><Icon name="archive"/><span>归档对话</span></button><button onClick={() => { setSettingsOpen(true); setArchiveOpen(false); setDrawerOpen(false) }}><Icon name="settings"/><span>设置</span></button></div>

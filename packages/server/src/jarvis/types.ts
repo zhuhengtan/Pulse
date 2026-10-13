@@ -7,7 +7,7 @@ export interface PulseJarvisConfig {
   token?: string
   /** Max token budget for dynamic context package built by Jarvis. Defaults to 4000. */
   contextTokenBudget?: number
-  /** Whether to automatically record candidate memories upon task completion. Defaults to true. */
+  /** Whether Jarvis may extract concise candidates from task evidence on completion. Defaults to true. */
   autoCandidate?: boolean
   /** Allow an API URL that is not loopback. Defaults to false. */
   allowRemote?: boolean
@@ -57,6 +57,9 @@ export interface CandidateMemoryInput {
 export interface CloseSessionInput {
   result: 'success' | 'failure' | 'partial'
   summary: string
+  /** Detailed audit evidence stays in the experience source, outside candidate memory bodies. */
+  details?: string | undefined
+  extractMemory?: boolean | undefined
   decisions?: string[]
   failures?: string[]
   nextSteps?: string[]

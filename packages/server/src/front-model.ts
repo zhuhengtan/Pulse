@@ -1,8 +1,15 @@
+import { createProviderAdapter, type ProviderPresetConfig } from '@hunterzhu/pulse-adapters'
+import type { LLMRequestProjection } from '@hunterzhu/pulse-runtime'
+
 export interface FrontModelConfig {
   enabled?: boolean
+  /** Adapter protocol for the selected catalog model. */
   provider?: string
+  /** Provider-specific model code. */
   model?: string
   baseURL?: string
+  apiKey?: string
+  maxOutputTokens?: number
   timeoutMs?: number
 }
 
@@ -171,7 +178,27 @@ Strictly output one valid JSON object:
       const parsed = payload.response ? JSON.parse(payload.response) : undefined
       return sanitizeFrontModelResult(parsed, defaultAck)
     }
-    return { instantResponse: defaultAck }
+    const adapter = createProviderAdapter({
+      provider,
+      defaultModel: config.model,
+      ...(config.baseURL ? { baseURL: config.baseURL } : {}),
+      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+      maxOutputTokens: config.maxOutputTokens ?? 768,
+      reasoningEffort: 'none',
+    } satisfies ProviderPresetConfig)
+    const request = {
+      contextSpec: {
+        globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'front-model',
+        instruction: prompt, privacy: 'cloud_allowed', privacyRefs: [],
+      },
+      blocks: [{ kind: 'system', content: prompt }],
+      prefixHash: '', projectionHash: '', builderVersion: 'front-model-v1', policyVersion: '1', toolSetVersion: 'none',
+      privacy: 'cloud_allowed', privacyRefs: [],
+    } as unknown as LLMRequestProjection
+    const result = await adapter.executeAttempt({ request, signal: AbortSignal.timeout(timeoutMs), model: config.model, maxOutputTokens: config.maxOutputTokens ?? 768 })
+    if (result.finishReason === 'length') return { instantResponse: defaultAck }
+    const parsed = result.structured ?? (result.text ? JSON.parse(result.text) as unknown : undefined)
+    return sanitizeFrontModelResult(parsed, defaultAck)
   } catch {
     // Graceful fallback to heuristic ack on timeout or failure
     return { instantResponse: defaultAck }

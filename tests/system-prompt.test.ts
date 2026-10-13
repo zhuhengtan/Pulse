@@ -109,6 +109,14 @@ describe('system prompt and instructions discovery', () => {
       expect(langIdx).toBeGreaterThan(userIdx)
     })
 
+    it('teaches evidence and candidate separation when Jarvis tools are enabled', () => {
+      const prompt = buildSystemPrompt({ workspace: '/test', toolNames: ['jarvis.record', 'jarvis.remember'] })
+      expect(prompt).toContain('one reusable conclusion with necessary conditions')
+      expect(prompt).toContain('at most 360')
+      expect(prompt).toContain('pending review')
+      expect(buildSystemPrompt({ workspace: '/test', toolNames: ['fs.read'] })).not.toContain('## Jarvis memory writes')
+    })
+
     it('fences and caps Jarvis context as untrusted reference data', () => {
       const prompt = buildSystemPrompt({
         workspace: '/test/workspace',

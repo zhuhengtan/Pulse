@@ -4,7 +4,8 @@ import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertJarvisApiUrl, createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
-import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliModel, type PulseCliProviderProfile } from './config.js'
+import { modelSelectionId, normalizeModelConfig, resolveModelReference } from '@hunterzhu/pulse-server'
+import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
 import { runOneShot } from './commands/run.js'
 import { runDoctor } from './commands/doctor.js'
@@ -173,7 +174,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     await loadPulseConfig(requestedCwd ?? process.cwd(), explicitConfig, parsed.options['trust-workspace'] === true)
   ).value
   // A missing user config still has to answer usage errors and list sessions.
-  const config: PulseCliConfig = loaded.activeModel || loaded.models || loaded.providers ? loaded : { ...defaultPulseConfig, ...loaded }
+  const config: PulseCliConfig = normalizeModelConfig(loaded.activeModel || loaded.models || loaded.providers ? loaded : { ...defaultPulseConfig, ...loaded })
 
   const mockResponse = option(parsed.options, 'mock-response')
   const mockTaskAssessment = option(parsed.options, 'mock-task-assessment')
@@ -184,27 +185,28 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const hasMockDemand = mockResponse !== undefined || mockTaskAssessment !== undefined || mockStageAssessment !== undefined || mockToolCallsOption !== undefined || mockAfterToolResponse !== undefined || mockParallelPlanOption !== undefined
 
   const cliModel = option(parsed.options, 'model')
-  const requestedModel = cliModel ?? (hasMockDemand ? 'mock' : process.env.PULSE_MODEL ?? config.activeModel)
+  const requestedModel = cliModel ?? (hasMockDemand ? 'mock/mock' : process.env.PULSE_MODEL ?? config.activeModel)
 
-  const effectiveModels: Record<string, PulseCliModel> = { ...(config.models ?? {}) }
   const effectiveProviders: Record<string, PulseCliProviderProfile> = { ...(config.providers ?? {}) }
 
-  if (requestedModel === 'mock' || (hasMockDemand && cliModel === undefined)) {
-    if (!effectiveModels.mock) {
-      effectiveModels.mock = { displayName: 'mock', provider: 'mock', modelCode: 'mock', maxContextTokens: 32_000, maxOutputTokens: 4_096, reasoningEffort: 'medium' }
-    }
+  if (requestedModel === 'mock/mock' || requestedModel === 'mock' || (hasMockDemand && cliModel === undefined)) {
     if (!effectiveProviders.mock) {
       effectiveProviders.mock = { provider: 'mock', name: 'Mock' }
     }
+    effectiveProviders.mock.models ??= {}
+    effectiveProviders.mock.models.mock ??= { displayName: 'mock', modelCode: 'mock', maxContextTokens: 32_000, maxOutputTokens: 4_096, reasoningEffort: 'medium' }
   }
 
-  const configuredModelEntry = requestedModel === undefined
-    ? undefined
-    : Object.entries(effectiveModels).find(([name, item]) => name === requestedModel || item.displayName === requestedModel)
-  if (!configuredModelEntry) throw new Error(`UNKNOWN_MODEL_DISPLAY_NAME:${requestedModel ?? '(missing)'}`)
-  const [, modelSelection] = configuredModelEntry
-  const activeModelName = modelSelection.displayName
-  const providerName = modelSelection.provider
+  const catalog = { ...config, providers: effectiveProviders }
+  const selections = Object.entries(effectiveProviders).flatMap(([providerId, profile]) => Object.entries(profile.models ?? {}).map(([modelId, model]) => ({ id: modelSelectionId(providerId, modelId), providerId, modelId, model })))
+  if (!requestedModel) throw new Error('UNKNOWN_MODEL_DISPLAY_NAME:(missing)')
+  let activeModelName: string
+  try { activeModelName = resolveModelReference(catalog, requestedModel) }
+  catch (error) { if (error instanceof Error && error.message.startsWith('AMBIGUOUS_MODEL_REFERENCE:')) throw error; throw new Error(`UNKNOWN_MODEL_DISPLAY_NAME:${requestedModel}`) }
+  const configuredModelEntry = selections.find(item => item.id === activeModelName)
+  if (!configuredModelEntry) throw new Error(`UNKNOWN_MODEL_DISPLAY_NAME:${requestedModel}`)
+  const modelSelection = configuredModelEntry.model
+  const providerName = configuredModelEntry.providerId
   const profile = effectiveProviders[providerName]
   if (!profile) throw new Error(`MODEL_PROVIDER_NOT_FOUND:${providerName}`)
   const model = modelSelection.modelCode
@@ -255,24 +257,16 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
       ...(item.toolChoice === undefined ? {} : { toolChoice: item.toolChoice }),
     }]]
   }))
-  const modelDisplayNames = new Set<string>()
-  const providerModels = Object.fromEntries(Object.entries(effectiveModels).flatMap(([name, item]: [string, PulseCliModel]) => {
-    if (!effectiveProviders[item.provider]) throw new Error(`MODEL_PROVIDER_NOT_FOUND:${item.provider}`)
-    const displayName = item.displayName.trim()
-    if (!displayName) throw new Error(`MODEL_DISPLAY_NAME_REQUIRED:${name}`)
-    if (modelDisplayNames.has(displayName)) throw new Error(`DUPLICATE_MODEL_DISPLAY_NAME:${displayName}`)
-    modelDisplayNames.add(displayName)
-    return [[displayName, {
-      provider: item.provider,
-      model: item.modelCode,
-      ...(item.maxContextTokens === undefined ? {} : { maxContextTokens: item.maxContextTokens }),
-      ...(item.maxOutputTokens === undefined ? {} : { maxOutputTokens: item.maxOutputTokens }),
-      ...(item.reasoningEffort === undefined ? {} : { reasoningEffort: item.reasoningEffort }),
-    }]]
-  }))
-  const assistantModelName = config.assistantModel ?? activeModelName
+  const providerModels: NonNullable<LocalHostOptions['providerModels']> = Object.fromEntries(selections.map(({ id, providerId, model }) => [id, {
+      provider: providerId,
+      model: model.modelCode,
+      ...(model.maxContextTokens === undefined ? {} : { maxContextTokens: model.maxContextTokens }),
+      ...(model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens }),
+      ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
+    }]))
+  const assistantModelName = config.assistantModel ? resolveModelReference(catalog, config.assistantModel) : activeModelName
   if (!providerModels[assistantModelName]) throw new Error(`UNKNOWN_ASSISTANT_MODEL:${assistantModelName}`)
-  const taskRouting = config.taskRouting
+  const taskRouting = config.taskRouting && Object.fromEntries(Object.entries(config.taskRouting).map(([task, route]) => [task, Array.isArray(route) ? route.map(item => resolveModelReference(catalog, item)) : route])) as PulseCliConfig['taskRouting']
   for (const [task, models] of Object.entries(taskRouting ?? {})) {
     if (!Array.isArray(models) || models.length === 0 || models.some((model) => typeof model !== 'string' || !providerModels[model])) {
       throw new Error(`INVALID_TASK_MODEL_ROUTE:${task}`)
@@ -419,7 +413,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     provider,
     providerProfiles,
     providerModels,
-    modelPricing: Object.fromEntries(Object.values(config.models ?? {}).flatMap((item) => item.pricing ? [[item.displayName, item.pricing]] : [])),
+    modelPricing: Object.fromEntries(selections.flatMap(({ id, model }) => model.pricing ? [[id, model.pricing]] : [])),
     ...(taskRouting === undefined ? {} : { taskRouting }),
     capabilityPacks,
     enabledCapabilityPacks,
@@ -440,8 +434,20 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(allowNetwork === undefined ? {} : { allowNetwork }),
     ...(config.networkHosts === undefined ? {} : { networkHosts: config.networkHosts }),
     jarvis,
-    ...(config.frontModel ? { frontModel: config.frontModel } : {}),
-    ...(config.approvalReview?.model ? { approvalReview: { provider: config.approvalReview.provider ?? 'ollama', model: config.approvalReview.model, baseURL: config.approvalReview.baseURL ?? 'http://127.0.0.1:11434', timeoutMs: Math.max(1_000, Math.min(60_000, config.approvalReview.timeoutMs ?? 15_000)) } } : {}),
+    ...(config.frontModel ? { frontModel: (() => {
+      const selected = typeof config.frontModel?.model === 'string' ? resolveModelReference(catalog, config.frontModel.model) : undefined
+      const entry = selections.find(item => item.id === selected)
+      const source = entry && effectiveProviders[entry.providerId]
+      const keyEnv = source?.apiKeyEnv ?? (source?.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
+      return { ...config.frontModel, ...(entry && source ? { provider: source.provider, model: entry.model.modelCode, ...(source.baseURL ? { baseURL: source.baseURL } : {}), ...(process.env[keyEnv] ? { apiKey: process.env[keyEnv] } : {}) } : {}) }
+    })() } : {}),
+    ...(config.approvalReview?.model ? { approvalReview: (() => {
+      const selected = resolveModelReference(catalog, config.approvalReview!.model!)
+      const entry = selections.find(item => item.id === selected)
+      const source = entry && effectiveProviders[entry.providerId]
+      if (!entry || !source || source.provider !== 'ollama') throw new Error('APPROVAL_REVIEW_REQUIRES_OLLAMA')
+      return { provider: 'ollama' as const, model: entry.model.modelCode, baseURL: source.baseURL ?? 'http://127.0.0.1:11434', timeoutMs: Math.max(1_000, Math.min(60_000, config.approvalReview!.timeoutMs ?? 15_000)) }
+    })() } : {}),
   }
 }
 

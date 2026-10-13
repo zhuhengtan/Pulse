@@ -2,6 +2,18 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.5.1] - 2026-10-13
+
+### Added
+
+- Models are managed under providers, allowing different providers to register the same model name; defaults, assistant chat, task routing, instant replies, and approval review all select registered models.
+- Added project sidebar organization and improved workspace trust boundaries and model configuration migration.
+
+### Fixed
+
+- Instant replies use the selected provider's protocol and connection settings; approval review remains restricted to local Ollama and falls back to human review on errors.
+- Improved Jarvis experience recording, context filtering, and durable delivery workflows.
+
 ## [0.5.0] - 2026-10-12
 
 ### Added

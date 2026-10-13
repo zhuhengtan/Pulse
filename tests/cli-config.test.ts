@@ -84,11 +84,11 @@ describe('ensurePulseUserConfig', () => {
     })}\n`)
     try {
       const options = await hostOptions(parse(['--config', path]))
-      expect(options.activeModel).toBe('gpt5.6-b')
+      expect(options.activeModel).toBe('deepseek/gpt5.6-b')
       expect(options.activeProviderCode).toBe('deepseek')
       expect(options.provider).toMatchObject({ provider: 'deepseek', defaultModel: 'deepseek-chat' })
-      expect(options.providerModels).toEqual({ 'gpt5.6-b': { provider: 'deepseek', model: 'deepseek-chat' } })
-      expect(options.taskRouting).toEqual({ plan: ['gpt5.6-b'], verify: ['gpt5.6-b'] })
+      expect(options.providerModels).toEqual({ 'deepseek/gpt5.6-b': { provider: 'deepseek', model: 'deepseek-chat' } })
+      expect(options.taskRouting).toEqual({ plan: ['deepseek/gpt5.6-b'], verify: ['deepseek/gpt5.6-b'] })
       expect(options).not.toHaveProperty('executionMode')
     } finally {
       if (previousHome === undefined) delete process.env.PULSE_HOME
@@ -96,7 +96,7 @@ describe('ensurePulseUserConfig', () => {
     }
   })
 
-  it('rejects duplicate model display names across providers', async () => {
+  it('allows duplicate model names across providers and requires a qualified selection when ambiguous', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-model-duplicate-'))
     temporaryDirectories.push(directory)
     const previousHome = process.env.PULSE_HOME
@@ -110,7 +110,61 @@ describe('ensurePulseUserConfig', () => {
       },
     })}\n`)
     try {
-      await expect(hostOptions(parse(['--config', path, '--model', 'same']))).rejects.toThrow('DUPLICATE_MODEL_DISPLAY_NAME:same')
+      await expect(hostOptions(parse(['--config', path, '--model', 'same']))).rejects.toThrow('AMBIGUOUS_MODEL_REFERENCE:same:a/one,b/two')
+      const options = await hostOptions(parse(['--config', path, '--model', 'b/two']))
+      expect(options.activeModel).toBe('b/two')
+      expect(options.providerModels).toMatchObject({ 'a/one': { provider: 'a', model: 'one' }, 'b/two': { provider: 'b', model: 'two' } })
+    } finally {
+      if (previousHome === undefined) delete process.env.PULSE_HOME
+      else process.env.PULSE_HOME = previousHome
+    }
+  })
+
+  it('resolves feature models from the provider catalog and keeps approval review local-only', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-feature-models-'))
+    temporaryDirectories.push(directory)
+    const previousHome = process.env.PULSE_HOME
+    process.env.PULSE_HOME = directory
+    const path = join(directory, 'config.json')
+    await writeFile(path, `${JSON.stringify({
+      providers: {
+        ollama: { provider: 'ollama', baseURL: 'http://127.0.0.1:11434', models: { 'qwen3.5:4b': { modelCode: 'qwen3.5:4b' } } },
+        cloud: { provider: 'deepseek', baseURL: 'https://api.deepseek.com', models: { reviewer: { modelCode: 'deepseek-chat' } } },
+      },
+      activeModel: 'cloud/reviewer',
+      frontModel: { enabled: true, model: 'ollama/qwen3.5:4b' },
+      approvalReview: { model: 'ollama/qwen3.5:4b' },
+    })}\n`)
+    try {
+      const options = await hostOptions(parse(['--config', path]))
+      expect(options.frontModel).toMatchObject({ enabled: true, provider: 'ollama', model: 'qwen3.5:4b', baseURL: 'http://127.0.0.1:11434' })
+      expect(options.approvalReview).toMatchObject({ provider: 'ollama', model: 'qwen3.5:4b', baseURL: 'http://127.0.0.1:11434' })
+
+      await writeFile(path, `${JSON.stringify({
+        providers: { cloud: { provider: 'deepseek', models: { reviewer: { modelCode: 'deepseek-chat' } } } },
+        activeModel: 'cloud/reviewer',
+        approvalReview: { model: 'cloud/reviewer' },
+      })}\n`)
+      await expect(hostOptions(parse(['--config', path]))).rejects.toThrow('APPROVAL_REVIEW_REQUIRES_OLLAMA')
+    } finally {
+      if (previousHome === undefined) delete process.env.PULSE_HOME
+      else process.env.PULSE_HOME = previousHome
+    }
+  })
+
+  it('rejects invalid model references instead of silently routing them', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-invalid-model-ref-'))
+    temporaryDirectories.push(directory)
+    const previousHome = process.env.PULSE_HOME
+    process.env.PULSE_HOME = directory
+    const path = join(directory, 'config.json')
+    await writeFile(path, `${JSON.stringify({
+      providers: { local: { provider: 'mock', models: { quick: { modelCode: 'mock' } } } },
+      activeModel: 'local/quick',
+      taskRouting: { plan: ['local/missing'] },
+    })}\n`)
+    try {
+      await expect(hostOptions(parse(['--config', path]))).rejects.toThrow('UNKNOWN_MODEL_REFERENCE:local/missing')
     } finally {
       if (previousHome === undefined) delete process.env.PULSE_HOME
       else process.env.PULSE_HOME = previousHome

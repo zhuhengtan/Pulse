@@ -34,7 +34,7 @@ async function fixture() {
 
 it('retains failed events and completion across restore, and advances only acknowledged cursors', async () => {
   const f = await fixture(); f.fail('/v1/events')
-  await expect(f.run.close(f.runtime, { result: 'partial', summary: 'SYNTHETIC_CONFIGURED_CREDENTIAL' })).rejects.toThrow('503')
+  await expect(f.run.close(f.runtime, { result: 'partial', summary: 'SYNTHETIC_CONFIGURED_CREDENTIAL', details: 'Evidence SYNTHETIC_CONFIGURED_CREDENTIAL', extractMemory: false })).rejects.toThrow('503')
   const failed = await f.binding()
   expect(failed).toMatchObject({ closed: false, recordedEffectIds: [], pendingEvents: [{ effectId: 'effect-1' }] })
   expect(JSON.stringify(failed)).not.toContain('SYNTHETIC_CONFIGURED_CREDENTIAL')
@@ -44,6 +44,8 @@ it('retains failed events and completion across restore, and advances only ackno
   const restored = (await JarvisRun.open(f.client, f.path, f.root, 'Task', 4000, true))!
   await restored.close(f.runtime, { result: 'partial', summary: 'ignored on retry' })
   expect(await f.binding()).toMatchObject({ closed: true, recordedEffectIds: ['effect-1'], pendingEvents: [] })
+  expect(f.calls.find(call => call.path.endsWith('/close'))?.body).toMatchObject({ extractMemory: false, details: expect.stringContaining('Evidence') })
+  expect(JSON.stringify(f.calls)).not.toContain('SYNTHETIC_CONFIGURED_CREDENTIAL')
   expect(f.calls.filter((call) => call.path === '/v1/sessions')).toHaveLength(1)
   const keys = f.calls.filter((call) => call.path === '/v1/events').map((call) => call.key)
   expect(new Set(keys).size).toBe(1)

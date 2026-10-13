@@ -105,13 +105,16 @@ export class JarvisClient {
 
   async closeSession(sessionId: string, input: CloseSessionInput, idempotencyKey?: string): Promise<void> {
     try {
+      // Jarvis bounds extraction at 12 seconds; allow its source write and close to finish.
       await this.request(`/v1/sessions/${encodeURIComponent(sessionId)}/close`, {
         result: input.result,
         summary: this.safeText(input.summary),
+        ...(input.details === undefined ? {} : { details: this.safeText(input.details) }),
+        ...(input.extractMemory === undefined ? {} : { extractMemory: input.extractMemory }),
         decisions: (input.decisions ?? []).map((text) => this.safeText(text)),
         failures: (input.failures ?? []).map((text) => this.safeText(text)),
         nextSteps: (input.nextSteps ?? []).map((text) => this.safeText(text)),
-      }, this.contextTimeoutMs, idempotencyKey)
+      }, Math.max(this.contextTimeoutMs, 16_000), idempotencyKey)
     } catch (error) {
       this.warnFailure('closeSession', error)
       throw error

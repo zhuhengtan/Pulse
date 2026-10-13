@@ -37,7 +37,7 @@ Pulse 只使用供应商表和模型表这套配置：模型的 `displayName` �
 
 执行 `npm install @hunterzhu/pulse-cli`（或全局安装）时，跨平台的 Node 安装脚本会在当前操作系统的用户主目录下创建 `.pulse/config.json`（macOS/Linux 为 `~/.pulse/config.json`，Windows 为 `%USERPROFILE%\.pulse\config.json`）。初始文件包含 `mock` 默认模型以及 OpenAI、DeepSeek 的示例映射；已有配置不会被覆盖。API Key 只记录环境变量名，不会写入配置。macOS/Linux 使用 `0600` 文件权限；Windows 由当前用户目录的 Windows ACL 管理访问权限。
 
-旧版单 `provider` 配置不会自动迁移。已有用户配置请执行 `npx @hunterzhu/pulse-cli setup --force` 生成新模板，再按下面的格式填写；该命令会覆盖指定的配置文件。
+旧版单 `provider` 配置不会自动迁移。旧版顶层 `models` 注册表会在读取时兼容，Web 设置页保存后转为供应商嵌套结构。新配置按以下格式填写：
 
 ```json
 {
@@ -46,31 +46,21 @@ Pulse 只使用供应商表和模型表这套配置：模型的 `displayName` �
       "name": "OpenAI",
       "provider": "openai-compatible",
       "baseURL": "https://api.openai.com/v1",
-      "apiKeyEnv": "OPENAI_API_KEY"
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "models": { "gpt5.6-a": { "displayName": "gpt5.6-a", "modelCode": "gpt-5.6" } }
     },
     "deepseek": {
       "name": "DeepSeek",
       "provider": "deepseek",
       "baseURL": "https://api.deepseek.com",
-      "apiKeyEnv": "DEEPSEEK_API_KEY"
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "models": { "gpt5.6-b": { "displayName": "gpt5.6-b", "modelCode": "deepseek-chat" } }
     }
   },
-  "models": {
-    "gpt5.6-a": {
-      "displayName": "gpt5.6-a",
-      "provider": "openai",
-      "modelCode": "gpt-5.6"
-    },
-    "gpt5.6-b": {
-      "displayName": "gpt5.6-b",
-      "provider": "deepseek",
-      "modelCode": "deepseek-chat"
-    }
-  },
-  "activeModel": "gpt5.6-a",
+  "activeModel": "openai/gpt5.6-a",
   "taskRouting": {
-    "plan": ["gpt5.6-a", "gpt5.6-b"],
-    "verify": ["gpt5.6-b", "gpt5.6-a"]
+    "plan": ["openai/gpt5.6-a", "deepseek/gpt5.6-b"],
+    "verify": ["deepseek/gpt5.6-b", "openai/gpt5.6-a"]
   },
   "capabilities": {
     "enabled": ["pdf", "spreadsheet", "skills"],
@@ -96,9 +86,9 @@ npx @hunterzhu/pulse-cli
 Provider 字段说明：
 
 - `providers`：供应商注册表，key 是供应商 code；`provider` 是适配器/协议 id，`apiKeyEnv` 只保存环境变量名。
-- `models`：全局模型注册表，key 或 `displayName` 是 Pulse 内显示名，`provider` 引用供应商 code，`modelCode` 是实际传给供应商的模型名。
-- `activeModel`：当前使用的 Pulse 模型显示名。交互界面中可用 `/model gpt5.6-a` 切换。
-- `taskRouting`：为 `reason`、`plan`、`merge`、`verify` 配置有序的模型显示名列表；按顺序尝试候选，失败时回退。没有配置的任务使用当前模型。只在用户级配置生效。
+- `providers.<id>.models`：该服务商提供的模型注册表。不同供应商可以有相同的模型 ID；模型代码 `modelCode` 是实际传给供应商的名称。
+- `activeModel`：当前模型引用，格式为 `供应商ID/模型ID`。交互界面中可用 `/model deepseek/gpt5.6-b` 切换；不带供应商的旧名称仅在唯一匹配时兼容。
+- `taskRouting`：为 `reason`、`plan`、`merge`、`verify` 配置有序的 `供应商ID/模型ID` 列表；按顺序尝试候选，失败时回退。没有配置的任务使用当前模型。只在用户级配置生效。
 - `capabilities.enabled`：显式启用已安装的宿主能力包。内置有 `pdf`、`spreadsheet`、`skills`；MCP 包名来自 `capabilities.mcpServers`。工作区配置不能启动进程或启用宿主扩展。
 - `capabilities.skills`：可选的技能目录名白名单；省略时自动发现全部技能，空数组表示不开放任何技能。旧配置中的名称现在只限制可选范围，不会预先加载正文。
 - `capabilities.trustedSkillRoots`：可选的绝对目录列表，额外信任其中的技能目录；路径必须是绝对路径，符号链接会被拒绝。
@@ -110,7 +100,7 @@ Provider 字段说明：
 - `reasoningEffort`：`low`、`medium` 或 `high`；是否被 Provider 接受由适配器处理。
 - MCP 诊断可用 `pulse mcp doctor [server-id]` 检查启动、握手和工具发现。`mcpServers.<id>.envFrom` 将 MCP 子进程环境变量映射到 Pulse 启动环境变量名，例如 `{ "envFrom": { "BROWSER_TOKEN": "BROWSER_MCP_TOKEN" } }`；只保存变量名，不把凭据写入配置。
 - `toolPolicies` 按远端原始工具名显式标记 `read`、`write` 或 `external`。未列出的工具默认 `external`；只读模式只允许显式标记为 `read` 的 MCP 工具。
-- `models.<name>.pricing` 可为本地费用估算提供 `{ currency, inputPerMillion, outputPerMillion, version }`。估算费用与 Provider 报告费用分开展示，并保留价格版本。
+- `providers.<id>.models.<modelId>.pricing` 可为本地费用估算提供 `{ currency, inputPerMillion, outputPerMillion, version }`。估算费用与 Provider 报告费用分开展示，并保留价格版本。
 - `toolChoice`：`auto`、`required`、`none`，或指定一个函数工具。
 - `approvalMode`：`ask` 每次副作用由你确认；`read-only` 禁止写入和 shell；`auto` 对 workspace 内的 `fs.write`、`fs.apply_patch`、`fs.move` 使用工具自身的 workspace 权限和路径校验直接执行，其他外部副作用再由独立的 Pulse safety reviewer 审查。审查回复必须整段就是 `APPROVE` 才会放行，`DENY`、解释句，以及「不允许」「不批准」都不会放行。
 - Runtime 默认以事件驱动方式调度异步模型请求和工具调用。独立工具操作可并行提交；同一目标文件仍由路径级锁与基线哈希保护，冲突后应重新读取再规划。

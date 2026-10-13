@@ -8,6 +8,7 @@ export interface WebConversation {
   activeRunId?: string
   approvalPolicy?: 'manual' | 'delegate'
   projectId?: string
+  projectUnassigned?: boolean
   pinned?: boolean
   archivedAt?: string
   kind?: 'assistant' | 'work'

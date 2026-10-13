@@ -62,7 +62,7 @@ describe('Jarvis 3-tier memory integration', () => {
         await client.buildContext('safe-session', text)
         await client.recordEvent('safe-session', 'action', text)
         await client.recordCandidate('safe-session', { title: 'Task:\n  First item\r\nSecond item', content: text })
-        await client.closeSession('safe-session', { result: 'success', summary: text, decisions: [text], failures: [text], nextSteps: [text] })
+        await client.closeSession('safe-session', { result: 'success', summary: text, details: text, extractMemory: false, decisions: [text], failures: [text], nextSteps: [text] })
         const serialized = JSON.stringify(bodies)
         for (const secret of ['SYNTHETIC_JSON_CREDENTIAL', 'SYNTHETIC_ENV_CREDENTIAL', 'SYNTHETIC_BEARER_CREDENTIAL', 'SYNTHETIC_URL_PASSWORD', 'SYNTHETIC_URL_TOKEN', 'SYNTHETIC_CONFIGURED_TOKEN']) expect(serialized).not.toContain(secret)
         expect(bodies[3]).toMatchObject({ title: 'Task: First item Second item' })
@@ -321,9 +321,11 @@ describe('Jarvis 3-tier memory integration', () => {
       await host.close()
     })
 
-    it.each(['Say hello.', 'Say hello.\nUse a friendly tone.'])('records a candidate with a single-line title after an accepted task: %s', async (objective) => {
+    it.each([true, false])('keeps accepted task evidence separate from candidates (extract memory: %s)', async (autoCandidate) => {
+      const objective = 'Say hello.\nUse a friendly tone.'
       const order: string[] = []
       let closedResult: string | undefined
+      let closeInput: any
       const mockClient = {
         async openSession(workspace: string) {
           return { id: 'mock-session-accepted', projectId: 'proj-42', workspace }
@@ -332,14 +334,10 @@ describe('Jarvis 3-tier memory integration', () => {
           return { text: 'Accepted context' }
         },
         async recordEvent() {},
-        async recordCandidate(sessionId: string, candidate: { title: string; sourceRefs?: string[] }) {
-          expect(candidate.title).not.toMatch(/[\r\n]/)
-          expect(candidate.title.length).toBeLessThanOrEqual(200)
-          expect(candidate.sourceRefs).toEqual([sessionId])
-          order.push('candidate')
-        },
+        async recordCandidate() { order.push('candidate') },
         async closeSession(_id: string, input: { result: string }) {
           closedResult = input.result
+          closeInput = input
           order.push('close')
         },
       } as unknown as JarvisClient
@@ -347,7 +345,7 @@ describe('Jarvis 3-tier memory integration', () => {
       const host = createLocalHost({
         cwd: tempDir,
         dataDir: join(tempDir, 'data'),
-        jarvis: { enabled: true, autoCandidate: true },
+        jarvis: { enabled: true, autoCandidate },
         jarvisClient: mockClient,
         provider: { provider: 'mock' },
         mockResponse: 'The requested result is ready.',
@@ -360,7 +358,12 @@ describe('Jarvis 3-tier memory integration', () => {
       expect((await run.outcome()).status).toBe('succeeded')
       expect(await run.taskOutcome()).toMatchObject({ status: 'accepted' })
       expect(closedResult).toBe('success')
-      expect(order).toEqual(['candidate', 'close'])
+      expect(order).toEqual(['close'])
+      expect(closeInput.decisions).toEqual([])
+      expect(closeInput.summary.length).toBeLessThan(250)
+      expect(closeInput.extractMemory).toBe(autoCandidate)
+      expect(JSON.parse(closeInput.details)).toMatchObject({ objective, outcome: 'The requested result is ready.', acceptance: { status: 'accepted' } })
+      expect(closeInput.details).toContain('The candidate directly satisfies the simple request.')
       await host.close()
     })
 

@@ -12,15 +12,17 @@ export interface PulseCliProviderProfile {
   maxOutputTokens?: number
   reasoningEffort?: 'low' | 'medium' | 'high'
   toolChoice?: 'auto' | 'required' | 'none' | { type: 'function'; function: { name: string } }
+  /** Models served by this provider. The provider plus map key is the model identity. */
+  models?: Record<string, Omit<PulseCliModel, 'provider'>>
 }
 
 export interface PulseCliModel {
-  /** Provider map key, not the adapter id. */
-  provider: string
+  /** Legacy flat-config field; nested models inherit their provider from the parent. */
+  provider?: string
   /** Exact model identifier sent to the provider. */
   modelCode: string
   /** Globally unique name shown by the CLI and accepted by `/model`. */
-  displayName: string
+  displayName?: string
   maxContextTokens?: number
   maxOutputTokens?: number
   reasoningEffort?: 'low' | 'medium' | 'high'
@@ -60,13 +62,13 @@ export interface PulseCliConfig {
   systemPromptFile?: string
   /** Named provider profiles. The map key is a stable provider code. */
   providers?: Record<string, PulseCliProviderProfile>
-  /** Globally unique Pulse model names mapped to provider/model codes. */
+  /** @deprecated Legacy flat model catalog. New configs nest models under providers. */
   models?: Record<string, PulseCliModel>
-  /** Active Pulse model display name. */
+  /** Active Pulse model reference, preferably providerId/modelId. */
   activeModel?: string
   /** Dedicated model for the persistent Pulse assistant chat; defaults to activeModel. */
   assistantModel?: string
-  /** Ordered model display names per task; later entries act as fallbacks. */
+  /** Ordered providerId/modelId references per task; later entries act as fallbacks. */
   taskRouting?: Partial<Record<PulseModelTask, string[]>>
   capabilities?: PulseCliCapabilities
   approvalMode?: 'read-only' | 'ask' | 'auto'
@@ -111,26 +113,23 @@ export interface PulseCliJarvisConfig {
 
 export const defaultPulseConfig: PulseCliConfig = {
   providers: {
-    mock: { provider: 'mock', name: 'Mock' },
+    mock: { provider: 'mock', name: 'Mock', models: { mock: { displayName: 'mock', modelCode: 'mock', maxContextTokens: 32_000, maxOutputTokens: 4_096, reasoningEffort: 'medium' } } },
     openai: {
       provider: 'openai-compatible',
       name: 'OpenAI',
       baseURL: 'https://api.openai.com/v1',
       apiKeyEnv: 'OPENAI_API_KEY',
+      models: { 'gpt5.6-a': { displayName: 'gpt5.6-a', modelCode: 'gpt-5.6' } },
     },
     deepseek: {
       provider: 'deepseek',
       name: 'DeepSeek',
       baseURL: 'https://api.deepseek.com',
       apiKeyEnv: 'DEEPSEEK_API_KEY',
+      models: { 'deepseek-chat': { displayName: 'deepseek-chat', modelCode: 'deepseek-chat' } },
     },
   },
-  models: {
-    mock: { displayName: 'mock', provider: 'mock', modelCode: 'mock', maxContextTokens: 32_000, maxOutputTokens: 4_096, reasoningEffort: 'medium' },
-    'gpt5.6-a': { displayName: 'gpt5.6-a', provider: 'openai', modelCode: 'gpt-5.6' },
-    'deepseek-chat': { displayName: 'deepseek-chat', provider: 'deepseek', modelCode: 'deepseek-chat' },
-  },
-  activeModel: 'mock',
+  activeModel: 'mock/mock',
   approvalMode: 'ask',
   maxTurns: 32,
   autoCompactPercent: 90,
@@ -190,6 +189,13 @@ export function sanitizeWorkspaceConfig(value: PulseCliConfig): PulseCliConfig {
     const safe = {
       provider: profile.provider,
       ...(profile.name === undefined ? {} : { name: profile.name }),
+      ...(profile.models === undefined ? {} : { models: Object.fromEntries(Object.entries(profile.models).flatMap(([modelId, model]) => model.modelCode ? [[modelId, {
+        modelCode: model.modelCode,
+        ...(model.displayName === undefined ? {} : { displayName: model.displayName }),
+        ...(model.maxContextTokens === undefined ? {} : { maxContextTokens: model.maxContextTokens }),
+        ...(model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens }),
+        ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
+      }]] : [])) }),
     }
     return Object.keys(safe).length ? [[name, safe]] : []
   }))
@@ -207,7 +213,7 @@ export function sanitizeWorkspaceConfig(value: PulseCliConfig): PulseCliConfig {
         return [[name, {
           provider: model.provider,
           modelCode: model.modelCode,
-          displayName: model.displayName,
+          ...(model.displayName === undefined ? {} : { displayName: model.displayName }),
           ...(model.maxContextTokens === undefined ? {} : { maxContextTokens: model.maxContextTokens }),
           ...(model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens }),
           ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
@@ -221,10 +227,19 @@ export function mergePulseConfigs(layers: Array<{ value: PulseCliConfig; trust: 
   let merged: PulseCliConfig = {}
   for (const layer of layers) {
     const value = layer.trust === 'workspace' ? sanitizeWorkspaceConfig(layer.value) : layer.value
+    const providers = { ...(merged.providers ?? {}) }
+    for (const [providerId, profile] of Object.entries(value.providers ?? {})) {
+      const previous = providers[providerId]
+      providers[providerId] = {
+        ...previous,
+        ...profile,
+        ...(previous?.models === undefined && profile.models === undefined ? {} : { models: { ...previous?.models, ...profile.models } }),
+      }
+    }
     merged = {
       ...merged,
       ...value,
-      ...(merged.providers === undefined && value.providers === undefined ? {} : { providers: { ...merged.providers, ...value.providers } }),
+      ...(merged.providers === undefined && value.providers === undefined ? {} : { providers }),
       ...(merged.models === undefined && value.models === undefined ? {} : { models: { ...merged.models, ...value.models } }),
     }
   }

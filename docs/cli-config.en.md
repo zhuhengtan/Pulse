@@ -31,7 +31,7 @@ Pulse uses a Provider table and a model table. A model's `displayName` must be g
 
 When running `npm install @hunterzhu/pulse-cli --foreground-scripts` (or installing globally), the cross-platform Node install script creates `.pulse/config.json` in the current operating system user's home directory (macOS/Linux: `~/.pulse/config.json`; Windows: `%USERPROFILE%\.pulse\config.json`) and displays a bilingual welcome message. The initial file includes the `mock` default model and example OpenAI and DeepSeek mappings; an existing config is never overwritten. API Keys are represented only by environment variable names and are not written to config. On macOS/Linux the file permissions are `0600`; on Windows access is managed by the current user's Windows ACL.
 
-The legacy single-`provider` configuration is not migrated automatically. For an existing user config, run `npx @hunterzhu/pulse-cli setup --force` to generate a new template and then fill it in as shown below. This command overwrites the selected configuration file.
+The legacy single-`provider` configuration is not migrated automatically. The legacy top-level `models` registry remains readable and is converted to provider-nested models when saved from Web settings. New configs use the following shape:
 
 ```json
 {
@@ -40,31 +40,21 @@ The legacy single-`provider` configuration is not migrated automatically. For an
       "name": "OpenAI",
       "provider": "openai-compatible",
       "baseURL": "https://api.openai.com/v1",
-      "apiKeyEnv": "OPENAI_API_KEY"
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "models": { "gpt5.6-a": { "displayName": "gpt5.6-a", "modelCode": "gpt-5.6" } }
     },
     "deepseek": {
       "name": "DeepSeek",
       "provider": "deepseek",
       "baseURL": "https://api.deepseek.com",
-      "apiKeyEnv": "DEEPSEEK_API_KEY"
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "models": { "gpt5.6-b": { "displayName": "gpt5.6-b", "modelCode": "deepseek-chat" } }
     }
   },
-  "models": {
-    "gpt5.6-a": {
-      "displayName": "gpt5.6-a",
-      "provider": "openai",
-      "modelCode": "gpt-5.6"
-    },
-    "gpt5.6-b": {
-      "displayName": "gpt5.6-b",
-      "provider": "deepseek",
-      "modelCode": "deepseek-chat"
-    }
-  },
-  "activeModel": "gpt5.6-a",
+  "activeModel": "openai/gpt5.6-a",
   "taskRouting": {
-    "plan": ["gpt5.6-a", "gpt5.6-b"],
-    "verify": ["gpt5.6-b", "gpt5.6-a"]
+    "plan": ["openai/gpt5.6-a", "deepseek/gpt5.6-b"],
+    "verify": ["deepseek/gpt5.6-b", "openai/gpt5.6-a"]
   },
   "capabilities": {
     "enabled": ["pdf", "spreadsheet", "skills"],
@@ -90,9 +80,9 @@ npx @hunterzhu/pulse-cli
 Provider and model fields:
 
 - `providers`: Provider registry. Keys are Provider codes; `provider` is the adapter/protocol ID, and `apiKeyEnv` stores only the environment variable name.
-- `models`: Global model registry. The key or `displayName` is the name shown in Pulse; `provider` references a Provider code and `modelCode` is the model name sent to that Provider.
-- `activeModel`: Current Pulse model display name. Use `/model gpt5.6-a` in the interactive UI to switch.
-- `taskRouting`: Ordered lists of model display names for `reason`, `plan`, `merge`, and `verify`. Candidates are tried in order with fallback on failure. Tasks without a route use the current model. This applies only to user-level config.
+- `providers.<id>.models`: Model registry owned by that Provider. Model IDs may repeat across Providers; `modelCode` is sent to the selected Provider.
+- `activeModel`: Model reference in `providerId/modelId` form. Use `/model deepseek/gpt5.6-b` in the interactive UI to switch. An unqualified legacy name remains valid only when it has one match.
+- `taskRouting`: Ordered `providerId/modelId` lists for `reason`, `plan`, `merge`, and `verify`. Candidates are tried in order with fallback on failure. Tasks without a route use the current model. This applies only to user-level config.
 - `capabilities.enabled`: Explicitly enable installed host capability packs. Built-ins include `pdf`, `spreadsheet`, and `skills`; MCP pack names come from `capabilities.mcpServers`. Workspace config cannot start processes or enable host extensions.
 - `capabilities.skills`: Optional allowlist of skill directory names. If omitted, all discovered skills are available; an empty list enables none. Names in older config now only restrict the selectable set and do not preload skill content.
 - `capabilities.trustedSkillRoots`: Optional list of absolute directories that contain additionally trusted skills. Paths must be absolute; symbolic links are rejected.
@@ -104,7 +94,7 @@ Provider and model fields:
 - `reasoningEffort`: `low`, `medium`, or `high`; the adapter handles whether the Provider accepts the value.
 - MCP diagnostics: run `pulse mcp doctor [server-id]` to check startup, handshake, and tool discovery. `mcpServers.<id>.envFrom` maps MCP child-process environment variables to names in Pulse's launch environment, for example `{ "envFrom": { "BROWSER_TOKEN": "BROWSER_MCP_TOKEN" } }`. Only variable names are stored; credentials are not written to config.
 - `toolPolicies`: Explicitly mark remote raw tool names as `read`, `write`, or `external`. Unlisted tools default to `external`; read-only mode permits only MCP tools explicitly marked `read`.
-- `models.<name>.pricing`: Optional `{ currency, inputPerMillion, outputPerMillion, version }` for local cost estimates. Estimated costs are displayed separately from Provider-reported costs and retain their price version.
+- `providers.<id>.models.<modelId>.pricing`: Optional `{ currency, inputPerMillion, outputPerMillion, version }` for local cost estimates. Estimated costs are displayed separately from Provider-reported costs and retain their price version.
 - `toolChoice`: `auto`, `required`, `none`, or a specific function tool.
 - `approvalMode`: `ask` requests confirmation for each side effect; `read-only` prohibits writes and Shell; `auto` directly runs workspace `fs.write`, `fs.apply_patch`, and `fs.move` using each tool's workspace permissions and path checks, while other external side effects are reviewed by an independent Pulse safety reviewer. The review response must consist of exactly `APPROVE` to allow the operation. `DENY`, explanatory text, and phrases such as “not allowed” or “not approved” do not allow it.
 - Runtime scheduling is event-driven by default for asynchronous model requests and tool calls. Independent tool operations can be submitted concurrently. Operations targeting the same file remain protected by path-level locks and baseline hashes; after a conflict, reread the file and plan again.
