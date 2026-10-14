@@ -9,3 +9,7 @@ artifacts/cli/
 .env.*
 !.env.example
 .tmp
+# Native automation build output
+native/desktop-helper/target/
+native/desktop-helper/__pycache__/
+packages/server/native/

@@ -346,7 +346,7 @@ const DSML_PARAMETER_OPEN = /<\uFF5C+DSML\uFF5C+\s*parameter\b/
 const DSML_PARAMETER_CLOSE = /<\/\uFF5C+DSML\uFF5C+\s*parameter>/
 const DSML_PARAMETER_PATTERN = /<\uFF5C+DSML\uFF5C+\s*parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>([\s\S]*?)<\/\uFF5C+DSML\uFF5C+\s*parameter>/
 
-export function normalizeAnthropicResponse(response: any): LLMResult {
+export function normalizeAnthropicResponse(response: any, aliases: ReadonlyMap<string, string> = new Map()): LLMResult {
   const root = providerRecord(response, 'Anthropic response')
   if (!Array.isArray(root.content)) throw providerResponseError('Anthropic response content must be an array')
   const blocks = root.content
@@ -354,7 +354,8 @@ export function normalizeAnthropicResponse(response: any): LLMResult {
   const toolBlocks = blocks.filter((block: any) => providerRecord(block, 'Anthropic content block').type === 'tool_use')
   const toolCalls = (root.stop_reason === 'max_tokens' ? [] : toolBlocks).map((block: any, index: number) => {
     const value = providerRecord(block, 'Anthropic tool block')
-    return { toolCallId: `pulse-tool-${index + 1}`, name: requiredProviderString(value.name, 'Anthropic tool name'), input: parseJson(value.input) }
+    const providerName = requiredProviderString(value.name, 'Anthropic tool name')
+    return { toolCallId: `pulse-tool-${index + 1}`, name: aliases.get(providerName) ?? providerName, input: parseJson(value.input), ...(typeof value.id === 'string' ? { providerToolCallId: value.id, providerToolName: providerName, providerToolArguments: JSON.stringify(value.input) } : {}) }
   })
   const refusalBlock = blocks.find((block: any) => block.type === 'refusal' && typeof block.text === 'string')
   const refusal = refusalBlock?.text as string | undefined

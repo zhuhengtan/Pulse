@@ -1,4 +1,5 @@
 export * from './core/types.js'
+export * from './core/tool-image.js'
 export * from './core/errors.js'
 export * from './core/mutations.js'
 export * from './core/inbox.js'

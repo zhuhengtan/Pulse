@@ -1,9 +1,13 @@
 {
   "name": "pulse",
   "private": true,
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "ci:local": "node scripts/ci/local.mjs",
     "native:prepare": "pnpm --filter @hunterzhu/pulse-server rebuild node-pty",
@@ -35,7 +39,8 @@
     "check": "pnpm web:build && tsc -b --pretty false && pnpm --filter @hunterzhu/pulse-web check && pnpm --filter @hunterzhu/pulse-web test && node scripts/ci/test.mjs",
     "web:dev": "pnpm --filter @hunterzhu/pulse-web dev",
     "web:dev:server": "node scripts/web/dev-server.mjs",
-    "web:build": "pnpm --filter @hunterzhu/pulse-web build && node scripts/web/stage.mjs"
+    "web:build": "pnpm --filter @hunterzhu/pulse-web build && node scripts/web/stage.mjs",
+    "desktop:build": "node scripts/automation/build-desktop.mjs"
   },
   "devDependencies": {
     "@hunterzhu/pulse-cli": "workspace:*",

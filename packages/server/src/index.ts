@@ -1,3 +1,11 @@
+import { AutomationSessionManager } from './automation/manager.js'
+import { AutomationBroker, LocalAutomationClient, RemoteAutomationClient, type AutomationClient, type AutomationEndpoint } from './automation/broker.js'
+import { createAutomationTools } from './automation/tools.js'
+import type { AutomationConfig } from './automation/types.js'
+import { automationDoctor, requestAutomationPermissions } from './automation/doctor.js'
+export { automationDoctor, requestAutomationPermissions } from './automation/doctor.js'
+export { AutomationSessionManager } from './automation/manager.js'
+export type { AutomationConfig, AutomationSessionView } from './automation/types.js'
 import { createCheckpoint, validateCheckpoint, operationAudit, textWindow, checkpointReceipt, type Checkpoint } from './task-controller/checkpoint.js'
 import { buildTaskControllerProgram } from './task-controller/program.js'
 import { buildContextGraph, expandFromReachedPoint, type ContextSurface, type SurfaceTask } from './task-controller/context-page.js'
@@ -16,6 +24,8 @@ import {
   MonotonicClock,
   InMemoryModelRegistry,
   ModelRouter,
+  effectivePrivacy,
+  privacyRank,
   defineReActLane,
   runtimeErrorFromCause,
   type EffectExecutor,
@@ -71,6 +81,8 @@ export { buildSystemPrompt, loadProjectInstructions, MAX_INSTRUCTION_BYTES, MAX_
 
 export type ApprovalMode = 'read-only' | 'ask' | 'auto'
 export interface LocalHostOptions {
+  automation?: AutomationConfig
+  automationEndpoint?: AutomationEndpoint
   /** Override automatic staged execution for substantive tasks. Persisted per Run. */
   taskController?: boolean
   cwd?: string
@@ -80,7 +92,8 @@ export interface LocalHostOptions {
   provider?: ProviderPresetConfig
   /** Named provider profiles used by the interactive `/model` selector. */
   providerProfiles?: Record<string, ProviderPresetConfig>
-  providerModels?: Record<string, { provider: string; model: string; maxContextTokens?: number; maxOutputTokens?: number; reasoningEffort?: 'low' | 'medium' | 'high' }>
+  providerModels?: Record<string, { provider: string; model: string; maxContextTokens?: number; maxOutputTokens?: number; imageInput?: 'supported' | 'unsupported' | 'unknown'
+  reasoningEffort?: 'low' | 'medium' | 'high' }>
   modelPricing?: Record<string, { currency: string; inputPerMillion: number; outputPerMillion: number; version: string }>
   /** Ordered model display names per task; later entries are bounded fallbacks. */
   taskRouting?: Partial<Record<HostModelTask, string[]>>
@@ -1236,6 +1249,9 @@ function snapshotHostOptions(source: LocalHostOptions): LocalHostOptions {
 }
 
 export class LocalHost {
+  readonly automation: AutomationSessionManager
+  private readonly automationBroker: AutomationBroker
+  private automationClient: AutomationClient
   private readonly root: string
   private readonly dataDir: string
   private readonly logDir: string
@@ -1261,11 +1277,18 @@ export class LocalHost {
     this.dataDir = resolve(options.dataDir ?? process.env.PULSE_DATA_DIR ?? pulseDataPath())
     this.logDir = resolve(options.logDir ?? process.env.PULSE_LOG_DIR ?? pulseLogPath())
     this.options = options
+    this.automation = new AutomationSessionManager(this.dataDir, options.automation, options.allowNetwork === true, undefined, options.networkHosts)
+    this.automationBroker = new AutomationBroker(this.automation, this.dataDir)
+    this.automationClient = options.automationEndpoint ? new RemoteAutomationClient(options.automationEndpoint) : new LocalAutomationClient(this.automation)
     this.activeProviderName = options.activeProviderCode ?? options.provider?.provider
     this.activeModelName = options.activeModel ?? options.provider?.defaultModel
     this.jarvisClient = options.jarvisClient ?? (options.jarvis?.enabled ? new JarvisClient(options.jarvis) : undefined)
     this.jarvisSync = this.jarvisClient ? new JarvisSyncQueue(this.dataDir, this.jarvisClient) : undefined
   }
+  async prepareAutomation(): Promise<void> { if (!this.options.automationEndpoint && this.getAutomationOptions().enabled.length) { await this.automation.init(); await this.automationBroker.start() } }
+  async automationDoctor(): Promise<Record<string, unknown>> { return automationDoctor(this.options.automation) }
+  async requestAutomationPermissions(): Promise<unknown> { return requestAutomationPermissions(this.options.automation) }
+  getAutomationOptions(): { enabled: string[]; approvalMode: ApprovalMode } { return { enabled: (this.options.enabledCapabilityPacks ?? []).filter(id => (id === 'browser' || id === 'computer') && !this.options.capabilityPacks?.some(pack => pack.manifest.id === id)), approvalMode: this.options.approvalMode ?? 'ask' } }
   setAssistantWorkTools(handlers: AssistantWorkToolHandlers): void { this.assistantWorkTools = handlers }
   private async migrateLegacyData(): Promise<void> {
     if (!this.shouldMigrateLegacyData) return
@@ -1276,7 +1299,7 @@ export class LocalHost {
     await mkdir(dirname(this.dataDir), { recursive: true })
     await rename(legacy, this.dataDir)
   }
-  async init(): Promise<void> { await this.migrateLegacyData(); await mkdir(this.dataDir, { recursive: true }); if (this.usesDefaultDataDir || this.options.logDir !== undefined || process.env.PULSE_LOG_DIR !== undefined) await mkdir(this.logDir, { recursive: true }); await stat(this.root); await this.listSkills(); await (this.jarvisRecovery ??= this.retryJarvisCompletions().finally(() => { this.jarvisRecovery = undefined })); if (this.jarvisSync) { await this.jarvisSync.init(); queueMicrotask(() => { void this.jarvisSync?.flush() }) } }
+  async init(): Promise<void> { await this.migrateLegacyData(); await mkdir(this.dataDir, { recursive: true }); await this.prepareAutomation(); if (this.usesDefaultDataDir || this.options.logDir !== undefined || process.env.PULSE_LOG_DIR !== undefined) await mkdir(this.logDir, { recursive: true }); await stat(this.root); await this.listSkills(); await (this.jarvisRecovery ??= this.retryJarvisCompletions().finally(() => { this.jarvisRecovery = undefined })); if (this.jarvisSync) { await this.jarvisSync.init(); queueMicrotask(() => { void this.jarvisSync?.flush() }) } }
   async retryJarvisSync(): Promise<void> { await this.jarvisSync?.flush() }
   private async retryJarvisForConversation(conversationId: string): Promise<void> {
     if (!this.jarvisClient) return
@@ -1524,6 +1547,7 @@ export class LocalHost {
       ...(nextDataDir === this.dataDir ? [] : ['dataDir']),
     ]
     this.options = { ...options, cwd: this.root, dataDir: this.dataDir }
+    this.automation.configure(options.automation ?? {}, options.allowNetwork === true, options.networkHosts)
     this.activeProviderName = options.activeProviderCode ?? options.provider?.provider
     this.activeModelName = options.activeModel ?? options.provider?.defaultModel
     this.jarvisClient = options.jarvisClient ?? (options.jarvis?.enabled ? new JarvisClient(options.jarvis) : undefined)
@@ -1532,11 +1556,13 @@ export class LocalHost {
   /** JSON-safe Runtime config for a child work process; live objects remain owned by its own Host. */
   getWorkWorkerOptions(): Omit<LocalHostOptions, 'capabilityPacks' | 'jarvisClient'> {
     const { capabilityPacks: _capabilityPacks, jarvisClient: _jarvisClient, ...serializable } = snapshotHostOptions(this.options)
+    if (this.automationBroker.endpoint) serializable.automationEndpoint = this.automationBroker.endpoint
     return JSON.parse(JSON.stringify(serializable)) as Omit<LocalHostOptions, 'capabilityPacks' | 'jarvisClient'>
   }
   /** Apply the parent Host's captured options while retaining child-local capability implementations. */
   applyWorkerOptions(options: Omit<LocalHostOptions, 'capabilityPacks' | 'jarvisClient'>): void {
     const { capabilityPacks, jarvisClient: _jarvisClient, ...base } = this.options
+    if (options.automationEndpoint) this.automationClient = new RemoteAutomationClient(options.automationEndpoint)
     this.applyLiveOptions({ ...base, ...options, ...(capabilityPacks ? { capabilityPacks } : {}) })
   }
   async getPublicRunLanes(conversationId: string, runId: string): Promise<{ runId: string; available: boolean; lanes: Array<{ id: string; parentId?: string; label: string; status: 'ready' | 'running' | 'waiting' | 'closing' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled'; activity?: string; activities?: Array<{ id: string; label: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'waiting' }> }> }> {
@@ -1575,6 +1601,20 @@ export class LocalHost {
   }
   getAvailableModels(): Array<{ name: string; provider: string; model: string }> {
     return Object.entries(this.options.providerModels ?? {}).map(([name, selection]) => ({ name, ...selection }))
+  }
+  async probeVisionModel(reference: string): Promise<{ model: string; accepted: boolean; response: string }> {
+    const model = this.options.providerModels?.[reference]
+    if (!model) throw new Error('UNKNOWN_MODEL:save the model configuration first')
+    const profile = this.options.providerProfiles?.[model.provider] ?? (model.provider === this.options.activeProviderCode ? this.options.provider : undefined)
+    if (!profile) throw new Error('MODEL_PROVIDER_NOT_FOUND')
+    const request: import('@hunterzhu/pulse-runtime').LLMRequestProjection = {
+      contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'vision-probe', instruction: 'Briefly describe the attached one-pixel image.', privacy: 'public', privacyRefs: [] },
+      blocks: [{ kind: 'instruction', content: 'Briefly describe the attached one-pixel image. This is an image-input protocol compatibility test.' }],
+      images: [{ ref: 'vision-probe', mediaType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC' }],
+      prefixHash: 'vision-probe', projectionHash: 'vision-probe-v1', builderVersion: '2', policyVersion: '1', toolSetVersion: 'vision-probe', privacy: 'public', privacyRefs: [],
+    }
+    const result = await createProviderAdapter(profile).executeAttempt({ request, model: model.model, signal: AbortSignal.timeout(30000), maxOutputTokens: 256 })
+    return { model: reference, accepted: !result.refusal, response: result.text.slice(0, 300) }
   }
   getReasoningEffort(): 'low' | 'medium' | 'high' | undefined {
     const effort = this.options.provider?.reasoningEffort
@@ -1689,7 +1729,14 @@ export class LocalHost {
     const capabilityRegistry = new CapabilityPackRegistry()
     for (const pack of options.capabilityPacks ?? []) capabilityRegistry.register(pack)
     const capabilityController = new AbortController()
-    const capabilities = await capabilityRegistry.activate(assistantChat ? [] : options.enabledCapabilityPacks ?? [], { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: assistantChat ? [] : await this.selectedSkillsFor(skillInput) })
+    const capabilities = await capabilityRegistry.activate(assistantChat ? [] : (options.enabledCapabilityPacks ?? []).filter(id => (id !== 'browser' && id !== 'computer') || options.capabilityPacks?.some(pack => pack.manifest.id === id)), { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: assistantChat ? [] : await this.selectedSkillsFor(skillInput) })
+    if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) capabilities.tools.push(...createAutomationTools(this.automationClient, cwd, options.enabledCapabilityPacks.filter(id => !options.capabilityPacks?.some(pack => pack.manifest.id === id)), runId))
+    if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) {
+      const dispose = capabilities.dispose.bind(capabilities)
+      capabilities.dispose = async () => {
+        try { const sessions = await this.automationClient.request('list', []); for (const session of sessions) if (session.owner.startsWith(runId + ':') && session.state !== 'closed') await this.automationClient.request('closeOwner', [session.owner]) } finally { await dispose() }
+      }
+    }
     try { registerCapabilityTools(registry, capabilities, options.approvalMode ?? 'ask') } catch (error) { capabilityController.abort(); await capabilities.dispose(); throw error }
     try {
     const provider = providerFromOptions(options)
@@ -1699,7 +1746,11 @@ export class LocalHost {
     let runtimeRef: PulseRuntime | undefined
     if (!assistantChat) this.registerTaskInspection(registry, () => runtimeRef!, conversationId, runId, cwd)
     const toolVersions = Object.fromEntries(registry.list().map((tool) => [tool.name, tool.version]))
-    const executeModelEffect = createModelEffectExecutor({ router, providers })
+    const executeModelEffect = createModelEffectExecutor({ router, providers, resolveImage: (ref, agentId, privacy) => {
+      const image = runtimeRef?.state.artifacts.get(ref)
+      if (!image || (image.agentId !== undefined && image.agentId !== agentId) || privacyRank(effectivePrivacy(image.privacy, image.privacyTaints)) > privacyRank(privacy)) throw new Error('IMAGE_ARTIFACT_NOT_VISIBLE')
+      return image.contentBase64
+    } })
     const runLlm = (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens })
     const runtime = new PulseRuntime({ sessionId: runId, clock: new MonotonicClock(), maxRuntimeMs: options.maxRuntimeMs ?? 15 * 60_000, programs: [], models, modelRouter: router, toolVersions, builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') return executeModelEffect(effect, signal, observe); if (effect.kind === 'tool') return approvedToolExecutor(registry, provider, options.approvalMode, userIntent, options.activeModel ?? provider.model.id, runLlm)(effect, signal, observe); throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     runtimeRef = runtime
@@ -2004,7 +2055,14 @@ export class LocalHost {
     for (const pack of options.capabilityPacks ?? []) capabilityRegistry.register(pack)
     const capabilityController = new AbortController()
     const skillInput = typeof savedInput.goal === 'string' ? savedInput.goal : ''
-    const capabilities = await capabilityRegistry.activate(assistantChat ? [] : options.enabledCapabilityPacks ?? [], { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: assistantChat ? [] : await this.selectedSkillsFor(skillInput) })
+    const capabilities = await capabilityRegistry.activate(assistantChat ? [] : (options.enabledCapabilityPacks ?? []).filter(id => (id !== 'browser' && id !== 'computer') || options.capabilityPacks?.some(pack => pack.manifest.id === id)), { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: assistantChat ? [] : await this.selectedSkillsFor(skillInput) })
+    if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) capabilities.tools.push(...createAutomationTools(this.automationClient, cwd, options.enabledCapabilityPacks.filter(id => !options.capabilityPacks?.some(pack => pack.manifest.id === id)), runId))
+    if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) {
+      const dispose = capabilities.dispose.bind(capabilities)
+      capabilities.dispose = async () => {
+        try { const sessions = await this.automationClient.request('list', []); for (const session of sessions) if (session.owner.startsWith(runId + ':') && session.state !== 'closed') await this.automationClient.request('closeOwner', [session.owner]) } finally { await dispose() }
+      }
+    }
     try { registerCapabilityTools(registry, capabilities, options.approvalMode ?? 'ask') } catch (error) { capabilityController.abort(); await capabilities.dispose(); throw error }
     try {
     const provider = providerFromOptions(options)
@@ -2032,7 +2090,11 @@ export class LocalHost {
     const toolVersions = Object.fromEntries(registry.list().map((tool) => [tool.name, tool.version]))
     const savedControllerVersion = typeof savedInput.controllerVersion === 'string' ? savedInput.controllerVersion : undefined
     const modelEffectBudget = savedInput.taskController === true && savedControllerVersion !== '8' && savedControllerVersion !== '9' ? Math.max(1, Math.floor(savedMaxTurns)) : undefined
-    const executeModelEffect = createModelEffectExecutor({ router, providers })
+    const executeModelEffect = createModelEffectExecutor({ router, providers, resolveImage: (ref, agentId, privacy) => {
+      const image = runtimeRef?.state.artifacts.get(ref)
+      if (!image || (image.agentId !== undefined && image.agentId !== agentId) || privacyRank(effectivePrivacy(image.privacy, image.privacyTaints)) > privacyRank(privacy)) throw new Error('IMAGE_ARTIFACT_NOT_VISIBLE')
+      return image.contentBase64
+    } })
     const runLlm = (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens })
     const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), maxRuntimeMs: options.maxRuntimeMs ?? 15 * 60_000, programs: [legacyProgram, version2Program, program, ...(assistantProgram ? [assistantProgram] : []), workerProgram, ...(['5', '6', '7', '8', '9'] as const).map((version) => buildTaskControllerProgram({ ...(savedReuse ? { resumePlan: savedReuse.controller, reusableIds: savedReuse.reusableIds } : {}), version, system: prompt, toolNames, conversation, approvalMode: options.approvalMode ?? 'ask', maxTurns: savedMaxTurns }))], models, modelRouter: router, toolVersions, builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { if (modelEffectBudget !== undefined) assertParallelModelEffectBudget(runtimeRef, modelEffectBudget); return executeModelEffect(effect, signal, observe) } if (effect.kind === 'tool') return approvedToolExecutor(registry, provider, options.approvalMode, reviewContext, options.activeModel ?? provider.model.id, runLlm)(effect, signal, observe); throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     runtimeRef = runtime
@@ -2712,6 +2774,7 @@ export class LocalHost {
     }
   }
   async close(): Promise<void> {
+    await this.automationBroker.close()
     const running = [...this.active.values()]
     for (const active of running) active.capabilityController.abort()
     await Promise.allSettled(running.map(async (active) => {

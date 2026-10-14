@@ -10,6 +10,7 @@ export interface PulseCliProviderProfile {
   apiKeyEnv?: string
   maxContextTokens?: number
   maxOutputTokens?: number
+  imageInput?: 'supported' | 'unsupported' | 'unknown'
   reasoningEffort?: 'low' | 'medium' | 'high'
   toolChoice?: 'auto' | 'required' | 'none' | { type: 'function'; function: { name: string } }
   /** Models served by this provider. The provider plus map key is the model identity. */
@@ -25,11 +26,12 @@ export interface PulseCliModel {
   displayName?: string
   maxContextTokens?: number
   maxOutputTokens?: number
+  imageInput?: 'supported' | 'unsupported' | 'unknown'
   reasoningEffort?: 'low' | 'medium' | 'high'
   pricing?: { currency: string; inputPerMillion: number; outputPerMillion: number; version: string }
 }
 
-export type PulseModelTask = 'reason' | 'plan' | 'merge' | 'verify'
+export type PulseModelTask = 'reason' | 'plan' | 'merge' | 'verify' | 'vision'
 
 export interface PulseCliMcpServer {
   command: string
@@ -45,6 +47,8 @@ export interface PulseCliMcpServer {
 }
 
 export interface PulseCliCapabilities {
+  browser?: import('@hunterzhu/pulse-server').AutomationConfig['browser']
+  computer?: import('@hunterzhu/pulse-server').AutomationConfig['computer']
   /** IDs must be explicitly enabled; workspace config cannot enable host extensions. */
   enabled?: string[]
   /** Optional discovery allow-list of skill directory names; omitted discovers all. Bodies load only on invocation. */

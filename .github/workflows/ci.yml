@@ -40,7 +40,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm desktop:build
       - name: Install Linux shell sandbox dependencies
         if: runner.os == 'Linux'
         run: |

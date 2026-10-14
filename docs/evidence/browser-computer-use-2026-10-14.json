@@ -1,0 +1,364 @@
+{
+  "schemaVersion": 1,
+  "verifiedAt": "2026-10-14T03:18:40.676Z",
+  "timezone": "Asia/Shanghai",
+  "workspace": "/Users/zhuhengtan/projects/Pulse",
+  "gitHead": "4609a10633dcc097f00eb05ad4762adea21579d6",
+  "uncommitted": true,
+  "sourceFingerprint": "f3b8017de1bffc75fe6971f200a201dd83b394e282b9a9c6edbf214d5dbe0ecf",
+  "sourceHashes": {
+    ".github/workflows/ci.yml": "65f68827a286ec0ab65d98517d7c15c7c5b41d68a24f3737af253995bab07158",
+    ".github/workflows/release.yml": "421597ac282302f665be05295195bfba3d53b07d4782fe56d185919b10a3031d",
+    "native/desktop-helper/Cargo.lock": "8c17ba4769de647e444e14c89ecbd2e76a5f9e69bbc7abc8247ae5d441c57459",
+    "native/desktop-helper/Cargo.toml": "0218b094a62ee3a3bf0b201a054f2df70f62202f484d5f47420405430081b3f2",
+    "native/desktop-helper/linux.py": "a6a34c26270c6fcc6965ed1f7c309b5f4aadea3569bf5802940e91c960b83e2d",
+    "native/desktop-helper/macos.swift": "f9ab003f24f88b41950169b69ce39c06b0420981da55df7e0b66bfb021df0b73",
+    "native/desktop-helper/src/main.rs": "6dd05d872bb932b277cae0e37acf7c9878712f7c60d61f7a93bec046c44579ee",
+    "native/desktop-helper/windows.ps1": "7a515e6dbdac98e549344e22d280e1fc8769b6c154c0c8847ebcce8463a8157d",
+    "packages/adapters/src/mcp/stdio.ts": "86d970f02dc43e10c3ee8c91cc6eeae281f770c0ac4a8497344b497d2c0caaa4",
+    "packages/adapters/src/providers/anthropic.ts": "b55c8ed6a4bd7354da18db834fc8a1baedc2c16b9d61c131516f38b336bef953",
+    "packages/adapters/src/providers/canonical/lowering.ts": "c062364842f4c516615b9421966bd8b62ca2e3fd227c2b532b11aadca050c344",
+    "packages/adapters/src/providers/canonical/mappers/anthropic.ts": "86f7951a02b40b8d5d97fb433f9e28bab586cded7177764d8891e25b02dfe22b",
+    "packages/adapters/src/providers/canonical/mappers/openai.ts": "41cef3cab6d736c38728f9ec49e01c29ab5c746a850cba7436a0393829b6a6ff",
+    "packages/adapters/src/providers/normalize.ts": "a4a6786b5df93b51f555dbaa2ecf803e282931d75f0630ebc70668ba4523aec7",
+    "packages/adapters/src/providers/openai-compat.ts": "636140969d0a7ebec9941a00cc636bc2ced5b5c2cbf449f07785963ed03f71dc",
+    "packages/adapters/src/providers/runtime-executor.ts": "12af07a09136c13a1c415dcc53256c9cd7356af47a7c15be92616346d70c0193",
+    "packages/adapters/src/tools/registry.ts": "08d473190dc13692e4114e8ec919e82b14ee1887b4e1264f43694038881bc63e",
+    "packages/cli/src/bin.ts": "246ff6c5b43b6b8ba4da066c994c454bb53bfe4ebeb6ee2bddb74bcc2d0056b4",
+    "packages/cli/src/components/App.tsx": "0171cc188c87a90ff5a584ae444eebe432b2c8cd1dc9ea9ac2ba78ea58b812da",
+    "packages/cli/src/config.ts": "3be10f1325f230f5ae0cc441843c93e3f38c82c4e705823e7458f7ec41b12c0e",
+    "packages/cli/src/hooks/useSlashCommands.ts": "b6288326c9e96afd8dca3a06dab2b9d3fbbdbeb1c77a2ef6188bd36b2317478a",
+    "packages/runtime/src/context/builder.ts": "7988a09a18bb033a877babab20224426eb79fbfb9f3ed9ab71c41eb6ff7990c5",
+    "packages/runtime/src/core/tool-image.ts": "85df9cd3ba94fb484ac575458a66bc809b8822e5720fedf0e34171e2cb059bf6",
+    "packages/runtime/src/core/types.ts": "8bfa5ff0018880ace72a8c4c84d850d9390c624914a5af3941563f4643725f34",
+    "packages/runtime/src/index.ts": "b69f6df7d920a9bff0c3c6bf76d6870933208dc66ec7484c484494e1ddf80ab7",
+    "packages/runtime/src/models/router.ts": "dad22770792bc78d0c5543a9c3f304317208e127d0a22ffccad116fbdf21d374",
+    "packages/runtime/src/scheduler/runtime.ts": "47d523684b25e910b1dd499c97f1e954e5631608476e6125013ed75bcfd75cc0",
+    "packages/server/package.json": "bfac323bb85d16aeb9771e908e2a4dc30c1f64b9cd2d919fbcaac413bea325d3",
+    "packages/server/src/automation/broker.ts": "973ba43794caea090778894ebe3300fd9188aaac5f51a0e886ffdfe560a17df7",
+    "packages/server/src/automation/browser.ts": "3129d753ed5ceac671a71c85ed8e7776f5d8bc5ba4787f088cd729f62813b412",
+    "packages/server/src/automation/desktop.ts": "f4e7fe32499121f9f37b70dea4aafc8df45f03fd5effa40ec4bce383678d7b17",
+    "packages/server/src/automation/doctor.ts": "d0c765a9e646329db79eece3890081c7919ddad8428dda12d3c73fb3d911677b",
+    "packages/server/src/automation/manager.ts": "7fafa39d7b837bf6dbf424f029e2f3a4d0d79079d2c2eab68179d9a48b277179",
+    "packages/server/src/automation/tools.ts": "51c3acb988a16191294cd315445082917354b8ec4018cc8c64358f8046c06d9c",
+    "packages/server/src/automation/types.ts": "c5fa3f681c3394d8f09445330f1545092ddcf5782e28da4a7c700b7985eebcee",
+    "packages/server/src/capabilities.ts": "855bc84f63020cd17125dec1ea7062a2b77c6f40ef270907ae22d011945d102b",
+    "packages/server/src/h5/auth.ts": "37bb54bfc133d9158cfd026b4c7c313241ecfca3a43867cfb8e6cf049fa2e8c9",
+    "packages/server/src/h5/server.ts": "4e2909e81d842a38bf279623d22ae9e1a71415e005ea74eb1b84bc89d9bc7f8d",
+    "packages/server/src/index.ts": "5bf35757bff8046544d0410be81939cb5982a08929adb67853abbc36433b94b5",
+    "packages/server/src/model-config.ts": "0452a25f557b251a8bd2754ff73a01882d230acbe7431341462c083f1804fb7f",
+    "packages/server/src/model-routing.ts": "f83128e7e25e71f0afc0feb0ac89059f02b0206653ac50f5dff634e29fa3cf77",
+    "packages/server/src/protocol.ts": "9dd1ad198d3dc116c8f25181d0080461a4ae994a7f46b262bbd728116920edb0",
+    "packages/server/src/scheduled-tasks.ts": "c3c8c2a1de5779700434f448368a1d600194ab35f255b0785d2d67da795cd7bc",
+    "packages/server/src/task-controller/program.ts": "92a6e78ad3c3cc1b77ee6c4280de8490de618963f5d778a6bf7670b4f8710ff8",
+    "packages/web/src/AutomationPanel.tsx": "4e74bff5a41759a90c2ec89dfe00ea38a2667178e268d63879f11c88ab6f4b4e",
+    "packages/web/src/PulseApp.tsx": "b2e3264e84f06486c1171597fe17afd752944cf1919673e83f3ab32783907538",
+    "packages/web/src/SettingsPage.tsx": "8cfaadceb29b2036d03754e2f63090522896908c8ff4fc7fbb31429b1824ffc0",
+    "packages/web/src/WorkbenchPanel.tsx": "d76595a048dae044bc1bfca7d154f807d6f7025125887d07fa44c9a3ecb08b6e",
+    "packages/web/src/style.css": "b9193717efccf65cc997a0a367b2d47fa7547fdf3a43faed5e20c4572e11582d",
+    "scripts/automation/build-desktop.mjs": "8abf99f1adc2bfdd8b1c1e1ea2df1b997365ebfadc251f3930b551093ff32594",
+    "scripts/cli/pack.mjs": "50b0d3edfece334945d22ae7f1921c0f45db20c590676149fdcd887d3e5c6e0c",
+    "scripts/release/npm-publish.mjs": "68df257786c7db84e4f566dfd7b3001745bef6bca71c3a1841b57e4ff1d8a29c",
+    "tests/automation-h5.test.ts": "84c7943abc095554e39d83e5312bc7ea9ac86ec7e551b9631cf84fe268c1ff77",
+    "tests/automation.test.ts": "e3209fd77f2bb99ed0643a704c0eafec4c58ef26560773cb91989dfef0782bc0",
+    "tests/capabilities.test.ts": "1d691db958b0fbba01c62e4285e32e991f4b2be464855541a7b099cd890d1326",
+    "tests/cli-config.test.ts": "23ee136524c11ea03121459dd071fed063cd43d4acb0bc4cda7ba161e64b54ec",
+    "tests/cli-host.test.ts": "3cf2c69c2dd8c0addbdc684a92cdbc80a00108bcb6e54dd819ee70a34f35c551",
+    "tests/fixtures/desktop-acceptance.swift": "50eac0d2d31626be5f37985b5073c5845281b2865b989c0760dc3b40d5d572a8",
+    "tests/h5-server.test.ts": "c4f27c5293787a3b731447e9fef1e4e275d132d3ca7cd6d2569d1951756cc4c2",
+    "tests/live/automation-browser.test.ts": "b35891cf4da9c43b0e835ea3898eed5b803b5211fb95a6c79c0229b44e102d63",
+    "tests/live/automation-desktop.test.ts": "617da67b7c159848a518bcf9194f74f3ba83258be2adfeba3089019e07d451e0",
+    "tests/live/automation-extension.test.ts": "14b7fb199eb9fee219fb574c9729fa5d2a1b0b2174a37cd2324e2d21b66a18f9",
+    "tests/live/automation-h5-ui.test.ts": "62a7af8db212ad7006647f0175aac1c07c6f380810c47f19217c748bd90d061a",
+    "tests/live/automation-vision.test.ts": "3fe64d690747684e1e0404d47f1c4e0d09b50e93568d878cb3a4919416425127",
+    "tests/ollama-endpoint.test.ts": "5c89ea48412f92460a9cb259e677f7f722d601b11ef868f7e977eb94a0126df9",
+    "tests/task-controller.test.ts": "85ee5212db63bbffa47c7f228744ad021e28dd6e3c562759a591b2195926ad48"
+  },
+  "passed": [
+    {
+      "id": "ci-local",
+      "command": "pnpm ci:local",
+      "ordinaryTestFiles": 132,
+      "ordinaryTests": 1018,
+      "webTests": 17,
+      "scope": [
+        "build",
+        "eval schema validation",
+        "release metadata validation",
+        "CLI archive",
+        "temporary install/uninstall and preserved user data"
+      ]
+    },
+    {
+      "id": "chrome-live",
+      "tests": 2,
+      "scope": [
+        "Chinese form submission",
+        "download content",
+        "workspace upload",
+        "symlink escape rejected",
+        "select option",
+        "tabs",
+        "persistent synthetic cookie after reopen"
+      ]
+    },
+    {
+      "id": "chromium-live",
+      "tests": 2,
+      "binary": "Chrome for Testing 155.0.8059.12 / Playwright revision 1247",
+      "scope": [
+        "same browser behaviors as Chrome",
+        "actual owned browser process executable asserted"
+      ]
+    },
+    {
+      "id": "h5-live",
+      "tests": 1,
+      "viewports": [
+        "1280x900",
+        "390x844"
+      ],
+      "scope": [
+        "screenshot click",
+        "Chinese input",
+        "manual lease and return to AI",
+        "emulated touchscreen",
+        "shortcut"
+      ]
+    },
+    {
+      "id": "vision-live",
+      "tests": 2,
+      "provider": "ollama",
+      "model": "qwen3.5:4b",
+      "scope": [
+        "saved-model protocol probe",
+        "screenshot artifact remains reference-only",
+        "vision route selected",
+        "provider-boundary image hydration",
+        "model-selected coordinate",
+        "server confirms blue target click"
+      ],
+      "data": "synthetic local fixture only"
+    },
+    {
+      "id": "extension-live",
+      "tests": 1,
+      "extension": "Google-distributed official Playwright Extension 0.4.0",
+      "scope": [
+        "isolated existing Chromium profile",
+        "standard Allow & select flow",
+        "synthetic HttpOnly cookie reuse",
+        "Chinese input",
+        "disconnect preserves original tab and cookie"
+      ],
+      "dailyBrowserAccessed": false,
+      "tokenPassedToMcp": false
+    },
+    {
+      "id": "macos-desktop-live",
+      "tests": 2,
+      "platform": "macOS 26.5.2 arm64",
+      "scope": [
+        "own application identity com.hunterzhu.pulse.desktop",
+        "parentPid 1",
+        "helper exits",
+        "window enumeration/focus",
+        "screenshot",
+        "click",
+        "Chinese Unicode input",
+        "drag",
+        "saved text and slider value verified"
+      ]
+    },
+    {
+      "id": "native-source-checks",
+      "scope": [
+        "cargo check darwin arm64",
+        "cargo check x86_64-unknown-linux-gnu",
+        "cargo check x86_64-pc-windows-msvc",
+        "Python py_compile",
+        "PowerShell 7.6.7 Parser",
+        "actionlint 1.7.12 ci.yml/release.yml",
+        "macOS arm64/x64 codesign verify and six-file manifest hashes"
+      ]
+    }
+  ],
+  "fixes": [
+    "Ollama root/default API base normalized to compatible /v1 without changing configured non-root paths",
+    "Owned persistent browser flushes profile before MCP transport shuts down; attached browsers only disconnect",
+    "Explicit chromium channel forwarded to MCP instead of selecting its default Chrome"
+  ],
+  "attemptedBlocked": [
+    {
+      "id": "openai-vision-cloud",
+      "model": "gpt-4o-mini",
+      "data": "synthetic one-pixel image only",
+      "errorCode": "PROVIDER_HTTP_401",
+      "retryable": false
+    },
+    {
+      "id": "macos-distribution",
+      "signature": "ad-hoc",
+      "gatekeeper": "rejected",
+      "notarization": "no stapled ticket",
+      "signingIdentities": 0
+    }
+  ],
+  "notRun": [
+    {
+      "id": "windows-linux-desktop",
+      "reason": "No Windows/Linux host, VM, Docker or desktop session available"
+    },
+    {
+      "id": "edge-browser",
+      "reason": "Microsoft Edge not installed"
+    },
+    {
+      "id": "exact-source-cloud-ci",
+      "reason": "Working changes are uncommitted; no user authorization to commit/push; old SHA CI is not proof for this source"
+    },
+    {
+      "id": "anthropic-live",
+      "reason": "ANTHROPIC_API_KEY unavailable"
+    },
+    {
+      "id": "physical-phone-multidisplay-production",
+      "reason": "Only emulated touch and primary display fixtures were exercised; no production account accessed"
+    }
+  ],
+  "earlierFailures": [
+    {
+      "id": "ollama-http-404",
+      "resolution": "fixed and live passed"
+    },
+    {
+      "id": "persistent-cookie-lost",
+      "resolution": "fixed and live passed"
+    },
+    {
+      "id": "extension-initial-view-changed",
+      "resolution": "standard tab approval plus fresh observation on geometry change; guard remained enabled; live passed"
+    },
+    {
+      "id": "h5-pairing-timeout-under-concurrent-live-load",
+      "resolution": "standalone 22 H5 tests and final full isolated CI passed; timeout thresholds unchanged"
+    }
+  ],
+  "preserved": {
+    "helperRecompiled": false,
+    "arm64HelperModifiedAt": "2026-10-14T09:55:35+08:00",
+    "userConfigurationChanged": false,
+    "dailyBrowserProfileChanged": false,
+    "residentServicesRestarted": false,
+    "committed": false,
+    "pushed": false,
+    "published": false
+  },
+  "logs": {
+    "ci": "/private/tmp/pulse-automation-ci-complete.log",
+    "chromium": "/private/tmp/pulse-chromium-live-final.log",
+    "h5": "/private/tmp/pulse-h5-live-final.log",
+    "vision": "/private/tmp/pulse-vision-live-final.log",
+    "desktop": "/private/tmp/pulse-desktop-live-final.log",
+    "extension": "/private/tmp/pulse-extension-live-final.log"
+  },
+  "validationScope": "Historical live and ci-local results above describe the full working tree at verifiedAt, including preserved pre-task changes. sourceHashes/sourceFingerprint identify that historical state. Commit preparation below separately validates the feature-only snapshot.",
+  "commitPreparation": {
+    "verifiedAt": "2026-10-14T03:39:21.774074+00:00",
+    "scope": "browser/computer use only; initial dirty task-budget and approval changes remain uncommitted",
+    "files": 67,
+    "snapshotSourceHashes": {
+      ".github/workflows/ci.yml": "65f68827a286ec0ab65d98517d7c15c7c5b41d68a24f3737af253995bab07158",
+      ".github/workflows/release.yml": "421597ac282302f665be05295195bfba3d53b07d4782fe56d185919b10a3031d",
+      ".gitignore": "7635699b529bb18cb44679644f6293db2b985c5099a61e5d290afd72b383f5a4",
+      "README.en.md": "67f47c93e8c442407373811d6e6e3194229ebb2abdc9b2b2fa5d9e144bc24e30",
+      "README.md": "947817e0090886fabcaed54e5fff0e9d0c6155a321722dbefd2442bd5899b451",
+      "native/desktop-helper/Cargo.lock": "8c17ba4769de647e444e14c89ecbd2e76a5f9e69bbc7abc8247ae5d441c57459",
+      "native/desktop-helper/Cargo.toml": "0218b094a62ee3a3bf0b201a054f2df70f62202f484d5f47420405430081b3f2",
+      "native/desktop-helper/linux.py": "a6a34c26270c6fcc6965ed1f7c309b5f4aadea3569bf5802940e91c960b83e2d",
+      "native/desktop-helper/macos.swift": "f9ab003f24f88b41950169b69ce39c06b0420981da55df7e0b66bfb021df0b73",
+      "native/desktop-helper/src/main.rs": "6dd05d872bb932b277cae0e37acf7c9878712f7c60d61f7a93bec046c44579ee",
+      "native/desktop-helper/windows.ps1": "7a515e6dbdac98e549344e22d280e1fc8769b6c154c0c8847ebcce8463a8157d",
+      "package.json": "e35af004d7d727db01141bbb2979d33508c5038bb68e26a4c503c2afe63bcc24",
+      "packages/adapters/src/mcp/stdio.ts": "86d970f02dc43e10c3ee8c91cc6eeae281f770c0ac4a8497344b497d2c0caaa4",
+      "packages/adapters/src/providers/anthropic.ts": "b55c8ed6a4bd7354da18db834fc8a1baedc2c16b9d61c131516f38b336bef953",
+      "packages/adapters/src/providers/canonical/lowering.ts": "c062364842f4c516615b9421966bd8b62ca2e3fd227c2b532b11aadca050c344",
+      "packages/adapters/src/providers/canonical/mappers/anthropic.ts": "86f7951a02b40b8d5d97fb433f9e28bab586cded7177764d8891e25b02dfe22b",
+      "packages/adapters/src/providers/canonical/mappers/openai.ts": "41cef3cab6d736c38728f9ec49e01c29ab5c746a850cba7436a0393829b6a6ff",
+      "packages/adapters/src/providers/normalize.ts": "a4a6786b5df93b51f555dbaa2ecf803e282931d75f0630ebc70668ba4523aec7",
+      "packages/adapters/src/providers/openai-compat.ts": "636140969d0a7ebec9941a00cc636bc2ced5b5c2cbf449f07785963ed03f71dc",
+      "packages/adapters/src/providers/runtime-executor.ts": "12af07a09136c13a1c415dcc53256c9cd7356af47a7c15be92616346d70c0193",
+      "packages/adapters/src/tools/registry.ts": "08d473190dc13692e4114e8ec919e82b14ee1887b4e1264f43694038881bc63e",
+      "packages/cli/src/bin.ts": "f5769da9323f613e56b3f1939c5280fd51c0d47d8ee07e39313eab036cd6d9ee",
+      "packages/cli/src/components/App.tsx": "0171cc188c87a90ff5a584ae444eebe432b2c8cd1dc9ea9ac2ba78ea58b812da",
+      "packages/cli/src/config.ts": "f398f3032d31d795b62ff575bde26bd137364e256e4263c59a88c81e9ee8fe95",
+      "packages/cli/src/hooks/useSlashCommands.ts": "b6288326c9e96afd8dca3a06dab2b9d3fbbdbeb1c77a2ef6188bd36b2317478a",
+      "packages/runtime/src/context/builder.ts": "7988a09a18bb033a877babab20224426eb79fbfb9f3ed9ab71c41eb6ff7990c5",
+      "packages/runtime/src/core/tool-image.ts": "85df9cd3ba94fb484ac575458a66bc809b8822e5720fedf0e34171e2cb059bf6",
+      "packages/runtime/src/core/types.ts": "8bfa5ff0018880ace72a8c4c84d850d9390c624914a5af3941563f4643725f34",
+      "packages/runtime/src/index.ts": "b69f6df7d920a9bff0c3c6bf76d6870933208dc66ec7484c484494e1ddf80ab7",
+      "packages/runtime/src/models/router.ts": "dad22770792bc78d0c5543a9c3f304317208e127d0a22ffccad116fbdf21d374",
+      "packages/runtime/src/scheduler/runtime.ts": "47d523684b25e910b1dd499c97f1e954e5631608476e6125013ed75bcfd75cc0",
+      "packages/server/package.json": "bfac323bb85d16aeb9771e908e2a4dc30c1f64b9cd2d919fbcaac413bea325d3",
+      "packages/server/src/automation/broker.ts": "973ba43794caea090778894ebe3300fd9188aaac5f51a0e886ffdfe560a17df7",
+      "packages/server/src/automation/browser.ts": "3129d753ed5ceac671a71c85ed8e7776f5d8bc5ba4787f088cd729f62813b412",
+      "packages/server/src/automation/desktop.ts": "f4e7fe32499121f9f37b70dea4aafc8df45f03fd5effa40ec4bce383678d7b17",
+      "packages/server/src/automation/doctor.ts": "d0c765a9e646329db79eece3890081c7919ddad8428dda12d3c73fb3d911677b",
+      "packages/server/src/automation/manager.ts": "7fafa39d7b837bf6dbf424f029e2f3a4d0d79079d2c2eab68179d9a48b277179",
+      "packages/server/src/automation/tools.ts": "51c3acb988a16191294cd315445082917354b8ec4018cc8c64358f8046c06d9c",
+      "packages/server/src/automation/types.ts": "c5fa3f681c3394d8f09445330f1545092ddcf5782e28da4a7c700b7985eebcee",
+      "packages/server/src/capabilities.ts": "855bc84f63020cd17125dec1ea7062a2b77c6f40ef270907ae22d011945d102b",
+      "packages/server/src/h5/auth.ts": "37bb54bfc133d9158cfd026b4c7c313241ecfca3a43867cfb8e6cf049fa2e8c9",
+      "packages/server/src/h5/server.ts": "04f3bafe38be72c4d55027b3794e452836e412c3fb92426fa73eec3be13ffa7f",
+      "packages/server/src/index.ts": "928d2b977b0af3bef2e7b4cc6140ff760dcfce5718182ef65603bc327c365e6e",
+      "packages/server/src/model-config.ts": "0452a25f557b251a8bd2754ff73a01882d230acbe7431341462c083f1804fb7f",
+      "packages/server/src/model-routing.ts": "f83128e7e25e71f0afc0feb0ac89059f02b0206653ac50f5dff634e29fa3cf77",
+      "packages/server/src/protocol.ts": "9dd1ad198d3dc116c8f25181d0080461a4ae994a7f46b262bbd728116920edb0",
+      "packages/web/src/AutomationPanel.tsx": "4e74bff5a41759a90c2ec89dfe00ea38a2667178e268d63879f11c88ab6f4b4e",
+      "packages/web/src/PulseApp.tsx": "b2e3264e84f06486c1171597fe17afd752944cf1919673e83f3ab32783907538",
+      "packages/web/src/SettingsPage.tsx": "8cfaadceb29b2036d03754e2f63090522896908c8ff4fc7fbb31429b1824ffc0",
+      "packages/web/src/WorkbenchPanel.tsx": "d76595a048dae044bc1bfca7d154f807d6f7025125887d07fa44c9a3ecb08b6e",
+      "packages/web/src/style.css": "b9193717efccf65cc997a0a367b2d47fa7547fdf3a43faed5e20c4572e11582d",
+      "pnpm-lock.yaml": "c4ef8099037bac8774317c836fb0bb12e262d2442a584e5c4c5c64a0830c5055",
+      "scripts/automation/build-desktop.mjs": "8abf99f1adc2bfdd8b1c1e1ea2df1b997365ebfadc251f3930b551093ff32594",
+      "scripts/cli/pack.mjs": "50b0d3edfece334945d22ae7f1921c0f45db20c590676149fdcd887d3e5c6e0c",
+      "scripts/release/npm-publish.mjs": "68df257786c7db84e4f566dfd7b3001745bef6bca71c3a1841b57e4ff1d8a29c",
+      "tests/automation-h5.test.ts": "84c7943abc095554e39d83e5312bc7ea9ac86ec7e551b9631cf84fe268c1ff77",
+      "tests/automation.test.ts": "e3209fd77f2bb99ed0643a704c0eafec4c58ef26560773cb91989dfef0782bc0",
+      "tests/capabilities.test.ts": "1d691db958b0fbba01c62e4285e32e991f4b2be464855541a7b099cd890d1326",
+      "tests/fixtures/desktop-acceptance.swift": "50eac0d2d31626be5f37985b5073c5845281b2865b989c0760dc3b40d5d572a8",
+      "tests/live/automation-browser.test.ts": "b35891cf4da9c43b0e835ea3898eed5b803b5211fb95a6c79c0229b44e102d63",
+      "tests/live/automation-desktop.test.ts": "617da67b7c159848a518bcf9194f74f3ba83258be2adfeba3089019e07d451e0",
+      "tests/live/automation-extension.test.ts": "14b7fb199eb9fee219fb574c9729fa5d2a1b0b2174a37cd2324e2d21b66a18f9",
+      "tests/live/automation-h5-ui.test.ts": "62a7af8db212ad7006647f0175aac1c07c6f380810c47f19217c748bd90d061a",
+      "tests/live/automation-vision.test.ts": "3fe64d690747684e1e0404d47f1c4e0d09b50e93568d878cb3a4919416425127",
+      "tests/ollama-endpoint.test.ts": "5c89ea48412f92460a9cb259e677f7f722d601b11ef868f7e977eb94a0126df9"
+    },
+    "passed": [
+      {
+        "command": "pnpm build"
+      },
+      {
+        "command": "pnpm --filter @hunterzhu/pulse-web check"
+      },
+      {
+        "command": "pnpm --filter @hunterzhu/pulse-web test",
+        "tests": 17
+      },
+      {
+        "command": "node scripts/ci/test.mjs",
+        "testFiles": 132,
+        "tests": 1015
+      }
+    ],
+    "logs": {
+      "build": "/private/tmp/pulse-scoped-build.log",
+      "ordinary": "/private/tmp/pulse-scoped-tests.log",
+      "web": "/private/tmp/pulse-scoped-web.log"
+    },
+    "liveTestsRerunForScopedSnapshot": false,
+    "pushed": false,
+    "published": false
+  }
+}

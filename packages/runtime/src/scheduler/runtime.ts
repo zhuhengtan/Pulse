@@ -14,6 +14,7 @@ import { EffectOutbox } from '../storage/outbox.js'
 import { exportRuntimeCheckpoint, exportRuntimePersistence, externalizeRuntimeResultBodies, externalizeRuntimeSnapshotBodies, hydrateRuntimeResultBodies, hydrateRuntimeSnapshotBodies, importRuntimePersistence, validateRuntimePersistenceSnapshot, withRuntimePersistenceIntegrity, type RuntimePersistenceBackend, type RuntimePersistenceCompatibility, type RuntimePersistenceSnapshot } from '../storage/persistence.js'
 import { exportRuntimeLog, exportRuntimeLogTo, exportWarmStartSession, type RuntimeLogSink, type RuntimeSessionStore, type SessionLogExport, type SessionLogExportOptions } from '../storage/session.js'
 import { ResourceLockManager } from './locks.js'
+import { extractToolImage } from '../core/tool-image.js'
 import { appendRuntimeEvent, normalizeRuntimeEvent } from '../core/events.js'
 import { apply, forkRuntimeStateForAdmission, type Mutation } from '../core/mutations.js'
 import { ContextMerger, type MergePlan } from '../context/merger.js'
@@ -1254,7 +1255,10 @@ export class PulseRuntime {
         let value: JsonValue
         let artifact: EffectArtifactOutput | undefined
         try { value = strictJsonValue(detailed.output) } catch { value = null; artifact = artifactOutput(detailed.output) }
-        return { value, ...(artifact === undefined ? {} : { artifact }), ...(detailed.normalized === undefined ? {} : { normalized: strictJsonValue(detailed.normalized) }), ...(detailed.summary === undefined ? {} : { summary: strictJsonValue(detailed.summary) }), sideEffectState: isSideEffectful(definition.manifest.sideEffectPolicy) ? 'applied' : 'none', executionState: 'succeeded', status: 'succeeded', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length, ...(artifact === undefined ? {} : { artifactMediaType: artifact.mediaType }) }, ...(observations.length ? { observations } : {}) }
+        const image = extractToolImage(value)
+        value = image.value
+        artifact = image.artifact ?? artifact
+        return { value, ...(artifact === undefined ? {} : { artifact }), ...(detailed.normalized === undefined ? {} : { normalized: image.artifact ? value : strictJsonValue(detailed.normalized) }), ...(detailed.summary === undefined ? {} : { summary: strictJsonValue(detailed.summary) }), sideEffectState: isSideEffectful(definition.manifest.sideEffectPolicy) ? 'applied' : 'none', executionState: 'succeeded', status: 'succeeded', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length, ...(artifact === undefined ? {} : { artifactMediaType: artifact.mediaType }) }, ...(observations.length ? { observations } : {}) }
       } catch (cause) {
         if (signal.aborted && isSideEffectful(definition.manifest.sideEffectPolicy)) return { value: null, executionState: 'remote_unknown', sideEffectState: 'unknown', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: definition.manifest.version, reconcileRequired: true }, error: runtimeErrorFromCause(cause, 'TOOL_CANCELLED_UNKNOWN') }
         const error = runtimeErrorFromCause(cause, 'TOOL_EXECUTION_FAILED')
@@ -2144,7 +2148,7 @@ export class PulseRuntime {
         const artifact = prepareArtifactPublication(this.state, { ...execution.artifact, laneId: effect.ownerLaneId, derivedFrom: [...(effect.derivedFrom ?? []), ...(execution.artifact.derivedFrom ?? [])] })
         publishedArtifact = artifact
         resultDerivedFrom = [...resultDerivedFrom, { kind: 'artifact', ref: artifact.ref }]
-        effectiveExecution = { ...effectiveExecution, value: { artifactRef: artifact.ref }, privacy: artifact.privacy, ...(artifact.privacyTaints === undefined ? {} : { privacyTaints: artifact.privacyTaints }) }
+        effectiveExecution = { ...effectiveExecution, value: { ...(effectiveExecution.value && typeof effectiveExecution.value === 'object' && !Array.isArray(effectiveExecution.value) ? effectiveExecution.value : {}), artifactRef: artifact.ref }, privacy: artifact.privacy, ...(artifact.privacyTaints === undefined ? {} : { privacyTaints: artifact.privacyTaints }) }
       } catch (cause) {
         effectiveExecution = { ...effectiveExecution, status: 'failed', executionState: 'failed', error: runtimeErrorFromCause(cause, 'ARTIFACT_PUBLICATION_FAILED') }
         outputError = effectiveExecution.error

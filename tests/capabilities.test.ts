@@ -48,6 +48,6 @@ describe('CapabilityPackRegistry', () => {
     registry.register(pack('spreadsheet', async () => ({ tools: [mockTool('shell.exec')] })))
 
     await expect(registry.activate(['spreadsheet'], { workspaceRoot: '/workspace', config: {}, signal: new AbortController().signal })).rejects.toThrow('CAPABILITY_TOOL_NAMESPACE_REQUIRED:spreadsheet')
-    expect(referenceCapabilityPackCatalog.map((item) => item.id)).toEqual(['mcp', 'skills', 'jarvis', 'browser', 'pdf', 'spreadsheet'])
+    expect(referenceCapabilityPackCatalog.map((item) => item.id)).toEqual(['mcp', 'skills', 'jarvis', 'browser', 'computer', 'pdf', 'spreadsheet'])
   })
 })

@@ -459,6 +459,8 @@ export type ProviderHistoryMessage =
   | { role: 'tool'; toolCallId: string; name: string; content: string; resultRef: ResultRef }
 
 export interface LLMRequestProjection {
+  /** Resolved, visible image artifacts. Never serialize these into text history. */
+  images?: Array<{ ref: ArtifactRef; mediaType: 'image/png' | 'image/jpeg'; data?: string }>
   contextSpec: LLMContextSpec
   blocks: Array<{ kind: 'system' | 'policy' | 'tools' | 'global' | 'conversation' | 'history' | 'provider_history' | 'lane' | 'events' | 'results' | 'artifacts' | 'instruction'; content: JsonValue }>
   prefixHash: string

@@ -393,7 +393,7 @@ Agent 需要询问你时，会调用 `ask.choice`、`ask.multi` 或 `ask.input`�
 }
 ```
 
-MCP 配置会启动本机进程，必须只填写自己信任的服务；服务工具按外部副作用处理并遵守当前审批模式。Skill 自动索引用户级安装目录及显式信任目录下的技能名称；输入 `/` 搜索、↑/↓ 选择、Tab 补全，用 `/技能名 任务` 调用时才读取 `SKILL.md` 加入当前任务上下文。索引仅保存名称，正文作为不可信参考指令，不执行其中代码。浏览器与 Jarvis 目前是可接入的能力目录项，需要用户安装并配置对应 MCP 服务；Pulse 不会假装这些连接器已经存在。
+MCP 配置会启动本机进程，必须只填写自己信任的服务；服务工具按外部副作用处理并遵守当前审批模式。Skill 自动索引用户级安装目录及显式信任目录下的技能名称；输入 `/` 搜索、↑/↓ 选择、Tab 补全，用 `/技能名 任务` 调用时才读取 `SKILL.md` 加入当前任务上下文。索引仅保存名称，正文作为不可信参考指令，不执行其中代码。浏览器和桌面自动化支持受管理的 `browser` / `computer` 能力、独立视觉模型及 CLI/H5 接管，详见 [Browser/Computer Use](docs/browser-computer-use.md)。已有同名 MCP 配置继续兼容；Jarvis 仍需显式配置外部服务。
 
 持久化定时任务可由一个前台 Worker 处理：
 
@@ -423,4 +423,4 @@ pulse --read-only schedule daemon
 
 当前工作区的测试结果以 `pnpm check` 的实际输出为准，不再固定具体数量（其范围不含 `tests/live/**`）；测试包含 loopback Provider/Worker 与 SRT 集成测试；`pnpm build`、评测集验证和独立 CLI 包的解压、运行、安装、卸载验证也已通过。dry run 只证明评测数据集可用，不代表真实模型质量基线。
 
-真实 Provider 凭证下的 Live Smoke、跨 Linux/Windows 的 SRT 实机验证、真实远程写系统的副作用对账、生产级多主机 Worker 故障注入、跨进程 Detached Agent scope 迁移、生产级隐私/权限审计，以及外部指标和 Token 成本接入仍需部署环境单独验收。Browser 与 Jarvis 是 MCP 能力接入点，需用户安装并显式配置服务；本仓库没有内置或模拟这些外部服务。
+真实 Provider 凭证下的 Live Smoke、跨 Linux/Windows 的 SRT 实机验证、真实远程写系统的副作用对账、生产级多主机 Worker 故障注入、跨进程 Detached Agent scope 迁移、生产级隐私/权限审计，以及外部指标和 Token 成本接入仍需部署环境单独验收。Browser/Computer Use 已提供实现与独立环境测试入口；系统权限、真实视觉模型、既有登录态连接及各平台桌面仍需实机验收。Jarvis 需显式配置服务。

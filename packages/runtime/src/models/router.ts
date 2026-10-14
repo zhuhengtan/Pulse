@@ -1,7 +1,7 @@
 import type { JsonValue, LLMRequestProjection, PrivacyLabel, ProvenanceRef } from '../core/types.js'
 
 export type ReasoningLevel = 'low' | 'medium' | 'high'
-export interface ModelCapabilities { toolCalling?: boolean; structuredOutput?: boolean; reasoning?: ReasoningLevel; maxContextTokens: number; maxOutputTokens?: number; local?: boolean }
+export interface ModelCapabilities { imageInput?: boolean; toolCalling?: boolean; structuredOutput?: boolean; reasoning?: ReasoningLevel; maxContextTokens: number; maxOutputTokens?: number; local?: boolean }
 export interface ModelRouteRequirements extends Partial<ModelCapabilities> { contextSize?: number }
 export interface ModelUsage {
   inputTokens?: number
@@ -60,7 +60,7 @@ function isModelCandidate(value: unknown): value is ModelCandidate {
   const capabilities = candidate.capabilities
   if (!capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities)) return false
   const modelCapabilities = capabilities as Record<string, unknown>
-  return typeof candidate.id === 'string' && candidate.id.length > 0 && typeof candidate.providerId === 'string' && candidate.providerId.length > 0 && Array.isArray(candidate.tasks) && candidate.tasks.length > 0 && candidate.tasks.every((task) => typeof task === 'string' && task.length > 0) && typeof candidate.priority === 'number' && Number.isFinite(candidate.priority) && Number.isInteger(modelCapabilities.maxContextTokens) && (modelCapabilities.maxContextTokens as number) > 0 && (modelCapabilities.maxOutputTokens === undefined || (Number.isInteger(modelCapabilities.maxOutputTokens) && (modelCapabilities.maxOutputTokens as number) > 0)) && (modelCapabilities.local === undefined || typeof modelCapabilities.local === 'boolean') && (modelCapabilities.toolCalling === undefined || typeof modelCapabilities.toolCalling === 'boolean') && (modelCapabilities.structuredOutput === undefined || typeof modelCapabilities.structuredOutput === 'boolean') && (modelCapabilities.reasoning === undefined || ['low', 'medium', 'high'].includes(String(modelCapabilities.reasoning))) && (candidate.adapter === undefined || (typeof candidate.adapter === 'object' && candidate.adapter !== null && typeof (candidate.adapter as { executeAttempt?: unknown }).executeAttempt === 'function'))
+  return typeof candidate.id === 'string' && candidate.id.length > 0 && typeof candidate.providerId === 'string' && candidate.providerId.length > 0 && Array.isArray(candidate.tasks) && candidate.tasks.length > 0 && candidate.tasks.every((task) => typeof task === 'string' && task.length > 0) && typeof candidate.priority === 'number' && Number.isFinite(candidate.priority) && Number.isInteger(modelCapabilities.maxContextTokens) && (modelCapabilities.maxContextTokens as number) > 0 && (modelCapabilities.maxOutputTokens === undefined || (Number.isInteger(modelCapabilities.maxOutputTokens) && (modelCapabilities.maxOutputTokens as number) > 0)) && (modelCapabilities.imageInput === undefined || typeof modelCapabilities.imageInput === 'boolean') && (modelCapabilities.local === undefined || typeof modelCapabilities.local === 'boolean') && (modelCapabilities.toolCalling === undefined || typeof modelCapabilities.toolCalling === 'boolean') && (modelCapabilities.structuredOutput === undefined || typeof modelCapabilities.structuredOutput === 'boolean') && (modelCapabilities.reasoning === undefined || ['low', 'medium', 'high'].includes(String(modelCapabilities.reasoning))) && (candidate.adapter === undefined || (typeof candidate.adapter === 'object' && candidate.adapter !== null && typeof (candidate.adapter as { executeAttempt?: unknown }).executeAttempt === 'function'))
 }
 
 export class InMemoryModelRegistry implements ModelRegistry {
@@ -75,7 +75,7 @@ export class InMemoryModelRegistry implements ModelRegistry {
 
 /** Conservative admission estimate used before a provider attempt is started. */
 export function estimateProjectionTokens(projection: LLMRequestProjection): number {
-  return Math.ceil(Buffer.byteLength(JSON.stringify(projection.blocks), 'utf8') / 4)
+  return Math.ceil(Buffer.byteLength(JSON.stringify(projection.blocks), 'utf8') / 4) + (projection.images?.length ?? 0) * 4096
 }
 
 export class ModelRouter {

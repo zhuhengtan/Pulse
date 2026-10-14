@@ -103,3 +103,5 @@ export interface WebRunSnapshot {
   complete?: Extract<WebRunEvent, { type: 'complete' }>
   laneState?: WebRunLanes
 }
+
+export type { AutomationSessionView as WebAutomationSession } from './automation/types.js'

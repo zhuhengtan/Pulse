@@ -3,6 +3,7 @@ export interface ModelDefinition {
   modelCode: string
   maxContextTokens?: number
   maxOutputTokens?: number
+  imageInput?: 'supported' | 'unsupported' | 'unknown'
   reasoningEffort?: 'low' | 'medium' | 'high'
   pricing?: { currency: string; inputPerMillion: number; outputPerMillion: number; version: string }
 }
@@ -14,6 +15,7 @@ export interface ProviderDefinition {
   apiKeyEnv?: string
   maxContextTokens?: number
   maxOutputTokens?: number
+  imageInput?: 'supported' | 'unsupported' | 'unknown'
   reasoningEffort?: 'low' | 'medium' | 'high'
   toolChoice?: unknown
   models?: Record<string, ModelDefinition>
@@ -70,6 +72,7 @@ export function normalizeModelConfig<T extends Record<string, any>>(input: T): T
         ...(typeof raw.maxContextTokens === 'number' ? { maxContextTokens: raw.maxContextTokens } : {}),
         ...(typeof raw.maxOutputTokens === 'number' ? { maxOutputTokens: raw.maxOutputTokens } : {}),
         ...(raw.reasoningEffort === 'low' || raw.reasoningEffort === 'medium' || raw.reasoningEffort === 'high' ? { reasoningEffort: raw.reasoningEffort } : {}),
+        ...(raw.imageInput === 'supported' || raw.imageInput === 'unsupported' || raw.imageInput === 'unknown' ? { imageInput: raw.imageInput } : {}),
         ...(raw.pricing && typeof raw.pricing === 'object' ? { pricing: raw.pricing as ModelDefinition['pricing'] } : {}),
       }
     }

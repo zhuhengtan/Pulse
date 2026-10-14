@@ -7,7 +7,14 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   readonly name = 'OpenAI Compatible'
   private readonly baseURL: string
   private readonly probe = new DynamicCapabilityProbe()
-  constructor(readonly id: string, private readonly config: ProviderPresetConfig) { this.baseURL = config.baseURL ?? 'https://api.openai.com/v1' }
+  constructor(readonly id: string, private readonly config: ProviderPresetConfig) {
+    let baseURL = config.baseURL ?? (config.provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : 'https://api.openai.com/v1')
+    if (config.provider === 'ollama') {
+      const url = new URL(baseURL)
+      if (url.pathname === '/' && !url.search && !url.hash) baseURL = baseURL.replace(/\/$/, '') + '/v1'
+    }
+    this.baseURL = baseURL
+  }
   async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number }): Promise<LLMResult> {
     const streaming = params.onObservation !== undefined
     const { canonical, toolNameAliases } = lowerProjectionToCanonical({

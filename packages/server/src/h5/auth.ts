@@ -3,6 +3,7 @@ import { readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 export interface H5DeviceRecord {
+  automationControl?: boolean
   id: string
   tokenHash: string
   name: string
@@ -152,11 +153,12 @@ export class H5AuthStore {
 
   async listDevices(): Promise<Array<Omit<H5DeviceRecord, 'tokenHash'>>> {
     await this.init()
-    return this.devices.map(({ id, name, createdAt, lastUsedAt }) => ({
+    return this.devices.map(({ id, name, createdAt, lastUsedAt, automationControl }) => ({
       id,
       name,
       createdAt,
       lastUsedAt,
+      automationControl: automationControl === true,
     }))
   }
 
@@ -169,5 +171,14 @@ export class H5AuthStore {
       return true
     }
     return false
+  }
+
+  async setAutomationControl(deviceId: string, enabled: boolean): Promise<boolean> {
+    await this.init()
+    const device = this.devices.find(device => device.id === deviceId)
+    if (!device) return false
+    device.automationControl = enabled
+    await this.persist()
+    return true
   }
 }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
-import type { LocalHostOptions } from '@hunterzhu/pulse-server';
+import { automationDoctor, type LocalHostOptions } from '@hunterzhu/pulse-server';
 
 import { Header } from './Header.js';
 import { Welcome } from './Welcome.js';
@@ -178,6 +178,22 @@ export function App({
   }, [hostReady, conversation, initialTask, isRunning, addUserMessage, addAssistantMessage, createConversation, sendMessage]);
 
   const { commands, executeCommand, isSlashCommand } = useSlashCommands({
+    onAutomation: async args => {
+      if (!host) return;
+      const report = (text: string) => addAssistantMessage({id:`automation-${Date.now()}`,role:'system',text,createdAt:new Date().toISOString()});
+      try {
+        const [action = 'status', id] = args.split(/\s+/).filter(Boolean);
+        if (action === 'doctor') { await report(JSON.stringify(await automationDoctor(hostOptions.automation), null, 2)); return; }
+        const sessions = host.automation.list();
+        if (action === 'status') { await report(JSON.stringify(sessions.map(session=>({...session,screenshotPath:session.state==='closed'?undefined:host.automation.screenshotPath(session.id)})), null, 2)); return; }
+        if (host.getAutomationOptions().approvalMode === 'read-only') throw new Error('READ_ONLY');
+        const selected = id ?? sessions.find(session => session.state !== 'closed')?.id;
+        if (!selected || !['pause', 'takeover', 'resume', 'stop'].includes(action)) throw new Error('用法：/automation status|doctor|pause|takeover|resume|stop [id]');
+        const result = await host.automation.control(selected, action === 'stop' ? 'close' : action as 'pause' | 'takeover' | 'resume', 'local-cli');
+        const { lease: _lease, ...status } = result;
+        await report(JSON.stringify(status, null, 2) + (action === 'takeover' ? '\nAI 已暂停，可在本机手动操作；完成后 /automation resume。' : ''));
+      } catch (error) { await report(String(error)); }
+    },
     onMouse: (arg) => setMouseEnabled((current) => arg === 'off' ? false : arg === 'on' ? true : !current),
     onCopy: async () => {
       if (selectedText) { await copySelectedText(); return }

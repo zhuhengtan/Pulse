@@ -119,7 +119,17 @@ export class ContextBuilder {
       if (input.lane.visibleResultRefs !== undefined && !input.lane.visibleResultRefs.has(ref)) throw new Error(`RESULT_NOT_VISIBLE:${ref}`)
       return result
     })
-    const artifactRefs = input.artifactRefs ?? []
+    const imageRefs = [...(input.explicitContext ? [] : input.lane.context.history.flatMap(record => record.resultRefs).flatMap(ref => {
+      if (input.lane.visibleResultRefs && !input.lane.visibleResultRefs.has(ref)) return []
+      const result = this.state.results.get(ref)
+      return result ? [result] : []
+    })), ...results].flatMap(result => {
+      const value = result.value
+      const ref = value && typeof value === 'object' && !Array.isArray(value) ? value.artifactRef : undefined
+      const artifact = typeof ref === 'string' ? this.state.artifacts.get(ref) : undefined
+      return artifact && (artifact.mediaType === 'image/png' || artifact.mediaType === 'image/jpeg') ? [artifact.ref] : []
+    })
+    const artifactRefs = [...new Set([...(input.artifactRefs ?? []), ...[...new Set(imageRefs)].slice(-2)])]
     const artifacts = artifactRefs.map((ref) => {
       const artifact = this.state.artifacts.get(ref)
       if (!artifact) throw new Error(`UNKNOWN_ARTIFACT_REF:${ref}`)
@@ -160,7 +170,8 @@ export class ContextBuilder {
       const projected = projectResultValue(result)
       return { id: result.id, value: projected.value, ...(projected.summarized ? { summarized: true, ...(projected.originalBytes === undefined ? {} : { originalBytes: projected.originalBytes }) } : {}), ...(result.privacyTaints === undefined ? {} : { privacyTaints: result.privacyTaints.map((taint) => ({ path: [...taint.path], privacy: taint.privacy }) as unknown as JsonValue) }) }
     }) }, { kind: 'artifacts' as const, content: artifacts.map((artifact) => ({ ref: artifact.ref, mediaType: artifact.mediaType, sizeBytes: artifact.sizeBytes, contentHash: artifact.contentHash })) }, { kind: 'instruction' as const, content: input.instruction }]
-    return { contextSpec, blocks, prefixHash: hash(prefixBlocks), projectionHash: hash(blocks), builderVersion: this.version, policyVersion: '1', toolSetVersion: input.toolSetId, privacy, privacyRefs, ...(privacyTaints.length ? { privacyTaints } : {}) }
+    const images = artifacts.filter(artifact => artifact.mediaType === 'image/png' || artifact.mediaType === 'image/jpeg').slice(-2).map(artifact => ({ ref: artifact.ref, mediaType: artifact.mediaType as 'image/png' | 'image/jpeg' }))
+    return { contextSpec, blocks, ...(images.length ? { images } : {}), prefixHash: hash(prefixBlocks), projectionHash: hash(blocks), builderVersion: this.version, policyVersion: '1', toolSetVersion: input.toolSetId, privacy, privacyRefs, ...(privacyTaints.length ? { privacyTaints } : {}) }
   }
 }
 

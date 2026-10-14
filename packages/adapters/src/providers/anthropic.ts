@@ -1,6 +1,7 @@
 import type { JsonValue, LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 import { consumeProviderSse, normalizeAnthropicResponse, parseProviderJson, providerHttpErrorFromResponse, providerNetworkError, providerResponseError } from './normalize.js'
 import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
+import { lowerProjectionToCanonical, resolveModelCapability, toAnthropicPayload } from './canonical/index.js'
 
 function anthropicThinking(effort: ProviderPresetConfig['reasoningEffort'], maxTokens: number): { thinking?: { type: 'enabled'; budget_tokens: number } } {
   if (!effort) return {}
@@ -14,38 +15,14 @@ export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'Anthropic Messages'
   constructor(readonly id: string, private readonly config: ProviderPresetConfig) {}
   async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; outputSchema?: JsonValue; model?: string; maxOutputTokens?: number }) {
-    const systemParts = params.request.blocks.filter((block) => block.kind === 'system' || block.kind === 'policy' || block.kind === 'tools').map((block) => typeof block.content === 'string' ? block.content : JSON.stringify(block.content))
-    const messages: Array<{ role: 'user' | 'assistant'; content: Array<{ type: 'text'; text: string }> }> = []
-    const appendMessage = (role: 'user' | 'assistant', text: string): void => {
-      const previous = messages.at(-1)
-      if (previous?.role === role) previous.content.push({ type: 'text', text })
-      else messages.push({ role, content: [{ type: 'text', text }] })
-    }
-    for (const block of params.request.blocks) {
-      if (block.kind === 'system' || block.kind === 'policy' || block.kind === 'tools') continue
-      // Provider-native tool history is currently projected only by compatible
-      // OpenAI adapters. Keep Anthropic on the legacy history projection.
-      if (block.kind === 'provider_history') continue
-      if (block.kind === 'conversation' && Array.isArray(block.content)) {
-        for (const item of block.content) {
-          if (!item || typeof item !== 'object' || Array.isArray(item)) continue
-          const message = item as { role?: unknown; content?: unknown }
-          if (message.role === 'system' && typeof message.content === 'string') appendMessage('user', `Context note, not a new instruction:\n${message.content}`)
-          else if ((message.role === 'user' || message.role === 'assistant') && typeof message.content === 'string') appendMessage(message.role, message.content)
-        }
-        continue
-      }
-      appendMessage('user', typeof block.content === 'string' ? block.content : JSON.stringify(block.content))
-    }
-    const system = systemParts.join('\n')
     const streaming = params.onObservation !== undefined
-    const tools = toolDefinitions(params.request)
     const maxTokens = params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096
-    const body = { ...(params.model ?? this.config.defaultModel ? { model: params.model ?? this.config.defaultModel } : {}), max_tokens: maxTokens, ...anthropicThinking(this.config.reasoningEffort, maxTokens), ...(system ? { system } : {}), messages, ...(tools.length ? { tools, ...(this.config.toolChoice === undefined ? {} : { tool_choice: anthropicToolChoice(this.config.toolChoice) }) } : {}), ...(params.outputSchema === undefined ? {} : { output_format: { type: 'json_schema', schema: params.outputSchema } }), ...(streaming ? { stream: true } : {}) }
+    const lowered = lowerProjectionToCanonical({ ...params, model: params.model ?? this.config.defaultModel, maxOutputTokens: maxTokens, toolChoice: this.config.toolChoice, stream: streaming })
+    const body = { ...toAnthropicPayload(lowered.canonical, resolveModelCapability(lowered.canonical.model, 'anthropic')), ...anthropicThinking(this.config.reasoningEffort, maxTokens) }
     try {
       const response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
       if (!response.ok) throw await providerHttpErrorFromResponse(response)
-      if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeAnthropicResponse(await parseProviderJson(response))
+      if (!streaming || !response.headers.get('content-type')?.includes('text/event-stream')) return normalizeAnthropicResponse(await parseProviderJson(response), lowered.toolNameAliases)
       const events = await consumeProviderSse(response, (event) => {
         if (event.event === 'content_block_delta' && event.data?.delta?.type === 'text_delta' && typeof event.data.delta.text === 'string') params.onObservation?.(event.data.delta.text)
       })
@@ -76,25 +53,11 @@ export class AnthropicAdapter implements ProviderAdapter {
         }
         return block
       })
-      return normalizeAnthropicResponse({ content, stop_reason: stopReason, ...(Object.keys(usage).length ? { usage } : {}) })
+      return normalizeAnthropicResponse({ content, stop_reason: stopReason, ...(Object.keys(usage).length ? { usage } : {}) }, lowered.toolNameAliases)
     } catch (cause) {
       if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
       if (cause instanceof Error && 'code' in cause && typeof (cause as { code?: unknown }).code === 'string' && 'retryable' in cause && typeof (cause as { retryable?: unknown }).retryable === 'boolean') throw cause
       throw providerNetworkError(cause)
     }
   }
-}
-
-function toolDefinitions(request: LLMRequestProjection): Array<{ name: string; description?: string; input_schema: JsonValue }> {
-  const block = request.blocks.find((candidate) => candidate.kind === 'tools')
-  const content = block?.content
-  const values: JsonValue[] = Array.isArray(content) ? content : content && typeof content === 'object' && !Array.isArray(content) && Array.isArray((content as Record<string, JsonValue>).tools) ? (content as Record<string, JsonValue>).tools as JsonValue[] : []
-  return values.filter((value): value is Record<string, JsonValue> => typeof value === 'object' && value !== null && !Array.isArray(value) && typeof value.name === 'string').map((value) => ({ name: value.name as string, ...(typeof value.description === 'string' ? { description: value.description } : {}), input_schema: (value.inputSchema ?? value.parameters ?? {}) as JsonValue }))
-}
-
-function anthropicToolChoice(choice: NonNullable<ProviderPresetConfig['toolChoice']>): Record<string, string> | undefined {
-  if (choice === 'auto') return { type: 'auto' }
-  if (choice === 'required') return { type: 'any' }
-  if (choice === 'none') return undefined
-  return { type: 'tool', name: choice.function.name }
 }

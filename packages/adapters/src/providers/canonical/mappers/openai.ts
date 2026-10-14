@@ -8,7 +8,7 @@ export function toOpenAIPayload(
   const messages = canonical.messages.map((msg) => {
     const base: Record<string, unknown> = {
       role: msg.role,
-      content: msg.content === null ? null : typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+      content: msg.content === null ? null : typeof msg.content === 'string' ? msg.content : msg.content.map(part => part.type === 'text' ? part : ({ type: 'image_url', image_url: { url: part.source.type === 'url' ? part.source.data : `data:${part.source.mediaType};base64,${part.source.data}` } })),
     }
     if (msg.name) base.name = msg.name
     if (msg.toolCallId) base.tool_call_id = msg.toolCallId

@@ -16,7 +16,36 @@ permissions:
   id-token: write
 
 jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, arch: x64, target: x86_64-unknown-linux-gnu }
+          - { os: windows-latest, arch: x64, target: x86_64-pc-windows-msvc }
+          - { os: macos-latest, arch: arm64, target: aarch64-apple-darwin }
+          - { os: macos-latest, arch: x64, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: node scripts/automation/build-desktop.mjs
+        env:
+          PULSE_DESKTOP_ARCH: ${{ matrix.arch }}
+          PULSE_DESKTOP_TARGET: ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}-${{ matrix.arch }}
+          path: packages/server/native/
+          if-no-files-found: error
   release:
+    needs: desktop
     runs-on: ubuntu-latest
     env:
       PULSE_EXPECTED_PNPM_VERSION: 12.4.2
@@ -76,6 +105,12 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: packages/server/native
+          merge-multiple: true
+      - run: chmod +x packages/server/native/*/pulse-desktop-helper packages/server/native/darwin-*/Pulse\ Desktop\ Helper.app/Contents/MacOS/PulseDesktopHelper
       - run: pnpm native:prepare
       - run: pnpm check
       - run: pnpm release:check

@@ -29,6 +29,7 @@
     "@hunterzhu/pulse-adapters": "workspace:*",
     "@hunterzhu/pulse-runtime": "workspace:*",
     "@hunterzhu/pulse-tool-sdk": "workspace:*",
+    "@playwright/mcp": "0.0.83",
     "node-pty": "^1.1.0",
     "qrcode": "^1.5.4",
     "ws": "^8.21.3",
@@ -37,5 +38,11 @@
   "devDependencies": {
     "@types/qrcode": "^1.5.6",
     "@types/ws": "^8.18.2"
-  }
+  },
+  "files": [
+    "dist",
+    "native",
+    "README.md",
+    "README.zh-CN.md"
+  ]
 }

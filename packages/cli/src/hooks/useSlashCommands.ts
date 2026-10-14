@@ -2,6 +2,7 @@ import { useMemo, useCallback } from 'react';
 import type { SlashCommand } from '../types.js';
 
 export interface SlashCommandDependencies {
+  onAutomation?: (args: string) => void | Promise<void>;
   onMouse?: (args: string) => void | Promise<void>;
   onCopy?: () => void | Promise<void>;
   onHelp?: () => void | Promise<void>;
@@ -27,6 +28,7 @@ export interface SlashCommandDependencies {
 export function useSlashCommands(deps: SlashCommandDependencies) {
   const commands = useMemo<SlashCommand[]>(
     () => [
+      { name: '/automation', description: '自动化会话 [status|pause|takeover|resume|stop] [id]', execute: async args => deps.onAutomation?.(args) },
       { name: '/mouse', description: '滚轮和触控板滚动 [on|off]', execute: async (args) => deps.onMouse?.(args) },
       { name: '/copy', description: '复制选区或最近一条完整回复', execute: async () => deps.onCopy?.() },
       { name: '/help', aliases: ['/h'], description: '显示帮助信息', execute: async () => deps.onHelp?.() },

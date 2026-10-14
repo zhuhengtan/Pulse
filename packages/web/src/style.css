@@ -60,3 +60,13 @@
 .work-message-card:hover{border-color:#b8c6ee;background:var(--soft)}
 .work-message-card>span:nth-child(2){min-width:0;flex:1;display:grid;gap:4px}.work-message-card strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.work-message-card small{color:var(--muted);font-size:10px}.work-message-icon{width:34px;height:34px;display:grid;place-items:center;border-radius:9px;background:#edf1ff;color:#4267d8}.work-message-card.failed .work-message-icon{background:#fff0ee;color:#c64f49}
 @media(max-width:767px){.navbar.surface-chat .navbar-title{left:11px;max-width:calc(50% - 83px)}.navbar.surface-work .navbar-title{left:50px;max-width:calc(50% - 108px)}.surface-switch button{min-width:47px;min-height:34px;padding:0 10px}.delivery-state button{min-height:40px}.work-message-card{min-height:64px}}
+
+.automation-panel{min-height:0;flex:1;padding:16px;overflow:auto;display:flex;flex-direction:column;gap:14px;color:var(--ink);background:var(--panel)}
+.automation-panel>p{margin:0;font-size:12px;line-height:1.6;overflow-wrap:anywhere;color:var(--muted)}
+.automation-controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.automation-controls select,.automation-controls input,.automation-controls textarea{box-sizing:border-box;max-width:100%;min-width:120px;min-height:40px;flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink);font:inherit;font-size:12px}
+.automation-controls textarea{flex-basis:100%;min-height:70px;resize:vertical}.automation-controls strong{flex-basis:100%;font-size:12px}
+.automation-controls button{min-height:40px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--soft);color:var(--ink);font:inherit;font-size:12px;cursor:pointer}.automation-controls button:hover{border-color:#a7b9ed}.automation-controls button:disabled{opacity:.45;cursor:default}
+.automation-frame{display:block;flex:none;width:100%;height:auto;user-select:none;object-fit:contain;border:1px solid var(--line);border-radius:10px;background:var(--soft)}
+.automation-panel [role=alert]{color:#b84b3a;background:#fff3f0;border-radius:8px;padding:10px}.automation-panel details{font-size:12px;color:var(--muted)}.automation-panel summary{cursor:pointer;min-height:36px;padding:8px 0}.automation-panel details label{display:flex;gap:8px;padding:8px}
+@media(max-width:767px){.automation-panel{padding:14px}.automation-controls button,.automation-controls select,.automation-controls input{min-height:44px}.automation-controls select{flex-basis:100%}}

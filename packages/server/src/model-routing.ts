@@ -1,14 +1,15 @@
 import { InMemoryModelRegistry, ModelRouter, type ModelCandidate } from '@hunterzhu/pulse-runtime'
 import { createProviderAdapter, type ProviderAdapter, type ProviderPresetConfig } from '@hunterzhu/pulse-adapters'
 
-export type HostModelTask = 'reason' | 'plan' | 'merge' | 'verify'
+export type HostModelTask = 'reason' | 'plan' | 'merge' | 'verify' | 'vision'
 
 export interface HostModelRouteOptions {
   activeModel: string
   activeProviderCode?: string
   activeProvider: ProviderPresetConfig
   providerProfiles?: Record<string, ProviderPresetConfig>
-  providerModels?: Record<string, { provider: string; model: string; maxContextTokens?: number; maxOutputTokens?: number; reasoningEffort?: 'low' | 'medium' | 'high' }>
+  providerModels?: Record<string, { provider: string; model: string; maxContextTokens?: number; maxOutputTokens?: number; imageInput?: 'supported' | 'unsupported' | 'unknown'
+  reasoningEffort?: 'low' | 'medium' | 'high' }>
   taskRouting?: Partial<Record<HostModelTask, string[]>>
   /** Reuse the active provider instance (notably the scripted Mock adapter). */
   activeAdapter?: ProviderAdapter
@@ -59,9 +60,10 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
     candidates.push({
       id: displayName,
       providerId: selection.provider,
-      tasks: ['reason', 'plan', 'merge', 'verify'],
+      tasks: ['reason', 'plan', 'merge', 'verify', 'vision'],
       priority: isActive ? 100 : 10,
       capabilities: {
+        imageInput: selection.imageInput === 'supported',
         toolCalling: true,
         structuredOutput: true,
         reasoning: requestedReasoning === 'none' ? 'low' : requestedReasoning,
@@ -96,7 +98,7 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
   for (const candidate of candidates) models.register(candidate)
   const router = new ModelRouter(models)
   const routes = options.taskRouting ?? {}
-  for (const task of ['reason', 'plan', 'merge', 'verify'] as const) {
+  for (const task of ['reason', 'plan', 'merge', 'verify', 'vision'] as const) {
     const configured = routes[task]
     const route = configured === undefined ? [options.activeModel] : [...configured]
     if (route.length === 0) throw new Error(`EMPTY_MODEL_ROUTE:${task}`)

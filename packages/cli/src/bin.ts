@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { assertJarvisApiUrl, createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
+import { createLocalHost, automationDoctor, requestAutomationPermissions, assertJarvisApiUrl, createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
 import { modelSelectionId, normalizeModelConfig, resolveModelReference } from '@hunterzhu/pulse-server'
 import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
@@ -42,6 +42,7 @@ Usage:
                                           manage recurring tasks (daemon requires read-only or auto approval)
   pulse service <install|status|start|stop|uninstall>
   pulse template <list|show|run> [name] [values...]
+  pulse automation doctor                  check browser and desktop dependencies
   pulse mcp doctor [server-id]
 
 Options:
@@ -150,7 +151,7 @@ export function parse(argv: string[]): Parsed {
       options[key] = true
       continue
     }
-  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp', 'h5'].includes(arg)) {
+  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp', 'h5', 'automation'].includes(arg)) {
       command = arg
     } else {
       positionals.push(arg)
@@ -257,9 +258,11 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
       ...(item.toolChoice === undefined ? {} : { toolChoice: item.toolChoice }),
     }]]
   }))
+  for (const selection of selections) if (selection.model.imageInput !== undefined && !['supported','unsupported','unknown'].includes(selection.model.imageInput)) throw new Error(`INVALID_MODEL_IMAGE_INPUT:${selection.id}`)
   const providerModels: NonNullable<LocalHostOptions['providerModels']> = Object.fromEntries(selections.map(({ id, providerId, model }) => [id, {
       provider: providerId,
       model: model.modelCode,
+      ...(model.imageInput === undefined ? {} : { imageInput: model.imageInput }),
       ...(model.maxContextTokens === undefined ? {} : { maxContextTokens: model.maxContextTokens }),
       ...(model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens }),
       ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
@@ -335,6 +338,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   if (!Array.isArray(skillNames) || skillNames.some((name) => typeof name !== 'string')) throw new Error('INVALID_SKILL_SELECTION')
   const capabilityPacks = [createPdfCapabilityPack(), createSpreadsheetCapabilityPack(), createSkillCapabilityPack({ trustedRoots: skillRoots.map((root) => resolve(expandHome(root) ?? root)) })]
   for (const [id, server] of Object.entries(capabilitySettings.mcpServers ?? {})) {
+    if ((id === 'browser' && capabilitySettings.browser) || (id === 'computer' && capabilitySettings.computer)) throw new Error(`AUTOMATION_CAPABILITY_CONFLICT:${id}`)
     if (!server || typeof server.command !== 'string' || server.command.trim().length === 0 || (server.args !== undefined && (!Array.isArray(server.args) || server.args.some((arg) => typeof arg !== 'string')))) throw new Error(`INVALID_MCP_SERVER_CONFIG:${id}`)
     if (server.toolPolicies && Object.entries(server.toolPolicies).some(([name, policy]) => !name || !['read', 'write', 'external'].includes(policy))) throw new Error(`INVALID_MCP_TOOL_POLICY:${id}`)
     const resolvedEnv: Record<string, string> = { ...(server.env ?? {}) }
@@ -354,7 +358,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     }))
   }
   for (const id of enabledCapabilityPacks) {
-    if (!capabilityPacks.some((pack) => pack.manifest.id === id)) throw new Error(`UNKNOWN_ENABLED_CAPABILITY:${id}`)
+    if (!['browser', 'computer'].includes(id) && !capabilityPacks.some((pack) => pack.manifest.id === id)) throw new Error(`UNKNOWN_ENABLED_CAPABILITY:${id}`)
   }
 
   const rawSystemPrompt = option(parsed.options, 'system-prompt') ?? process.env.PULSE_SYSTEM_PROMPT ?? config.systemPrompt
@@ -413,6 +417,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     provider,
     providerProfiles,
     providerModels,
+    automation: { ...(capabilitySettings.browser ? { browser: capabilitySettings.browser } : {}), ...(capabilitySettings.computer ? { computer: capabilitySettings.computer } : {}) },
     modelPricing: Object.fromEntries(selections.flatMap(({ id, model }) => model.pricing ? [[id, model.pricing]] : [])),
     ...(taskRouting === undefined ? {} : { taskRouting }),
     capabilityPacks,
@@ -469,6 +474,18 @@ export async function main(): Promise<number> {
   }
 
   const options = await hostOptions(parsed)
+
+  if (parsed.command === 'automation') {
+    if (parsed.positionals[0] === 'permissions') { process.stdout.write(JSON.stringify(await requestAutomationPermissions(options.automation), null, 2) + '\n'); return 0 }
+    if (parsed.positionals[0] !== 'doctor') throw new Error('Usage: pulse automation doctor|permissions')
+    if (parsed.options.live === true) {
+      const host = createLocalHost(options)
+      try { process.stdout.write(JSON.stringify(await host.probeVisionModel(option(parsed.options, 'model') ?? options.taskRouting?.vision?.[0] ?? options.activeModel ?? ''), null, 2) + '\n'); return 0 } finally { await host.close() }
+    }
+    const report = await automationDoctor(options.automation)
+    process.stdout.write(JSON.stringify(report, null, 2) + '\n')
+    return (report.desktop as { error?: string }).error && options.enabledCapabilityPacks?.includes('computer') ? 1 : 0
+  }
 
   if (parsed.command === 'doctor') {
     return runDoctor(options, parsed.options.live === true, option(parsed.options, 'format') ?? 'text')

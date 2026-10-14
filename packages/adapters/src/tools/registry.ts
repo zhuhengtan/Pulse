@@ -1,4 +1,4 @@
-import { isSideEffectful, type EffectArtifactOutput, type EffectExecutor, type EffectExecution, type EffectRecord, type EffectSubmission, type JsonValue } from '@hunterzhu/pulse-runtime'
+import { extractToolImage, isSideEffectful, type EffectArtifactOutput, type EffectExecutor, type EffectExecution, type EffectRecord, type EffectSubmission, type JsonValue } from '@hunterzhu/pulse-runtime'
 import { ToolRegistry, type ReconcileResult, type ToolDiscoveryQuery } from '@hunterzhu/pulse-tool-sdk'
 
 function toJson(value: unknown, seen = new Set<object>()): import('@hunterzhu/pulse-runtime').JsonValue {
@@ -73,7 +73,10 @@ export function createToolEffectExecutor(registry: ToolRegistry): EffectExecutor
     let value: JsonValue
     let artifact: EffectArtifactOutput | undefined
     try { value = toJson(detailed.normalized ?? detailed.output) } catch { value = null; artifact = artifactOutput(detailed.output) }
-    return { value, ...(detailed.normalized === undefined ? {} : { normalized: toJson(detailed.normalized) }), ...(artifact === undefined ? {} : { artifact }), ...(summary === undefined ? {} : { summary }), sideEffectState: isSideEffectful(definition.manifest.sideEffectPolicy) ? 'applied' : 'none', executionState: 'succeeded', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length, ...(artifact === undefined ? {} : { artifactMediaType: artifact.mediaType }) }, ...(observations.length ? { observations } : {}) }
+    const image = extractToolImage(value)
+    value = image.value
+    artifact = image.artifact ?? artifact
+    return { value, ...(detailed.normalized === undefined ? {} : { normalized: image.artifact ? value : toJson(detailed.normalized) }), ...(artifact === undefined ? {} : { artifact }), ...(summary === undefined ? {} : { summary }), sideEffectState: isSideEffectful(definition.manifest.sideEffectPolicy) ? 'applied' : 'none', executionState: 'succeeded', ...(executionRef === undefined ? {} : { executionRef }), metadata: { toolVersion: detailed.manifest.version, retrySafety: detailed.manifest.retrySafety, defaultTimeoutMs: detailed.manifest.defaultTimeoutMs, observationCount: observations.length, ...(artifact === undefined ? {} : { artifactMediaType: artifact.mediaType }) }, ...(observations.length ? { observations } : {}) }
   }
 }
 

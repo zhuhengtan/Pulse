@@ -1,6 +1,7 @@
 import type { CanonicalContentPart, CanonicalLLMRequest, CanonicalStreamEvent, ModelCapabilityProfile } from '../types.js'
 
 type AnthropicContentBlock =
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string } }
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: string }
@@ -42,8 +43,8 @@ export function toAnthropicPayload(
       continue
     }
 
-    const text = textFromContent(msg.content)
-    if (text !== undefined) appendBlocks('user', [{ type: 'text', text }])
+    if (Array.isArray(msg.content)) appendBlocks('user', msg.content.map(part => part.type === 'text' ? part : ({ type: 'image', source: part.source.type === 'url' ? { type: 'url', url: part.source.data } : { type: 'base64', media_type: part.source.mediaType, data: part.source.data } })))
+    else if (typeof msg.content === 'string') appendBlocks('user', [{ type: 'text', text: msg.content }])
   }
 
   const system = systemParts.join('\n')

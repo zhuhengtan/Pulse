@@ -90,14 +90,14 @@ function candidateMetadata(candidate: ModelCandidate, attempts: Array<{ effectId
   }) }
 }
 
-export function createModelEffectExecutor(config: { router: ModelRouter; providers: ReadonlyMap<string, ProviderAdapter>; requirements?: ModelRouteRequirements; maxConcurrentByProvider?: Readonly<Record<string, number>>; maxConcurrentByModel?: Readonly<Record<string, number>> }): EffectExecutor {
+export function createModelEffectExecutor(config: { resolveImage?: (ref: string, agentId: string, privacy: LLMRequestProjection['privacy']) => string | Promise<string>; router: ModelRouter; providers: ReadonlyMap<string, ProviderAdapter>; requirements?: ModelRouteRequirements; maxConcurrentByProvider?: Readonly<Record<string, number>>; maxConcurrentByModel?: Readonly<Record<string, number>> }): EffectExecutor {
   const fallback = new ModelFallbackController()
   const providerSlots = new SlotPool(config.maxConcurrentByProvider)
   const modelSlots = new SlotPool(config.maxConcurrentByModel)
   return async (effect, signal, emitObservation): Promise<EffectExecution> => {
     if (effect.kind !== 'llm') throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`)
     const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
-    const task = input.task
+    const task = (input.request as unknown as LLMRequestProjection | undefined)?.images?.length ? 'vision' : input.task
     const request = input.request
     if (typeof task !== 'string' || !request || typeof request !== 'object' || Array.isArray(request)) throw new Error('INVALID_LLM_EFFECT_INPUT')
     const projection = request as unknown as LLMRequestProjection
@@ -110,7 +110,7 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
     const structuredRequirement = dynamicRequirements.structuredOutput
     const structuredSchema = structuredRequirement && typeof structuredRequirement === 'object' && !Array.isArray(structuredRequirement) ? (structuredRequirement as Record<string, JsonValue>).schema : undefined
     if (structuredSchema !== undefined && (input.outputSchema === undefined || stableSerialize(structuredSchema) !== stableSerialize(input.outputSchema))) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'STRUCTURED_OUTPUT_CONTRACT_MISMATCH', message: 'requirements.structuredOutput.schema must equal outputSchema.' } }
-    const routeRequirements: ModelRouteRequirements = { ...config.requirements, ...(typeof dynamicRequirements.toolCalling === 'boolean' ? { toolCalling: dynamicRequirements.toolCalling } : {}), ...(typeof dynamicRequirements.structuredOutput === 'boolean' ? { structuredOutput: dynamicRequirements.structuredOutput } : structuredSchema === undefined ? {} : { structuredOutput: true }), ...(dynamicRequirements.reasoning === 'low' || dynamicRequirements.reasoning === 'medium' || dynamicRequirements.reasoning === 'high' ? { reasoning: dynamicRequirements.reasoning } : {}), ...(typeof dynamicRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: dynamicRequirements.maxOutputTokens } : {}), ...(typeof dynamicRequirements.contextSize === 'number' ? { contextSize: dynamicRequirements.contextSize } : {}) }
+    const routeRequirements: ModelRouteRequirements = { ...(projection.images?.length ? { imageInput: true } : {}), ...config.requirements, ...(typeof dynamicRequirements.toolCalling === 'boolean' ? { toolCalling: dynamicRequirements.toolCalling } : {}), ...(typeof dynamicRequirements.structuredOutput === 'boolean' ? { structuredOutput: dynamicRequirements.structuredOutput } : structuredSchema === undefined ? {} : { structuredOutput: true }), ...(dynamicRequirements.reasoning === 'low' || dynamicRequirements.reasoning === 'medium' || dynamicRequirements.reasoning === 'high' ? { reasoning: dynamicRequirements.reasoning } : {}), ...(typeof dynamicRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: dynamicRequirements.maxOutputTokens } : {}), ...(typeof dynamicRequirements.contextSize === 'number' ? { contextSize: dynamicRequirements.contextSize } : {}) }
     const routeDiagnostics = config.router.diagnostics(task, projection.privacy, routeRequirements, estimateProjectionTokens(projection) + (typeof routeRequirements.maxOutputTokens === 'number' ? routeRequirements.maxOutputTokens : 0))
     const candidates = config.router.routeProjection(task, projection, routeRequirements)
     const attemptNo = Math.max(1, effect.attemptNo)
@@ -145,7 +145,13 @@ export function createModelEffectExecutor(config: { router: ModelRouter; provide
           if (emitObservation) emitObservation(observation)
           else observations.push(observation)
         }
-        const output = assignRuntimeToolCallIds(validateAdapterResult(await provider.executeAttempt({ request: projection, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation })), effect.id)
+        const images = projection.images === undefined ? undefined : await Promise.all(projection.images.map(async image => {
+          if (image.data) return image
+          if (!projection.contextSpec.artifactRefs?.includes(image.ref) || !config.resolveImage) throw Object.assign(new Error('IMAGE_RESOLVER_REQUIRED'), { retryable: false })
+          return { ...image, data: await config.resolveImage(image.ref, effect.agentId, projection.privacy) }
+        }))
+        const hydrated = images === undefined ? projection : { ...projection, images }
+        const output = assignRuntimeToolCallIds(validateAdapterResult(await provider.executeAttempt({ request: hydrated, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation })), effect.id)
         const measuredUsage = { ...(output.usage ?? {}), visibleOutputChars: output.text.length, latencyMs: output.usage?.latencyMs ?? Math.max(0, Date.now() - startedAt), ...(output.usage?.uncachedInputTokens === undefined && output.usage?.inputTokens !== undefined && output.usage.cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, output.usage.inputTokens - output.usage.cachedInputTokens) } : {}) }
         usage.set(attempt.attemptId, measuredUsage)
         if (output.finishReason === 'length' && input.outputSchema !== undefined) throw Object.assign(new OutputValidationError('adapter', 'OUTPUT_TRUNCATED', 'Model output reached its token limit; incomplete output was rejected.', { outputTokens: output.usage?.outputTokens ?? null, reasoningTokens: output.usage?.reasoningTokens ?? null, visibleOutputChars: output.text.length, maxOutputTokens: routeRequirements.maxOutputTokens ?? config.requirements?.maxOutputTokens ?? null }), { retryable: false })

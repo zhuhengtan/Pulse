@@ -233,7 +233,15 @@ export class McpStdioClient {
           if (!matchesJsonSchema(input, tool.inputSchema)) throw new Error(`MCP_INVALID_TOOL_INPUT:${tool.name}`)
           return input as Record<string, JsonValue>
         },
-        execute: async (input, context): Promise<JsonValue> => this.callTool(tool.name, input, { signal: context.signal }),
+        execute: async (input, context): Promise<JsonValue> => {
+          const result = await this.callTool(tool.name, input, { signal: context.signal })
+          if (!result || typeof result !== 'object' || Array.isArray(result) || !Array.isArray(result.content)) return result
+          const images = result.content.filter(part => part && typeof part === 'object' && !Array.isArray(part) && part.type === 'image') as Array<Record<string, JsonValue>>
+          if (!images.length) return result
+          if (images.length !== 1) throw new Error('MCP_MULTIPLE_IMAGES_REQUIRE_SEPARATE_OBSERVATIONS')
+          const image = images[0]!
+          return { ...result, content: result.content.filter(part => !(part && typeof part === 'object' && !Array.isArray(part) && part.type === 'image')), pulseImage: { mediaType: image.mimeType ?? null, data: image.data ?? null } }
+        },
       }
     })
   }

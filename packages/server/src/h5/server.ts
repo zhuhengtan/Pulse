@@ -145,6 +145,7 @@ export class H5Server {
   private assistantPump: Promise<void> | undefined
   private jarvisSyncTimer: NodeJS.Timeout | undefined
   private readonly terminalSockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
+  private readonly automationSockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
   private readonly previewSockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
   private configWriteTail: Promise<void> = Promise.resolve()
 
@@ -252,7 +253,8 @@ export class H5Server {
       })
     })
     server.on('upgrade', (req, socket, head) => {
-      if ((req.url ?? '').startsWith('/preview/')) void this.handlePreviewUpgrade(req, socket, head)
+      if ((req.url ?? '').startsWith('/api/automation/socket')) void this.handleAutomationUpgrade(req, socket, head)
+      else if ((req.url ?? '').startsWith('/preview/')) void this.handlePreviewUpgrade(req, socket, head)
       else void this.handleTerminalUpgrade(req, socket, head)
     })
 
@@ -298,6 +300,7 @@ export class H5Server {
       try { terminal.process.kill() } catch { /* process already exited */ }
     }
     this.terminals.clear()
+    for (const client of this.automationSockets.clients) client.close(1001, 'Pulse server stopped')
     if (this.server) {
       await new Promise<void>((resolve) => this.server?.close(() => resolve()))
       this.server = undefined
@@ -317,6 +320,7 @@ export class H5Server {
 
   private async startConversationRun(conversationId: string, text: string): Promise<RunHandle> {
     await this.prepareWorkConversation(conversationId)
+    await this.host.prepareAutomation()
     const handle = this.workWorker
       ? await startH5WorkWorker({ ...this.workWorker, runtimeOptions: this.host.getWorkWorkerOptions() }, { conversationId, text })
       : await this.host.sendMessage(conversationId, { text })
@@ -423,6 +427,7 @@ export class H5Server {
   }
 
   private async resumeConversationRun(conversationId: string): Promise<RunHandle> {
+    await this.host.prepareAutomation()
     const handle = this.workWorker
       ? await startH5WorkWorker({ ...this.workWorker, runtimeOptions: this.host.getWorkWorkerOptions() }, { conversationId, text: '', resume: true })
       : await this.host.resumeRun(conversationId)
@@ -571,6 +576,34 @@ export class H5Server {
         client.on('error', () => terminal.clients.delete(client))
       })
     } catch { reject(400, 'Bad Request') }
+  }
+
+  private async handleAutomationUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
+    const reject = () => socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+    try {
+      const host = req.headers.host, origin = req.headers.origin
+      if (typeof host !== 'string' || !isAllowedH5Host(host) || typeof origin !== 'string' || new URL(origin).origin !== `http://${host}` || req.url !== '/api/automation/socket') { reject(); return }
+      const token = this.parseCookies(req).pulse_device
+      const allowed = async () => { const device = await this.auth.authenticateToken(token); return device && ((device.scope === 'local' && isLoopbackIp(req.socket.remoteAddress)) || device.automationControl === true) ? device : undefined }
+      if (!await allowed()) { reject(); return }
+      this.automationSockets.handleUpgrade(req, socket, head, client => {
+        let sequence = 0, previous = '', pending = false
+        const emit = async () => {
+          if (pending || client.readyState !== WebSocket.OPEN) return
+          pending = true
+          try {
+            if (!await allowed()) { client.close(1008, 'Permission revoked'); return }
+            const data = this.host.automation.list(), serialized = JSON.stringify(data)
+            if (serialized !== previous) { previous = serialized; client.send(JSON.stringify({ type: 'automation', seq: ++sequence, sessions: data })) }
+          } finally { pending = false }
+        }
+        void emit().catch(() => client.close(1011))
+        const timer = setInterval(() => { void emit().catch(() => client.close(1011)) }, 500)
+        client.on('message', message => { if (message.toString() === 'ping') client.send('pong'); else client.close(1003, 'Use authenticated HTTP input endpoint') })
+        client.on('close', () => clearInterval(timer))
+        client.on('error', () => clearInterval(timer))
+      })
+    } catch { reject() }
   }
 
   getLanIp(): string {
@@ -779,9 +812,66 @@ export class H5Server {
       return Boolean(origin && origin === `http://${hostHeader}`)
     }
 
+    const canControlAutomation = localAdmin || authedDevice?.automationControl === true
+    const automationPermission = pathname.match(/^\/api\/devices\/([^/]+)\/automation$/)
+    if (automationPermission && method === 'POST') {
+      if (!localAdmin || !requireSameOrigin()) { res.writeHead(403).end(); return }
+      const body = await this.parseJsonBody(req)
+      if (typeof body.enabled !== 'boolean') { res.writeHead(400).end(); return }
+      const ok = await this.auth.setAutomationControl(automationPermission[1]!, body.enabled)
+      res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ ok }))
+      return
+    }
+    if (pathname === '/api/automation/vision-probe' && method === 'POST') {
+      if (!localAdmin || !requireSameOrigin()) { res.writeHead(403).end(); return }
+      const body = await this.parseJsonBody(req)
+      if (typeof body.model !== 'string') { res.writeHead(400).end(); return }
+      try { const result = await this.host.probeVisionModel(body.model); res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result)) }
+      catch (error) { res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({error: error instanceof Error ? error.message : 'VISION_PROBE_FAILED'})) }
+      return
+    }
+    if (pathname.startsWith('/api/automation/')) {
+      if (!canControlAutomation) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'AUTOMATION_CONTROL_REQUIRED' })); return }
+      try {
+        const manager = this.host.automation
+        const options = this.host.getAutomationOptions()
+        if (pathname === '/api/automation/doctor' && method === 'GET') { res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.host.automationDoctor())); return }
+        if (pathname === '/api/automation/permissions' && method === 'POST') {
+          if (!localAdmin || !requireSameOrigin()) { res.writeHead(403).end(); return }
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.host.requestAutomationPermissions())); return
+        }
+        const target = pathname.match(/^\/api\/automation\/sessions\/([^/]+)(?:\/(observe|frame|control|input|heartbeat|command))?$/)
+        let value: unknown
+        if (pathname === '/api/automation/sessions' && method === 'GET') value = { sessions: manager.list(), ...options }
+        else if (pathname === '/api/automation/sessions' && method === 'POST') {
+          if (!requireSameOrigin() || options.approvalMode === 'read-only') { res.writeHead(403).end(); return }
+          const body = await this.parseJsonBody(req)
+          if (!['browser', 'computer'].includes(String(body.kind)) || !options.enabled.includes(String(body.kind)) || (body.mode !== undefined && !['dedicated','existing'].includes(String(body.mode)))) { res.writeHead(400).end(); return }
+          const project = typeof body.projectId === 'string' ? await this.projects.get(body.projectId) : undefined
+          if (!project) { res.writeHead(400).end(); return }
+          value = await manager.open(body.kind as 'browser' | 'computer', `device:${authedDevice!.id}`, project.cwd, body.mode as 'dedicated' | 'existing' | undefined)
+        } else if (target && method === 'GET' && target[2] === 'frame') {
+          const frame = await manager.frame(target[1]!)
+          res.writeHead(200, { 'Content-Type': frame.mediaType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }).end(frame.bytes); return
+        } else if (target && method === 'POST') {
+          if (!requireSameOrigin()) { res.writeHead(403).end(); return }
+          const body = await this.parseJsonBody(req)
+          if (target[2] === 'heartbeat' && typeof body.lease === 'string') { manager.heartbeat(target[1]!, authedDevice!.id, body.lease); value = { ok: true } }
+          else if (target[2] === 'observe') { const { pulseImage: _image, ...view } = await manager.observe(target[1]!); value = view }
+          else {
+            if (options.approvalMode === 'read-only') { res.writeHead(403).end(); return }
+            if (target[2] === 'command' && typeof body.lease === 'string' && typeof body.method === 'string' && body.params && typeof body.params === 'object' && !Array.isArray(body.params)) value = await manager.manualCommand(target[1]!, body.method, body.params as Record<string, unknown>, authedDevice!.id, body.lease)
+            else if (target[2] === 'control' && ['pause', 'resume', 'takeover', 'close'].includes(String(body.action))) value = await manager.control(target[1]!, body.action as 'pause' | 'resume' | 'takeover' | 'close', authedDevice!.id)
+            else if (target[2] === 'input' && typeof body.frameId === 'string' && typeof body.requestId === 'string' && typeof body.lease === 'string') value = await manager.act(target[1]!, body.frameId, body.action, body.requestId, undefined, body.lease)
+            else { res.writeHead(400).end(); return }
+          }
+        } else { res.writeHead(404).end(); return }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(value)); return
+      } catch (error) { res.writeHead(409, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ error: error instanceof Error ? error.message : 'AUTOMATION_FAILED' })); return }
+    }
     if (pathname === '/api/session' && method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify({ ok: true, deviceId: authedDevice?.id, localAdmin, canRegisterProject: localAdmin, canUseTerminal: localAdmin, canEditConfig: localAdmin }))
+      res.end(JSON.stringify({ ok: true, deviceId: authedDevice?.id, localAdmin, canRegisterProject: localAdmin, canUseTerminal: localAdmin, canEditConfig: localAdmin, canControlAutomation }))
       return
     }
 
