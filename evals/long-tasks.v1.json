@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "name": "pulse-real-long-tasks-2026-10-14",
+  "limits": { "samples": 6, "perSampleCalls": 16, "totalCalls": 96, "perSampleMs": 1200000 },
+  "scoring": { "requirements": 40, "correctness": 30, "continuity": 15, "efficiency": 10, "boundaries": 5 },
+  "tasks": [
+    {
+      "id": "LT01", "effort": "low", "category": "code-repair",
+      "title": "修复真实评测入口的模型选择与调用预算",
+      "prompt": "修复 scripts/eval/run.mjs 当前不能读取 provider-nested 模型配置、且把 --max-calls 当 max-turns 的问题。先查现状，再实现兼容与定向测试，最后核查集成。支持 providerId/modelId 新配置和旧 flat models；非法模型或非法预算明确失败。新增 scripts/eval/config-budget.mjs，导出 resolveEvaluationModel(config, ref)，返回 {providerCode, modelCode, profile}；导出 buildEvaluationArgs({maxModelCalls,maxTurns})，返回 CLI 参数数组，实际调用预算使用 --max-model-calls，maxTurns 保持独立。旧 --max-calls 可作为实际调用预算的兼容别名但不得再冒充轮数。将模块接入现有 runner，更新 evals/README.md，提供本地定向检查证据。不得启动真实模型、不得读取用户配置/凭据、不得提交。",
+      "criteria": ["新旧配置解析正确并拒绝未知引用", "实际调用预算与轮数参数独立且接入旧 runner", "定向检查及文档真实一致"],
+      "deliverables": ["scripts/eval/config-budget.mjs", "scripts/eval/run.mjs", "evals/README.md"]
+    },
+    {
+      "id": "LT02", "effort": "high", "category": "resumable-workflow",
+      "title": "为批量评测补充可恢复执行",
+      "prompt": "为 scripts/eval/run.mjs 增加 --resume 支持，解决长批次中断后只能重跑的问题。先调查输出与记录结构，再实现恢复与定向模拟测试，最后更新 evals/README.md。恢复同一输出目录时，已写入终态记录的 taskId/trial（包括失败）不能重跑，未完成 trial 继续待执行，已有记录和产物必须保留；重复终态记录不能导致重复运行，损坏 JSONL 必须明确报错而非静默丢弃。新增 scripts/eval/resume.mjs 导出 selectPendingTrials(tasks,trials,records)，返回 [{taskId,trial}]（task 顺序优先，trial 从1开始）；已终态 status 为 passed/partial/failed/blocked_env/succeeded/cancelled 均跳过，running/pending 不跳过。接入真实 runner 的循环和输出目录策略，追加记录并汇总历史+新增记录，不改变现有成本边界。用本地假 CLI/记录复现中断恢复，绝不能启动真实模型，不提交。",
+      "criteria": ["终态不重复、待执行不遗漏、重复输入去重", "损坏记录明确失败并保留历史", "恢复逻辑接入实际 runner 且有中断模拟证据"],
+      "deliverables": ["scripts/eval/resume.mjs", "scripts/eval/run.mjs", "evals/README.md"]
+    },
+    {
+      "id": "LT03", "effort": "low", "category": "data-analysis",
+      "title": "整理真实失败运行与消耗账本",
+      "prompt": "分析 fixtures/run-records.json 中从 Pulse 历史真实运行摘取并脱敏的记录。先检查结构与重复，再实现可重算归一化，最后输出解释报告。新增 scripts/eval/audit-runs.mjs，可执行 node scripts/eval/audit-runs.mjs --input fixtures/run-records.json --out audit-output，输出 summary.json 和 report.md。summary.json 包含 uniqueRuns、duplicateRecords、modelCalls、inputTokens、outputTokens、unknownCostRuns、runtimeStatusCounts、businessStatusCounts；按 runId 去重，同一 runId 有冲突必须报错；token/modelCalls 的缺失值保持未知并用 knownTotals 与 unknownCounts 标识（现有已知数值仍可合计），未知价格不能计为零；businessStatus 缺失用 unknown，不能把 Runtime succeeded 算成业务完成。报告说明数据来源、去重规则、失败原因、消耗与局限，不推测账单金额。不得真实调用模型、不提交。",
+      "criteria": ["真实数据去重且总数可以重算", "成本缺失与业务状态未知不伪造", "可执行归一化脚本和来源明确的报告"],
+      "deliverables": ["scripts/eval/audit-runs.mjs", "audit-output/summary.json", "audit-output/report.md"]
+    },
+    {
+      "id": "LT04", "effort": "high", "category": "technical-research",
+      "title": "调研当前 DeepSeek 长任务适配缺口",
+      "prompt": "为 Pulse 维护者研究当前 DeepSeek 长任务适配。先阅读 fixtures/deepseek-official-notes.md 的本次官方文档快照及 URL，再沿实际 providers/openai-compat、normalize、runtime-executor、server model-budget、task-controller 和 DSL history 路径追踪，最后写 docs/reviews/deepseek-long-task-adaptation.md。报告必须区分 API 官方事实、当前实现、已验证结果、尚待验证的推断；覆盖 low/high 与 medium 映射、reasoning_content 在 tools 历史的连续传递、max_tokens 截断、缓存/usage、重试与全任务预算、工具调用 JSON、模型名兼容、压缩与恢复。给出至少3个有源码位置支撑的风险和按优先级可实施的改进与回归方案。引用官方链接，不能把本地模拟通过等同真实 API 验收，不能编造联网结果。仅调查并写报告，不修改功能代码，不提交。",
+      "criteria": ["官方事实有引用且没有混淆 medium/high", "实现结论有实际源码证据且区分推断", "具体风险、优先级、回归方案可执行"],
+      "deliverables": ["docs/reviews/deepseek-long-task-adaptation.md"]
+    },
+    {
+      "id": "LT05", "effort": "low", "category": "documentation",
+      "title": "同步过时的执行控制与中英配置文档",
+      "prompt": "维护 Pulse 文档：docs/task-controller.md 和 docs/cli-config.md、docs/cli-config.en.md。先对照实际 server/task-controller、model-budget、cli config/bin 和 verification-policy，再修正过时表述，最后核对中英文一致并写 docs/reviews/documentation-maintenance.md 记录依据。重点核实 controller 程序版本、阶段重试/并行与检查点复用边界、maxModelCalls 全任务实际调用（含审批/压缩/重试/恢复）与 maxTurns 的区别、未设 maxRuntimeMs 没有隐式任务时限、resume 行为、安全检查白名单与拒绝后的行为。补充 ENOTFOUND、预算耗尽、审批拒绝、等待问题恢复的排障建议。只修改文档，不更改功能、不声称真实模型或跨平台已经验证、不提交。",
+      "criteria": ["当前控制器与预算描述准确", "中英说明一致且安全边界正确", "排障有依据、未夸大验证"],
+      "deliverables": ["docs/task-controller.md", "docs/cli-config.md", "docs/cli-config.en.md", "docs/reviews/documentation-maintenance.md"]
+    },
+    {
+      "id": "LT06", "effort": "high", "category": "requirements-interview",
+      "title": "访谈并形成真实长任务评估计划后暂停",
+      "prompt": "/grill-and-plan 我想模拟 Pulse 执行各种真实长任务，评价执行能力，写各场景评估报告及优化方案。请先查项目和 fixtures/evaluation-request.md，再逐题问会影响方案的问题，形成 docs/plans/pulse-long-task-evaluation.md，预览后由我明确选择是否执行。同名文件先问，不能覆盖现有计划。当前不要自行实现评估脚本。",
+      "criteria": ["调查实际项目且逐题澄清有意义的问题", "同名文件先询问并保留原件，计划保存且预览", "最终安全默认问题冷恢复一致，暂不执行后没有实现改动"],
+      "deliverables": ["docs/plans/pulse-long-task-evaluation-v2.md"]
+    }
+  ]
+}

@@ -39,8 +39,32 @@ function truncateProviderDetail(value: string): string {
   return value.length <= 500 ? value : `${value.slice(0, 497)}...`
 }
 
+const NETWORK_CAUSE_CODES = new Set([
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+])
+
+/**
+ * Keep the stable PROVIDER_NETWORK_ERROR code and retryable=true, appending only
+ * whitelisted low-level cause codes. Arbitrary codes, messages, URLs and credentials
+ * on the cause chain are ignored.
+ */
 export function providerNetworkError(cause: unknown): Error & { code: string; retryable: boolean } {
-  return Object.assign(new Error('PROVIDER_NETWORK_ERROR'), { code: 'PROVIDER_NETWORK_ERROR', retryable: true, cause })
+  const reasons: string[] = []
+  let node: unknown = cause
+  for (let depth = 0; depth < 4 && node !== null && typeof node === 'object'; depth += 1) {
+    const code = (node as { code?: unknown }).code
+    if (typeof code === 'string' && NETWORK_CAUSE_CODES.has(code) && !reasons.includes(code)) reasons.push(code)
+    const name = (node as { name?: unknown }).name
+    if ((name === 'TimeoutError' || name === 'AbortError') && !reasons.includes(name)) reasons.push(name)
+    node = (node as { cause?: unknown }).cause
+  }
+  const message = reasons.length > 0 ? `PROVIDER_NETWORK_ERROR (${reasons.join(', ')})` : 'PROVIDER_NETWORK_ERROR'
+  return Object.assign(new Error(message), { code: 'PROVIDER_NETWORK_ERROR', retryable: true, cause })
 }
 
 export function providerResponseError(detail: string): Error & { code: string; retryable: boolean } {

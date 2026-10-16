@@ -1,3 +1,4 @@
+import { currentRequestText, suppliedRequestResults, retainedRequestResults } from './helpers/provider-request.js'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,7 +20,7 @@ function chat(content: string): Response {
 
 type Message = { role?: string; name?: string; content?: unknown }
 function suppliedResults(messages: Message[]): Array<{ id: string; value: any }> {
-  return messages.filter((message) => message.name === 'results').flatMap((message) => JSON.parse(String(message.content)))
+  return suppliedRequestResults(messages)
 }
 
 describe('task controller with DeepSeek DSML tool calls', () => {
@@ -30,16 +31,16 @@ describe('task controller with DeepSeek DSML tool calls', () => {
     const trace: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { messages: Message[] }
-      const blob = body.messages.map((message) => typeof message.content === 'string' ? message.content : JSON.stringify(message.content ?? '')).join('\n')
+      const blob = currentRequestText(body.messages)
       const active = blob.match(/"activeStage":\{"id":"(stage-[^"]+)"/)?.[1]
-      const sawList = blob.includes('"entries"')
-      const sawWrite = blob.includes('"bytes"')
+      const sawList = retainedRequestResults(body.messages).some(r => Array.isArray(r.value?.entries))
+      const sawWrite = retainedRequestResults(body.messages).some(r => r.value?.path === 'note.txt' && typeof r.value?.bytes === 'number')
       const kind = blob.includes('You are the Pulse safety reviewer') ? 'safety'
         : blob.includes('Create an executable plan') ? 'plan'
         : blob.includes('Verify ONLY the active taskController stage') ? 'verify-stage'
         : blob.includes('Independently verify every ORIGINAL') ? 'verify-task'
         : blob.includes('progress checkpoint') ? 'progress'
-        : blob.includes('Execute only this independent taskController stage') ? `work:${active ?? 'unknown'}:${sawList ? 'listed' : 'fresh'}:${sawWrite ? 'written' : 'unwritten'}`
+        : (blob.includes('Execute only this independent taskController stage') || blob.includes('Execute only the active taskController stage')) ? `work:${active ?? 'unknown'}:${sawList ? 'listed' : 'fresh'}:${sawWrite ? 'written' : 'unwritten'}`
         : 'other'
       trace.push(kind)
       if (kind === 'safety') return chat('APPROVE')
@@ -69,7 +70,7 @@ describe('task controller with DeepSeek DSML tool calls', () => {
       for await (const event of run.events) if (event.type === 'text') texts.push(String(event.data))
       const controller = JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'task-controller.json'), 'utf8')) as { tasks: Array<{ id: string; status: string; note?: string; attempts: number }> }
       const note = await readFile(join(directory, 'note.txt'), 'utf8').catch((error: NodeJS.ErrnoException) => error.code ?? 'missing')
-      expect({ trace, texts, tasks: controller.tasks.map((task) => ({ id: task.id, status: task.status, attempts: task.attempts, note: task.note })), note, outcome: await run.taskOutcome() }).toMatchObject({
+      expect({ trace, texts, tasks: controller.tasks.map((task) => ({ id: task.id, status: task.status, attempts: task.attempts, note: task.note })), note, outcome: await run.taskOutcome() }, JSON.stringify({trace,tasks:controller.tasks})).toMatchObject({
         tasks: [
           { id: 'stage-1', status: 'passed' },
           { id: 'stage-2', status: 'passed' },
@@ -92,7 +93,7 @@ describe('task controller with DeepSeek DSML tool calls', () => {
     let sawNewPoint = false
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
       const { messages } = JSON.parse(String(init?.body)) as { messages: Message[] }
-      const blob = messages.map((message) => typeof message.content === 'string' ? message.content : JSON.stringify(message.content ?? '')).join('\n')
+      const blob = currentRequestText(messages)
       const results = suppliedResults(messages)
       if (blob.includes('Create an executable plan')) return chat(JSON.stringify({ tasks: criterionIds.map((criterionId, i) => ({ id: `stage-${i + 1}`, goal: `Explain section ${i + 1}`, check: 'Response delivered', criterionIds: [criterionId], dependsOn: i ? [`stage-${i}`] : [] })) }))
       if (blob.includes('Verify ONLY the active taskController stage')) return chat(JSON.stringify({ status: 'passed', evidenceRefs: results.map((result) => result.id), note: 'Response verified' }))
@@ -139,7 +140,7 @@ describe('task controller with DeepSeek DSML tool calls', () => {
       expect(surfaces.every((observation) => observation.status === 'succeeded')).toBe(true)
       // Restored streams replay durable events; tools themselves must not rerun.
       expect(new Set(surfaces.map((observation) => observation.toolCallId)).size).toBe(2)
-      expect(await run.taskOutcome()).toMatchObject({ status: 'accepted' })
+      expect(await run.taskOutcome(), JSON.stringify({ runtime: await run.outcome(), task: await run.taskOutcome() })).toMatchObject({ status: 'accepted' })
       const audit = JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'operations.json'), 'utf8')) as { operations: Array<{ tool: string }> }
       expect(audit.operations.filter((operation) => operation.tool === 'task.surface')).toHaveLength(2)
     } finally { vi.unstubAllGlobals(); await second?.close(); await first.close(); await rm(directory, { recursive: true, force: true }) }

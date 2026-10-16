@@ -10,14 +10,14 @@ describe('persisted task state helpers', () => {
   it('turns explicit list items into criteria and preserves overflow beyond the bounded list', () => {
     expect(acceptanceCriteriaFromObjective('只改样例。1. 复现问题。2. 修复代码。3. 验证。').map((item) => item.description)).toEqual(['只改样例。', '1. 复现问题。', '2. 修复代码。', '3. 验证。'])
     const listed = acceptanceCriteriaFromObjective('- Find the sources\n- Summarize the findings')
-    expect(listed).toEqual([
+    expect(listed.map(({ id, description }) => ({ id, description }))).toEqual([
       { id: 'criterion-1', description: 'Find the sources' },
       { id: 'criterion-2', description: 'Summarize the findings' },
     ])
 
     const longRequest = Array.from({ length: 40 }, (_, index) => `- Condition ${index + 1}`).join('\n')
     const bounded = acceptanceCriteriaFromObjective(longRequest)
-    expect(bounded).toHaveLength(32)
+    expect(bounded).toHaveLength(40)
     expect(bounded.at(-1)?.description).toContain('Condition 40')
   })
 

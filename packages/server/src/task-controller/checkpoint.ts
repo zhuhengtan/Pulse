@@ -37,7 +37,7 @@ export interface WorkspaceStamp { available: boolean; files: Record<string, stri
 export async function workspaceStamp(root: string): Promise<WorkspaceStamp> {
   try {
     const { stdout } = await exec('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: root, maxBuffer: 1_000_000, timeout: 5000 })
-    const paths = [...new Set(stdout.split('\0').filter(Boolean))].sort()
+    const paths = [...new Set(stdout.split('\0').filter(path => path && !path.split(/[\\/]/).includes('node_modules')))].sort()
     if (paths.length > 5000) return { available: false, files: {} }
     const realRoot = await realpath(root)
     const files: Record<string, string> = {}; let bytes = 0
@@ -63,6 +63,8 @@ export interface Checkpoint {
   schemaVersion: 1; sourceRunId: string; objective: string; controller: TaskControllerState
   stamp: WorkspaceStamp; fileHashes: Record<string, string>; reusableIds: string[]
   evidence: Record<string, JsonValue[]>
+  stageFileHashes?: Record<string, Record<string, string>>
+  facts?: Array<{ stageId: string; sourceRef: string; tool: string; result: JsonValue }>
 }
 const object = (value: unknown): Record<string, any> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {}
 async function fileHash(root: string, path: string): Promise<string | undefined> {
@@ -74,19 +76,30 @@ async function fileHash(root: string, path: string): Promise<string | undefined>
     return await boundedHash(target)
   } catch { return undefined }
 }
-export async function createCheckpoint(runtime: PulseRuntime, root: string, runId: string, global: JsonValue, prior?: Checkpoint): Promise<Checkpoint | undefined> {
+export async function createCheckpoint(runtime: Pick<PulseRuntime, 'state'>, root: string, runId: string, global: JsonValue, prior?: Checkpoint): Promise<Checkpoint | undefined> {
   const controller = controllerFromGlobal(global); const objective = object(object(global).taskRecord).objective
   if (!controller || typeof objective !== 'string') return undefined
   const inherited = prior ? await validateCheckpoint(root, prior, objective) : undefined
-  const stamp = await workspaceStamp(root); const fileHashes: Record<string,string> = {}; const evidence: Record<string,JsonValue[]> = {}; const reusableIds: string[] = []
+  const stamp = await workspaceStamp(root); const fileHashes: Record<string,string> = {}; const stageFileHashes: Record<string, Record<string, string>> = {}; const evidence: Record<string,JsonValue[]> = {}; const reusableIds: string[] = []
+  const facts: NonNullable<Checkpoint['facts']> = []
+  for (const task of controller.tasks) for (const ref of task.evidenceRefs) {
+    const result = runtime.state.results.get(ref); const effect = result?.producer?.kind === 'effect' ? runtime.state.effects.get(result.producer.id) : undefined
+    const input = object(effect?.input); const value = object(result?.value ?? result?.summary)
+    if (result?.privacy !== 'public' || result.privacyTaints?.length || effect?.outcome?.status !== 'succeeded' || !['fs.read','fs.write','fs.apply_patch','fs.apply_patches'].includes(input.name)) continue
+    if (typeof value.path !== 'string' || typeof value.hash !== 'string' || await fileHash(root, value.path) !== value.hash) continue
+    const args = object(input.arguments); const content = typeof value.content === 'string' ? value.content : input.name === 'fs.write' && typeof args.content === 'string' ? args.content : undefined
+    const window = content === undefined ? undefined : textWindow(content)
+    const fact = { stageId: task.id, sourceRef: ref, tool: input.name as string, result: { path: value.path, hash: value.hash, offset: value.offset ?? 0, ...(window === undefined ? {} : { content: window.content, nextOffset: window.nextOffset === null ? value.nextOffset ?? null : (value.offset ?? 0) + window.nextOffset }) } }
+    if (Buffer.byteLength(JSON.stringify([...facts, fact])) <= 32000) facts.push(fact)
+  }
   for (const task of controller.tasks) {
     if (task.status !== 'passed' || !task.evidenceRefs.length) continue
-    let valid = true; const values: JsonValue[] = []
+    let valid = true; const values: JsonValue[] = []; const hashes: Record<string, string> = {}
     for (const ref of task.evidenceRefs) {
       const result = runtime.state.results.get(ref); const effect = result?.producer?.kind === 'effect' ? runtime.state.effects.get(result.producer.id) : undefined
       const input = object(effect?.input); const value = object(result?.value)
       if (input.name === 'task.recall' && inherited?.reusableIds.includes(task.id) && result?.privacy === 'public' && !result.privacyTaints?.length && effect?.outcome?.status === 'succeeded' && value.valid === true && Array.isArray(value.reusableIds) && value.reusableIds.includes(task.id) && !object(input.arguments).stageId) {
-        values.push(...inherited.evidence[task.id]!); Object.assign(fileHashes, inherited.fileHashes); continue
+        values.push(...inherited.evidence[task.id]!); Object.assign(hashes, inherited.stageFileHashes?.[task.id] ?? inherited.fileHashes); continue
       }
       // External calls and commands may depend on state outside the workspace.
       // They are never automatically cached as fresh checks.
@@ -94,13 +107,13 @@ export async function createCheckpoint(runtime: PulseRuntime, root: string, runI
       if (['fs.read','fs.write','fs.apply_patch','fs.apply_patches'].includes(input.name)) {
         const path = value.path
         if (typeof path !== 'string' || typeof value.hash !== 'string' || await fileHash(root, path) !== value.hash) { valid = false; break }
-        fileHashes[path] = value.hash
+        hashes[path] = value.hash
       }
       values.push({ sourceRef: ref, tool: input.name, result: result?.summary ?? result?.value ?? null })
     }
-    if (valid && stamp.available && Buffer.byteLength(JSON.stringify(values)) <= 32_000) { reusableIds.push(task.id); evidence[task.id] = values }
+    if (valid && stamp.available && Buffer.byteLength(JSON.stringify(values)) <= 32_000) { reusableIds.push(task.id); evidence[task.id] = values; stageFileHashes[task.id] = hashes; Object.assign(fileHashes, hashes) }
   }
-  return { schemaVersion: 1, sourceRunId: runId, objective, controller, stamp, fileHashes, reusableIds, evidence }
+  return { schemaVersion: 1, sourceRunId: runId, objective, controller, stamp, fileHashes, stageFileHashes, reusableIds, evidence, facts }
 }
 export function checkpointReceipt(checkpoint: Checkpoint) {
   const stages: Array<{ id: string; goal: string; check: string; note: string; evidence: string }> = []
@@ -109,18 +122,41 @@ export function checkpointReceipt(checkpoint: Checkpoint) {
     const item = { id: task.id, goal: task.goal, check: task.check, note: task.note ?? '', evidence: JSON.stringify(checkpoint.evidence[task.id]) }
     if (Buffer.byteLength(JSON.stringify([...stages, item])) <= 2800) stages.push(item)
   }
-  return { valid: true, sourceRunId: checkpoint.sourceRunId, reusableIds: stages.map((stage) => stage.id), stages, verification: 'Workspace and referenced hashes match. These are historical filesystem facts, not fresh shell or external checks.' }
+  return { valid: true, sourceRunId: checkpoint.sourceRunId, reusableIds: stages.map((stage) => stage.id), stages, facts: checkpoint.facts ?? [], verification: 'Workspace and referenced hashes match. These are historical filesystem facts, not fresh shell or external checks.' }
 }
 export async function validateCheckpoint(root: string, checkpoint: Checkpoint, objective: string): Promise<Checkpoint | undefined> {
   try {
-    if (!checkpoint || checkpoint.schemaVersion !== 1 || checkpoint.objective !== objective || !checkpoint.stamp?.available || typeof checkpoint.sourceRunId !== 'string') return undefined
+    if (!checkpoint || checkpoint.schemaVersion !== 1 || checkpoint.objective !== objective || !checkpoint.stamp || typeof checkpoint.sourceRunId !== 'string') return undefined
     const controller = controllerFromGlobal({ taskController: JSON.parse(JSON.stringify(checkpoint.controller)) })
     if (!controller || !Array.isArray(checkpoint.reusableIds) || !checkpoint.fileHashes || !checkpoint.evidence) return undefined
     if (checkpoint.reusableIds.some((id) => typeof id !== 'string' || !controller.tasks.some((task) => task.id === id && task.status === 'passed') || !Array.isArray(checkpoint.evidence[id]))) return undefined
     const current = await workspaceStamp(root)
-    if (!current.available || current.digest !== checkpoint.stamp.digest) return undefined
-    for (const [path, hash] of Object.entries(checkpoint.fileHashes)) if (typeof hash !== 'string' || await fileHash(root, path) !== hash) return undefined
-    return checkpoint
+    if (!current.available && !(checkpoint.facts?.length)) return undefined
+    const valid = new Set<string>()
+    const stageFileHashes: Record<string, Record<string, string>> = {}
+    for (const id of current.available && checkpoint.stamp.available ? checkpoint.reusableIds : []) {
+      // Legacy checkpoints cannot attribute files to individual stages, so
+      // keep their conservative all-referenced-files check.
+      const hashes = checkpoint.stageFileHashes?.[id] ?? checkpoint.fileHashes
+      if (!hashes || !Object.keys(hashes).length) continue
+      if ((await Promise.all(Object.entries(hashes).map(async ([path, hash]) => typeof hash === 'string' && await fileHash(root, path) === hash))).every(Boolean)) {
+        valid.add(id); stageFileHashes[id] = hashes
+      }
+    }
+    // A dependent stage must be revalidated when its prerequisite is stale.
+    let changed = true
+    while (changed) {
+      changed = false
+      for (const task of controller.tasks) if (valid.has(task.id) && task.dependsOn.some(id => !valid.has(id))) { valid.delete(task.id); changed = true }
+    }
+    const facts: NonNullable<Checkpoint['facts']> = []
+    for (const fact of checkpoint.facts ?? []) {
+      const value = object(fact.result)
+      if (controller.tasks.some(t => t.id === fact.stageId) && typeof value.path === 'string' && typeof value.hash === 'string' && await fileHash(root, value.path) === value.hash && Buffer.byteLength(JSON.stringify([...facts, fact])) <= 32000) facts.push(fact)
+    }
+    if (!valid.size && !facts.length) return undefined
+    const reusableIds = checkpoint.reusableIds.filter(id => valid.has(id))
+    return { ...checkpoint, facts, stamp: current, reusableIds, stageFileHashes: Object.fromEntries(reusableIds.map(id => [id, stageFileHashes[id]!])), fileHashes: Object.assign({}, ...reusableIds.map(id => stageFileHashes[id])), evidence: Object.fromEntries(reusableIds.map(id => [id, checkpoint.evidence[id]!])) }
   } catch { return undefined }
 }
 

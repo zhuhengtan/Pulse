@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto'
 import type { JsonValue, ResultRef } from '@hunterzhu/pulse-runtime'
+import { acceptanceCheckSchema, type AcceptanceCheck } from './task-controller/acceptance.js'
 
 export type TaskRecordStatus = 'in_progress' | 'verifying' | 'replanning' | 'accepted' | 'incomplete' | 'unverifiable'
 
@@ -15,7 +17,9 @@ export interface TaskRecord {
   objective: string
   continuedFromRunId?: string
   assessments?: TaskCriterionAssessment[]
-  acceptanceCriteria: Array<{ id: string; description: string }>
+  acceptanceCriteria: AcceptanceCriterion[]
+  acceptanceChecks?: AcceptanceCheck[]
+  supersededCriteria?: AcceptanceCriterion[]
   status: TaskRecordStatus
   replanCount: number
   attempts: TaskAttempt[]
@@ -44,6 +48,13 @@ export interface TaskOutcome {
   completedAt: string
 }
 
+export interface AcceptanceCriterion {
+  id: string
+  description: string
+  kind?: 'requirement' | 'constraint' | 'environment'
+  source?: { hash: string; start: number; end: number; document?: string }
+}
+
 export const maxTaskReplans = 2
 
 export function taskRecordFromGlobal(global: JsonValue): TaskRecord | undefined {
@@ -56,7 +67,7 @@ export function taskRecordFromGlobal(global: JsonValue): TaskRecord | undefined 
     if (!item || typeof item !== 'object' || Array.isArray(item)) return []
     const criterion = item as Record<string, JsonValue>
     return typeof criterion.id === 'string' && typeof criterion.description === 'string'
-      ? [{ id: criterion.id, description: criterion.description }]
+      ? [{ id: criterion.id, description: criterion.description, ...(criterion.source && typeof criterion.source === 'object' && !Array.isArray(criterion.source) ? { source: criterion.source as unknown as NonNullable<AcceptanceCriterion['source']> } : {}), ...(['requirement', 'constraint', 'environment'].includes(String(criterion.kind)) ? { kind: criterion.kind as NonNullable<AcceptanceCriterion['kind']> } : {}) }]
       : []
   }) : []
   const attempts = Array.isArray(value.attempts) ? value.attempts.flatMap((item) => {
@@ -75,6 +86,8 @@ export function taskRecordFromGlobal(global: JsonValue): TaskRecord | undefined 
     ...(typeof value.continuedFromRunId === 'string' ? { continuedFromRunId: value.continuedFromRunId } : {}),
     ...(Array.isArray(value.assessments) ? { assessments: value.assessments.filter((item) => item && typeof item === 'object' && !Array.isArray(item) && typeof item.criterionId === 'string' && ['passed', 'not_met', 'unverifiable'].includes(String(item.status)) && typeof item.rationale === 'string' && Array.isArray(item.evidenceRefs)) as unknown as TaskCriterionAssessment[] } : {}),
     acceptanceCriteria: criteria,
+    ...(value.acceptanceChecks !== undefined ? { acceptanceChecks: acceptanceCheckSchema.array().parse(value.acceptanceChecks) } : {}),
+    ...(Array.isArray(value.supersededCriteria) ? { supersededCriteria: structuredClone(value.supersededCriteria) as unknown as AcceptanceCriterion[] } : {}),
     status,
     replanCount: typeof value.replanCount === 'number' && Number.isInteger(value.replanCount) ? Math.max(0, value.replanCount) : 0,
     attempts,
@@ -101,28 +114,35 @@ export function hasTaskProgress(previous: TaskAttempt | undefined, current: Task
 }
 
 /** Preserve explicit checklist lines and sentence boundaries in the user request. */
-export function acceptanceCriteriaFromObjective(objective: string): Array<{ id: string; description: string }> {
-  const lines = objective.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  const listItems = lines.flatMap((line) => {
-    const match = line.match(/^(?:[-*•]\s+|\d+[.)、]\s*)(.+)$/)
-    return match ? [match[1]!.trim()] : []
-  })
-  const clauses = (listItems.length > 1 ? listItems : [objective.replace(/\r?\n/g, ' ')])
-    .flatMap((text) => text.split(/(?<=[.!?;])\s+|(?<=[。！？；])\s*/))
-    .map((text) => text.trim())
-    .filter(Boolean)
-  // Sentence splitting must not turn inline list numbers into standalone goals.
-  const merged: string[] = []
-  for (let index = 0; index < clauses.length; index++) {
-    const clause = clauses[index]!
-    if (/^\d+[.)、]$/.test(clause) && clauses[index + 1]) merged.push(`${clause} ${clauses[++index]}`)
-    else merged.push(clause)
+export function acceptanceCriteriaFromObjective(objective: string, document?: string): AcceptanceCriterion[] {
+  const sourceHash = createHash('sha256').update(objective).digest('hex')
+  const clauses: Array<{ description: string; start: number; end: number }> = []
+  let cursor = 0
+  for (const line of objective.split(/\r?\n/)) {
+    const prefix = line.match(/^\s*(?:[-*•]\s+|\d+[.)、]\s*)/)?.[0] ?? ''
+    const body = line.slice(prefix.length)
+    let offset = 0
+    for (const part of body.split(/(?<=[.!?;])\s+|(?<=[。！？；])\s*/)) {
+      const description = part.trim()
+      if (description) {
+        const start = cursor + prefix.length + offset + part.indexOf(description)
+        clauses.push({ description, start, end: start + description.length })
+      }
+      offset = body.indexOf(part, offset) + part.length
+      while (/\s/.test(body[offset] ?? '') && offset < body.length) offset++
+    }
+    cursor += line.length + (objective.slice(cursor + line.length).startsWith('\r\n') ? 2 : 1)
   }
-  const normalized = merged.length ? merged : [objective.trim()]
-  const bounded = normalized.length <= 32
-    ? normalized
-    : [...normalized.slice(0, 31), `Additional requested conditions: ${normalized.slice(31).join('; ')}`]
-  return bounded.map((description, index) => ({ id: `criterion-${index + 1}`, description }))
+  const merged: typeof clauses = []
+  for (let i = 0; i < clauses.length; i++) {
+    const clause = clauses[i]!
+    if (/^\d+[.)、]$/.test(clause.description) && clauses[i + 1]) {
+      const next = clauses[++i]!; merged.push({ ...clause, description: `${clause.description} ${next.description}`, end: next.end })
+    } else merged.push(clause)
+  }
+  return merged.map(({ description, start, end }, index) => ({ id: `criterion-${index + 1}`, description,
+    kind: /禁止|不得|不能|必须|不要|must|never|without|do not/i.test(description) ? 'constraint' : /环境|版本|platform|environment/i.test(description) ? 'environment' : 'requirement',
+    source: { hash: sourceHash, start, end, ...(document ? { document } : {}) } }))
 }
 
 /** Deliberately narrow: unrelated new requests must not inherit authorization. */
@@ -138,6 +158,8 @@ export function isExecutionSummaryFollowup(text: string): boolean {
 export function continueTaskRecord(previous: TaskRecord, runId: string): TaskRecord {
   return { schemaVersion: 1, runId, objective: previous.objective,
     acceptanceCriteria: structuredClone(previous.acceptanceCriteria),
+    ...(previous.acceptanceChecks ? { acceptanceChecks: structuredClone(previous.acceptanceChecks) } : {}),
+    ...(previous.supersededCriteria ? { supersededCriteria: structuredClone(previous.supersededCriteria) } : {}),
     continuedFromRunId: previous.runId, assessments: structuredClone(previous.assessments ?? []),
     status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] }
 }

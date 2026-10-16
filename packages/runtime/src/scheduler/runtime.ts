@@ -29,6 +29,12 @@ import { RuntimeToolRegistry } from '../tools/registry.js'
 import { SchedulerDecisionCoordinator, schedulerDecisionCandidateFromLane, type SchedulerDecision, type SchedulerDecisionConfig, type SchedulerDecisionRequest } from './decision.js'
 import { HumanArbitrationCoordinator, ruleHumanArbitration, type HumanArbitrationConfig, type HumanArbitrationDecision, type HumanArbitrationRequest } from './human-arbitration.js'
 
+function repeatedControlFailure(error: RuntimeError, count: number): RuntimeError {
+  const details = { lastError: error as unknown as JsonValue, consecutiveControlErrors: count }
+  if (error.code === 'CONTEXT_TOO_LARGE') return { code: error.code, message: `${error.message} Configure historyCompaction with an Effect-backed summary, or restore a checkpoint with a smaller history before continuing.`, details }
+  return { code: 'CONTROL_ERROR_LOOP', message: 'Lane exceeded the consecutive control error limit.', details }
+}
+
 export interface LaneStepContext { lane: Readonly<LaneRecord>; state: Readonly<RuntimeState>; resumeInput?: ResumeInput; humanInputs?: readonly HumanInputRecord[]; now: number; observe?: (event: { type: 'progress' | 'chunk' | 'trace' | 'warning' | 'diagnostic'; data: JsonValue }) => void }
 export interface LaneProgram {
   id: string
@@ -134,6 +140,8 @@ export interface RuntimeConfig {
   hostPolicy?: ModelHostPolicy
   modelRouter?: ModelRouter
   tools?: RuntimeToolRegistry
+  recoveryBuildMigration?: { from: string; to: string }
+  recoveryFingerprints?: RuntimePersistenceCompatibility['fingerprints']
   toolVersions?: Record<string, string>
   policyVersion?: string
   routerVersion?: string
@@ -505,7 +513,7 @@ export class PulseRuntime {
   readonly results = {
     get: (resultRef: string): ResultRecord | undefined => {
       const result = this.state.results.get(resultRef)
-      return result === undefined ? undefined : structuredClone(result)
+      return result === undefined ? undefined : { ...structuredClone(result), ...(result.value === undefined ? {} : { value: structuredClone(result.value) }) }
     },
   }
   private shuttingDown = false
@@ -524,6 +532,8 @@ export class PulseRuntime {
   private readonly enforcingRecoveryPrograms: boolean
   private readonly toolVersions: Readonly<Record<string, string>>
   private readonly recoveryCompatibility: RuntimePersistenceCompatibility | undefined
+  private readonly recoveryBuildMigration: { from: string; to: string } | undefined
+  private readonly recoveryFingerprints: RuntimePersistenceCompatibility['fingerprints']
   private readonly policyVersion: string | undefined
   private readonly routerVersion: string | undefined
   private readonly budget: RuntimeBudgetConfig
@@ -620,14 +630,58 @@ export class PulseRuntime {
     const loaded = await backend.load()
     if (loaded?.snapshotBodies === 'external' && backend.snapshotStore === undefined) throw new Error('RUNTIME_SNAPSHOT_STORE_REQUIRED')
     const withSnapshots = loaded === undefined || backend.snapshotStore === undefined ? loaded : await hydrateRuntimeSnapshotBodies(loaded, backend.snapshotStore)
-    const snapshot = withSnapshots === undefined || backend.resultStore === undefined ? withSnapshots : await hydrateRuntimeResultBodies(withSnapshots, backend.resultStore)
+    const snapshot = withSnapshots === undefined || backend.resultStore === undefined || backend.lazyResultBodies && backend.resultStore.loadSync ? withSnapshots : await hydrateRuntimeResultBodies(withSnapshots, backend.resultStore)
     if (snapshot?.resultBodies === 'external' && backend.resultStore === undefined) throw new Error('RUNTIME_RESULT_STORE_REQUIRED')
     const restoredConfig = snapshot === undefined ? config : { ...config, persistence: snapshot, ...(config.persistenceBackend === undefined || loaded?.integrity?.digest === undefined ? {} : { persistenceExpectedDigest: loaded.integrity.digest }) }
-    return new PulseRuntime({
+    const runtime = new PulseRuntime({
       ...restoredConfig,
       ...(restoredConfig.factInboxDedupeArchive === undefined && backend.factInboxDedupeArchive !== undefined ? { factInboxDedupeArchive: backend.factInboxDedupeArchive } : {}),
       ...(restoredConfig.sessionStore === undefined && backend.sessionStore !== undefined ? { sessionStore: backend.sessionStore } : {}),
     })
+    if (snapshot?.compatibility?.fingerprints) runtime.assertRecoveryFingerprints(snapshot.compatibility)
+    if (backend.lazyResultBodies && backend.resultStore?.loadSync) runtime.installLazyResults(backend, snapshot?.externalResultRefs ?? [])
+    return runtime
+  }
+
+  private lazyResultCache = new Map<string, JsonValue>()
+  private lazyResultSizes = new Map<string, number>()
+  private lazyResultBytes = 0
+  private lazyResultRefs = new Set<string>()
+  private installLazyResults(backend: RuntimePersistenceBackend, persistedRefs: string[]): void {
+    const store = backend.resultStore
+    if (!store?.loadSync) return
+    for (const [ref, result] of this.state.results) {
+      if (this.lazyResultRefs.has(ref) || !persistedRefs.includes(ref)) continue
+      this.lazyResultRefs.add(ref)
+      delete result.value
+      Object.defineProperty(result, 'value', { configurable: true, enumerable: false, get: () => {
+        let value = this.lazyResultCache.get(ref)
+        if (value === undefined) { value = store.loadSync!(ref); if (value === undefined) throw new Error(`RUNTIME_RESULT_NOT_FOUND:${ref}`); if (result.contentHash && contentHash(value) !== result.contentHash) throw new Error(`RUNTIME_RESULT_INTEGRITY_MISMATCH:${ref}`); this.lazyResultCache.set(ref, value); const bytes = Buffer.byteLength(stableSerialize(value)); this.lazyResultSizes.set(ref, bytes); this.lazyResultBytes += bytes }
+        while ((this.lazyResultBytes > 4_000_000 || this.lazyResultCache.size > 128) && this.lazyResultCache.size > 1) {
+          const oldest = this.lazyResultCache.keys().next().value!
+          this.lazyResultBytes -= this.lazyResultSizes.get(oldest) ?? 0
+          this.lazyResultCache.delete(oldest); this.lazyResultSizes.delete(oldest)
+        }
+        return value
+      } })
+    }
+  }
+  /** Only the active step's referenced bodies enter its pure snapshot. Older refs remain available through Host inspection. */
+  private stepState(lane: LaneRecord): RuntimeState {
+    const copy = structuredClone(this.state)
+    if (!this.lazyResultRefs.size) return copy
+    const refs = new Set<string>()
+    const collect = (value: unknown): void => {
+      if (typeof value === 'string') { if (this.state.results.has(value)) refs.add(value); return }
+      if (Array.isArray(value)) { for (const item of value) collect(item); return }
+      if (value && typeof value === 'object') for (const item of Object.values(value)) collect(item)
+    }
+    collect(lane.resume.locals); collect(lane.context.state); collect(lane.pendingResumeInput); collect(lane.pendingHumanInputs); collect([...(lane.visibleResultRefs ?? [])].slice(-64))
+    collect(lane.context.history.slice(-64))
+    const agent = this.state.agents.get(lane.agentId)
+    if (agent) { collect(agent.globalVersions.get(agent.latestGlobalVersion)); collect(agent.globalVersions.get(lane.contextSnapshotVersion)) }
+    for (const ref of refs) { const source = this.state.results.get(ref), target = copy.results.get(ref); if (source && target && source.value !== undefined) { target.value = structuredClone(source.value); collect(target.value) } }
+    return copy
   }
 
   constructor(config: RuntimeConfig = {}) {
@@ -640,6 +694,8 @@ export class PulseRuntime {
     this.modelRouter = config.modelRouter ?? new ModelRouter(this.models, config.hostPolicy)
     this.tools = config.tools ?? new RuntimeToolRegistry()
     this.toolVersions = { ...(config.toolVersions ?? {}) }
+    this.recoveryBuildMigration = config.recoveryBuildMigration
+    this.recoveryFingerprints = config.recoveryFingerprints
     this.policyVersion = config.policyVersion
     this.routerVersion = config.routerVersion
     this.state = restored?.state ?? createRuntimeState(config.maxTotalLanes ?? 64, { ...(config.maxQueuedEffects === undefined ? {} : { maxQueuedEffects: config.maxQueuedEffects }), ...(config.maxRunning === undefined ? {} : { maxRunning: config.maxRunning }), ...(config.forkAffinity === undefined ? {} : { forkAffinity: config.forkAffinity }), ...(config.historySoftTokens === undefined ? {} : { historySoftTokens: config.historySoftTokens }), ...(config.historyHardTokens === undefined ? {} : { historyHardTokens: config.historyHardTokens }), ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }), ...(config.trustedSanitizerIds === undefined ? {} : { trustedSanitizerIds: config.trustedSanitizerIds }) })
@@ -1035,6 +1091,7 @@ export class PulseRuntime {
     return compacted
   }
   async persist(backend: RuntimePersistenceBackend): Promise<void> {
+    if (backend.eventArchive && backend.checkpointEventInterval && this.state.events.length >= backend.checkpointEventInterval) { await this.checkpoint(backend); return }
     const persistedPolicy = this.storagePolicy.clone()
     persistedPolicy.markPersisted()
     // The saved state is already authoritative: restore does not replay the
@@ -1055,6 +1112,7 @@ export class PulseRuntime {
       this.persistenceDigest = snapshot.integrity?.digest
       if (journalWatermark !== undefined && journalWatermark > this.mutationLog.watermark && journalWatermark <= this.mutationLog.lastSequence) this.mutationLog.truncateThrough(journalWatermark)
     }
+    if (backend.lazyResultBodies && backend.resultStore?.loadSync) this.installLazyResults(backend, snapshot.externalResultRefs ?? [])
     this.storagePolicy.markPersisted()
     this.markArtifactsPersisted()
     this.syncStoragePolicy()
@@ -1097,10 +1155,13 @@ export class PulseRuntime {
       }
     }
     const eventWatermark = options.compactEventsThrough ?? this.state.events.at(-1)?.seq
+    let archivedEventIds: string[] = []
     if (backend.eventArchive !== undefined && eventWatermark !== undefined) {
       const fromSeq = (this.state.eventsCompactedThrough ?? 0) + 1
       const events = this.state.events.filter((event) => event.seq >= fromSeq && event.seq <= eventWatermark)
       if (events.length) await backend.eventArchive.append(events)
+      archivedEventIds = events.map(event => event.id)
+      persistedPolicy.forgetArchivedEvents(archivedEventIds)
     }
     const exported = exportRuntimeCheckpoint(this.persistenceState(), this.mutationLog, this.outbox, this.quarantine, persistedPolicy, eventWatermark === undefined ? {} : { compactEventsThrough: eventWatermark }, this.factInbox.snapshot(), this.persistenceCompatibility())
     const archived = backend.eventArchive === undefined || eventWatermark === undefined ? exported : withRuntimePersistenceIntegrity({ ...exported, eventArchive: { through: eventWatermark } })
@@ -1111,13 +1172,15 @@ export class PulseRuntime {
     if (backend === this.persistenceBackend) this.persistenceDigest = snapshot.integrity?.digest
     this.storagePolicy.markPersisted()
     this.markArtifactsPersisted()
-    this.syncStoragePolicy()
     const watermark = snapshot.checkpoint?.logWatermark ?? 0
     if (watermark > 0 && this.mutationLog.lastSequence >= watermark) this.mutationLog.truncateThrough(watermark)
     if (eventWatermark !== undefined) {
       this.state.events = this.state.events.filter((event) => event.seq > eventWatermark)
       this.state.eventsCompactedThrough = Math.max(this.state.eventsCompactedThrough ?? 0, eventWatermark)
     }
+    this.storagePolicy.forgetArchivedEvents(archivedEventIds)
+    this.syncStoragePolicy()
+    if (backend.lazyResultBodies && backend.resultStore?.loadSync) this.installLazyResults(backend, snapshot.externalResultRefs ?? [])
     this.schedulePersistence()
     return snapshot
   }
@@ -1160,6 +1223,7 @@ export class PulseRuntime {
       schemaVersion: 1,
       programVersions: Object.fromEntries([...this.programs.entries()].map(([key, program]) => [key, program.version])),
       toolVersions,
+      ...(this.recoveryFingerprints ? { fingerprints: this.recoveryFingerprints } : {}),
       ...(this.policyVersion === undefined ? {} : { policyVersion: this.policyVersion }),
       ...(this.routerVersion === undefined ? {} : { routerVersion: this.routerVersion }),
     }
@@ -1169,10 +1233,20 @@ export class PulseRuntime {
       const program = this.programs.get(key)
       if (!program || program.version !== version) throw new Error(`PROGRAM_VERSION_UNAVAILABLE:${key}`)
     }
+    this.assertRecoveryFingerprints(expected)
     const toolVersions = this.currentToolVersions()
     for (const [name, version] of Object.entries(expected.toolVersions)) if (toolVersions[name] !== version) throw new Error(`TOOL_VERSION_UNAVAILABLE:${name}@${version}`)
     if (expected.policyVersion !== undefined && this.policyVersion !== expected.policyVersion) throw new Error(`POLICY_VERSION_UNAVAILABLE:${expected.policyVersion}`)
     if (expected.routerVersion !== undefined && this.routerVersion !== expected.routerVersion) throw new Error(`ROUTER_VERSION_UNAVAILABLE:${expected.routerVersion}`)
+  }
+
+  private assertRecoveryFingerprints(expected: RuntimePersistenceCompatibility): void {
+    if (expected.fingerprints) {
+      if (!this.recoveryFingerprints) throw new Error('RECOVERY_FINGERPRINT_REQUIRED')
+      if (expected.fingerprints.build !== this.recoveryFingerprints.build && (this.recoveryBuildMigration?.from !== expected.fingerprints.build || this.recoveryBuildMigration?.to !== this.recoveryFingerprints.build)) throw new Error(`RECOVERY_BUILD_MIGRATION_REQUIRED:from=${expected.fingerprints.build}:to=${this.recoveryFingerprints.build}`)
+      for (const [name, hash] of Object.entries(expected.fingerprints.tools)) if (this.recoveryFingerprints.tools[name] !== hash) throw new Error(`TOOL_SCHEMA_INCOMPATIBLE:${name}`)
+      if (expected.fingerprints.policy !== this.recoveryFingerprints.policy) throw new Error('RECOVERY_POLICY_INCOMPATIBLE')
+    }
   }
 
   private currentToolVersions(): Record<string, string> {
@@ -1334,7 +1408,7 @@ export class PulseRuntime {
   }
 
   private enqueueFact(fact: RuntimeFact, eventId: string, urgent = false): boolean {
-    const candidateInbox = FactInbox.fromSnapshot<RuntimeFact>(this.factInbox.snapshot())
+    const candidateInbox = FactInbox.fromSnapshot<RuntimeFact>(this.factInbox.snapshot(), this.factInboxDedupeArchive ? { dedupeArchive: this.factInboxDedupeArchive } : {})
     if (!(urgent ? candidateInbox.enqueueUrgent(fact, eventId) : candidateInbox.enqueue(fact, eventId))) return false
     const candidatePolicy = this.storagePolicy.clone()
     this.syncStoragePolicy(candidatePolicy, this.state, candidateInbox)
@@ -1710,7 +1784,7 @@ export class PulseRuntime {
       const program = this.programs.get(`${lane.resume.programId}@${lane.resume.programVersion}`)
       if (!program) { this.failLane(lane, { code: 'PROGRAM_NOT_REGISTERED', message: `${lane.resume.programId}@${lane.resume.programVersion}` }); continue }
       let output: LaneStepOutput
-      const stepContext: LaneStepContext = { lane: stepLane, state: structuredClone(this.state), ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), ...(lane.pendingHumanInputs?.length ? { humanInputs: structuredClone(lane.pendingHumanInputs) } : {}), now: this.state.now, observe: (event) => { this.observationInbox.enqueue({ ...event, agentId: lane.agentId, laneId: lane.id, timestamp: this.state.now }); this.notifyActivity() } }
+      const stepContext: LaneStepContext = { lane: stepLane, state: this.stepState(lane), ...(lane.pendingResumeInput ? { resumeInput: structuredClone(lane.pendingResumeInput) } : {}), ...(lane.pendingHumanInputs?.length ? { humanInputs: structuredClone(lane.pendingHumanInputs) } : {}), now: this.state.now, observe: (event) => { this.observationInbox.enqueue({ ...event, agentId: lane.agentId, laneId: lane.id, timestamp: this.state.now }); this.notifyActivity() } }
       try { output = withPureStepGuard(() => lane.series || program.seriesMember ? this.seriesStep(program, stepContext, lane.series) : program.step(stepContext)) }
       catch (cause) {
         const failure: RuntimeError = runtimeErrorFromCause(cause, 'STEP_FAILED')
@@ -1731,7 +1805,7 @@ export class PulseRuntime {
         const rejection: RuntimeError = { code, message }
         const consecutive = (lane.consecutiveControlErrors ?? 0) + 1
         const controlInput: ResumeInput = { type: 'control_error', error: rejection, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
-        if (consecutive >= this.maxConsecutiveControlErrors) this.failLane(lane, { code: 'CONTROL_ERROR_LOOP', message: 'Lane exceeded the consecutive control error limit.', details: { lastError: rejection as unknown as JsonValue } })
+        if (consecutive >= this.maxConsecutiveControlErrors) this.failLane(lane, repeatedControlFailure(rejection, consecutive))
         else this.commitLaneControlInput(lane, controlInput, { type: 'step.rejected', laneId: lane.id, data: rejection as unknown as JsonValue }, { consecutiveControlErrors: consecutive })
         progressed++
         continue
@@ -1743,7 +1817,7 @@ export class PulseRuntime {
         if (result.rejection.code === 'FORK_AFFINITY_COLLAPSIBLE') {
           this.commitLaneControlInput(lane, controlInput, { type: 'fork.affinity_advice', laneId: lane.id, data: result.rejection as unknown as JsonValue })
         } else {
-          if (consecutive >= this.maxConsecutiveControlErrors) this.failLane(lane, { code: 'CONTROL_ERROR_LOOP', message: 'Lane exceeded the consecutive control error limit.', details: { lastError: result.rejection as unknown as JsonValue } })
+          if (consecutive >= this.maxConsecutiveControlErrors) this.failLane(lane, repeatedControlFailure(result.rejection, consecutive))
           else this.commitLaneControlInput(lane, controlInput, { type: 'step.rejected', laneId: lane.id, data: result.rejection as unknown as JsonValue }, { consecutiveControlErrors: consecutive })
         }
       } else {
@@ -2180,6 +2254,7 @@ export class PulseRuntime {
       effect.retryPolicy = { maxAttempts: Math.max(1, eligible), initialBackoffMs: 0, maxBackoffMs: 0, jitter: false }
     }
     const attemptMetadata = execution.metadata && typeof execution.metadata === 'object' && !Array.isArray(execution.metadata) ? execution.metadata as Record<string, JsonValue> : undefined
+    if (attempt && typeof attemptMetadata?.providerAttempts === 'number') attempt.providerAttempts = attemptMetadata.providerAttempts
     const selectedModel = attemptMetadata?.selected && typeof attemptMetadata.selected === 'object' && !Array.isArray(attemptMetadata.selected) ? attemptMetadata.selected as Record<string, JsonValue> : undefined
     if (attempt && typeof selectedModel?.id === 'string') attempt.modelId = selectedModel.id
     if (attempt && typeof selectedModel?.providerId === 'string') attempt.providerId = selectedModel.providerId
@@ -3067,6 +3142,17 @@ export class PulseRuntime {
             ...(observation.outcome?.resultRef === undefined ? [] : [observation.outcome.resultRef]),
             ...(observation.outcome?.rejectedOutputRefs ?? []),
           ])
+          // A failed/cancelled child may have durable tool effects without a
+          // completion ResultRef. Expose only direct same-agent child receipts.
+          for (const observation of Object.values(observations)) {
+            if (observation.state === 'pending' || observation.target.kind !== 'lane') continue
+            const child = this.state.lanes.get(observation.target.id)
+            if (!child || child.ownerLaneId !== nextLane.id || child.agentId !== nextLane.agentId) continue
+            for (const effectId of child.ownedEffectIds) {
+              const effect = this.state.effects.get(effectId)
+              if (effect?.kind === 'tool' && effect.outcome?.resultRef) refs.push(effect.outcome.resultRef)
+            }
+          }
           if (!refs.length) return
           if (nextLane.visibleResultRefs) for (const ref of refs) nextLane.visibleResultRefs.add(ref)
           else nextLane.visibleResultRefs = new Set(refs)

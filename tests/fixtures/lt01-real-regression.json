@@ -1,0 +1,737 @@
+{
+  "source": "LT01 round5 real DeepSeek; sanitized result receipts and usage only, no messages or reasoning body",
+  "stages": [
+    {
+      "id": "t1",
+      "goal": "读取 scripts/eval/run.mjs、evals/README.md 及 scripts/eval 目录清单，确认 provider-nested 缺失与 --max-calls 误用，并写出含各节结论的现状发现报告",
+      "check": "发现报告文件已写入且含现状/差距/计划等完整小节（非空目录清单：scripts/eval、evals/README.md）"
+    },
+    {
+      "id": "t2",
+      "goal": "新增 scripts/eval/config-budget.mjs：resolveEvaluationModel(config,ref) 支持 providerId/modelId 嵌套与旧 flat models，非法模型抛错；buildEvaluationArgs 用 --max-model-calls 作调用预算、maxTurns 独立、--max-calls 仅为兼容别名，非法预算抛错",
+      "check": "node 本地导入该模块：嵌套/扁平均得 {providerCode,modelCode,profile}；非法模型与非法预算抛错；buildEvaluationArgs 输出数组含 --max-model-calls 且 --max-calls 不复用作轮数"
+    },
+    {
+      "id": "t3",
+      "goal": "将 config-budget.mjs 接入 scripts/eval/run.mjs，使其读取 provider-nested 与 flat 模型配置并正确区分调用预算(max-model-calls)与轮数(max-turns)",
+      "check": "run.mjs 已 import 并使用 resolveEvaluationModel/buildEvaluationArgs；本地无网络 dry 检查参数生成，未启动真实模型"
+    },
+    {
+      "id": "t4",
+      "goal": "更新 evals/README.md，记录 providerId/modelId 新配置、旧 flat models 兼容、--max-model-calls 与 --max-turns 语义及 --max-calls 兼容别名说明",
+      "check": "README 含新配置示例与两组预算参数说明，且明确 --max-calls 仅为实际调用预算别名"
+    },
+    {
+      "id": "t5",
+      "goal": "编写并运行本地定向测试脚本，覆盖嵌套/扁平配置解析、非法模型/预算失败、CLI 参数生成与 run.mjs 集成，不启动真实模型",
+      "check": "node 运行定向测试脚本退出码为 0，输出全部用例通过；无网络/无真实模型调用"
+    },
+    {
+      "id": "t6",
+      "goal": "最终核查集成并汇总交付证据：重跑定向测试，确认未启动真实模型、未读取用户配置/凭据、未执行 git 提交，产出核查报告",
+      "check": "测试复跑通过；核查报告显式说明未启动真实模型、未读取凭据、未提交，并列出改动文件路径"
+    }
+  ],
+  "checks": [
+    {
+      "args": {
+        "command": "node",
+        "args": [
+          "--test",
+          "scripts/eval/config-budget.test.mjs"
+        ]
+      },
+      "value": {
+        "code": 0,
+        "stdout": "✔ resolves provider-nested providerId/modelId (1.157041ms)\n✔ resolves provider-nested by bare model key (0.111167ms)\n✔ resolves legacy flat models when no nesting matches (0.082708ms)\n✔ ambiguous bare reference fails explicitly (0.227709ms)\n✔ unknown model fails explicitly (0.115ms)\n✔ malformed reference fails explicitly (0.074292ms)\n✔ buildEvaluationArgs keeps call budget and turns independent (0.482125ms)\n✔ legacy --max-calls is only a call-budget alias, never turns (0.079041ms)\n✔ conflicting call budgets fail explicitly (0.091917ms)\n✔ illegal budgets fail explicitly (0.168208ms)\nℹ tests 10\nℹ suites 0\nℹ pass 10\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 50.278083\n",
+        "stderr": "",
+        "truncated": false,
+        "timedOut": false,
+        "aborted": false,
+        "outputArchive": {
+          "stdout": {
+            "id": "67ff66ab-faea-475f-959f-9819de4eedbd-stdout.log",
+            "bytes": 725,
+            "storedBytes": 725,
+            "sha256": "bb76d0a22f83f09bd8800e1077686b7d7c53fbaf74798245418c4fcc0523989f",
+            "storedSha256": "bb76d0a22f83f09bd8800e1077686b7d7c53fbaf74798245418c4fcc0523989f",
+            "omittedStart": 725,
+            "omittedEnd": 725,
+            "complete": true
+          }
+        },
+        "checkReceipt": {
+          "schemaVersion": 1,
+          "command": "node",
+          "args": [
+            "--test",
+            "scripts/eval/config-budget.test.mjs"
+          ],
+          "cwd": ".",
+          "files": {
+            "tsconfig.json": "81c3c5eb96f9d1db55772869e24547c36ae1b676437b2e0acb32732b32bfc192",
+            "package.json": "e35af004d7d727db01141bbb2979d33508c5038bb68e26a4c503c2afe63bcc24",
+            "scripts/eval/config-budget.test.mjs": "b621f7a264541ec78cf82b66fcb77ea14fc75ce9ae96e57e2b48cb7b34e71e74",
+            "scripts/eval/config-budget.mjs": "fcbb3b51f3acc69fe0530631ef402007d948e0a0cfa454015fff685e29c1d57a"
+          },
+          "definitions": {
+            "scripts/eval/config-budget.test.mjs": "b621f7a264541ec78cf82b66fcb77ea14fc75ce9ae96e57e2b48cb7b34e71e74"
+          },
+          "environment": {
+            "platform": "darwin",
+            "node": "v24.1.0"
+          },
+          "stable": true,
+          "definitionChanged": false
+        }
+      }
+    },
+    {
+      "args": {
+        "command": "node",
+        "args": [
+          "--test",
+          "scripts/eval/config-budget.test.mjs"
+        ]
+      },
+      "value": {
+        "code": 0,
+        "stdout": "✔ resolves provider-nested providerId/modelId (0.909416ms)\n✔ resolves provider-nested by bare model key (0.0875ms)\n✔ resolves legacy flat models when no nesting matches (0.074333ms)\n✔ ambiguous bare reference fails explicitly (0.22175ms)\n✔ unknown model fails explicitly (0.118375ms)\n✔ malformed reference fails explicitly (0.090208ms)\n✔ buildEvaluationArgs keeps call budget and turns independent (0.436417ms)\n✔ legacy --max-calls is only a call-budget alias, never turns (0.066208ms)\n✔ conflicting call budgets fail explicitly (0.076333ms)\n✔ illegal budgets fail explicitly (0.148458ms)\nℹ tests 10\nℹ suites 0\nℹ pass 10\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 48.481416\n",
+        "stderr": "",
+        "truncated": false,
+        "timedOut": false,
+        "aborted": false,
+        "outputArchive": {
+          "stdout": {
+            "id": "345b06de-0112-4ab0-a289-16a858fd2cdd-stdout.log",
+            "bytes": 725,
+            "storedBytes": 725,
+            "sha256": "c293dc4f75febaf253942e65c2a7044767ab71b4252a008786c2c1777593b89c",
+            "storedSha256": "c293dc4f75febaf253942e65c2a7044767ab71b4252a008786c2c1777593b89c",
+            "omittedStart": 725,
+            "omittedEnd": 725,
+            "complete": true
+          }
+        },
+        "checkReceipt": {
+          "schemaVersion": 1,
+          "command": "node",
+          "args": [
+            "--test",
+            "scripts/eval/config-budget.test.mjs"
+          ],
+          "cwd": ".",
+          "files": {
+            "tsconfig.json": "81c3c5eb96f9d1db55772869e24547c36ae1b676437b2e0acb32732b32bfc192",
+            "package.json": "e35af004d7d727db01141bbb2979d33508c5038bb68e26a4c503c2afe63bcc24",
+            "scripts/eval/config-budget.test.mjs": "b621f7a264541ec78cf82b66fcb77ea14fc75ce9ae96e57e2b48cb7b34e71e74",
+            "scripts/eval/config-budget.mjs": "fcbb3b51f3acc69fe0530631ef402007d948e0a0cfa454015fff685e29c1d57a"
+          },
+          "definitions": {
+            "scripts/eval/config-budget.test.mjs": "b621f7a264541ec78cf82b66fcb77ea14fc75ce9ae96e57e2b48cb7b34e71e74"
+          },
+          "environment": {
+            "platform": "darwin",
+            "node": "v24.1.0"
+          },
+          "stable": true,
+          "definitionChanged": false
+        }
+      }
+    },
+    {
+      "args": {
+        "command": "node",
+        "args": [
+          "--test",
+          "scripts/eval/config-budget.test.mjs"
+        ]
+      },
+      "value": {
+        "code": 0,
+        "stdout": "✔ resolves provider-nested providerId/modelId (0.880084ms)\n✔ resolves provider-nested by bare model key (0.081666ms)\n✔ resolves legacy flat models when no nesting matches (0.067708ms)\n✔ ambiguous bare reference fails explicitly (0.192042ms)\n✔ unknown model fails explicitly (0.104208ms)\n✔ malformed reference fails explicitly (0.065375ms)\n✔ buildEvaluationArgs keeps call budget and turns independent (0.337667ms)\n✔ legacy --max-calls is only a call-budget alias, never turns (0.057292ms)\n✔ conflicting call budgets fail explicitly (0.077875ms)\n✔ illegal budgets fail explicitly (0.143208ms)\nℹ tests 10\nℹ suites 0\nℹ pass 10\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 49.21525\n",
+        "stderr": "",
+        "truncated": false,
+        "timedOut": false,
+        "aborted": false,
+        "outputArchive": {
+          "stdout": {
+            "id": "1093c8df-db3c-4924-ba42-f1b84637aca4-stdout.log",
+            "bytes": 727,
+            "storedBytes": 727,
+            "sha256": "e7545154afbc0bb43c6252ccd1a016ba1efaf402fd643a33f8dd9118674ef7bc",
+            "storedSha256": "e7545154afbc0bb43c6252ccd1a016ba1efaf402fd643a33f8dd9118674ef7bc",
+            "omittedStart": 727,
+            "omittedEnd": 727,
+            "complete": true
+          }
+        },
+        "checkReceipt": {
+          "schemaVersion": 1,
+          "command": "node",
+          "args": [
+            "--test",
+            "scripts/eval/config-budget.test.mjs"
+          ],
+          "cwd": ".",
+          "files": {
+            "tsconfig.json": "81c3c5eb96f9d1db55772869e24547c36ae1b676437b2e0acb32732b32bfc192",
+            "package.json": "e35af004d7d727db01141bbb2979d33508c5038bb68e26a4c503c2afe63bcc24",
+            "scripts/eval/config-budget.test.mjs": "b621f7a264541ec78cf82b66fcb77ea14fc75ce9ae96e57e2b48cb7b34e71e74",
+            "scripts/eval/config-budget.mjs": "fcbb3b51f3acc69fe0530631ef402007d948e0a0cfa454015fff685e29c1d57a"
+          },
+          "definitions": {
+            "scripts/eval/config-budget.test.mjs": "b621f7a264541ec78cf82b66fcb77ea14fc75ce9ae96e57e2b48cb7b34e71e74"
+          },
+          "environment": {
+            "platform": "darwin",
+            "node": "v24.1.0"
+          },
+          "stable": true,
+          "definitionChanged": false
+        }
+      }
+    },
+    {
+      "args": {
+        "command": "node",
+        "args": [
+          "--test",
+          "scripts/eval/config-budget.test.mjs"
+        ]
+      },
+      "value": {
+        "code": 0,
+        "stdout": "✔ resolves provider-nested providerId/modelId (0.934417ms)\n✔ resolves provider-nested by bare model key (0.088459ms)\n✔ resolves legacy flat models when no nesting matches (0.085292ms)\n✔ ambiguous bare reference fails explicitly (0.204959ms)\n✔ unknown model fails explicitly (0.116625ms)\n✔ malformed reference fails explicitly (0.067042ms)\n✔ buildEvaluationArgs keeps call budget and turns independent (0.435458ms)\n✔ legacy --max-calls is only a call-budget alias, never turns (0.086292ms)\n✔ conflicting call budgets fail explicitly (0.07325ms)\n✔ illegal budgets fail explicitly (0.215625ms)\nℹ tests 10\nℹ suites 0\nℹ pass 10\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 49.958667\n",
+        "stderr": "",
+        "truncated": false,
+        "timedOut": false,
+        "aborted": false,
+        "outputArchive": {
+          "stdout": {
+            "id": "8bc26e1a-b345-4f67-9e92-10412515d7a3-stdout.log",
+            "bytes": 727,
+            "storedBytes": 727,
+            "sha256": "499541df6aea045a2f6bd12e66b4a349067fd98bf3354556a897cd6df6c4cfe8",
+            "storedSha256": "499541df6aea045a2f6bd12e66b4a349067fd98bf3354556a897cd6df6c4cfe8",
+            "omittedStart": 727,
+            "omittedEnd": 727,
+            "complete": true
+          }
+        },
+        "checkReceipt": {
+          "schemaVersion": 1,
+          "command": "node",
+          "args": [
+            "--test",
+            "scripts/eval/config-budget.test.mjs"
+          ],
+          "cwd": ".",
+          "files": {
+            "tsconfig.json": "81c3c5eb96f9d1db55772869e24547c36ae1b676437b2e0acb32732b32bfc192",
+            "package.json": "e35af004d7d727db01141bbb2979d33508c5038bb68e26a4c503c2afe63bcc24",
+            "scripts/eval/config-budget.test.mjs": "b621f7a264541ec78cf82b66fcb77ea14fc75ce9ae96e57e2b48cb7b34e71e74",
+            "scripts/eval/config-budget.mjs": "fcbb3b51f3acc69fe0530631ef402007d948e0a0cfa454015fff685e29c1d57a"
+          },
+          "definitions": {
+            "scripts/eval/config-budget.test.mjs": "b621f7a264541ec78cf82b66fcb77ea14fc75ce9ae96e57e2b48cb7b34e71e74"
+          },
+          "environment": {
+            "platform": "darwin",
+            "node": "v24.1.0"
+          },
+          "stable": true,
+          "definitionChanged": false
+        }
+      }
+    },
+    {
+      "args": {
+        "command": "node",
+        "args": [
+          "--test",
+          "scripts/eval/config-budget.test.mjs"
+        ]
+      },
+      "value": {
+        "code": 0,
+        "stdout": "✔ resolves provider-nested providerId/modelId (0.866833ms)\n✔ resolves provider-nested by bare model key (0.077542ms)\n✔ resolves legacy flat models when no nesting matches (0.066125ms)\n✔ ambiguous bare reference fails explicitly (0.186166ms)\n✔ unknown model fails explicitly (0.117791ms)\n✔ malformed reference fails explicitly (0.070292ms)\n✔ buildEvaluationArgs keeps call budget and turns independent (0.335ms)\n✔ legacy --max-calls is only a call-budget alias, never turns (0.052333ms)\n✔ conflicting call budgets fail explicitly (0.069291ms)\n✔ illegal budgets fail explicitly (0.148042ms)\nℹ tests 10\nℹ suites 0\nℹ pass 10\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 49.511208\n",
+        "stderr": "",
+        "truncated": false,
+        "timedOut": false,
+        "aborted": false,
+        "outputArchive": {
+          "stdout": {
+            "id": "a5508675-3b13-4ad7-8a8b-c231856bc3b4-stdout.log",
+            "bytes": 725,
+            "storedBytes": 725,
+            "sha256": "a3a907a900229cfad9d83b01c548fbaecb8a710ced0a3d3cee6d050b42878118",
+            "storedSha256": "a3a907a900229cfad9d83b01c548fbaecb8a710ced0a3d3cee6d050b42878118",
+            "omittedStart": 725,
+            "omittedEnd": 725,
+            "complete": true
+          }
+        },
+        "checkReceipt": {
+          "schemaVersion": 1,
+          "command": "node",
+          "args": [
+            "--test",
+            "scripts/eval/config-budget.test.mjs"
+          ],
+          "cwd": ".",
+          "files": {
+            "tsconfig.json": "81c3c5eb96f9d1db55772869e24547c36ae1b676437b2e0acb32732b32bfc192",
+            "package.json": "e35af004d7d727db01141bbb2979d33508c5038bb68e26a4c503c2afe63bcc24",
+            "scripts/eval/config-budget.test.mjs": "b621f7a264541ec78cf82b66fcb77ea14fc75ce9ae96e57e2b48cb7b34e71e74",
+            "scripts/eval/config-budget.mjs": "fcbb3b51f3acc69fe0530631ef402007d948e0a0cfa454015fff685e29c1d57a"
+          },
+          "definitions": {
+            "scripts/eval/config-budget.test.mjs": "b621f7a264541ec78cf82b66fcb77ea14fc75ce9ae96e57e2b48cb7b34e71e74"
+          },
+          "environment": {
+            "platform": "darwin",
+            "node": "v24.1.0"
+          },
+          "stable": true,
+          "definitionChanged": false
+        }
+      }
+    },
+    {
+      "args": {
+        "command": "node",
+        "args": [
+          "--test",
+          "scripts/eval/config-budget.test.mjs"
+        ]
+      },
+      "value": {
+        "code": 0,
+        "stdout": "✔ resolves provider-nested providerId/modelId (0.919709ms)\n✔ resolves provider-nested by bare model key (0.086083ms)\n✔ resolves legacy flat models when no nesting matches (0.075666ms)\n✔ ambiguous bare reference fails explicitly (0.218125ms)\n✔ unknown model fails explicitly (0.109292ms)\n✔ malformed reference fails explicitly (0.068459ms)\n✔ buildEvaluationArgs keeps call budget and turns independent (0.366167ms)\n✔ legacy --max-calls is only a call-budget alias, never turns (0.060792ms)\n✔ conflicting call budgets fail explicitly (0.069208ms)\n✔ illegal budgets fail explicitly (0.146667ms)\nℹ tests 10\nℹ suites 0\nℹ pass 10\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 59.052042\n",
+        "stderr": "",
+        "truncated": false,
+        "timedOut": false,
+        "aborted": false,
+        "outputArchive": {
+          "stdout": {
+            "id": "5687c870-dfd7-438a-b89e-6dcc4b5f0a50-stdout.log",
+            "bytes": 728,
+            "storedBytes": 728,
+            "sha256": "de6824e3fac04f08c977fcbdfc20b6f4c8ce203e248d5efa26114256fd4af9a7",
+            "storedSha256": "de6824e3fac04f08c977fcbdfc20b6f4c8ce203e248d5efa26114256fd4af9a7",
+            "omittedStart": 728,
+            "omittedEnd": 728,
+            "complete": true
+          }
+        },
+        "checkReceipt": {
+          "schemaVersion": 1,
+          "command": "node",
+          "args": [
+            "--test",
+            "scripts/eval/config-budget.test.mjs"
+          ],
+          "cwd": ".",
+          "files": {
+            "tsconfig.json": "81c3c5eb96f9d1db55772869e24547c36ae1b676437b2e0acb32732b32bfc192",
+            "package.json": "e35af004d7d727db01141bbb2979d33508c5038bb68e26a4c503c2afe63bcc24",
+            "scripts/eval/config-budget.test.mjs": "b621f7a264541ec78cf82b66fcb77ea14fc75ce9ae96e57e2b48cb7b34e71e74",
+            "scripts/eval/config-budget.mjs": "fcbb3b51f3acc69fe0530631ef402007d948e0a0cfa454015fff685e29c1d57a"
+          },
+          "definitions": {
+            "scripts/eval/config-budget.test.mjs": "b621f7a264541ec78cf82b66fcb77ea14fc75ce9ae96e57e2b48cb7b34e71e74"
+          },
+          "environment": {
+            "platform": "darwin",
+            "node": "v24.1.0"
+          },
+          "stable": true,
+          "definitionChanged": false
+        }
+      }
+    }
+  ],
+  "usage": [
+    {
+      "sample": 1,
+      "inputTokens": 3547,
+      "outputTokens": 1643,
+      "cachedInputTokens": 0,
+      "uncachedInputTokens": 3547,
+      "reasoningTokens": 929,
+      "latencyMs": 9524
+    },
+    {
+      "sample": 2,
+      "inputTokens": 8980,
+      "outputTokens": 80,
+      "cachedInputTokens": 0,
+      "uncachedInputTokens": 8980,
+      "reasoningTokens": 13,
+      "latencyMs": 736
+    },
+    {
+      "sample": 3,
+      "inputTokens": 9130,
+      "outputTokens": 83,
+      "cachedInputTokens": 8448,
+      "uncachedInputTokens": 682,
+      "reasoningTokens": 7,
+      "latencyMs": 1164
+    },
+    {
+      "sample": 4,
+      "inputTokens": 10805,
+      "outputTokens": 126,
+      "cachedInputTokens": 8576,
+      "uncachedInputTokens": 2229,
+      "reasoningTokens": 14,
+      "latencyMs": 1297
+    },
+    {
+      "sample": 5,
+      "inputTokens": 12675,
+      "outputTokens": 405,
+      "cachedInputTokens": 10240,
+      "uncachedInputTokens": 2435,
+      "reasoningTokens": 239,
+      "latencyMs": 3497
+    },
+    {
+      "sample": 6,
+      "inputTokens": 16135,
+      "outputTokens": 235,
+      "cachedInputTokens": 12160,
+      "uncachedInputTokens": 3975,
+      "reasoningTokens": 140,
+      "latencyMs": 2261
+    },
+    {
+      "sample": 7,
+      "inputTokens": 11192,
+      "outputTokens": 1241,
+      "cachedInputTokens": 0,
+      "uncachedInputTokens": 11192,
+      "reasoningTokens": 819,
+      "latencyMs": 7566
+    },
+    {
+      "sample": 8,
+      "inputTokens": 11573,
+      "outputTokens": 1506,
+      "cachedInputTokens": 10880,
+      "uncachedInputTokens": 693,
+      "reasoningTokens": 451,
+      "latencyMs": 8579
+    },
+    {
+      "sample": 9,
+      "inputTokens": 17052,
+      "outputTokens": 2591,
+      "cachedInputTokens": 15616,
+      "uncachedInputTokens": 1436,
+      "reasoningTokens": 687,
+      "latencyMs": 13412
+    },
+    {
+      "sample": 10,
+      "inputTokens": 17302,
+      "outputTokens": 191,
+      "cachedInputTokens": 8448,
+      "uncachedInputTokens": 8854,
+      "reasoningTokens": 145,
+      "latencyMs": 2048
+    },
+    {
+      "sample": 11,
+      "inputTokens": 18131,
+      "outputTokens": 176,
+      "cachedInputTokens": 16512,
+      "uncachedInputTokens": 1619,
+      "reasoningTokens": 83,
+      "latencyMs": 1712
+    },
+    {
+      "sample": 12,
+      "inputTokens": 19238,
+      "outputTokens": 181,
+      "cachedInputTokens": 17536,
+      "uncachedInputTokens": 1702,
+      "reasoningTokens": 118,
+      "latencyMs": 1805
+    },
+    {
+      "sample": 13,
+      "inputTokens": 19357,
+      "outputTokens": 1180,
+      "cachedInputTokens": 18688,
+      "uncachedInputTokens": 669,
+      "reasoningTokens": 838,
+      "latencyMs": 7713
+    },
+    {
+      "sample": 14,
+      "inputTokens": 15402,
+      "outputTokens": 211,
+      "cachedInputTokens": 0,
+      "uncachedInputTokens": 15402,
+      "reasoningTokens": 107,
+      "latencyMs": 2264
+    },
+    {
+      "sample": 15,
+      "inputTokens": 12443,
+      "outputTokens": 127,
+      "cachedInputTokens": 7552,
+      "uncachedInputTokens": 4891,
+      "reasoningTokens": 51,
+      "latencyMs": 1277
+    },
+    {
+      "sample": 16,
+      "inputTokens": 14367,
+      "outputTokens": 260,
+      "cachedInputTokens": 11904,
+      "uncachedInputTokens": 2463,
+      "reasoningTokens": 167,
+      "latencyMs": 2455
+    },
+    {
+      "sample": 17,
+      "inputTokens": 16012,
+      "outputTokens": 8629,
+      "cachedInputTokens": 13824,
+      "uncachedInputTokens": 2188,
+      "reasoningTokens": 5712,
+      "latencyMs": 37136
+    },
+    {
+      "sample": 18,
+      "inputTokens": 16144,
+      "outputTokens": 186,
+      "cachedInputTokens": 15488,
+      "uncachedInputTokens": 656,
+      "reasoningTokens": 105,
+      "latencyMs": 1704
+    },
+    {
+      "sample": 19,
+      "inputTokens": 18110,
+      "outputTokens": 299,
+      "cachedInputTokens": 15616,
+      "uncachedInputTokens": 2494,
+      "reasoningTokens": 184,
+      "latencyMs": 2527
+    },
+    {
+      "sample": 20,
+      "inputTokens": 19486,
+      "outputTokens": 199,
+      "cachedInputTokens": 17536,
+      "uncachedInputTokens": 1950,
+      "reasoningTokens": 79,
+      "latencyMs": 2113
+    },
+    {
+      "sample": 21,
+      "inputTokens": 20351,
+      "outputTokens": 540,
+      "cachedInputTokens": 18944,
+      "uncachedInputTokens": 1407,
+      "reasoningTokens": 375,
+      "latencyMs": 3329
+    },
+    {
+      "sample": 22,
+      "inputTokens": 20444,
+      "outputTokens": 600,
+      "cachedInputTokens": 19840,
+      "uncachedInputTokens": 604,
+      "reasoningTokens": 360,
+      "latencyMs": 3997
+    },
+    {
+      "sample": 23,
+      "inputTokens": 21844,
+      "outputTokens": 661,
+      "cachedInputTokens": 19968,
+      "uncachedInputTokens": 1876,
+      "reasoningTokens": 524,
+      "latencyMs": 4086
+    },
+    {
+      "sample": 24,
+      "inputTokens": 22825,
+      "outputTokens": 430,
+      "cachedInputTokens": 21248,
+      "uncachedInputTokens": 1577,
+      "reasoningTokens": 303,
+      "latencyMs": 2812
+    },
+    {
+      "sample": 25,
+      "inputTokens": 23854,
+      "outputTokens": 487,
+      "cachedInputTokens": 22272,
+      "uncachedInputTokens": 1582,
+      "reasoningTokens": 268,
+      "latencyMs": 2821
+    },
+    {
+      "sample": 26,
+      "inputTokens": 25604,
+      "outputTokens": 1433,
+      "cachedInputTokens": 23296,
+      "uncachedInputTokens": 2308,
+      "reasoningTokens": 1261,
+      "latencyMs": 8459
+    },
+    {
+      "sample": 27,
+      "inputTokens": 26761,
+      "outputTokens": 444,
+      "cachedInputTokens": 25088,
+      "uncachedInputTokens": 1673,
+      "reasoningTokens": 262,
+      "latencyMs": 3706
+    },
+    {
+      "sample": 28,
+      "inputTokens": 27748,
+      "outputTokens": 626,
+      "cachedInputTokens": 26240,
+      "uncachedInputTokens": 1508,
+      "reasoningTokens": 529,
+      "latencyMs": 3914
+    },
+    {
+      "sample": 29,
+      "inputTokens": 28699,
+      "outputTokens": 903,
+      "cachedInputTokens": 27264,
+      "uncachedInputTokens": 1435,
+      "reasoningTokens": 744,
+      "latencyMs": 6088
+    },
+    {
+      "sample": 30,
+      "inputTokens": 31440,
+      "outputTokens": 527,
+      "cachedInputTokens": 28160,
+      "uncachedInputTokens": 3280,
+      "reasoningTokens": 451,
+      "latencyMs": 4551
+    },
+    {
+      "sample": 31,
+      "inputTokens": 33115,
+      "outputTokens": 819,
+      "cachedInputTokens": 30848,
+      "uncachedInputTokens": 2267,
+      "reasoningTokens": 699,
+      "latencyMs": 5184
+    },
+    {
+      "sample": 32,
+      "inputTokens": 28889,
+      "outputTokens": 306,
+      "cachedInputTokens": 2048,
+      "uncachedInputTokens": 26841,
+      "reasoningTokens": 163,
+      "latencyMs": 2904
+    },
+    {
+      "sample": 33,
+      "inputTokens": 20735,
+      "outputTokens": 102,
+      "cachedInputTokens": 7552,
+      "uncachedInputTokens": 13183,
+      "reasoningTokens": 58,
+      "latencyMs": 1909
+    },
+    {
+      "sample": 34,
+      "inputTokens": 21678,
+      "outputTokens": 173,
+      "cachedInputTokens": 20224,
+      "uncachedInputTokens": 1454,
+      "reasoningTokens": 42,
+      "latencyMs": 1324
+    },
+    {
+      "sample": 35,
+      "inputTokens": 23534,
+      "outputTokens": 221,
+      "cachedInputTokens": 21120,
+      "uncachedInputTokens": 2414,
+      "reasoningTokens": 61,
+      "latencyMs": 2027
+    },
+    {
+      "sample": 36,
+      "inputTokens": 25404,
+      "outputTokens": 111,
+      "cachedInputTokens": 23040,
+      "uncachedInputTokens": 2364,
+      "reasoningTokens": 67,
+      "latencyMs": 1530
+    },
+    {
+      "sample": 37,
+      "inputTokens": 26347,
+      "outputTokens": 422,
+      "cachedInputTokens": 24832,
+      "uncachedInputTokens": 1515,
+      "reasoningTokens": 308,
+      "latencyMs": 2852
+    },
+    {
+      "sample": 38,
+      "inputTokens": 22319,
+      "outputTokens": 1170,
+      "cachedInputTokens": 1792,
+      "uncachedInputTokens": 20527,
+      "reasoningTokens": 834,
+      "latencyMs": 7991
+    },
+    {
+      "sample": 39,
+      "inputTokens": 22614,
+      "outputTokens": 413,
+      "cachedInputTokens": 22016,
+      "uncachedInputTokens": 598,
+      "reasoningTokens": 335,
+      "latencyMs": 2948
+    },
+    {
+      "sample": 40,
+      "inputTokens": 28247,
+      "outputTokens": 160,
+      "cachedInputTokens": 25856,
+      "uncachedInputTokens": 2391,
+      "reasoningTokens": 116,
+      "latencyMs": 1936
+    },
+    {
+      "sample": 41,
+      "inputTokens": 29258,
+      "outputTokens": 273,
+      "cachedInputTokens": 10112,
+      "uncachedInputTokens": 19146,
+      "reasoningTokens": 211,
+      "latencyMs": 2816
+    },
+    {
+      "sample": 42,
+      "inputTokens": 30133,
+      "outputTokens": 102,
+      "cachedInputTokens": 27648,
+      "uncachedInputTokens": 2485,
+      "reasoningTokens": 58,
+      "latencyMs": 1245
+    }
+  ],
+  "correction": "{\"status\":\"continue\",\"evidenceRefs\":[\"result-216\",\"result-219\",\"result-73\",\"result-76\",\"result-80\",\"result-79\"],\"nextAction\":\"读取当前 scripts/eval/run.mjs 全文（result-216/result-219 显示其仍为旧实现），在顶部 import { resolveEvaluationModel, buildEvaluationArgs } from './config-budget.mjs'；用 resolveEvaluationModel(configData, model) 替换 configData.models 扁平查找（得到 providerCode/modelCode/profile，供 modelRow/providerProfile/modelIdentity/contextLimit 使用）；将 maxCalls(=--max-model-calls 或 --max-calls 别名)与 maxTurns(=--max-turns)拆分，并用 buildEvaluationArgs({maxModelCalls:maxTurns? ...}) 生成 cliArgs 中的预算/轮数参数段；更新报告字段与 note，去除“--max-calls 是 --max-turns 别名”的表述。\",\"note\":\"t3 集成尚未执行：run.mjs 仍含旧代码 `const maxCalls = Number(option('--max-turns', option('--max-calls','24')))` 与 `Object.entries(configData.models ?? {}).find(...)`（result-216），未 import config-budget.mjs。模块本体已就绪且 10/10 本地测试通过（result-73/76/80、result-79）。需按上述定向编辑接入后，再用本地 dry 检查（无网络、不启动真实模型）验证参数生成。\"}",
+  "blank": "                                                                            "
+}

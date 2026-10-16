@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { evaluationStatus } from './status.mjs'
+import { resolveEvaluationModel, buildEvaluationArgs, parseEvaluationBudgets } from './config-budget.mjs'
+import { selectPendingTrials, completedTrials, historicalAccounting, readRunRecords, readJson, saveJson, fingerprint, trialKey, acquireBatchLock, recoverTrial, verifyTrialBudget } from './resume.mjs'
 import { spawn } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
+import { createHash } from 'node:crypto'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const args = process.argv.slice(2)
@@ -21,6 +24,7 @@ if (validation !== 0) process.exit(validation)
 const selected = option('--task', undefined)
 const tasks = selected ? dataset.tasks.filter((task) => task.id === selected) : dataset.tasks
 if (!tasks.length) { console.error(`Unknown task: ${selected}`); process.exit(2) }
+if (tasks.some(task => !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(task.id))) throw new Error('EVAL_TASK_ID_INVALID')
 if (has('--dry-run') || has('--validate-only')) {
   console.log(JSON.stringify({ mode: 'validate-only', qualityBaselineCreated: false, taskCount: tasks.length, tasks: tasks.map(({ id, category, goal, successCriteria, scoring, modelRequirements, sideEffects }) => ({ id, category, goal, successCriteria, scoring, modelRequirements, sideEffects })) }, null, 2))
   process.exit(0)
@@ -35,12 +39,11 @@ if ((!archive && !localCli) || (archive && localCli) || !config || !model || !ou
   process.exit(2)
 }
 const trials = Number(option('--trials', '1'))
-const maxCalls = Number(option('--max-turns', option('--max-calls', '24')))
+const { maxModelCalls: maxCalls, maxTurns } = parseEvaluationBudgets(args)
 const maxRunMs = Number(option('--max-run-ms', '600000'))
 const maxOutputTokens = Number(option('--max-output-tokens', '8192'))
 const maxCost = option('--max-cost', undefined) === undefined ? undefined : Number(option('--max-cost', undefined))
 const maxTotalTokens = option('--max-total-tokens', undefined) === undefined ? undefined : Number(option('--max-total-tokens', undefined))
-if (!Number.isInteger(maxCalls) || maxCalls < 1 || maxCalls > 256) throw new Error('--max-calls must be 1..256')
 if (!Number.isInteger(maxRunMs) || maxRunMs < 1000 || maxRunMs > 3600000) throw new Error('--max-run-ms must be 1000..3600000')
 if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 32768) throw new Error('--max-output-tokens must be 1..32768')
 if (maxTotalTokens === undefined) throw new Error('Real evaluations require --max-total-tokens as a conservative run budget')
@@ -53,15 +56,24 @@ const localCliPath = localCli ? resolve(localCli) : null
 const outputRoot = resolve(outArg)
 const configPath = resolve(config)
 const configData = JSON.parse(await readFile(configPath, 'utf8'))
-const modelEntry = Object.entries(configData.models ?? {}).find(([name, entry]) => name === model || entry.displayName === model)
-if (!modelEntry) throw new Error(`Configured Pulse model not found: ${model}`)
-const [modelName, modelRow] = modelEntry
-const providerProfile = configData.providers?.[modelRow.provider]
-if (!providerProfile) throw new Error(`Configured provider profile not found: ${modelRow.provider}`)
+const selection = resolveEvaluationModel(configData, model)
+const modelName = selection.reference, modelRow = selection.model, providerProfile = selection.profile
+const contextLimit = Number(modelRow.maxContextTokens ?? providerProfile.maxContextTokens ?? 32000)
+if (!Number.isSafeInteger(contextLimit) || contextLimit < 1) throw new Error('EVAL_CONTEXT_LIMIT_INVALID')
 if (providerProfile.provider === 'mock') throw new Error('Real-provider evaluations cannot use the mock provider')
-const apiKeyEnv = providerProfile.apiKeyEnv ?? (providerProfile.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
+const apiKeyEnv = providerProfile.apiKeyEnv ?? (providerProfile.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : providerProfile.provider === 'deepseek' ? 'DEEPSEEK_API_KEY' : 'OPENAI_API_KEY')
 if (providerProfile.provider !== 'ollama' && !process.env[apiKeyEnv]) throw new Error(`Provider credential is unavailable in environment variable ${apiKeyEnv}`)
-await mkdir(outputRoot, { recursive: false }).catch((error) => { if (error.code !== 'EEXIST') throw error; throw new Error(`Output directory already exists: ${outputRoot}`) })
+if (!has('--resume')) await mkdir(outputRoot, { recursive: false }).catch((error) => { if (error.code !== 'EEXIST') throw error; throw new Error(`Output directory already exists: ${outputRoot}; use --resume to retain prior trials`) })
+const batchPath = join(outputRoot, 'batch.json'), runsPath = join(outputRoot, 'runs.jsonl')
+const batchIdentity = { schemaVersion: 1, dataset: fingerprint(dataset), tasks: tasks.map(task => task.id), trials, model: { reference: modelName, modelCode: selection.modelCode, provider: selection.providerCode, configuration: fingerprint({ profile: providerProfile, model: modelRow }) }, cli: { kind: archivePath ? 'archive' : 'local', hash: createHash('sha256').update(await readFile(archivePath ?? localCliPath)).digest('hex') }, maxCalls, maxTurns, maxRunMs, maxOutputTokens, maxCost: maxCost ?? null, maxTotalTokens, costCurrency }
+const previousRecords = has('--resume') ? await readRunRecords(runsPath) : []
+let batch = has('--resume') ? await readJson(batchPath) : { identity: batchIdentity, trials: {} }
+if (fingerprint(batch.identity) !== fingerprint(batchIdentity)) throw new Error('EVAL_BATCH_IDENTITY_MISMATCH')
+if (!batch.trials || typeof batch.trials !== 'object' || Object.values(batch.trials).some(state => !state || !['running', 'recorded'].includes(state.status) || !Number.isSafeInteger(state.maxModelCalls) || state.maxModelCalls < 1 || state.maxModelCalls > maxCalls || state.reservedTokens !== state.maxModelCalls * (contextLimit + maxOutputTokens) || !Number.isSafeInteger(state.startedAt))) throw new Error('EVAL_BATCH_JOURNAL_CORRUPT')
+const selectedIds = new Set(tasks.map(task => task.id))
+if (previousRecords.some(row => !selectedIds.has(row.taskId) || row.trial > trials)) throw new Error('EVAL_RECORD_OUTSIDE_BATCH')
+const releaseLock = await acquireBatchLock(outputRoot, has('--resume'))
+if (!has('--resume')) await saveJson(batchPath, batch)
 const temporaryRoot = await mkdtemp(join(tmpdir(), 'pulse-eval-'))
 try {
   if (archivePath) {
@@ -72,20 +84,27 @@ try {
     })
   }
   const bin = localCliPath ?? join(temporaryRoot, 'pulse/bin/pulse.js')
-  const contextLimit = Number(modelRow.maxContextTokens ?? providerProfile.maxContextTokens ?? 32000)
-  const modelIdentity = { displayName: modelRow.displayName ?? modelName, modelCode: modelRow.modelCode, provider: modelRow.provider }
-  const runsPath = join(outputRoot, 'runs.jsonl')
+  const modelIdentity = { displayName: modelRow.displayName ?? modelName, reference: modelName, modelCode: modelRow.modelCode, provider: selection.providerCode }
   const reportsPath = join(outputRoot, 'report.json')
-const records = []
+const inherited = historicalAccounting(previousRecords, costCurrency)
+const records = inherited.records
 const fullSuiteSelected = selected === undefined && tasks.length === 24 && trials >= 3
-let consumedTokens = 0; let consumedCostUnknown = false; let budgetStopped = false
-  for (const task of tasks) for (let trial = 1; trial <= trials; trial++) {
+let consumedTokens = inherited.tokens
+let consumedCostUnknown = inherited.costUnknown
+let budgetStopped = consumedTokens >= maxTotalTokens || inherited.unknownTokenRuns > 0 || (maxCost !== undefined && (consumedCostUnknown || inherited.knownCost >= maxCost))
+  for (const pending of selectPendingTrials(tasks, trials, previousRecords)) {
+    const task = tasks.find(task => task.id === pending.taskId), trial = pending.trial, key = trialKey(task.id, trial)
     if (budgetStopped) break
-    const tokensForTask = maxTotalTokens === undefined ? undefined : Math.min(maxCalls, Math.floor((maxTotalTokens - consumedTokens) / (contextLimit + maxOutputTokens)))
+    const prior = batch.trials[key]
+    const reservedElsewhere = Object.entries(batch.trials).filter(([otherKey, state]) => otherKey !== key && state.status === 'running' && !records.some(row => trialKey(row.taskId, row.trial) === otherKey)).reduce((sum, [, state]) => sum + state.reservedTokens, 0)
+    const tokensForTask = prior?.maxModelCalls ?? Math.min(maxCalls, Math.floor((maxTotalTokens - consumedTokens - reservedElsewhere) / (contextLimit + maxOutputTokens)))
+    if (prior && consumedTokens + reservedElsewhere + prior.reservedTokens > maxTotalTokens) { budgetStopped = true; break }
     if (tokensForTask !== undefined && tokensForTask < 1) { budgetStopped = true; break }
     const taskRoot = join(outputRoot, 'workspaces', task.id, `trial-${trial}`)
     const dataDir = join(outputRoot, 'pulse-data', task.id, `trial-${trial}`)
-    await mkdir(taskRoot, { recursive: true })
+    if (!prior) {
+    await mkdir(dirname(taskRoot), { recursive: true })
+    await mkdir(taskRoot)
     for (const [relativePath, value] of Object.entries(task.fixtures ?? {})) {
       const target = resolve(taskRoot, relativePath)
       const fromTaskRoot = relative(taskRoot, target)
@@ -95,19 +114,37 @@ let consumedTokens = 0; let consumedCostUnknown = false; let budgetStopped = fal
       await mkdir(dirname(target), { recursive: true })
       await writeFile(target, value, { flag: 'wx' })
     }
-    const cliArgs = [bin, 'run', task.prompt, '--cwd', taskRoot, '--data-dir', dataDir, '--config', configPath, '--model', model, '--format', 'jsonl', '--approval-mode', 'auto', '--max-turns', String(tokensForTask ?? maxCalls), '--max-output-tokens', String(maxOutputTokens), ...(task.sideEffects.network ? ['--allow-network'] : ['--no-network'])]
+    batch.trials[key] = { status: 'running', startedAt: Date.now(), maxModelCalls: tokensForTask, reservedTokens: tokensForTask * (contextLimit + maxOutputTokens) }
+    await saveJson(batchPath, batch)
+    }
+    const capturePath = join(outputRoot, 'captures', `${task.id}-trial-${trial}.json`)
+    let captured = await readJson(capturePath).catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+    let invocation = ['run', task.prompt]
+    if (prior && !captured) {
+      const recovered = await recoverTrial(dataDir, prior)
+      if (recovered.captured) captured = recovered.captured
+      else invocation = ['resume', recovered.conversationId]
+      batch.trials[key].runId = recovered.runId
+    }
+    if (!captured && Date.now() - batch.trials[key].startedAt >= maxRunMs) throw new Error('EVAL_TRIAL_DEADLINE_EXPIRED')
+    const cliArgs = [bin, ...invocation, '--cwd', taskRoot, '--data-dir', dataDir, '--config', configPath, '--model', modelName, '--format', 'jsonl', '--approval-mode', 'auto', ...buildEvaluationArgs({ maxModelCalls: tokensForTask, maxTurns }), '--max-output-tokens', String(maxOutputTokens), ...(task.sideEffects.network ? ['--allow-network'] : ['--no-network'])]
     const started = performance.now()
-    const captured = await new Promise((resolvePromise, reject) => {
+    if (!captured) captured = await new Promise((resolvePromise, reject) => {
       const child = spawn(process.execPath, cliArgs, { cwd: taskRoot, env: { ...process.env, PULSE_DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'] })
+      batch.trials[key].childPid = child.pid
+      const journaled = saveJson(batchPath, batch)
       let stdout = ''; let stderr = ''; let timedOut = false
-      const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); setTimeout(() => child.kill('SIGKILL'), 3000).unref() }, maxRunMs)
+      const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); setTimeout(() => child.kill('SIGKILL'), 3000).unref() }, Math.max(1, maxRunMs - (Date.now() - batch.trials[key].startedAt)))
       child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8')
       child.stdout.on('data', (chunk) => { stdout += chunk })
       child.stderr.on('data', (chunk) => { stderr += chunk })
       child.on('error', reject)
-      child.on('exit', (code, signal) => { clearTimeout(timer); resolvePromise({ stdout, stderr, code: code ?? (signal ? 128 : 1), signal, timedOut }) })
+      child.on('exit', (code, signal) => { clearTimeout(timer); journaled.then(() => resolvePromise({ stdout, stderr, code: code ?? (signal ? 128 : 1), signal, timedOut }), reject) })
     })
-    const elapsedMs = Math.round(performance.now() - started)
+    await mkdir(dirname(capturePath), { recursive: true })
+    captured.elapsedMs ??= Date.now() - batch.trials[key].startedAt
+    await saveJson(capturePath, captured)
+    const elapsedMs = captured.elapsedMs ?? Math.max(Math.round(performance.now() - started), Date.now() - batch.trials[key].startedAt)
     const events = []
     let finalResult = null
     let assistantText = ''
@@ -122,6 +159,7 @@ let consumedTokens = 0; let consumedCostUnknown = false; let budgetStopped = fal
         }
       } catch { /* non-JSON stdout is retained only in the trace summary size */ }
     }
+    if (typeof usage?.modelCalls === 'number' && usage.modelCalls > tokensForTask) throw new Error('EVAL_PROVIDER_BUDGET_VIOLATED')
     const grade = await new Promise((resolvePromise, reject) => {
       const child = spawn(process.execPath, [join(root, 'scripts/eval/grade.mjs'), '--dataset', datasetPath, '--task', task.id, '--workspace', taskRoot], { stdio: ['ignore', 'pipe', 'inherit'] })
       let stdout = ''; child.stdout.setEncoding('utf8'); child.stdout.on('data', (chunk) => { stdout += chunk })
@@ -146,16 +184,21 @@ let consumedTokens = 0; let consumedCostUnknown = false; let budgetStopped = fal
       error: finalResult?.error ?? (captured.stderr.trim() ? captured.stderr.trim().slice(-2000) : null),
       grading: { status: 'sandboxed-behavior-and-artifact-grader', score: grade.score, maxPoints: grade.maxPoints, passed: grade.passed, checks: grade.checks },
       workspace: taskRoot,
+      requestedModelCalls: tokensForTask,
+      budgetVerified: await verifyTrialBudget(dataDir, finalResult?.runId, tokensForTask, usage?.modelCalls),
     }
+    completedTrials([record])
     records.push(record)
     consumedTokens += (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0)
     if (maxTotalTokens !== undefined && (typeof usage?.inputTokens !== 'number' || typeof usage?.outputTokens !== 'number')) budgetStopped = true
+    if (!usage?.providerCosts?.some(cost => cost.currency === costCurrency)) consumedCostUnknown = true
     if (maxCost !== undefined) {
-      const taskCost = (usage?.providerCosts ?? []).reduce((sum, cost) => sum + (cost.currency === costCurrency ? cost.amount : 0), 0)
-      if (!usage?.providerCosts?.length) consumedCostUnknown = true
-      if (taskCost && records.reduce((sum, item) => sum + (item.usage?.providerCosts ?? []).filter(cost => cost.currency === costCurrency).reduce((costSum, cost) => costSum + cost.amount, 0), 0) > maxCost) budgetStopped = true
+      if (!usage?.providerCosts?.some(cost => cost.currency === costCurrency)) { consumedCostUnknown = true; budgetStopped = true }
+      if (records.reduce((sum, item) => sum + (item.usage?.providerCosts ?? []).filter(cost => cost.currency === costCurrency).reduce((costSum, cost) => costSum + cost.amount, 0), 0) >= maxCost) budgetStopped = true
     }
     await writeFile(runsPath, `${JSON.stringify(record)}\n`, { flag: 'a' })
+    batch.trials[key].status = 'recorded'
+    await saveJson(batchPath, batch)
     console.log(`${task.id} trial ${trial}: ${record.status}, behavior/artifact score ${grade.score}/${grade.maxPoints}`)
   }
   const uniqueCosts = new Map()
@@ -169,7 +212,7 @@ let consumedTokens = 0; let consumedCostUnknown = false; let budgetStopped = fal
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
     realProviderRun: providerProfile.provider !== 'mock',
-    budget: { stoppedBeforeNextRun: budgetStopped, consumedCostUnknown, maxTurnsPerAttempt: maxCalls, providerCallLimitEnforced: false, tokenLimitEnforced: false, maxRunMs, maxOutputTokens, maxCost: maxCost ?? null, costCurrency, maxTotalTokens: maxTotalTokens ?? null, actualTokens: actualTokenTotal, actualCosts: Object.fromEntries(uniqueCosts), usageCompleteRuns, costLimitEnforced: false, note: 'Cost is checked between tasks and may exceed its ceiling within one task. Wall time and ReAct turns are bounded. --max-calls is a legacy alias for --max-turns, not a hard provider-call cap. Verification, replanning and safety review may make additional calls. Token reservation is an estimate, not a hard limit.' },
+    budget: { stoppedBeforeNextRun: budgetStopped, consumedCostUnknown, maxModelCallsPerTrial: maxCalls, maxTurnsPerAttempt: maxTurns, providerCallLimitRequested: true, providerCallLimitEnforced: records.length > 0 && records.every(row => row.budgetVerified === true), tokenLimitEnforced: false, maxRunMs, maxOutputTokens, maxCost: maxCost ?? null, costCurrency, maxTotalTokens: maxTotalTokens ?? null, actualTokens: actualTokenTotal, unknownTokenRuns: records.filter(row => typeof row.usage?.inputTokens !== 'number' || typeof row.usage?.outputTokens !== 'number').length, actualCosts: Object.fromEntries(uniqueCosts), usageCompleteRuns, costLimitEnforced: false, note: 'max-model-calls (legacy alias max-calls) bounds cumulative attempts per work run; max-turns remains independent. Enforcement is confirmed only when every saved Host ledger matches the requested limit and reported usage; missing ledgers are unverified. Interrupted trials resume the same Host run and original budget. Token reservation is conservative, not an exact token ceiling. Unknown usage stops further trials; an explicit cost ceiling also stops on unknown prices. Cost is checked between trials and can exceed its ceiling within a trial.' },
     qualityBaselineCreated: fullSuiteSelected && records.length === 24 * trials && !budgetStopped,
     baselineDefinition: 'A baseline sample is complete only when all 24 tasks have at least three trials. Completion means the measurement exists; it does not mean the agent passed.',
     dataset: datasetPath,
@@ -188,4 +231,5 @@ let consumedTokens = 0; let consumedCostUnknown = false; let budgetStopped = fal
   console.log(`Wrote ${runsPath} and ${reportsPath}`)
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true })
+  await releaseLock()
 }

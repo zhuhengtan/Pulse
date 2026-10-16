@@ -1,9 +1,24 @@
 import { describe, expect, it } from 'vitest'
-import { apply, createAgent, createRuntimeState, defineLaneProgram, validateStep } from '@hunterzhu/pulse-runtime'
+import { apply, createAgent, createRuntimeState, defineLaneProgram, validateStep, PulseRuntime } from '@hunterzhu/pulse-runtime'
 
 const point = (step: string) => ({ programId: 'history', programVersion: '1', step, locals: {} })
 
 describe('history pressure and compaction', () => {
+  it('preserves the actionable hard-history error, original history and restorable snapshot', async () => {
+    const runtime = new PulseRuntime({ maxConsecutiveControlErrors: 2, historySoftTokens: 1, historyHardTokens: 2 })
+    const program = defineLaneProgram({ id: 'history-limit-diagnostic', version: '1' }, builder => {
+      builder.addStep('work', () => ({ actions: [{ type: 'complete', result: { done: true } }], next: 'work' }))
+    })
+    const { agentId, laneId } = runtime.createAgent('Retain task evidence', program)
+    const history = [{ seq: 7, instruction: 'Preserve completed work and user constraints', resultRefs: [], output: { completed: ['accepted-stage'] }, privacy: 'public' as const }]
+    runtime.state.lanes.get(laneId)!.context.history = structuredClone(history)
+    const outcome = await runtime.start(agentId).outcome()
+    expect(outcome).toMatchObject({ status: 'failed', error: { code: 'CONTEXT_TOO_LARGE', message: expect.stringContaining('historyCompaction'), details: { lastError: { code: 'CONTEXT_TOO_LARGE' }, consecutiveControlErrors: 2 } } })
+    expect(runtime.state.lanes.get(laneId)!.context.history.slice(0, 1)).toEqual(history)
+    const restored = new PulseRuntime({ persistence: runtime.exportPersistence(), programs: [program] })
+    expect(restored.state.lanes.get(laneId)!.failure?.error.code).toBe('CONTEXT_TOO_LARGE')
+    expect(restored.state.lanes.get(laneId)!.context.history.slice(0, 1)).toEqual(history)
+  })
   it('rejects a step beyond hardTokens until it submits a valid compaction', () => {
     const state = createRuntimeState(8, { historySoftTokens: 1, historyHardTokens: 2 })
     const { root } = createAgent(state, 'history', point('start'))
@@ -41,7 +56,8 @@ describe('history pressure and compaction', () => {
       builder.addStep('work', () => ({ actions: [{ type: 'complete', result: { ok: true } }], next: 'work' }))
     })
     const instructedStep = instructed.step({ lane: { ...root, resume: output.next, historyPressure: root.historyPressure }, state, now: 0 })
-    expect(instructedStep.actions[0]).toMatchObject({ type: 'submit_effects', effects: [{ key: '$compact-summary', input: { task: 'reason', instruction: 'Keep the durable facts.', upToSeq: 3 } }] })
+    expect(instructedStep.actions[0]).toMatchObject({ type: 'submit_effects', effects: [{ key: '$compact-summary', input: { task: 'reason', instruction: expect.stringContaining('Keep the durable facts.'), upToSeq: 3, tools: { tools: [] }, explicitContext: true } }] })
+    expect(JSON.stringify(instructedStep.actions[0])).toContain('a proposed tool call is not an executed operation')
   })
 
   it('does not summarize a prefix that is already a single compaction record', () => {

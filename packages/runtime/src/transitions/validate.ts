@@ -485,6 +485,8 @@ function prepareLLMInput(state: RuntimeState, lane: LaneRecord, submission: Subm
     ? rawConversation as unknown as import('../core/types.js').ConversationMessage[]
     : undefined
   const conversationError = rawConversation !== undefined && conversation === undefined ? 'INVALID_LLM_CONVERSATION' : undefined
+  const historySeqs = input.historySeqs
+  if (historySeqs !== undefined && (!Array.isArray(historySeqs) || historySeqs.some(seq => typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 1))) return { error: 'INVALID_LLM_HISTORY_SELECTION' }
   const inputError = resultInputs.error ?? findingInputs.error ?? rejectedInputs.error ?? artifactInputs.error ?? eventInputs.error ?? conversationError
   if (inputError) return { error: inputError }
   const resultRefs = [...new Set([...(resultInputs.refs ?? []), ...(findingInputs.refs ?? []), ...(rejectedInputs.refs ?? [])])]
@@ -492,7 +494,7 @@ function prepareLLMInput(state: RuntimeState, lane: LaneRecord, submission: Subm
   try {
     const agent = state.agents.get(lane.agentId)
     if (!agent) return { error: 'UNKNOWN_AGENT' }
-    const projection = new ContextBuilder(state).build({ agent, lane, explicitContext: input.explicitContext === true, resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: eventInputs.refs ?? [], ...(conversation === undefined || conversation.length === 0 ? {} : { conversation }), instruction, ...(typeof input.system === 'string' ? { system: input.system } : {}), ...(input.policy === undefined ? {} : { policy: input.policy }), ...(input.tools === undefined ? {} : { tools: input.tools }), toolSetId: typeof input.toolSetId === 'string' ? input.toolSetId : 'default' })
+    const projection = new ContextBuilder(state).build({ agent, lane, explicitContext: input.explicitContext === true, includeLaneHistory: input.includeLaneHistory === true, ...(Array.isArray(historySeqs) ? { historySeqs: historySeqs as number[] } : {}), resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: eventInputs.refs ?? [], ...(conversation === undefined || conversation.length === 0 ? {} : { conversation }), instruction, ...(typeof input.system === 'string' ? { system: input.system } : {}), ...(input.policy === undefined ? {} : { policy: input.policy }), ...(input.tools === undefined ? {} : { tools: input.tools }), toolSetId: typeof input.toolSetId === 'string' ? input.toolSetId : 'default' })
     return { input: { ...input, request: projection as unknown as JsonValue } }
   } catch (cause) {
     return { error: cause instanceof Error ? cause.message : 'INVALID_LLM_CONTEXT' }
@@ -534,28 +536,30 @@ export function validateStep(state: RuntimeState, laneId: string, output: LaneSt
   const seenCancelTargets = new Set<string>()
   const cancelledSubtreeLanes = new Set<string>()
 
-  if (output.contextDelta !== undefined) {
-    const deltaShapeError = validateContextDeltaShape(output.contextDelta)
+  if (output.laneContextDelta !== undefined && (output.contextDelta?.target !== 'global' || output.laneContextDelta?.target !== 'lane')) return { rejection: error('INVALID_CONTEXT_DELTA_PAIR', 'A secondary lane delta requires a primary global delta') }
+  if (output.adoptCommittedContext && output.contextDelta?.target !== 'global') return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'adoptCommittedContext requires a global ContextDelta') }
+  for (const delta of [output.contextDelta, output.laneContextDelta]) {
+    if (delta === undefined) continue
+    const deltaShapeError = validateContextDeltaShape(delta)
     if (deltaShapeError) return { rejection: error(deltaShapeError, 'ContextDelta shape is invalid') }
-    const deltaPrivacyTaintError = validatePrivacyTaints(output.contextDelta.privacyTaints)
+    const deltaPrivacyTaintError = validatePrivacyTaints(delta.privacyTaints)
     if (deltaPrivacyTaintError) return { rejection: error(deltaPrivacyTaintError, 'ContextDelta privacy taints are invalid') }
-    const deltaDerived = derivedPrivacy(state, lane, output.contextDelta.derivedFrom ?? [])
+    const deltaDerived = derivedPrivacy(state, lane, delta.derivedFrom ?? [])
     if (deltaDerived.error) return { rejection: error(deltaDerived.error, 'ContextDelta provenance references an unknown or invisible result') }
-    if (output.contextDelta.privacy !== undefined && deltaDerived.privacy !== undefined && privacyRank(output.contextDelta.privacy) < privacyRank(deltaDerived.privacy)) return { rejection: error('PRIVACY_DOWNGRADE_WITHOUT_PROOF', 'ContextDelta privacy cannot be broader than its sources') }
-    if (output.contextDelta.target === 'global' && !output.contextDelta.proposal && lane.ownerLaneId !== undefined) return { rejection: error('GLOBAL_CONTEXT_WRITE_NOT_AUTHORIZED', 'Only the root Lane may commit Global Context directly.') }
-    if (output.contextDelta.target !== 'global' && output.contextDelta.proposal) return { rejection: error('INVALID_MERGE_PROPOSAL', 'Only Global Context deltas may be proposals.') }
-    const applied = applyContextDelta(state, workingLane, output.contextDelta, mutations, output.contextDelta.proposal ? `proposal-${proposalCounter++}` : undefined)
+    if (delta.privacy !== undefined && deltaDerived.privacy !== undefined && privacyRank(delta.privacy) < privacyRank(deltaDerived.privacy)) return { rejection: error('PRIVACY_DOWNGRADE_WITHOUT_PROOF', 'ContextDelta privacy cannot be broader than its sources') }
+    if (delta.target === 'global' && !delta.proposal && lane.ownerLaneId !== undefined) return { rejection: error('GLOBAL_CONTEXT_WRITE_NOT_AUTHORIZED', 'Only the root Lane may commit Global Context directly.') }
+    if (delta.target !== 'global' && delta.proposal) return { rejection: error('INVALID_MERGE_PROPOSAL', 'Only Global Context deltas may be proposals.') }
+    const applied = applyContextDelta(state, workingLane, delta, mutations, delta.proposal ? `proposal-${proposalCounter++}` : undefined)
     if (applied.error) return { rejection: error(applied.error, 'ContextDelta rejected') }
-    if (output.contextDelta.target === 'lane') {
+    if (delta.target === 'lane') {
       const nextValue = mutations[mutations.length - 1]
       if (nextValue?.op === 'setLaneContext') workingLane.context = { ...workingLane.context, state: nextValue.value, version: applied.nextVersion, ...(nextValue.history === undefined ? {} : { history: structuredClone(nextValue.history) }), ...(nextValue.metadata === undefined ? {} : structuredClone(nextValue.metadata)) }
     }
-    if (output.adoptCommittedContext && output.contextDelta.target !== 'global') return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'adoptCommittedContext requires a global ContextDelta') }
-    if (output.contextDelta.proposal && output.adoptCommittedContext) return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'proposals cannot be adopted in the same transaction') }
-    if (output.contextDelta.target === 'global' && output.adoptCommittedContext) workingLane.contextSnapshotVersion = applied.nextVersion
-  } else if (output.adoptCommittedContext) return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'adoptCommittedContext requires a ContextDelta') }
+    if (delta.proposal && output.adoptCommittedContext) return { rejection: error('INVALID_ADOPT_COMMITTED_CONTEXT', 'proposals cannot be adopted in the same transaction') }
+    if (delta.target === 'global' && output.adoptCommittedContext) workingLane.contextSnapshotVersion = applied.nextVersion
+  }
 
-  const compactRequested = output.contextDelta?.target === 'lane' && output.contextDelta.ops.some((op) => op.op === 'compact_history')
+  const compactRequested = [output.contextDelta, output.laneContextDelta].some(delta => delta?.target === 'lane' && delta.ops.some(op => op.op === 'compact_history'))
   // ReAct can discover pressure only after consuming a model result. Permit
   // the two-step compaction handoff and its summary request to cross the hard
   // threshold; the following compact_history delta removes the old records.

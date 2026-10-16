@@ -60,6 +60,7 @@ export async function runResume(
 
     const outcome = await run.outcome();
     const taskOutcome = await run.taskOutcome();
+    const usage = await run.usage();
 
     if (format === 'jsonl') {
       process.stdout.write(
@@ -69,6 +70,7 @@ export async function runResume(
           runId: run.id,
           status: outcome.status,
           taskOutcome: taskOutcome ?? null,
+          usage,
           text: outcome.text ?? null,
           error: outcome.error ?? null,
         })}\n`

@@ -1,0 +1,252 @@
+{
+  "stage": {
+    "goal": "集成核查：在不联网、不读用户配置/凭据、不提交前提下，运行本地定向检查并记录证据",
+    "check": "本地 command 输出显示全部定向测试通过且无真实模型调用、无提交；记录命令与结果",
+    "kind": "edit"
+  },
+  "tools": [
+    {
+      "name": "shell.exec",
+      "arguments": {
+        "command": "node",
+        "args": [
+          "--test",
+          "scripts/eval/config-budget.test.mjs"
+        ]
+      },
+      "outcome": {
+        "status": "succeeded",
+        "resultRef": "result-282"
+      },
+      "result": {
+        "code": 0,
+        "stdout": "✔ resolves a provider-nested model by providerId/modelId (0.847ms)\n✔ resolves a provider-nested model by display name (0.0855ms)\n✔ resolves a legacy flat model by key (0.075875ms)\n✔ resolves a legacy flat model by display name (0.058ms)\n✔ rejects an unknown model (0.191208ms)\n✔ rejects an unknown provider and a malformed reference (0.066291ms)\n✔ rejects the mock provider for real evaluations (0.07075ms)\n✔ buildEvaluationArgs uses --max-model-calls for the budget and keeps maxTurns independent (0.32125ms)\n✔ --max-calls acts only as an actual-call budget alias, never as turns (0.083625ms)\n✔ rejects illegal budgets and conflicting aliases (0.148708ms)\nℹ tests 10\nℹ suites 0\nℹ pass 10\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 46.910625\n",
+        "stderr": "",
+        "truncated": false,
+        "timedOut": false,
+        "aborted": false,
+        "outputArchive": {
+          "stdout": {
+            "id": "a3eb0671-7450-4592-a39e-f5a43e0daa4c-stdout.log",
+            "bytes": 793,
+            "storedBytes": 793,
+            "sha256": "0065aa425346b042b607dd1d6fecc67055d9628e7295c7d8123eba3329407348",
+            "storedSha256": "0065aa425346b042b607dd1d6fecc67055d9628e7295c7d8123eba3329407348",
+            "omittedStart": 793,
+            "omittedEnd": 793,
+            "complete": true
+          }
+        },
+        "checkReceipt": {
+          "schemaVersion": 1,
+          "command": "node",
+          "args": [
+            "--test",
+            "scripts/eval/config-budget.test.mjs"
+          ],
+          "cwd": ".",
+          "files": {
+            "tsconfig.json": "81c3c5eb96f9d1db55772869e24547c36ae1b676437b2e0acb32732b32bfc192",
+            "package.json": "e35af004d7d727db01141bbb2979d33508c5038bb68e26a4c503c2afe63bcc24",
+            "scripts/eval/config-budget.test.mjs": "20a154a5ed1c65f9407383d99ca4cb3d441277404cc7016556edf6a3effddfa7",
+            "scripts/eval/config-budget.mjs": "6b7806a9cfc798088ff8b1cd9d0ade3775c6041ea7efa9dd3eb18b7673839aed"
+          },
+          "definitions": {
+            "scripts/eval/config-budget.test.mjs": "20a154a5ed1c65f9407383d99ca4cb3d441277404cc7016556edf6a3effddfa7"
+          },
+          "environment": {
+            "platform": "darwin",
+            "node": "v24.1.0"
+          },
+          "stable": true,
+          "definitionChanged": false
+        }
+      }
+    },
+    {
+      "name": "shell.exec",
+      "arguments": {
+        "command": "node",
+        "args": [
+          "--check",
+          "scripts/eval/run.mjs"
+        ]
+      },
+      "outcome": {
+        "status": "succeeded",
+        "resultRef": "result-283"
+      },
+      "result": {
+        "code": 0,
+        "stdout": "",
+        "stderr": "",
+        "truncated": false,
+        "timedOut": false,
+        "aborted": false,
+        "outputArchive": {},
+        "checkReceipt": {
+          "schemaVersion": 1,
+          "command": "node",
+          "args": [
+            "--check",
+            "scripts/eval/run.mjs"
+          ],
+          "cwd": ".",
+          "files": {
+            "tsconfig.json": "81c3c5eb96f9d1db55772869e24547c36ae1b676437b2e0acb32732b32bfc192",
+            "package.json": "e35af004d7d727db01141bbb2979d33508c5038bb68e26a4c503c2afe63bcc24",
+            "scripts/eval/run.mjs": "aa476cf776e52dbf91f716b708a410393a23bf3754f395cc59e1910a9c977a45",
+            "scripts/eval/config-budget.mjs": "6b7806a9cfc798088ff8b1cd9d0ade3775c6041ea7efa9dd3eb18b7673839aed",
+            "scripts/eval/status.mjs": "ebeecd8aa4b4db95ca911713d562b1b9013d26b6e777daea9f1db7e970a6b602"
+          },
+          "definitions": {},
+          "environment": {
+            "platform": "darwin",
+            "node": "v24.1.0"
+          },
+          "stable": true,
+          "definitionChanged": false
+        }
+      }
+    },
+    {
+      "name": "shell.exec",
+      "arguments": {
+        "command": "git",
+        "args": [
+          "log",
+          "--oneline",
+          "-1"
+        ]
+      },
+      "outcome": {
+        "status": "succeeded",
+        "resultRef": "result-285"
+      },
+      "result": {
+        "code": 128,
+        "stdout": "",
+        "stderr": "fatal: your current branch 'main' does not have any commits yet\n",
+        "truncated": false,
+        "timedOut": false,
+        "aborted": false,
+        "outputArchive": {
+          "stderr": {
+            "id": "da0f93d3-031a-48ae-925e-bfef47007c55-stderr.log",
+            "bytes": 64,
+            "storedBytes": 64,
+            "sha256": "7a6350b6c54cf232aebe4286ec8567c7842edf2a5f522fe06b1289700fd09b86",
+            "storedSha256": "7a6350b6c54cf232aebe4286ec8567c7842edf2a5f522fe06b1289700fd09b86",
+            "omittedStart": 64,
+            "omittedEnd": 64,
+            "complete": true
+          }
+        }
+      }
+    },
+    {
+      "name": "shell.exec",
+      "arguments": {
+        "command": "node",
+        "args": [
+          "--test",
+          "scripts/eval/config-budget.test.mjs"
+        ]
+      },
+      "outcome": {
+        "status": "succeeded",
+        "resultRef": "result-293"
+      },
+      "result": {
+        "code": 0,
+        "stdout": "✔ resolves a provider-nested model by providerId/modelId (0.883459ms)\n✔ resolves a provider-nested model by display name (0.085625ms)\n✔ resolves a legacy flat model by key (0.0755ms)\n✔ resolves a legacy flat model by display name (0.057791ms)\n✔ rejects an unknown model (0.194917ms)\n✔ rejects an unknown provider and a malformed reference (0.10475ms)\n✔ rejects the mock provider for real evaluations (0.134125ms)\n✔ buildEvaluationArgs uses --max-model-calls for the budget and keeps maxTurns independent (0.429833ms)\n✔ --max-calls acts only as an actual-call budget alias, never as turns (0.105084ms)\n✔ rejects illegal budgets and conflicting aliases (0.161083ms)\nℹ tests 10\nℹ suites 0\nℹ pass 10\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 47.292292\n",
+        "stderr": "",
+        "truncated": false,
+        "timedOut": false,
+        "aborted": false,
+        "outputArchive": {
+          "stdout": {
+            "id": "0e8d1e33-f1ce-4632-a3fb-9698d451e376-stdout.log",
+            "bytes": 800,
+            "storedBytes": 800,
+            "sha256": "c428753aa5c104c3d828796e055733f72fb5810ae980fcdcc5213cdb38ec9b07",
+            "storedSha256": "c428753aa5c104c3d828796e055733f72fb5810ae980fcdcc5213cdb38ec9b07",
+            "omittedStart": 800,
+            "omittedEnd": 800,
+            "complete": true
+          }
+        },
+        "checkReceipt": {
+          "schemaVersion": 1,
+          "command": "node",
+          "args": [
+            "--test",
+            "scripts/eval/config-budget.test.mjs"
+          ],
+          "cwd": ".",
+          "files": {
+            "tsconfig.json": "81c3c5eb96f9d1db55772869e24547c36ae1b676437b2e0acb32732b32bfc192",
+            "package.json": "e35af004d7d727db01141bbb2979d33508c5038bb68e26a4c503c2afe63bcc24",
+            "scripts/eval/config-budget.test.mjs": "20a154a5ed1c65f9407383d99ca4cb3d441277404cc7016556edf6a3effddfa7",
+            "scripts/eval/config-budget.mjs": "6b7806a9cfc798088ff8b1cd9d0ade3775c6041ea7efa9dd3eb18b7673839aed"
+          },
+          "definitions": {
+            "scripts/eval/config-budget.test.mjs": "20a154a5ed1c65f9407383d99ca4cb3d441277404cc7016556edf6a3effddfa7"
+          },
+          "environment": {
+            "platform": "darwin",
+            "node": "v24.1.0"
+          },
+          "stable": true,
+          "definitionChanged": false
+        }
+      }
+    },
+    {
+      "name": "shell.exec",
+      "arguments": {
+        "command": "node",
+        "args": [
+          "--check",
+          "scripts/eval/run.mjs"
+        ]
+      },
+      "outcome": {
+        "status": "succeeded",
+        "resultRef": "result-294"
+      },
+      "result": {
+        "code": 0,
+        "stdout": "",
+        "stderr": "",
+        "truncated": false,
+        "timedOut": false,
+        "aborted": false,
+        "outputArchive": {},
+        "checkReceipt": {
+          "schemaVersion": 1,
+          "command": "node",
+          "args": [
+            "--check",
+            "scripts/eval/run.mjs"
+          ],
+          "cwd": ".",
+          "files": {
+            "tsconfig.json": "81c3c5eb96f9d1db55772869e24547c36ae1b676437b2e0acb32732b32bfc192",
+            "package.json": "e35af004d7d727db01141bbb2979d33508c5038bb68e26a4c503c2afe63bcc24",
+            "scripts/eval/run.mjs": "aa476cf776e52dbf91f716b708a410393a23bf3754f395cc59e1910a9c977a45",
+            "scripts/eval/config-budget.mjs": "6b7806a9cfc798088ff8b1cd9d0ade3775c6041ea7efa9dd3eb18b7673839aed",
+            "scripts/eval/status.mjs": "ebeecd8aa4b4db95ca911713d562b1b9013d26b6e777daea9f1db7e970a6b602"
+          },
+          "definitions": {},
+          "environment": {
+            "platform": "darwin",
+            "node": "v24.1.0"
+          },
+          "stable": true,
+          "definitionChanged": false
+        }
+      }
+    }
+  ]
+}

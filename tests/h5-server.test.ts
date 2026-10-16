@@ -636,7 +636,7 @@ describe('H5Server End-to-End', () => {
       cwd: dir,
       dataDir: dir,
       approvalMode: 'ask',
-      mockToolCalls: [{ name: 'fs.write', input: { path: 'delegated.txt', content: 'approved by the test reviewer' } }],
+      mockToolCalls: [{ name: 'fs.list', input: { path: '.' } }, { name: 'fs.write', input: { path: 'delegated.txt', content: 'approved by the test reviewer' } }],
       mockAfterToolResponse: '文件已写入。',
       approvalReview: { provider: 'ollama', model: 'qwen3.5:4b', baseURL: `http://127.0.0.1:${reviewerPort}`, timeoutMs: 2_000 },
     })
@@ -672,8 +672,9 @@ describe('H5Server End-to-End', () => {
       expect(runState).toBe('succeeded')
       expect(await readFile(join(dir, 'delegated.txt'), 'utf8')).toBe('approved by the test reviewer')
       expect(reviewerCalls).toBe(1)
-      expect(reviewerRequest).toMatchObject({ reasoning_effort: 'none' })
+      expect(reviewerRequest).toMatchObject({ reasoning_effort: 'none', max_tokens: 128 })
       expect(JSON.stringify(reviewerRequest?.messages)).toContain('Apply the authorization review above and respond with exactly APPROVE or HANDOFF.')
+      expect(JSON.stringify(reviewerRequest?.messages)).not.toContain('fs.list')
       const audit = await readFile(join(dir, 'conversations', conversation.id, 'runs', runId, 'approval-reviews.jsonl'), 'utf8')
       expect(audit).toContain('"status":"approved"')
       expect(audit).toContain('"inputTokens":22')

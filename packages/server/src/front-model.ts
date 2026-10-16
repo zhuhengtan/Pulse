@@ -1,5 +1,5 @@
 import { createProviderAdapter, type ProviderPresetConfig } from '@hunterzhu/pulse-adapters'
-import type { LLMRequestProjection } from '@hunterzhu/pulse-runtime'
+import type { LLMRequestProjection, LLMResult } from '@hunterzhu/pulse-runtime'
 
 export interface FrontModelConfig {
   enabled?: boolean
@@ -116,6 +116,8 @@ export async function processFrontModel(
   config?: FrontModelConfig,
   conversation: FrontModelMessage[] = [],
   contextItems: FrontModelContextItem[] = [],
+  beforeAttempt?: () => Promise<void>,
+  afterAttempt?: (usage: LLMResult['usage']) => Promise<void>,
 ): Promise<FrontModelResult> {
   const defaultAck = heuristicFastAck(userInput)
   if (!config?.enabled || !config.model?.trim()) {
@@ -160,6 +162,7 @@ Strictly output one valid JSON object:
 }`
 
     if (provider === 'ollama') {
+      await beforeAttempt?.()
       const res = await fetch(`${baseURL}/api/generate`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -174,7 +177,8 @@ Strictly output one valid JSON object:
         }),
       })
       if (!res.ok) return { instantResponse: defaultAck }
-      const payload = (await res.json()) as { response?: string }
+      const payload = (await res.json()) as { response?: string; prompt_eval_count?: number; eval_count?: number }
+      await afterAttempt?.({ ...(payload.prompt_eval_count === undefined ? {} : { inputTokens: payload.prompt_eval_count }), ...(payload.eval_count === undefined ? {} : { outputTokens: payload.eval_count }) })
       const parsed = payload.response ? JSON.parse(payload.response) : undefined
       return sanitizeFrontModelResult(parsed, defaultAck)
     }
@@ -195,11 +199,14 @@ Strictly output one valid JSON object:
       prefixHash: '', projectionHash: '', builderVersion: 'front-model-v1', policyVersion: '1', toolSetVersion: 'none',
       privacy: 'cloud_allowed', privacyRefs: [],
     } as unknown as LLMRequestProjection
-    const result = await adapter.executeAttempt({ request, signal: AbortSignal.timeout(timeoutMs), model: config.model, maxOutputTokens: config.maxOutputTokens ?? 768 })
+    await beforeAttempt?.()
+    const result = await adapter.executeAttempt({ request, signal: AbortSignal.timeout(timeoutMs), model: config.model, maxOutputTokens: config.maxOutputTokens ?? 768, ...(beforeAttempt ? { beforeRetryAttempt: beforeAttempt } : {}) })
+    await afterAttempt?.(result.usage)
     if (result.finishReason === 'length') return { instantResponse: defaultAck }
     const parsed = result.structured ?? (result.text ? JSON.parse(result.text) as unknown : undefined)
     return sanitizeFrontModelResult(parsed, defaultAck)
-  } catch {
+  } catch (error) {
+    if (String((error as { code?: unknown } | null)?.code ?? '').startsWith('TASK_MODEL_CALL_BUDGET_')) throw error
     // Graceful fallback to heuristic ack on timeout or failure
     return { instantResponse: defaultAck }
   }

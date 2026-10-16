@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, sanitizeWorkspaceConfig } from '../packages/cli/src/config.js'
 import { hostOptions, parse } from '../packages/cli/src/bin.js'
 import { runSetup } from '../packages/cli/src/commands/setup.js'
+import { createHostModelRouting } from '../packages/server/src/model-routing.js'
 
 const temporaryDirectories: string[] = []
 
@@ -13,6 +14,19 @@ afterEach(async () => {
 })
 
 describe('ensurePulseUserConfig', () => {
+  it('applies explicit cost limits to the routed active model without changing other catalog entries', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-cost-limits-'))
+    temporaryDirectories.push(directory)
+    const path = join(directory, 'config.json')
+    await writeFile(path, JSON.stringify({ providers: { local: { provider: 'mock', models: {
+      active: { modelCode: 'wire-active', maxContextTokens: 100000, maxOutputTokens: 64000, reasoningEffort: 'high' },
+      other: { modelCode: 'wire-other', maxOutputTokens: 32000, reasoningEffort: 'high' },
+    } } }, activeModel: 'local/active' }))
+    const options = await hostOptions(parse(['--config', path, '--context-tokens', '32000', '--max-output-tokens', '4096', '--reasoning-effort', 'low']))
+    const routing = createHostModelRouting({ activeModel: options.activeModel!, activeProviderCode: options.activeProviderCode!, activeProvider: options.provider!, providerProfiles: options.providerProfiles!, providerModels: options.providerModels! })
+    expect(routing.candidates.find((c) => c.id === 'local/active')?.capabilities).toMatchObject({ maxContextTokens: 32000, maxOutputTokens: 4096, reasoning: 'low' })
+    expect(routing.candidates.find((c) => c.id === 'local/other')?.capabilities).toMatchObject({ maxOutputTokens: 32000, reasoning: 'high' })
+  })
   it('uses PULSE_HOME for the user configuration root', () => {
     const previous = process.env.PULSE_HOME
     try {
@@ -83,12 +97,13 @@ describe('ensurePulseUserConfig', () => {
       taskRouting: { plan: ['gpt5.6-b'], verify: ['gpt5.6-b'] },
     })}\n`)
     try {
-      const options = await hostOptions(parse(['--config', path]))
+      const options = await hostOptions(parse(['--config', path, '--max-model-calls', '48']))
       expect(options.activeModel).toBe('deepseek/gpt5.6-b')
       expect(options.activeProviderCode).toBe('deepseek')
       expect(options.provider).toMatchObject({ provider: 'deepseek', defaultModel: 'deepseek-chat' })
       expect(options.providerModels).toEqual({ 'deepseek/gpt5.6-b': { provider: 'deepseek', model: 'deepseek-chat' } })
       expect(options.taskRouting).toEqual({ plan: ['deepseek/gpt5.6-b'], verify: ['deepseek/gpt5.6-b'] })
+      expect(options.maxModelCalls).toBe(48)
       expect(options).not.toHaveProperty('executionMode')
     } finally {
       if (previousHome === undefined) delete process.env.PULSE_HOME
@@ -138,7 +153,7 @@ describe('ensurePulseUserConfig', () => {
     try {
       const options = await hostOptions(parse(['--config', path]))
       expect(options.frontModel).toMatchObject({ enabled: true, provider: 'ollama', model: 'qwen3.5:4b', baseURL: 'http://127.0.0.1:11434' })
-      expect(options.approvalReview).toMatchObject({ provider: 'ollama', model: 'qwen3.5:4b', baseURL: 'http://127.0.0.1:11434' })
+      expect(options.approvalReview).toMatchObject({ provider: 'ollama', model: 'qwen3.5:4b', baseURL: 'http://127.0.0.1:11434', timeoutMs: 30_000 })
 
       await writeFile(path, `${JSON.stringify({
         providers: { cloud: { provider: 'deepseek', models: { reviewer: { modelCode: 'deepseek-chat' } } } },
@@ -196,9 +211,9 @@ describe('ensurePulseUserConfig', () => {
     })}\n`)
     try {
       const options = await hostOptions(parse(['--config', path]))
-      expect(options.enabledCapabilityPacks).toEqual(['pdf', 'skills', 'browser'])
+      expect(options.enabledCapabilityPacks).toEqual(['builtin-skills', 'pdf', 'skills', 'browser'])
       expect(options.capabilityConfig).toEqual({ skills: ['review'] })
-      expect(options.capabilityPacks?.map((pack) => pack.manifest.id)).toEqual(['pdf', 'spreadsheet', 'skills', 'browser'])
+      expect(options.capabilityPacks?.map((pack) => pack.manifest.id)).toEqual(['builtin-skills', 'pdf', 'spreadsheet', 'skills', 'browser'])
     } finally {
       if (previousHome === undefined) delete process.env.PULSE_HOME
       else process.env.PULSE_HOME = previousHome

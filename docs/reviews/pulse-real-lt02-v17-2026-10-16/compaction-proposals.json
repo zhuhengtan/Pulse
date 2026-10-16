@@ -1,0 +1,59 @@
+[
+  {
+    "sample": 22,
+    "at": "2026-10-16T07:11:54.494Z",
+    "effectId": "effect-50",
+    "resultRef": "result-50",
+    "stage": "s4-verify",
+    "role": "compaction",
+    "status": 200,
+    "latencyMs": 13726,
+    "inputTokens": 43668,
+    "outputTokens": 2157,
+    "reasoningTokens": 2060,
+    "rawVisibleChars": 398,
+    "tools": [
+      {
+        "name": "fs.list",
+        "path": "packages/adapters/dist/tools"
+      },
+      {
+        "name": "fs.read",
+        "path": "evals/tasks.v1.json"
+      }
+    ],
+    "finish": "stop",
+    "summaryTextChars": 0,
+    "toolsExecutedBySummaryStep": false,
+    "proposedPathsExist": {
+      "packages/adapters/dist/tools": true,
+      "evals/tasks.v1.json": true
+    }
+  },
+  {
+    "sample": 29,
+    "at": "2026-10-16T07:15:32.760Z",
+    "effectId": "effect-63",
+    "resultRef": "result-63",
+    "stage": "s4-verify",
+    "role": "compaction",
+    "status": 200,
+    "latencyMs": 36394,
+    "inputTokens": 34461,
+    "outputTokens": 7048,
+    "reasoningTokens": 5392,
+    "rawVisibleChars": 5843,
+    "tools": [
+      {
+        "name": "fs.write",
+        "path": "scripts/eval/resume-e2e.test.mjs"
+      }
+    ],
+    "finish": "stop",
+    "summaryTextChars": 0,
+    "toolsExecutedBySummaryStep": false,
+    "proposedPathsExist": {
+      "scripts/eval/resume-e2e.test.mjs": false
+    }
+  }
+]

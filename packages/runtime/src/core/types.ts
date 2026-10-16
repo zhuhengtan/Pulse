@@ -174,6 +174,8 @@ export interface EffectRecord {
 }
 
 export interface AttemptRecord {
+  /** Actual provider requests admitted by the Host, including transport retries. */
+  providerAttempts?: number
   id: string
   effectId: EffectId
   modelId?: string
@@ -426,6 +428,8 @@ export interface MergeProposal {
 
 export interface LaneStepOutput {
   contextDelta?: ContextDelta
+  /** Optional lane update committed atomically alongside a global ContextDelta. */
+  laneContextDelta?: ContextDelta
   adoptCommittedContext?: boolean
   actions: RuntimeAction[]
   next: ResumePoint

@@ -8,7 +8,6 @@ export const MAX_SCHEDULED_TASK_INTERVAL_MS = 30 * 24 * 60 * 60 * 1_000
 const MAX_STORE_BYTES = 8 * 1024 * 1024
 const MAX_TASKS = 1_000
 const CLAIM_LEASE_MS = 60_000
-const EXECUTION_TIMEOUT_MS = 15 * 60_000
 
 const scheduleInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -423,15 +422,15 @@ export type ScheduledTaskExecutor = (task: Readonly<ScheduledTask>, signal: Abor
 
 export class ScheduledTaskWorker {
   private readonly pollIntervalMs: number
-  private readonly executionTimeoutMs: number
+  private readonly executionTimeoutMs: number | undefined
   private readonly cancellationGraceMs: number
 
   constructor(private readonly store: ScheduledTaskStore, private readonly execute: ScheduledTaskExecutor, options: ScheduledTaskWorkerOptions = {}) {
     this.pollIntervalMs = options.pollIntervalMs ?? 1_000
     this.cancellationGraceMs = options.cancellationGraceMs ?? 1_000
     if (!Number.isInteger(this.cancellationGraceMs) || this.cancellationGraceMs < 1 || this.cancellationGraceMs > 60_000) throw taskError('INVALID_SCHEDULED_TASK_CANCELLATION_GRACE')
-    this.executionTimeoutMs = options.executionTimeoutMs ?? EXECUTION_TIMEOUT_MS
-    if (!Number.isInteger(this.executionTimeoutMs) || this.executionTimeoutMs < 100 || this.executionTimeoutMs > 24 * 60 * 60_000) throw taskError('INVALID_SCHEDULED_TASK_EXECUTION_TIMEOUT')
+    this.executionTimeoutMs = options.executionTimeoutMs
+    if (this.executionTimeoutMs !== undefined && (!Number.isInteger(this.executionTimeoutMs) || this.executionTimeoutMs < 100 || this.executionTimeoutMs > 24 * 60 * 60_000)) throw taskError('INVALID_SCHEDULED_TASK_EXECUTION_TIMEOUT')
     if (!Number.isInteger(this.pollIntervalMs) || this.pollIntervalMs < 100 || this.pollIntervalMs > 60_000) throw taskError('INVALID_SCHEDULED_TASK_POLL_INTERVAL')
   }
 
@@ -457,7 +456,7 @@ export class ScheduledTaskWorker {
       }).catch((error: unknown) => { executionError = error; throw error }).finally(() => { settled = true })
       if (signal.aborted) abortExecution()
       try {
-        await Promise.race([execution, aborted, new Promise<never>((_, reject) => { timeout = setTimeout(() => { reject(taskError('SCHEDULED_TASK_EXECUTION_TIMEOUT')); executionController.abort(new Error('SCHEDULED_TASK_EXECUTION_TIMEOUT')) }, this.executionTimeoutMs) })])
+        await Promise.race([execution, aborted, ...(this.executionTimeoutMs === undefined ? [] : [new Promise<never>((_, reject) => { timeout = setTimeout(() => { reject(taskError('SCHEDULED_TASK_EXECUTION_TIMEOUT')); executionController.abort(new Error('SCHEDULED_TASK_EXECUTION_TIMEOUT')) }, this.executionTimeoutMs) })])])
         const completed = await this.store.finish(task.id, task.run.id, 'succeeded')
         if (completed) summary.succeeded++
       } catch (error) {

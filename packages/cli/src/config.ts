@@ -77,7 +77,12 @@ export interface PulseCliConfig {
   capabilities?: PulseCliCapabilities
   approvalMode?: 'read-only' | 'ask' | 'auto'
   maxTurns?: number
-  /** Wall-clock limit for one run. Unset keeps the server default of 15 minutes. */
+  /** Provider attempts allowed across one controlled work task; defaults to 256. */
+  maxModelCalls?: number
+  modelBudgetPolicy?: import('@hunterzhu/pulse-server').LocalHostOptions['modelBudgetPolicy']
+  persistenceBackend?: 'json' | 'sqlite' | 'external-files'
+  maxCostByCurrency?: Record<string, number>
+  /** Optional wall-clock limit for one run. Unset means no overall deadline. */
   maxRuntimeMs?: number
   /** Percent of maxContextTokens that triggers automatic history compaction. Clamped to 1–90. */
   autoCompactPercent?: number
@@ -136,6 +141,7 @@ export const defaultPulseConfig: PulseCliConfig = {
   activeModel: 'mock/mock',
   approvalMode: 'ask',
   maxTurns: 32,
+  maxModelCalls: 256,
   autoCompactPercent: 90,
   allowNetwork: false,
   jarvis: {

@@ -1,3 +1,4 @@
+import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 import { defineTool } from '@hunterzhu/pulse-tool-sdk'
 import { z } from 'zod'
 import { describe, expect, it, vi } from 'vitest'
@@ -59,7 +60,7 @@ describe('local CLI application host', () => {
       allCalls++
       const body = JSON.parse(String(options.body))
       const safety = body.messages.some((message: { content: string }) => message.content.includes('You are the Pulse safety reviewer'))
-      const planning = !safety && body.messages.some((message: { content: string }) => message.content.includes('Create an executable plan'))
+      const planning = !safety && currentRequestText(body.messages).includes('Create an executable plan')
       if (safety) safetyPrompt = JSON.stringify(body.messages)
       if (!safety) mainCalls++
       const callTool = !safety && !planning && mainCalls === 2
@@ -68,7 +69,7 @@ describe('local CLI application host', () => {
         : callTool ? { content: '', tool_calls: [{ id: 'call', function: { name: 'shell_exec', arguments: '{"command":"node","args":["--version"]}' } }] } : { content: safety ? 'DENY' : 'blocked' }
       return new Response(JSON.stringify({ choices: [{ message, finish_reason: callTool ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } }), { headers: { 'content-type': 'application/json' } })
     }))
-    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', provider: { provider: 'openai', defaultModel: 'test' } })
+    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', approvalReview: { provider: 'ollama', model: 'local-test-review', baseURL: 'http://127.0.0.1:11434', timeoutMs: 30000 }, provider: { provider: 'openai', defaultModel: 'test' } })
     try {
       const conversation = await host.createConversation()
       await writeFile(join(directory, 'data', 'conversations', conversation.id, 'messages.jsonl'), JSON.stringify({ id: 'prior-plan', role: 'assistant', text: '1. Add lint. 2. Check Node and pnpm versions before validation.', createdAt: new Date().toISOString() }) + '\n')
@@ -150,6 +151,24 @@ describe('local CLI application host', () => {
       const snapshot = await readFile(join(runDir, 'runtime.json'), 'utf8')
       expect(snapshot).toContain('taskRecord')
       expect(snapshot).toContain('accepted')
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('uses a whole-task model-call budget independently of legacy maxTurns', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-task-model-budget-'))
+    try {
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), taskController: true, maxTurns: 1, maxModelCalls: 4, mockResponse: 'result' })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'Inspect the project and report a result.' })
+      for await (const _event of run.events) { /* drain */ }
+      await run.outcome()
+      const runDir = join(directory, 'data', 'conversations', conversation.id, 'runs', run.id)
+      const input = JSON.parse(await readFile(join(runDir, 'input.json'), 'utf8')) as { controllerVersion: string; maxTurns: number; maxModelCalls: number }
+      expect(input).toMatchObject({ controllerVersion: '18', maxTurns: 1, maxModelCalls: 4 })
+      const modelCalls = (await run.usage()).modelCalls
+      expect(modelCalls).toBeGreaterThan(1)
+      expect(modelCalls).toBeLessThanOrEqual(4)
       await host.close()
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
@@ -251,6 +270,44 @@ describe('local CLI application host', () => {
       await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'write finished' })
       expect(replied).toBe(true)
       await expect(readFile(join(directory, 'approved.txt'), 'utf8')).resolves.toBe('approved')
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('delegates an ordinary workspace read without calling an unconfigured reviewer', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-read-delegation-'))
+    try {
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'ask', mockToolCalls: [{ name: 'fs.list', input: { path: '.' } }], mockAfterToolResponse: 'Listed.' })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'List the project files.' })
+      let reviewed = false
+      for await (const event of run.events) {
+        if (event.type !== 'waiting' || reviewed) continue
+        const effectId = (event.data as { effectId?: string }).effectId
+        if (!effectId) continue
+        expect(await run.reviewApproval(effectId)).toMatchObject({ status: 'approved', reason: 'read_only' })
+        reviewed = true
+      }
+      expect(reviewed).toBe(true)
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded' })
+      await host.close()
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it('keeps environment dumps for manual approval', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-env-delegation-'))
+    try {
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'ask', mockToolCalls: [{ name: 'shell.exec', input: { command: '/usr/bin/env' } }] })
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'Inspect the project.' })
+      for await (const event of run.events) {
+        if (event.type !== 'waiting') continue
+        const effectId = (event.data as { effectId?: string }).effectId
+        if (!effectId) continue
+        expect(await run.reviewApproval(effectId)).toMatchObject({ status: 'manual', reason: 'risk_requires_user' })
+        await run.cancel('TEST_DONE')
+      }
+      await run.outcome()
       await host.close()
     } finally { await rm(directory, { recursive: true, force: true }) }
   })

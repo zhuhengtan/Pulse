@@ -139,6 +139,14 @@ export class SessionStoragePolicy {
     return true
   }
 
+  /** Only after the event archive has durably acknowledged these exact events. */
+  forgetArchivedEvents(ids: Iterable<string>): void {
+    for (const id of ids) {
+      const record = this.records.get(`event:${id}`)
+      if (record?.kind === 'event' && record.storageState === 'persisted' && record.pinCount === 0) this.unset(record.key)
+    }
+  }
+
   /** Replace one logical owner’s pins without double-counting repeated reconciliation. */
   replacePinSource(source: string, keys: Iterable<string>): void {
     const next = new Set(keys)

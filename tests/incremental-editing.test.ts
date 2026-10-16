@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { FilesystemTool } from '@hunterzhu/pulse-adapters'
-import { StagedEditor, boundedEdit } from '../packages/server/src/editing.js'
+import { PlanWriter, PLAN_BYTES, StagedEditor, boundedEdit } from '../packages/server/src/editing.js'
+import { isAllowedPlanWrite } from '../packages/server/src/index.js'
 
 describe('incremental file editing', () => {
   it('streams a new file in chunks and refuses to rewrite an existing file', async () => {
@@ -18,7 +19,7 @@ describe('incremental file editing', () => {
       let draft = await editor.execute({ operation: 'begin', path: 'new.ts' })
       const chunk = 'a'.repeat(2048)
       draft = await editor.execute({ operation: 'append', draftId: draft.draftId, revision: draft.revision, content: chunk })
-      await expect(editor.execute({ operation: 'append', draftId: draft.draftId, revision: draft.revision, content: 'b'.repeat(2049) })).rejects.toMatchObject({ code: 'CREATE_TOO_LARGE' })
+      await expect(editor.execute({ operation: 'append', draftId: draft.draftId, revision: draft.revision, content: 'b'.repeat(16385) })).rejects.toMatchObject({ code: 'CREATE_TOO_LARGE' })
       await expect(files.read('new.ts')).rejects.toMatchObject({ code: 'ENOENT' })
       const restored = new StagedEditor(new FilesystemTool(root))
       const saved = await restored.execute({ operation: 'inspect', draftId: draft.draftId })
@@ -54,6 +55,32 @@ describe('incremental file editing', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('stages a new docs plan by seeding begin content, then appends and commits', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulse-begin-content-'))
+    try {
+      const files = new FilesystemTool(root)
+      const editor = new StagedEditor(files)
+      const target = 'docs/plans/begin-content-plan.md'
+      const head = '# Plan\n\nFirst paragraph seeded through begin content.\n'
+      const tail = '\n## Rest\n\nThe remainder is appended before commit.\n'
+      let draft = await editor.execute({ operation: 'begin', path: target, content: head })
+      expect(draft.committed).toBe(false)
+      expect(draft.target).toBe(target)
+      expect(draft.bytes).toBe(Buffer.byteLength(head))
+      expect(draft.contentHash).toBe(createHash('sha256').update(head).digest('hex'))
+      await expect(files.read(target)).rejects.toMatchObject({ code: 'ENOENT' })
+      const saved = await editor.execute({ operation: 'inspect', draftId: draft.draftId })
+      expect(saved).toEqual(draft)
+      draft = await editor.execute({ operation: 'append', draftId: draft.draftId, revision: saved.revision, content: tail })
+      expect(draft.bytes).toBe(Buffer.byteLength(head + tail))
+      expect(draft.contentHash).toBe(createHash('sha256').update(head + tail).digest('hex'))
+      await expect(files.read(target)).rejects.toMatchObject({ code: 'ENOENT' })
+      const committed = await editor.execute({ operation: 'commit', draftId: draft.draftId, revision: draft.revision, expectedBytes: Buffer.byteLength(head + tail) })
+      expect(committed.committed).toBe(true)
+      expect(await files.read(target)).toBe(head + tail)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('rejects stale appends, concurrent target changes, and aborted commits', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-draft-conflict-'))
     try {
@@ -80,5 +107,37 @@ describe('incremental file editing', () => {
       expect(await files.read('file.txt')).toBe('first')
       expect(() => boundedEdit('雪'.repeat(3000))).toThrow('8192')
     } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('writes a whole long plan with plan.write and refuses an out-of-bounds, existing, or oversized target', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulse-plan-'))
+    try {
+      const files = new FilesystemTool(root)
+      const writer = new PlanWriter(files)
+      const body = `# Plan\n\n${'snow 雪 '.repeat(400)}`
+      expect(Buffer.byteLength(body)).toBeGreaterThan(2048)
+      const written = await writer.execute({ path: 'docs/plans/long-plan.md', content: body })
+      expect(written.path).toBe('docs/plans/long-plan.md')
+      expect(written.bytes).toBe(Buffer.byteLength(body))
+      expect(await files.read('docs/plans/long-plan.md')).toBe(body)
+      await expect(writer.execute({ path: 'docs/plans/long-plan.md', content: '# overwrite' })).rejects.toMatchObject({ code: 'FILE_BASELINE_CONFLICT' })
+      expect(await files.read('docs/plans/long-plan.md')).toBe(body)
+      await expect(writer.execute({ path: 'src/plan.md', content: '# x' })).rejects.toMatchObject({ code: 'PLAN_PATH_NOT_ALLOWED' })
+      await expect(writer.execute({ path: 'docs/plans/plan.txt', content: '# x' })).rejects.toMatchObject({ code: 'PLAN_PATH_NOT_ALLOWED' })
+      await expect(writer.execute({ path: '../docs/plans/plan.md', content: '# x' })).rejects.toMatchObject({ code: 'PLAN_PATH_NOT_ALLOWED' })
+      await expect(writer.execute({ path: '', content: '# x' })).rejects.toMatchObject({ code: 'INVALID_PLAN_PATH' })
+      await expect(writer.execute({ path: '.pulse/plans/plan.md', content: '# x' })).rejects.toMatchObject({ code: 'INVALID_PLAN_PATH' })
+      await expect(writer.execute({ path: 'docs/plans/huge.md', content: 'x'.repeat(PLAN_BYTES + 1) })).rejects.toMatchObject({ code: 'PLAN_TOO_LARGE' })
+      await expect(files.read('docs/plans/huge.md')).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('gates plan.write to docs/plans before confirmation', () => {
+    const cwd = '/workspace'
+    expect(isAllowedPlanWrite('plan.write', { path: 'docs/plans/greet.md' }, cwd)).toBe(true)
+    expect(isAllowedPlanWrite('plan.write', { path: 'src/greet.md' }, cwd)).toBe(false)
+    expect(isAllowedPlanWrite('plan.write', { path: 'docs/plans/greet.txt' }, cwd)).toBe(false)
+    expect(isAllowedPlanWrite('fs.write', { path: 'docs/plans/greet.md' }, cwd)).toBe(true)
+    expect(isAllowedPlanWrite('fs.write', { path: 'src/greet.ts' }, cwd)).toBe(false)
   })
 })

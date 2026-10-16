@@ -375,7 +375,7 @@ export DEEPSEEK_API_KEY="your-api-key"
 npx @hunterzhu/pulse-cli
 ```
 
-审批模式可以设置为 `ask`（每次由你确认）、`read-only`（禁止写入和 Shell）或 `auto`（由独立的模型安全审查先替你判断，再执行通过的操作）。一次 ReAct 运行默认最多 32 轮，可用 `--max-turns 64` 或配置文件中的 `maxTurns` 调整。上下文默认在估算用量达到 `autoCompactPercent`（默认 90）时自动压缩，会话里会留下提示；也可以随时用 `/compact` 手动压缩。
+审批模式可以设置为 `ask`（每次由你确认）、`read-only`（禁止写入和 Shell）或 `auto`（由独立的模型安全审查先替你判断，再执行通过的操作）。工作任务默认最多调用大模型 256 次，可用 `--max-model-calls` 或配置中的 `maxModelCalls` 调整；默认不设总时长上限。普通 ReAct 运行仍可用 `--max-turns` 或 `maxTurns` 调整轮数。上下文默认在估算用量达到 `autoCompactPercent`（默认 90）时自动压缩，会话里会留下提示；也可以随时用 `/compact` 手动压缩。
 
 Agent 需要询问你时，会调用 `ask.choice`、`ask.multi` 或 `ask.input`。CLI 会显示对应的单选、多选或文本输入卡片，回答会回到同一轮任务中。
 

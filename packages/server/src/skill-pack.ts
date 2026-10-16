@@ -3,6 +3,7 @@ import { lstat, open, realpath, readdir } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep, join } from 'node:path'
 import type { JsonValue } from '@hunterzhu/pulse-runtime'
 import type { CapabilityPack, CapabilityPackContext } from './capabilities.js'
+import { isBuiltinSkill } from './builtin-skills.js'
 import { pulseHomePath } from './paths.js'
 
 export interface SkillCapabilityPackOptions {
@@ -139,7 +140,7 @@ export function createSkillCapabilityPack(options: SkillCapabilityPackOptions = 
       const counts = new Map<string, number>()
       for (const root of roots) {
         for (const entry of await readdir(root, { withFileTypes: true })) {
-          if (!entry.isDirectory() || !skillNamePattern.test(entry.name) || (allowed && !allowed.includes(entry.name))) continue
+          if (!entry.isDirectory() || !skillNamePattern.test(entry.name) || isBuiltinSkill(entry.name) || (allowed && !allowed.includes(entry.name))) continue
           const file = join(root, entry.name, 'SKILL.md')
           try {
             const info = await lstat(file)
@@ -154,7 +155,8 @@ export function createSkillCapabilityPack(options: SkillCapabilityPackOptions = 
       return [...counts].filter(([, count]) => count === 1).map(([name]) => name).sort()
     },
     activate: async (context: CapabilityPackContext) => {
-      const names = selectedSkills({ skills: [...(context.selectedSkills ?? [])] }, limits.maxFiles)
+      // A built-in skill outranks a same-named external one; never load the external duplicate.
+      const names = selectedSkills({ skills: [...(context.selectedSkills ?? [])] }, limits.maxFiles).filter((name) => !isBuiltinSkill(name))
       if (names.length === 0) return { tools: [], instructions: [] }
       const roots = await approvedRoots(options)
       const loaded: Array<{ name: string; content: string; bytes: number }> = []

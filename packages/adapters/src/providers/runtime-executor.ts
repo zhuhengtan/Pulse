@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto'
 import type { EffectExecutor, EffectExecution, JsonValue, LLMRequestProjection, LLMResult, ModelCandidate, ModelRouteRequirements, ModelRouter } from '@hunterzhu/pulse-runtime'
-import { assignRuntimeToolCallIds, ModelFallbackController, OutputValidationError, estimateProjectionTokens, stableSerialize, validateAdapterResult, validateJsonSchema, modelFallbackError, runtimeErrorFromCause } from '@hunterzhu/pulse-runtime'
+import { assignRuntimeToolCallIds, contentHash, ModelFallbackController, OutputValidationError, estimateProjectionTokens, stableSerialize, validateAdapterResult, validateJsonSchema, modelFallbackError, runtimeErrorFromCause } from '@hunterzhu/pulse-runtime'
 import type { ProviderAdapter } from './types.js'
 
 class AsyncSlot {
@@ -90,7 +91,7 @@ function candidateMetadata(candidate: ModelCandidate, attempts: Array<{ effectId
   }) }
 }
 
-export function createModelEffectExecutor(config: { resolveImage?: (ref: string, agentId: string, privacy: LLMRequestProjection['privacy']) => string | Promise<string>; router: ModelRouter; providers: ReadonlyMap<string, ProviderAdapter>; requirements?: ModelRouteRequirements; maxConcurrentByProvider?: Readonly<Record<string, number>>; maxConcurrentByModel?: Readonly<Record<string, number>> }): EffectExecutor {
+export function createModelEffectExecutor(config: { resolveImage?: (ref: string, agentId: string, privacy: LLMRequestProjection['privacy']) => string | Promise<string>; router: ModelRouter; providers: ReadonlyMap<string, ProviderAdapter>; requirements?: ModelRouteRequirements; maxConcurrentByProvider?: Readonly<Record<string, number>>; maxConcurrentByModel?: Readonly<Record<string, number>>; modelBudget?: () => { limit: number; used: number }; beforeProviderAttempt?: (purpose?: string) => Promise<void>; afterProviderAttempt?: (usage: LLMResult['usage'], receiptId?: string) => Promise<void> }): EffectExecutor {
   const fallback = new ModelFallbackController()
   const providerSlots = new SlotPool(config.maxConcurrentByProvider)
   const modelSlots = new SlotPool(config.maxConcurrentByModel)
@@ -101,6 +102,8 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
     const request = input.request
     if (typeof task !== 'string' || !request || typeof request !== 'object' || Array.isArray(request)) throw new Error('INVALID_LLM_EFFECT_INPUT')
     const projection = request as unknown as LLMRequestProjection
+    const purpose = effect.key?.startsWith('progress-review') ? 'progress-review' : effect.key === 'safety-review' ? 'approval' : effect.key?.startsWith('verify-task') ? 'final-verification' : effect.key?.startsWith('verify-stage') || task === 'verify' ? 'verification' : task === 'plan' ? 'planning' : 'work'
+    let providerAttempts = 0
     const observations: NonNullable<EffectExecution['observations']> = []
     const usage = new Map<string, NonNullable<LLMResult['usage']>>()
     const slotWaitMs = new Map<string, number>()
@@ -132,6 +135,7 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
       try { modelRelease = await modelSlots.get(attempt.candidate.id).acquire(signal) } catch (cause) { providerRelease(); if (signal.aborted) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause }); throw cause }
       slotWaitMs.set(attempt.attemptId, Math.max(0, Date.now() - slotStartedAt))
       const releases = [providerRelease, modelRelease]
+      let providerStartedAt: number | undefined
       let feedbackRecorded = false
       const recordFeedback = (outcome: 'succeeded' | 'failed' | 'refused' | 'schema_rejected', quality: number): void => {
         if (feedbackRecorded) return
@@ -140,6 +144,7 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
       }
       try {
         const startedAt = Date.now()
+        const usageReceiptId = randomUUID()
         const onObservation = (chunk: string): void => {
           const observation = { type: 'chunk' as const, data: chunk }
           if (emitObservation) emitObservation(observation)
@@ -151,8 +156,16 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
           return { ...image, data: await config.resolveImage(image.ref, effect.agentId, projection.privacy) }
         }))
         const hydrated = images === undefined ? projection : { ...projection, images }
-        const output = assignRuntimeToolCallIds(validateAdapterResult(await provider.executeAttempt({ request: hydrated, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation })), effect.id)
-        const measuredUsage = { ...(output.usage ?? {}), visibleOutputChars: output.text.length, latencyMs: output.usage?.latencyMs ?? Math.max(0, Date.now() - startedAt), ...(output.usage?.uncachedInputTokens === undefined && output.usage?.inputTokens !== undefined && output.usage.cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, output.usage.inputTokens - output.usage.cachedInputTokens) } : {}) }
+        signal.throwIfAborted()
+        await config.beforeProviderAttempt?.(purpose)
+        providerStartedAt = Date.now()
+        providerAttempts++
+        const budget = config.modelBudget?.()
+        const blocks = budget ? [...hydrated.blocks, { kind: 'policy' as const, content: `Host model-call ledger: limit=${budget.limit}, used=${budget.used} (including this request), remaining=${Math.max(0, budget.limit - budget.used)}. This is shared by planning, tools' approval reviews, retries, compaction and final verification. Reserve at least two requests for verification. Produce an incremental usable deliverable now; do not spend the remaining allowance on discovery or start another run.` }] : hydrated.blocks
+        const budgeted = budget ? { ...hydrated, blocks, projectionHash: contentHash(blocks) } : hydrated
+        const output = assignRuntimeToolCallIds(validateAdapterResult(await provider.executeAttempt({ request: budgeted, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation, ...(config.beforeProviderAttempt === undefined ? {} : { beforeRetryAttempt: async () => { await config.beforeProviderAttempt!(purpose); providerAttempts++ } }) })), effect.id)
+        const measuredUsage = { ...(output.usage ?? {}), outputTruncated: output.finishReason === 'length', visibleOutputChars: output.text.length, latencyMs: output.usage?.latencyMs ?? Math.max(0, Date.now() - startedAt), ...(output.usage?.uncachedInputTokens === undefined && output.usage?.inputTokens !== undefined && output.usage.cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, output.usage.inputTokens - output.usage.cachedInputTokens) } : {}) }
+        await config.afterProviderAttempt?.(measuredUsage, usageReceiptId)
         usage.set(attempt.attemptId, measuredUsage)
         if (output.finishReason === 'length' && input.outputSchema !== undefined) throw Object.assign(new OutputValidationError('adapter', 'OUTPUT_TRUNCATED', 'Model output reached its token limit; incomplete output was rejected.', { outputTokens: output.usage?.outputTokens ?? null, reasoningTokens: output.usage?.reasoningTokens ?? null, visibleOutputChars: output.text.length, maxOutputTokens: routeRequirements.maxOutputTokens ?? config.requirements?.maxOutputTokens ?? null }), { retryable: false })
         if (output.finishReason === 'refusal') { recordFeedback('refused', 0); throw new OutputValidationError('adapter', 'MODEL_REFUSAL', output.refusal ?? 'Provider refused the request.') }
@@ -171,7 +184,15 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
         recordFeedback('succeeded', 1)
         return output
       } catch (cause) {
-        recordFeedback('failed', 0)
+        // Transport failure still consumed time. Preserve measured timing, but
+        // never invent token counts or costs when the provider returned none.
+        if (providerStartedAt !== undefined) {
+          const measured = usage.get(attempt.attemptId) ?? { latencyMs: Math.max(1, Date.now() - providerStartedAt) }
+          usage.set(attempt.attemptId, measured)
+          usage.set(effect.attemptId, measured)
+        }
+        const stopped = cause && typeof cause === 'object' && 'code' in cause && /^(?:TASK_MODEL_CALL_BUDGET_|AI_APPROVAL_DENIED|APPROVAL_DENIED|TOOL_CANCELLED)/.test(String(cause.code))
+        if (!stopped) recordFeedback('failed', 0)
         if (signal.aborted) throw modelFallbackError({ retryable: false, localClosed: true, sideEffectState: 'none', cause })
         const retryable = cause && typeof cause === 'object' && 'retryable' in cause && typeof (cause as { retryable?: unknown }).retryable === 'boolean' ? (cause as { retryable: boolean }).retryable : true
         throw modelFallbackError({ retryable, localClosed: true, sideEffectState: 'none', cause })
@@ -191,11 +212,11 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
       const error = runtimeErrorFromCause(fallbackError?.cause ?? cause, 'MODEL_EXECUTION_FAILED')
       return { result: { text: '', toolCalls: [], finishReason: 'error' as const }, candidate, attempts: [{ effectId: effect.id, attemptId: effect.attemptId, attemptNo, candidate }], failed: { ...error, ...(canFallback && fallbackError?.retryable !== false && error.retryable !== false ? { retryable: true } : {}) } }
     })
-    if ('schemaRejected' in result) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Provider output did not match the declared schema.', ...(canFallback ? { retryable: true } : {}) }, metadata: candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue), rejectedOutput: { value: result.schemaRejected, privacy: projection.privacy, derivedFrom: [...(effect.derivedFrom ?? [])] } }
-    if ('refused' in result) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'MODEL_REFUSAL', message: result.result.refusal ?? 'Provider refused the request.', ...(result.retryable ? { retryable: true } : {}) }, metadata: candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue) }
-    if ('failed' in result) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: result.failed, metadata: candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue) }
+    if ('schemaRejected' in result) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'OUTPUT_SCHEMA_VIOLATION', message: 'Provider output did not match the declared schema.', ...(canFallback ? { retryable: true } : {}) }, metadata: { ...(candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue) as Record<string, JsonValue>), providerAttempts }, rejectedOutput: { value: result.schemaRejected, privacy: projection.privacy, derivedFrom: [...(effect.derivedFrom ?? [])] } }
+    if ('refused' in result) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: 'MODEL_REFUSAL', message: result.result.refusal ?? 'Provider refused the request.', ...(result.retryable ? { retryable: true } : {}) }, metadata: { ...(candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue) as Record<string, JsonValue>), providerAttempts } }
+    if ('failed' in result) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: result.failed, metadata: { ...(candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue) as Record<string, JsonValue>), providerAttempts } }
     const modelValue = input.outputSchema !== undefined || typeof input.schema === 'string' ? (result.result.structured ?? result.result.text) : result.result
     const value = toJson(modelValue)
-    return { value, privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue), ...(observations.length ? { observations } : {}) }
+    return { value, privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: { ...(candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue) as Record<string, JsonValue>), providerAttempts }, ...(observations.length ? { observations } : {}) }
   }
 }

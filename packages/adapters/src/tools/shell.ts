@@ -1,3 +1,4 @@
+import { ShellOutput } from './shell-output.js'
 import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
@@ -9,8 +10,9 @@ import { SandboxManager, VENDORED_SRT_WIN_EXE, checkWindowsDependenciesAsync, re
 import { resolveWindowsPackageManager } from './windows-package-manager.js'
 import { carveWindowsReadDenies } from './windows-read-policy.js'
 import { initializeShellSandbox } from './sandbox-initialization.js'
+import { installationDependencyRoots } from './installation-dependencies.js'
 
-export interface ShellResult { code: number | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean; aborted: boolean }
+export interface ShellResult { code: number | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean; aborted: boolean; outputArchive?: ReturnType<ShellOutput['finish']> }
 
 function shellError(code: string, retryable = false, cause?: unknown): Error & { code: string; retryable: boolean; cause?: unknown } {
   return Object.assign(new Error(code), { code, retryable, ...(cause === undefined ? {} : { cause }) })
@@ -172,12 +174,18 @@ function shellLaunchesCommand(command: string, args: string[]): boolean {
   return args.some((arg) => /^(?:-lc|-c|-command|\/c)$/i.test(arg))
 }
 
-export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[] } = {}): Promise<ShellResult> {
+/** Deterministic argv validation, shared by pre-approval and actual execution. */
+export function validateShellInvocation(command: string, args: string[] = []): void {
+  if (!command || typeof command !== 'string' || !Array.isArray(args) || args.some((arg) => typeof arg !== 'string')) throw shellError('INVALID_SHELL_ARGUMENT')
+  if (/&&|\|\||[|&;<>\n`]|\$\(/.test(command) || shellLaunchesCommand(command, args)) throw Object.assign(shellError('SHELL_SYNTAX_UNSUPPORTED'), { message: 'shell.exec does not start a shell. Pass the executable in command and each argument in args. Do not put &&, pipes, redirects, command substitution, or sh -c in command.' })
+  encodeSandboxCommand(command, args)
+}
+
+export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number } = {}): Promise<ShellResult> {
   const max = options.maxOutputBytes ?? 256 * 1024
   if (!Number.isFinite(max) || max < 0) return Promise.reject(shellError('INVALID_SHELL_OUTPUT_LIMIT'))
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0)) return Promise.reject(shellError('INVALID_SHELL_TIMEOUT'))
-  if (!command || typeof command !== 'string' || !Array.isArray(args) || args.some((arg) => typeof arg !== 'string')) return Promise.reject(shellError('INVALID_SHELL_ARGUMENT'))
-  if (/&&|\|\||[|&;<>\n`]|\$\(/.test(command) || shellLaunchesCommand(command, args)) return Promise.reject(Object.assign(shellError('SHELL_SYNTAX_UNSUPPORTED'), { message: 'shell.exec does not start a shell. Pass the executable in command and each argument in args. Do not put &&, pipes, redirects, command substitution, or sh -c in command.' }))
+  try { validateShellInvocation(command, args) } catch (error) { return Promise.reject(error) }
   try { encodeSandboxCommand(command, args) } catch (error) { return Promise.reject(error) }
 
   return withSandboxLease(async () => {
@@ -194,6 +202,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     const nodeBin = dirname(nodeExecutable)
     const installation = basename(nodeBin) === 'bin' ? dirname(nodeBin) : nodeBin
     const toolchainRoots = installation !== homedir() && installation !== parse(installation).root ? [installation] : [nodeExecutable]
+    toolchainRoots.push(...await installationDependencyRoots())
     // PNPM_HOME is a host installation setting, never supplied by model argv.
     let pnpmHome: string | undefined
     if (process.env.PNPM_HOME) {
@@ -231,7 +240,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     const invocationId = randomUUID()
     const policy = await sandboxConfig(cwd, options.allowedDomains ?? [], toolchainRoots, scratch)
     let child: ReturnType<typeof spawn> | undefined
-    const outputChunks = { stdout: [] as Buffer[], stderr: [] as Buffer[] }
+    const archive = new ShellOutput(max, options.outputDirectory, options.maxArchiveBytes, options.outputDirectory !== undefined)
     const outputBytes = { stdout: 0, stderr: 0 }
     let truncated = false
     let closed = false
@@ -259,14 +268,12 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       if (!killTimer) killTimer = setTimeout(() => { if (!closed) signalProcessGroup('SIGKILL') }, 250)
     }
     const append = (target: 'stdout' | 'stderr', chunk: Buffer): void => {
-      const remaining = Math.max(0, max - outputBytes[target])
-      const kept = Math.min(chunk.byteLength, remaining)
-      if (kept > 0) outputChunks[target].push(chunk.subarray(0, kept))
-      outputBytes[target] += kept
-      if (kept < chunk.byteLength) truncated = true
+      archive.append(target, chunk)
+      outputBytes[target] += chunk.byteLength
+      if (outputBytes[target] > max) truncated = true
     }
     const outputText = (target: 'stdout' | 'stderr'): string => {
-      return decodeUtf8WithinByteLimit(Buffer.concat(outputChunks[target]), max)
+      return decodeUtf8WithinByteLimit(Buffer.from(archive.text(target)), max)
     }
 
     let setupStage = 'reset'
@@ -323,6 +330,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         cleanup()
         const errorCode = cause && typeof cause === 'object' ? (cause as unknown as { code?: unknown }).code : undefined
         const code = typeof errorCode === 'string' ? errorCode : 'SHELL_EXECUTION_ERROR'
+        archive.finish()
         reject(shellError(code === 'ENOENT' || code === 'EACCES' ? code : 'SHELL_EXECUTION_ERROR', false, cause))
       })
       child!.once('close', (code) => {
@@ -333,7 +341,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         const annotated = SandboxManager.annotateStderrWithSandboxFailures(invocationId, stderr)
         const boundedStderr = decodeUtf8WithinByteLimit(Buffer.from(annotated, 'utf8'), max)
         const outputWasTruncated = truncated || Buffer.byteLength(annotated, 'utf8') > max
-        resolve({ code, stdout, stderr: boundedStderr, truncated: outputWasTruncated, timedOut: termination === 'timeout', aborted: termination === 'aborted' })
+        resolve({ code, stdout, stderr: boundedStderr, truncated: outputWasTruncated, timedOut: termination === 'timeout', aborted: termination === 'aborted', outputArchive: archive.finish() })
       })
     }).finally(async () => {
       try {

@@ -15,7 +15,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
     this.baseURL = baseURL
   }
-  async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number }): Promise<LLMResult> {
+  async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number; beforeRetryAttempt?: () => Promise<void> }): Promise<LLMResult> {
     const streaming = params.onObservation !== undefined
     const { canonical, toolNameAliases } = lowerProjectionToCanonical({
       request: params.request,
@@ -65,6 +65,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
       if (sentReasoning && this.probe.reasoningParameterRejected(cause)) {
         this.probe.markReasoningUnsupported(this.config.provider, canonical.model)
+        await params.beforeRetryAttempt?.()
         return this.executeAttempt(params)
       }
       if (cause instanceof Error && 'code' in cause && typeof (cause as { code?: unknown }).code === 'string' && 'retryable' in cause && typeof (cause as { retryable?: unknown }).retryable === 'boolean') throw cause

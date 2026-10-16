@@ -225,7 +225,7 @@ export class H5Server {
   }
 
   private configSources(): Record<string, unknown> {
-    const vars = ['PULSE_CONFIG', 'PULSE_DATA_DIR', 'PULSE_MODEL', 'PULSE_APPROVAL_MODE', 'PULSE_MAX_TURNS', 'PULSE_MAX_RUNTIME_MS', 'PULSE_AUTO_COMPACT_PERCENT', 'PULSE_ALLOW_NETWORK', 'PULSE_JARVIS_ENABLED', 'PULSE_JARVIS_API_URL', 'PULSE_FRONT_MODEL']
+    const vars = ['PULSE_CONFIG', 'PULSE_DATA_DIR', 'PULSE_MODEL', 'PULSE_APPROVAL_MODE', 'PULSE_MAX_TURNS', 'PULSE_MAX_MODEL_CALLS', 'PULSE_MAX_RUNTIME_MS', 'PULSE_AUTO_COMPACT_PERCENT', 'PULSE_ALLOW_NETWORK', 'PULSE_JARVIS_ENABLED', 'PULSE_JARVIS_API_URL', 'PULSE_FRONT_MODEL']
     return Object.fromEntries(vars.filter(name => process.env[name] !== undefined).map(name => [name, { source: 'environment', active: true }]))
   }
 

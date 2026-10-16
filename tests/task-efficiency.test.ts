@@ -59,6 +59,21 @@ describe('efficient task continuation', () => {
       expect(chained?.reusableIds).toEqual(['read'])
       expect(chained?.evidence.read).toEqual(checkpoint.evidence.read)
       expect(checkpointReceipt(checkpoint).stages[0]?.evidence).toContain('evidence')
+      await writeFile(join(root, 'unrelated.txt'), 'An unrelated user edit')
+      expect((await validateCheckpoint(root, checkpoint, initial.taskRecord.objective))?.reusableIds).toEqual(['read'])
+      // Keep independent accepted evidence when only another stage becomes stale.
+      await writeFile(join(root, 'other.txt'), 'other evidence')
+      const otherHash = createHash('sha256').update('other evidence').digest('hex')
+      const multi = structuredClone(checkpoint)
+      multi.controller.tasks.push({ ...structuredClone(multi.controller.tasks[0]!), id: 'other', dependsOn: [] })
+      multi.reusableIds.push('other')
+      multi.evidence.other = [{ tool: 'fs.read', result: { path: 'other.txt', hash: otherHash } }]
+      multi.fileHashes['other.txt'] = otherHash
+      multi.stageFileHashes = { read: { 'source.txt': hash }, other: { 'other.txt': otherHash } }
+      await writeFile(join(root, 'other.txt'), 'stale')
+      expect((await validateCheckpoint(root, multi, initial.taskRecord.objective))?.reusableIds).toEqual(['read'])
+      multi.controller.tasks[0]!.dependsOn = ['other']
+      expect(await validateCheckpoint(root, multi, initial.taskRecord.objective)).toMatchObject({ reusableIds: [], facts: [expect.objectContaining({ stageId: 'read' })] }) // Retained context is not accepted stage evidence.
       await writeFile(join(root, 'source.txt'), 'changed')
       expect(await validateCheckpoint(root, checkpoint, initial.taskRecord.objective)).toBeUndefined()
       expect(await validateCheckpoint(root, checkpoint, 'different goal')).toBeUndefined()
@@ -81,7 +96,7 @@ describe('efficient task continuation', () => {
       if (effect.key?.startsWith('verify-stage')) return { value: { status: 'passed', evidenceRefs: refs, note: 'done' } }
       return { value: ++work === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.read', input: {} }] } : { text: 'done', finishReason: 'stop' } }
     } })
-    const program = buildTaskControllerProgram({ system: 'system policy', toolNames: ['fs.read'], approvalMode: 'auto', maxTurns: 16, conversation: [{ role: 'assistant', content: 'OLD_BULK'.repeat(20000) }, { role: 'assistant', content: 'Earlier agreed design remains available' }, { role: 'user', content: 'NEVER modify tests' }, { role: 'assistant', content: 'Latest answer' }] })
+    const program = buildTaskControllerProgram({ version: '13', system: 'system policy', toolNames: ['fs.read'], approvalMode: 'auto', maxTurns: 16, conversation: [{ role: 'assistant', content: 'OLD_BULK'.repeat(20000) }, { role: 'assistant', content: 'Earlier agreed design remains available' }, { role: 'user', content: 'NEVER modify tests' }, { role: 'assistant', content: 'Latest answer' }] })
     const { agentId } = runtime.createAgent({ goal: 'Read source', program, initialGlobal: { ...initial, irrelevant: 'bulk'.repeat(20000) } })
     expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'succeeded' })
     for (const request of requests) {

@@ -25,7 +25,8 @@ export async function runOneShot(
   options: LocalHostOptions,
   task: string,
   format = 'text',
-  version = '0.4.1'
+  version = '0.4.1',
+  requirementPaths?: string[]
 ): Promise<number> {
   const host = createLocalHost(options);
   let activeRun: RunHandle | undefined;
@@ -36,6 +37,7 @@ export async function runOneShot(
     const conversation = await host.createConversation(options.cwd ? { cwd: options.cwd } : {});
     const run = await host.sendMessage(conversation.id, {
       text: task,
+      ...(requirementPaths ? { requirementPaths } : {}),
       format: format === 'jsonl' ? 'jsonl' : 'text',
     });
     activeRun = run;

@@ -379,7 +379,7 @@ export DEEPSEEK_API_KEY="your-api-key"
 npx @hunterzhu/pulse-cli
 ```
 
-Approval modes are `ask` (confirm each time), `read-only` (prohibit writes and Shell), or `auto` (an independent model safety review checks an operation before execution). A ReAct run allows up to 32 turns by default; adjust it with `--max-turns 64` or config field `maxTurns`. Context is automatically compacted when estimated usage reaches `autoCompactPercent` (90 by default), and the session shows a notice. You can also run `/compact` at any time.
+Approval modes are `ask` (confirm each time), `read-only` (prohibit writes and Shell), or `auto` (an independent model safety review checks an operation before execution). A work task allows up to 256 model attempts by default; adjust this with `--max-model-calls` or `maxModelCalls`. There is no overall time limit unless one is configured. Ordinary ReAct runs still use `--max-turns` or `maxTurns`. Context is automatically compacted when estimated usage reaches `autoCompactPercent` (90 by default), and the session shows a notice. You can also run `/compact` at any time.
 
 When an Agent needs input, it calls `ask.choice`, `ask.multi`, or `ask.input`. The CLI displays a single-choice, multi-choice, or text-input card; the answer returns to the same task run.
 

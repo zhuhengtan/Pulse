@@ -103,10 +103,12 @@ Provider 字段说明：
 - `providers.<id>.models.<modelId>.pricing` 可为本地费用估算提供 `{ currency, inputPerMillion, outputPerMillion, version }`。估算费用与 Provider 报告费用分开展示，并保留价格版本。
 - `toolChoice`：`auto`、`required`、`none`，或指定一个函数工具。
 - `approvalMode`：`ask` 每次副作用由你确认；`read-only` 禁止写入和 shell；`auto` 对 workspace 内的 `fs.write`、`fs.apply_patch`、`fs.move` 使用工具自身的 workspace 权限和路径校验直接执行，其他外部副作用再由独立的 Pulse safety reviewer 审查。审查回复必须整段就是 `APPROVE` 才会放行，`DENY`、解释句，以及「不允许」「不批准」都不会放行。
+- H5 的“代审”会直接通过工作区内的普通只读操作；集中审核必要的文件写入与常规验证，敏感路径和危险命令仍交给用户。配置本地 Ollama 审核模型后，审核至少等待 30 秒，并为判断回复保留 128 token。
 - Runtime 默认以事件驱动方式调度异步模型请求和工具调用。独立工具操作可并行提交；同一目标文件仍由路径级锁与基线哈希保护，冲突后应重新读取再规划。
 - `systemPrompt`：自定义系统指令文本。也可通过 `--system-prompt` 或 `PULSE_SYSTEM_PROMPT` 注入。未加 `--trust-workspace` 时，工作区 `.pulse/config.json` 里的此项会被忽略。
 - `systemPromptFile`：从文件载入自定义系统指令。也可通过 `--system-prompt-file` 或 `PULSE_SYSTEM_PROMPT_FILE` 注入。未加 `--trust-workspace` 时，工作区配置不能指定这个路径。
-- `maxTurns`：一次 ReAct 运行允许的最大模型/工具轮数，默认 32，命令行可用 `--max-turns` 或 `PULSE_MAX_TURNS` 覆盖，最大 256。
+- `maxModelCalls`：单个工作任务调用大模型的总次数上限，默认 256，包含计划、各阶段与验收；可用 `--max-model-calls` 或 `PULSE_MAX_MODEL_CALLS` 覆盖，最大 256。工作任务默认没有总时长上限；需要时可显式配置 `maxRuntimeMs` 或 `--max-runtime-ms`。
+- `maxTurns`：普通 ReAct 运行的模型/工具轮数，默认 32，可用 `--max-turns` 或 `PULSE_MAX_TURNS` 覆盖；不再充当工作任务的总调用预算。
 - `autoCompactPercent`：自动压缩阈值，按 `maxContextTokens` 的百分比估算。默认 90，可用 `--auto-compact-percent` 或 `PULSE_AUTO_COMPACT_PERCENT` 覆盖，超过 90 会降到 90，给摘要请求留出空间。达到阈值后，下一条消息发送前会调用已配置模型压缩历史，并在会话里留下 `[自动压缩]` 提示；原记录备份为 `messages.jsonl.bak`。估算会加上系统提示词的体积。更早内容如果已经只剩一条历史摘要，则不再重复压缩。摘要留在对话记录里，适配器会把它当作上下文，而不会并入系统提示词。`mock` provider 不会自动压缩。会话中也可以随时执行 `/compact` 手动压缩。
 
 定时任务通过 `pulse schedule add --every 1h --name "项目巡检" "任务内容"` 创建，`list`、`pause <id>`、`resume <id>`、`remove <id>` 管理。`pulse schedule daemon` 常驻轮询，`run-once` 只运行已到期任务。计划任务只允许 `read-only` 或明确配置的 `auto` 审批模式；执行记录保存在数据目录的 `scheduled-tasks.json` 中。它是前台 worker，操作系统登录启动服务尚需由部署环境单独配置。
@@ -149,3 +151,9 @@ Pulse 采用模块化系统提示词基座（参考 Claude Code、OpenAI Codex C
 ```
 
 同名内置命令优先；技能可始终使用 `/skill:review 检查当前改动` 调用。只有提交的技能正文会加入当前任务上下文；下一条普通消息不会再次注入技能正文。任务运行期间需等待结束或 `/cancel` 后再调用技能。单个正文最多 64 KiB；目录索引不受原先 32 个已加载技能的限制。技能只提供不可信参考指令，不自动执行脚本或加载配套文件。
+
+## 长任务中断与排障
+
+`resume <会话ID>` 和 `--resume` 恢复该会话的未完成运行；已完成时进入历史会话。文本“继续”是向会话发送续做需求，不能代替恢复等待中的原问题。恢复保留题目、选项和默认保守项，不自动回答。
+
+`maxModelCalls` 的持久账本包含规划、审批、重试、压缩和验证，重启不清零。不要删除或清理预算文件；预算耗尽后保留现场并停止，是否发起后续工作由用户决定。`ENOTFOUND` 表示网络/DNS阻塞，应保留脱敏原因码，不记成业务实现错误。

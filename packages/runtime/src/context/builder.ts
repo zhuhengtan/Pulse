@@ -11,6 +11,9 @@ function hash(value: unknown): string { return createHash('sha256').update(stabl
 
 export interface ContextBuildInput {
   explicitContext?: boolean
+  /** Include this lane's append-only history without implicitly exposing Global/Lane state. */
+  includeLaneHistory?: boolean
+  historySeqs?: readonly number[]
   agent: AgentRecord
   lane: LaneRecord
   resultRefs?: ResultRef[]
@@ -47,6 +50,12 @@ function projectResultValue(result: { value?: JsonValue; summary?: JsonValue }):
     summarized: true,
     originalBytes,
   }
+}
+
+function visibleModelOutput(value: JsonValue): JsonValue {
+  if (Array.isArray(value)) return value.map(visibleModelOutput)
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([key]) => !['providerContinuation', 'reasoningContent', 'reasoning_content'].includes(key)).map(([key, item]) => [key, visibleModelOutput(item)]))
+  return value
 }
 
 function buildProviderHistory(state: RuntimeState, history: LaneRecord['context']['history'], visible?: Set<ResultRef>): ProviderHistoryMessage[] | undefined {
@@ -112,7 +121,9 @@ export class ContextBuilder {
     assertDslInstructionSize(input.instruction)
     const global = input.agent.globalVersions.get(input.lane.contextSnapshotVersion)
     if (global === undefined) throw new Error('UNKNOWN_CONTEXT_VERSION')
-    const resultRefs = input.resultRefs ?? []
+    const history = (input.includeLaneHistory || !input.explicitContext ? input.lane.context.history : []).filter(record => input.historySeqs === undefined || input.historySeqs.includes(record.seq))
+    const historyRefs = input.includeLaneHistory ? [...new Set(history.flatMap(r => r.resultRefs))].filter(ref => this.state.results.has(ref) && (input.lane.visibleResultRefs === undefined || input.lane.visibleResultRefs.has(ref))) : []
+    const resultRefs = [...new Set([...(input.resultRefs ?? []), ...historyRefs])]
     const results = resultRefs.map((ref) => {
       const result = this.state.results.get(ref)
       if (!result) throw new Error(`UNKNOWN_RESULT_REF:${ref}`)
@@ -154,19 +165,36 @@ export class ContextBuilder {
       ...effectiveArtifacts.flatMap((item) => (item.artifact.privacyTaints ?? []).map((taint) => ({ path: [item.artifact.ref, ...taint.path], privacy: taint.privacy }))),
     ]
     const conversation = input.conversation ?? []
-    const providerHistory = input.explicitContext ? undefined : buildProviderHistory(this.state, input.lane.context.history, input.lane.visibleResultRefs)
+    const providerHistory = input.explicitContext ? undefined : buildProviderHistory(this.state, history, input.lane.visibleResultRefs)
+    const emitted = new Set<string>()
+    const historyResult = (ref: string) => {
+      const result = this.state.results.get(ref)!
+      const effectId = result.effectId ?? (result.producer?.kind === 'effect' ? result.producer.id : undefined)
+      return effectId && this.state.effects.get(effectId)?.kind === 'llm'
+        ? projectResultValue({ value: visibleModelOutput(result.value ?? null), ...(result.summary === undefined ? {} : { summary: visibleModelOutput(result.summary) }) }) : projectResultValue(result)
+    }
+    const historyBlock = { kind: 'history' as const, content: history.map(record => {
+      const output = record.output && typeof record.output === 'object' && !Array.isArray(record.output) ? record.output : undefined
+      return { seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), instruction: record.instruction, resultRefs: record.resultRefs,
+        ...(record.resultSelection === undefined ? {} : { resultSelection: record.resultSelection }), ...(record.result === undefined ? {} : { result: record.result }),
+        ...(record.findings === undefined ? {} : { findings: record.findings }),
+        output: input.includeLaneHistory && output ? visibleModelOutput(output) : record.output,
+        ...(input.includeLaneHistory ? { evidence: record.resultRefs.filter(ref => historyRefs.includes(ref) && !emitted.has(ref) && !!emitted.add(ref)).map(ref => ({ ref, ...historyResult(ref) })) } : {}),
+        privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: record.privacyTaints as unknown as JsonValue }) }
+    }) }
     const contextSpec: LLMContextSpec = { globalSnapshotVersion: input.lane.contextSnapshotVersion, laneSnapshotVersion: input.lane.context.version, resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: input.eventIds ?? [], toolSetId: input.toolSetId, instruction: input.instruction, ...(conversation.length ? { conversation: structuredClone(conversation) } : {}), ...(providerHistory === undefined ? {} : { providerHistory }), privacy, privacyRefs, ...(privacyTaints.length ? { privacyTaints } : {}) }
     const prefixBlocks = [
       { kind: 'system' as const, content: input.system ?? '' },
       { kind: 'policy' as const, content: input.policy ?? {} },
       { kind: 'tools' as const, content: input.tools ?? {} },
       { kind: 'global' as const, content: input.explicitContext ? {} : global },
-      ...(conversation.length ? [{ kind: 'conversation' as const, content: structuredClone(conversation) as unknown as JsonValue }] : []),
-      { kind: 'history' as const, content: (input.explicitContext ? [] : input.lane.context.history).map((record) => ({ seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), instruction: record.instruction, resultRefs: record.resultRefs, ...(record.resultSelection === undefined ? {} : { resultSelection: record.resultSelection }), ...(record.result === undefined ? {} : { result: record.result }), ...(record.findings === undefined ? {} : { findings: record.findings }), output: record.output, privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: record.privacyTaints as unknown as JsonValue }) })) },
+      ...(!input.includeLaneHistory && conversation.length ? [{ kind: 'conversation' as const, content: structuredClone(conversation) as unknown as JsonValue }] : []),
+      historyBlock,
     ]
     const correlatedRefs = new Set((providerHistory ?? []).flatMap((message) => message.role === 'tool' ? [message.resultRef] : []))
-    const remainingResults = results.filter((result) => !correlatedRefs.has(result.id))
-    const blocks = [...prefixBlocks, ...(providerHistory === undefined ? [] : [{ kind: 'provider_history' as const, content: providerHistory as unknown as JsonValue }]), { kind: 'lane' as const, content: input.explicitContext ? {} : input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: remainingResults.map((result) => {
+    const remainingResults = results.filter((result) => !correlatedRefs.has(result.id) && (!emitted.has(result.id) || input.resultRefs?.includes(result.id)))
+    const blocks = [...prefixBlocks, ...(input.includeLaneHistory && conversation.length ? [{ kind: 'conversation' as const, content: structuredClone(conversation) as unknown as JsonValue }] : []), ...(providerHistory === undefined ? [] : [{ kind: 'provider_history' as const, content: providerHistory as unknown as JsonValue }]), { kind: 'lane' as const, content: input.explicitContext ? {} : input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: remainingResults.map((result) => {
+      if (emitted.has(result.id)) return { id: result.id, fromHistory: true }
       const projected = projectResultValue(result)
       return { id: result.id, value: projected.value, ...(projected.summarized ? { summarized: true, ...(projected.originalBytes === undefined ? {} : { originalBytes: projected.originalBytes }) } : {}), ...(result.privacyTaints === undefined ? {} : { privacyTaints: result.privacyTaints.map((taint) => ({ path: [...taint.path], privacy: taint.privacy }) as unknown as JsonValue) }) }
     }) }, { kind: 'artifacts' as const, content: artifacts.map((artifact) => ({ ref: artifact.ref, mediaType: artifact.mediaType, sizeBytes: artifact.sizeBytes, contentHash: artifact.contentHash })) }, { kind: 'instruction' as const, content: input.instruction }]

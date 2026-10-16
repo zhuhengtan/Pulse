@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createLocalHost, automationDoctor, requestAutomationPermissions, assertJarvisApiUrl, createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
+import { createLocalHost, automationDoctor, requestAutomationPermissions, assertJarvisApiUrl, createBuiltinSkillCapabilityPack, createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
 import { modelSelectionId, normalizeModelConfig, resolveModelReference } from '@hunterzhu/pulse-server'
 import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
@@ -35,7 +35,7 @@ Usage:
   pulse run <task> [options]              run one task
   pulse sessions [options]                list saved conversations
   pulse resume <conversation-id> [task]    continue or recover a conversation
-  pulse doctor [options]                  check local configuration
+  pulse drafts <conversation-id> <run-id> <draft-id> [--revision <hash> --confirm-owner]\n                                          preview or explicitly migrate an ownerless draft\n  pulse doctor [options]                  check local configuration
   pulse h5 [start|qr|devices|revoke|install|status|stop|uninstall]
                                           mobile web assistant and launchd daemon
   pulse schedule <add|list|pause|resume|remove|daemon> [options]
@@ -54,8 +54,9 @@ Options:
   --max-output-tokens <n>   maximum generated tokens (default 4096)
   --reasoning-effort <x>    low, medium, or high
   --max-turns <n>           maximum ReAct model/tool turns (default 32)
+  --max-model-calls <n>     maximum model attempts per work task (default 256)
   --auto-compact-percent <n> compact automatically at this percent of the context window (1-90, default 90)
-  --format <text|jsonl>     output format
+  --accept-build-migration <old:new> authorize one reviewed recovery build pair\n  --requirements-doc <path> explicitly attach a workspace requirements document\n  --format <text|jsonl>     output format
   --resume                  enter the latest saved session
   --read-only               disable write and shell tools
   --auto-approve             approve local writes and shell execution on your behalf
@@ -106,6 +107,7 @@ const knownBooleanFlags = new Set([
   'help',
   'version',
   'force',
+  'confirm-owner',
   'jarvis',
   'no-jarvis',
   'jarvis-allow-remote',
@@ -151,7 +153,7 @@ export function parse(argv: string[]): Parsed {
       options[key] = true
       continue
     }
-  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp', 'h5', 'automation'].includes(arg)) {
+  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp', 'h5', 'automation', 'drafts'].includes(arg)) {
       command = arg
     } else {
       positionals.push(arg)
@@ -217,6 +219,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const maxOutputTokens = option(parsed.options, 'max-output-tokens') ?? process.env.PULSE_MAX_OUTPUT_TOKENS
   const reasoningEffort = option(parsed.options, 'reasoning-effort') ?? process.env.PULSE_REASONING_EFFORT
   const maxTurns = option(parsed.options, 'max-turns') ?? process.env.PULSE_MAX_TURNS
+  const maxModelCalls = option(parsed.options, 'max-model-calls') ?? process.env.PULSE_MAX_MODEL_CALLS
   const maxRuntimeMs = option(parsed.options, 'max-runtime-ms') ?? process.env.PULSE_MAX_RUNTIME_MS
   const autoCompactPercent = option(parsed.options, 'auto-compact-percent') ?? process.env.PULSE_AUTO_COMPACT_PERCENT
   const apiKeyEnv = profile.apiKeyEnv ?? (profile.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
@@ -231,6 +234,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const configuredReasoningEffort = reasoningEffort === 'low' || reasoningEffort === 'medium' || reasoningEffort === 'high' ? reasoningEffort : modelSelection.reasoningEffort ?? profile.reasoningEffort
   const configuredToolChoice = profile.toolChoice
   const configuredMaxTurns = parsePositiveInteger(maxTurns) ?? config.maxTurns
+  const configuredMaxModelCalls = parsePositiveInteger(maxModelCalls) ?? config.maxModelCalls ?? 256
   const configuredMaxRuntimeMs = parsePositiveInteger(maxRuntimeMs) ?? config.maxRuntimeMs
   const configuredAutoCompactPercent = parsePositiveInteger(autoCompactPercent) ?? config.autoCompactPercent
   const provider = {
@@ -267,6 +271,12 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
       ...(model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens }),
       ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
     }]))
+  // Explicit CLI/env limits must reach the routed candidate too. Otherwise the
+  // model catalog silently overrides the adapter's smaller output/effort limits.
+  const activeCandidate = providerModels[activeModelName]!
+  if (parsePositiveInteger(contextTokens) !== undefined) activeCandidate.maxContextTokens = configuredContextTokens!
+  if (parsePositiveInteger(maxOutputTokens) !== undefined) activeCandidate.maxOutputTokens = configuredMaxOutputTokens!
+  if (reasoningEffort === 'low' || reasoningEffort === 'medium' || reasoningEffort === 'high') activeCandidate.reasoningEffort = reasoningEffort
   const assistantModelName = config.assistantModel ? resolveModelReference(catalog, config.assistantModel) : activeModelName
   if (!providerModels[assistantModelName]) throw new Error(`UNKNOWN_ASSISTANT_MODEL:${assistantModelName}`)
   const taskRouting = config.taskRouting && Object.fromEntries(Object.entries(config.taskRouting).map(([task, route]) => [task, Array.isArray(route) ? route.map(item => resolveModelReference(catalog, item)) : route])) as PulseCliConfig['taskRouting']
@@ -332,11 +342,13 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const capabilitySettings = config.capabilities ?? {}
   const skillRoots = capabilitySettings.trustedSkillRoots ?? []
   if (!Array.isArray(skillRoots) || skillRoots.some((root) => typeof root !== 'string' || !isAbsolute(expandHome(root) ?? root))) throw new Error('SKILL_TRUSTED_ROOT_MUST_BE_ABSOLUTE')
-  const enabledCapabilityPacks = capabilitySettings.enabled ?? []
-  if (!Array.isArray(enabledCapabilityPacks) || enabledCapabilityPacks.some((id) => typeof id !== 'string') || new Set(enabledCapabilityPacks).size !== enabledCapabilityPacks.length) throw new Error('INVALID_ENABLED_CAPABILITY_LIST')
+  const configuredCapabilityPacks = capabilitySettings.enabled ?? []
+  if (!Array.isArray(configuredCapabilityPacks) || configuredCapabilityPacks.some((id) => typeof id !== 'string') || new Set(configuredCapabilityPacks).size !== configuredCapabilityPacks.length) throw new Error('INVALID_ENABLED_CAPABILITY_LIST')
+  // Built-in skills are always enabled so they are discoverable with no external skills directory.
+  const enabledCapabilityPacks = ['builtin-skills', ...configuredCapabilityPacks.filter((id) => id !== 'builtin-skills')]
   const skillNames = capabilitySettings.skills ?? []
   if (!Array.isArray(skillNames) || skillNames.some((name) => typeof name !== 'string')) throw new Error('INVALID_SKILL_SELECTION')
-  const capabilityPacks = [createPdfCapabilityPack(), createSpreadsheetCapabilityPack(), createSkillCapabilityPack({ trustedRoots: skillRoots.map((root) => resolve(expandHome(root) ?? root)) })]
+  const capabilityPacks = [createBuiltinSkillCapabilityPack(), createPdfCapabilityPack(), createSpreadsheetCapabilityPack(), createSkillCapabilityPack({ trustedRoots: skillRoots.map((root) => resolve(expandHome(root) ?? root)) })]
   for (const [id, server] of Object.entries(capabilitySettings.mcpServers ?? {})) {
     if ((id === 'browser' && capabilitySettings.browser) || (id === 'computer' && capabilitySettings.computer)) throw new Error(`AUTOMATION_CAPABILITY_CONFLICT:${id}`)
     if (!server || typeof server.command !== 'string' || server.command.trim().length === 0 || (server.args !== undefined && (!Array.isArray(server.args) || server.args.some((arg) => typeof arg !== 'string')))) throw new Error(`INVALID_MCP_SERVER_CONFIG:${id}`)
@@ -434,6 +446,11 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(mockParallelPlan === undefined ? {} : { mockParallelPlan }),
     ...(approvalMode === undefined ? {} : { approvalMode }),
     ...(configuredMaxTurns === undefined ? {} : { maxTurns: configuredMaxTurns }),
+    maxModelCalls: configuredMaxModelCalls,
+    ...(option(parsed.options, 'accept-build-migration') ? { recoveryBuildMigration: (() => { const pair = option(parsed.options, 'accept-build-migration')!.split(':'); if (pair.length !== 2 || pair.some(hash => !/^[a-f0-9]{64}$/.test(hash))) throw new Error('Invalid build migration pair; use the two hashes in the recovery diagnostic.'); return { from: pair[0]!, to: pair[1]! } })() } : {}),
+    ...(config.modelBudgetPolicy === undefined ? {} : { modelBudgetPolicy: config.modelBudgetPolicy }),
+    ...(config.persistenceBackend === undefined ? {} : { persistenceBackend: config.persistenceBackend }),
+    ...(config.maxCostByCurrency === undefined ? {} : { maxCostByCurrency: config.maxCostByCurrency }),
     ...(configuredMaxRuntimeMs === undefined ? {} : { maxRuntimeMs: configuredMaxRuntimeMs }),
     ...(configuredAutoCompactPercent === undefined ? {} : { autoCompactPercent: Math.min(90, configuredAutoCompactPercent) }),
     ...(allowNetwork === undefined ? {} : { allowNetwork }),
@@ -451,7 +468,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
       const entry = selections.find(item => item.id === selected)
       const source = entry && effectiveProviders[entry.providerId]
       if (!entry || !source || source.provider !== 'ollama') throw new Error('APPROVAL_REVIEW_REQUIRES_OLLAMA')
-      return { provider: 'ollama' as const, model: entry.model.modelCode, baseURL: source.baseURL ?? 'http://127.0.0.1:11434', timeoutMs: Math.max(1_000, Math.min(60_000, config.approvalReview!.timeoutMs ?? 15_000)) }
+      return { provider: 'ollama' as const, model: entry.model.modelCode, baseURL: source.baseURL ?? 'http://127.0.0.1:11434', timeoutMs: Math.max(30_000, Math.min(60_000, config.approvalReview!.timeoutMs ?? 30_000)) }
     })() } : {}),
   }
 }
@@ -491,6 +508,12 @@ export async function main(): Promise<number> {
     return runDoctor(options, parsed.options.live === true, option(parsed.options, 'format') ?? 'text')
   }
 
+  if (parsed.command === 'drafts') {
+    const [conversationId, runId, draftId] = parsed.positionals
+    if (!conversationId || !runId || !draftId) throw new Error('Usage: pulse drafts <conversation-id> <run-id> <draft-id> [--revision <hash> --confirm-owner]')
+    const host = createLocalHost(options)
+    try { process.stdout.write(JSON.stringify(await host.migrateDraft(conversationId, runId, draftId, option(parsed.options, 'revision'), parsed.options['confirm-owner'] === true), null, 2) + '\n'); return 0 } finally { await host.close() }
+  }
   if (parsed.command === 'sessions') {
     return runSessions(options, option(parsed.options, 'format') ?? 'text', version)
   }
@@ -541,7 +564,7 @@ async function readPipedStdin(): Promise<string> {
       if (piped) task = `${task}\n\n${piped}`
     }
     if (!task) throw new Error('TASK_REQUIRED')
-    return runOneShot(options, task, option(parsed.options, 'format') ?? 'text', version)
+    return runOneShot(options, task, option(parsed.options, 'format') ?? 'text', version, option(parsed.options, 'requirements-doc') ? [option(parsed.options, 'requirements-doc')!] : undefined)
   }
 
   if (parsed.command === 'resume') {

@@ -1,0 +1,73 @@
+{
+  "source": "LT02 continuation-04 actual successful and stale patch fragments; text-only replay, original file hash replaced by fixture hash",
+  "operations": [
+    {
+      "patches": [
+        {
+          "find": "let consumedCostUnknown = false; let budgetStopped = false",
+          "replace": "// --resume inherits the cost-cap bookkeeping from history: if an earlier run\n// could not report provider costs, the amount spent is unknown and the cap can\n// no longer be proven, so that state must not be reset by starting over.\nconst historyCostUnknown = maxCost !== undefined && previousRecords.some((record) => !(record?.usage?.providerCosts?.length))\nconst historyCost = previousRecords.reduce((sum, record) => sum + (record.usage?.providerCosts ?? []).filter((cost) => cost.currency === costCurrency).reduce((costSum, cost) => costSum + cost.amount, 0), 0)\nlet consumedCostUnknown = historyCostUnknown\nlet consumedCost = historyCost\nlet budgetStopped = false"
+        },
+        {
+          "find": "    const trial = plan.trial\n    if (budgetStopped) break",
+          "replace": "    const trial = plan.trial\n    if (budgetStopped) break\n    // Re-check the inherited cap before spending an attempt: an unknown\n    // historical cost or an already exhausted budget stops the batch instead\n    // of silently resetting the cost boundary on resume.\n    if (maxCost !== undefined && (consumedCostUnknown || consumedCost > maxCost)) { budgetStopped = true; break }"
+        },
+        {
+          "find": "      if (!usage?.providerCosts?.length) consumedCostUnknown = true\n      if (taskCost && records.reduce((sum, item) => sum + (item.usage?.providerCosts ?? []).filter(cost => cost.currency === costCurrency).reduce((costSum, cost) => costSum + cost.amount, 0), 0) > maxCost) budgetStopped = true",
+          "replace": "      if (!usage?.providerCosts?.length) consumedCostUnknown = true\n      consumedCost += taskCost\n      // History is counted from the inherited total, so the cap is evaluated on\n      // this run's real spend instead of restarting the accounting.\n      if (consumedCostUnknown || consumedCost > maxCost) budgetStopped = true"
+        },
+        {
+          "find": "      // On resume the workspace may already exist, so restore fixture content instead of failing with EEXIST.\n      await writeFile(target, value, { flag: has('--resume') ? 'w' : 'wx' })",
+          "replace": "      // On resume the workspace may already exist. A fixture file that is\n      // already present is left exactly as found (it may hold the interrupted\n      // run's output or a local edit), so only missing fixtures are filled in;\n      // switching to exclusive creation must not abort the resumed batch with\n      // EEXIST either.\n      try {\n        await writeFile(target, value, { flag: 'wx' })\n      } catch (error) {\n        if (error.code !== 'EEXIST') throw error\n      }"
+        }
+      ],
+      "hadExpectedHash": true
+    },
+    {
+      "patches": [
+        {
+          "find": "let consumedCostUnknown = false; let budgetStopped = false",
+          "replace": "// --resume inherits the cost-cap bookkeeping from history: when an earlier run\n// could not report provider costs the amount already spent is unknown, so the\n// cap can no longer be proven and that state must not be reset by resuming.\nconst historyCostUnknown = maxCost !== undefined && previousRecords.some((record) => !(record?.usage?.providerCosts?.length))\nconst historyCost = previousRecords.reduce((sum, record) => sum + (record.usage?.providerCosts ?? []).filter((cost) => cost.currency === costCurrency).reduce((costSum, cost) => costSum + cost.amount, 0), 0)\nlet consumedCostUnknown = historyCostUnknown\nlet consumedCost = historyCost\nlet budgetStopped = false"
+        },
+        {
+          "find": "    const trial = plan.trial\n    if (budgetStopped) break",
+          "replace": "    const trial = plan.trial\n    if (budgetStopped) break\n    // Re-check the inherited cap before spending an attempt: an unknown\n    // historical cost, or a budget already at its ceiling, stops the batch\n    // instead of silently restarting the cost boundary on resume.\n    if (maxCost !== undefined && (consumedCostUnknown || consumedCost > maxCost)) { budgetStopped = true; break }"
+        },
+        {
+          "find": "      if (!usage?.providerCosts?.length) consumedCostUnknown = true\n      if (taskCost && records.reduce((sum, item) => sum + (item.usage?.providerCosts ?? []).filter(cost => cost.currency === costCurrency).reduce((costSum, cost) => costSum + cost.amount, 0), 0) > maxCost) budgetStopped = true",
+          "replace": "      if (!usage?.providerCosts?.length) consumedCostUnknown = true\n      consumedCost += taskCost\n      // Spend is accumulated on top of the inherited total, so the cap is\n      // evaluated against the whole batch rather than this run alone.\n      if (consumedCostUnknown || consumedCost > maxCost) budgetStopped = true"
+        }
+      ],
+      "hadExpectedHash": true
+    },
+    {
+      "patches": [
+        {
+          "find": "let consumedCostUnknown = false; let budgetStopped = false",
+          "replace": "// --resume inherits the cost-cap bookkeeping from history: when an earlier run\n// could not report provider costs the amount already spent is unknown, so the\n// cap can no longer be proven and that state must not be reset by resuming.\nconst historyCostUnknown = maxCost !== undefined && previousRecords.some((record) => !(record?.usage?.providerCosts?.length))\nconst historyCost = previousRecords.reduce((sum, record) => sum + (record.usage?.providerCosts ?? []).filter((cost) => cost.currency === costCurrency).reduce((costSum, cost) => costSum + cost.amount, 0), 0)\nlet consumedCostUnknown = historyCostUnknown\nlet consumedCost = historyCost\nlet budgetStopped = false"
+        },
+        {
+          "find": "    const trial = plan.trial\n    if (budgetStopped) break\n    const tokensForTask = maxTotalTokens === undefined",
+          "replace": "    const trial = plan.trial\n    if (budgetStopped) break\n    // Re-check the inherited cap before spending an attempt: an unknown\n    // historical cost, or a budget already at its ceiling, stops the batch\n    // instead of silently restarting the cost boundary on resume.\n    if (maxCost !== undefined && (consumedCostUnknown || consumedCost > maxCost)) { budgetStopped = true; break }\n    const tokensForTask = maxTotalTokens === undefined"
+        },
+        {
+          "find": "      if (!usage?.providerCosts?.length) consumedCostUnknown = true\n      if (taskCost && records.reduce((sum, item) => sum + (item.usage?.providerCosts ?? []).filter(cost => cost.currency === costCurrency).reduce((costSum, cost) => costSum + cost.amount, 0), 0) > maxCost) budgetStopped = true",
+          "replace": "      if (!usage?.providerCosts?.length) consumedCostUnknown = true\n      consumedCost += taskCost\n      // Spend accumulates on top of the inherited total, so the cap is judged\n      // against the whole batch rather than this run alone.\n      if (consumedCostUnknown || consumedCost > maxCost) budgetStopped = true"
+        }
+      ],
+      "hadExpectedHash": true
+    },
+    {
+      "patches": [
+        {
+          "find": "let consumedCostUnknown = false; let budgetStopped = false",
+          "replace": "// --resume inherits the cost-cap bookkeeping from history: when an earlier run\n// could not report provider costs the amount already spent is unknown, so the\n// cap can no longer be proven and that state must not be reset by resuming.\nconst historyCostUnknown = maxCost !== undefined && previousRecords.some((record) => !(record?.usage?.providerCosts?.length))\nconst historyCost = previousRecords.reduce((sum, record) => sum + (record.usage?.providerCosts ?? []).filter((cost) => cost.currency === costCurrency).reduce((costSum, cost) => costSum + cost.amount, 0), 0)\nlet consumedCostUnknown = historyCostUnknown\nlet consumedCost = historyCost\nlet budgetStopped = false"
+        },
+        {
+          "find": "      if (!usage?.providerCosts?.length) consumedCostUnknown = true\n      if (taskCost && records.reduce((sum, item) => sum + (item.usage?.providerCosts ?? []).filter(cost => cost.currency === costCurrency).reduce((costSum, cost) => costSum + cost.amount, 0), 0) > maxCost) budgetStopped = true",
+          "replace": "      if (!usage?.providerCosts?.length) consumedCostUnknown = true\n      consumedCost += taskCost\n      // The cap is judged against the inherited history plus this run, and an\n      // unknown historical cost means the ceiling cannot be proven, so the\n      // batch stops instead of silently restarting the cost boundary.\n      if (consumedCostUnknown || consumedCost > maxCost) budgetStopped = true"
+        }
+      ],
+      "hadExpectedHash": false
+    }
+  ]
+}

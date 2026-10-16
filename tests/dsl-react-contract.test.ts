@@ -259,11 +259,11 @@ describe('DSL ReAct contract', () => {
     const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
       if (effect.kind === 'tool') { executed.push(String((effect.input as { name?: string }).name)); return { value: { draftId: 'draft', committed: false, bytes: 0 } } }
       models++
-      if (models === 1) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.write', input: { path: 'new.ts', content: 'x'.repeat(3000) } }] } }
+      if (models === 1) return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.write', input: { path: 'new.ts', content: 'x'.repeat(20000) } }] } }
       if (models === 2) {
         const prompt = JSON.stringify(effect.input)
         expect(prompt).toContain('fs.stage')
-        expect(prompt).toContain('2048')
+        expect(prompt).toContain('16384')
         return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.stage', input: { operation: 'begin', path: 'new.ts' } }] } }
       }
       return { value: { text: 'streaming', finishReason: 'stop', toolCalls: [] } }
@@ -377,15 +377,15 @@ describe('DSL ReAct contract', () => {
       builder.addReActLoopStep('reason', { instruction: 'work', maxTurns: 20, onFinish: () => ({ complete: {} }) })
     })
     const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
-      if (effect.kind === 'tool') return { status: 'failed', executionState: 'failed', error: { code: 'APPROVAL_DENIED', message: 'Permission denied for web.fetch', retryable: false } }
+      if (effect.kind === 'tool') return { status: 'failed', executionState: 'failed', error: { code: 'TOOL_VALIDATION_FAILED', message: 'Invalid argument for web.fetch', retryable: false } }
       requests.push(effect.input)
       return { value: { text: '', finishReason: 'tool_calls', toolCalls: [{ name: 'web.fetch', input: { url: 'https://example.com' } }] } }
     } })
     const { agentId, laneId } = runtime.createAgent('work', program)
     expect((await runtime.start(agentId).outcome()).status).toBe('failed')
     expect(requests).toHaveLength(3)
-    expect(JSON.stringify(requests[1].inputs.conversation)).toContain('APPROVAL_DENIED')
-    expect(JSON.stringify(requests[1].inputs.conversation)).toContain('Permission denied for web.fetch')
+    expect(JSON.stringify(requests[1].inputs.conversation)).toContain('TOOL_VALIDATION_FAILED')
+    expect(JSON.stringify(requests[1].inputs.conversation)).toContain('Invalid argument for web.fetch')
     expect(runtime.state.lanes.get(laneId)?.failure?.error.code).toBe('REPEATED_TOOL_FAILURE')
   })
 
@@ -406,6 +406,23 @@ describe('DSL ReAct contract', () => {
     const { agentId } = runtime.createAgent('work', program)
     expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
     expect(tools).toBe(6)
+  })
+
+  it.each(['APPROVAL_DENIED', 'AI_APPROVAL_DENIED', 'AI_APPROVAL_UNAVAILABLE', 'TASK_MODEL_CALL_BUDGET_EXHAUSTED', 'TOOL_CANCELLED'])('stops on %s before a model retry or queued operation', async (code) => {
+    let models = 0, tools = 0
+    const program = defineLaneProgram({ id: `terminal-${code}`, version: '1' }, builder => {
+      builder.addReActLoopStep('reason', { instruction: 'work', maxTurns: 20, maxToolsPerTurn: 1, onError: () => 'reason', onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async effect => {
+      if (effect.kind === 'tool') { tools++; return code === 'TOOL_CANCELLED' ? { status: 'cancelled', executionState: 'cancelled', sideEffectState: 'none', reason: 'User cancelled' } : { status: 'failed', executionState: 'failed', error: { code, message: 'Do not retry', retryable: false } } }
+      models++
+      return { value: { text: '', finishReason: 'tool_calls', toolCalls: [{ name: 'shell.exec', input: { command: 'node', args: ['-e', 'operation()'] } }, { name: 'shell.exec', input: { command: process.execPath, args: ['-e', 'operation()'] } }] } }
+    } })
+    const { agentId } = runtime.createAgent('work', program)
+    const outcome = await runtime.start(agentId).outcome()
+    expect(outcome.status).toBe('failed')
+    expect(outcome.error?.code).toBe(code)
+    expect(models).toBe(1); expect(tools).toBe(1)
   })
 
   it('stops immediately when the sandbox cannot initialize', async () => {
@@ -436,8 +453,104 @@ describe('DSL ReAct contract', () => {
     const { agentId, laneId } = runtime.createAgent('work', program)
     expect((await runtime.start(agentId).outcome()).status).toBe('failed')
     expect(requests).toHaveLength(5)
-    expect(JSON.stringify(requests[2].inputs.conversation)).toContain('same evidence')
+    expect(JSON.stringify(requests[3].inputs.conversation)).toContain('same evidence')
     expect(runtime.state.lanes.get(laneId)?.failure?.error.code).toBe('NO_PROGRESS')
+  })
+
+  it('bounds rejected oversized appends even when their arguments keep changing', async () => {
+    let models = 0
+    const executed: string[] = []
+    const program = defineLaneProgram({ id: 'oversized-append-loop', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'create a module', maxTurns: 32, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') { executed.push((effect.input as any).arguments.operation); return { value: { bytes: 100, revision: 'a'.repeat(64) } } }
+      ++models
+      return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.stage', input: models === 1
+        ? { operation: 'begin', path: 'module.ts', content: 'head' }
+        : { operation: 'append', draftId: '00000000-0000-4000-8000-000000000001', revision: 'a'.repeat(64), content: 'x'.repeat(16384 + models) } }] } }
+    } })
+    const { agentId } = runtime.createAgent('create', program)
+    expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'failed', error: { code: 'REPEATED_TOOL_FAILURE' } })
+    expect(models).toBe(4)
+    expect(executed).toEqual(['begin'])
+  })
+
+  it('detects alternating command results despite changing timing metadata', async () => {
+    let models = 0
+    const requests: any[] = []
+    const program = defineLaneProgram({ id: 'alternating-evidence', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'inspect', maxTurns: 20, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { code: 0, stdout: (effect.input as any).arguments.args[0], durationMs: models } }
+      requests.push(effect.input)
+      return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'shell.exec', input: { command: 'node', args: [++models % 2 ? 'a' : 'b'] } }] } }
+    } })
+    const { agentId } = runtime.createAgent('inspect', program)
+    expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'failed', error: { code: 'NO_PROGRESS' } })
+    expect(models).toBe(6)
+    expect(requests.filter((r) => JSON.stringify(r.inputs.conversation ?? []).includes('same evidence'))).toHaveLength(1)
+  })
+
+  it('keeps identical content at different paths distinct', async () => {
+    let models = 0
+    const program = defineLaneProgram({ id: 'different-paths', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'inspect', maxTurns: 12, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { content: 'same' } }
+      return { value: ++models <= 7 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.read', input: { path: `file-${models}` } }] } : { text: 'done' } }
+    } })
+    const { agentId } = runtime.createAgent('inspect', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+  })
+
+  it.each([false, true])('bounds fresh investigation but allows pagination (pagination=%s)', async (pagination) => {
+    let models = 0
+    const requests: any[] = []
+    const program = defineLaneProgram({ id: `investigation-${pagination}`, version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'implement', maxTurns: 12, maxReadOnlyRounds: 6, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { content: `page-${models}`, nextOffset: models } }
+      requests.push(effect.input)
+      return { value: ++models <= 7 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.read', input: { path: pagination ? 'large.ts' : `file-${models}`, offset: pagination ? models - 1 : 0 } }] } : { text: 'done' } }
+    } })
+    const { agentId } = runtime.createAgent('implement', program)
+    expect(await runtime.start(agentId).outcome()).toMatchObject(pagination ? { status: 'succeeded' } : { status: 'failed', error: { code: 'INVESTIGATION_LIMIT_REACHED' } })
+    if (!pagination) expect(requests.filter((r) => JSON.stringify(r.inputs.conversation ?? []).includes('implementation checkpoint'))).toHaveLength(1)
+  })
+
+  it('starts a fresh investigation allowance after an edit', async () => {
+    let models = 0
+    const program = defineLaneProgram({ id: 'edit-progress', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'implement', maxTurns: 12, maxReadOnlyRounds: 6, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'tool') return { value: { content: `evidence-${models}` } }
+      ++models
+      return { value: models <= 9 ? { finishReason: 'tool_calls', toolCalls: [{ name: models === 5 ? 'fs.apply_patch' : 'fs.read', input: { path: `file-${models}` } }] } : { text: 'done' } }
+    } })
+    const { agentId } = runtime.createAgent('implement', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+  })
+
+  it('starts a fresh investigation allowance after a user answer', async () => {
+    let models = 0
+    let answers = 0
+    const program = defineLaneProgram({ id: 'answer-progress', version: '1' }, (builder) => {
+      builder.addReActLoopStep('reason', { instruction: 'implement', maxTurns: 12, maxReadOnlyRounds: 6, onFinish: () => ({ complete: {} }) })
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async (effect) => {
+      if (effect.kind === 'human') { answers++; return { value: { text: 'confirmed' } } }
+      if (effect.kind === 'tool') return { value: { content: `evidence-${models}` } }
+      ++models
+      return { value: models <= 9 ? { finishReason: 'tool_calls', toolCalls: [{ name: models === 5 ? 'ask.input' : 'fs.read', input: models === 5 ? { prompt: 'Which behavior?' } : { path: `file-${models}` } }] } : { text: 'done' } }
+    } })
+    const { agentId } = runtime.createAgent('implement', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(answers).toBe(1)
   })
 
   it('supports separate text and structured finish callbacks', async () => {

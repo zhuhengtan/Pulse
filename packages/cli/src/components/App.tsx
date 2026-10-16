@@ -677,6 +677,7 @@ export function App({
           request={askRequest}
           disabled={approvalSubmitting}
           onReply={(value) => void replyAsk(askRequest.effectId, value)}
+          onCancel={() => void cancelRun()}
         />
       ) : (
         <Box marginTop={1} flexDirection="column">

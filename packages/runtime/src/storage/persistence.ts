@@ -67,11 +67,13 @@ export interface RuntimePersistenceCompatibility {
   toolVersions: Record<string, string>
   policyVersion?: string
   routerVersion?: string
+  fingerprints?: { build: string; tools: Record<string, string>; policy: string }
 }
 
 export interface RuntimeResultStore {
   save(ref: string, value: JsonValue): Promise<void>
   load(ref: string): Promise<JsonValue | undefined>
+  loadSync?(ref: string): JsonValue | undefined
 }
 
 export interface RuntimeSnapshotStore {
@@ -128,6 +130,13 @@ export class FileRuntimeContentStore implements RuntimeResultStore, RuntimeSnaps
     if (envelope === undefined) return undefined
     if (envelope.ref !== ref) throw new Error('RUNTIME_CONTENT_REF_COLLISION')
     return structuredClone(envelope.value)
+  }
+
+  loadSync(ref: string): JsonValue | undefined {
+    let envelope: RuntimeContentEnvelope
+    try { envelope = JSON.parse(readFileSync(this.pathFor(ref), 'utf8')) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
+    if (envelope.schemaVersion !== 1 || envelope.ref !== ref || envelope.value === undefined) throw new Error('INVALID_RUNTIME_CONTENT')
+    return envelope.value
   }
 
   private pathFor(ref: string): string { return join(this.directory, `${createHash('sha256').update(ref).digest('hex')}.json`) }
@@ -198,6 +207,11 @@ export class SqliteRuntimeContentStore implements RuntimeResultStore, RuntimeSna
       if (!row || typeof row.payload !== 'string') return undefined
       return structuredClone(JSON.parse(row.payload) as JsonValue)
     })
+  }
+
+  loadSync(ref: string): JsonValue | undefined {
+    const row = this.open().prepare('SELECT payload FROM runtime_content WHERE namespace = ? AND ref = ?').get(this.namespace, ref)
+    return row && typeof row.payload === 'string' ? JSON.parse(row.payload) as JsonValue : undefined
   }
 
   async close(): Promise<void> {
@@ -523,10 +537,13 @@ export class SqliteRuntimeFactInboxDedupeArchive implements FactInboxDedupeArchi
 }
 
 export interface RuntimePersistenceBackend {
+  close?(): Promise<void>
   load(): Promise<RuntimePersistenceSnapshot | undefined>
   save(snapshot: RuntimePersistenceSnapshot, expectedDigest?: string): Promise<void>
   sessionStore?: RuntimeSessionStore
   resultStore?: RuntimeResultStore
+  lazyResultBodies?: boolean
+  checkpointEventInterval?: number
   snapshotStore?: RuntimeSnapshotStore
   eventArchive?: RuntimeEventArchive
   factInboxDedupeArchive?: FactInboxDedupeArchiveWriter
@@ -827,7 +844,7 @@ export async function externalizeRuntimeResultBodies(snapshot: RuntimePersistenc
   const states = [copy.state, ...(copy.checkpoint === undefined ? [] : [copy.checkpoint.state])]
   for (const session of states) {
     for (const [ref, result] of session.state.results) {
-      if (result.value === undefined) continue
+      if (result.value === undefined) { refs.add(ref); continue }
       await store.save(ref, result.value)
       delete result.value
       refs.add(ref)
