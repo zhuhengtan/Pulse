@@ -19,6 +19,8 @@ describe('evaluation grader regressions', () => {
       expect((await grade(root, 'research-01')).checks.find((item: any) => item.type === 'accessDate').passed).toBe(false)
     } finally { await rm(root, { recursive: true, force: true }) }
   })
+  // Two independent grader processes each initialize and revoke native ACLs;
+  // the 30-second command limit starts only after that setup has completed.
   it('executes valid Python behavior probes and rejects swallowed unrelated errors', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-python-grader-'))
     try {
@@ -30,5 +32,5 @@ describe('evaluation grader regressions', () => {
       await writeFile(join(root, 'src/json_util.py'), source.replace('json.JSONDecodeError', 'Exception'))
       expect((await grade(root, 'code-03')).checks.find((item: any) => item.type === 'behavior').passed).toBe(false)
     } finally { await rm(root, { recursive: true, force: true }) }
-  })
+  }, process.platform === 'win32' ? 300_000 : 10_000)
 })

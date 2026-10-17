@@ -69,6 +69,13 @@ jobs:
           SRT_DEBUG: '1'
           PULSE_SANDBOX_TIMING: '1'
         run: pnpm exec vitest run tests/lt02-four-issues-repair.test.ts tests/windows-acl-batches.test.ts -t "loads shared installed aliases|cleans up every native ACL batch" --reporter verbose
+      - name: Verify Windows Python behavior probes
+        if: runner.os == 'Windows'
+        timeout-minutes: 7
+        run: |
+          pnpm exec tsc -b --pretty false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm exec vitest run tests/eval-grader.test.ts -t "executes valid Python behavior probes" --reporter verbose
       - name: Run shared local and cloud checks
         timeout-minutes: ${{ runner.os == 'Windows' && 65 || 15 }}
         run: pnpm ci:local
