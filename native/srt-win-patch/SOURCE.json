@@ -1,0 +1,9 @@
+{
+  "upstream": "https://github.com/anthropics/sandbox-runtime",
+  "commit": "6fa731368807419ee157f9a3fac955fefe1019c6",
+  "archiveUrl": "https://codeload.github.com/anthropics/sandbox-runtime/tar.gz/6fa731368807419ee157f9a3fac955fefe1019c6",
+  "archiveSha256": "978b0bacedf88ac441d2c723290a1aba64c85571978ba517fabde68a9455ce90",
+  "patchCommit": "26dbcbeaa29e665af25b6685564b3d550d94cf2c",
+  "patchUrl": "https://github.com/anthropics/sandbox-runtime/pull/523",
+  "patchSha256": "f4dbef2a97cb4b5ed45518de0053b556bc8501c889da78c50f112747519440cb"
+}

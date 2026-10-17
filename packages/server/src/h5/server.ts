@@ -148,6 +148,7 @@ export class H5Server {
   private readonly terminals = new Map<string, TerminalSession>()
   private readonly assistantPendingRuns = new Set<string>()
   private assistantPump: Promise<void> | undefined
+  private stopping = false
   private jarvisSyncTimer: NodeJS.Timeout | undefined
   private readonly terminalSockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
   private readonly automationSockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
@@ -235,6 +236,7 @@ export class H5Server {
   }
 
   async start(): Promise<{ port: number; lanIp: string; pairUrl: string }> {
+    this.stopping = false
     await this.auth.init()
     const assistantId = await this.assistantInbox.init(async () => (await this.host.createConversation({ title: 'Pulse 助理' })).id)
     for (const message of this.assistantInbox.transcript()) {
@@ -283,7 +285,11 @@ export class H5Server {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true
     await Promise.all([...this.activeRuns.values()].map(handle => handle.shutdown?.().catch(() => undefined)))
+    // A sendMessage call can still be starting and not yet appear in activeRuns.
+    // The pump joins that launch and shuts it down without dispatching its queue.
+    await this.assistantPump?.catch(() => undefined)
     await this.workspaces.close()
     if (this.jarvisSyncTimer) clearInterval(this.jarvisSyncTimer)
     this.jarvisSyncTimer = undefined
@@ -345,20 +351,24 @@ export class H5Server {
   }
 
   private async pumpAssistantInbox(): Promise<void> {
+    if (this.stopping) return
     if (this.assistantPump) return this.assistantPump
     this.assistantPump = (async () => {
       const conversationId = this.assistantInbox.conversationId
-      for (;;) {
+      while (!this.stopping) {
         const message = await this.assistantInbox.next()
         if (!message) return
+        if (this.stopping) { await this.assistantInbox.update(message.runId, 'interrupted', 'Server stopped before launch'); return }
         this.assistantPendingRuns.add(message.runId)
         this.runConversations.set(message.runId, conversationId)
         this.runEventBuffers.set(message.runId, [])
         this.runSseClients.set(message.runId, new Set())
         try {
           await this.host.appendAssistantUserMessage(conversationId, { id: `msg-${message.messageId}`, runId: message.runId, text: message.text, createdAt: message.createdAt })
+          if (this.stopping) { await this.assistantInbox.update(message.runId, 'interrupted', 'Server stopped before launch'); return }
           const handle = await this.host.sendMessage(conversationId, { text: message.text, assistantChat: true, runId: message.runId, requestId: message.messageId, userMessageRecorded: true })
           this.attachRun(handle, false)
+          if (this.stopping) await handle.shutdown?.()
           await this.consumeRun(message.runId, handle)
         } catch (error) {
           const detail = error instanceof Error ? error.message : 'ASSISTANT_REPLY_FAILED'
@@ -375,7 +385,7 @@ export class H5Server {
       this.assistantPump = undefined
       // A message can be enqueued after next() observed an empty inbox but
       // before this promise's finally callback. Recheck after releasing pump.
-      if (this.assistantInbox.hasQueued()) queueMicrotask(() => { void this.pumpAssistantInbox() })
+      if (!this.stopping && this.assistantInbox.hasQueued()) queueMicrotask(() => { void this.pumpAssistantInbox() })
     })
     return this.assistantPump
   }

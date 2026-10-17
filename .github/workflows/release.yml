@@ -44,12 +44,19 @@ jobs:
           name: desktop-${{ matrix.os }}-${{ matrix.arch }}
           path: packages/server/native/
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: windows-sandbox
+          path: packages/adapters/dist/native/
+          if-no-files-found: error
   release:
     needs: desktop
     runs-on: ubuntu-latest
     env:
       PULSE_EXPECTED_PNPM_VERSION: 12.4.2
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      PULSE_VERIFY_WINDOWS_SANDBOX: '1'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -111,6 +118,10 @@ jobs:
           path: packages/server/native
           merge-multiple: true
       - run: chmod +x packages/server/native/*/pulse-desktop-helper packages/server/native/darwin-*/Pulse\ Desktop\ Helper.app/Contents/MacOS/PulseDesktopHelper
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-sandbox
+          path: packages/adapters/dist/native
       - run: pnpm native:prepare
       - run: pnpm check
       - run: pnpm release:check

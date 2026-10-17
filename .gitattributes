@@ -1,1 +1,2 @@
 tests/fixtures/document-tools.pdf -diff
+native/srt-win-patch/*.patch text eol=lf

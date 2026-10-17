@@ -32,6 +32,10 @@ export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>
     {
       "zh": "修复 Windows 安装依赖与相邻源码的读取边界、脚本审批路径显示和沙箱冷启动时限，完善跨平台回归验证。",
       "en": "Fix Windows read boundaries between installed dependencies and adjacent source, script approval path display, and cold sandbox startup limits, and improve cross-platform regression checks."
+    },
+    {
+      "zh": "H5 停止服务时等待正在启动的助理运行完成清理，保留后续排队消息，避免关闭后继续启动任务。",
+      "en": "H5 shutdown waits for assistant launches already in progress to settle and preserves later queued messages, preventing new tasks from starting after shutdown."
     }
   ],
   "0.5.1": [

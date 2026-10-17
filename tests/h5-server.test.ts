@@ -237,60 +237,69 @@ describe('H5Server End-to-End', () => {
   it('serves pair page, handles pairing, and authorizes conversation endpoints', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'h5-server-test-'))
     temporaryDirectories.push(dir)
-    const host = createLocalHost({ dataDir: dir, root: dir })
+    const host = createLocalHost({ dataDir: dir, cwd: dir, jarvis: { enabled: false } })
     const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1' })
     const info = await server.start()
     const baseUrl = `http://127.0.0.1:${info.port}`
+    const started = Date.now()
+    const checkpoint = (phase: string) => { if (process.env.CI) console.info(`[H5 pairing] ${Date.now() - started}ms ${phase}`) }
+    const request = async (url: string, init?: RequestInit) => {
+      const phase = `${init?.method ?? 'GET'} ${new URL(url).pathname}`
+      checkpoint(`start ${phase}`)
+      const response = await fetch(url, init)
+      checkpoint(`response ${response.status} ${phase}`)
+      return response
+    }
 
     try {
       // 1. Check local /pair dashboard
-      const pairRes = await fetch(`${baseUrl}/pair`)
+      const pairRes = await request(`${baseUrl}/pair`)
       expect(pairRes.status).toBe(200)
       const pairHtml = await pairRes.text()
       expect(pairHtml).toContain('<div id="root"></div>')
 
       // 2. Mobile HTML entry /
-      const chatRes = await fetch(`${baseUrl}/`)
+      const chatRes = await request(`${baseUrl}/`)
       expect(chatRes.status).toBe(200)
       const chatHtml = await chatRes.text()
       expect(chatHtml).toContain('<div id="root"></div>')
 
-      const rejectedLocalOrigin = await fetch(`${baseUrl}/api/session/local`, { method: 'POST', headers: { Origin: 'http://evil.example' } })
+      const rejectedLocalOrigin = await request(`${baseUrl}/api/session/local`, { method: 'POST', headers: { Origin: 'http://evil.example' } })
       expect(rejectedLocalOrigin.status).toBe(403)
-      const localSession = await fetch(`${baseUrl}/api/session/local`, { method: 'POST', headers: { Origin: baseUrl } })
+      const localSession = await request(`${baseUrl}/api/session/local`, { method: 'POST', headers: { Origin: baseUrl } })
       expect(localSession.status).toBe(200)
       expect(localSession.headers.get('set-cookie')).toContain('SameSite=Strict')
       const localCookie = localSession.headers.get('set-cookie')!
-      const repeatedLocalSession = await fetch(`${baseUrl}/api/session/local`, { method: 'POST', headers: { Origin: baseUrl, Cookie: localCookie } })
+      const repeatedLocalSession = await request(`${baseUrl}/api/session/local`, { method: 'POST', headers: { Origin: baseUrl, Cookie: localCookie } })
       expect(await repeatedLocalSession.json()).toEqual(await localSession.clone().json())
-      const webHistory = await fetch(`${baseUrl}/api/conversations`, { headers: { Cookie: localCookie } })
+      const webHistory = await request(`${baseUrl}/api/conversations`, { headers: { Cookie: localCookie } })
       expect(webHistory.status).toBe(200)
-      const assistantHistory = await fetch(`${baseUrl}/api/assistant`, { headers: { Cookie: localCookie } })
+      const assistantHistory = await request(`${baseUrl}/api/assistant`, { headers: { Cookie: localCookie } })
       expect(assistantHistory.status).toBe(200)
       const assistantView = await assistantHistory.json() as { conversation: { id: string; kind: string }; messages: Array<{ id: string; role: string }> }
       expect(assistantView.conversation.kind).toBe('assistant')
       expect((await webHistory.json() as Array<{ id: string }>).some(item => item.id === assistantView.conversation.id)).toBe(false)
       const assistantRequest = { requestId: 'assistant-request-0001', text: '你好，Pulse' }
-      const acceptedAssistant = await fetch(`${baseUrl}/api/assistant/messages`, { method: 'POST', headers: { Cookie: localCookie, Origin: baseUrl, 'Content-Type': 'application/json' }, body: JSON.stringify(assistantRequest) })
+      const acceptedAssistant = await request(`${baseUrl}/api/assistant/messages`, { method: 'POST', headers: { Cookie: localCookie, Origin: baseUrl, 'Content-Type': 'application/json' }, body: JSON.stringify(assistantRequest) })
       expect(acceptedAssistant.status).toBe(202)
       const acceptedBody = await acceptedAssistant.json() as { runId: string; state: string }
       expect(acceptedBody.runId).toMatch(/^run-/)
-      const duplicateAssistant = await fetch(`${baseUrl}/api/assistant/messages`, { method: 'POST', headers: { Cookie: localCookie, Origin: baseUrl, 'Content-Type': 'application/json' }, body: JSON.stringify(assistantRequest) })
+      const duplicateAssistant = await request(`${baseUrl}/api/assistant/messages`, { method: 'POST', headers: { Cookie: localCookie, Origin: baseUrl, 'Content-Type': 'application/json' }, body: JSON.stringify(assistantRequest) })
       expect(duplicateAssistant.status).toBe(202)
       expect(await duplicateAssistant.json()).toMatchObject({ runId: acceptedBody.runId, duplicate: true })
-      const queuedAssistant = await fetch(`${baseUrl}/api/assistant/messages`, { method: 'POST', headers: { Cookie: localCookie, Origin: baseUrl, 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: 'assistant-request-0002', text: '第二条排队消息' }) })
+      const queuedAssistant = await request(`${baseUrl}/api/assistant/messages`, { method: 'POST', headers: { Cookie: localCookie, Origin: baseUrl, 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: 'assistant-request-0002', text: '第二条排队消息' }) })
       expect(queuedAssistant.status).toBe(202)
-      const assistantAfterSend = await fetch(`${baseUrl}/api/assistant`, { headers: { Cookie: localCookie } }).then(response => response.json()) as { messages: Array<{ id: string; role: string }> }
+      const assistantAfterSend = await request(`${baseUrl}/api/assistant`, { headers: { Cookie: localCookie } }).then(response => response.json()) as { messages: Array<{ id: string; role: string }> }
       expect(assistantAfterSend.messages.filter(message => message.id === 'msg-assistant-request-0001')).toHaveLength(1)
       expect(assistantAfterSend.messages.filter(message => message.id === 'msg-assistant-request-0002')).toHaveLength(1)
 
       // 3. Unauthorized access to /api/conversations gives 401
-      const unauth = await fetch(`${baseUrl}/api/conversations`)
+      const unauth = await request(`${baseUrl}/api/conversations`)
       expect(unauth.status).toBe(401)
 
       // 4. Pair device using active code
       const pairCodeInfo = server.createPairingCode()
-      const pairReq = await fetch(`${baseUrl}/api/pair`, {
+      const pairReq = await request(`${baseUrl}/api/pair`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: pairCodeInfo.code, name: 'Test Client' }),
@@ -304,7 +313,7 @@ describe('H5Server End-to-End', () => {
       expect(cookie).toContain('HttpOnly')
 
       // 5. Authorized access using cookie
-      const convListRes = await fetch(`${baseUrl}/api/conversations`, {
+      const convListRes = await request(`${baseUrl}/api/conversations`, {
         headers: { Cookie: cookie! },
       })
       expect(convListRes.status).toBe(200)
@@ -312,7 +321,7 @@ describe('H5Server End-to-End', () => {
       expect(Array.isArray(conversations)).toBe(true)
 
       // 6. Create conversation
-      const createConvRes = await fetch(`${baseUrl}/api/conversations`, {
+      const createConvRes = await request(`${baseUrl}/api/conversations`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Cookie: cookie! },
         body: JSON.stringify({ title: 'Test Chat' }),
@@ -322,14 +331,14 @@ describe('H5Server End-to-End', () => {
       expect(createdConv.title).toBe('Test Chat')
 
       // 7. Get messages of created conversation
-      const msgsRes = await fetch(`${baseUrl}/api/conversations/${createdConv.id}/messages`, {
+      const msgsRes = await request(`${baseUrl}/api/conversations/${createdConv.id}/messages`, {
         headers: { Cookie: cookie! },
       })
       expect(msgsRes.status).toBe(200)
       const msgs = await msgsRes.json()
       expect(Array.isArray(msgs)).toBe(true)
 
-      const renamed = await fetch(`${baseUrl}/api/conversations/${createdConv.id}`, {
+      const renamed = await request(`${baseUrl}/api/conversations/${createdConv.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Cookie: cookie! },
         body: JSON.stringify({ title: 'Renamed Chat' }),
@@ -337,7 +346,7 @@ describe('H5Server End-to-End', () => {
       expect(renamed.status).toBe(200)
       expect(await renamed.json()).toMatchObject({ id: createdConv.id, title: 'Renamed Chat' })
 
-      const deleted = await fetch(`${baseUrl}/api/conversations/${createdConv.id}`, { method: 'DELETE', headers: { Cookie: cookie! } })
+      const deleted = await request(`${baseUrl}/api/conversations/${createdConv.id}`, { method: 'DELETE', headers: { Cookie: cookie! } })
       expect(deleted.status).toBe(200)
       expect(await deleted.json()).toEqual({ ok: true })
 
@@ -345,7 +354,7 @@ describe('H5Server End-to-End', () => {
       expect(rejectedHost.status).toBe(400)
       expect(rejectedHost.body).toContain('INVALID_HOST')
 
-      const rejectedCwd = await fetch(`${baseUrl}/api/conversations`, {
+      const rejectedCwd = await request(`${baseUrl}/api/conversations`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Cookie: cookie! },
         body: JSON.stringify({ title: 'Elsewhere', cwd: '/tmp' }),
@@ -353,8 +362,11 @@ describe('H5Server End-to-End', () => {
       expect(rejectedCwd.status).toBe(400)
       expect(await rejectedCwd.json()).toMatchObject({ error: 'CWD_NOT_ALLOWED' })
     } finally {
+      checkpoint("stop server")
       await server.stop()
+      checkpoint("close host")
       await host.close()
+      checkpoint("closed")
     }
   }, process.platform === 'win32' ? 120_000 : 30_000)
 

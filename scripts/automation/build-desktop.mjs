@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { copyFile, mkdir, readFile, writeFile, readdir, rm } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildWindowsSandbox } from './build-srt-win.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const arch = process.env.PULSE_DESKTOP_ARCH ?? process.arch
@@ -55,3 +56,4 @@ const files = [executable, 'windows.ps1', 'linux.py', ...(process.platform === '
 const hashes = Object.fromEntries(await Promise.all(files.map(async file => [file, createHash('sha256').update(await readFile(resolve(destination, file))).digest('hex')])))
 await writeFile(resolve(destination, 'manifest.json'), JSON.stringify({protocolVersion:1,platform:process.platform,arch,hashes},null,2)+'\n')
 console.log(`Desktop helper built for ${process.platform}/${arch}`)
+await buildWindowsSandbox()
