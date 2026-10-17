@@ -293,7 +293,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       await SandboxManager.reset()
       checkpoint('reset complete')
       setupStage = 'initialize'
-      await initializeShellSandbox(policy)
+      await initializeShellSandbox(policy, process.platform, options.signal)
       checkpoint('initialized')
       const commandText = encodeSandboxCommand(executable, executableArgs)
       setupStage = 'wrap'
@@ -312,7 +312,9 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         windowsHide: true,
       })
     } catch (cause) {
-      try { await SandboxManager.reset() } catch { /* preserve the setup failure */ }
+      let resetFailed = false
+      try { await SandboxManager.reset() } catch { resetFailed = true /* preserve the setup failure */ }
+      if (options.signal?.aborted && !resetFailed) return { code: null, stdout: '', stderr: '', truncated: false, timedOut: false, aborted: true }
       // Persist only classified diagnostics, never raw subprocess output or credentials.
       const message = cause instanceof Error ? cause.message : ''
       const nativeCode = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''

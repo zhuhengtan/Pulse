@@ -305,7 +305,7 @@ const safetyReviewMaxOutputTokens = 2048
 const writeToolTimeoutMs = 120_000
 // Windows ACL setup precedes the child timer. Reserve bounded setup time plus
 // the maximum accepted 300s command; ordinary children still default to 30s.
-const shellToolTimeoutMs = process.platform === 'win32' ? 420_000 : 30_000
+const shellToolTimeoutMs = process.platform === 'win32' ? 600_000 : 30_000
 
 function resolveAutoCompactPercent(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return defaultAutoCompactPercent

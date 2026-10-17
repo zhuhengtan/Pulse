@@ -30,8 +30,8 @@ export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>
       "en": "Fix evidence freshness, recovery from invalid citations, and recognition of passing test supersets that cover earlier failed subsets, reducing redundant checks and false blocks."
     },
     {
-      "zh": "修复 Windows 安装依赖只读隔离、相邻源码的读取边界、脚本审批路径显示和沙箱冷启动时限，减少无关脚本的递归依赖授权开销，完善跨平台回归验证。",
-      "en": "Fix Windows read-only isolation for installed dependencies, read boundaries for adjacent source, script approval path display, and cold sandbox startup limits; reduce recursive dependency grants for unrelated scripts and improve cross-platform regression checks."
+      "zh": "修复 Windows 安装依赖只读隔离、相邻源码的读取边界、脚本审批路径显示及沙箱权限分批初始化，减少无关脚本的递归依赖授权开销，完善跨平台回归验证。",
+      "en": "Fix Windows read-only isolation for installed dependencies, read boundaries for adjacent source, script approval path display, and batched sandbox permission initialization; reduce recursive dependency grants for unrelated scripts and improve cross-platform regression checks."
     },
     {
       "zh": "H5 停止服务时等待正在启动的助理运行完成清理，保留后续排队消息；会话文件统一原子写入，修复并发读取异常和请求挂起。",
