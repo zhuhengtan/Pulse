@@ -10,7 +10,7 @@ import { SandboxManager, checkWindowsDependenciesAsync, resolveSrtWin, type Sand
 import { resolveWindowsPackageManager } from './windows-package-manager.js'
 import { carveWindowsReadDenies, windowsReadDenyRoots } from './windows-read-policy.js'
 import { initializeShellSandbox } from './sandbox-initialization.js'
-import { installationDependencyRoots } from './installation-dependencies.js'
+import { installationDependencyRoots, workspaceUsesInstallationDependencies } from './installation-dependencies.js'
 import { verifiedWindowsSrt } from './windows-srt-path.js'
 
 export interface ShellResult { code: number | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean; aborted: boolean; outputArchive?: ReturnType<ShellOutput['finish']> }
@@ -135,7 +135,9 @@ async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolcha
   return {
     network: { allowedDomains, deniedDomains: [], strictAllowlist: true },
     filesystem: {
-      denyRead: process.platform === 'win32' ? await carveWindowsReadDenies([...denyRead], allowRead) : [...denyRead],
+      // Known dependency trees remain outside source denies. Only workspaces
+      // that actually reference them need recursive Windows read grants.
+      denyRead: process.platform === 'win32' ? await carveWindowsReadDenies([...denyRead], [...allowRead, ...dependencyRoots]) : [...denyRead],
       allowRead,
       allowWrite: [cwd, ...(scratch ? [scratch] : [])],
       denyWrite: [],
@@ -205,7 +207,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     const installation = basename(nodeBin) === 'bin' ? dirname(nodeBin) : nodeBin
     const toolchainRoots = installation !== homedir() && installation !== parse(installation).root ? [installation] : [nodeExecutable]
     const dependencyRoots = await installationDependencyRoots()
-    toolchainRoots.push(...dependencyRoots)
+    if (process.platform !== 'win32' || await workspaceUsesInstallationDependencies(cwd, dependencyRoots)) toolchainRoots.push(...dependencyRoots)
     // The Windows broker relaunches itself as the sandbox user before starting
     // the target command. Permit only its fixed, integrity-checked image folder.
     if (process.platform === 'win32') toolchainRoots.push(dirname(verifiedWindowsSrt()))
