@@ -4,6 +4,8 @@ Pulse builds `srt-win` from sandbox-runtime 0.0.77's exact source commit and
 applies the native portion of upstream PR #523. `SOURCE.json` records both
 commits and SHA-256 hashes. The source archive and patch must match those hashes.
 The upstream Apache-2.0 license is retained here and in the packaged binary folder.
+The owned-fixture round-trip test permits only Windows Server's documented
+`D:(` to `D:AI(` canonicalization; all other descriptor bytes remain exact.
 
 The patch makes parent delete-child guards object-local and avoids rewriting
 unrelated descendants for object-only ACL changes. Full deny/grant propagation,

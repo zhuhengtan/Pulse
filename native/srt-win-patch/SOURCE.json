@@ -5,5 +5,6 @@
   "archiveSha256": "978b0bacedf88ac441d2c723290a1aba64c85571978ba517fabde68a9455ce90",
   "patchCommit": "26dbcbeaa29e665af25b6685564b3d550d94cf2c",
   "patchUrl": "https://github.com/anthropics/sandbox-runtime/pull/523",
-  "patchSha256": "f4dbef2a97cb4b5ed45518de0053b556bc8501c889da78c50f112747519440cb"
+  "patchSha256": "3cf1d16ef273c9d066ff0479b1cd28178a7453a41dbdf80cbc3239dd831ca067",
+  "testAdaptation": "Parent SDDL round-trip permits only D:( to D:AI( canonicalization; all owner/group/ACE/protection comparisons remain exact."
 }

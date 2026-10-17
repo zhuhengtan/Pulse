@@ -741,7 +741,7 @@ new file mode 100644
 index 000000000..49cd975db
 --- /dev/null
 +++ b/vendor/srt-win-src/tests/acl_parent_scope.rs
-@@ -0,0 +1,546 @@
+@@ -0,0 +1,549 @@
 +//! Parent deletion protection must not spread over unrelated sibling trees.
 +//! All ACL changes are confined to a fresh owned fixture. No sandbox account,
 +//! elevation, WFP installation or machine-wide state is needed.
@@ -907,11 +907,14 @@ index 000000000..49cd975db
 +    apply_sandbox_aces(fixture.0.to_str().unwrap(), TEST_SID, SbAceSet::default()).unwrap();
 +    assert!(sandbox_aces(&fixture.0).is_empty());
 +    assert_eq!(sandbox_aces(&sibling), before);
-+    assert_eq!(
-+        snapshot(&fixture.0),
-+        original,
-+        "parent descriptor did not round-trip"
-+    );
++    let restored = snapshot(&fixture.0);
++    // Windows Server may canonicalize only SE_DACL_AUTO_INHERITED from 0 to 1.
++    // Permit that exact metadata transition; owner, group, protection, all ACE
++    // flags/masks/order and every other byte must still round-trip unchanged.
++    if restored != original {
++        assert_eq!(restored, original.replacen("D:(", "D:AI(", 1),
++            "parent descriptor changed beyond AUTO_INHERITED canonicalization");
++    }
 +    assert_eq!(
 +        snapshot(&sibling),
 +        sibling_original,
