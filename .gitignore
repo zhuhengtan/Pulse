@@ -13,3 +13,5 @@ artifacts/cli/
 native/desktop-helper/target/
 native/desktop-helper/__pycache__/
 packages/server/native/
+# Local real-task evaluation files and generated run artifacts
+/tests/real-task/

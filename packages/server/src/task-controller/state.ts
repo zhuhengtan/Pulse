@@ -62,6 +62,8 @@ export interface TaskControllerState {
   actualBudget?: { limit: number; used: number; workAllowed: boolean; verificationAllowed: boolean; finalAllowed: boolean; reason?: string }
   activeId?: string
   activeIds?: string[]
+  planConfirmation?: { path: string; hash: string; ref: string }
+  planConfirmations?: { path: string; hash: string; ref: string }[]
 }
 export function initialController(maxTurns: number): TaskControllerState {
   return { schemaVersion: 1, revision: 1, tasks: [], priorTasks: [], seenInputIds: [], updates: [], seenModelRefs: [], usedTurns: 0, maxTurns, goalRecoveries: 0 }
@@ -92,6 +94,8 @@ const controllerSchema = z.object({
   recoveryCriterionIds: z.array(z.string()).optional(),
   budgetStopped: z.string().optional(),
   actualBudget: z.object({ limit: z.number().int().min(0), used: z.number().int().min(0), workAllowed: z.boolean(), verificationAllowed: z.boolean(), finalAllowed: z.boolean(), reason: z.string().optional() }).optional(),
+  planConfirmation: z.object({ path: z.string(), hash: z.string(), ref: z.string() }).optional(),
+  planConfirmations: z.array(z.object({ path: z.string(), hash: z.string(), ref: z.string() })).max(32).optional(),
 })
 export function controllerFromGlobal(global: Readonly<JsonValue>): TaskControllerState | undefined {
   if (!global || typeof global !== 'object' || Array.isArray(global)) return undefined
@@ -101,7 +105,7 @@ export function controllerFromGlobal(global: Readonly<JsonValue>): TaskControlle
   if (!parsed.success) throw new Error('TASK_CONTROLLER_STATE_INVALID')
   return JSON.parse(JSON.stringify(parsed.data)) as TaskControllerState
 }
-export function validatePlan(tasks: PlannedTask[], criterionIds: string[]): void {
+export function validatePlan(tasks: PlannedTask[], criterionIds: string[], originalContract?: string): void {
   const byId = new Map(tasks.map((task) => [task.id, task]))
   if (byId.size !== tasks.length) throw new Error('TASK_PLAN_DUPLICATE_ID')
   const covered = new Set(tasks.flatMap((task) => task.criterionIds))
@@ -120,6 +124,15 @@ export function validatePlan(tasks: PlannedTask[], criterionIds: string[]): void
   }
   tasks.forEach((task) => walk(task.id))
   if (tasks.some(t => t.settledDependencies?.some(id => !t.dependsOn.includes(id)))) throw new Error('TASK_PLAN_INVALID_SETTLED_DEPENDENCY')
+  if (originalContract !== undefined) {
+    // Plans are written before repository investigation. A calculated decimal
+    // must not silently become a new business oracle. Defer derived constants
+    // to evidence-backed tests; preserve explicitly requested values unchanged.
+    const numbers = new Set([...originalContract.matchAll(/(?<![\w.])-?\d+(?:\.\d+)?(?!\w|\.\d)/g)].map(match => Number(match[0])))
+    for (const task of tasks) for (const match of task.check.matchAll(/(?<![\w.])-?\d+\.\d+(?!\w|\.\d)/g)) {
+      if (!numbers.has(Number(match[0]))) throw new Error(`TASK_PLAN_UNGROUNDED_EXPECTATION: ${task.id}; decimal ${match[0]} is absent from the original contract. Describe the required behavior; derive expected values from repository evidence during execution.`)
+    }
+  }
 }
 
 /** A test failure need not prevent documenting current, actually implemented behavior. */
@@ -182,6 +195,9 @@ export function stageRequiresFileChange(goal: string, check: string, kind?: Plan
   const edit = /新增|修改|实现|创建|接入|集成|更新|改动|写入|写出|修复|\b(?:implement|modify|patch|create|edit|fix|refactor|add|update|write|integrate)\b/i
   const inspection = /^\s*(?:审查|检查|分析|阅读|读取|定位|查看|\b(?:review|inspect|analyze|read|locate)\b)/i.test(prose)
   const alsoEdit = /(?:并|然后|\b(?:and|then)\s+)(?:修改|修复|新增|创建|实现|更新|接入|集成|写入|写出|(?:implement|modify|patch|create|edit|fix|refactor|add|update|write|integrate)\b)/i.test(prose)
+  // Executing an existing generator can create its own artifacts. Requiring an
+  // additional filesystem edit here forces pointless rewrites or repeated runs.
+  if (strictIntent && /^\s*(?:运行|执行|重跑|重新运行|\b(?:run|execute)\b)/i.test(prose) && TOOL_RUNNER.test(goal) && !edit.test(prose)) return false
   const validation = /验证|复现|运行|测试|确认|输出|列出|记录|\b(?:reproduce|verify|run|test|check|report|review)\b/i.test(prose)
   const directEdit = /^\s*(?:新增|修改|实现|创建|接入|集成|更新|改动|写入|写出|修复|(?:将|把).*(?:接入|集成|修改|更新)|\b(?:implement|modify|patch|create|edit|fix|refactor|add|update|write|integrate)\b)/i.test(prose)
   // Named output files are real deliverables even when the verb is 'record'.
@@ -203,29 +219,72 @@ export function stageRequiresFileChange(goal: string, check: string, kind?: Plan
 /** New plans have durable intent; legacy snapshots may omit it. */
 export function normalizeStageKinds(tasks: PlannedTask[], strictIntent = false): PlannedTask[] {
   return tasks.map(task => {
-    const verify = /验证|核查|检查|测试|确认|\b(?:verify|verification|test|check|review)\b/i.test(task.goal.replace(/\S+\.[\w.-]+/g, ''))
+    const verify = /验证|核查|检查|测试|确认|运行|执行|重跑|\b(?:verify|verification|test|check|review|run|execute)\b/i.test(task.goal.replace(/\S+\.[\w.-]+/g, ''))
     const kind = stageRequiresFileChange(task.goal, task.check, task.kind, strictIntent) ? 'edit' : strictIntent && verify ? 'verify' : task.kind === 'edit' ? 'analyze' : task.kind ?? (verify ? 'verify' : 'analyze')
     return { ...task, kind }
   })
 }
 
-/** Merge a discovery-only prerequisite into its single deliverable, preserving the DAG. */
-export function mergePreparatoryStages(tasks: PlannedTask[]): PlannedTask[] {
+/** Merge pure discovery with dependent repairs, preserving checks and the DAG. */
+export function mergePreparatoryStages(tasks: PlannedTask[], options: { preserveParallel?: boolean; allowFailureBaseline?: boolean } = {}): PlannedTask[] {
   let result = tasks.map(t => ({ ...t, dependsOn: [...t.dependsOn] }))
   for (const prep of [...result]) {
-    if (prep.kind !== 'analyze' || !/^\s*(?:读取|阅读|调查|检查现状|确认范围|read\b|inspect\b|investigate\b)/i.test(prep.goal)) continue
-    if (/报告|文档|report|document/i.test(prep.check)) continue
+    if (prep.kind === 'edit' || !/^\s*(?:读取|阅读|调查|检查|确认范围|read\b|inspect\b|investigate\b)/i.test(prep.goal)) continue
+    const text = prep.goal + '\n' + prep.check
+    const failureBaseline = options.allowFailureBaseline && /复现.{0,30}(?:失败|崩溃|错误)|(?:baseline|reproduce).{0,40}(?:fail|crash|error)/i.test(text)
+    if (/报告|文档|审批|批准|用户确认|必须.{0,10}通过|report|document|approval|approve|ask|human|user|must.{0,10}pass/i.test(text) || TOOL_RUNNER.test(text) && !failureBaseline) continue
+    if (failureBaseline && /退出码\s*(?:[:=]|必须为)?\s*0|exit(?: code)?\s*(?:[:=]|must be)?\s*0|all tests pass/i.test(text)) continue
     const users = result.filter(t => t.dependsOn.includes(prep.id))
-    const next = users.length === 1 ? users[0] : undefined
-    if (!next || next.kind !== 'edit') continue
-    const goal = `${prep.goal}; ${next.goal}`, check = `${prep.check}; ${next.check}`
-    if (goal.length > 700 || check.length > 500) continue
-    next.goal = goal; next.check = check
-    next.criterionIds = [...new Set([...prep.criterionIds, ...next.criterionIds])]
-    next.dependsOn = [...new Set([...next.dependsOn.filter(id => id !== prep.id), ...prep.dependsOn])]
-    result = result.filter(t => t.id !== prep.id)
+    if (!users.length || options.preserveParallel && users.length > 1 || users.some(t => t.kind !== 'edit' || t.dependsOn.length !== 1)) continue
+    const combined = [prep, ...users], ids = new Set(combined.map(t => t.id))
+    if (result.some(t => t.settledDependencies?.some(id => ids.has(id)))) continue
+    const goal = combined.map(t => t.goal).join('; '), check = combined.map(t => t.check).join('; ')
+    if (goal.length > 700 || check.length > 500 || new Set(combined.flatMap(t => t.criterionIds)).size > 32 || prep.dependsOn.some(id => ids.has(id))) continue
+    const owner = users[0]!
+    owner.goal = goal; owner.check = check
+    owner.criterionIds = [...new Set(combined.flatMap(t => t.criterionIds))]
+    owner.dependsOn = [...prep.dependsOn]
+    result = result.filter(t => t.id === owner.id || !ids.has(t.id)).map(t => ({ ...t, dependsOn: [...new Set(t.dependsOn.map(id => ids.has(id) ? owner.id : id))] }))
   }
   return result
+}
+
+/** Keep routine checks with their implementing stage instead of asking a new
+ * worker to rerun the same settled operation. All checks and criteria survive. */
+export function mergeRoutineVerificationStages(tasks: PlannedTask[]): PlannedTask[] {
+  let result = tasks.map(t => ({ ...t, dependsOn: [...t.dependsOn] }))
+  for (const verify of tasks) {
+    if (verify.kind !== 'verify' || verify.dependsOn.length !== 1 || /审批|批准|用户确认|approval|approve|ask|human|user/i.test(verify.goal + '\n' + verify.check)) continue
+    // Full test stages retain their own definition/freshness boundary.
+    if (/测试|--test|\b(?:tests?|suite|vitest|jest|pytest)\b/i.test(verify.goal + '\n' + verify.check)) continue
+    const current = result.find(t => t.id === verify.id)
+    const owner = current && result.find(t => t.id === current.dependsOn[0])
+    if (!current || !owner || owner.kind !== 'edit' || !verify.criterionIds.length || !verify.criterionIds.every(id => owner.criterionIds.includes(id))) continue
+    const ids = new Set([owner.id, verify.id])
+    if (result.some(t => t.settledDependencies?.some(id => ids.has(id)))) continue
+    const goal = `${owner.goal}; ${verify.goal}`, check = `${owner.check}; ${verify.check}`
+    if (goal.length > 700 || check.length > 500) continue
+    owner.goal = goal; owner.check = check
+    result = result.filter(t => t.id !== verify.id).map(t => ({ ...t, dependsOn: [...new Set(t.dependsOn.map(id => id === verify.id ? owner.id : id))] }))
+  }
+  return result
+}
+
+/** Host final review already checks all original criteria. Keep real final
+ * commands, human gates and deliverables; omit only a duplicate terminal review
+ * whose criteria are all covered by other planned stages. */
+export function omitRedundantFinalReviews(tasks: PlannedTask[]): PlannedTask[] {
+  let retained = [...tasks]
+  for (const task of tasks) {
+    const text = `${task.goal}\n${task.check}`
+    if (task.kind !== 'verify' || TOOL_RUNNER.test(text) || WORKSPACE_FILE.test(text)) continue
+    if (/运行|执行|复跑|测试|询问|批准|审批|摘要|报告|\b(?:run|execute|rerun|test|ask|approve|approval|summary|report)\b/i.test(text)) continue
+    if (!/最终|整体|全面|\b(?:final|overall|entire)\b/i.test(text) || !/全部交付物|原始.{0,20}(?:标准|要求)|(?:所有|全部).{0,20}(?:标准|要求)|\b(?:criteria|requirements)\b/i.test(text)) continue
+    if (retained.some(other => other.dependsOn.includes(task.id))) continue
+    const covered = new Set(retained.filter(other => other.id !== task.id).flatMap(other => other.criterionIds))
+    if (task.criterionIds.length > 0 && task.criterionIds.every(id => covered.has(id))) retained = retained.filter(other => other.id !== task.id)
+  }
+  return retained
 }
 
 /** Implementation, file, and command stages need settled tool evidence. Versions and abbreviations do not. */

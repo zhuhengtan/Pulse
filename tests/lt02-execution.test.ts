@@ -148,6 +148,43 @@ it.each([false, true])('keeps manual approval across cold restore and executes o
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
 }, 20000)
 
+it.each(['default-deny', 'manual-deny', 'manual-approve'] as const)('preserves local reviewer DENY unless an explicit operator-enabled human decision overrides it (%s)', async mode => {
+  const dir = await mkdtemp(join(tmpdir(), 'pulse-review-rejection-'))
+  await writeFile(join(dir, 'probe.mjs'), "import {writeFileSync} from 'node:fs'; writeFileSync('executed.txt','once')")
+  const goal = '验证 probe.mjs 的执行结果', ids = acceptanceCriteriaFromObjective(goal).map(c => c.id)
+  let work = 0, reviews = 0, waiting = 0
+  const waitingIds: string[] = []
+  vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+    const { messages } = JSON.parse(String(init?.body)), text = currentRequestText(messages), refs = suppliedRequestResults(messages).map(r => r.id)
+    if (text.includes('You are the Pulse safety reviewer')) { reviews++; return chat('DENY') }
+    if (text.includes('Create an executable plan')) return chat({ tasks: [{ id: 's', kind: 'verify', goal, check: '脚本完成', criterionIds: ids, dependsOn: [] }] })
+    if (text.includes('Verify ONLY the active')) return chat({ status: 'passed', evidenceRefs: refs, note: 'Actual script settled' })
+    if (text.includes('Independently verify every ORIGINAL')) return chat({ criteria: ids.map(criterionId => ({ criterionId, status: 'passed', evidenceRefs: refs, rationale: 'Actual tool receipt' })) })
+    return ++work === 1 ? tool('shell_exec', { command: 'node', args: ['probe.mjs'] }) : chat('Delivered')
+  }))
+  const host = createLocalHost({ cwd: dir, dataDir: join(dir, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, approvalMode: 'auto', taskController: true, maxModelCalls: 10, jarvis: { enabled: false }, approvalReview: { provider: 'ollama', model: 'fixture-review', baseURL: 'http://127.0.0.1:11434', timeoutMs: 30000, manualOnRejection: mode !== 'default-deny' } })
+  try {
+    const c = await host.createConversation(), run = await host.sendMessage(c.id, { text: goal })
+    for await (const event of run.events) if (event.type === 'waiting') {
+      waiting++
+      waitingIds.push(String(event.data?.effectId))
+      await expect(readFile(join(dir, 'executed.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(event.data).toMatchObject({ input: { tools: [{ toolName: 'shell.exec', input: { command: 'node', args: ['probe.mjs'] }, reviewCode: 'AI_APPROVAL_DENIED' }] } })
+      await run.reply(String(event.data?.effectId), { approved: mode === 'manual-approve', reason: 'Explicit decision for the inspected operation' })
+    }
+    const outcome = await run.outcome()
+    expect(waiting, JSON.stringify({ waitingIds, reviews, work, outcome })).toBe(mode === 'default-deny' ? 0 : 1)
+    expect(reviews).toBe(1)
+    if (mode === 'manual-approve') {
+      expect(await readFile(join(dir, 'executed.txt'), 'utf8')).toBe('once')
+      expect(await run.taskOutcome(), outcome.text).toMatchObject({ status: 'accepted' })
+    } else {
+      await expect(readFile(join(dir, 'executed.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect((await run.taskOutcome())?.status).not.toBe('accepted')
+    }
+  } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
+}, 20000)
+
 it('scopes terminal independent failure without failing unrelated criteria', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-terminal-assertion-'))
   const goal = '验证当前项目。保留用户文档', ids = acceptanceCriteriaFromObjective(goal).map(c => c.id)

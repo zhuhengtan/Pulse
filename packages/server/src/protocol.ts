@@ -29,6 +29,7 @@ export interface WebLane {
   id: string
   parentId?: string
   label: string
+  goal?: string
   status: 'ready' | 'running' | 'waiting' | 'closing' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled'
   activity?: string
   activities?: Array<{ id: string; label: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'waiting' }>
@@ -62,10 +63,16 @@ export interface WebAssistantMessageReceipt {
   updatedAt: string
 }
 
+/** Lane-attributed model, reasoning and note events shown in the work-mode execution block. */
+export type WebTraceData =
+  | { kind: 'model'; effectId?: string; laneId?: string; attemptId?: string; task: string; modelId: string; providerId?: string; attemptNo: number; fallback: boolean }
+  | { kind: 'reasoning' | 'note'; effectId?: string; laneId?: string; attemptId?: string; attemptNo?: number; task: string; modelId?: string; text: string }
+
 type WebRunEventPayload =
   | { type: 'status'; runId: string; seq: number; data: { kind: 'working' | 'context'; label?: string } }
   | { type: 'text'; runId: string; seq: number; data: string; activityId?: string }
-  | { type: 'tool'; runId: string; seq: number; data: { activityId: string; effectId: string; attemptId?: string; tool: string; status: 'succeeded' | 'failed' | 'cancelled' } }
+  | { type: 'tool'; runId: string; seq: number; data: { activityId: string; effectId: string; attemptId?: string; laneId?: string; tool: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled'; args?: Record<string, unknown>; preview?: Record<string, unknown>; error?: Record<string, unknown> } }
+  | { type: 'trace'; runId: string; seq: number; data: WebTraceData }
   | { type: 'waiting'; runId: string; seq: number; data: { effectId: string; input: Record<string, unknown> } }
   | { type: 'interactions'; runId: string; seq: number; data: { interactions: WebPendingInteraction[]; reviewNote?: string } }
   | { type: 'lanes'; runId: string; seq: number; data: WebRunLanes }
@@ -74,7 +81,7 @@ type WebRunEventPayload =
   | { type: 'error'; runId: string; seq: number; data: { message: string } }
   | { type: 'run_finished'; runId: string; seq: number }
 
-export type WebRunEvent = WebRunEventPayload & { conversationId?: string }
+export type WebRunEvent = WebRunEventPayload & { conversationId?: string; timestamp?: number; runStartedAt?: number }
 
 export interface WebPendingInteraction {
   groupId: string

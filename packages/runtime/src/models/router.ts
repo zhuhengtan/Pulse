@@ -16,7 +16,7 @@ export interface ModelUsage {
   cost?: { amount: number; currency: string; source: 'reported' | 'estimated'; pricingVersion?: string }
 }
 export interface ModelAdapter {
-  executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number }): Promise<LLMResult>
+  executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; onReasoning?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number }): Promise<LLMResult>
 }
 export interface ModelCandidate { id: string; providerId: string; tasks: string[]; capabilities: ModelCapabilities; priority: number; adapter?: ModelAdapter }
 export interface ModelRouteDiagnostic { id: string; providerId: string; accepted: boolean; reasons: string[] }

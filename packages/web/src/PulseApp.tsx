@@ -1,9 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, FormEvent, KeyboardEvent } from 'react'
+import type { CSSProperties, FormEvent, KeyboardEvent, ReactElement } from 'react'
 import { ApiError, apiJson, browserTransport, jsonRequest } from './transport.js'
 import type { ConversationList, MessageList, PulseWebTransport, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebLane, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from './transport.js'
 import { Dropdown, Select } from 'antd'
 import { MessageBubble } from './MessageBubble.js'
+import { emptyTrace, isTraceEvent, PersistedRunTrace, reduceTrace, RunTraceView } from './RunTrace.js'
+import type { TraceState } from './RunTrace.js'
 import { copyText } from './clipboard.js'
 import { SettingsPage } from './SettingsPage.js'
 import { ArchivePage } from './ArchivePage.js'
@@ -40,6 +42,23 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const [running, setRunning] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [status, setStatus] = useState<RunStatus[]>([])
+  const [traces, setTraces] = useState<Record<string, TraceState>>({})
+  const [persistedTraceFallback, setPersistedTraceFallback] = useState(false)
+  const traceQueue = useRef<Array<{ runId: string; event: WebRunEvent }>>([])
+  const traceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const queueTrace = useCallback((runId: string, event: WebRunEvent) => {
+    traceQueue.current.push({ runId, event })
+    if (traceTimer.current !== undefined) return
+    traceTimer.current = setTimeout(() => {
+      traceTimer.current = undefined
+      const batch = traceQueue.current.splice(0)
+      setTraces(current => {
+        const next = { ...current }
+        for (const item of batch) next[item.runId] = reduceTrace(next[item.runId] ?? emptyTrace, item.event)
+        return next
+      })
+    }, 60)
+  }, [])
   const [reviewNote, setReviewNote] = useState('')
   const [draft, setDraft] = useState('')
   const [drafts, setDrafts] = useState<Record<string, string>>({})
@@ -320,10 +339,18 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     streamRunRef.current = runId
     if (selectedIdRef.current === conversationId) setRunning(true)
     let lastSeq = after
+    let traceSeq = 0
+    let closed = false
+    let unsubscribe: (() => void) | undefined
+    eventClose.current = () => { closed = true; unsubscribe?.() }
     const onEvent = (event: WebRunEvent) => {
       if ((event.conversationId && event.conversationId !== conversationId) || event.runId !== runId || event.seq <= lastSeq) return
       lastSeq = event.seq
       if (selectedIdRef.current !== conversationId) return
+      if (isTraceEvent(event) && event.seq > traceSeq) queueTrace(runId, event)
+      // The state snapshot already rendered these. Replaying them after a trace
+      // rewind would put answered approvals and stale tool rows back on screen.
+      if (event.seq <= after && (event.type === 'status' || event.type === 'tool' || event.type === 'lanes' || event.type === 'waiting' || event.type === 'interactions' || event.type === 'text')) return
       if (event.type === 'status') setStatus(current => replaceStatus(current, { kind: 'status', label: event.data.label ?? (event.data.kind === 'context' ? '正在整理上下文' : '正在处理') }))
       if (event.type === 'tool') setStatus(current => replaceStatus(current, { kind: 'tool', activityId: event.data.activityId, label: readableTool(event.data.tool), state: event.data.status }))
       if (event.type === 'lanes') setStatus(current => replaceStatus(current, { kind: 'lanes', available: event.data.available, lanes: event.data.lanes }))
@@ -361,11 +388,65 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         if (selectedIdRef.current === conversationId) { setRunning(false); setStopping(false) }
       }
     }
-    eventClose.current = transport.subscribe(`/api/runs/${encodeURIComponent(runId)}/events?after=${lastSeq}`, onEvent, () => {
-      setToast('连接中断，正在尝试恢复…')
-      window.setTimeout(() => setToast(''), 3000)
-    })
-  }, [transport])
+    const subscribe = (cursor: number) => {
+      if (closed || selectedIdRef.current !== conversationId) return
+      lastSeq = cursor
+      unsubscribe = transport.subscribe(`/api/runs/${encodeURIComponent(runId)}/events?after=${cursor}`, onEvent, () => {
+        setToast('连接中断，正在尝试恢复…')
+        window.setTimeout(() => setToast(''), 3000)
+      })
+      if (closed) unsubscribe()
+    }
+    if (conversationId === assistantIdRef.current) subscribe(after)
+    else {
+      // Hydrate the trace prefix before subscribing. Events newer than the state
+      // snapshot may already be in this response; still replay other UI events,
+      // but do not append their reasoning a second time.
+      traceQueue.current = traceQueue.current.filter(item => item.runId !== runId)
+      setTraces(current => ({ ...current, [runId]: emptyTrace }))
+      void apiJson<{ events: WebRunEvent[]; seq?: number }>(transport, `/api/runs/${encodeURIComponent(runId)}/trace`).then(result => {
+        if (closed || selectedIdRef.current !== conversationId) return
+        traceSeq = result.seq ?? Math.max(0, ...result.events.map(event => event.seq))
+        setTraces(current => ({ ...current, [runId]: result.events.reduce(reduceTrace, emptyTrace) }))
+        subscribe(Math.min(after, traceSeq))
+      }).catch(() => { subscribe(0) })
+    }
+  }, [transport, queueTrace])
+
+  const historicalTraceKey = surfaceMode === 'work' && selectedId
+    ? [...new Set(messages.flatMap(message => message.role === 'assistant' && message.runId ? [message.runId] : []))].join('\n')
+    : ''
+
+  useEffect(() => {
+    traceQueue.current = []; setTraces({}); setPersistedTraceFallback(false)
+    return () => {
+      if (traceTimer.current !== undefined) clearTimeout(traceTimer.current)
+      traceTimer.current = undefined; traceQueue.current = []
+    }
+  }, [selectedId])
+
+  useEffect(() => {
+    if (!historicalTraceKey || !selectedId) return
+    const conversationId = selectedId
+    const runIds = historicalTraceKey.split('\n')
+    let cancelled = false
+    void apiJson<{ traces: Array<{ runId: string; events: WebRunEvent[] }> }>(transport, `/api/web/conversations/${encodeURIComponent(conversationId)}/traces`).then(result => {
+      if (cancelled || selectedIdRef.current !== conversationId) return
+      setTraces(current => {
+        let changed = false
+        const next = { ...current }
+        for (const item of result.traces) {
+          if (!runIds.includes(item.runId) || next[item.runId]) continue
+          const reduced = item.events.reduce(reduceTrace, emptyTrace)
+          if (reduced.order.length === 0) continue
+          next[item.runId] = reduced
+          changed = true
+        }
+        return changed ? next : current
+      })
+    }).catch(() => { if (!cancelled && selectedIdRef.current === conversationId) setPersistedTraceFallback(true) })
+    return () => { cancelled = true }
+  }, [historicalTraceKey, selectedId, transport])
 
   useEffect(() => {
     if (!paired || surfaceMode !== 'chat') return
@@ -783,6 +864,24 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   if (settingsOpen) return <SettingsPage transport={transport} canEditConfig={sessionCapabilities.localAdmin} onClose={() => setSettingsOpen(false)} onOpenArchive={() => { setSettingsOpen(false); setArchiveOpen(true) }} />
   if (archiveOpen) return <ArchivePage transport={transport} onBack={() => setArchiveOpen(false)} onChanged={() => { void apiJson<ConversationList>(transport, '/api/conversations').then(setConversations); void refreshProjects() }} onOpen={conversation => { setConversations(items => [conversation, ...items.filter(item => item.id !== conversation.id)]); setArchiveOpen(false); void openConversation(conversation) }} />
 
+  const activeRunId = selected?.activeRunId
+  const renderMessages = () => {
+    const shown = new Set<string>()
+    const items = messages.flatMap(message => {
+      const out: ReactElement[] = []
+      const runId = message.runId
+      if (surfaceMode === 'work' && message.role === 'assistant' && runId && !shown.has(runId)) {
+        shown.add(runId)
+        const live = traces[runId]
+        if (live) out.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} />)
+        else if (persistedTraceFallback) out.push(<PersistedRunTrace key={`trace:${runId}`} runId={runId} transport={transport} />)
+      }
+      out.push(<MessageBubble key={`${selectedId}:${message.id}`} mode={surfaceMode} message={message} retry={() => void retryAssistantMessage(message)} onOpenWork={openWorkNotice} />)
+      return out
+    })
+    if (surfaceMode === 'work') for (const [runId, live] of Object.entries(traces)) if (!shown.has(runId)) items.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} />)
+    return items
+  }
   return <main className={`shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''} ${workbenchOpen ? 'workbench-open' : ''}`}>
     {surfaceMode === 'work' && !drawerOpen && <div className="desktop-history">{history}</div>}
     {surfaceMode === 'work' && drawerOpen && <button className="scrim" aria-label="关闭历史对话" onClick={() => { setDrawerOpen(false); drawerTrigger.current?.focus() }} />}
@@ -801,7 +900,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       <section ref={messagesEl} className={`messages ${messages.length === 0 ? 'is-empty' : ''}`} aria-live="polite" aria-label="聊天消息" onScroll={event => { const el = event.currentTarget; setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 96) }}>
         {loading && <div className="empty"><span className="spinner" />正在加载对话…</div>}
         {!loading && messages.length === 0 && paired && <div className="empty"><div className="empty-mark"><Icon name="spark" size={27}/></div><h1>我们要做什么？</h1><p>在 Pulse 工作区中提问或交代任务。</p></div>}
-      {messages.map(message => <MessageBubble key={`${selectedId}:${message.id}`} mode={surfaceMode} message={message} retry={() => void retryAssistantMessage(message)} onOpenWork={openWorkNotice} />)}
+      {renderMessages()}
       </section>
       {!atBottom && <button className="jump-bottom" onClick={() => { setAtBottom(true); messagesEl.current?.scrollTo({ top: messagesEl.current.scrollHeight, behavior: 'smooth' }) }}>回到底部 ↓</button>}
       <footer className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${messages.length === 0 && !activeInteraction ? 'is-empty' : ''}`}>

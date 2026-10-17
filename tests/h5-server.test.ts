@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createLocalHost, getLocalNetworkIp, hostHeaderHostname, isAllowedH5Host, isLoopbackIp, H5Server, type RunHandle } from '../packages/server/src/index.js'
 import { H5AuthStore } from '../packages/server/src/h5/auth.js'
 import type { JarvisClient } from '../packages/server/src/jarvis/client.js'
@@ -521,26 +521,20 @@ describe('H5Server End-to-End', () => {
       const conversation = await created.json() as { id: string }
       const sent = await fetch(`${baseUrl}/api/conversations/${conversation.id}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ text: 'Start work and ask me a question.' }) })
       const { runId } = await sent.json() as { runId: string }
-      let pending = false
-      for (let attempt = 0; attempt < 100; attempt++) {
+      await vi.waitFor(async () => {
         const snapshot = await fetch(`${baseUrl}/api/runs/${runId}/state`, { headers: { Cookie: cookie } }).then(response => response.json()) as { interactions?: unknown[] }
-        if (snapshot.interactions?.length) { pending = true; break }
-        await new Promise(resolve => setTimeout(resolve, 10))
-      }
-      expect(pending).toBe(true)
+        expect(snapshot.interactions?.length).toBeGreaterThan(0)
+      }, { timeout: 5_000, interval: 25 })
       const assistant = await fetch(`${baseUrl}/api/assistant`, { headers: { Cookie: cookie } }).then(response => response.json()) as { messages: Array<{ id: string; work?: { conversationId: string; title: string; state: string } }>; workInteractions: Array<{ runId: string; conversationId: string; title: string; approvalPolicy: string; kind: string; items: Array<{ input: Record<string, unknown> }> }> }
       expect(assistant.workInteractions).toEqual([expect.objectContaining({ runId, conversationId: conversation.id, title: 'Start work and ask me a question.', approvalPolicy: 'manual', kind: 'ask', items: [expect.objectContaining({ input: expect.objectContaining({ prompt: 'Choose a mode' }) })] })])
       expect(assistant.messages.find(message => message.id === `work-live-${runId}`)?.work).toMatchObject({ conversationId: conversation.id, state: 'waiting' })
       const interaction = assistant.workInteractions[0]!
       const answer = await fetch(`${baseUrl}/api/runs/${runId}/replies`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ conversationId: conversation.id, groupId: interaction.groupId, requestId: 'assistant-work-answer-0001', answers: [{ effectId: interaction.items[0]!.effectId, value: { value: 'safe' } }] }) })
       expect(await answer.json()).toMatchObject({ ok: true, duplicate: false })
-      let finalState = ''
-      for (let attempt = 0; attempt < 100; attempt++) {
-        finalState = (await fetch(`${baseUrl}/api/runs/${runId}/state`, { headers: { Cookie: cookie } }).then(response => response.json()) as { state: string }).state
-        if (finalState !== 'running') break
-        await new Promise(resolve => setTimeout(resolve, 10))
-      }
-      expect(finalState).toBe('succeeded')
+      const events = await readSse(`${baseUrl}/api/runs/${runId}/events`, cookie)
+      expect(events.some(event => event.type === 'complete' && (event.data as { status?: string })?.status === 'succeeded')).toBe(true)
+      const finalState = await fetch(`${baseUrl}/api/runs/${runId}/state`, { headers: { Cookie: cookie } }).then(response => response.json()) as { state: string }
+      expect(finalState.state).toBe('succeeded')
     } finally {
       await server.stop()
       await host.close()
@@ -565,14 +559,13 @@ describe('H5Server End-to-End', () => {
       expect(conversation.approvalPolicy).toBe('manual')
       const sent = await fetch(`${baseUrl}/api/conversations/${conversation.id}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ text: 'Ask me two questions' }) })
       const { runId } = await sent.json() as { runId: string }
-      let snapshot: Record<string, unknown> | undefined
-      for (let attempt = 0; attempt < 100; attempt++) {
+      const snapshot = await vi.waitFor(async () => {
         const response = await fetch(`${baseUrl}/api/runs/${runId}/state`, { headers: { Cookie: cookie } })
-        snapshot = await response.json() as Record<string, unknown>
-        if (Array.isArray(snapshot.interactions) && snapshot.interactions.length) break
-        await new Promise(resolve => setTimeout(resolve, 10))
-      }
-      const groups = snapshot?.interactions as Array<{ groupId: string; kind: string; items: Array<{ effectId: string; input: Record<string, unknown> }> }>
+        const value = await response.json() as { interactions?: Array<{ groupId: string; kind: string; items: Array<{ effectId: string; input: Record<string, unknown> }> }> }
+        expect(value.interactions?.length).toBeGreaterThan(0)
+        return value
+      }, { timeout: 5_000, interval: 25 })
+      const groups = snapshot.interactions!
       expect(groups).toHaveLength(1)
       expect(groups[0]).toMatchObject({ kind: 'ask' })
       expect(groups[0]?.items).toHaveLength(2)
@@ -594,21 +587,11 @@ describe('H5Server End-to-End', () => {
       expect(await duplicate.json()).toMatchObject({ ok: true, duplicate: true })
       const reused = await fetch(`${baseUrl}/api/runs/${runId}/replies`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ ...payload, answers: [{ ...payload.answers[0]!, value: { value: 'fast' } }, payload.answers[1]] }) })
       expect(reused.status).toBe(409)
-      await expect((async () => {
-        for (let attempt = 0; attempt < 100; attempt++) {
-          const messages = await host.getConversationMessages(conversation.id)
-          if (messages.some(message => message.text === '全部已收到')) return
-          await new Promise(resolve => setTimeout(resolve, 10))
-        }
-        throw new Error('RUN_DID_NOT_FINISH')
-      })()).resolves.toBeUndefined()
-      let runState = ''
-      for (let attempt = 0; attempt < 100; attempt++) {
-        runState = (await fetch(`${baseUrl}/api/runs/${runId}/state`, { headers: { Cookie: cookie } }).then(response => response.json()) as { state: string }).state
-        if (runState === 'succeeded') break
-        await new Promise(resolve => setTimeout(resolve, 10))
-      }
-      expect(runState).toBe('succeeded')
+      const events = await readSse(`${baseUrl}/api/runs/${runId}/events`, cookie)
+      expect(events.some(event => event.type === 'complete' && (event.data as { status?: string })?.status === 'succeeded')).toBe(true)
+      expect((await host.getConversationMessages(conversation.id)).some(message => message.text === '全部已收到')).toBe(true)
+      const runState = await fetch(`${baseUrl}/api/runs/${runId}/state`, { headers: { Cookie: cookie } }).then(response => response.json()) as { state: string }
+      expect(runState.state).toBe('succeeded')
       const receipt = JSON.parse(await readFile(join(dir, 'conversations', conversation.id, 'runs', runId, 'interaction-receipts.json'), 'utf8')) as Record<string, unknown>
       expect(receipt[requestId]).toBeDefined()
     } finally {

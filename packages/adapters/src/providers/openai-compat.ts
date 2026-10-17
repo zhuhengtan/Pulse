@@ -15,7 +15,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
     this.baseURL = baseURL
   }
-  async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number; beforeRetryAttempt?: () => Promise<void> }): Promise<LLMResult> {
+  async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; onReasoning?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number; beforeRetryAttempt?: () => Promise<void> }): Promise<LLMResult> {
     const streaming = params.onObservation !== undefined
     const { canonical, toolNameAliases } = lowerProjectionToCanonical({
       request: params.request,
@@ -40,6 +40,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         const streamEvents = parseOpenAISseEvents(event.data)
         for (const ev of streamEvents) {
           if (ev.type === 'text_delta') params.onObservation?.(ev.text)
+          if (ev.type === 'reasoning_delta') params.onReasoning?.(ev.text)
           if (ev.type === 'refusal_delta') params.onObservation?.(ev.refusal)
         }
       })

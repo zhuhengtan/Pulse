@@ -81,7 +81,10 @@ describe('task controller with DeepSeek DSML tool calls', () => {
       expect(texts.join('\n')).not.toContain('Required dependency is blocked')
       expect(trace).toContain('work:stage-1:fresh:unwritten')
       expect(trace).toContain('work:stage-2:listed:unwritten')
-    } finally { vi.unstubAllGlobals(); await host.close(); await rm(directory, { recursive: true, force: true }) }
+    } finally {
+      try { await host.close() }
+      finally { vi.unstubAllGlobals(); await rm(directory, { recursive: true, force: true }) }
+    }
   }, 20_000)
 
   it.each([false, true])('continues context expansion using settled lane receipts (restore=%s)', async (restore) => {
@@ -143,6 +146,9 @@ describe('task controller with DeepSeek DSML tool calls', () => {
       expect(await run.taskOutcome(), JSON.stringify({ runtime: await run.outcome(), task: await run.taskOutcome() })).toMatchObject({ status: 'accepted' })
       const audit = JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'operations.json'), 'utf8')) as { operations: Array<{ tool: string }> }
       expect(audit.operations.filter((operation) => operation.tool === 'task.surface')).toHaveLength(2)
-    } finally { vi.unstubAllGlobals(); await second?.close(); await first.close(); await rm(directory, { recursive: true, force: true }) }
+    } finally {
+      try { try { await second?.close() } finally { await first.close() } }
+      finally { vi.unstubAllGlobals(); await rm(directory, { recursive: true, force: true }) }
+    }
   }, 20_000)
 })

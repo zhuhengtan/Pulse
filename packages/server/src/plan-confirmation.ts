@@ -1,3 +1,15 @@
+/** Explicit natural-language sequencing is a gate, even without a skill command. */
+export function requiresExplicitPlanConfirmation(text: string): boolean {
+  if (/无需确认|不用确认|不必确认|无需批准|\b(?:without approval|no confirmation needed)\b/i.test(text)) return false
+  // 「确认计划后再实现」names the plan inside the confirmation phrase. A plan
+  // word that only appears later, as in 「先确认阈值后写计划」, is not this gate.
+  const confirmation = /(?:确认|批准|审批)(?:一下)?(?:(?:该|此)?(?:计划|方案))?后(?:再)?|\b(?:after|once)\b.{0,45}\b(?:approve\w*|confirm\w*|approval|confirmation)\b/i.exec(text)
+  if (!confirmation || !/实现|实施|执行|修改|开发|\b(?:implement|execute|develop|edit)\b/i.test(text.slice(confirmation.index))) return false
+  if (/计划|方案|\bplan\b/i.test(confirmation[0])) return true
+  const plan = /计划|方案|\bplan\b/i.exec(text)
+  return !!plan && plan.index < confirmation.index
+}
+
 /** Shared by the Host gate and the offline evaluator. Values are opaque IDs. */
 export function planConfirmationOptions(input: unknown): { defer: string; execute: string } | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined

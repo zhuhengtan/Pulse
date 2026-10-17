@@ -13,8 +13,9 @@ import { WebSocket, WebSocketServer } from 'ws'
 import QRCode from 'qrcode'
 import type { JsonValue } from '@hunterzhu/pulse-runtime'
 import type { AssistantEvent, ConversationSummary, LocalHost, LocalHostOptions, RunHandle } from '../index.js'
-import type { WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebMessage, WebPendingInteraction, WebProject, WebRunEvent, WebRunSnapshot } from '../protocol.js'
+import type { WebAssistantMessageReceipt, WebLane, WebRunLanes, WebAssistantWorkInteraction, WebMessage, WebPendingInteraction, WebProject, WebRunEvent, WebRunSnapshot } from '../protocol.js'
 import { H5AuthStore } from './auth.js'
+import { compactTraceEvents, prepareRunEvent, traceWatermark } from './trace.js'
 import { AssistantConversationStore, type QueuedAssistantMessage } from './assistant.js'
 import { H5ProjectCatalog } from './projects.js'
 import { H5WorkspaceManager } from './workspaces.js'
@@ -24,6 +25,10 @@ import { getLocalNetworkIp, isAllowedH5Host, isLoopbackIp } from './network.js'
 import { safeShellEnv, searchWorkspace, within } from '../security.js'
 
 const execFileAsync = promisify(execFile)
+
+function isSafePathId(value: string): boolean {
+  return value.length > 0 && value.length <= 200 && !value.includes('/') && !value.includes('\\') && !value.includes('..')
+}
 
 interface SseClient {
   res: ServerResponse
@@ -1379,6 +1384,16 @@ export class H5Server {
       }
     }
 
+    const webTracesMatch = pathname.match(/^\/api\/web\/conversations\/([^/]+)\/traces$/)
+    if (webTracesMatch && method === 'GET') {
+      const conversationId = webTracesMatch[1]
+      if (!conversationId || !isSafePathId(conversationId)) { res.writeHead(400).end(); return }
+      try { await this.host.getConversation(conversationId) } catch { res.writeHead(404).end(); return }
+      const traces = await this.loadConversationTraces(conversationId)
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ traces }))
+      return
+    }
+
     // 9. Send message: POST /api/conversations/:id/messages
     if (messagesMatch && method === 'POST') {
       const convId = messagesMatch[1]
@@ -1398,6 +1413,15 @@ export class H5Server {
         res.end(JSON.stringify({ runId }))
         return
       }
+    }
+
+    const runTraceMatch = pathname.match(/^\/api\/runs\/([^/]+)\/trace$/)
+    if (runTraceMatch && method === 'GET') {
+      const runId = runTraceMatch[1]
+      if (!runId) { res.writeHead(404).end(); return }
+      const trace = await this.loadRunTrace(runId)
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ runId, events: trace.events, seq: trace.seq }))
+      return
     }
 
     const runStateMatch = pathname.match(/^\/api\/runs\/([^/]+)\/state$/)
@@ -1607,7 +1631,7 @@ export class H5Server {
     const fact = event.type === 'fact' && event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data as Record<string, JsonValue> : undefined
     if (fact?.type === 'lane.snapshot' && event.conversationId) {
       const data = await this.host.getPublicRunLanes(event.conversationId, runId)
-      projected = { runId, conversationId: event.conversationId, seq: event.seq, type: 'lanes', data }
+      projected = { runId, conversationId: event.conversationId, seq: event.seq, type: 'lanes', data: enrichLanesFromSnapshot(runId, data, fact) }
     }
     if (projected) this.pushEvent(runId, projected)
     if (event.type === 'waiting') {
@@ -1628,7 +1652,7 @@ export class H5Server {
   private pushEvent(runId: string, event: WebRunEvent): void {
     const buffer = this.runEventBuffers.get(runId)
     if (!buffer) return
-    buffer.push(event as AssistantEvent)
+    buffer.push(prepareRunEvent(event, (buffer[0] as unknown as WebRunEvent | undefined)?.runStartedAt) as unknown as AssistantEvent)
     const clients = this.runSseClients.get(runId)
     if (clients) for (const client of [...clients]) this.flushClient(client, buffer, clients)
   }
@@ -1720,6 +1744,65 @@ export class H5Server {
     }
   }
 
+  private runTracePath(conversationId: string, runId: string): string {
+    return join(this.dataDir, 'conversations', conversationId, 'runs', runId, 'web-trace.json')
+  }
+
+  /** Keep the browser-safe execution trace so a finished run can be reopened after a refresh. */
+  private async persistRunTrace(runId: string): Promise<void> {
+    const conversationId = this.runConversations.get(runId)
+    const buffer = this.runEventBuffers.get(runId)
+    if (!conversationId || !buffer || conversationId === this.assistantInbox.conversationId) return
+    const events = compactTraceEvents(buffer as unknown as WebRunEvent[])
+    if (events.length === 0) return
+    await mkdir(join(this.dataDir, 'conversations', conversationId, 'runs', runId), { recursive: true })
+    await writeFile(this.runTracePath(conversationId, runId), JSON.stringify({ version: 1, events }), { encoding: 'utf8', mode: 0o600 })
+  }
+
+  private async loadRunTrace(runId: string): Promise<{ events: WebRunEvent[]; seq: number }> {
+    const buffer = this.runEventBuffers.get(runId)
+    if (buffer) {
+      const raw = buffer as unknown as WebRunEvent[]
+      return { events: compactTraceEvents(raw), seq: traceWatermark(raw) }
+    }
+    const conversationId = await this.host.findConversationByRunId(runId).catch(() => undefined)
+    if (!conversationId) return { events: [], seq: 0 }
+    try {
+      const parsed = JSON.parse(await readFile(this.runTracePath(conversationId, runId), 'utf8')) as { events?: WebRunEvent[] }
+      const events = Array.isArray(parsed.events) ? compactTraceEvents(parsed.events) : []
+      return { events, seq: traceWatermark(events) }
+    } catch { return { events: [], seq: 0 } }
+  }
+
+  /** One response for the visible history, instead of a request per assistant message. */
+  private async loadConversationTraces(conversationId: string): Promise<Array<{ runId: string; events: WebRunEvent[]; seq: number }>> {
+    const messages = await this.host.getWebConversationMessages(conversationId).catch(() => [])
+    const runIds: string[] = []
+    for (const message of [...messages].reverse()) {
+      if (!message.runId || runIds.includes(message.runId) || !isSafePathId(message.runId)) continue
+      runIds.push(message.runId)
+      if (runIds.length >= 40) break
+    }
+    const traces: Array<{ runId: string; events: WebRunEvent[]; seq: number }> = []
+    for (const runId of runIds.reverse()) {
+      const buffer = this.runEventBuffers.get(runId)
+      if (buffer && this.runConversations.get(runId) === conversationId) {
+        const raw = buffer as unknown as WebRunEvent[]
+        const events = compactTraceEvents(raw)
+        if (events.length > 0) traces.push({ runId, events, seq: traceWatermark(raw) })
+        continue
+      }
+      try {
+        const parsed = JSON.parse(await readFile(this.runTracePath(conversationId, runId), 'utf8')) as { events?: WebRunEvent[] }
+        if (!Array.isArray(parsed.events)) continue
+        const events = compactTraceEvents(parsed.events)
+        if (events.length === 0) continue
+        traces.push({ runId, events, seq: traceWatermark(events) })
+      } catch { /* This run has no persisted trace. */ }
+    }
+    return traces
+  }
+
   private finishStream(runId: string): void {
     this.approvalReviewControllers.get(runId)?.abort()
     this.approvalReviewControllers.delete(runId)
@@ -1734,6 +1817,10 @@ export class H5Server {
         try { client.res.end() } catch { /* already closed */ }
       }
     }
+    void this.persistRunTrace(runId).catch(error => {
+      const message = error instanceof Error ? error.message : 'unknown'
+      console.error(`Failed to persist run trace ${runId}: ${message}`)
+    })
     this.activeRuns.delete(runId)
     this.runSseClients.delete(runId)
     const existing = this.bufferTimers.get(runId)
@@ -1802,6 +1889,27 @@ function publicInteraction(interaction: { groupId: string; kind: 'ask' | 'approv
   }
 }
 
+/**
+ * A work run may execute in an isolated worker process, where the parent Host has no live
+ * lane state. The snapshot fact travels with the event stream, so use it for goals and as a
+ * fallback source of lanes.
+ */
+function enrichLanesFromSnapshot(runId: string, lanes: WebRunLanes, fact: Record<string, JsonValue>): WebRunLanes {
+  const snapshot = Array.isArray(fact.lanes) ? fact.lanes.filter((item): item is Record<string, JsonValue> => Boolean(item) && typeof item === 'object' && !Array.isArray(item)) : []
+  const byId = new Map(snapshot.map(item => [String(item.id), item]))
+  const known = new Map(lanes.lanes.map(lane => [lane.id, lane]))
+  const merged: WebLane[] = lanes.lanes.map(lane => {
+    const goal = byId.get(lane.id)?.goal
+    return typeof goal === 'string' && goal ? { ...lane, goal: goal.slice(0, 240) } : lane
+  })
+  snapshot.forEach((item, index) => {
+    const id = String(item.id)
+    if (known.has(id) || typeof item.status !== 'string') return
+    merged.push({ id, ...(typeof item.parentId === 'string' ? { parentId: item.parentId } : {}), label: typeof item.parentId === 'string' ? `并行任务 ${index + 1}` : '主任务', ...(typeof item.goal === 'string' ? { goal: item.goal.slice(0, 240) } : {}), status: item.status as WebLane['status'] })
+  })
+  return { runId, available: merged.length > 0, lanes: merged }
+}
+
 function publicH5Event(event: AssistantEvent): WebRunEvent | undefined {
   const base = { ...(event.conversationId ? { conversationId: event.conversationId } : {}), runId: event.runId, seq: event.seq }
   if (event.type === 'text' && typeof event.data === 'string') return { ...base, type: 'text', activityId: `${event.runId}:answer`, data: event.data }
@@ -1816,10 +1924,22 @@ function publicH5Event(event: AssistantEvent): WebRunEvent | undefined {
   }
   if (event.type === 'observation' && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
     const tool = event.data as Record<string, JsonValue>
-    if (typeof tool.tool !== 'string' || (tool.status !== 'succeeded' && tool.status !== 'failed' && tool.status !== 'cancelled')) return undefined
+    if (tool.kind === 'model' && typeof tool.modelId === 'string') {
+      return { ...base, type: 'trace', data: { kind: 'model', ...(typeof tool.effectId === 'string' ? { effectId: tool.effectId } : {}), ...(typeof tool.laneId === 'string' ? { laneId: tool.laneId } : {}), ...(typeof tool.attemptId === 'string' ? { attemptId: tool.attemptId } : {}), task: typeof tool.task === 'string' ? tool.task : 'reason', modelId: tool.modelId, ...(typeof tool.providerId === 'string' ? { providerId: tool.providerId } : {}), attemptNo: typeof tool.attemptNo === 'number' ? tool.attemptNo : 1, fallback: tool.fallback === true } }
+    }
+    if ((tool.kind === 'reasoning' || tool.kind === 'note') && typeof tool.text === 'string') {
+      return { ...base, type: 'trace', data: { kind: tool.kind, ...(typeof tool.effectId === 'string' ? { effectId: tool.effectId } : {}), ...(typeof tool.laneId === 'string' ? { laneId: tool.laneId } : {}), ...(typeof tool.attemptId === 'string' ? { attemptId: tool.attemptId } : {}), ...(typeof tool.attemptNo === 'number' ? { attemptNo: tool.attemptNo } : {}), task: typeof tool.task === 'string' ? tool.task : 'reason', ...(typeof tool.modelId === 'string' ? { modelId: tool.modelId } : {}), text: tool.text } }
+    }
+    const started = tool.kind === 'tool_start'
+    const status = started ? 'running' : tool.status
+    if (typeof tool.tool !== 'string' || (status !== 'running' && status !== 'succeeded' && status !== 'failed' && status !== 'cancelled')) return undefined
     if (typeof tool.effectId !== 'string') return undefined
     const attemptId = typeof tool.attemptId === 'string' ? tool.attemptId : 'initial'
-    return { ...base, type: 'tool', data: { activityId: `${event.runId}:${tool.effectId}:${attemptId}`, effectId: tool.effectId, ...(attemptId === 'initial' ? {} : { attemptId }), tool: tool.tool, status: tool.status } }
+    const record = (value: JsonValue | undefined): Record<string, unknown> | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+    const args = record(tool.args)
+    const preview = record(tool.preview)
+    const error = record(tool.result)
+    return { ...base, type: 'tool', data: { activityId: `${event.runId}:${tool.effectId}:${attemptId}`, effectId: tool.effectId, ...(attemptId === 'initial' ? {} : { attemptId }), ...(typeof tool.laneId === 'string' ? { laneId: tool.laneId } : {}), tool: tool.tool, status, ...(args ? { args } : {}), ...(preview ? { preview } : {}), ...(error ? { error } : {}) } }
   }
   if (event.type === 'waiting' && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
     const data = event.data as Record<string, JsonValue>

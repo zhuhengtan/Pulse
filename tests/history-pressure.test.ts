@@ -4,6 +4,22 @@ import { apply, createAgent, createRuntimeState, defineLaneProgram, validateStep
 const point = (step: string) => ({ programId: 'history', programVersion: '1', step, locals: {} })
 
 describe('history pressure and compaction', () => {
+  it('consumes a corrected tool response after a compacted pending response was rejected', () => {
+    const program = defineLaneProgram({ id: 'react-pending-correction', version: '1', historyCompaction: { summarizeTask: 'summarize', keepRecentRounds: 1 } }, builder => {
+      builder.addReActLoopStep('reason', { instruction: 'Patch the file', toolAllow: ['fs.apply_patch'], maxTurns: 5, onFinish: () => ({ complete: { value: { ok: true } } }) })
+    })
+    const state = createRuntimeState()
+    const { root } = createAgent(state, 'patch', { programId: program.id, programVersion: program.version, step: 'reason:decode', locals: { $sdk: { reasonTurns: 1, reasonPendingResultRef: 'result-rejected' } } })
+    for (const [ref, replace] of [['result-rejected', 'x'.repeat(9000)], ['result-corrected', 'ready']] as const) {
+      state.results.set(ref, { id: ref, value: { text: '', finishReason: 'tool_calls', toolCalls: [{ name: 'fs.apply_patch', input: { path: 'file.txt', find: 'old', replace } }] }, privacy: 'public', derivedFrom: [], producer: { kind: 'effect', id: `effect-${ref}` }, storageState: 'memory', pinCount: 0 })
+    }
+    root.visibleResultRefs = new Set(['result-rejected', 'result-corrected'])
+    const corrected = program.step({ lane: root, state, now: 0, resumeInput: { type: 'control_error', error: { code: 'INVALID_TOOL_INPUT', message: 'Input does not match the manifest for tool fs.apply_patch.' } } })
+    expect((corrected.next.locals as Record<string, any>).$sdk.reasonPendingResultRef).toBeUndefined()
+    expect(JSON.stringify(corrected.actions)).toContain('8192 UTF-8 bytes')
+    const decoded = program.step({ lane: { ...root, resume: corrected.next }, state, now: 0, resumeInput: { type: 'wait', resolution: { waitId: 'wait-fix', status: 'satisfied', dependencies: { model: { state: 'settled', target: { kind: 'effect', id: 'effect-corrected' }, outcome: { status: 'succeeded', resultRef: 'result-corrected' } } } } } })
+    expect(decoded.actions[0]).toMatchObject({ type: 'submit_effects', effects: [{ kind: 'tool', input: { name: 'fs.apply_patch', arguments: { replace: 'ready' } } }] })
+  })
   it('preserves the actionable hard-history error, original history and restorable snapshot', async () => {
     const runtime = new PulseRuntime({ maxConsecutiveControlErrors: 2, historySoftTokens: 1, historyHardTokens: 2 })
     const program = defineLaneProgram({ id: 'history-limit-diagnostic', version: '1' }, builder => {

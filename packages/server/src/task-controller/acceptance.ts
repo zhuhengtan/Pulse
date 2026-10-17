@@ -21,7 +21,12 @@ export interface AcceptanceResult { checks?: Array<{ id: string; passed: boolean
 /** Conservative scope: a request to reject invalid CLI budgets/parameters. */
 export function requiredArgumentChecks(record: Pick<TaskRecord, 'objective' | 'acceptanceCriteria'>): AcceptanceCriterion[] {
   if (!/--[a-z][a-z-]+|\bCLI\b|命令行/i.test(record.objective) || /(?:只|仅)(?:做|需|要)?(?:分析|阅读)|^\s*只读(?:[，,:\s]|$)|不要(?:运行|执行)测试|do not (?:run|execute) (?:any )?(?:tests|checks)\b|read[- ]only (?:analysis|review)/i.test(record.objective)) return []
-  return record.acceptanceCriteria.filter(c => /非法|无效|invalid|malformed/i.test(c.description) && /预算|参数|budget|argument|option/i.test(c.description) && /失败|拒绝|报错|fail|reject|error/i.test(c.description))
+  const cliObjective = /\bCLI\b|命令行|--(?!(?:test|check)(?:\b|=))[a-z][a-z-]+/i.test(record.objective)
+  return record.acceptanceCriteria.filter(c => {
+    const httpCriterion = /\b(?:GET|POST|PUT|PATCH|DELETE|HTTP|URL)\b|\/api\/|查询参数/i.test(c.description)
+    const cliCriterion = /\bCLI\b|命令行|--(?!(?:test|check)(?:\b|=))[a-z][a-z-]+/i.test(c.description)
+    return (cliCriterion || cliObjective && !httpCriterion) && /非法|无效|invalid|malformed/i.test(c.description) && /预算|参数|budget|argument|option/i.test(c.description) && /失败|拒绝|报错|fail|reject|error/i.test(c.description)
+  })
 }
 export const argumentCheckKinds = ['valid-entry', 'invalid-value', 'conflicting-options', 'duplicate-option', 'missing-value'] as const
 

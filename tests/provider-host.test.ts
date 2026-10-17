@@ -76,6 +76,29 @@ describe('Provider Adapter to Runtime LLM Effect host', () => {
     await expect(executor(effect, new AbortController().signal)).resolves.toMatchObject({ value: { toolCalls: [{ toolCallId: 'effect-tool-id:tool:1' }] } })
   })
 
+  it('separates reasoning already streamed before a provider retry from the retry itself', async () => {
+    const registry = new InMemoryModelRegistry()
+    registry.register({ id: 'model', providerId: 'provider', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 1 })
+    const providers = new Map<string, ProviderAdapter>([['provider', { id: 'provider', name: 'test', executeAttempt: async (params) => {
+      params.onReasoning?.('partial')
+      await params.beforeRetryAttempt?.()
+      params.onReasoning?.('retry')
+      return { text: 'ok', toolCalls: [], finishReason: 'stop' }
+    } }]])
+    const seen: Array<{ type?: string; data?: { kind?: string; text?: string; attemptNo?: number } }> = []
+    const executor = createModelEffectExecutor({ router: new ModelRouter(registry), providers, beforeProviderAttempt: async () => undefined })
+    const effect = { id: 'effect-retry', agentId: 'agent', ownerLaneId: 'lane', kind: 'llm', input: { task: 'reason', request: projection }, attemptId: 'attempt', attemptNo: 1 } as unknown as EffectRecord
+    await executor(effect, new AbortController().signal, observation => { seen.push(observation) })
+    expect(seen.filter(item => item.type === 'trace')).toMatchObject([
+      { data: { kind: 'llm.attempt', attemptNo: 1, fallback: false } },
+      { data: { kind: 'llm.attempt', attemptNo: 2, fallback: true } },
+    ])
+    expect(seen.filter(item => item.data?.kind === 'reasoning')).toMatchObject([
+      { data: { text: 'partial', attemptNo: 1 } },
+      { data: { text: 'retry', attemptNo: 2 } },
+    ])
+  })
+
   it('routes local_only requests, re-enters the queue for fallback, and records attempt metadata', async () => {
     const registry = new InMemoryModelRegistry()
     registry.register({ id: 'local-first', providerId: 'p1', tasks: ['reason'], capabilities: { local: true, maxContextTokens: 4096 }, priority: 2 })

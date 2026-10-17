@@ -748,6 +748,8 @@ export class StepBuilder<TState = JsonValue> {
       }
       const hint = message.includes('tool fs.stage')
         ? ' fs.stage accepts path and content for a new file of at most 16384 bytes, or operation begin, inspect, append, or commit. Put the workspace path in path.'
+        : /tool fs\.apply_patch(?:es)?\b/.test(message)
+          ? ' Each fs.apply_patch find/replace fragment must be at most 8192 UTF-8 bytes. Split a larger change into smaller exact-fragment patches; do not stage or rewrite the existing file.'
         : message.includes('tool shell.exec')
           ? ' shell.exec command is the executable alone; put each flag in args, for example {"command":"node","args":["--test"]}.'
           : ''
@@ -757,7 +759,12 @@ export class StepBuilder<TState = JsonValue> {
       const inputs: StepInputs = { ...previous, ...current, conversation: [...(current.conversation ?? []), { role: 'user', content: notice }] }
       const output = submitModel(ctx, readTurns(ctx) + 1, inputs)
       const locals = output.locals as Record<string, JsonValue>
-      return { ...output, next: `${name}:decode`, locals: { ...locals, $sdk: { ...sdkLocals(locals), [failureKey]: { signature, count, observations: [{ code: 'INVALID_TOOL_INPUT', message }] }, [`${name}QueuedTools`]: [], [`${name}StopAfterSerial`]: false } } }
+      const sdk = { ...sdkLocals(locals) }
+      // Compaction pins the response awaiting decode. Once its tool arguments
+      // are rejected, the fresh model correction must replace that response.
+      // Keeping the pin here replays the rejected call even after a valid fix.
+      delete sdk[pendingResultKey]
+      return { ...output, next: `${name}:decode`, locals: { ...locals, $sdk: { ...sdk, [failureKey]: { signature, count, observations: [{ code: 'INVALID_TOOL_INPUT', message }] }, [`${name}QueuedTools`]: [], [`${name}StopAfterSerial`]: false } } }
     }
     this.handlers.set(name, (ctx) => { const resetToken = options.resetTurnsOnEntry?.(ctx); const priorToken = sdkLocals(ctx.lane.resume.locals)[resetTokenKey]; const reset = resetToken !== undefined && priorToken !== resetToken; const turn = (reset ? 0 : readTurns(ctx)) + 1; const inputs = options.inputs?.(ctx) ?? {}; const output = submitModel(ctx, turn, inputs); const locals = writeTurns(ctx, turn, inputs, resetToken); return { ...output, next: `${name}:decode`, locals } })
     this.handlers.set(`${name}:tools`, (ctx) => {

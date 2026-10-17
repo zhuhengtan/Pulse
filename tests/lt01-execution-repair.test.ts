@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { readFile, mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { stageRequiresFileChange, normalizeStageKinds, mergePreparatoryStages, validatePlan } from '../packages/server/src/task-controller/state.js'
+import { stageRequiresFileChange, normalizeStageKinds, mergePreparatoryStages, mergeRoutineVerificationStages, validatePlan } from '../packages/server/src/task-controller/state.js'
 import { toolEvidenceHash, stableCheckOutput } from '../packages/runtime/src/dsl/program.js'
 import { ModelAttemptBudget } from '../packages/server/src/model-budget.js'
 import { PulseRuntime, defineLaneProgram } from '@hunterzhu/pulse-runtime'
@@ -31,6 +31,42 @@ it('merges a discovery prerequisite without dropping criteria or dependency edge
   expect(merged[0]!.criterionIds).toEqual(['c1', 'c2'])
   expect(merged[1]!.dependsOn).toEqual(['edit'])
   expect(() => validatePlan(merged, ['c1', 'c2', 'c3'])).not.toThrow()
+})
+it('merges a pure inspection fanout into a delivery while preserving final CI and mandatory gates', () => {
+  const prep = { id: 'inspect', kind: 'verify' as const, goal: '检查入口及源码', check: '读取现状与失败原因', dependsOn: [], criterionIds: ['c0'] }
+  const edits = [1, 2, 3].map(n => ({ id: `edit${n}`, kind: 'edit' as const, goal: `修复模块${n}`, check: `模块${n}正确`, dependsOn: ['inspect'], criterionIds: [`c${n}`] }))
+  const ci = { id: 'ci', kind: 'verify' as const, goal: '运行 node scripts/ci-check.mjs', check: '退出码0', dependsOn: edits.map(t => t.id), criterionIds: ['c4'] }
+  expect(mergePreparatoryStages([prep, ...edits, ci], { preserveParallel: true })).toHaveLength(5)
+  const merged = mergePreparatoryStages([prep, ...edits, ci])
+  expect(merged.map(t => t.id)).toEqual(['edit1', 'ci'])
+  expect(merged[0]!.criterionIds).toEqual(['c0', 'c1', 'c2', 'c3'])
+  expect(merged[1]!.dependsOn).toEqual(['edit1'])
+  expect(merged[1]!.goal).toBe(ci.goal)
+  const baseline = { ...prep, check: '运行 node scripts/ci-check.mjs 复现失败输出' }
+  expect(mergePreparatoryStages([baseline, ...edits, ci])).toHaveLength(5)
+  const withBaseline = mergePreparatoryStages([baseline, ...edits, ci], { allowFailureBaseline: true })
+  expect(withBaseline).toHaveLength(2)
+  expect(withBaseline[0]!.check).toContain(baseline.check)
+  expect(mergePreparatoryStages([{ ...baseline, check: baseline.check + '，退出码必须为0' }, ...edits, ci], { allowFailureBaseline: true })).toHaveLength(5)
+  expect(() => validatePlan(merged, ['c0', 'c1', 'c2', 'c3', 'c4'])).not.toThrow()
+  for (const check of ['写出报告', '等待用户确认', '运行 node --test baseline.test.mjs 必须通过']) expect(mergePreparatoryStages([{ ...prep, check }, ...edits, ci])).toHaveLength(5)
+  expect(mergePreparatoryStages([prep, ...edits, { ...ci, settledDependencies: ['edit2'] }])).toHaveLength(5)
+  expect(mergePreparatoryStages([prep, { ...edits[0]!, dependsOn: ['inspect', 'external'] }])).toHaveLength(2)
+})
+it('folds a routine verification into its edit with checks intact, but preserves new criteria and user gates', () => {
+  const edit = { id: 'edit', kind: 'edit' as const, goal: '修复 entry.mjs', check: '入口正确', dependsOn: [], criterionIds: ['c1'] }
+  const verify = { id: 'verify', kind: 'verify' as const, goal: '复跑 node entry.mjs', check: '退出码0', dependsOn: ['edit'], criterionIds: ['c1'] }
+  const doc = { id: 'doc', kind: 'edit' as const, goal: '撰写 report.md', check: '报告完整', dependsOn: ['verify'], criterionIds: ['c2'] }
+  const merged = mergeRoutineVerificationStages([edit, verify, doc])
+  expect(merged.map(t => t.id)).toEqual(['edit', 'doc'])
+  expect(merged[0]!.goal).toContain(verify.goal)
+  expect(merged[0]!.check).toContain(verify.check)
+  expect(merged[1]!.dependsOn).toEqual(['edit'])
+  expect(() => validatePlan(merged, ['c1', 'c2'])).not.toThrow()
+  expect(mergeRoutineVerificationStages([edit, { ...verify, criterionIds: ['c2'] }])).toHaveLength(2)
+  expect(mergeRoutineVerificationStages([edit, { ...verify, goal: 'Run all tests', check: 'All tests pass' }])).toHaveLength(2)
+  expect(mergeRoutineVerificationStages([edit, { ...verify, goal: '询问用户确认修复结果' }])).toHaveLength(2)
+  expect(mergeRoutineVerificationStages([edit, { ...verify, settledDependencies: ['edit'] }])).toHaveLength(2)
 })
 it('replays six actual successful checks as the same evidence, keeping failures distinct', () => {
   const hashes = fixture.checks.map((c: any) => toolEvidenceHash({ toolName: 'shell.exec', toolArguments: c.args }, c.value))

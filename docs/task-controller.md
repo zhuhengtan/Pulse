@@ -237,8 +237,7 @@ arguments or environment. This is operation attribution, **not** a complete
 filesystem diff or proof that all dirty changes belong to Pulse. Existing dirty
 files and concurrent modifications still need review.
 
-See `tests/task-efficiency.test.ts` and
-`pulse-efficiency-2026-09-24.md` for regression and real-model measurements.
+See `tests/task-efficiency.test.ts` for regression coverage.
 
 Passed dependency evidence is also supplied to later work and stage verification,
 including transitive dependencies. It remains subject to tool outcome and exit

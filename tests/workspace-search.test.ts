@@ -82,7 +82,11 @@ describe('workspace search behavior', () => {
   it('reports visit-limit truncation for a directory larger than the visit budget', async () => {
     const directory = await tempDir('pulse-search-visited-')
     try {
-      for (let index = 0; index < 2_001; index += 1) await writeFile(join(directory, `f${index}.txt`), 'nothing\n')
+      // Keep all 2,001 real entries, but avoid 2,001 serial filesystem round trips
+      // competing with concurrent Host persistence and sandbox setup.
+      for (let offset = 0; offset < 2_001; offset += 32) {
+        await Promise.all(Array.from({ length: Math.min(32, 2_001 - offset) }, (_, index) => writeFile(join(directory, `f${offset + index}.txt`), 'nothing\n')))
+      }
       const result = await searchWorkspace(directory, 'needle')
       expect(result.truncated).toBe(true)
       expect(result.reason).toBe('visited')

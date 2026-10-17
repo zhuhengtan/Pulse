@@ -42,3 +42,15 @@ export function existingContractEvidence(ctx: Pick<StepContext<JsonValue>, 'resu
     })
   })
 }
+
+/** A successful unfiltered named Node suite covers an earlier explicit subset. */
+export function coversNamedNodeTests(previous: JsonValue | undefined, current: JsonValue | undefined): boolean {
+  const parse = (input: JsonValue | undefined) => {
+    if (!input || typeof input !== 'object' || Array.isArray(input) || input.command !== 'node' || !Array.isArray(input.args) || input.args[0] !== '--test') return undefined
+    const files = input.args.slice(1)
+    if (!files.length || !files.every(p => typeof p === 'string' && p.length > 0 && !p.startsWith('-') && !/[*?\[\]{}]/.test(p))) return undefined
+    return { cwd: input.cwd ?? '.', files: files as string[] }
+  }
+  const before = parse(previous), after = parse(current)
+  return !!before && !!after && before.cwd === after.cwd && before.files.every(file => after.files.includes(file))
+}

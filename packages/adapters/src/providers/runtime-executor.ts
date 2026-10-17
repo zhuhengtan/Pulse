@@ -145,11 +145,18 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
       try {
         const startedAt = Date.now()
         const usageReceiptId = randomUUID()
+        const streamAttempt = { no: attemptNo, emitted: false }
         const onObservation = (chunk: string): void => {
+          streamAttempt.emitted = true
           const observation = { type: 'chunk' as const, data: chunk }
           if (emitObservation) emitObservation(observation)
           else observations.push(observation)
         }
+        const onReasoning = emitObservation === undefined ? undefined : (chunk: string): void => {
+          streamAttempt.emitted = true
+          emitObservation({ type: 'chunk', data: { kind: 'reasoning', text: chunk, task, modelId: attempt.candidate.id, providerId: attempt.candidate.providerId, attemptNo: streamAttempt.no } })
+        }
+        emitObservation?.({ type: 'trace', data: { kind: 'llm.attempt', task, purpose, modelId: attempt.candidate.id, providerId: attempt.candidate.providerId, attemptNo, fallback: attemptNo > 1 } })
         const images = projection.images === undefined ? undefined : await Promise.all(projection.images.map(async image => {
           if (image.data) return image
           if (!projection.contextSpec.artifactRefs?.includes(image.ref) || !config.resolveImage) throw Object.assign(new Error('IMAGE_RESOLVER_REQUIRED'), { retryable: false })
@@ -163,7 +170,14 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
         const budget = config.modelBudget?.()
         const blocks = budget ? [...hydrated.blocks, { kind: 'policy' as const, content: `Host model-call ledger: limit=${budget.limit}, used=${budget.used} (including this request), remaining=${Math.max(0, budget.limit - budget.used)}. This is shared by planning, tools' approval reviews, retries, compaction and final verification. Reserve at least two requests for verification. Produce an incremental usable deliverable now; do not spend the remaining allowance on discovery or start another run.` }] : hydrated.blocks
         const budgeted = budget ? { ...hydrated, blocks, projectionHash: contentHash(blocks) } : hydrated
-        const output = assignRuntimeToolCallIds(validateAdapterResult(await provider.executeAttempt({ request: budgeted, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation, ...(config.beforeProviderAttempt === undefined ? {} : { beforeRetryAttempt: async () => { await config.beforeProviderAttempt!(purpose); providerAttempts++ } }) })), effect.id)
+        const output = assignRuntimeToolCallIds(validateAdapterResult(await provider.executeAttempt({ request: budgeted, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation, ...(onReasoning === undefined ? {} : { onReasoning }), ...(config.beforeProviderAttempt === undefined ? {} : { beforeRetryAttempt: async () => {
+          await config.beforeProviderAttempt!(purpose)
+          providerAttempts++
+          if (!streamAttempt.emitted) return
+          streamAttempt.no += 1
+          streamAttempt.emitted = false
+          emitObservation?.({ type: 'trace', data: { kind: 'llm.attempt', task, purpose, modelId: attempt.candidate.id, providerId: attempt.candidate.providerId, attemptNo: streamAttempt.no, fallback: true } })
+        } }) })), effect.id)
         const measuredUsage = { ...(output.usage ?? {}), outputTruncated: output.finishReason === 'length', visibleOutputChars: output.text.length, latencyMs: output.usage?.latencyMs ?? Math.max(0, Date.now() - startedAt), ...(output.usage?.uncachedInputTokens === undefined && output.usage?.inputTokens !== undefined && output.usage.cachedInputTokens !== undefined ? { uncachedInputTokens: Math.max(0, output.usage.inputTokens - output.usage.cachedInputTokens) } : {}) }
         await config.afterProviderAttempt?.(measuredUsage, usageReceiptId)
         usage.set(attempt.attemptId, measuredUsage)

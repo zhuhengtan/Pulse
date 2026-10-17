@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { PulseRuntime, type JsonValue } from '@hunterzhu/pulse-runtime'
 import { buildTaskControllerProgram } from '../packages/server/src/task-controller/program.js'
-import { initialController, isPreConfirmationInspectionCommand, isReadOnlyInspectionCommand, nextTask, reviseController, stageRequiresFileChange, stageRequiresToolEvidence, validatePlan } from '../packages/server/src/task-controller/state.js'
+import { initialController, isPreConfirmationInspectionCommand, isReadOnlyInspectionCommand, nextTask, normalizeStageKinds, omitRedundantFinalReviews, reviseController, stageRequiresFileChange, stageRequiresToolEvidence, validatePlan } from '../packages/server/src/task-controller/state.js'
 
 const task = (id: string, dependsOn: string[] = []) => ({ id, goal: `Implement ${id}`, check: 'Read and verify result', dependsOn, criterionIds: [id.replace('task-', 'criterion-')] })
 const initialGlobal = (count: number): JsonValue => ({ taskRecord: { schemaVersion: 1, runId: 'test', objective: 'Complete the checklist', acceptanceCriteria: Array.from({ length: count }, (_, index) => ({ id: `criterion-${index + 1}`, description: `Requirement ${index + 1}` })), status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] } })
@@ -14,6 +14,55 @@ function finalReview(runtime: PulseRuntime): { value: JsonValue } {
 }
 
 describe('Host task controller', () => {
+  it('omits only a redundant terminal all-criteria review, retaining commands, gates and uncovered requirements', () => {
+    const edit = { ...task('task-1'), kind: 'edit' as const }
+    const final = { id: 'final', kind: 'verify' as const, goal: '最终核对全部交付物与 criteria 覆盖情况', check: '所有原始要求均有证据', criterionIds: ['criterion-1'], dependsOn: ['task-1'] }
+    expect(omitRedundantFinalReviews([edit, final])).toEqual([edit])
+    expect(omitRedundantFinalReviews([edit, { ...final, goal: '最终核验三项交付物与用户全部要求' }])).toEqual([edit])
+    const duplicate = { ...final, id: 'duplicate', dependsOn: [] }
+    expect(omitRedundantFinalReviews([{ ...final, dependsOn: [] }, duplicate])).toEqual([duplicate])
+    for (const goal of ['最终运行 node --test test/feature.test.mjs', '最终核对 output/report.json 与所有原始要求', '最终询问用户批准全部交付物', '最终核对全部交付物并给出摘要', '最终复跑基准并核对所有原始要求']) {
+      expect(omitRedundantFinalReviews([edit, { ...final, goal }])).toHaveLength(2)
+    }
+    expect(omitRedundantFinalReviews([edit, { ...final, criterionIds: ['criterion-2'] }])).toHaveLength(2)
+    expect(omitRedundantFinalReviews([edit, final, { ...task('task-2'), dependsOn: ['final'] }])).toHaveLength(3)
+  })
+  it('supplies retained source reads from passed dependencies to the stage verifier', async () => {
+    let agentId = '', readRef = '', writeRef = ''
+    let workCalls = 0, verifiedSource = false
+    const program = buildTaskControllerProgram({ version: '13', system: 'test', toolNames: ['fs.read', 'fs.write'], approvalMode: 'auto', maxTurns: 24 })
+    const runtime = new PulseRuntime({ effectExecutor: async effect => {
+      if (effect.kind === 'tool') return { value: (effect.input as any).name === 'fs.read' ? { content: 'original input', path: 'input.txt' } : { path: 'output.txt', changed: true } }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [
+        { id: 'task-1', goal: 'Read input and create output.txt', check: 'Output saved', dependsOn: [], criterionIds: ['criterion-1'] },
+        { id: 'task-2', goal: 'Inspect original source', check: 'Read original source accurately', dependsOn: ['task-1'], criterionIds: ['criterion-2'] },
+      ] } }
+      const state = globalFor(runtime, agentId).taskController
+      if (effect.key?.startsWith('verify-stage')) {
+        const refs = [...runtime.state.results.values()].filter(r => r.producer?.kind === 'effect' && runtime.state.effects.get(r.producer.id)?.kind === 'tool')
+        readRef = refs.find(r => (runtime.state.effects.get((r.producer as any).id)?.input as any).name === 'fs.read')!.id
+        writeRef = refs.find(r => (runtime.state.effects.get((r.producer as any).id)?.input as any).name === 'fs.write')!.id
+        if (state.activeId === 'task-2') {
+          verifiedSource = (effect.input as any).inputs.results.includes(readRef)
+          return { value: { status: 'passed', evidenceRefs: [readRef], note: 'Original source verified' } }
+        }
+        return { value: { status: 'passed', evidenceRefs: [writeRef], note: 'Output saved' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      return { value: ++workCalls === 1 ? { finishReason: 'tool_calls', toolCalls: [
+        { name: 'fs.read', input: { path: 'input.txt' } },
+        { name: 'fs.write', input: { path: 'output.txt', content: 'derived output' } },
+      ] } : { text: 'Stage done.', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Read source, produce output and verify source', program, initialGlobal: initialGlobal(2) }).agentId
+    expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'succeeded' })
+    const state = globalFor(runtime, agentId)
+    expect(state.taskOutcome.status).toBe('accepted')
+    expect(state.taskController.tasks[0].evidenceRefs).toEqual([writeRef])
+    expect(state.taskController.tasks[0].contextRefs).toContain(readRef)
+    expect(state.taskController.tasks[1].evidenceRefs).toEqual([readRef])
+    expect(verifiedSource).toBe(true)
+  })
   it('repairs a final citation from explicit feedback without repeating work', async () => {
     let agentId = ''
     let finalReviews = 0
@@ -390,6 +439,32 @@ describe('Host task controller', () => {
     expect(globalFor(runtime, agentId).taskController.usedTurns).toBe(2)
   })
 
+  it.each([false, true])('rechecks ancillary negative citations without masking required failures (required=%s)', async required => {
+    let agentId = '', work = 0, reviews = 0, tools = 0
+    const program = buildTaskControllerProgram({ version: '13', system: 'test', toolNames: ['shell.exec'], approvalMode: 'auto', maxTurns: 20 })
+    const runtime = new PulseRuntime({ effectExecutor: async effect => {
+      if (effect.kind === 'tool') { tools++; return { value: { code: (effect.input as any).arguments.args.includes('--invalid') ? 1 : 0, stdout: '', stderr: 'invalid argument' } } }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [{ ...task('task-1'), goal: 'Run supplied entrypoint', check: 'Entrypoint exits zero' }] } }
+      const active = globalFor(runtime, agentId).taskController.tasks[0]
+      if (effect.key?.startsWith('verify-stage')) {
+        reviews++
+        const good = active.evidenceRefs.filter((ref: string) => (runtime.state.results.get(ref)?.value as any)?.code === 0)
+        const bad = active.evidenceRefs.filter((ref: string) => (runtime.state.results.get(ref)?.value as any)?.code === 1)
+        return { value: { status: 'passed', evidenceRefs: good, ...(reviews === 1 ? { expectedFailureRefs: bad } : {}), note: 'Entrypoint passed; ancillary invalid argument was rejected' } }
+      }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      return { value: ++work === 1 ? { finishReason: 'tool_calls', toolCalls: [
+        { name: 'shell.exec', input: { command: 'node', args: ['entry.mjs'] } },
+        { name: 'shell.exec', input: { command: 'node', args: required ? ['--test', 'required.test.mjs', '--invalid'] : ['entry.mjs', '--invalid'] } },
+      ] } : { text: 'Done', finishReason: 'stop' } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Run the entrypoint successfully', program, initialGlobal: initialGlobal(1) }).agentId
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(globalFor(runtime, agentId).taskOutcome.status).toBe(required ? 'incomplete' : 'accepted')
+    expect(reviews).toBe(required ? 1 : 2)
+    expect(tools).toBe(2)
+  })
+
   it.each([[0, false], [1, false], [1, true]] as const)('requires successful or explicitly expected failure evidence (exit=%s, expected=%s)', async (exitCode, expectedFailure) => {
     let workCalls = 0
     const program = buildTaskControllerProgram({ version: '13', system: 'test', toolNames: ['shell.exec'], approvalMode: 'auto', maxTurns: 16 })
@@ -462,6 +537,14 @@ describe('Host task controller', () => {
     expect(stageRequiresToolEvidence('运行检查', 'go test ./...')).toBe(true)
     expect(stageRequiresToolEvidence('说明 1.2 节的设计', '概括 e.g. 架构取舍')).toBe(false)
     expect(stageRequiresToolEvidence('Write a commit message from the supplied changes', 'Return a title and concise bullets')).toBe(false)
+  })
+  it('treats existing generator execution as a command check, preserving mixed code-edit intent', () => {
+    const generate = { id: 'generate', kind: 'edit' as const, goal: '运行 node scripts/generate.mjs 生成 output/report.json', check: 'Three output files exist', dependsOn: [], criterionIds: ['criterion-1'] }
+    expect(stageRequiresFileChange(generate.goal, generate.check, generate.kind, true)).toBe(false)
+    expect(normalizeStageKinds([generate], true)[0]!.kind).toBe('verify')
+    expect(stageRequiresFileChange('Run node scripts/generate.mjs to generate report.json', 'Outputs exist', 'edit', true)).toBe(false)
+    expect(stageRequiresFileChange('运行测试并修复发现的问题', 'Tests pass', 'edit', true)).toBe(true)
+    expect(stageRequiresFileChange('创建 scripts/generate.mjs 并运行', 'Outputs exist', 'edit', true)).toBe(true)
   })
 
   it('does not pass a file stage from candidate text alone', async () => {

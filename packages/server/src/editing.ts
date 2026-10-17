@@ -189,7 +189,7 @@ export class PlanWriter {
 export interface ExactFragment { find: string; replace: string }
 /** Exact compare-and-swap editing. Recovery observes the file; it never rebases a write. */
 export class ExactPatchEditor {
-  constructor(private readonly files: FilesystemTool) {}
+  constructor(private readonly files: FilesystemTool, private readonly validate?: (path: string, content: string) => Promise<void>) {}
   async execute(input: { path: string; patches: ExactFragment[]; expectedHash?: string | undefined; all?: boolean | undefined }, signal?: AbortSignal) {
     const { path, patches, expectedHash, all = false } = input
     if (!patches.length || patches.length > 16 || all && patches.length !== 1 || patches.some(p => !p.find)) throw editingError('INVALID_PATCH_INPUT', 'Supply 1-16 nonempty exact fragments; all is only valid for a single fragment.')
@@ -243,6 +243,7 @@ export class ExactPatchEditor {
     if (!edits) conflict('PATCH_RANGES_OVERLAP')
     const content = applyExactEdits(source.content, edits!)
     if (content === source.content) return { path, replacements: edits!.length, bytes: Buffer.byteLength(content), hash: beforeHash, beforeHash, changed: false }
+    await this.validate?.(path, content)
     let saved
     try { saved = await this.files.writeIfUnchanged(path, content, expectedHash ?? beforeHash, signal) }
     catch (error) {

@@ -15,6 +15,11 @@ export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
     pool: 'forks',
+    // Match the local CI budget: Host tests also spawn sandboxes and CLI workers.
+    // CPU-count defaults oversubscribe those children and starve wall-clock waits.
+    maxWorkers: 2,
+    minWorkers: 1,
+    setupFiles: ['tests/setup.ts'],
     // Windows SRT provisions one OS sandbox account and stamps filesystem ACLs.
     // Separate test processes must not race that machine-wide policy lifecycle.
     fileParallelism: process.platform !== 'win32',
