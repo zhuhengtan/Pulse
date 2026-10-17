@@ -1613,7 +1613,7 @@ export class LocalHost {
     const { executionCwd: _executionCwd, jarvisWorkspace: _jarvisWorkspace, ...summary } = manifest
     return summary
   }
-  async createConversation(input: CreateConversationInput = {}): Promise<ConversationHandle> { const id = `conv-${randomUUID()}`; const now = new Date().toISOString(); const cwd = resolve(input.cwd ?? this.root); const manifest: Manifest = { schemaVersion: 1, id, title: input.title ?? 'New conversation', cwd, createdAt: now, updatedAt: now, approvalPolicy: 'manual', ...(input.projectId ? { projectId: input.projectId } : input.projectId === null ? { projectUnassigned: true } : {}), pinned: false, runs: [], artifacts: [] }; await mkdir(this.conversationDir(id), { recursive: true }); await writeFile(this.manifestPath(id), JSON.stringify(manifest, null, 2), { mode: 0o600 }); return { id, summary: this.publicConversation(manifest) } }
+  async createConversation(input: CreateConversationInput = {}): Promise<ConversationHandle> { const id = `conv-${randomUUID()}`; const now = new Date().toISOString(); const cwd = resolve(input.cwd ?? this.root); const manifest: Manifest = { schemaVersion: 1, id, title: input.title ?? 'New conversation', cwd, createdAt: now, updatedAt: now, approvalPolicy: 'manual', ...(input.projectId ? { projectId: input.projectId } : input.projectId === null ? { projectUnassigned: true } : {}), pinned: false, runs: [], artifacts: [] }; await mkdir(this.conversationDir(id), { recursive: true }); await this.saveManifest(manifest); return { id, summary: this.publicConversation(manifest) } }
   async listConversations(): Promise<ConversationSummary[]> { await this.init(); const entries = await readdir(join(this.dataDir, 'conversations'), { withFileTypes: true }).catch(() => []); const summaries: ConversationSummary[] = []; for (const entry of entries) { if (!entry.isDirectory()) continue; try { summaries.push(this.publicConversation(await this.readManifest(entry.name))) } catch { /* ignore incomplete directories */ } } return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) }
   async findConversationByRunId(runId: string): Promise<string | undefined> {
     for (const summary of await this.listConversations()) {
@@ -1632,7 +1632,7 @@ export class LocalHost {
       manifest.executionCwd = resolve(executionCwd)
       manifest.jarvisWorkspace = resolve(jarvisWorkspace)
       manifest.updatedAt = new Date().toISOString()
-      await writeFile(this.manifestPath(id), JSON.stringify(manifest, null, 2), { mode: 0o600 })
+      await this.saveManifest(manifest)
     } finally { await this.releaseConversationLock(id) }
   }
   async deleteConversation(id: string): Promise<void> {
@@ -1682,7 +1682,7 @@ export class LocalHost {
       const manifest = await this.readManifest(conversationId)
       manifest.updatedAt = message.createdAt
       if (existing.length === 0) manifest.title = message.text.length > 50 ? `${message.text.slice(0, 50)}...` : message.text
-      await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2), { mode: 0o600 })
+      await this.saveManifest(manifest)
     } finally { await this.releaseConversationLock(conversationId) }
   }
   async migrateDraft(conversationId: string, runId: string, draftId: string, revision?: string, confirmed = false) {
@@ -2540,7 +2540,7 @@ export class LocalHost {
       current.artifacts = [...(current.artifacts ?? []).filter((item) => item.runId !== runId), ...artifacts]
       if (current.activeRunId === runId) delete current.activeRunId
       current.updatedAt = new Date().toISOString()
-      await writeFile(this.manifestPath(conversationId), JSON.stringify(current, null, 2))
+      await this.saveManifest(current)
       this.active.delete(runId)
       this.approvedToolCalls.delete(runId)
       await runtime.flushPersistence()
@@ -2893,7 +2893,7 @@ export class LocalHost {
         await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'assistant', text: clarification, runId, createdAt: new Date().toISOString(), displayVersion: 1 })
         manifest.runs.push(runId)
         manifest.updatedAt = new Date().toISOString()
-        await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
+        await this.saveManifest(manifest)
         const clarificationHandle = this.clarificationHandle(conversationId, runId, clarification, modelBudget?.used ?? 0)
         const usage = await clarificationHandle.usage()
         await writeFile(join(this.runDir(conversationId, runId), 'usage.json'), JSON.stringify(usage, null, 2))
@@ -2940,7 +2940,7 @@ export class LocalHost {
       manifest.activeRunId = runId
       manifest.runs.push(runId)
       manifest.updatedAt = now
-      await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
+      await this.saveManifest(manifest)
       return this.makeRunHandle(conversationId, runId, runtime, session, contextNotice, frontResult?.instantResponse)
     } catch (error) {
       if (jarvis) {
@@ -2975,7 +2975,7 @@ export class LocalHost {
         const manifest = await this.readManifest(conversationId)
         if (!manifest.runs.includes(runId)) manifest.runs.push(runId)
         manifest.updatedAt = new Date().toISOString()
-        await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
+        await this.saveManifest(manifest)
         await writeFile(join(this.runDir(conversationId, runId), 'usage.json'), JSON.stringify(usage, null, 2))
         await writeFile(join(this.runDir(conversationId, runId), 'outcome.json'), JSON.stringify({ schemaVersion: 1, status: 'failed', error: persistedError, usage, completedAt: manifest.updatedAt }, null, 2))
         } catch { /* The durable ledger still retains reservations if exporting failure metadata also fails. */ }
@@ -3042,7 +3042,7 @@ export class LocalHost {
         if (current?.activeRunId === runId) {
           delete current.activeRunId
           current.updatedAt = new Date().toISOString()
-          await writeFile(this.manifestPath(conversationId), JSON.stringify(current, null, 2))
+          await this.saveManifest(current)
         }
       }
       await this.releaseConversationLock(conversationId)
@@ -3059,7 +3059,7 @@ export class LocalHost {
         return { cleared: false, ...(manifest.activeRunId ? { activeRunId: manifest.activeRunId } : {}) }
       }
       delete manifest.activeRunId
-      await writeFile(this.manifestPath(conversationId), JSON.stringify(manifest, null, 2))
+      await this.saveManifest(manifest)
       return { cleared: true }
     } finally {
       await this.releaseConversationLock(conversationId)

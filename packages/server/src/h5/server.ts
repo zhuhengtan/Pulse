@@ -256,6 +256,8 @@ export class H5Server {
           const status = message === 'PAYLOAD_TOO_LARGE' ? 413 : message === 'INVALID_JSON' ? 400 : message === 'REQUEST_ID_REUSED' || message === 'ASSISTANT_MESSAGE_ALREADY_COMPLETED' ? 409 : 500
           res.writeHead(status, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: message === 'PAYLOAD_TOO_LARGE' || message === 'INVALID_JSON' || message === 'REQUEST_ID_REUSED' || message === 'ASSISTANT_MESSAGE_ALREADY_COMPLETED' ? message : 'INTERNAL_ERROR' }))
+        } else if (!res.writableEnded) {
+          res.destroy(err instanceof Error ? err : undefined)
         }
       })
     })
@@ -891,8 +893,9 @@ export class H5Server {
     }
 
     if (pathname === '/api/assistant' && method === 'GET') {
+      const view = await this.assistantView()
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify(await this.assistantView()))
+      res.end(JSON.stringify(view))
       return
     }
 
