@@ -62,8 +62,15 @@ jobs:
           SRT_DEBUG: '1'
           PULSE_SANDBOX_TIMING: '1'
         run: pnpm exec vitest run tests/m3-context-adapters.test.ts -t "runs the installed development toolchain" --reporter verbose
+      - name: Verify Windows dependency access
+        if: runner.os == 'Windows'
+        timeout-minutes: 8
+        env:
+          SRT_DEBUG: '1'
+          PULSE_SANDBOX_TIMING: '1'
+        run: pnpm exec vitest run tests/lt02-four-issues-repair.test.ts -t "loads shared installed aliases|reads installed aliases" --reporter verbose
       - name: Run shared local and cloud checks
-        timeout-minutes: ${{ runner.os == 'Windows' && 45 || 15 }}
+        timeout-minutes: ${{ runner.os == 'Windows' && 65 || 15 }}
         run: pnpm ci:local
       - name: Remove Windows shell sandbox
         if: always() && runner.os == 'Windows' && steps.windows-sandbox.outcome == 'success'

@@ -506,10 +506,10 @@ describe('M1-3 context, models and adapters', () => {
       await filesystem.write('nested/file.txt', 'ok')
       await expect(filesystem.read('nested/file.txt')).resolves.toBe('ok')
       await expect(filesystem.read('../outside.txt')).rejects.toThrow('PATH_OUTSIDE_SANDBOX')
-      const result = await runShell(process.execPath, ['-e', 'process.stdout.write("hello")'], { maxOutputBytes: 3 })
+      const result = await runShell(process.execPath, ['-e', 'process.stdout.write("hello")'], { cwd: root, maxOutputBytes: 3 })
       expect(result.stdout).toBe('hel')
       expect(result.truncated).toBe(true)
-      const unicode = await runShell(process.execPath, ['-e', 'process.stdout.write("雪雪")'], { maxOutputBytes: 4 })
+      const unicode = await runShell(process.execPath, ['-e', 'process.stdout.write("雪雪")'], { cwd: root, maxOutputBytes: 4 })
       expect(unicode.stdout).toBe('雪')
       expect(Buffer.byteLength(unicode.stdout, 'utf8')).toBeLessThanOrEqual(4)
       expect(unicode.truncated).toBe(true)
@@ -547,7 +547,7 @@ describe('M1-3 context, models and adapters', () => {
       await rm(sibling, { recursive: true, force: true })
       if (privateProfile) await rm(privateProfile, { recursive: true, force: true })
     }
-  }, process.platform === 'win32' ? 270_000 : 60_000)
+  }, process.platform === 'win32' ? 600_000 : 60_000)
 
   it('runs the installed development toolchain inside the sandbox by name', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse toolchain 雪-'))

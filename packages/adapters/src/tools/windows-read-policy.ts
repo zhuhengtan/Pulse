@@ -27,3 +27,10 @@ export async function carveWindowsReadDenies(denied: string[], allowed: string[]
   for (const path of denied) await visit(path)
   return [...result]
 }
+
+/** Read grants are additive; inherited Users/Everyone write rights need a deny. */
+export async function windowsToolchainWriteDenies(readRoots: string[], writeRoots: string[]): Promise<string[]> {
+  const unique = readRoots.filter((path, index) => !readRoots.slice(0, index).some(other => relative(path, other) === ''))
+  const roots = unique.filter(path => !unique.some(other => other !== path && within(path, other)))
+  return carveWindowsReadDenies(roots, writeRoots)
+}

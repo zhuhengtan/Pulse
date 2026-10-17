@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
-import { carveWindowsReadDenies, windowsReadDenyRoots } from '../packages/adapters/src/tools/windows-read-policy.js'
+import { carveWindowsReadDenies, windowsReadDenyRoots, windowsToolchainWriteDenies } from '../packages/adapters/src/tools/windows-read-policy.js'
 
 it('denies siblings without placing inherited denies above allowed workspaces or toolchains', async () => {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'pulse-windows-policy-')))
@@ -37,5 +37,18 @@ it('opens installed dependency trees while denying adjacent source and configura
     await writeFile(join(nested, 'dist', 'private-source.js'), 'private')
     const denies = await carveWindowsReadDenies(windowsReadDenyRoots(workspace, deps), [workspace, scratch, broker, ...deps])
     expect(denies.sort()).toEqual([join(root, 'jobs', 'private.json'), join(install, '.env'), join(nested, 'src'), join(nested, 'dist', 'private-source.js')].sort())
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+it('denies writes to shared read-only toolchains while retaining workspace and scratch writes', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pulse-toolchain-write-')))
+  try {
+    const toolchain = join(root, 'installed'), workspace = join(toolchain, 'workspace'), deps = join(toolchain, 'node_modules'), scratch = join(root, 'scratch')
+    for (const path of [workspace, deps, scratch]) await mkdir(path, { recursive: true })
+    await writeFile(join(toolchain, 'node.exe'), 'fixture')
+    expect((await windowsToolchainWriteDenies([toolchain, deps, deps, scratch], [workspace, scratch])).sort()).toEqual([deps, join(toolchain, 'node.exe')].sort())
+    expect(await windowsToolchainWriteDenies([deps], [workspace, scratch])).toEqual([deps])
+    if (process.platform === 'win32') expect(await windowsToolchainWriteDenies([deps, deps.toUpperCase()], [workspace, scratch])).toEqual([deps])
+    expect(await windowsToolchainWriteDenies([workspace], [workspace, scratch])).toEqual([])
   } finally { await rm(root, { recursive: true, force: true }) }
 })

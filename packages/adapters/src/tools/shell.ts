@@ -8,7 +8,7 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { SandboxManager, checkWindowsDependenciesAsync, resolveSrtWin, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import { resolveWindowsPackageManager } from './windows-package-manager.js'
-import { carveWindowsReadDenies, windowsReadDenyRoots } from './windows-read-policy.js'
+import { carveWindowsReadDenies, windowsReadDenyRoots, windowsToolchainWriteDenies } from './windows-read-policy.js'
 import { initializeShellSandbox } from './sandbox-initialization.js'
 import { installationDependencyRoots, workspaceUsesInstallationDependencies } from './installation-dependencies.js'
 import { verifiedWindowsSrt } from './windows-srt-path.js'
@@ -140,7 +140,7 @@ async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolcha
       denyRead: process.platform === 'win32' ? await carveWindowsReadDenies([...denyRead], [...allowRead, ...dependencyRoots]) : [...denyRead],
       allowRead,
       allowWrite: [cwd, ...(scratch ? [scratch] : [])],
-      denyWrite: [],
+      denyWrite: process.platform === 'win32' ? await windowsToolchainWriteDenies([...toolchainRoots, ...dependencyRoots], [cwd, ...(scratch ? [scratch] : [])]) : [],
     },
     ...(seccompPath ? { seccomp: { applyPath: seccompPath } } : {}),
     ...(process.platform === 'win32' ? { windows: { srtWin: { path: verifiedWindowsSrt() } } } : {}),
