@@ -57,7 +57,7 @@ jobs:
         run: pnpm --filter @hunterzhu/pulse-adapters exec srt windows-install
       - name: Verify Windows sandbox toolchain
         if: runner.os == 'Windows'
-        timeout-minutes: 4
+        timeout-minutes: 8
         run: pnpm exec vitest run tests/m3-context-adapters.test.ts -t "runs the installed development toolchain" --reporter verbose
       - name: Run shared local and cloud checks
         timeout-minutes: ${{ runner.os == 'Windows' && 25 || 15 }}

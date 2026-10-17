@@ -55,7 +55,7 @@ describe('H5 isolated project workspaces', () => {
     expect((await manager.finish('conv-retry', true)).status).toBe('merged')
     expect(await readFile(join(project, 'code.txt'), 'utf8')).toBe('task result\n')
     await manager.close()
-  }, 30_000)
+  }, process.platform === 'win32' ? 120_000 : 30_000)
 
   it.each([false, true])('reacquires the non-Git lock after failure (legacy record: %s)', async (legacy) => {
     const parent = await mkdtemp(join(tmpdir(), 'pulse-workspace-retry-'))

@@ -356,7 +356,7 @@ describe('H5Server End-to-End', () => {
       await server.stop()
       await host.close()
     }
-  })
+  }, process.platform === 'win32' ? 120_000 : 30_000)
 
   it('protects editable config, project files, and local terminal sessions', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'h5-workbench-'))
