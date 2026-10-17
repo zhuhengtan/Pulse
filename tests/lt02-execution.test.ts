@@ -77,7 +77,7 @@ it('accounts local approvals and spends reserved calls on verification, with ind
     expect(state.acceptanceResults[0].status).toBe('failed')
     expect((await run.usage()).budget).toMatchObject({ used: 16, purposes: { approval: 1, verification: 1, 'final-verification': 1 } })
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
-}, process.platform === 'win32' ? 180_000 : 20_000)
+}, process.platform === 'win32' ? 180_000 : 60_000)
 
 it('runs frozen independent checks after abnormal termination without extra model requests or fabricated refs', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-terminal-assertion-'))

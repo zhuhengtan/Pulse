@@ -193,6 +193,8 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
   try { encodeSandboxCommand(command, args) } catch (error) { return Promise.reject(error) }
 
   return withSandboxLease(async () => {
+    const started = Date.now()
+    const checkpoint = (phase: string): void => { if (process.env.PULSE_SANDBOX_TIMING === '1') console.info(`[sandbox timing] ${Date.now() - started}ms ${phase}`) }
     if (options.signal?.aborted) return { code: null, stdout: '', stderr: '', truncated: false, timedOut: false, aborted: true }
 
     let cwd: string
@@ -284,15 +286,19 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       return decodeUtf8WithinByteLimit(Buffer.from(archive.text(target)), max)
     }
 
+    checkpoint('policy ready')
     let setupStage = 'reset'
     try {
       // reset first in case an earlier initialize failed part-way through.
       await SandboxManager.reset()
+      checkpoint('reset complete')
       setupStage = 'initialize'
       await initializeShellSandbox(policy)
+      checkpoint('initialized')
       const commandText = encodeSandboxCommand(executable, executableArgs)
       setupStage = 'wrap'
       const descriptor = await SandboxManager.wrapWithSandboxArgv(commandText, undefined, undefined, options.signal, cwd, { commandId: invocationId, commandText: 'shell.exec' })
+      checkpoint('wrapped')
       if (options.signal?.aborted) {
         SandboxManager.cleanupAfterCommand()
         await SandboxManager.reset()
@@ -342,6 +348,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         reject(shellError(code === 'ENOENT' || code === 'EACCES' ? code : 'SHELL_EXECUTION_ERROR', false, cause))
       })
       child!.once('close', (code) => {
+        checkpoint('child closed')
         closed = true
         cleanup()
         const stdout = outputText('stdout')
@@ -352,9 +359,11 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         resolve({ code, stdout, stderr: boundedStderr, truncated: outputWasTruncated, timedOut: termination === 'timeout', aborted: termination === 'aborted', outputArchive: archive.finish() })
       })
     }).finally(async () => {
+      checkpoint('cleanup start')
       try {
         SandboxManager.cleanupAfterCommand()
         await SandboxManager.reset()
+        checkpoint('cleanup complete')
       } catch (cause) {
         // A teardown failure must be visible and fail closed for the next call.
         throw shellError('SANDBOX_CLEANUP_FAILED', false, cause)

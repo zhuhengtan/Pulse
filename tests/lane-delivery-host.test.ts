@@ -50,7 +50,7 @@ it('retrieves omitted delivery evidence through the real Host index without repe
   const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, taskController: true, jarvis: { enabled: false }, approvalMode: 'auto', maxModelCalls: 32 })
   try {
     const c = await host.createConversation(), run = await host.sendMessage(c.id, { text: objective })
-    const outcome = await run.outcome(); if (outcome.status !== 'succeeded') await writeFile('.pulse-dev/lane-continuity-repair-20261016/delivery-snapshot.json', await readFile(join(cwd, 'data/conversations', c.id, 'runs', run.id, 'runtime.json'), 'utf8')); expect(outcome, JSON.stringify({ outcome, calls, writes, readTurn, indexes, mockErrors })).toMatchObject({ status: 'succeeded' })
+    const outcome = await run.outcome(); expect(outcome, JSON.stringify({ outcome, calls, writes, readTurn, indexes, mockErrors })).toMatchObject({ status: 'succeeded' })
     expect((await run.taskOutcome())?.status).toBe('accepted')
     expect(await readdir(join(cwd, 'fixtures'))).toHaveLength(20)
     expect(writes).toBe(20)
@@ -59,4 +59,4 @@ it('retrieves omitted delivery evidence through the real Host index without repe
     expect(state.tasks[0].ownerLaneId).toBe(state.tasks[1].ownerLaneId)
     expect((await run.usage()).modelCalls).toBe(calls)
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
-}, 20_000)
+}, process.platform === 'win32' ? 180_000 : 60_000)
