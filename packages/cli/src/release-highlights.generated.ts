@@ -1,5 +1,35 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.6.0": [
+    {
+      "zh": "新增受管理的浏览器与桌面自动化，支持页面观察、截图操作、上传下载、暂停及人工接管，并在 CLI 和 H5 中提供入口。",
+      "en": "Added managed browser and desktop automation with page observation, screenshot actions, uploads and downloads, pause, and human takeover through CLI and H5 controls."
+    },
+    {
+      "zh": "Web 工作台展示任务执行过程、阶段进度和工具调用详情，便于查看运行状态与审批内容。",
+      "en": "The Web workbench displays task execution traces, stage progress, and tool-call details to make run status and approval requests easier to inspect."
+    },
+    {
+      "zh": "改善长任务的上下文压缩、工具输入恢复、循环检测和预算处理，保留中断续跑的状态及调用记录。",
+      "en": "Improved context compaction, tool-input recovery, loop detection, and budget handling for long tasks, preserving state and call accounting across interrupted runs."
+    },
+    {
+      "zh": "按明确的并行要求调度独立阶段，修复并行工作单元的状态访问与依赖证据传递。",
+      "en": "Schedule independent stages in parallel when explicitly requested, and fix worker state access and dependency evidence propagation."
+    },
+    {
+      "zh": "保存计划后执行与内容绑定的确认，计划变更需重新确认；审批继续保留人工回退和操作范围限制。",
+      "en": "Bind execution confirmation to the saved plan and require confirmation again after changes; approvals retain human fallback and operation scope checks."
+    },
+    {
+      "zh": "保护原有测试与验收命令，在修改前阻止破坏性补丁，同时允许授权的新测试补充和修正。",
+      "en": "Protect original tests and acceptance commands by rejecting destructive patches before writes, while allowing authorized additions and corrections to new tests."
+    },
+    {
+      "zh": "修复验证证据的新鲜度、无效引用恢复及已通过测试覆盖先前失败子集的判定，减少重复验证与错误阻塞。",
+      "en": "Fix evidence freshness, recovery from invalid citations, and recognition of passing test supersets that cover earlier failed subsets, reducing redundant checks and false blocks."
+    }
+  ],
   "0.5.1": [
     {
       "zh": "模型目录按供应商管理，支持不同供应商登记同名模型；默认模型、助理聊天、任务路由、即时预回复和审批复核统一选择已登记模型。",

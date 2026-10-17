@@ -2,6 +2,21 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.6.0] - 2026-10-17
+
+### Added
+
+- Added managed browser and desktop automation with page observation, screenshot actions, uploads and downloads, pause, and human takeover through CLI and H5 controls.
+- The Web workbench displays task execution traces, stage progress, and tool-call details to make run status and approval requests easier to inspect.
+
+### Fixed
+
+- Improved context compaction, tool-input recovery, loop detection, and budget handling for long tasks, preserving state and call accounting across interrupted runs.
+- Schedule independent stages in parallel when explicitly requested, and fix worker state access and dependency evidence propagation.
+- Bind execution confirmation to the saved plan and require confirmation again after changes; approvals retain human fallback and operation scope checks.
+- Protect original tests and acceptance commands by rejecting destructive patches before writes, while allowing authorized additions and corrections to new tests.
+- Fix evidence freshness, recovery from invalid citations, and recognition of passing test supersets that cover earlier failed subsets, reducing redundant checks and false blocks.
+
 ## [0.5.1] - 2026-10-13
 
 ### Added
