@@ -16,8 +16,8 @@ This file records Pulse release notes in English and is the source for `pulse --
 - Bind execution confirmation to the saved plan and require confirmation again after changes; approvals retain human fallback and operation scope checks.
 - Protect original tests and acceptance commands by rejecting destructive patches before writes, while allowing authorized additions and corrections to new tests.
 - Fix evidence freshness, recovery from invalid citations, and recognition of passing test supersets that cover earlier failed subsets, reducing redundant checks and false blocks.
-- Fix Windows read boundaries between installed dependencies and adjacent source, script approval path display, and cold sandbox startup limits, and improve cross-platform regression checks.
-- H5 shutdown waits for assistant launches already in progress to settle and preserves later queued messages, preventing new tasks from starting after shutdown.
+- Fix Windows read boundaries between installed dependencies and adjacent source, script approval path display, and cold sandbox startup limits; reduce recursive dependency grants for unrelated scripts and improve cross-platform regression checks.
+- H5 shutdown waits for assistant launches already in progress to settle and preserves later queued messages; atomic conversation writes prevent concurrent read errors and hanging requests.
 
 ## [0.5.1] - 2026-10-13
 
