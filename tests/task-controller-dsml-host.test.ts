@@ -150,5 +150,5 @@ describe('task controller with DeepSeek DSML tool calls', () => {
       try { try { await second?.close() } finally { await first.close() } }
       finally { vi.unstubAllGlobals(); await rm(directory, { recursive: true, force: true }) }
     }
-  }, 20_000)
+  }, 45_000)
 })

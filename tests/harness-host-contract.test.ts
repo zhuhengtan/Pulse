@@ -42,11 +42,18 @@ it.each(['old-check', 'rerun', 'unrelated', 'weakened'])('Host binds successful 
   const host = createLocalHost({ cwd: root, dataDir: join(root, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, approvalMode: 'auto', jarvis: { enabled: false }, maxModelCalls: 16 })
   try {
     const conversation = await host.createConversation(), run = await host.sendMessage(conversation.id, { text: objective })
+    const runtime = (host as any).active.get(run.id).runtime as PulseRuntime
     expect(await run.outcome()).toMatchObject({ status: 'succeeded' })
-    expect(await run.taskOutcome(), JSON.stringify({ work, calls, feature: await readFile(join(root, 'feature.mjs'), 'utf8'), check: await readFile(join(root, 'data/conversations', conversation.id, 'runs', run.id, 'task-controller.json'), 'utf8') })).toMatchObject({ status: scenario === 'rerun' || scenario === 'unrelated' ? 'accepted' : 'incomplete' })
+    expect(await run.taskOutcome(), JSON.stringify({ work, calls, feature: await readFile(join(root, 'feature.mjs'), 'utf8'), check: await readFile(join(root, 'data/conversations', conversation.id, 'runs', run.id, 'task-controller.json'), 'utf8') })).toMatchObject({ status: scenario === 'old-check' ? 'incomplete' : 'accepted' })
+    if (scenario === 'weakened') {
+      // The Host now rejects destructive patches before writes: the original
+      // passing check stays valid because neither it nor its source changed.
+      expect(await readFile(join(root, 'feature.test.mjs'), 'utf8')).toBe("import './feature.mjs'\n")
+      expect([...runtime.state.effects.values()].some(effect => effect.outcome?.error?.code === 'FROZEN_TEST_CHANGE')).toBe(true)
+    }
     expect(plans).toBe(1); expect(calls).toBeLessThanOrEqual(10)
-    expect(verifications).toBe(scenario === 'old-check' || scenario === 'weakened' ? 0 : 1)
-    expect(vi.mocked(runShell)).toHaveBeenCalledTimes(scenario === 'rerun' || scenario === 'weakened' ? 2 : 1)
+    expect(verifications).toBe(scenario === 'old-check' ? 0 : 1)
+    expect(vi.mocked(runShell)).toHaveBeenCalledTimes(scenario === 'rerun' ? 2 : 1)
   } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
 })
 

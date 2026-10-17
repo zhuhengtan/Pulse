@@ -58,7 +58,11 @@ describe('v14 delivery-chain continuity', () => {
     const bFirst = f.inputs.find(i => i.stage === 'b')!.inputs as any
     expect(bFirst.inputs.results ?? []).toEqual([]) // source bodies stay in history; no duplicate dependency injection
     expect(bFirst.inputs.conversation.some((m: any) => { try { return JSON.parse(m.content).deliveries?.some((d: any) => d.version === 1 && d.stageId === 'a') } catch { return false } })).toBe(true)
-    expect(g.taskController.usedTurns).toBe([...f.r.state.effects.values()].filter(e => e.kind === 'llm').length)
+    // Auxiliary compaction calls belong to the Host budget ledger, not the
+    // controller's work/review counter.
+    const controllerCalls = [...f.r.state.effects.values()].filter(e => e.kind === 'llm' && e.key !== '$compact-summary')
+    expect(new Set(g.taskController.seenModelRefs)).toEqual(new Set(controllerCalls.map(e => e.id)))
+    expect(g.taskController.usedTurns).toBe(controllerCalls.length)
   })
   it('runs two independent carriers and joins their verified receipts without losing stages', async () => {
     const f = fixture([stage('a'), stage('b', ['a']), stage('x'), stage('y', ['x'])], 'b')
