@@ -115,9 +115,9 @@ it.each([
   try {
     const conversation = await host.createConversation(), run = await host.sendMessage(conversation.id, { text: objective })
     const outcome = await run.outcome()
-    expect(outcome).toMatchObject({ status: 'succeeded' })
+    expect(outcome, JSON.stringify(outcome)).toMatchObject({ status: 'succeeded' })
     expect(await run.taskOutcome(), outcome.text).toMatchObject({ status: 'accepted' })
     expect(stage).toBe(3)
     expect((await readFile(join(cwd, 'feature.test.mjs'), 'utf8')).startsWith(original)).toBe(true)
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
-})
+}, process.platform === 'win32' ? 360_000 : 10_000)

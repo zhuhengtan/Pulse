@@ -8,7 +8,7 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { SandboxManager, VENDORED_SRT_WIN_EXE, checkWindowsDependenciesAsync, resolveSrtWin, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import { resolveWindowsPackageManager } from './windows-package-manager.js'
-import { carveWindowsReadDenies } from './windows-read-policy.js'
+import { carveWindowsReadDenies, windowsReadDenyRoots } from './windows-read-policy.js'
 import { initializeShellSandbox } from './sandbox-initialization.js'
 import { installationDependencyRoots } from './installation-dependencies.js'
 
@@ -106,7 +106,7 @@ export function encodeSandboxCommand(command: string, args: string[], platform: 
   return `exec ${[command, ...args].map(quotePosix).join(' ')}`
 }
 
-async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolchainRoots: string[] = [], scratch?: string): Promise<SandboxRuntimeConfig> {
+async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolchainRoots: string[] = [], scratch?: string, dependencyRoots: string[] = []): Promise<SandboxRuntimeConfig> {
   // Linux invokes this trusted helper *inside* the read-restricted namespace.
   // A user-local npm install otherwise hides it together with the home directory.
   const seccompPath = process.platform === 'linux'
@@ -121,12 +121,13 @@ async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolcha
   // Windows runs as a separate srt-sandbox account, which has no access to
   // private host-profile files without explicit grants. Stamping the entire
   // profile recursively is both redundant and very expensive (registry/cache
-  // trees); only carve the workspace's sibling boundary on that platform.
+  // trees); carve workspace and installation dependency boundaries instead.
   const denyRead = new Set(process.platform === 'win32' ? [] : [home])
   // Close the common sibling-workspace and temporary-directory escape: deny
   // the workspace's immediate container, then re-open only this invocation's
   // cwd. Root workspaces cannot be carved this way and are rejected upstream.
   if (parent !== parse(cwd).root && parent !== cwd) denyRead.add(parent)
+  if (process.platform === 'win32') for (const boundary of windowsReadDenyRoots(cwd, dependencyRoots)) denyRead.add(boundary)
   const allowRead = [cwd, ...toolchainRoots, ...(scratch ? [scratch] : []), ...(seccompPath ? [seccompPath] : [])]
   // Reads default to the system toolchain plus this workspace. Writes are
   // limited to the workspace; srt adds only its required stdio/temp paths.
@@ -202,7 +203,8 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     const nodeBin = dirname(nodeExecutable)
     const installation = basename(nodeBin) === 'bin' ? dirname(nodeBin) : nodeBin
     const toolchainRoots = installation !== homedir() && installation !== parse(installation).root ? [installation] : [nodeExecutable]
-    toolchainRoots.push(...await installationDependencyRoots())
+    const dependencyRoots = await installationDependencyRoots()
+    toolchainRoots.push(...dependencyRoots)
     // PNPM_HOME is a host installation setting, never supplied by model argv.
     let pnpmHome: string | undefined
     if (process.env.PNPM_HOME) {
@@ -238,7 +240,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       if (resolved) { executable = resolved.executable; executableArgs = [...resolved.prefixArgs, ...args] }
     }
     const invocationId = randomUUID()
-    const policy = await sandboxConfig(cwd, options.allowedDomains ?? [], toolchainRoots, scratch)
+    const policy = await sandboxConfig(cwd, options.allowedDomains ?? [], toolchainRoots, scratch, dependencyRoots)
     let child: ReturnType<typeof spawn> | undefined
     const archive = new ShellOutput(max, options.outputDirectory, options.maxArchiveBytes, options.outputDirectory !== undefined)
     const outputBytes = { stdout: 0, stderr: 0 }

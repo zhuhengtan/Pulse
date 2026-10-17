@@ -77,7 +77,7 @@ it('accounts local approvals and spends reserved calls on verification, with ind
     expect(state.acceptanceResults[0].status).toBe('failed')
     expect((await run.usage()).budget).toMatchObject({ used: 16, purposes: { approval: 1, verification: 1, 'final-verification': 1 } })
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
-}, 20000)
+}, process.platform === 'win32' ? 180_000 : 20_000)
 
 it('runs frozen independent checks after abnormal termination without extra model requests or fabricated refs', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-terminal-assertion-'))
@@ -101,7 +101,7 @@ it('runs frozen independent checks after abnormal termination without extra mode
     expect(terminal.results[0].ref).toBeUndefined()
     expect(JSON.parse(await readFile(join(base, 'task-controller.json'), 'utf8')).tasks[0].status).toBe('blocked')
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
-}, 20000)
+}, process.platform === 'win32' ? 180_000 : 20_000)
 
 it.each([false, true])('keeps manual approval across cold restore and executes only an explicit yes (%s)', async approved => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-manual-review-'))
@@ -117,7 +117,7 @@ it.each([false, true])('keeps manual approval across cold restore and executes o
     if (text.includes('Independently verify every ORIGINAL')) return chat({ criteria: ids.map(criterionId => ({ criterionId, status: 'passed', evidenceRefs: refs, rationale: 'actual tool receipt' })) })
     return ++work === 1 ? tool('shell_exec', { command: 'node', args: ['probe.mjs'] }) : chat('Delivered')
   }))
-  const options = { cwd: dir, dataDir: join(dir, 'data'), provider: { provider: 'openai-compatible' as const, baseURL: 'https://fixture.invalid', defaultModel: 'fixture' }, approvalMode: 'auto' as const, taskController: true, maxModelCalls: 8, jarvis: { enabled: false } }
+  const options = { cwd: dir, dataDir: join(dir, 'data'), provider: { provider: 'openai-compatible' as const, baseURL: 'https://fixture.invalid', defaultModel: 'fixture', maxContextTokens: 256000 }, approvalMode: 'auto' as const, taskController: true, maxModelCalls: 8, jarvis: { enabled: false } }
   let host = createLocalHost(options)
   try {
     const c = await host.createConversation(); let run = await host.sendMessage(c.id, { text: goal })
@@ -146,7 +146,7 @@ it.each([false, true])('keeps manual approval across cold restore and executes o
       expect(primary).toBe(2)
     }
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
-}, 20000)
+}, process.platform === 'win32' ? 180_000 : 20_000)
 
 it.each(['default-deny', 'manual-deny', 'manual-approve'] as const)('preserves local reviewer DENY unless an explicit operator-enabled human decision overrides it (%s)', async mode => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-review-rejection-'))
@@ -183,7 +183,7 @@ it.each(['default-deny', 'manual-deny', 'manual-approve'] as const)('preserves l
       expect((await run.taskOutcome())?.status).not.toBe('accepted')
     }
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
-}, 20000)
+}, process.platform === 'win32' ? 180_000 : 20_000)
 
 it('scopes terminal independent failure without failing unrelated criteria', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-terminal-assertion-'))
@@ -207,4 +207,4 @@ it('scopes terminal independent failure without failing unrelated criteria', asy
     expect(terminal.results[0].ref).toBeUndefined()
     expect(JSON.parse(await readFile(join(base, 'task-controller.json'), 'utf8')).tasks[0].status).toBe('blocked')
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
-}, 20000)
+}, process.platform === 'win32' ? 180_000 : 20_000)

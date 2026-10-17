@@ -35,7 +35,7 @@ it('loads shared installed aliases in the actual sandbox while denying sibling s
     expect(result.code, result.stderr + result.stdout).toBe(0)
     expect(result.stdout).toContain('DEPENDENCY_READ_ONLY_OK')
   } finally { await rm(forbiddenWrite, { force: true }); await rm(base, { recursive: true, force: true }) }
-}, 40000)
+}, process.platform === 'win32' ? 180_000 : 40_000)
 
 it('keeps no-progress accounting across work, changed durations, verification retries and cold state restore', () => {
   const t = stage('s', 'Run tests'); t.kind = 'verify'; t.attempts = 1

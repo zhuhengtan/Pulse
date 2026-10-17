@@ -50,4 +50,4 @@ it.each([true, false])('requires the later passing suite to include every earlie
     expect(outcome, outcome.text).toMatchObject({ status: 'succeeded' })
     expect(await run.taskOutcome(), outcome.text).toMatchObject({ status: covers ? 'accepted' : 'incomplete' })
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
-})
+}, process.platform === 'win32' ? 300_000 : 10_000)

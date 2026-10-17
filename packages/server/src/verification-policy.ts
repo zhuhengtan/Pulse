@@ -1,5 +1,5 @@
 import { readFile, readdir, stat } from 'node:fs/promises'
-import { basename, dirname, relative, resolve } from 'node:path'
+import { basename, dirname, relative, resolve, sep } from 'node:path'
 import type { JsonValue } from '@hunterzhu/pulse-runtime'
 import { within } from './security.js'
 import { FilesystemTool } from '@hunterzhu/pulse-adapters'
@@ -39,7 +39,7 @@ export async function approvalScriptContext(root: string, input: Record<string, 
     // Match the bounded fs.write artifact size so a normally generated script
     // includes its entry point and output operations, not just its declarations.
     const source = await new FilesystemTool(canonicalRoot).readLimited(path, 16_384)
-    return { path: name, content: source.content, truncated: source.truncated }
+    return { path: name.split(sep).join('/'), content: source.content, truncated: source.truncated }
   } catch { return undefined }
 }
 

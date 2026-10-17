@@ -28,6 +28,10 @@ export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>
     {
       "zh": "修复验证证据的新鲜度、无效引用恢复及已通过测试覆盖先前失败子集的判定，减少重复验证与错误阻塞。",
       "en": "Fix evidence freshness, recovery from invalid citations, and recognition of passing test supersets that cover earlier failed subsets, reducing redundant checks and false blocks."
+    },
+    {
+      "zh": "修复 Windows 安装依赖与相邻源码的读取边界、脚本审批路径显示和沙箱冷启动时限，完善跨平台回归验证。",
+      "en": "Fix Windows read boundaries between installed dependencies and adjacent source, script approval path display, and cold sandbox startup limits, and improve cross-platform regression checks."
     }
   ],
   "0.5.1": [

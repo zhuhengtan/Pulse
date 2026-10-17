@@ -1,5 +1,10 @@
 import { readdir } from 'node:fs/promises'
-import { join, relative, isAbsolute, sep } from 'node:path'
+import { dirname, join, relative, isAbsolute, sep } from 'node:path'
+
+/** Dependency reads do not authorize adjacent installation source or secrets. */
+export function windowsReadDenyRoots(workspace: string, dependencyRoots: string[]): string[] {
+  return [...new Set([dirname(workspace), ...dependencyRoots.map(root => dirname(root))])]
+}
 
 function within(path: string, root: string): boolean {
   const rel = relative(root, path)

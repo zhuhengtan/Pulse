@@ -48,4 +48,4 @@ it('extends a new candidate test across refactor stages without rebasing the cal
     expect(await readFile(join(cwd, 'baseline.test.mjs'), 'utf8')).toBe(baseline)
     expect(await readFile(join(cwd, 'candidate.test.mjs'), 'utf8')).toBe(second)
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
-})
+}, process.platform === 'win32' ? 360_000 : 10_000)

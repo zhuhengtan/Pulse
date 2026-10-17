@@ -129,7 +129,7 @@ it('salvages legacy empty checkpoints from archived receipts without rewriting t
     expect(JSON.stringify(plan.input)).toContain('DELIVERY-V1')
     expect(await readFile(join(oldDir, 'checkpoint.json'), 'utf8')).toBe(legacy)
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
-}, 15000)
+}, process.platform === 'win32' ? 240_000 : 15_000)
 
 it.each(['REASONING_OUTPUT_EXHAUSTED', 'OUTPUT_TRUNCATED'])('does not reopen exhausted recovery with a reworded plan: %s', code => {
   const state = initialController(256)
@@ -187,7 +187,7 @@ it('continues after approving a canonical operation even when a sibling carries 
     const audit = JSON.parse(await readFile(join(dir, 'data/conversations', c.id, 'runs', run.id, 'operations.json'), 'utf8'))
     expect(audit.operations.filter((e: any) => e.tool === 'shell.exec' && e.status === 'succeeded'), JSON.stringify({ audit, outcome: await run.outcome() })).toHaveLength(2)
   } finally { await host.close(); vi.unstubAllGlobals(); await rm(dir, { recursive: true, force: true }) }
-}, 15000)
+}, process.platform === 'win32' ? 240_000 : 15_000)
 
 it.each([false, true])('deduplicates inherited approval cards and rejects conflicting identities (%s)', conflict => {
   const controller = initialController(16)

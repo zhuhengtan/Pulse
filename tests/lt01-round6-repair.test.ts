@@ -150,7 +150,7 @@ it('carries passed check evidence into a new verify stage using a real offline H
     expect(state.tasks.every((t: any) => t.status === 'passed')).toBe(true)
     expect(state.tasks.every((t: any) => t.kind === 'verify')).toBe(true)
     expect(work).toBe(3)
-  } finally { await host.close(); vi.unstubAllGlobals(); await rm(cwd, { recursive: true, force: true }) }
+  } finally { await host.close(); vi.unstubAllGlobals(); await rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }) }
 })
 
 it('retains unselected read windows across passed stages without promoting them to acceptance', async () => {

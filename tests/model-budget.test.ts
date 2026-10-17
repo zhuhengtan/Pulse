@@ -28,7 +28,8 @@ check('reopen preserves used and original limit', async () => {
   await restored.reserve()
   await assert.rejects(restored.reserve(), { code: 'TASK_MODEL_CALL_BUDGET_EXHAUSTED', retryable: false })
   assert.equal(JSON.parse(await readFile(p, 'utf8')).used, 2)
-  assert.equal((await stat(p)).mode & 0o777, 0o600)
+  // Windows stat exposes synthetic mode bits; POSIX chmod is not its ACL model.
+  if (process.platform !== 'win32') assert.equal((await stat(p)).mode & 0o777, 0o600)
 })
 check('parallel reservations admit exactly limit', async () => {
   const budget = await ModelAttemptBudget.open(budgetPath('parallel'), 3)
