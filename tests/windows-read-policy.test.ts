@@ -30,10 +30,12 @@ it('opens installed dependency trees while denying adjacent source and configura
     const workspace = join(root, 'jobs', 'workspace'), scratch = join(root, 'jobs', 'scratch')
     const install = join(root, 'install'), nested = join(install, 'packages', 'adapters')
     const deps = [join(install, 'node_modules'), join(nested, 'node_modules')]
-    for (const path of [workspace, scratch, ...deps, join(nested, 'src')]) await mkdir(path, { recursive: true })
+    const broker = join(nested, 'dist', 'native')
+    for (const path of [workspace, scratch, broker, ...deps, join(nested, 'src')]) await mkdir(path, { recursive: true })
     await writeFile(join(install, '.env'), 'private')
     await writeFile(join(root, 'jobs', 'private.json'), 'private')
-    const denies = await carveWindowsReadDenies(windowsReadDenyRoots(workspace, deps), [workspace, scratch, ...deps])
-    expect(denies.sort()).toEqual([join(root, 'jobs', 'private.json'), join(install, '.env'), join(nested, 'src')].sort())
+    await writeFile(join(nested, 'dist', 'private-source.js'), 'private')
+    const denies = await carveWindowsReadDenies(windowsReadDenyRoots(workspace, deps), [workspace, scratch, broker, ...deps])
+    expect(denies.sort()).toEqual([join(root, 'jobs', 'private.json'), join(install, '.env'), join(nested, 'src'), join(nested, 'dist', 'private-source.js')].sort())
   } finally { await rm(root, { recursive: true, force: true }) }
 })

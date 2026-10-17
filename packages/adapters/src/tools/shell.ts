@@ -206,6 +206,9 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     const toolchainRoots = installation !== homedir() && installation !== parse(installation).root ? [installation] : [nodeExecutable]
     const dependencyRoots = await installationDependencyRoots()
     toolchainRoots.push(...dependencyRoots)
+    // The Windows broker relaunches itself as the sandbox user before starting
+    // the target command. Permit only its fixed, integrity-checked image folder.
+    if (process.platform === 'win32') toolchainRoots.push(dirname(verifiedWindowsSrt()))
     // PNPM_HOME is a host installation setting, never supplied by model argv.
     let pnpmHome: string | undefined
     if (process.env.PNPM_HOME) {
