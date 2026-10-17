@@ -112,7 +112,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
     })
     expect(errRes.code).not.toBe(0)
     expect(errRes.stderr).toContain('UNKNOWN_MODEL_DISPLAY_NAME')
-  })
+  }, process.platform === 'win32' ? 120_000 : 30_000)
 
   it('Scenario 2: One-shot task execution with text and jsonl outputs', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-run-'))

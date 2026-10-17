@@ -68,7 +68,7 @@ jobs:
         env:
           SRT_DEBUG: '1'
           PULSE_SANDBOX_TIMING: '1'
-        run: pnpm exec vitest run tests/lt02-four-issues-repair.test.ts -t "loads shared installed aliases|reads installed aliases" --reporter verbose
+        run: pnpm exec vitest run tests/lt02-four-issues-repair.test.ts -t "loads shared installed aliases" --reporter verbose
       - name: Run shared local and cloud checks
         timeout-minutes: ${{ runner.os == 'Windows' && 65 || 15 }}
         run: pnpm ci:local

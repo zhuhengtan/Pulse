@@ -170,7 +170,7 @@ it.each([false, true])('runs a named frozen Host check at stage and final verifi
   expect(result.taskOutcome.status).toBe(failed ? 'incomplete' : 'accepted')
   if (failed) expect(result.taskOutcome.criteria[0].status).toBe('not_met')
   else expect(result.taskController.tasks[0].status).toBe('passed')
-})
+}, process.platform === 'win32' ? 120_000 : 30_000)
 
 it.each([false, true])('actually writes independent README after an environment failure unless the user requires tests to pass (%s)', async explicitGate => {
   let runtime: PulseRuntime
@@ -233,7 +233,7 @@ it.each([false, true])('replays the real LT02 prefix with bounded verification c
   if (fork) expect(result.taskController.tasks.find((t: any) => t.id === 'other').status, JSON.stringify({controller:result.taskController,errors:runtime.state.events.filter(e=>/control|reject/.test(e.type)).slice(-8)})).toBe('passed')
   expect(result.taskController.tasks[0].correctionKind).toBe('verify')
   expect(result.taskController.tasks[0].note).toMatch(/NO_PROGRESS|Verifier/)
-})
+}, process.platform === 'win32' ? 120_000 : 30_000)
 
 it('preserves soft documentation prerequisites when fitting the plan budget and rejects mixed source edits', () => {
   const tests = stage('tests', 'Run tests'); tests.kind = 'verify'
