@@ -17,6 +17,7 @@ const MAX_XLSX_SHEETS = 100
 
 const pdfInput = z.object({
   path: z.string().min(1).max(1_024),
+  offset: z.number().int().min(0).optional(),
   startPage: z.number().int().positive().optional(),
   endPage: z.number().int().positive().optional(),
   maxChars: z.number().int().positive().max(MAX_OUTPUT_CHARS).default(20_000),
@@ -25,6 +26,7 @@ const pdfInput = z.object({
 const xlsxInput = z.object({
   path: z.string().min(1).max(1_024),
   sheet: z.string().min(1).max(128).optional(),
+  startRow: z.number().int().positive().optional(),
   maxRows: z.number().int().positive().max(100).default(20),
   maxColumns: z.number().int().positive().max(50).default(20),
 }).strict()
@@ -35,6 +37,8 @@ type XlsxInput = z.infer<typeof xlsxInput>
 export interface PdfReadOutput {
   path: string
   totalPages: number
+  nextPage?: number | null
+  nextOffset?: number | null
   firstPage: number
   lastPage: number
   title?: string
@@ -101,7 +105,7 @@ function pdfText(items: unknown[]): string {
   return items.map((item) => item !== null && typeof item === 'object' && 'str' in item && typeof item.str === 'string' ? item.str : '').join(' ')
 }
 
-async function readPdf(root: string, input: PdfInput, signal: AbortSignal): Promise<PdfReadOutput> {
+export async function readPdf(root: string, input: PdfInput, signal: AbortSignal): Promise<PdfReadOutput> {
   const { absolutePath, data } = await readWorkspaceFile(root, input.path, signal)
   let destroyDocument: (() => Promise<void>) | undefined
   try {
@@ -118,24 +122,28 @@ async function readPdf(root: string, input: PdfInput, signal: AbortSignal): Prom
     const chunks: string[] = []
     let used = 0
     let truncated = false
+    let nextPage: number | null = lastPage < pdf.numPages ? lastPage + 1 : null
+    let nextOffset: number | null = nextPage === null ? null : 0
     for (let pageNumber = firstPage; pageNumber <= lastPage; pageNumber++) {
       if (signal.aborted) throw docError('ABORTED')
       const page = await pdf.getPage(pageNumber)
       try {
         const content = await page.getTextContent()
-        const text = pdfText(content.items)
+        const pageOffset = pageNumber === firstPage ? input.offset ?? 0 : 0
+        const text = pdfText(content.items).slice(pageOffset)
         const remaining = input.maxChars - used
-        if (remaining <= 0) { truncated = true; break }
+        if (remaining <= 0) { truncated = true; nextPage = pageNumber; nextOffset = pageOffset; break }
         const bounded = text.slice(0, remaining)
-        if (bounded.length < text.length) truncated = true
-        chunks.push(`--- Page ${pageNumber} ---\n${bounded}`)
-        used += bounded.length
+        if (bounded.length < text.length) { truncated = true; nextPage = pageNumber; nextOffset = pageOffset + bounded.length }
+        chunks.push(input.offset === undefined ? `--- Page ${pageNumber} ---\n${bounded}` : bounded)
+        used += bounded.length + (input.offset === undefined ? 0 : 2)
       } finally { page.cleanup() }
       if (truncated) break
     }
     return {
       path: input.path,
       totalPages: pdf.numPages,
+      ...(input.offset === undefined ? {} : { nextPage, nextOffset }),
       firstPage,
       lastPage: Math.min(lastPage, firstPage + chunks.length - 1),
       ...(typeof info.Title === 'string' && info.Title ? { title: info.Title.slice(0, 500) } : {}),
@@ -221,7 +229,7 @@ function cellValue(value: unknown, maxChars: number): string | number | boolean 
   return String(value).slice(0, maxChars)
 }
 
-async function inspectXlsx(root: string, input: XlsxInput, signal: AbortSignal): Promise<XlsxInspectOutput> {
+export async function inspectXlsx(root: string, input: XlsxInput, signal: AbortSignal): Promise<XlsxInspectOutput> {
   const { data } = await readWorkspaceFile(root, input.path, signal)
   checkXlsxArchive(Buffer.from(data))
   const workbook = new ExcelJS.Workbook()
@@ -246,6 +254,7 @@ async function inspectXlsx(root: string, input: XlsxInput, signal: AbortSignal):
         const previewLimit = Symbol('preview-limit')
         try {
           sheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+            if (rowNumber < (input.startRow ?? 1)) return
             if (preview!.length >= input.maxRows || remaining <= 0) { truncated = true; throw previewLimit }
             const cells: Array<string | number | boolean | null> = []
             const columnLimit = Math.min(input.maxColumns, Math.max(1, sheet.columnCount))
@@ -260,7 +269,7 @@ async function inspectXlsx(root: string, input: XlsxInput, signal: AbortSignal):
             if (remaining <= 0) throw previewLimit
           })
         } catch (cause) { if (cause !== previewLimit) throw cause }
-        if (rowCount > input.maxRows) truncated = true
+        if (sheet.rowCount >= (input.startRow ?? 1) + input.maxRows) truncated = true
       }
       worksheets.push({ id: sheet.id, name: sheet.name.slice(0, 128), state: String(sheet.state), rowCount, columnCount, ...(preview === undefined ? {} : { preview }) })
     }
@@ -291,7 +300,7 @@ const pdfManifest = manifest('document.pdf.read', 'Extract bounded text and meta
   { type: 'object', required: ['path', 'totalPages', 'firstPage', 'lastPage', 'text', 'truncated'], properties: { path: { type: 'string' }, totalPages: { type: 'integer' }, firstPage: { type: 'integer' }, lastPage: { type: 'integer' }, title: { type: 'string' }, author: { type: 'string' }, text: { type: 'string' }, truncated: { type: 'boolean' } }, additionalProperties: false })
 
 const xlsxManifest = manifest('document.xlsx.inspect', 'List workbook metadata and worksheet dimensions; optionally return a bounded cell preview.',
-  { type: 'object', required: ['path'], properties: { path: { type: 'string' }, sheet: { type: 'string' }, maxRows: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, maxColumns: { type: 'integer', minimum: 1, maximum: 50, default: 20 } }, additionalProperties: false },
+  { type: 'object', required: ['path'], properties: { path: { type: 'string' }, sheet: { type: 'string' }, startRow: { type: 'integer', minimum: 1 }, maxRows: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, maxColumns: { type: 'integer', minimum: 1, maximum: 50, default: 20 } }, additionalProperties: false },
   { type: 'object', required: ['path', 'sheetCount', 'worksheets', 'truncated'], properties: { path: { type: 'string' }, creator: { type: 'string' }, title: { type: 'string' }, subject: { type: 'string' }, sheetCount: { type: 'integer' }, worksheets: { type: 'array', items: { type: 'object', required: ['id', 'name', 'state', 'rowCount', 'columnCount'], properties: { id: { type: 'integer' }, name: { type: 'string' }, state: { type: 'string' }, rowCount: { type: 'integer' }, columnCount: { type: 'integer' }, preview: { type: 'array', items: { type: 'object', required: ['row', 'cells'], properties: { row: { type: 'integer' }, cells: { type: 'array', items: { anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }, { type: 'null' }] } } }, additionalProperties: false } } }, additionalProperties: false } }, truncated: { type: 'boolean' } }, additionalProperties: false })
 
 export function createDocumentTools(workspaceRoot: string): [ToolDefinition<PdfInput, PdfReadOutput>, ToolDefinition<XlsxInput, XlsxInspectOutput>] {
@@ -311,3 +320,6 @@ export function createDocumentTools(workspaceRoot: string): [ToolDefinition<PdfI
     },
   ]
 }
+
+/** Apply the same bounded ZIP admission used by XLSX before parsing DOCX. */
+export function validateOfficeArchive(data: Buffer): void { checkXlsxArchive(data) }
