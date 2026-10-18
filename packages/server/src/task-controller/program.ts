@@ -56,7 +56,7 @@ function chainState(ctx: Context): TaskControllerState | undefined {
     ? controllerFromGlobal({ taskController: local.taskControllerChain }) : undefined
 }
 function controllerOf(ctx: Context): TaskControllerState | undefined {
-  const pending = ctx.lane.resume.programVersion === '18' ? pendingControllers.get(ctx) : undefined
+  const pending = ['18', '19'].includes(ctx.lane.resume.programVersion) ? pendingControllers.get(ctx) : undefined
   if (pending) return structuredClone(pending)
   return chainState(ctx) ?? controllerFromGlobal(ctx.global)
 }
@@ -64,7 +64,7 @@ function save(ctx: Context, state: TaskControllerState): void {
   for (const task of [...state.tasks, ...state.priorTasks]) for (const ref of [...task.evidenceRefs, ...(task.contextRefs ?? []), ...(task.candidateRef ? [task.candidateRef] : [])]) ctx.results.summary(ref)
   for (const result of state.acceptanceResults ?? []) if (result.ref) ctx.results.summary(result.ref)
   if (chainState(ctx)) {
-    if (ctx.lane.resume.programVersion === '18') pendingControllers.set(ctx, structuredClone(state))
+    if (['18', '19'].includes(ctx.lane.resume.programVersion)) pendingControllers.set(ctx, structuredClone(state))
     ctx.mutateLane(draft => { if (draft && typeof draft === 'object' && !Array.isArray(draft)) draft.taskControllerChain = json(state) })
   }
   else ctx.commitGlobal({ ops: [{ op: 'set', path: ['taskController'], value: json(state) }], adoptImmediately: true })
@@ -95,7 +95,7 @@ function stateOf(ctx: Context, readOnlyToolNames: readonly string[] = []): TaskC
       if (active) {
         active.modelCalls = (active.modelCalls ?? 0) + fresh.length
         // A lane carries history across stages, but candidates belong to this attempt.
-        if (['16', '17', '18'].includes(ctx.lane.resume.programVersion)) {
+        if (['16', '17', '18', '19'].includes(ctx.lane.resume.programVersion)) {
           const candidate = refsFromWait(ctx).find(ref => ctx.results.meta(ref)?.effectKind === 'llm')
           if (candidate) { active.candidateRef = candidate; active.candidateAttempt = active.attempts }
         }
@@ -107,7 +107,7 @@ function stateOf(ctx: Context, readOnlyToolNames: readonly string[] = []): TaskC
     const refs = refsFromWait(ctx).filter((ref) => ctx.results.meta(ref)?.effectKind === 'tool')
     if (active) {
       active.evidenceRefs = [...new Set([...active.evidenceRefs, ...refs])]
-      if (ctx.lane.resume.programVersion === '18' && refs.some(ref => committedFileEdit(ctx, ref))) delete active.hostCheckRefs
+      if (['18', '19'].includes(ctx.lane.resume.programVersion) && refs.some(ref => committedFileEdit(ctx, ref))) delete active.hostCheckRefs
       const batch = [...refs].sort().join(',')
       if (batch && batch !== active.lastInvestigationBatch) {
           const readOnly = refs.length > 0 && refs.every((ref) => { const meta = ctx.results.meta(ref); return (meta?.toolName === 'fs.stage' && meta.toolArguments && typeof meta.toolArguments === 'object' && !Array.isArray(meta.toolArguments) && meta.toolArguments.operation === 'inspect') || meta?.sideEffectPolicy === 'read' || (meta?.toolName !== undefined && readOnlyToolNames.includes(meta.toolName)) || (meta?.toolName === 'shell.exec' && isReadOnlyInspectionCommand(meta.toolCommand)) })
@@ -199,7 +199,7 @@ function stageFailure(ctx: Context, code: string, message: string): string {
 
 export interface TaskControllerProgramOptions {
   system: string
-  version?: '5' | '6' | '7' | '8' | '9' | '10' | '11' | '12' | '13' | '14' | '15' | '16' | '17' | '18'
+  version?: '5' | '6' | '7' | '8' | '9' | '10' | '11' | '12' | '13' | '14' | '15' | '16' | '17' | '18' | '19'
   resumePlan?: TaskControllerState
   reusableIds?: string[]
   toolNames: string[]
@@ -213,8 +213,9 @@ export interface TaskControllerProgramOptions {
 /** Host-owned policy, executed exclusively through Runtime steps and atomic commits. */
 export function buildTaskControllerProgram(options: TaskControllerProgramOptions) {
   const budget = Math.max(4, Math.min(256, Math.floor(options.maxTurns)))
-  const programVersion = options.version ?? '18'
-  const boundedTransitions = programVersion === '18'
+  const programVersion = options.version ?? '19'
+  const recoverFinalReview = programVersion === '19'
+  const boundedTransitions = programVersion === '18' || recoverFinalReview
   const durableScheduling = programVersion === '17' || boundedTransitions
   const isolatedCandidates = programVersion === '16' || durableScheduling
   const independentAcceptance = programVersion === '15' || isolatedCandidates
@@ -1166,13 +1167,17 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
         return { criterionId: criterion.id, status: passed ? 'passed' as const : independentFailure?.status ?? (explicitFailure?.status === 'not_met' ? 'not_met' as const : 'unverifiable' as const), evidenceRefs: [...new Set([...evidenceRefs, ...independentRefs])], rationale }
       })
       const accepted = criteria.length > 0 && criteria.every((criterion) => criterion.status === 'passed')
-      if (!accepted && !state.budgetStopped && (!durableScheduling || options.modelBudgetView?.().workAllowed !== false) && !state.finalReviewErrors?.length && !state.tasks.every(t => t.status === 'passed') && unmetGoalCanChangeApproach(state, { enforceTurnBudget })) {
-        recoverUnmetGoal(state)
+      if (recoverFinalReview && !accepted && !state.finalReviewErrors?.length) state.finalReview = criteria
+      // A verification-only request may expose a failed behavior without
+      // authorizing implementation changes to make that independent check pass.
+      const recoverFinal = recoverFinalReview && (!(state.acceptanceResults ?? []).some(result => result.status === 'failed') || requiresFileChange(record.objective, ''))
+      if (!accepted && !state.budgetStopped && (!durableScheduling || options.modelBudgetView?.().workAllowed !== false) && !state.finalReviewErrors?.length && unmetGoalCanChangeApproach(state, { enforceTurnBudget, recoverFinalReview: recoverFinal })) {
+        recoverUnmetGoal(state, { recoverFinalReview })
         save(ctx, state)
         return { actions: [], next: 'plan' }
       }
       const candidateResultRef = [...state.tasks].reverse().map((task) => task.candidateRef).find((ref): ref is string => typeof ref === 'string')
-      const outcome: TaskOutcome = { schemaVersion: 1, status: accepted ? 'accepted' : 'incomplete', verifier: 'host', criteria, ...(candidateResultRef ? { candidateResultRef } : {}), evidenceRefs: [...new Set(criteria.flatMap((criterion) => criterion.evidenceRefs))], replanCount: state.revision - 1, completedAt: new Date().toISOString() }
+      const outcome: TaskOutcome = { schemaVersion: 1, status: accepted ? 'accepted' : 'incomplete', verifier: 'host', criteria, ...(candidateResultRef ? { candidateResultRef } : {}), evidenceRefs: [...new Set(criteria.flatMap((criterion) => criterion.evidenceRefs))], replanCount: state.revision - 1 + (recoverFinalReview ? state.goalRecoveries : 0), completedAt: new Date().toISOString() }
       ctx.commitGlobal({ ops: [{ op: 'set', path: ['taskRecord'], value: taskRecordJson({ ...record, status: accepted ? 'accepted' : 'incomplete', assessments: criteria, ...(candidateResultRef ? { candidateResultRef } : {}), evidenceRefs: outcome.evidenceRefs }) }, { op: 'set', path: ['taskOutcome'], value: json(outcome) }], adoptImmediately: true })
       const zh = detectResponseLanguage(ctx.goal) === 'zh-CN'
       const title = accepted ? (zh ? '任务逐项验收通过。' : 'All task stages accepted.') : (zh ? '任务尚未全部完成，已保留完成项与阻塞原因。' : 'Task incomplete; completed work and blockers retained.')

@@ -2,15 +2,39 @@
 
 The Host owns task policy; the Runtime owns execution, cancellation, scheduling,
 and atomic persistence. `packages/server/src/task-controller/` implements the
-policy as version 18 of `pulse.assistant`, using the existing Runtime DSL. It
+policy as version 19 of `pulse.assistant`, using the existing Runtime DSL. It
 does not add an external scheduler loop or a second mutable task database.
 
-## Current execution policy (version 18)
+## Current execution policy (version 19)
+
+Final `not_met` requirements with valid evidence can add bounded correction
+stages even when every earlier stage passed. Passed deliveries are retained;
+the original budget, refusal and no-progress guards still apply. Repeated final
+failures stop, as do uncertain evidence, exhausted budgets and external refusals.
+Versions 5–18 retain their historical completion behavior on restoration.
+
+Front-model clarification persists the caller's original contract and attachment
+criteria before asking. A later answer supplements that contract across Host
+restarts; an explicit new task or `continueTask: false` starts a separate contract.
+The front model's inferred requirements cannot replace caller-owned sources.
+Caller-owned independent checks also survive clarification and restart; empty
+configuration cannot remove them, and conflicting replacement checks are rejected.
+Skill selection and plan-confirmation gates use the combined original request
+and clarification, rather than treating a filename answer as a new task.
+
+Assistant chat version 2 permits read-only file and web queries across successive
+tool rounds, including new files, continuation pages and corrected arguments.
+Unchanged repeated calls remain bounded by Runtime progress guards. Project
+mutations still require a work session; historical version 1 remains registered.
+
+Recovery build fingerprints cover the server, Runtime, adapters and tool SDK code
+trees and embedded JSON data. Dependency changes require the existing exact
+build-migration authorization; old snapshots and budget accounting are retained.
 
 The durable Host `maxModelCalls` ledger counts actual provider requests, including
 approval reviews, retries and compaction. Each request receives its current
 limit/used/remaining counters. Controller `usedTurns` is diagnostic and is not a
-replacement for that ledger. Versions 5–13 remain registered for restoration.
+replacement for that ledger. Versions 5–18 remain registered for restoration.
 
 Plans retain every original criterion and check. Oversplit DAGs are coalesced in
 topological order when their goals/checks still fit the schema; no checks are

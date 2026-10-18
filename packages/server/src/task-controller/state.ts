@@ -346,6 +346,17 @@ function isExternalGoalBlock(note: string): boolean {
   return EXTERNAL_GOAL_BLOCK.test(note)
 }
 
+function correctableFailure(note: string): boolean {
+  if (note.includes('Total model budget exhausted')) return false
+  if (/REASONING_OUTPUT_EXHAUSTED|OUTPUT_TRUNCATED|TASK_CONSTRAINT_VIOLATION|DELIVERY_CHECKPOINT_UNAVAILABLE|EVIDENCE_CHANGED|PROGRESS_REVIEW_UNAVAILABLE|PROVIDER_NETWORK_ERROR|PROVIDER_HTTP_(?:401|403|429|5\d\d)|ENOTFOUND|EAI_AGAIN|MODEL_BUDGET_CHECKPOINT|NO_PROGRESS|INVESTIGATION_LIMIT_REACHED|REPEATED_TOOL_FAILURE|TASK_MODEL_CALL_BUDGET_|Verifier unusable|Verifier cited unavailable evidence/.test(note)) return false
+  if (note.trim() === 'Verifier did not cite valid successful tool evidence.') return false
+  return !isExternalGoalBlock(note)
+}
+
+function correctableFinalFailures(state: TaskControllerState) {
+  return (state.finalReview ?? []).filter(item => item.status === 'not_met' && item.evidenceRefs.length > 0 && correctableFailure(item.rationale))
+}
+
 function recoveryKey(state: TaskControllerState): string {
   const roots = state.tasks.filter((task) => task.status !== 'passed').map((task) => {
     const root = isCascadeBlocked(task, state.tasks) ? rootBlockedDependency(task, state.tasks) ?? task : task
@@ -355,27 +366,28 @@ function recoveryKey(state: TaskControllerState): string {
   return [...new Set([...roots, ...finalFailures])].sort().join('\n').slice(0, 800)
 }
 
-export function unmetGoalCanChangeApproach(state: TaskControllerState, options?: { enforceTurnBudget?: boolean }): boolean {
+export function unmetGoalCanChangeApproach(state: TaskControllerState, options?: { enforceTurnBudget?: boolean; recoverFinalReview?: boolean }): boolean {
   if (state.goalRecoveries >= usefulGoalRecoveries) return false
   if (options?.enforceTurnBudget !== false && state.usedTurns >= state.maxTurns - 2) return false
   if (state.tasks.length === 0) return false
   const key = recoveryKey(state)
   if (!key || key === state.lastRecoveryKey) return false
-  if (state.tasks.every((task) => task.status === 'passed')) return false
+  if (state.tasks.every((task) => task.status === 'passed')) {
+    // A passed stage can still have omitted part of its original requirement.
+    // Uncertain evidence and external refusals do not authorize new execution.
+    return options?.recoverFinalReview === true && correctableFinalFailures(state).length > 0
+  }
   const open = state.tasks.filter((task) => task.status !== 'passed')
   return open.some((task) => {
     const root = isCascadeBlocked(task, state.tasks) ? rootBlockedDependency(task, state.tasks) ?? task : task
-    const note = root.note ?? ''
-    if (note.includes('Total model budget exhausted')) return false
-    if (/REASONING_OUTPUT_EXHAUSTED|OUTPUT_TRUNCATED|TASK_CONSTRAINT_VIOLATION|DELIVERY_CHECKPOINT_UNAVAILABLE|EVIDENCE_CHANGED|PROGRESS_REVIEW_UNAVAILABLE|PROVIDER_NETWORK_ERROR|PROVIDER_HTTP_(?:401|403|429|5\d\d)|ENOTFOUND|EAI_AGAIN|MODEL_BUDGET_CHECKPOINT|NO_PROGRESS|INVESTIGATION_LIMIT_REACHED|REPEATED_TOOL_FAILURE|TASK_MODEL_CALL_BUDGET_|Verifier unusable|Verifier cited unavailable evidence/.test(note)) return false
-    if (note.trim() === 'Verifier did not cite valid successful tool evidence.') return false
-    return !isExternalGoalBlock(note)
+    return correctableFailure(root.note ?? '')
   })
 }
 
-export function recoverUnmetGoal(state: TaskControllerState): void {
+export function recoverUnmetGoal(state: TaskControllerState, options?: { recoverFinalReview?: boolean }): void {
   const failed = state.tasks.filter((task) => task.status !== 'passed' && !isCascadeBlocked(task, state.tasks))
-  const finalFailures = (state.finalReview ?? []).filter((item) => item.status === 'not_met').map((item) => `${item.criterionId}: ${item.rationale}`)
+  const reviews = options?.recoverFinalReview && state.tasks.every(task => task.status === 'passed') ? correctableFinalFailures(state) : (state.finalReview ?? []).filter(item => item.status === 'not_met')
+  const finalFailures = reviews.map((item) => `${item.criterionId}: ${item.rationale}`)
   const summary = [...failed.map((task) => `${task.id}: ${task.goal} — ${task.note ?? task.status}`), ...finalFailures].join('\n').slice(0, 1_500)
   state.lastRecoveryKey = recoveryKey(state)
   state.goalRecoveries += 1
@@ -386,13 +398,16 @@ export function recoverUnmetGoal(state: TaskControllerState): void {
   state.tasks = passed
   state.recoveryCriterionIds = [...new Set([
     ...unmet.flatMap((task) => task.criterionIds),
-    ...(state.finalReview ?? []).filter((item) => item.status === 'not_met').map((item) => item.criterionId),
+    ...reviews.map((item) => item.criterionId),
   ])]
   delete state.activeId
   delete state.activeIds
   delete state.finalReview
   delete state.planErrors
   delete state.finalReviewErrors
+  // New work invalidates the current independent verdict. Original receipts
+  // remain in Runtime history; the frozen checks must run again after correction.
+  if (options?.recoverFinalReview) delete state.acceptanceResults
 }
 export function nextTask(state: TaskControllerState): ControlledTask | undefined {
   let changed = true

@@ -1,3 +1,4 @@
+import { AttachmentStore, MAX_ATTACHMENT_REQUEST } from './attachments.js'
 import { canReadShellArchive } from './shell-archive.js'
 import { freezeConstraintBaseline, violatedConstraints } from './constraint-baseline.js'
 import { recoveryFingerprints, prepareRecovery, finishRecovery } from './recovery-contract.js'
@@ -71,7 +72,7 @@ import { defineTool, ToolRegistry } from '@hunterzhu/pulse-tool-sdk'
 import { legacyPulseDataPath, pulseDataPath, pulseLogPath } from './paths.js'
 import { detectResponseLanguage, responseLanguageInstruction } from './language.js'
 import { buildSystemPrompt, loadProjectInstructions, JARVIS_MEMORY_GUIDANCE, type BuildSystemPromptOptions, type DiscoveredInstructions } from './prompt.js'
-import { continueTaskRecord, isExecutionSummaryFollowup, isTaskContinuation, acceptanceCriteriaFromObjective, hasTaskProgress, maxTaskReplans, taskRecordFromGlobal, taskRecordJson, type TaskOutcome, type TaskRecord, type TaskCriterionAssessment } from './task.js'
+import { continueTaskRecord, isExecutionSummaryFollowup, isExplicitNewTask, isTaskContinuation, acceptanceCriteriaFromObjective, hasTaskProgress, maxTaskReplans, taskRecordFromGlobal, taskRecordJson, type TaskOutcome, type TaskRecord, type TaskCriterionAssessment } from './task.js'
 import { createHostModelRouting, type HostModelTask } from './model-routing.js'
 import { modelSelectionId, normalizeModelConfig, parseModelSelectionId, resolveModelReference, resolveModelSelection } from './model-config.js'
 import { CapabilityPackRegistry, type ActiveCapabilityPacks, type CapabilityPack } from './capabilities.js'
@@ -95,6 +96,7 @@ export { getLocalNetworkIp, hostHeaderHostname, isAllowedH5Host, isLoopbackIp } 
 export { legacyPulseDataPath, pulseDataPath, pulseHomePath, pulseLogPath } from './paths.js'
 export { buildSystemPrompt, loadProjectInstructions, MAX_INSTRUCTION_BYTES, MAX_JARVIS_CONTEXT_CHARS, type BuildSystemPromptOptions, type DiscoveredInstructions } from './prompt.js'
 
+import type { WebAttachment } from './protocol.js'
 export type ApprovalMode = 'read-only' | 'ask' | 'auto'
 export interface LocalHostOptions {
   automation?: AutomationConfig
@@ -160,8 +162,8 @@ export interface LocalHostOptions {
   /** Separate local model used only to review pending H5 approvals. */
   approvalReview?: { provider: 'ollama'; model: string; baseURL: string; timeoutMs: number; manualOnRejection?: boolean }
 }
-export interface CreateConversationInput { cwd?: string; title?: string; projectId?: string | null }
-export interface ArtifactSummary { path: string; hash: string; bytes: number; mediaType?: string; label?: string; runId: string }
+export interface CreateConversationInput { cwd?: string; title?: string; projectId?: string | null; origin?: 'assistant' }
+export interface ArtifactSummary { path: string; hash: string; bytes: number; mediaType?: string; label?: string; runId: string; absolutePath?: string; workspaceState?: 'isolated' | 'project' }
 /** Provider-reported usage is kept separate from estimates; missing fields stay unknown. */
 export interface RunUsage {
   schemaVersion: 1
@@ -180,8 +182,21 @@ export interface RunUsage {
   estimatedCost?: { currency: string; amount: number; pricingVersion: string }
   completeness: 'complete' | 'partial' | 'unavailable'
 }
-export interface ConversationSummary { id: string; title: string; cwd: string; createdAt: string; updatedAt: string; activeRunId?: string; approvalPolicy?: 'manual' | 'delegate'; artifacts?: ArtifactSummary[]; projectId?: string; projectUnassigned?: boolean; pinned?: boolean; archivedAt?: string }
-export interface UserMessageInput { text: string; format?: 'text' | 'jsonl'; continueTask?: boolean; assistantChat?: boolean; requestId?: string; requirementPaths?: string[]; requirementUpdate?: boolean; runId?: string; userMessageRecorded?: boolean }
+export interface ConversationSummary { id: string; title: string; cwd: string; createdAt: string; updatedAt: string; activeRunId?: string; approvalPolicy?: 'manual' | 'delegate'; artifacts?: ArtifactSummary[]; projectId?: string; projectUnassigned?: boolean; origin?: 'assistant'; pinned?: boolean; archivedAt?: string }
+export interface UserMessageInput {
+  text: string
+  format?: 'text' | 'jsonl'
+  continueTask?: boolean
+  assistantChat?: boolean
+  requestId?: string
+  requirementPaths?: string[]
+  requirementUpdate?: boolean
+  runId?: string
+  userMessageRecorded?: boolean
+  attachments?: WebAttachment[]
+  skills?: string[]
+  mentionedFiles?: string[]
+}
 export interface AssistantWorkToolHandlers {
   start(projectId: string, task: string): Promise<{ conversationId: string; projectId: string; title: string }>
   list(projectId?: string): Promise<unknown>
@@ -219,7 +234,17 @@ export interface RunHandle {
 export interface ConversationHandle { readonly id: string; readonly summary: ConversationSummary }
 
 interface Manifest extends ConversationSummary { schemaVersion: 1; runs: string[]; executionCwd?: string; jarvisWorkspace?: string }
-interface StoredMessage { id: string; role: 'user' | 'assistant' | 'system'; text: string; runId?: string; createdAt: string; displayVersion?: 1 }
+interface StoredMessage {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  text: string
+  runId?: string
+  createdAt: string
+  displayVersion?: 1
+  attachments?: WebAttachment[]
+  skills?: string[]
+  mentionedFiles?: string[]
+}
 
 function jarvisContextItems(pkg: JarvisContextPackage | undefined, legacyText?: string): FrontModelContextItem[] {
   if (!pkg) return legacyText ? [{ ref: 'jarvis/legacy-context', kind: 'memory', text: legacyText.slice(0, 16_384) }] : []
@@ -305,7 +330,7 @@ const safetyReviewMaxOutputTokens = 2048
 const writeToolTimeoutMs = 120_000
 // Windows ACL setup precedes the child timer. Reserve bounded setup time plus
 // the maximum accepted 300s command; ordinary children still default to 30s.
-const shellToolTimeoutMs = process.platform === 'win32' ? 600_000 : 30_000
+const shellToolTimeoutMs = 600_000
 
 function resolveAutoCompactPercent(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return defaultAutoCompactPercent
@@ -349,6 +374,9 @@ function parseStoredMessages(content: string): StoredMessage[] {
         ...(typeof value.runId === 'string' ? { runId: value.runId } : {}),
         ...(value.displayVersion === 1 ? { displayVersion: 1 as const } : {}),
         createdAt: typeof value.createdAt === 'string' ? value.createdAt : new Date(0).toISOString(),
+        ...(Array.isArray(value.attachments) ? { attachments: value.attachments as WebAttachment[] } : {}),
+        ...(Array.isArray(value.skills) ? { skills: value.skills as string[] } : {}),
+        ...(Array.isArray(value.mentionedFiles) ? { mentionedFiles: value.mentionedFiles as string[] } : {}),
       })
     } catch {
       continue
@@ -418,7 +446,7 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
     name: 'artifact.record', description: 'Record a bounded text file as a user-visible artifact.', tags: ['artifact', 'files', 'read'], input: z.object({ path: z.string(), mediaType: z.string().default('text/plain'), label: z.string().max(200).optional() }), output: z.object({ path: z.string(), mediaType: z.string(), label: z.string(), bytes: z.number(), hash: z.string() }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ path, mediaType, label }) => { const read = await fsTool.readLimited(path, 200_000); if (read.truncated) throw new Error('FILE_TOO_LARGE'); return { path, mediaType: mediaType ?? 'text/plain', label: label ?? path, bytes: Buffer.byteLength(read.content), hash: await fsTool.hash(path) } }, summarize: (output) => output,
   }))
   registry.register(defineTool({
-    name: 'shell.exec', description: 'Run an authorized local command with argv arguments. cwd defaults to the workspace; relative paths and absolute paths inside the workspace are allowed.', tags: ['shell', 'system'], input: z.object({ command: z.string().min(1), args: z.array(z.string()).default([]), cwd: z.string().default('.'), timeoutMs: z.number().int().positive().max(300_000).optional() }), output: z.object({ code: z.number().nullable(), stdout: z.string(), stderr: z.string(), truncated: z.boolean(), timedOut: z.boolean(), aborted: z.boolean(), outputArchive: z.unknown().optional(), checkReceipt: z.unknown().optional() }), sideEffectPolicy: 'external', resolveResources: () => [{ resource: 'workspace', mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: shellToolTimeoutMs, permissions: { workspaceRoots: [root] }, execute: async ({ command, args, cwd, timeoutMs }, context) => { if (approvalMode === 'read-only') throw new Error('SHELL_DISABLED_READ_ONLY'); if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:shell.exec'); let archiveBytes = 0; if (runData) for (const entry of await readdir(join(runData, 'shell-output')).catch(error => { if (error.code === 'ENOENT') return []; throw error })) archiveBytes += (await stat(join(runData, 'shell-output', entry))).size; const options = { cwd: await within(root, cwd ?? '.'), signal: context.signal, env: safeShellEnv(), allowedDomains: allowNetwork ? networkHosts ?? [] : [], maxOutputBytes: 64 * 1024, ...(runData ? { outputDirectory: join(runData, 'shell-output'), maxArchiveBytes: Math.min(16 * 1024 * 1024, Math.max(0, Math.floor((64 * 1024 * 1024 - archiveBytes) / 2))) } : {}), ...(timeoutMs === undefined ? process.platform === 'win32' ? { timeoutMs: 30_000 } : {} : { timeoutMs }) }; const receipt = isCheck(command, args ?? []) ? await captureCheck(root, options.cwd, command, args ?? []) : undefined; const result = await runShell(command, args, options); return { ...result, ...(receipt ? { checkReceipt: await finishCheck(root, receipt, runData ? join(runData, 'check-definitions') : undefined) } : {}) } }, summarize: (output) => ({ code: output.code, stdout: output.stdout.length > 2000 ? output.stdout.slice(0, 1000) + '\n[... read original output with shell.output ...]\n' + output.stdout.slice(-1000) : output.stdout, stderr: output.stderr.length > 2000 ? output.stderr.slice(0, 1000) + '\n[... read original output with shell.output ...]\n' + output.stderr.slice(-1000) : output.stderr, truncated: output.truncated, ...(output.outputArchive ? { outputArchive: json(output.outputArchive) } : {}) }),
+    name: 'shell.exec', description: 'Run an authorized local command with argv arguments. cwd defaults to the workspace; relative paths and absolute paths inside the workspace are allowed.', tags: ['shell', 'system'], input: z.object({ command: z.string().min(1), args: z.array(z.string()).default([]), cwd: z.string().default('.'), timeoutMs: z.number().int().positive().max(300_000).optional() }), output: z.object({ code: z.number().nullable(), stdout: z.string(), stderr: z.string(), truncated: z.boolean(), timedOut: z.boolean(), aborted: z.boolean(), outputArchive: z.unknown().optional(), checkReceipt: z.unknown().optional() }), sideEffectPolicy: 'external', resolveResources: () => [{ resource: 'workspace', mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: shellToolTimeoutMs, resolveTimeoutMs: ({ timeoutMs }) => process.platform === 'win32' ? shellToolTimeoutMs : (timeoutMs ?? 30_000) + 120_000, permissions: { workspaceRoots: [root] }, execute: async ({ command, args, cwd, timeoutMs }, context) => { if (approvalMode === 'read-only') throw new Error('SHELL_DISABLED_READ_ONLY'); if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:shell.exec'); let archiveBytes = 0; if (runData) for (const entry of await readdir(join(runData, 'shell-output')).catch(error => { if (error.code === 'ENOENT') return []; throw error })) archiveBytes += (await stat(join(runData, 'shell-output', entry))).size; const options = { cwd: await within(root, cwd ?? '.'), signal: context.signal, env: safeShellEnv(), allowedDomains: allowNetwork ? networkHosts ?? [] : [], maxOutputBytes: 64 * 1024, ...(runData ? { outputDirectory: join(runData, 'shell-output'), maxArchiveBytes: Math.min(16 * 1024 * 1024, Math.max(0, Math.floor((64 * 1024 * 1024 - archiveBytes) / 2))) } : {}), ...(timeoutMs === undefined ? { timeoutMs: 30_000 } : { timeoutMs }) }; const receipt = isCheck(command, args ?? []) ? await captureCheck(root, options.cwd, command, args ?? []) : undefined; const result = await runShell(command, args, options); return { ...result, ...(receipt ? { checkReceipt: await finishCheck(root, receipt, runData ? join(runData, 'check-definitions') : undefined) } : {}) } }, summarize: (output) => ({ code: output.code, stdout: output.stdout.length > 2000 ? output.stdout.slice(0, 1000) + '\n[... read original output with shell.output ...]\n' + output.stdout.slice(-1000) : output.stdout, stderr: output.stderr.length > 2000 ? output.stderr.slice(0, 1000) + '\n[... read original output with shell.output ...]\n' + output.stderr.slice(-1000) : output.stderr, truncated: output.truncated, ...(output.outputArchive ? { outputArchive: json(output.outputArchive) } : {}) }),
   }))
   if (runData) registry.register(defineTool({
     name: 'shell.output', description: 'Read a bounded byte page of this run’s original command output archive without repeating the command.', tags: ['shell', 'read'],
@@ -815,7 +843,7 @@ ${responseLanguageInstruction(detectResponseLanguage(text))}`
 }
 
 const assistantToolAllowList = [
-  'fs.list', 'fs.read', 'fs.search', 'web.fetch', 'web.search',
+  'fs.list', 'fs.read', 'fs.search', 'web.fetch', 'web.search', 'attachment.read', 'attachment.list',
   'jarvis.context', 'jarvis.search', 'jarvis.get', 'jarvis.record', 'jarvis.remember', 'jarvis.candidates', 'jarvis.status',
   'work.start', 'work.list', 'work.status', 'work.send', 'work.stop', 'work.resume',
 ]
@@ -865,10 +893,14 @@ export function assistantChatRequiredToolNames(toolNames: readonly string[], tex
   return toolNames.filter(name => required.has(name))
 }
 
-export function assistantChatAllowedToolNames(toolNames: string[], text: string, calledTools: ReadonlySet<string>): string[] {
-  const remainingRequired = assistantChatRequiredToolNames(toolNames, text).filter(name => !calledTools.has(name))
+const assistantRepeatableReadTools = new Set(['fs.list', 'fs.read', 'fs.search', 'web.search', 'web.fetch', 'attachment.read', 'attachment.list'])
+
+export function assistantChatAllowedToolNames(toolNames: string[], text: string, calledTools: ReadonlySet<string>, repeatableReads = true, attachmentRequested = false): string[] {
+  const required = assistantChatRequiredToolNames(toolNames, text).map(name => attachmentRequested && name === 'fs.read' ? 'attachment.read' : name)
+  if (attachmentRequested && toolNames.includes('attachment.read')) required.push('attachment.read')
+  const remainingRequired = required.filter(name => !calledTools.has(name))
   const remainingRequiredSet = new Set(remainingRequired)
-  return toolNames.filter(name => !calledTools.has(name) && (remainingRequired.length === 0 || remainingRequiredSet.has(name)))
+  return toolNames.filter(name => (!calledTools.has(name) || repeatableReads && assistantRepeatableReadTools.has(name)) && (remainingRequired.length === 0 || remainingRequiredSet.has(name)))
 }
 
 function assistantToolsAlreadyUsed(ctx: StepContext): Set<string> {
@@ -883,28 +915,36 @@ function assistantToolsAlreadyUsed(ctx: StepContext): Set<string> {
 }
 
 /** Conversational turns do not use the task planner or acceptance verifier. */
-function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, conversation: ConversationMessage[], configuredMaxTurns = 12) {
+function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, conversation: ConversationMessage[], configuredMaxTurns = 12, version: '1' | '2' | '3' = '3') {
+  const attachmentNames = conversation.filter(message => message.content.startsWith('[Conversation attachments;')).flatMap(message => {
+    try { return (JSON.parse(message.content.slice(message.content.indexOf('\n') + 1)) as Array<{ name: string }>).map(item => item.name) }
+    catch { return [] }
+  })
+  const attachmentRequestedFor = (text: string) => version === '3' && attachmentNames.length > 0 && !assistantExplicitToolRequests(toolNames, text).includes('fs.read') && (attachmentNames.some(name => text.includes(name)) || /附件|上传|上[一次张].*(?:图|文件)|attached|upload|image/i.test(text))
   return (approvalMode: ApprovalMode = 'ask') => defineReActLane({
     id: 'pulse.assistant-chat',
-    version: '1',
+    version,
     system: systemPrompt,
     toolSet: 'pulse.default',
     task: 'reason',
+    manualApprovalFallback: true,
     instruction: (ctx) => {
       const currentGoal = ctx.goal.startsWith('Human input: ') ? ctx.goal.slice('Human input: '.length) : ctx.goal
+      const attachmentRequested = attachmentRequestedFor(currentGoal)
       const requestedTools = assistantExplicitToolRequests(toolNames, currentGoal)
       const requestedJarvisTool = requestedTools.find((name) => name.startsWith('jarvis.'))
       const requestedWorkTools = requestedTools.filter((name) => name.startsWith('work.'))
       const workStartRequested = requestedTools.includes('work.start')
       const fileReadRequested = !workStartRequested && toolNames.includes('fs.read') && (requestedTools.includes('fs.read') || assistantExplicitFileReadRequested(currentGoal))
       const requiredCalls = [
+        ...(attachmentRequested ? ['Read the requested uploaded attachment contents using attachment.read before replying; use exact IDs from the index and continue across all requested attachments/windows.'] : []),
         ...(requestedJarvisTool ? [`The current user message explicitly requests ${requestedJarvisTool}. Call it once before answering. After it returns, do not call it again; answer from its result or report failure. Never claim success without a result.`] : []),
         ...(requestedWorkTools.length ? [`The user explicitly requests ${requestedWorkTools.join(', ')}. Call the requested work tool before replying. For work.start, resolve an exact registered project ID with work.list when needed; do not replace it with direct fs.* or shell work. A start receipt does not mean the task is complete.`] : []),
-        ...(fileReadRequested ? ['The latest user message explicitly asks to read a named file. Call fs.read exactly once before answering, even if an earlier turn contains an answer. Never claim that this non-empty message is empty. Use the exact file path from the request and report tool failure honestly.'] : []),
+        ...(fileReadRequested ? [attachmentRequested ? 'Read the requested uploaded attachment with attachment.read before answering. Use its exact id from the attachment index, follow continuation windows, and never claim contents from metadata alone.' : version === '1' ? 'The latest user message explicitly asks to read a named file. Call fs.read exactly once before answering, even if an earlier turn contains an answer. Never claim that this non-empty message is empty. Use the exact file path from the request and report tool failure honestly.' : 'The latest user message asks to read files. Read the exact requested paths, including additional files or continuation pages needed to answer. Reuse returned content; never repeat unchanged read windows. Report failures honestly.'] : []),
       ]
       return requiredCalls.length
         ? `${requiredCalls.join(' ')} Keep the answer concise.`
-        : 'Reply directly to the current user message. Use an available tool only when needed. After a tool returns, answer from its result; do not repeat the same call. Do not expose private reasoning.'
+        : version === '1' ? 'Reply directly to the current user message. Use an available tool only when needed. After a tool returns, answer from its result; do not repeat the same call. Do not expose private reasoning.' : 'Reply directly to the current user message. Use tools when needed, following read-only queries across different files, pages, or corrected arguments until the request is answered. Reuse settled results; do not repeat unchanged calls. Do not expose private reasoning.'
     },
     inputs: (ctx) => {
       const currentGoal = ctx.goal.startsWith('Human input: ') ? ctx.goal.slice('Human input: '.length) : ctx.goal
@@ -921,7 +961,7 @@ function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, co
       const calledTools = assistantToolsAlreadyUsed(ctx)
       const jarvisAlreadyCalled = requestedJarvisTool !== undefined && calledTools.has(requestedJarvisTool)
       return {
-        toolDiscovery: { limit: toolNames.length, ...(calledTools.size ? { exclude: [...calledTools] } : {}) },
+        toolDiscovery: { limit: toolNames.length, ...(calledTools.size ? { exclude: [...calledTools].filter(name => version === '1' || version === '2' && name.startsWith('attachment.') || !assistantRepeatableReadTools.has(name)) } : {}) },
         conversation: boundedAssistantConversation([
           ...conversation,
           ...humanUpdates,
@@ -933,7 +973,7 @@ function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, co
     toolAllow: (ctx) => {
       const calledTools = assistantToolsAlreadyUsed(ctx)
       const currentGoal = ctx.goal.startsWith('Human input: ') ? ctx.goal.slice('Human input: '.length) : ctx.goal
-      return assistantChatAllowedToolNames(toolNames, currentGoal, calledTools)
+      return assistantChatAllowedToolNames(toolNames, currentGoal, calledTools, version !== '1', attachmentRequestedFor(currentGoal)).filter(name => version !== '2' || !name.startsWith('attachment.') || !calledTools.has(name))
     },
     maxTurns: Math.max(1, Math.min(12, Math.floor(configuredMaxTurns))),
     maxToolsPerTurn: 4,
@@ -942,7 +982,7 @@ function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, co
       instruction: 'Keep only the facts and decisions needed to answer the current chat message.',
       keepRecentRounds: 2,
     },
-    ...(approvalMode === 'ask' ? { toolApproval: { prompt: () => 'Reply with approved=true to continue or approved=false to deny.' } } : {}),
+    ...(approvalMode === 'ask' ? { toolApproval: { requiresApproval: calls => Array.isArray(calls) && calls.some(call => { const name = asRecord(call)?.toolName; return typeof name !== 'string' || !(version === '3' && ['attachment.read', 'attachment.list'].includes(name)) && !['fs.list', 'fs.read', 'fs.search', 'web.search', 'web.fetch', 'jarvis.search', 'jarvis.context', 'jarvis.get', 'jarvis.status', 'jarvis.candidates', 'work.list', 'work.status'].includes(name) }), prompt: () => 'Reply with approved=true to continue or approved=false to deny.' } } : {}),
   })
 }
 
@@ -1206,7 +1246,7 @@ function toolPreview(name: string, value: JsonValue | undefined): JsonValue | un
     const stdout = typeof record.stdout === 'string' ? record.stdout : ''
     const stderr = typeof record.stderr === 'string' ? record.stderr : ''
     const clipped = clipPreviewText(stdout.trim() ? stdout : stderr)
-    return { exitCode: typeof record.code === 'number' || record.code === null ? record.code : null, ...(clipped.text ? { output: clipped.text } : {}), truncated: record.truncated === true || clipped.truncated }
+    return { exitCode: typeof record.code === 'number' || record.code === null ? record.code : null, ...(record.timedOut === true ? { timedOut: true, errorCode: 'SHELL_TIMEOUT' } : {}), ...(record.aborted === true ? { aborted: true } : {}), ...(clipped.text ? { output: clipped.text } : {}), truncated: record.truncated === true || clipped.truncated }
   }
   return undefined
 }
@@ -1331,6 +1371,7 @@ function approvedToolExecutor(registry: ToolRegistry, provider: ReturnType<typeo
     // Host-level pre-implementation gate: refuse mutation tools until the user confirms
     // execution. Before confirmation only the plan file under docs/plans may be written.
     if (await guard?.(name, args, policy)) return { value: null, status: 'failed', executionState: 'failed', sideEffectState: 'none', error: runtimeErrorFromCause(Object.assign(new Error('Implementation is blocked until the user confirms execution; only docs/plans writes are allowed.'), { code: 'PLAN_CONFIRMATION_REQUIRED', retryable: false })) }
+    if (approvalMode === 'read-only' && (policy === 'write' || policy === 'external')) return { value: null, status: 'failed', error: { code: 'READ_ONLY_TOOL_DENIED', message: `Read-only mode cannot execute ${name}.`, retryable: false }, sideEffectState: 'none' }
     let reviewAttempt: JsonValue | undefined
     const onUsage = (usage: NonNullable<LLMResult['usage']>) => {
       reviewAttempt = json({ effectId: effect.id, attemptId: `${effect.attemptId}:safety`, attemptNo: effect.attemptNo, modelId: reviewer?.modelId ?? modelId, providerId: reviewer?.providerId ?? provider.adapter.id, purpose: 'safety-review', usage })
@@ -1527,11 +1568,19 @@ export class LocalHost {
     return skills
   }
   private async selectedSkillsFor(text: string): Promise<string[]> {
-    const match = /^\/(?:skill:)?([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?=\s|$)/.exec(text.trim())
-    if (!match) return []
+    const regex = /(?:^|\s)\/(?:skill:)?([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?=\s|$|[.,!?;:])/g
+    const found = new Set<string>()
+    let match: RegExpExecArray | null
+    while ((match = regex.exec(text)) !== null) {
+      if (match[1]) found.add(match[1])
+    }
+    if (found.size === 0) return []
     const names = await this.listSkills()
-    if (!names.includes(match[1]!)) throw new Error(`SKILL_NOT_FOUND:${match[1]}`)
-    return [match[1]!]
+    const valid: string[] = []
+    for (const name of found) {
+      if (names.includes(name)) valid.push(name)
+    }
+    return valid
   }
   private conversationDir(id: string): string { return conversationDirectory(this.dataDir, id) }
   private manifestPath(id: string): string { return join(this.conversationDir(id), 'manifest.json') }
@@ -1613,7 +1662,7 @@ export class LocalHost {
     const { executionCwd: _executionCwd, jarvisWorkspace: _jarvisWorkspace, ...summary } = manifest
     return summary
   }
-  async createConversation(input: CreateConversationInput = {}): Promise<ConversationHandle> { const id = `conv-${randomUUID()}`; const now = new Date().toISOString(); const cwd = resolve(input.cwd ?? this.root); const manifest: Manifest = { schemaVersion: 1, id, title: input.title ?? 'New conversation', cwd, createdAt: now, updatedAt: now, approvalPolicy: 'manual', ...(input.projectId ? { projectId: input.projectId } : input.projectId === null ? { projectUnassigned: true } : {}), pinned: false, runs: [], artifacts: [] }; await mkdir(this.conversationDir(id), { recursive: true }); await this.saveManifest(manifest); return { id, summary: this.publicConversation(manifest) } }
+  async createConversation(input: CreateConversationInput = {}): Promise<ConversationHandle> { const id = `conv-${randomUUID()}`; const now = new Date().toISOString(); const cwd = resolve(input.cwd ?? this.root); const manifest: Manifest = { schemaVersion: 1, id, title: input.title ?? 'New conversation', cwd, createdAt: now, updatedAt: now, approvalPolicy: 'manual', ...(input.projectId ? { projectId: input.projectId } : input.projectId === null ? { projectUnassigned: true } : {}), ...(input.origin === 'assistant' ? { origin: 'assistant' as const } : {}), pinned: false, runs: [], artifacts: [] }; await mkdir(this.conversationDir(id), { recursive: true }); await this.saveManifest(manifest); return { id, summary: this.publicConversation(manifest) } }
   async listConversations(): Promise<ConversationSummary[]> { await this.init(); const entries = await readdir(join(this.dataDir, 'conversations'), { withFileTypes: true }).catch(() => []); const summaries: ConversationSummary[] = []; for (const entry of entries) { if (!entry.isDirectory()) continue; try { summaries.push(this.publicConversation(await this.readManifest(entry.name))) } catch { /* ignore incomplete directories */ } } return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) }
   async findConversationByRunId(runId: string): Promise<string | undefined> {
     for (const summary of await this.listConversations()) {
@@ -1658,8 +1707,8 @@ export class LocalHost {
       })
     }
   }
-  async getConversationMessages(id: string): Promise<Array<{id: string, role: 'user' | 'assistant' | 'system', text: string, runId?: string, createdAt: string, displayVersion?: 1}>> { const content = await readFile(this.messagesPath(id), 'utf8').catch(() => ''); return parseStoredMessages(content) }
-  async getWebConversationMessages(id: string): Promise<Array<{id: string, role: 'user' | 'assistant' | 'system', text: string, runId?: string, createdAt: string, legacy?: boolean, restored?: boolean}>> {
+  async getConversationMessages(id: string): Promise<Array<{id: string, role: 'user' | 'assistant' | 'system', text: string, runId?: string, createdAt: string, displayVersion?: 1, attachments?: WebAttachment[], skills?: string[], mentionedFiles?: string[]}>> { const content = await readFile(this.messagesPath(id), 'utf8').catch(() => ''); return parseStoredMessages(content) }
+  async getWebConversationMessages(id: string): Promise<Array<{id: string, role: 'user' | 'assistant' | 'system', text: string, runId?: string, createdAt: string, legacy?: boolean, restored?: boolean, attachments?: WebAttachment[], skills?: string[], mentionedFiles?: string[]}>> {
     const messages = await this.getConversationMessages(id)
     const archiveCache = new Map<string, Promise<string | undefined>>()
     return Promise.all(messages.map(async (message) => {
@@ -1672,8 +1721,8 @@ export class LocalHost {
       return restored ? { ...message, text: restored, restored: true } : { ...message, legacy: true }
     }))
   }
-  async appendAssistantUserMessage(conversationId: string, message: { id: string; runId: string; text: string; createdAt: string }): Promise<void> {
-    if (!message.id || !message.runId || !message.text.trim()) throw new Error('MESSAGE_REQUIRED')
+  async appendAssistantUserMessage(conversationId: string, message: { id: string; runId: string; text: string; createdAt: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }): Promise<void> {
+    if (!message.id || !message.runId || (!message.text.trim() && !message.attachments?.length)) throw new Error('MESSAGE_REQUIRED')
     await this.acquireConversationLock(conversationId, message.runId)
     try {
       const existing = await this.getConversationMessages(conversationId)
@@ -1756,7 +1805,24 @@ export class LocalHost {
     for (const msg of messages) md += `\n## ${msg.role === 'user' ? 'User' : 'Assistant'}\n${msg.text}\n`
     return md
   }
-  async listArtifacts(id: string): Promise<ArtifactSummary[]> { return [...((await this.readManifest(id)).artifacts ?? [])] }
+  async listArtifacts(id: string): Promise<ArtifactSummary[]> {
+    const manifest = await this.readManifest(id)
+    const root = manifest.executionCwd ?? manifest.cwd
+    const items = new Map<string, ArtifactSummary>()
+    for (const item of manifest.artifacts ?? []) items.set(item.path, { ...item, absolutePath: resolve(root, item.path), workspaceState: root === manifest.cwd ? 'project' : 'isolated' })
+    return [...items.values()]
+  }
+  async readArtifact(id: string, path: string, runId: string): Promise<{ content: string; path: string; absolutePath: string; workspaceState: 'isolated' | 'project' }> {
+    const manifest = await this.readManifest(id)
+    const artifact = (manifest.artifacts ?? []).find(item => item.path === path && item.runId === runId)
+    if (!artifact) throw new Error('ARTIFACT_NOT_FOUND')
+    const root = manifest.executionCwd ?? manifest.cwd
+    const absolutePath = await within(root, path)
+    const read = await new FilesystemTool(root).readLimited(path, 200_000)
+    if (read.truncated) throw new Error('ARTIFACT_TOO_LARGE')
+    if (createHash('sha256').update(read.content).digest('hex') !== artifact.hash) throw new Error('ARTIFACT_CHANGED')
+    return { content: read.content, path, absolutePath, workspaceState: root === manifest.cwd ? 'project' : 'isolated' }
+  }
   setReasoningEffort(effort?: 'low' | 'medium' | 'high'): void {
     if (!this.options.provider) this.options.provider = { provider: 'mock' }
     if (effort) this.options.provider.reasoningEffort = effort
@@ -1979,10 +2045,16 @@ export class LocalHost {
       const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
       this.registerAssistantJarvisTools(registry, getSession, cwd, userIntent)
     }
+    const attachmentStore = new AttachmentStore(this.dataDir, conversationId)
+    registry.register(attachmentStore.tool(Object.values(options.providerModels ?? {}).some(model => model.imageInput === 'supported')))
+    registry.register(attachmentStore.listTool())
     const capabilityRegistry = new CapabilityPackRegistry()
     for (const pack of options.capabilityPacks ?? []) capabilityRegistry.register(pack)
     const capabilityController = new AbortController()
-    const capabilities = await capabilityRegistry.activate(assistantChat ? [] : (options.enabledCapabilityPacks ?? []).filter(id => (id !== 'browser' && id !== 'computer') || options.capabilityPacks?.some(pack => pack.manifest.id === id)), { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: assistantChat ? [] : await this.selectedSkillsFor(skillInput) })
+    const activatedPackIds = assistantChat
+      ? (options.enabledCapabilityPacks ?? []).filter(id => id === 'skills' || id === 'builtin-skills')
+      : (options.enabledCapabilityPacks ?? []).filter(id => (id !== 'browser' && id !== 'computer') || options.capabilityPacks?.some(pack => pack.manifest.id === id))
+    const capabilities = await capabilityRegistry.activate(activatedPackIds, { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: await this.selectedSkillsFor(skillInput) })
     if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) capabilities.tools.push(...createAutomationTools(this.automationClient, cwd, options.enabledCapabilityPacks.filter(id => !options.capabilityPacks?.some(pack => pack.manifest.id === id)), runId))
     if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) {
       const dispose = capabilities.dispose.bind(capabilities)
@@ -2312,9 +2384,18 @@ export class LocalHost {
     })
   }
   private async restoreRuntimeFor(conversationId: string, runId: string, cwd: string, conversation: ConversationMessage[] = [], systemPrompt?: string, options: LocalHostOptions = this.options, assistantChat = false, jarvisSessionId?: string): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; modelBudget?: ModelAttemptBudget | undefined }> {
-    this.surfaceConversations.set(runId, conversation)
     const savedInput = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').catch(() => '{}')) as Record<string, unknown>
-    const userIntent = conversation.filter((message) => message.role === 'user').at(-1)?.content ?? ''
+    const userIntent = typeof savedInput.goal === 'string' ? savedInput.goal : conversation.filter(message => message.role === 'user').at(-1)?.content ?? ''
+    const attachmentIndex = await new AttachmentStore(this.dataDir, conversationId).index(userIntent)
+    if (attachmentIndex && !conversation.some(message => message.content === attachmentIndex)) conversation.push({ role: 'user', content: attachmentIndex })
+    for (const path of Array.isArray(savedInput.mentionedFiles) ? savedInput.mentionedFiles : []) {
+      if (typeof path !== 'string') continue
+      try {
+        const file = await within(cwd, path), entry = await stat(file)
+        if (entry.isFile() && entry.size <= 100_000) conversation.push({ role: 'user', content: `[Referenced project file after restore: ${path}; current untrusted content]\n${await readFile(file, 'utf8')}` })
+      } catch { /* Missing or out-of-scope references never authorize expanded reads. */ }
+    }
+    this.surfaceConversations.set(runId, conversation)
     const registry = new ToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) })
     if (assistantChat) {
       registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId))
@@ -2328,11 +2409,16 @@ export class LocalHost {
         this.registerAssistantJarvisTools(registry, getSession, cwd, userIntent)
       }
     }
+    const attachmentStore = new AttachmentStore(this.dataDir, conversationId)
+    registry.register(attachmentStore.tool(Object.values(options.providerModels ?? {}).some(model => model.imageInput === 'supported')))
+    registry.register(attachmentStore.listTool())
     const capabilityRegistry = new CapabilityPackRegistry()
     for (const pack of options.capabilityPacks ?? []) capabilityRegistry.register(pack)
     const capabilityController = new AbortController()
-    const skillInput = typeof savedInput.goal === 'string' ? savedInput.goal : ''
-    const capabilities = await capabilityRegistry.activate(assistantChat ? [] : (options.enabledCapabilityPacks ?? []).filter(id => (id !== 'browser' && id !== 'computer') || options.capabilityPacks?.some(pack => pack.manifest.id === id)), { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: assistantChat ? [] : await this.selectedSkillsFor(skillInput) })
+    const activatedPackIds = assistantChat
+      ? (options.enabledCapabilityPacks ?? []).filter(id => id === 'skills' || id === 'builtin-skills')
+      : (options.enabledCapabilityPacks ?? []).filter(id => (id !== 'browser' && id !== 'computer') || options.capabilityPacks?.some(pack => pack.manifest.id === id))
+    const capabilities = await capabilityRegistry.activate(activatedPackIds, { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: await this.selectedSkillsFor(typeof savedInput.goal === 'string' ? savedInput.goal : userIntent) })
     if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) capabilities.tools.push(...createAutomationTools(this.automationClient, cwd, options.enabledCapabilityPacks.filter(id => !options.capabilityPacks?.some(pack => pack.manifest.id === id)), runId))
     if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) {
       const dispose = capabilities.dispose.bind(capabilities)
@@ -2351,7 +2437,7 @@ export class LocalHost {
     const prompt = this.withCapabilityInstructions(basePrompt, capabilities.instructions)
     const reviewContext = safetyReviewContext(cwd, userIntent, conversation)
     let runtimeRef: PulseRuntime | undefined
-    if (!assistantChat) this.registerTaskInspection(registry, () => runtimeRef!, conversationId, runId, cwd, savedInput.deliveryProtocol === 1 || ['14', '15', '16', '17', '18'].includes(String(savedInput.controllerVersion)))
+    if (!assistantChat) this.registerTaskInspection(registry, () => runtimeRef!, conversationId, runId, cwd, savedInput.deliveryProtocol === 1 || ['14', '15', '16', '17', '18', '19'].includes(String(savedInput.controllerVersion)))
     const toolNames = isStatusOnlyTurn(userIntent) ? [] : registry.list().map((tool) => tool.name)
     const readOnlyToolNames = registry.list().filter((tool) => tool.sideEffectPolicy === 'read' && !tool.name.startsWith('task.')).map((tool) => tool.name)
     // Preserve the opt-in lane shape only when restoring an older persisted run.
@@ -2362,7 +2448,7 @@ export class LocalHost {
     const savedMaxTurns = typeof savedInput.maxTurns === 'number' && Number.isInteger(savedInput.maxTurns) && savedInput.maxTurns > 0 ? savedInput.maxTurns : options.maxTurns ?? 32
     const workerProgram = buildReadonlyWorkerProgram(prompt, readOnlyToolNames, 3)
     const program = buildProgram(toolNames, prompt, conversation, false, options.maxTurns ?? 32, legacyParallelRead ? '4' : '3', legacyParallelRead)(options.approvalMode ?? 'ask')
-    const assistantProgram = assistantChat ? buildAssistantChatProgram(toolNames, prompt, conversation, savedMaxTurns)(options.approvalMode ?? 'ask') : undefined
+    const assistantPrograms = assistantChat ? (['1', '2', '3'] as const).map(version => buildAssistantChatProgram(toolNames, prompt, conversation, savedMaxTurns, version)(options.approvalMode ?? 'ask')) : []
     const version2Program = buildProgram(registry.list().map((tool) => tool.name), prompt, conversation, false, options.maxTurns ?? 32, '2')(options.approvalMode ?? 'ask')
     const legacyProgram = buildProgram(registry.list().map((tool) => tool.name), prompt, conversation, false, options.maxTurns ?? 32, '1')(options.approvalMode ?? 'ask')
     registry.register(defineTool({ name: 'fs.stage.capacity', description: 'Preflight new-file bytes against remaining actual model calls. Does not increase budgets. Choose chunks that fit the model output token limit.', tags: ['files', 'read'], input: z.object({ bytes: z.number().int().min(0).max(500_000) }), output: z.object({ chunkBytes: z.number(), toolSteps: z.number(), remainingCalls: z.number(), feasible: z.boolean() }), sideEffectPolicy: 'read', execute: async ({ bytes }) => { const chunkBytes = Math.min(STREAM_BYTES, Math.max(512, (provider.model.capabilities.maxOutputTokens ?? 4096) * 2)); const toolSteps = Math.max(1, Math.ceil(bytes / chunkBytes)) + 1; const remainingCalls = Math.max(0, (modelBudget?.limit ?? 256) - (modelBudget?.used ?? 0) - (modelBudget?.accounting.policy?.verificationReserve ?? 0)); return { chunkBytes, toolSteps, remainingCalls, feasible: toolSteps + 1 <= remainingCalls } } }))
@@ -2390,9 +2476,9 @@ export class LocalHost {
     } })
     const fingerprints = recoveryFingerprints(registry, { approvalMode: options.approvalMode ?? 'ask', allowNetwork: options.allowNetwork ?? false, networkHosts: options.networkHosts ?? [], contract: 2 })
     const runLlm = (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => runLocalApproval(options.approvalReview, modelBudget, () => runtimeRef, system, instruction, signal, maxOutputTokens)
-    const controllerPrograms: ReturnType<typeof buildTaskControllerProgram>[] = (['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18'] as const).map((version) => buildTaskControllerProgram({ modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(savedReuse ? { resumePlan: savedReuse.controller, reusableIds: savedReuse.reusableIds } : {}), version, system: prompt, toolNames, conversation, approvalMode: options.approvalMode ?? 'ask', maxTurns: (version === '10' || version === '11' || version === '12' || version === '13' || version === '14' || version === '15' || version === '16' || version === '17' || version === '18') ? modelEffectBudget ?? 256 : savedMaxTurns }))
+    const controllerPrograms: ReturnType<typeof buildTaskControllerProgram>[] = (['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19'] as const).map((version) => buildTaskControllerProgram({ modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(savedReuse ? { resumePlan: savedReuse.controller, reusableIds: savedReuse.reusableIds } : {}), version, system: prompt, toolNames, conversation, approvalMode: options.approvalMode ?? 'ask', maxTurns: (version === '10' || version === '11' || version === '12' || version === '13' || version === '14' || version === '15' || version === '16' || version === '17' || version === '18' || version === '19') ? modelEffectBudget ?? 256 : savedMaxTurns }))
     const recovery = await prepareRecovery(backend, this.runDir(conversationId, runId), fingerprints, options.recoveryBuildMigration)
-    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, programs: [legacyProgram, version2Program, program, ...(assistantProgram ? [assistantProgram] : []), workerProgram, ...controllerPrograms], models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return approvedToolExecutor(registry, provider, options.approvalMode, reviewContext, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: 'ollama', timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined)(effect, signal, observe) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, programs: [legacyProgram, version2Program, program, ...assistantPrograms, workerProgram, ...controllerPrograms], models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return approvedToolExecutor(registry, provider, options.approvalMode, reviewContext, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: 'ollama', timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined)(effect, signal, observe) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     runtimeRef = runtime
     if (!assistantChat) modelBudget = await ModelAttemptBudget.open(join(this.runDir(conversationId, runId), 'model-budget.json'), modelEffectBudget ?? Math.max(4, Math.min(256, Math.floor(options.maxModelCalls ?? 256))), legacyModelCalls(runtime), options.modelBudgetPolicy)
     if (recovery.journal) { await runtime.persist(backend); await finishRecovery(recovery.journal) }
@@ -2751,7 +2837,12 @@ export class LocalHost {
     }
   }
   async sendMessage(conversationId: string, input: UserMessageInput): Promise<RunHandle> {
-    if (!input.text.trim()) throw new Error('MESSAGE_REQUIRED')
+    if (!input.text.trim() && !input.attachments?.length) throw new Error('MESSAGE_REQUIRED')
+    if (Buffer.byteLength(JSON.stringify(input)) > MAX_ATTACHMENT_REQUEST) throw new Error('PAYLOAD_TOO_LARGE')
+    const explicitSkills = [...new Set(input.skills ?? [])]
+    if (explicitSkills.length) { const known = await this.listSkills(); for (const skill of explicitSkills) if (!known.includes(skill)) throw new Error(`SKILL_NOT_FOUND:${skill}`) }
+    const normalizedAttachments = input.attachments?.length ? await new AttachmentStore(this.dataDir, conversationId).save(input.attachments) : undefined
+    input = { ...input, ...(normalizedAttachments ? { attachments: normalizedAttachments } : {}) }
     let runOptions = snapshotHostOptions(this.options)
     if (input.assistantChat) {
       const selectedModel = runOptions.assistantModel ?? runOptions.activeModel
@@ -2764,7 +2855,7 @@ export class LocalHost {
       // The assistant registry contains only Jarvis and job-management tools.
       // Those tools are intentionally callable without an approval card; every
       // project mutation remains governed by that work conversation's policy.
-      runOptions = { ...runOptions, taskController: false, approvalMode: 'auto' }
+      runOptions = { ...runOptions, taskController: false, approvalMode: runOptions.approvalMode ?? 'ask', ...(runOptions.approvalReview ? { approvalReview: { ...runOptions.approvalReview, manualOnRejection: true } } : {}) }
     }
     const runJarvisClient = this.jarvisClient
     const runId = input.runId ?? `run-${randomUUID()}`; await this.acquireConversationLock(conversationId, runId)
@@ -2793,7 +2884,24 @@ export class LocalHost {
         } catch { /* Older or incomplete exports may not contain an outcome. */ }
       }
       let inheritedTask: TaskRecord | undefined
-      if (!input.assistantChat && !isStatusOnlyTurn(input.text) && (input.continueTask ?? isTaskContinuation(input.text))) {
+      let clarificationAnswer = false
+      if (!input.assistantChat && !isStatusOnlyTurn(input.text) && input.continueTask !== false && !isExplicitNewTask(input.text) && !/^(?:取消(?:任务)?|不用了|先不做了|cancel(?: the task)?|never mind)[。！!?.\s]*$/i.test(input.text.trim())) {
+        for (const previousId of [...manifest.runs].reverse()) {
+          const priorInput = JSON.parse(await readFile(join(this.runDir(conversationId, previousId), 'input.json'), 'utf8')) as { goal: string }
+          if (isStatusOnlyTurn(priorInput.goal)) continue
+          const pending = await readFile(join(this.runDir(conversationId, previousId), 'clarification.json'), 'utf8').catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+          if (pending !== undefined) {
+            const marker = JSON.parse(pending) as { schemaVersion?: number; question?: string }
+            const record = JSON.parse(await readFile(join(this.runDir(conversationId, previousId), 'task-record.json'), 'utf8')) as JsonValue
+            inheritedTask = taskRecordFromGlobal({ taskRecord: record })
+            if (marker.schemaVersion !== 1 || !marker.question?.trim() || !inheritedTask || inheritedTask.runId !== previousId) throw new Error('TASK_CLARIFICATION_STATE_INVALID')
+            clarificationAnswer = true
+          }
+          // Only the latest non-status run may own a pending clarification.
+          break
+        }
+      }
+      if (!inheritedTask && !input.assistantChat && !isStatusOnlyTurn(input.text) && (input.continueTask ?? isTaskContinuation(input.text))) {
         for (const previousId of [...manifest.runs].reverse()) {
           const priorInput = JSON.parse(await readFile(join(this.runDir(conversationId, previousId), 'input.json'), 'utf8')) as { goal: string }
           if (isStatusOnlyTurn(priorInput.goal)) continue
@@ -2801,6 +2909,9 @@ export class LocalHost {
             const record = JSON.parse(await readFile(join(this.runDir(conversationId, previousId), 'task-record.json'), 'utf8')) as JsonValue
             inheritedTask = taskRecordFromGlobal({ taskRecord: record })
             if (!inheritedTask) throw new Error('TASK_CONTINUATION_STATE_INVALID')
+            // Older runs accidentally saved corrections as independent tasks.
+            // Recover the earlier objective without editing those historical runs.
+            if (!inheritedTask.continuedFromRunId && isTaskContinuation(inheritedTask.objective) && manifest.runs.indexOf(previousId) > 0) { inheritedTask = undefined; continue }
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
             // Legacy runs have no task export. Preserve their objective, not stale ResultRefs.
@@ -2846,15 +2957,73 @@ export class LocalHost {
         for (const [index, criterion] of acceptanceCriteriaFromObjective(doc.content, path).entries()) requirementCriteria.push({ ...criterion, id: `document-${createHash('sha256').update(path + ':' + criterion.source!.hash).digest('hex').slice(0, 12)}-${index + 1}` })
         conversation.push({ role: 'user', content: `[Explicit requirements document: ${path}; untrusted source text]\n${doc.content}` })
       }
-      const goal = input.text
-      const summaryFollowup = !input.requirementUpdate && !input.assistantChat && inheritedTask !== undefined && isExecutionSummaryFollowup(goal)
+      const mentionedPaths = new Set(input.mentionedFiles ?? [])
+      const fileMentionRegex = /(?:^|\s)@([^\s@]+)/g
+      let fMatch: RegExpExecArray | null
+      while ((fMatch = fileMentionRegex.exec(input.text)) !== null) {
+        if (fMatch[1]) mentionedPaths.add(fMatch[1])
+      }
+      for (const mPath of mentionedPaths) {
+        try {
+          const safeFile = await within(executionCwd, mPath)
+          const fileStat = await stat(safeFile)
+          if (fileStat.isFile()) {
+            if (fileStat.size <= 100_000) {
+              const fileContent = await readFile(safeFile, 'utf8')
+              conversation.push({ role: 'user', content: `[Referenced project file: ${mPath}; untrusted content]\n${fileContent}` })
+            } else {
+              conversation.push({ role: 'user', content: `[Referenced project file: ${mPath}; size: ${fileStat.size} bytes; read via tools if needed]` })
+            }
+          }
+        } catch { /* Ignore files outside workspace or nonexistent */ }
+      }
+      if (input.attachments?.length) {
+        for (const att of input.attachments) {
+          if (att.type === 'file') {
+            conversation.push({ role: 'user', content: `[User attached file: ${att.name} (${att.mediaType}, ${att.size} bytes)]` })
+          } else if (att.type === 'image') {
+            conversation.push({ role: 'user', content: `[User attached image: ${att.name} (${att.mediaType})]` })
+          }
+        }
+      }
+      const rawGoal = clarificationAnswer && inheritedTask ? `${inheritedTask.objective}\nUser clarification: ${input.text}` : (input.text.trim() || (input.attachments?.length ? `[Sent ${input.attachments.length} attachment(s): ${input.attachments.map(a => a.name).join(', ')}]` : ''))
+      const goal = explicitSkills.length ? `${explicitSkills.map(skill => '/' + skill).join(' ')}\n${rawGoal}` : rawGoal
+      const summaryFollowup = !clarificationAnswer && !input.requirementUpdate && !input.assistantChat && inheritedTask !== undefined && isExecutionSummaryFollowup(goal)
       // /grill-and-plan must confirm before implementing; its parallel task controller would
       // fork and implement stages on its own, so keep this run off the controller lane. Every
       // other request keeps the controller exactly as before.
       const needsPreImplementationConfirmation = !input.assistantChat && isPreImplementationConfirmationSkill(goal)
       const controlled = !input.assistantChat && !isStatusOnlyTurn(goal) && !needsPreImplementationConfirmation && (runOptions.taskController ?? (runOptions.provider?.provider !== undefined && runOptions.provider.provider !== 'mock' && (!isBareTaskContinuation(goal) || inheritedTask !== undefined)))
-      const now = new Date().toISOString(); if (!input.userMessageRecorded) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal: input.text, assistantChat: input.assistantChat === true, taskController: controlled, ...(controlled ? { controllerVersion: '18' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), ...(input.assistantChat ? {} : { maxModelCalls }), maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
-      if (conversation.length === 0) manifest.title = input.text.length > 50 ? input.text.slice(0, 50) + '...' : input.text;
+      const initialTask: TaskRecord | undefined = input.assistantChat
+        ? undefined
+        : summaryFollowup
+          ? { schemaVersion: 1, runId, objective: goal, continuedFromRunId: inheritedTask!.runId, acceptanceCriteria: [{ id: 'criterion-1', description: '根据上一轮真实执行记录回答当前追问，不重复修改文件' }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] }
+          : inheritedTask ? { ...continueTaskRecord(inheritedTask, runId), ...(input.requirementUpdate || clarificationAnswer ? { objective: clarificationAnswer ? goal : `${inheritedTask.objective}\nExplicit update: ${goal}`, acceptanceCriteria: [...inheritedTask.acceptanceCriteria, ...acceptanceCriteriaFromObjective(clarificationAnswer ? input.text : goal).map((c, i) => ({ ...c, id: `${clarificationAnswer ? 'clarification' : 'update'}-${runId}-${i + 1}` }))] } : {}) } : { schemaVersion: 1, runId, objective: goal, acceptanceCriteria: acceptanceCriteriaFromObjective(goal), status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] }
+      if (initialTask && requirementCriteria.length) {
+        const replaced = initialTask.acceptanceCriteria.filter(c => c.source?.document && (input.requirementPaths ?? []).includes(c.source.document))
+        initialTask.acceptanceCriteria = initialTask.acceptanceCriteria.filter(c => !replaced.includes(c))
+        initialTask.acceptanceCriteria.push(...requirementCriteria.filter((c, i) => requirementCriteria.findIndex(other => other.id === c.id) === i))
+        if (replaced.length) initialTask.supersededCriteria = [...(initialTask.supersededCriteria ?? []), ...replaced.filter(c => !requirementCriteria.some(next => next.id === c.id))]
+      }
+      if (clarificationAnswer && initialTask?.acceptanceChecks?.length && !controlled) throw new Error('ACCEPTANCE_CONTROLLER_REQUIRED')
+      if (initialTask && controlled) {
+        const declared = runOptions.acceptanceChecks ?? initialTask.acceptanceChecks ?? []
+        // Validate caller declarations now, then verify that their tools are
+        // actually read-only when the registry is available below.
+        const incoming = validateAcceptanceChecks(declared, initialTask.acceptanceCriteria, declared.map(check => check.toolName))
+        const retained = clarificationAnswer ? [...(initialTask.acceptanceChecks ?? [])] : []
+        for (const check of incoming) {
+          const frozen = retained.find(item => item.id === check.id)
+          if (frozen && contentHash(frozen) !== contentHash(check)) throw new Error('ACCEPTANCE_CONTRACT_CHANGED_DURING_CLARIFICATION')
+          if (!frozen) retained.push(check)
+        }
+        initialTask.acceptanceChecks = retained
+      }
+      const now = new Date().toISOString(); if (!input.userMessageRecorded) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}) }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), assistantChat: input.assistantChat === true, ...(input.assistantChat ? { assistantChatVersion: '3' } : {}), taskController: controlled, ...(controlled ? { controllerVersion: '19' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), ...(input.assistantChat ? {} : { maxModelCalls }), maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
+      await new AttachmentStore(this.dataDir, conversationId).remember()
+      const attachmentIndex = await new AttachmentStore(this.dataDir, conversationId).index(input.text)
+      if (attachmentIndex) conversation.push({ role: 'user', content: attachmentIndex })
+      const titleCandidate = input.text.trim() || (input.attachments?.length ? `[附件] ${input.attachments[0]?.name}` : '新对话'); if (parseStoredMessages(previous).length === 0) manifest.title = titleCandidate.length > 50 ? titleCandidate.slice(0, 50) + '...' : titleCandidate;
       if (reuse) await writeFile(join(this.runDir(conversationId, runId), 'reuse-checkpoint.json'), JSON.stringify(reuse))
       if (runJarvisClient && !input.assistantChat) {
         try {
@@ -2890,6 +3059,10 @@ export class LocalHost {
       await writeFile(join(this.runDir(conversationId, runId), 'jarvis-context-selection.json'), JSON.stringify({ schemaVersion: 1, status: contextSelectionStatus, refs: selectedRefs, ...(contextSelectionStatus === 'curated' ? { summary: proposedSelection?.summary } : {}), ...(selectedJarvisContext === undefined ? {} : { context: selectedJarvisContext }), decidedAt: new Date().toISOString() }, null, 2), { mode: 0o600 })
       const clarification = frontResult?.brief?.needsClarification ? frontResult.brief.clarificationQuestion?.trim() : ''
       if (clarification) {
+        // Persist caller-owned requirements before ending this conversational turn.
+        // A short answer after restart must supplement this contract, not replace it.
+        if (initialTask) await writeFile(join(this.runDir(conversationId, runId), 'task-record.json'), JSON.stringify(initialTask, null, 2))
+        await writeFile(join(this.runDir(conversationId, runId), 'clarification.json'), JSON.stringify({ schemaVersion: 1, question: clarification }, null, 2))
         await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'assistant', text: clarification, runId, createdAt: new Date().toISOString(), displayVersion: 1 })
         manifest.runs.push(runId)
         manifest.updatedAt = new Date().toISOString()
@@ -2904,9 +3077,9 @@ export class LocalHost {
       }
       const systemPrompt = input.assistantChat
         ? assistantChatSystemPrompt(input.text, runOptions.systemPrompt)
-        : await this.resolveSystemPrompt(executionCwd, input.text, conversation, selectedJarvisContext, frontResult?.brief, runOptions)
+        : await this.resolveSystemPrompt(executionCwd, goal, conversation, selectedJarvisContext, frontResult?.brief, runOptions)
       this.surfaceConversations.set(runId, conversation)
-      activated = await this.runtimeFor(conversationId, runId, executionCwd, safetyReviewContext(executionCwd, goal, conversation), input.text, runOptions, input.assistantChat === true, jarvis?.sessionId, modelBudget)
+      activated = await this.runtimeFor(conversationId, runId, executionCwd, safetyReviewContext(executionCwd, goal, conversation), goal, runOptions, input.assistantChat === true, jarvis?.sessionId, modelBudget)
       const { runtime, registry, capabilities, capabilityController } = activated
       const runPrompt = this.withCapabilityInstructions(systemPrompt, capabilities.instructions)
       // Explicit status-only turns must not resume the previous operation.
@@ -2920,18 +3093,7 @@ export class LocalHost {
           : buildProgram(toolNames, runPrompt, conversation, true, runOptions.maxTurns ?? 32, '3')(runOptions.approvalMode ?? 'ask')
       runtime.register(program)
       runtime.setHumanInputProgram(program)
-      const initialTask: TaskRecord | undefined = input.assistantChat
-        ? undefined
-        : summaryFollowup
-          ? { schemaVersion: 1, runId, objective: goal, continuedFromRunId: inheritedTask!.runId, acceptanceCriteria: [{ id: 'criterion-1', description: '根据上一轮真实执行记录回答当前追问，不重复修改文件' }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] }
-          : inheritedTask ? { ...continueTaskRecord(inheritedTask, runId), ...(input.requirementUpdate ? { objective: `${inheritedTask.objective}\nExplicit update: ${goal}`, acceptanceCriteria: [...inheritedTask.acceptanceCriteria, ...acceptanceCriteriaFromObjective(goal).map((c, i) => ({ ...c, id: `update-${runId}-${i + 1}` }))] } : {}) } : { schemaVersion: 1, runId, objective: goal, acceptanceCriteria: acceptanceCriteriaFromObjective(goal), status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] }
-      if (initialTask && requirementCriteria.length) {
-        const replaced = initialTask.acceptanceCriteria.filter(c => c.source?.document && (input.requirementPaths ?? []).includes(c.source.document))
-        initialTask.acceptanceCriteria = initialTask.acceptanceCriteria.filter(c => !replaced.includes(c))
-        initialTask.acceptanceCriteria.push(...requirementCriteria.filter((c, i) => requirementCriteria.findIndex(other => other.id === c.id) === i))
-        if (replaced.length) initialTask.supersededCriteria = [...(initialTask.supersededCriteria ?? []), ...replaced.filter(c => !requirementCriteria.some(next => next.id === c.id))]
-      }
-      if (initialTask && controlled) initialTask.acceptanceChecks = validateAcceptanceChecks(runOptions.acceptanceChecks ?? initialTask.acceptanceChecks, initialTask.acceptanceCriteria, registry.list().filter(t => t.sideEffectPolicy === 'read').map(t => t.name))
+      if (initialTask && controlled) initialTask.acceptanceChecks = validateAcceptanceChecks(initialTask.acceptanceChecks, initialTask.acceptanceCriteria, registry.list().filter(t => t.sideEffectPolicy === 'read').map(t => t.name))
       if (initialTask) await writeFile(join(this.runDir(conversationId, runId), 'task-record.json'), JSON.stringify(initialTask, null, 2))
       const initialGlobal = initialTask ? { taskRecord: taskRecordJson(initialTask) } : {}
       const { agentId } = runtime.createAgent({ goal, program, initialGlobal })
@@ -2990,7 +3152,7 @@ export class LocalHost {
     if (!runId) throw new Error('NO_ACTIVE_RUN')
     const existing = this.active.get(runId)
     if (existing) return this.makeRunHandle(conversationId, runId, existing.runtime, existing.session)
-    const runOptions = snapshotHostOptions(this.options)
+    let runOptions = snapshotHostOptions(this.options)
     const runJarvisClient = this.jarvisClient
     await this.acquireConversationLock(conversationId, runId)
     let restored: Awaited<ReturnType<LocalHost['restoreRuntimeFor']>> | undefined
@@ -2999,6 +3161,7 @@ export class LocalHost {
       const lastUserMsg = conversation.filter((m) => m.role === 'user').at(-1)?.content
       const savedInput = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').catch(() => '{}')) as Record<string, unknown>
       const assistantChat = savedInput.assistantChat === true
+      if (assistantChat && runOptions.approvalReview) runOptions = { ...runOptions, approvalReview: { ...runOptions.approvalReview, manualOnRejection: true } }
       const jarvis = runJarvisClient
         ? !assistantChat ? await JarvisRun.open(runJarvisClient, join(this.runDir(conversationId, runId), 'jarvis.json'), manifest.jarvisWorkspace ?? manifest.cwd, lastUserMsg ?? manifest.title, runOptions.jarvis?.contextTokenBudget ?? 4000, true).catch(() => undefined) : undefined
         : undefined
@@ -3025,7 +3188,7 @@ export class LocalHost {
       const runPrompt = this.withCapabilityInstructions(systemPrompt, capabilities.instructions)
       const restoredToolNames = registry.list().map((tool) => tool.name)
       const interactionProgram = assistantChat
-        ? buildAssistantChatProgram(restoredToolNames, runPrompt, conversation, runOptions.maxTurns ?? 12)(runOptions.approvalMode ?? 'ask')
+        ? buildAssistantChatProgram(restoredToolNames, runPrompt, conversation, runOptions.maxTurns ?? 12, savedInput.assistantChatVersion === '3' ? '3' : savedInput.assistantChatVersion === '2' ? '2' : '1')(runOptions.approvalMode ?? 'ask')
         : buildProgram(restoredToolNames, runPrompt, conversation, true, runOptions.maxTurns ?? 32)(runOptions.approvalMode ?? 'ask')
       runtime.setHumanInputProgram(interactionProgram)
       const agent = [...runtime.state.agents.values()].find((candidate) => candidate.parentAgentId === undefined)

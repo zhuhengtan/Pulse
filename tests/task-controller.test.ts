@@ -281,7 +281,7 @@ describe('Host task controller', () => {
 
   it('uses v18 for new controllers while retaining earlier program versions for restoration', () => {
     expect(buildTaskControllerProgram({ system: 'test', version: '17', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('17')
-    expect(buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('18')
+    expect(buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('19')
     expect(buildTaskControllerProgram({ system: 'test', version: '9', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('9')
     expect(buildTaskControllerProgram({ system: 'test', version: '8', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('8')
     expect(buildTaskControllerProgram({ system: 'test', version: '7', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('7')

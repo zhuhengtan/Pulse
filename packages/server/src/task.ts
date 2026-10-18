@@ -146,8 +146,14 @@ export function acceptanceCriteriaFromObjective(objective: string, document?: st
 }
 
 /** Deliberately narrow: unrelated new requests must not inherit authorization. */
+export function isExplicitNewTask(text: string): boolean {
+  return /^(?:新任务|换个话题|另一个问题|重新开始|new task\b|start over\b)/i.test(text.trim())
+}
+
 export function isTaskContinuation(text: string): boolean {
-  return /^(?:继续|接着|恢复(?:任务|执行)|continue(?:\b)|resume(?:\b))/i.test(text.trim())
+  const request = text.trim()
+  if (isExplicitNewTask(request)) return false
+  return /^(?:继续|接着|恢复(?:任务|执行)|continue(?:\b)|resume(?:\b))/i.test(request) || /^(?:(?:你|这|这个|刚才|之前|还是|仍然|怎么|为什么|为啥)[，,\s]*){0,3}(?:没有|没看到|找不到|缺少|遗漏|漏了)[^。！？!?\n]{0,30}(?:计划|文件|产物|报告|测试|功能|修改|结果)|^(?:这个|刚才的|之前的).{0,16}(?:不对|有问题|没修好)|^(?:the |that )?(?:plan|file|artifact|report|test|fix).{0,20}(?:missing|not found|still broken)/i.test(request)
 }
 
 /** A follow-up that asks for the previous run's factual work log rather than new mutations. */

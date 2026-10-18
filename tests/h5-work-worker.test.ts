@@ -118,3 +118,14 @@ describe('H5 work worker IPC', () => {
     }
   })
 })
+
+it('preserves attachment, skill, file and request fields through real worker IPC', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pulse-worker-fields-')); temporaryDirectories.push(dir)
+  const entry = join(dir, 'worker.mjs')
+  const fixture = await readFile(fileURLToPath(new URL('./fixtures/h5-work-worker.mjs', import.meta.url)), 'utf8')
+  await writeFile(entry, fixture.replace("  process.send({ schemaVersion: 1, type: 'started'", "  writeFileSync(join(process.argv[process.argv.indexOf('--data-dir') + 1], 'received.json'), JSON.stringify(message));\n  process.send({ schemaVersion: 1, type: 'started'"))
+  const input = { conversationId: 'conv-12345678-1234-1234-1234-123456789abc', text: '', requestId: 'request-worker-fields', attachments: [{ id: 'upload-a', name: 'a.txt', mediaType: 'text/plain', size: 3, type: 'file' as const, url: '/api/example' }], skills: ['grill-and-plan'], mentionedFiles: ['中文/a.ts'] }
+  const run = await startH5WorkWorker({ entry, dataDir: dir, approvalMode: 'ask' }, input)
+  await run.outcome()
+  expect(JSON.parse(await readFile(join(dir, 'received.json'), 'utf8'))).toMatchObject({ ...input, requestId: expect.any(String), messageRequestId: input.requestId })
+})

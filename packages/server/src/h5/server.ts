@@ -1,4 +1,6 @@
+import { AttachmentStore, MAX_ATTACHMENT_REQUEST } from '../attachments.js'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { createReadStream } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { normalizeModelConfig, parseModelSelectionId } from '../model-config.js'
 import { execFile } from 'node:child_process'
@@ -13,7 +15,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 import QRCode from 'qrcode'
 import type { JsonValue } from '@hunterzhu/pulse-runtime'
 import type { AssistantEvent, ConversationSummary, LocalHost, LocalHostOptions, RunHandle } from '../index.js'
-import type { WebAssistantMessageReceipt, WebLane, WebRunLanes, WebAssistantWorkInteraction, WebMessage, WebPendingInteraction, WebProject, WebRunEvent, WebRunSnapshot } from '../protocol.js'
+import type { WebAttachment, WebAssistantMessageReceipt, WebLane, WebRunLanes, WebAssistantWorkInteraction, WebMessage, WebPendingInteraction, WebProject, WebRunEvent, WebRunSnapshot } from '../protocol.js'
 import { H5AuthStore } from './auth.js'
 import { compactTraceEvents, prepareRunEvent, traceWatermark } from './trace.js'
 import { AssistantConversationStore, type QueuedAssistantMessage } from './assistant.js'
@@ -288,7 +290,7 @@ export class H5Server {
 
   async stop(): Promise<void> {
     this.stopping = true
-    await Promise.all([...this.activeRuns.values()].map(handle => handle.shutdown?.().catch(() => undefined)))
+    await Promise.all([...this.activeRuns.values()].map(handle => (handle.shutdown ? handle.shutdown() : handle.cancel('SERVER_STOPPED')).catch(() => undefined)))
     // A sendMessage call can still be starting and not yet appear in activeRuns.
     // The pump joins that launch and shuts it down without dispatching its queue.
     await this.assistantPump?.catch(() => undefined)
@@ -331,14 +333,23 @@ export class H5Server {
     if (consume) void this.consumeRun(runId, handle)
   }
 
-  private async startConversationRun(conversationId: string, text: string): Promise<RunHandle> {
-    await this.prepareWorkConversation(conversationId)
-    await this.host.prepareAutomation()
-    const handle = this.workWorker
-      ? await startH5WorkWorker({ ...this.workWorker, runtimeOptions: this.host.getWorkWorkerOptions() }, { conversationId, text })
-      : await this.host.sendMessage(conversationId, { text })
-    this.attachRun(handle)
-    return handle
+  private readonly workStarts = new Map<string, { digest: string; promise: Promise<RunHandle> }>()
+  private async startConversationRun(conversationId: string, text: string, options?: { requestId?: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }): Promise<RunHandle> {
+    const key = options?.requestId ? `${conversationId}:${options.requestId}` : undefined
+    const digest = createHash('sha256').update(JSON.stringify({ text, options })).digest('hex')
+    const prior = key ? this.workStarts.get(key) : undefined
+    if (prior) { if (prior.digest !== digest) throw new Error('REQUEST_ID_REUSED'); return prior.promise }
+    const promise = (async () => {
+      await this.prepareWorkConversation(conversationId)
+      await this.host.prepareAutomation()
+      const handle = this.workWorker
+        ? await startH5WorkWorker({ ...this.workWorker, runtimeOptions: this.host.getWorkWorkerOptions() }, { conversationId, text, ...options })
+        : await this.host.sendMessage(conversationId, { text, ...options })
+      this.attachRun(handle)
+      return handle
+    })()
+    if (key) this.workStarts.set(key, { digest, promise })
+    try { return await promise } finally { if (key) this.workStarts.delete(key) }
   }
 
   private async prepareWorkConversation(conversationId: string): Promise<void> {
@@ -349,7 +360,7 @@ export class H5Server {
     if (!project || !project.available) throw new Error('PROJECT_NOT_AVAILABLE')
     const prepared = await this.workspaces.prepare(conversationId, project.id, project.cwd)
     await this.host.setConversationExecutionWorkspace(conversationId, prepared.cwd, project.cwd)
-    await this.assistantInbox.linkWork(conversationId, project.id, conversation.summary.title)
+    if (conversation.summary.origin === 'assistant') await this.assistantInbox.linkWork(conversationId, project.id, conversation.summary.title)
   }
 
   private async pumpAssistantInbox(): Promise<void> {
@@ -366,11 +377,28 @@ export class H5Server {
         this.runEventBuffers.set(message.runId, [])
         this.runSseClients.set(message.runId, new Set())
         try {
-          await this.host.appendAssistantUserMessage(conversationId, { id: `msg-${message.messageId}`, runId: message.runId, text: message.text, createdAt: message.createdAt })
+          await this.host.appendAssistantUserMessage(conversationId, {
+            id: `msg-${message.messageId}`,
+            runId: message.runId,
+            text: message.text,
+            createdAt: message.createdAt,
+            ...(message.attachments ? { attachments: message.attachments } : {}),
+            ...(message.skills ? { skills: message.skills } : {}),
+            ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}),
+          })
           if (this.stopping) { await this.assistantInbox.update(message.runId, 'interrupted', 'Server stopped before launch'); return }
-          const handle = await this.host.sendMessage(conversationId, { text: message.text, assistantChat: true, runId: message.runId, requestId: message.messageId, userMessageRecorded: true })
+          const handle = await this.host.sendMessage(conversationId, {
+            text: message.text,
+            assistantChat: true,
+            runId: message.runId,
+            requestId: message.messageId,
+            userMessageRecorded: true,
+            ...(message.attachments ? { attachments: message.attachments } : {}),
+            ...(message.skills ? { skills: message.skills } : {}),
+            ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}),
+          })
           this.attachRun(handle, false)
-          if (this.stopping) await handle.shutdown?.()
+          if (this.stopping) await (handle.shutdown ? handle.shutdown() : handle.cancel('SERVER_STOPPED'))
           await this.consumeRun(message.runId, handle)
         } catch (error) {
           const detail = error instanceof Error ? error.message : 'ASSISTANT_REPLY_FAILED'
@@ -396,7 +424,7 @@ export class H5Server {
     const project = await this.projects.get(projectId)
     if (!project || !project.available) throw new Error('PROJECT_NOT_AVAILABLE')
     const title = task.trim().replace(/\s+/g, ' ').slice(0, 80) || 'Pulse 工作会话'
-    const conversation = await this.host.createConversation({ title, cwd: project.cwd, projectId: project.id })
+    const conversation = await this.host.createConversation({ title, cwd: project.cwd, projectId: project.id, origin: 'assistant' })
     await this.assistantInbox.linkWork(conversation.id, project.id, title)
     queueMicrotask(() => { void this.startConversationRun(conversation.id, task).catch(async error => {
       const detail = error instanceof Error ? error.message : 'WORK_START_FAILED'
@@ -482,8 +510,10 @@ export class H5Server {
     const workInteractions: WebAssistantWorkInteraction[] = []
     const liveWorkMessages: Array<{ id: string; role: 'assistant'; text: string; createdAt: string; work: NonNullable<WebMessage['work']> }> = []
     const workConversations = await this.host.listConversations()
+    const assistantWorkIds = new Set(workConversations.filter(work => work.origin === 'assistant').map(work => work.id))
     for (const work of workConversations) {
-      if (work.id === id || work.archivedAt || !work.activeRunId) continue
+      if (work.id !== id && !assistantWorkIds.has(work.id)) continue
+      if (work.archivedAt || !work.activeRunId) continue
       const handle = this.activeRuns.get(work.activeRunId)
       const pending = handle && handle.conversationId === work.id ? await handle.pendingInteractions() : []
       for (const interaction of pending) workInteractions.push({
@@ -494,6 +524,7 @@ export class H5Server {
         ...(work.projectId ? { projectId: work.projectId } : {}),
         approvalPolicy: work.approvalPolicy ?? 'manual',
       })
+      if (work.id === id) continue
       const laneState = handle && handle.conversationId === work.id ? await this.host.getPublicRunLanes(work.id, work.activeRunId).catch(() => undefined) : undefined
       const activeLane = laneState?.lanes.find(lane => lane.status === 'running' || lane.status === 'waiting')
       liveWorkMessages.push({
@@ -511,7 +542,8 @@ export class H5Server {
         },
       })
     }
-    const combined = [...messages, ...queued, ...this.assistantInbox.workNotices(), ...liveWorkMessages].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    const notices = this.assistantInbox.workNotices().filter(message => message.work && assistantWorkIds.has(message.work.conversationId))
+    const combined = [...messages, ...queued, ...notices, ...liveWorkMessages].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
     return { conversation: { ...base, kind: 'assistant' }, messages: combined, receipts, workInteractions }
   }
 
@@ -660,12 +692,15 @@ export class H5Server {
     return out
   }
 
-  private async parseJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  private async parseJsonBody(req: IncomingMessage, maxBytes = MAX_ATTACHMENT_REQUEST): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
       let data = ''
+      let bytes = 0
+      req.setEncoding('utf8')
       req.on('data', (chunk) => {
+        bytes += Buffer.byteLength(chunk)
         data += chunk
-        if (data.length > 1024 * 1024) {
+        if (bytes > maxBytes) {
           req.destroy()
           reject(new Error('PAYLOAD_TOO_LARGE'))
         }
@@ -683,6 +718,11 @@ export class H5Server {
       })
       req.on('error', reject)
     })
+  }
+
+  private async saveAttachments(conversationId: string, attachments: unknown[]): Promise<WebAttachment[]> {
+    if (!Array.isArray(attachments) || attachments.length === 0) return []
+    return new AttachmentStore(this.dataDir, conversationId).save(attachments)
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -705,8 +745,9 @@ export class H5Server {
     }
 
     // Web UI routes and fingerprinted assets are served from the standalone workspace build.
-    if (method === 'GET' && (pathname === '/' || pathname === '/pair' || pathname.startsWith('/assets/'))) {
-      const relativePath = pathname === '/pair' || pathname === '/' ? 'index.html' : pathname.slice(1)
+    const webPage = pathname === '/' || /^\/(chat|work|settings|archive|pair)(\/[^.]*)?$/.test(pathname)
+    if (method === 'GET' && (webPage || pathname.startsWith('/assets/'))) {
+      const relativePath = webPage ? 'index.html' : pathname.slice(1)
       const webRoot = this.webDistDirectory
       if (!webRoot) { res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Pulse Web assets are missing. Build packages/web before starting H5.'); return }
       const path = resolve(webRoot, relativePath)
@@ -716,7 +757,7 @@ export class H5Server {
       }
       try {
         const [content, file] = await Promise.all([readFile(path), stat(path)])
-        res.writeHead(200, { 'Content-Type': pathname === '/' || pathname === '/pair' ? 'text/html; charset=utf-8' : assetTypes[extname(path)] ?? 'application/octet-stream', 'Cache-Control': pathname.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache', 'Content-Length': file.size })
+        res.writeHead(200, { 'Content-Type': webPage ? 'text/html; charset=utf-8' : assetTypes[extname(path)] ?? 'application/octet-stream', 'Cache-Control': pathname.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache', 'Content-Length': file.size })
         res.end(content)
       } catch {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Pulse Web assets are missing. Build packages/web before starting H5.')
@@ -892,6 +933,13 @@ export class H5Server {
       return
     }
 
+    if (pathname === '/api/skills' && method === 'GET') {
+      const skills = await this.host.listSkills()
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify({ skills: skills.map(name => ({ id: name, name })) }))
+      return
+    }
+
     if (pathname === '/api/assistant' && method === 'GET') {
       const view = await this.assistantView()
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
@@ -904,10 +952,21 @@ export class H5Server {
       const body = await this.parseJsonBody(req)
       const text = typeof body.text === 'string' ? body.text.trim() : ''
       const requestId = typeof body.requestId === 'string' ? body.requestId : ''
-      if (!text || text.length > 20_000 || !/^[A-Za-z0-9._:-]{8,128}$/.test(requestId)) {
-        res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: !text ? 'MESSAGE_REQUIRED' : 'ASSISTANT_REQUEST_INVALID' })); return
+      const attachments = await this.saveAttachments(this.assistantInbox.conversationId, Array.isArray(body.attachments) ? body.attachments : [])
+      const skills = Array.isArray(body.skills) ? body.skills.filter((s): s is string => typeof s === 'string') : undefined
+      const mentionedFiles = Array.isArray(body.mentionedFiles) ? body.mentionedFiles.filter((f): f is string => typeof f === 'string') : undefined
+      if ((!text && attachments.length === 0) || text.length > 20_000 || !/^[A-Za-z0-9._:-]{8,128}$/.test(requestId)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: (!text && attachments.length === 0) ? 'MESSAGE_REQUIRED' : 'ASSISTANT_REQUEST_INVALID' })); return
       }
-      const accepted = body.retry === true ? await this.assistantInbox.retry(requestId, text) : await this.assistantInbox.enqueue({ requestId, text })
+      const accepted = body.retry === true
+        ? await this.assistantInbox.retry(requestId, text, attachments.length ? attachments : undefined, skills, mentionedFiles)
+        : await this.assistantInbox.enqueue({
+            requestId,
+            text,
+            ...(attachments.length ? { attachments } : {}),
+            ...(skills ? { skills } : {}),
+            ...(mentionedFiles ? { mentionedFiles } : {}),
+          })
       if (accepted.message.state === 'queued') {
         this.assistantPendingRuns.add(accepted.message.runId)
         this.runConversations.set(accepted.message.runId, this.assistantInbox.conversationId)
@@ -1165,13 +1224,52 @@ export class H5Server {
       return
     }
 
-    const projectViewMatch = pathname.match(/^\/api\/projects\/([^/]+)\/(files|file|search|git\/status|git\/diff)$/)
+    const projectViewMatch = pathname.match(/^\/api\/projects\/([^/]+)\/(files|file|search|git\/status|git\/diff|file-index)$/)
     if (projectViewMatch?.[1] && projectViewMatch[2] && method === 'GET') {
       const project = await this.projects.get(decodeURIComponent(projectViewMatch[1]))
       if (!project) { res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'PROJECT_NOT_FOUND' })); return }
       if (!project.available) { res.writeHead(410, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'PROJECT_DIRECTORY_UNAVAILABLE' })); return }
       const view = projectViewMatch[2]
       try {
+        if (view === 'file-index') {
+          const query = (url.searchParams.get('q') ?? '').trim().toLowerCase()
+          let paths: string[] = []
+          try {
+            const gitRes = await execFileAsync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], { cwd: project.cwd, timeout: 5_000, maxBuffer: 2 * 1024 * 1024 })
+            paths = gitRes.stdout.split(/\r?\n/).filter(Boolean)
+          } catch {
+            const walk = async (dir: string, base: string): Promise<string[]> => {
+              const res: string[] = []
+              const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+              for (const entry of entries) {
+                if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'build') continue
+                const full = join(dir, entry.name)
+                const rel = base ? `${base}/${entry.name}` : entry.name
+                if (entry.isDirectory()) {
+                  res.push(...(await walk(full, rel)))
+                } else if (entry.isFile()) {
+                  res.push(rel)
+                }
+              }
+              return res
+            }
+            paths = await walk(project.cwd, '')
+          }
+          if (query) {
+            paths = paths.filter(p => p.toLowerCase().includes(query))
+          }
+          paths.sort((a, b) => {
+            const aBase = a.split('/').pop()?.toLowerCase() ?? ''
+            const bBase = b.split('/').pop()?.toLowerCase() ?? ''
+            const aStarts = aBase.startsWith(query)
+            const bStarts = bBase.startsWith(query)
+            if (aStarts && !bStarts) return -1
+            if (!aStarts && bStarts) return 1
+            return a.length - b.length || a.localeCompare(b)
+          })
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ paths: paths.slice(0, 100) }))
+          return
+        }
         if (view === 'files') {
           const relativePath = url.searchParams.get('path') || '.'
           const directory = await within(project.cwd, relativePath)
@@ -1273,11 +1371,61 @@ export class H5Server {
       return
     }
 
+    const artifactsMatch = pathname.match(/^\/api\/conversations\/([^/]+)\/artifacts(?:\/(content))?$/)
+    if (artifactsMatch && method === 'GET') {
+      const conversationId = artifactsMatch[1]!
+      try {
+        const value = artifactsMatch[2]
+          ? await this.host.readArtifact(conversationId, url.searchParams.get('path') ?? '', url.searchParams.get('runId') ?? '')
+          : await this.host.listArtifacts(conversationId)
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(value))
+      } catch (error) {
+        const code = error instanceof Error ? error.message : 'ARTIFACT_UNAVAILABLE'
+        res.writeHead(code === 'ARTIFACT_CHANGED' ? 409 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ error: code === 'ARTIFACT_CHANGED' ? code : 'ARTIFACT_UNAVAILABLE' }))
+      }
+      return
+    }
+
+    const attachmentMatch = pathname.match(/^\/api\/conversations\/([^/]+)\/attachments\/([^/]+)$/)
+    if (attachmentMatch && method === 'GET') {
+      const conversationId = attachmentMatch[1]!
+      const attachmentId = attachmentMatch[2]!
+      if (!isSafePathId(conversationId) || !isSafePathId(attachmentId)) { res.writeHead(400).end(); return }
+      const filePath = join(this.dataDir, 'conversations', conversationId, 'attachments', attachmentId)
+      const metaPath = join(this.dataDir, 'conversations', conversationId, 'attachments', `${attachmentId}.meta.json`)
+      try {
+        const metaStr = await readFile(metaPath, 'utf8').catch(() => '{}')
+        const meta = JSON.parse(metaStr)
+        const mediaType = typeof meta.mediaType === 'string' ? meta.mediaType : 'application/octet-stream'
+        const name = typeof meta.name === 'string' ? meta.name : 'attachment'
+        const statResult = await stat(filePath)
+        res.writeHead(200, {
+          'Content-Type': mediaType,
+          'Content-Length': statResult.size,
+          'Content-Disposition': `${mediaType.startsWith('image/') ? 'inline' : 'attachment'}; filename="${encodeURIComponent(name)}"`,
+          'Cache-Control': 'public, max-age=86400',
+        })
+        createReadStream(filePath).pipe(res)
+      } catch {
+        res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'ATTACHMENT_NOT_FOUND' }))
+      }
+      return
+    }
+
     const conversationMatch = pathname.match(/^\/api\/conversations\/([^/]+)$/)
+    if (conversationMatch && method === 'GET') {
+      try {
+        const conversation = await this.host.getConversation(decodeURIComponent(conversationMatch[1]!))
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ ...conversation.summary, ...(conversation.id === this.assistantInbox.conversationId ? { kind: 'assistant' } : {}) }))
+      } catch {
+        res.writeHead(404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ error: 'CONVERSATION_NOT_FOUND' }))
+      }
+      return
+    }
     if (conversationMatch && method === 'PATCH') {
       const conversationId = conversationMatch[1]
-      if (conversationId === this.assistantInbox.conversationId) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'ASSISTANT_CONVERSATION_MANAGED' })); return }
       const body = await this.parseJsonBody(req)
+      if (conversationId === this.assistantInbox.conversationId && Object.keys(body).some(key => key !== 'approvalPolicy')) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'ASSISTANT_CONVERSATION_MANAGED' })); return }
       const title = typeof body.title === 'string' ? body.title.trim().slice(0, 80) : ''
       const hasTitle = typeof body.title === 'string'
       const policy = body.approvalPolicy
@@ -1413,13 +1561,28 @@ export class H5Server {
       if (convId) {
         const body = await this.parseJsonBody(req)
         const text = typeof body.text === 'string' ? body.text : ''
-        if (!text.trim()) {
+        const requestId = typeof body.requestId === 'string' ? body.requestId : undefined
+        if (requestId !== undefined && !/^[A-Za-z0-9._:-]{8,128}$/.test(requestId)) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'REQUEST_ID_INVALID' })); return }
+        if (requestId) {
+          const previous = (await this.host.getConversationMessages(convId)).find(message => message.id === `msg-${requestId}`)
+          if (previous && (previous.text !== text || JSON.stringify((previous.attachments ?? []).map(item => item.id)) !== JSON.stringify(Array.isArray(body.attachments) ? body.attachments.map(item => item?.id) : []) || JSON.stringify(previous.skills ?? []) !== JSON.stringify(body.skills ?? []) || JSON.stringify(previous.mentionedFiles ?? []) !== JSON.stringify(body.mentionedFiles ?? []))) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'REQUEST_ID_REUSED' })); return }
+          if (previous?.runId) { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId: previous.runId })); return }
+        }
+        const attachments = await this.saveAttachments(convId, Array.isArray(body.attachments) ? body.attachments : [])
+        const skills = Array.isArray(body.skills) ? body.skills.filter((s): s is string => typeof s === 'string') : undefined
+        const mentionedFiles = Array.isArray(body.mentionedFiles) ? body.mentionedFiles.filter((f): f is string => typeof f === 'string') : undefined
+        if (!text.trim() && attachments.length === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'MESSAGE_REQUIRED' }))
           return
         }
 
-        const handle = await this.startConversationRun(convId, text)
+        const handle = await this.startConversationRun(convId, text, {
+          ...(requestId ? { requestId } : {}),
+          ...(attachments.length ? { attachments } : {}),
+          ...(skills ? { skills } : {}),
+          ...(mentionedFiles ? { mentionedFiles } : {}),
+        })
         const runId = handle.id
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -1609,7 +1772,7 @@ export class H5Server {
       if (receipt) await this.assistantInbox.update(runId, outcome?.status === 'succeeded' ? 'completed' : outcome?.status === 'cancelled' ? 'failed' : 'failed', outcome?.status === 'cancelled' ? '回复已停止' : outcome?.status === 'failed' ? '回复失败' : outcome ? undefined : '回复状态未能确认').catch(() => undefined)
       const conversationId = this.runConversations.get(runId)
       const link = conversationId ? this.assistantInbox.workLink(conversationId) : undefined
-      if (link && conversationId && outcome) {
+      if (conversationId && outcome) {
         let workspaceResult: Awaited<ReturnType<H5WorkspaceManager['finish']>> | undefined
         const conversation = await this.host.getConversation(conversationId).catch(() => undefined)
         if (conversation?.summary.projectId) {
@@ -1617,19 +1780,23 @@ export class H5Server {
           const accepted = outcome.status === 'succeeded' && taskOutcome?.status === 'accepted'
           workspaceResult = await this.workspaces.finish(conversationId, accepted).catch(error => ({ status: 'pending' as const }))
           if (workspaceResult.status === 'merged' || workspaceResult.status === 'noop') {
-            const project = await this.projects.get(link.projectId)
+            const project = await this.projects.get(conversation.summary.projectId)
             if (project) await this.host.setConversationExecutionWorkspace(conversationId, project.cwd, project.cwd).catch(() => undefined)
           }
         }
-        const messages = await this.host.getWebConversationMessages(conversationId).catch(() => [])
-        const answer = [...messages].reverse().find(message => message.role === 'assistant')?.text ?? outcome.text ?? ''
-        const state = workspaceResult?.status === 'conflict' ? 'conflict' : workspaceResult?.status === 'pending' ? 'pending' : outcome.status === 'succeeded' ? 'succeeded' : outcome.status === 'cancelled' ? 'cancelled' : 'failed'
-        const suffix = state === 'conflict' ? '\n\n工作区结果已保留，但与项目最新修改有冲突，需要人工处理。' : state === 'pending' ? '\n\n工作结果已保留，验收未通过或状态不完整，尚未合入项目。' : ''
-        await this.assistantInbox.addWorkNotice({
-          id: `work-${runId}`, role: 'assistant', runId, createdAt: new Date().toISOString(),
-          text: `${answer || (outcome.status === 'succeeded' ? '工作会话已完成。' : '工作会话已结束，请查看运行记录。')}${suffix}`,
-          work: { conversationId, projectId: link.projectId, title: link.title, state },
-        }).catch(() => undefined)
+        if (link && conversation?.summary.origin === 'assistant') {
+          const messages = await this.host.getWebConversationMessages(conversationId).catch(() => [])
+          const answer = [...messages].reverse().find(message => message.role === 'assistant')?.text ?? outcome.text ?? ''
+          const state = workspaceResult?.status === 'conflict' ? 'conflict' : workspaceResult?.status === 'pending' ? 'pending' : outcome.status === 'succeeded' ? 'succeeded' : outcome.status === 'cancelled' ? 'cancelled' : 'failed'
+          const artifacts = await this.host.listArtifacts(conversationId).catch(() => [])
+          const locations = artifacts.filter(item => item.workspaceState === 'isolated').slice(-10).map(item => `${item.path}（实际位置：${item.absolutePath}）`).join('\n')
+          const suffix = (state === 'conflict' ? '\n\n工作区结果已保留，但与项目最新修改有冲突，需要人工处理。' : state === 'pending' ? '\n\n工作结果已保留，验收未通过或状态不完整，尚未合入项目。' : '') + (locations ? `\n\n以下文件保存在本次工作目录，尚未合入项目；打开工作会话可查看或下载：\n${locations}` : '')
+          await this.assistantInbox.addWorkNotice({
+            id: `work-${runId}`, role: 'assistant', runId, createdAt: new Date().toISOString(),
+            text: `${answer || (outcome.status === 'succeeded' ? '工作会话已完成。' : '工作会话已结束，请查看运行记录。')}${suffix}`,
+            work: { conversationId, projectId: link.projectId, title: link.title, state },
+          }).catch(() => undefined)
+        }
       }
       this.assistantPendingRuns.delete(runId)
       this.finishStream(runId)

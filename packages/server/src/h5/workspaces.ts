@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process'
 import { open, copyFile, lstat, mkdir, readFile, realpath, rename, rm, symlink, writeFile, readlink } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
+import { prepareWorkspaceDependencies } from './dependencies.js'
 
 const exec = promisify(execFile)
 
@@ -154,6 +155,7 @@ export class H5WorkspaceManager {
     const existing = await this.get(conversationId)
     if (existing && existing.status !== 'merged' && existing.status !== 'noop') {
       if (workspaceKind(existing) === 'shared') return this.prepareShared(conversationId, projectId, existing.projectRoot)
+      await this.prepareDependencies(existing.projectRoot, existing.worktreeRoot)
       existing.status = 'running'; existing.updatedAt = new Date().toISOString(); await this.save(existing)
       return { cwd: join(existing.worktreeRoot, existing.projectSubdirectory), isolated: true }
     }
@@ -173,6 +175,7 @@ export class H5WorkspaceManager {
       await git(projectRoot, ['worktree', 'add', '--detach', worktreeRoot, head])
       await applyTrackedSnapshot(projectRoot, worktreeRoot, head, scratch, excludedRoot)
       const baselineCommit = await commitSnapshot(worktreeRoot, 'Pulse task starting snapshot')
+      await this.prepareDependencies(projectRoot, worktreeRoot)
       const record: WorktreeRecord = { schemaVersion: 1, kind: 'git', conversationId, projectId, projectRoot, worktreeRoot, projectSubdirectory, baselineCommit, status: 'running', updatedAt: new Date().toISOString() }
       await this.save(record)
       return { cwd: join(worktreeRoot, projectSubdirectory), isolated: true }
@@ -180,6 +183,11 @@ export class H5WorkspaceManager {
       await git(projectRoot, ['worktree', 'remove', '--force', worktreeRoot]).catch(() => undefined)
       throw error
     } finally { await rm(scratch, { recursive: true, force: true }).catch(() => undefined) }
+  }
+
+  private async prepareDependencies(projectRoot: string, worktreeRoot: string): Promise<void> {
+    const packages = (await git(projectRoot, ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', 'package.json', '**/package.json'])).split('\0').filter(Boolean)
+    await prepareWorkspaceDependencies(projectRoot, worktreeRoot, packages)
   }
 
   private async prepareShared(conversationId: string, projectId: string, cwd: string): Promise<PreparedWorkspace> {

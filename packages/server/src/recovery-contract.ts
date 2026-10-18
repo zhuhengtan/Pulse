@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import type { ToolRegistry } from '@hunterzhu/pulse-tool-sdk'
 import type { RuntimePersistenceBackend } from '@hunterzhu/pulse-runtime'
@@ -12,10 +13,33 @@ function source(name: string): string {
   try { return readFileSync(new URL(`./${name}.js`, import.meta.url), 'utf8') }
   catch { return readFileSync(new URL(`./${name}.ts`, import.meta.url), 'utf8') }
 }
+
+/** Hash the deployed code trees, including helper modules and embedded data. */
+export function recoveryBuildFingerprint(roots: ReadonlyArray<{ name: string; directory: string }>): string {
+  const files: Array<[string, string]> = []
+  const byName = (a: { name: string }, b: { name: string }) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+  for (const root of [...roots].sort(byName)) {
+    const visit = (directory: string, prefix: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true }).sort(byName)) {
+        const path = join(directory, entry.name), name = `${prefix}${entry.name}`
+        if (entry.isSymbolicLink()) throw new Error(`RECOVERY_BUILD_SYMLINK_UNSUPPORTED:${root.name}/${name}`)
+        if (entry.isDirectory()) visit(path, `${name}/`)
+        else if (entry.isFile() && /\.(?:[cm]?[jt]sx?|json)$/.test(entry.name) && !/\.d\.[cm]?ts$/.test(entry.name)) files.push([`${root.name}/${name}`, createHash('sha256').update(readFileSync(path)).digest('hex')])
+      }
+    }
+    visit(root.directory, '')
+  }
+  return digest(files)
+}
+
 export function recoveryFingerprints(registry: ToolRegistry, policy: unknown): RecoveryFingerprints {
-  const runtimeRoot = dirname(createRequire(import.meta.url).resolve('@hunterzhu/pulse-runtime'))
-  const runtimeBuild = readFileSync(join(runtimeRoot, 'scheduler/runtime.js'), 'utf8')
-  return { build: digest([source('index'), source('editing'), source('task-controller/program'), runtimeBuild]),
+  const require = createRequire(import.meta.url)
+  const sourceMode = import.meta.url.endsWith('.ts')
+  const dependencies = ['@hunterzhu/pulse-runtime', '@hunterzhu/pulse-adapters', '@hunterzhu/pulse-tool-sdk'].map(name => {
+    const deployed = dirname(require.resolve(name)), sources = join(deployed, '..', 'src')
+    return { name, directory: sourceMode && existsSync(sources) ? sources : deployed }
+  })
+  return { build: recoveryBuildFingerprint([{ name: '@hunterzhu/pulse-server', directory: dirname(fileURLToPath(import.meta.url)) }, ...dependencies]),
     tools: Object.fromEntries(registry.list().map(tool => [tool.name, digest({ input: tool.inputSchema, output: tool.outputSchema, retry: tool.retrySafety, effects: tool.sideEffectPolicy, permissions: tool.permissions ?? {} })])),
     policy: digest([policy, source('verification-policy'), source('plan-confirmation'), source('security')]) }
 }

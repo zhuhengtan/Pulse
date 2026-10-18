@@ -1,5 +1,7 @@
 import { promises as fs } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { FilesystemTool } from '@hunterzhu/pulse-adapters'
 
@@ -178,6 +180,21 @@ export async function captureCheck(root: string, cwd: string, command: string, a
   const pending = args.filter(arg => !arg.startsWith('-') && /\.(?:[cm]?[jt]sx?|py|sh)$/.test(arg)).map(arg => resolve(cwd, arg))
   const named = pending.length > 0
   if (!named) {
+    // Include tracked checks even if ignored later, but exclude ignored generated
+    // run data. A broad filesystem walk otherwise freezes old Runtime snapshots.
+    let inventory: string | undefined
+    try {
+      inventory = (await promisify(execFile)('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', '.'], { cwd, timeout: 10_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true })).stdout
+    } catch (error) {
+      if ((error as { code?: string | number }).code !== 'ENOENT' && !/not a git repository/i.test(String((error as { stderr?: string }).stderr ?? ''))) throw error
+    }
+    if (inventory !== undefined) {
+      for (const path of inventory.split('\0')) {
+        if (!path || path.split(/[/\\]/).some(part => /^(?:\.|node_modules$|dist$|build$|coverage$|data$|logs$)/.test(part))) continue
+        if (/\.(?:[cm]?[jt]sx?|py|sh|json|toml|yaml|yml)$/.test(path)) pending.push(resolve(cwd, path))
+      }
+      if (pending.length > 20_000) throw Object.assign(new Error('Check scope exceeds bounded manifest; use a named check.'), { code: 'CHECK_SCOPE_TOO_LARGE' })
+    } else {
     const visit = async (dir: string): Promise<void> => {
       for (const item of await fs.readdir(dir, { withFileTypes: true })) {
         if (/^(?:\.|node_modules$|dist$|build$|coverage$|data$|logs$)/.test(item.name)) continue
@@ -188,6 +205,7 @@ export async function captureCheck(root: string, cwd: string, command: string, a
       }
     }
     await visit(cwd)
+    }
   }
   for (const name of ['package.json', 'pnpm-lock.yaml', 'package-lock.json', 'tsconfig.json']) pending.push(join(cwd, name))
   let bytes = 0

@@ -41,6 +41,16 @@ export interface WebRunLanes {
   lanes: WebLane[]
 }
 
+export interface WebAttachment {
+  id: string
+  name: string
+  type: 'image' | 'file'
+  size: number
+  mediaType: string
+  url?: string
+  data?: string
+}
+
 export interface WebMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
@@ -52,6 +62,9 @@ export interface WebMessage {
   deliveryState?: 'queued' | 'replying' | 'failed' | 'interrupted'
   requestId?: string
   work?: { conversationId: string; projectId?: string; title: string; state: 'succeeded' | 'failed' | 'cancelled' | 'interrupted' | 'pending' | 'conflict' | 'running' | 'waiting'; progress?: string; laneCount?: number }
+  attachments?: WebAttachment[]
+  skills?: string[]
+  mentionedFiles?: string[]
 }
 
 export interface WebAssistantMessageReceipt {

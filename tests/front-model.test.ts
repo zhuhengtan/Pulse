@@ -39,7 +39,11 @@ describe('processFrontModel', () => {
       expect((await first.outcome()).text).toBe('要修改哪个文件？')
       const second = await host.sendMessage(conversation.id, { text: 'src/login.ts' })
       for await (const _event of second.events) {}
-      expect((await second.outcome()).text).toContain('已处理请求')
+      // A mock answer without a fix is no longer sufficient to accept the
+      // original implementation request after its filename clarification.
+      expect((await second.taskOutcome())?.status).not.toBe('accepted')
+      const record = JSON.parse(await readFile(join(dir, 'conversations', conversation.id, 'runs', second.id, 'task-record.json'), 'utf8'))
+      expect(record.acceptanceCriteria[0].description).toBe('修复登录按钮重复提交的问题')
       expect(prompts[1]).toContain('修复登录按钮重复提交的问题')
       expect(prompts[1]).toContain('要修改哪个文件？')
     } finally {

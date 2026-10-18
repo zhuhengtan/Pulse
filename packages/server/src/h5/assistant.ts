@@ -1,9 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import type { WebAssistantMessageReceipt, WebMessage } from '../protocol.js'
+import type { WebAssistantMessageReceipt, WebAttachment, WebMessage } from '../protocol.js'
 
-export interface QueuedAssistantMessage extends WebAssistantMessageReceipt { text: string }
+export interface QueuedAssistantMessage extends WebAssistantMessageReceipt {
+  text: string
+  attachments?: WebAttachment[]
+  skills?: string[]
+  mentionedFiles?: string[]
+}
 interface AssistantQueueFile { schemaVersion: 1; conversationId: string; messages: QueuedAssistantMessage[]; notices?: WebMessage[]; workLinks?: Record<string, { projectId: string; title: string }> }
 
 /** Durable inbox for the single assistant conversation. Entries marked replying at
@@ -36,7 +41,7 @@ export class AssistantConversationStore {
     return this.state.conversationId
   }
 
-  async enqueue(input: { requestId: string; text: string }): Promise<{ message: QueuedAssistantMessage; duplicate: boolean }> {
+  async enqueue(input: { requestId: string; text: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }): Promise<{ message: QueuedAssistantMessage; duplicate: boolean }> {
     return this.serial(async () => {
       const state = this.requireState()
       const existing = state.messages.find(item => item.messageId === input.requestId)
@@ -45,20 +50,40 @@ export class AssistantConversationStore {
         return { message: structuredClone(existing), duplicate: true }
       }
       const now = new Date().toISOString()
-      const message: QueuedAssistantMessage = { messageId: input.requestId, runId: `run-${randomUUID()}`, text: input.text, state: 'queued', createdAt: now, updatedAt: now }
+      const message: QueuedAssistantMessage = {
+        messageId: input.requestId,
+        runId: `run-${randomUUID()}`,
+        text: input.text,
+        state: 'queued',
+        createdAt: now,
+        updatedAt: now,
+        ...(input.attachments ? { attachments: input.attachments } : {}),
+        ...(input.skills ? { skills: input.skills } : {}),
+        ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}),
+      }
       state.messages.push(message)
       await this.save()
       return { message: structuredClone(message), duplicate: false }
     })
   }
 
-  async retry(requestId: string, text: string): Promise<{ message: QueuedAssistantMessage; duplicate: boolean }> {
+  async retry(requestId: string, text: string, attachments?: WebAttachment[], skills?: string[], mentionedFiles?: string[]): Promise<{ message: QueuedAssistantMessage; duplicate: boolean }> {
     return this.serial(async () => {
       const state = this.requireState()
       const existing = state.messages.find(item => item.messageId === requestId)
       if (!existing) {
         const now = new Date().toISOString()
-        const created: QueuedAssistantMessage = { messageId: requestId, runId: `run-${randomUUID()}`, text, state: 'queued', createdAt: now, updatedAt: now }
+        const created: QueuedAssistantMessage = {
+          messageId: requestId,
+          runId: `run-${randomUUID()}`,
+          text,
+          state: 'queued',
+          createdAt: now,
+          updatedAt: now,
+          ...(attachments ? { attachments } : {}),
+          ...(skills ? { skills } : {}),
+          ...(mentionedFiles ? { mentionedFiles } : {}),
+        }
         state.messages.push(created)
         await this.save()
         return { message: structuredClone(created), duplicate: false }
@@ -69,6 +94,9 @@ export class AssistantConversationStore {
       existing.runId = `run-${randomUUID()}`
       existing.state = 'queued'
       existing.updatedAt = new Date().toISOString()
+      if (attachments) existing.attachments = attachments
+      if (skills) existing.skills = skills
+      if (mentionedFiles) existing.mentionedFiles = mentionedFiles
       delete existing.error
       await this.save()
       return { message: structuredClone(existing), duplicate: false }
@@ -104,8 +132,16 @@ export class AssistantConversationStore {
     return this.requireState().messages.map(({ text: _text, ...message }) => structuredClone(message))
   }
 
-  transcript(): Array<{ requestId: string; runId: string; text: string; createdAt: string }> {
-    return this.requireState().messages.map(message => ({ requestId: message.messageId, runId: message.runId, text: message.text, createdAt: message.createdAt }))
+  transcript(): Array<{ requestId: string; runId: string; text: string; createdAt: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }> {
+    return this.requireState().messages.map(message => ({
+      requestId: message.messageId,
+      runId: message.runId,
+      text: message.text,
+      createdAt: message.createdAt,
+      ...(message.attachments ? { attachments: message.attachments } : {}),
+      ...(message.skills ? { skills: message.skills } : {}),
+      ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}),
+    }))
   }
 
   async addWorkNotice(message: WebMessage): Promise<void> {

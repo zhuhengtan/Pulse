@@ -1,3 +1,4 @@
+import type { WebAttachment } from '../protocol.js'
 import { fork, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import type { JsonValue, Outcome } from '@hunterzhu/pulse-runtime'
@@ -5,7 +6,8 @@ import type { AssistantEvent, LocalHost, LocalHostOptions, RunHandle, RunUsage, 
 
 export const H5_WORKER_PROTOCOL_VERSION = 1 as const
 
-type WorkerStart = { schemaVersion: 1; type: 'start'; requestId: string; conversationId: string; text: string; resume: boolean }
+type WorkerPayload = { requestId?: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }
+type WorkerStart = Omit<WorkerPayload, 'requestId'> & { messageRequestId?: string } & { schemaVersion: 1; type: 'start'; requestId: string; conversationId: string; text: string; resume: boolean }
 type WorkerConfigure = { schemaVersion: 1; type: 'configure'; runtimeOptions: WorkWorkerRuntimeOptions }
 type WorkerRpc = { schemaVersion: 1; type: 'rpc'; requestId: string; method: 'cancel' | 'reply' | 'replyBatch' | 'pendingInteractions' | 'reviewApproval' | 'submitHumanInput'; args: unknown[] }
 type WorkerShutdown = { schemaVersion: 1; type: 'shutdown' }
@@ -84,7 +86,7 @@ export type WorkWorkerRuntimeOptions = Omit<LocalHostOptions, 'capabilityPacks' 
 /** Starts one isolated Pulse CLI process and adapts its versioned IPC to RunHandle. */
 export async function startH5WorkWorker(
   options: H5WorkWorkerLaunchOptions,
-  input: { conversationId: string; text: string; resume?: boolean }
+  input: WorkerPayload & { conversationId: string; text: string; resume?: boolean }
 ): Promise<RunHandle> {
   const args = ['h5', 'work-worker', input.conversationId, '--data-dir', options.dataDir]
   if (options.configPath) args.push('--config', options.configPath)
@@ -94,7 +96,7 @@ export async function startH5WorkWorker(
   if (options.configPath) env.PULSE_CONFIG = options.configPath
   const child = fork(options.entry, args, { cwd: options.cwd ?? process.cwd(), env, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], serialization: 'json' })
   const run = new RemoteWorkRun(child, input.conversationId, options.startupTimeoutMs ?? 30_000, options.runtimeOptions)
-  await run.start(input.text, input.resume === true)
+  await run.start(input.text, input.resume === true, input)
   return run.handle
 }
 
@@ -172,14 +174,14 @@ class RemoteWorkRun {
 
   private runId: string
 
-  async start(text: string, resume: boolean): Promise<void> {
+  async start(text: string, resume: boolean, input: WorkerPayload = {}): Promise<void> {
     try {
       await this.ready
       const runtimeOptions = JSON.parse(JSON.stringify(this.runtimeOptions ?? {})) as WorkWorkerRuntimeOptions
       await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'configure', runtimeOptions })
       await this.configured
       const requestId = this.startRequestId
-      await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'start', requestId, conversationId: this.conversationId, text, resume })
+      await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'start', requestId, conversationId: this.conversationId, text, resume, ...(input.requestId ? { messageRequestId: input.requestId } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}) })
       const started = await this.started
       this.runId = started.runId
     } catch (error) {
@@ -298,7 +300,7 @@ export async function runH5WorkWorker(host: LocalHost, conversationId: string): 
 
   let handle: RunHandle
   try {
-    handle = start.resume ? await host.resumeRun(conversationId) : await host.sendMessage(conversationId, { text: start.text })
+    handle = start.resume ? await host.resumeRun(conversationId) : await host.sendMessage(conversationId, { text: start.text, ...(start.messageRequestId ? { requestId: start.messageRequestId } : {}), ...(start.attachments ? { attachments: start.attachments } : {}), ...(start.skills ? { skills: start.skills } : {}), ...(start.mentionedFiles ? { mentionedFiles: start.mentionedFiles } : {}) })
     await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'started', requestId: start.requestId, runId: handle.id, conversationId })
   } catch (error) {
     await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'fatal', message: errorText(error).slice(0, 400) }).catch(() => undefined)

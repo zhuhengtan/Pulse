@@ -234,6 +234,41 @@ describe('H5Server End-to-End', () => {
     }
   })
 
+  it('serves deep page entries and resolves archived conversation metadata with authentication', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'h5-routes-test-'))
+    temporaryDirectories.push(dir)
+    const host = createLocalHost({ dataDir: dir, cwd: dir, jarvis: { enabled: false } })
+    const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1' })
+    const info = await server.start()
+    const base = `http://127.0.0.1:${info.port}`
+    try {
+      for (const page of ['/chat', '/work', '/work/new?project=sample', '/work/conv-sample?workspace=files&file=README.md', '/settings', '/settings/models', '/settings/not-found', '/archive', '/pair']) {
+        const response = await fetch(base + page)
+        expect(response.status, page).toBe(200)
+        expect(response.headers.get('content-type'), page).toContain('text/html')
+        expect(await response.text(), page).toContain('<div id="root"></div>')
+      }
+      for (const path of ['/assets/missing.js', '/api/no-such-route', '/preview/00000000-0000-0000-0000-000000000000/']) {
+        const response = await fetch(base + path)
+        expect(response.status, path).not.toBe(200)
+        expect(response.headers.get('content-type') ?? '', path).not.toContain('text/html')
+      }
+      const conversation = await host.createConversation({ title: 'Deep-linked archive', projectId: null })
+      await host.updateConversationOrganization(conversation.id, { archivedAt: new Date().toISOString() })
+      const path = `${base}/api/conversations/${conversation.id}`
+      expect((await fetch(path)).status).toBe(401)
+      const local = await fetch(base + '/api/session/local', { method: 'POST', headers: { Origin: base } })
+      const cookie = local.headers.get('set-cookie')!
+      const response = await fetch(path, { headers: { Cookie: cookie } })
+      expect(response.status).toBe(200)
+      expect(response.headers.get('cache-control')).toBe('no-store')
+      expect(await response.json()).toMatchObject({ id: conversation.id, title: 'Deep-linked archive', archivedAt: expect.any(String) })
+      const missing = await fetch(base + '/api/conversations/conv-missing', { headers: { Cookie: cookie } })
+      expect(missing.status).toBe(404)
+      expect(await missing.json()).toEqual({ error: 'CONVERSATION_NOT_FOUND' })
+    } finally { await server.stop(); await host.close() }
+  })
+
   it('serves pair page, handles pairing, and authorizes conversation endpoints', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'h5-server-test-'))
     temporaryDirectories.push(dir)
@@ -517,7 +552,7 @@ describe('H5Server End-to-End', () => {
     }
   })
 
-  it('projects a work-session ask into the persistent assistant chat', async () => {
+  it.each([true, false])('only projects assistant-origin work into chat (assistant origin: %s)', async assistantOrigin => {
     const dir = await mkdtemp(join(tmpdir(), 'h5-assistant-work-interaction-'))
     temporaryDirectories.push(dir)
     const host = createLocalHost({ cwd: dir, dataDir: dir, mockToolCalls: [
@@ -529,24 +564,37 @@ describe('H5Server End-to-End', () => {
     try {
       const pair = await fetch(`${baseUrl}/api/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: server.createPairingCode().code, name: 'Assistant interaction test' }) })
       const cookie = pair.headers.get('set-cookie') ?? ''
-      const created = await fetch(`${baseUrl}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ title: 'Work needs an answer' }) })
-      const conversation = await created.json() as { id: string }
+      const conversation = assistantOrigin
+        ? await host.createConversation({ title: 'Work needs an answer', origin: 'assistant' })
+        : await fetch(`${baseUrl}/api/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ title: 'Work needs an answer', origin: 'assistant' }) }).then(response => response.json()) as { id: string }
+      // The public creation API cannot spoof the trusted chat-origin marker.
+      expect((await host.getConversation(conversation.id)).summary.origin).toBe(assistantOrigin ? 'assistant' : undefined)
       const sent = await fetch(`${baseUrl}/api/conversations/${conversation.id}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ text: 'Start work and ask me a question.' }) })
       const { runId } = await sent.json() as { runId: string }
-      await vi.waitFor(async () => {
+      const snapshot = await vi.waitFor(async () => {
         const snapshot = await fetch(`${baseUrl}/api/runs/${runId}/state`, { headers: { Cookie: cookie } }).then(response => response.json()) as { interactions?: unknown[] }
         expect(snapshot.interactions?.length).toBeGreaterThan(0)
+        return snapshot
       }, { timeout: 5_000, interval: 25 })
       const assistant = await fetch(`${baseUrl}/api/assistant`, { headers: { Cookie: cookie } }).then(response => response.json()) as { messages: Array<{ id: string; work?: { conversationId: string; title: string; state: string } }>; workInteractions: Array<{ runId: string; conversationId: string; title: string; approvalPolicy: string; kind: string; items: Array<{ input: Record<string, unknown> }> }> }
-      expect(assistant.workInteractions).toEqual([expect.objectContaining({ runId, conversationId: conversation.id, title: 'Start work and ask me a question.', approvalPolicy: 'manual', kind: 'ask', items: [expect.objectContaining({ input: expect.objectContaining({ prompt: 'Choose a mode' }) })] })])
-      expect(assistant.messages.find(message => message.id === `work-live-${runId}`)?.work).toMatchObject({ conversationId: conversation.id, state: 'waiting' })
-      const interaction = assistant.workInteractions[0]!
+      if (assistantOrigin) {
+        expect(assistant.workInteractions).toEqual([expect.objectContaining({ runId, conversationId: conversation.id, title: 'Start work and ask me a question.', approvalPolicy: 'manual', kind: 'ask', items: [expect.objectContaining({ input: expect.objectContaining({ prompt: 'Choose a mode' }) })] })])
+        expect(assistant.messages.find(message => message.id === `work-live-${runId}`)?.work).toMatchObject({ conversationId: conversation.id, state: 'waiting' })
+      } else {
+        expect(assistant.workInteractions).toEqual([])
+        expect(assistant.messages.filter(message => message.work)).toEqual([])
+      }
+      const interaction = (snapshot.interactions as typeof assistant.workInteractions)[0]!
       const answer = await fetch(`${baseUrl}/api/runs/${runId}/replies`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ conversationId: conversation.id, groupId: interaction.groupId, requestId: 'assistant-work-answer-0001', answers: [{ effectId: interaction.items[0]!.effectId, value: { value: 'safe' } }] }) })
       expect(await answer.json()).toMatchObject({ ok: true, duplicate: false })
       const events = await readSse(`${baseUrl}/api/runs/${runId}/events`, cookie)
       expect(events.some(event => event.type === 'complete' && (event.data as { status?: string })?.status === 'succeeded')).toBe(true)
       const finalState = await fetch(`${baseUrl}/api/runs/${runId}/state`, { headers: { Cookie: cookie } }).then(response => response.json()) as { state: string }
       expect(finalState.state).toBe('succeeded')
+      if (!assistantOrigin) {
+        const finished = await fetch(`${baseUrl}/api/assistant`, { headers: { Cookie: cookie } }).then(response => response.json()) as typeof assistant
+        expect(finished.messages.filter(message => message.work)).toEqual([])
+      }
     } finally {
       await server.stop()
       await host.close()
