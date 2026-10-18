@@ -2214,6 +2214,12 @@ export class PulseRuntime {
     if (execution.executionState === 'remote_unknown') { this.markRemoteUnknown(effectId, execution.sideEffectState ?? 'none'); return false }
     let effectiveExecution = execution
     let outputError = error ?? execution.error
+    // A timeout remains a failure even when an aborted executor returns a generic cancellation.
+    const timeoutReason = effect.cancelRequested?.reason
+    if (timeoutReason === 'ATTEMPT_TIMEOUT' || timeoutReason === 'TIMEOUT') {
+      outputError = { code: timeoutReason, message: `Effect exceeded its execution time limit (${timeoutReason}).`, retryable: false }
+      effectiveExecution = { ...execution, status: 'failed', executionState: 'failed', error: outputError }
+    }
     let resultDerivedFrom = [...(effect.derivedFrom ?? [])]
     let publishedArtifact: ArtifactRecord | undefined
     const rawInput = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}

@@ -45,6 +45,7 @@ export interface RuntimeToolDefinition {
   execute(input: unknown, context: RuntimeToolContext): Promise<unknown> | unknown
   executionRef?(input: unknown, context: RuntimeToolContext): JsonValue
   resolveResources?(input: unknown): ResourceLockSpec[]
+  resolveTimeoutMs?(input: unknown): number
   reconcile?(executionRef: JsonValue, context: RuntimeReconcileContext): Promise<RuntimeReconcileResult>
   normalize?(output: unknown): JsonValue
   summarize?(output: unknown): JsonValue
@@ -260,7 +261,9 @@ export class RuntimeToolRegistry {
   admission(name: string, input: unknown): RuntimeToolAdmission {
     const definition = this.require(name)
     const parsed = this.validateInput(name, input)
-    return { locks: structuredClone(this.resolveResources(name, parsed)), sideEffectPolicy: definition.manifest.sideEffectPolicy, defaultTimeoutMs: definition.manifest.defaultTimeoutMs, retrySafety: definition.manifest.retrySafety, version: definition.manifest.version }
+    const timeout = definition.resolveTimeoutMs?.(parsed) ?? definition.manifest.defaultTimeoutMs
+    if (definition.resolveTimeoutMs && (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > 600_000)) throw Object.assign(new Error('Resolved tool timeout is outside host limits.'), { code: 'INVALID_TOOL_TIMEOUT' })
+    return { locks: structuredClone(this.resolveResources(name, parsed)), sideEffectPolicy: definition.manifest.sideEffectPolicy, defaultTimeoutMs: timeout, retrySafety: definition.manifest.retrySafety, version: definition.manifest.version }
   }
 
   private require(name: string): RuntimeToolDefinition {

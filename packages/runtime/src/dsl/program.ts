@@ -696,7 +696,7 @@ export class StepBuilder<TState = JsonValue> {
     })
     return this
   }
-  addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[] | ((ctx: StepContext<TState>) => string[]); maxTurns?: number; maxTruncationRetries?: number; maxToolsPerTurn?: number; maxReadOnlyRounds?: number | ((ctx: StepContext<TState>) => number | undefined); serialTools?: string[]; stopAfterFirstSerialTool?: boolean; blockReadOnlyTools?: (ctx: StepContext<TState>) => boolean; preserveReadContinuations?: boolean; scopeToolCallsToEffect?: boolean; reuseSettledEvidence?: boolean; onEvidenceReused?: (refs: ResultRef[], ctx: StepContext<TState>) => void; onReuseEvidence?: (refs: ResultRef[], ctx: StepContext<TState>) => NextStepTarget<TState>; resetTurnsOnEntry?: (ctx: StepContext<TState>) => string | number | undefined; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; toolApproval?: { prompt: string | ((calls: JsonValue, ctx: StepContext<TState>) => string); onDenied?: (reason: string, ctx: StepContext<TState>) => NextStepTarget<TState> }; onFinish: ((resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>) | { text: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; structured?: { schema: ZodTypeAny; onParsed: (data: unknown, ctx: StepContext<TState>) => NextStepTarget<TState> } }; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; prepareQuestion?: (toolName: string, input: JsonValue, ctx: StepContext<TState>) => JsonValue; onHumanReply?: (question: JsonValue, answer: JsonValue, ctx: StepContext<TState>) => NextStepTarget<TState> | undefined; onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
+  addReActLoopStep(name: string, options: { task?: string; instruction: string | ((view: InstructionView<TState>) => string); inputs?: (ctx: StepContext<TState>) => StepInputs; toolAllow?: string[] | ((ctx: StepContext<TState>) => string[]); maxTurns?: number; maxTruncationRetries?: number; maxToolsPerTurn?: number; maxReadOnlyRounds?: number | ((ctx: StepContext<TState>) => number | undefined); serialTools?: string[]; stopAfterFirstSerialTool?: boolean; blockReadOnlyTools?: (ctx: StepContext<TState>) => boolean; preserveReadContinuations?: boolean; scopeToolCallsToEffect?: boolean; reuseSettledEvidence?: boolean; onEvidenceReused?: (refs: ResultRef[], ctx: StepContext<TState>) => void; onReuseEvidence?: (refs: ResultRef[], ctx: StepContext<TState>) => NextStepTarget<TState>; resetTurnsOnEntry?: (ctx: StepContext<TState>) => string | number | undefined; outputSchema?: ZodTypeAny; requirements?: Record<string, JsonValue>; manualApprovalFallback?: boolean; toolApproval?: { requiresApproval?: (calls: JsonValue) => boolean; prompt: string | ((calls: JsonValue, ctx: StepContext<TState>) => string); onDenied?: (reason: string, ctx: StepContext<TState>) => NextStepTarget<TState> }; onFinish: ((resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>) | { text: (resultRef: ResultRef, ctx: StepContext<TState>) => NextStepTarget<TState>; structured?: { schema: ZodTypeAny; onParsed: (data: unknown, ctx: StepContext<TState>) => NextStepTarget<TState> } }; onMaxTurns?: (ctx: StepContext<TState>) => NextStepTarget<TState>; prepareQuestion?: (toolName: string, input: JsonValue, ctx: StepContext<TState>) => JsonValue; onHumanReply?: (question: JsonValue, answer: JsonValue, ctx: StepContext<TState>) => NextStepTarget<TState> | undefined; onError?: (error: RuntimeError, ctx: StepContext<TState>) => NextStepTarget<TState> }): this {
     this.compactionBoundaries.add(name)
     // The decode step handles ReAct compaction after consuming the current
     // model result. This preserves the wait's result references while the
@@ -767,12 +767,31 @@ export class StepBuilder<TState = JsonValue> {
       return { ...output, next: `${name}:decode`, locals: { ...locals, $sdk: { ...sdk, [failureKey]: { signature, count, observations: [{ code: 'INVALID_TOOL_INPUT', message }] }, [`${name}QueuedTools`]: [], [`${name}StopAfterSerial`]: false } } }
     }
     this.handlers.set(name, (ctx) => { const resetToken = options.resetTurnsOnEntry?.(ctx); const priorToken = sdkLocals(ctx.lane.resume.locals)[resetTokenKey]; const reset = resetToken !== undefined && priorToken !== resetToken; const turn = (reset ? 0 : readTurns(ctx)) + 1; const inputs = options.inputs?.(ctx) ?? {}; const output = submitModel(ctx, turn, inputs); const locals = writeTurns(ctx, turn, inputs, resetToken); return { ...output, next: `${name}:decode`, locals } })
+    this.handlers.set(`${name}:manual-approval`, (ctx) => {
+      const dependency = Object.values(waitResolution(ctx.resumeInput)?.dependencies ?? {}).find(item => item.state === 'settled' && item.outcome.resultRef)
+      const ref = dependency?.state === 'settled' ? dependency.outcome.resultRef : undefined
+      const answer = ref ? readResult(ctx, ref) : undefined
+      if (!answer || typeof answer !== 'object' || Array.isArray(answer) || answer.approved !== true) return { next: { fail: { code: 'APPROVAL_DENIED', message: 'Manual approval denied or cancelled. Operation not executed.', retryable: false } } }
+      const calls = sdkLocals(ctx.lane.resume.locals)[`${name}ManualCalls`]
+      const question = ref ? ctx.results.meta(ref)?.humanQuestion : undefined
+      if (!Array.isArray(calls) || !calls.length || !question || typeof question !== 'object' || Array.isArray(question) || JSON.stringify(question.tools) !== JSON.stringify(calls)) return { next: { fail: { code: 'APPROVAL_DIGEST_MISMATCH', message: 'Approved operation does not match the persisted question.', retryable: false } } }
+      return { actions: [{ type: 'submit_effects', effects: calls.map((call, index) => { const c = call as Record<string, JsonValue>; return { key: `${name}-manual-approved-${index}`, kind: 'tool' as const, concurrencyClass: 'tool' as const, toolCallId: String(c.toolCallId), derivedFrom: ref ? [ref] : [], input: { name: String(c.toolName), arguments: c.input ?? {}, toolCallId: String(c.toolCallId) } } }), wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:tools`, locals: { ...(ctx.lane.resume.locals as Record<string, JsonValue>), $sdk: { ...sdkLocals(ctx.lane.resume.locals), [`${name}ManualCalls`]: null } } }
+    })
     this.handlers.set(`${name}:tools`, (ctx) => {
       for (const ref of resultRefsFromWait(ctx)) {
         const meta = ctx.results.meta(ref)
         if (meta?.effectKind !== 'human' || meta.outcomeStatus !== 'succeeded' || !meta.humanQuestion) continue
         const next = options.onHumanReply?.(meta.humanQuestion, readResult(ctx, ref) ?? null, ctx)
         if (next) return { next }
+      }
+      const manualCalls = Object.values(waitResolution(ctx.resumeInput)?.dependencies ?? {}).flatMap(dependency => {
+        const details = dependency.state === 'settled' ? dependency.outcome.error?.details : undefined
+        if (!details || typeof details !== 'object' || Array.isArray(details) || details.manualApproval !== true || typeof details.toolName !== 'string' || typeof details.toolCallId !== 'string') return []
+        return [{ toolName: details.toolName, toolCallId: details.toolCallId, input: details.input ?? {} }]
+      })
+      if (options.manualApprovalFallback && manualCalls.length) {
+        const calls = [...new Map(manualCalls.map(call => [call.toolCallId, call])).values()]
+        return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-manual-approval`, kind: 'human', concurrencyClass: 'none', input: { prompt: '本地审批未通过或不可用。请确认下面的原始操作；未确认前不会执行。', tools: calls } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:manual-approval`, locals: { ...(ctx.lane.resume.locals as Record<string, JsonValue>), $sdk: { ...sdkLocals(ctx.lane.resume.locals), [`${name}ManualCalls`]: calls } } }
       }
       // Stop before another model turn or queued call can bypass a denied operation.
       const stopped = Object.values(waitResolution(ctx.resumeInput)?.dependencies ?? {}).find(dependency => dependency.state === 'settled' && (dependency.outcome.status === 'cancelled' || dependency.outcome.error?.code.startsWith('AI_APPROVAL_') || ['AI_APPROVAL_DENIED', 'APPROVAL_DENIED', 'APPROVAL_REQUIRED', 'TASK_MODEL_CALL_BUDGET_EXHAUSTED', 'TASK_MODEL_CALL_BUDGET_CORRUPT'].includes(dependency.outcome.error?.code ?? '')))
@@ -1186,7 +1205,7 @@ export class StepBuilder<TState = JsonValue> {
           if (skippedNames.length) sdk[`${name}SkippedTools`] = skippedNames
           return { actions: [{ ...action, effects: action.effects.slice(0, limit) }], next: `${name}:tools`, locals: { ...base, $sdk: sdk } }
         }
-        if (options.toolApproval) {
+        if (options.toolApproval && (options.toolApproval.requiresApproval?.(calls as unknown as JsonValue) ?? true)) {
           const approvalKey = `${name}PendingToolCalls`
           const digestKey = `${name}PendingToolDigest`
           const locals = ctx.lane.resume.locals && typeof ctx.lane.resume.locals === 'object' && !Array.isArray(ctx.lane.resume.locals) ? ctx.lane.resume.locals as Record<string, JsonValue> : {}
