@@ -1,0 +1,7 @@
+/* Ant Design owns control behavior; application classes retain Pulse's layouts. */
+.pulse-button { height:auto; padding:0; border:0; border-radius:0; background:transparent; color:inherit; font:inherit; line-height:inherit; box-shadow:none; white-space:normal; text-align:inherit; }
+.pulse-button:disabled { opacity:.5; cursor:not-allowed; }
+.pulse-select { min-width:120px; }
+.pulse-disclosure .ant-collapse-content-box { padding-inline:0; }
+.pulse-disclosure .ant-collapse-header { padding-inline:0; }
+.pulse-checkbox { color:inherit; }

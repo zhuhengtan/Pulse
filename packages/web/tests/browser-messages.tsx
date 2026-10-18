@@ -32,6 +32,8 @@ function Acceptance() {
     <MessageBubble mode={mode} message={{ id: 'user', role: 'user', text: '你好，Pulse', createdAt: '' }} retry={() => {}} onOpenWork={() => {}}/>
     <MessageBubble mode={mode} message={{ id: 'assistant', role: 'assistant', text, createdAt: '' }} retry={() => {}} onOpenWork={() => {}}/>
     <MessageBubble mode={mode} message={{ id: 'short', role: 'assistant', text: '好的', createdAt: '' }} retry={() => {}} onOpenWork={() => {}}/>
+    <MessageBubble mode={mode} message={{id:'failed',role:'user',text:'示例失败消息',deliveryState:'failed',requestId:'fixture-request',createdAt:''}} retry={()=>setResult('示例重试已触发')} onOpenWork={()=>{}}/>
+    <MessageBubble mode={mode} message={{id:'work',role:'assistant',text:'',work:{conversationId:'fixture-work',title:'检查全部页面和较长的工作卡片标题',state:'pending',progress:'已完成页面检查，等待你查看结果。',laneCount:3},createdAt:''}} retry={()=>{}} onOpenWork={()=>setResult('已打开示例工作')}/>
     <MessageBubble mode={mode} message={{ id: 'stream', role: 'assistant', text: stream, deliveryState: 'replying', createdAt: '' }} retry={() => {}} onOpenWork={() => {}}/>
   </div></PulseDesignSystem>
 }

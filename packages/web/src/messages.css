@@ -35,9 +35,10 @@
 }
 .chat:has(.navbar.surface-chat) .messages:not(.is-empty) { gap: 16px; }
 .message.message--chat.user, .message.message--work.user { align-items: flex-end; margin-left: auto; }
-.message > .bubble { position: relative; }
+.message-bubble-row { display: flex; align-items: flex-end; gap: 6px; max-width: 100%; min-width: 0; }
+.message > .message-bubble-row > .bubble { position: relative; min-width: 0; }
 .message-menu-anchor { position: absolute; width: 1px; height: 1px; pointer-events: none; }
-.message.message--chat > .bubble {
+.message.message--chat > .message-bubble-row > .bubble {
   width: fit-content;
   max-width: 100%;
   min-width: 0;
@@ -50,12 +51,12 @@
   line-height: 1.65;
   overflow-wrap: anywhere;
 }
-.message.message--chat.user > .bubble {
+.message.message--chat.user > .message-bubble-row > .bubble {
   border-radius: 18px 18px 5px 18px;
   background: var(--message-outgoing);
   color: var(--message-outgoing-text);
 }
-.message.message--work.assistant > .bubble { padding: 2px 0; background: transparent; color: var(--ink); }
+.message.message--work.assistant > .message-bubble-row > .bubble { padding: 2px 0; background: transparent; color: var(--ink); }
 .message.message--chat .markdown > :first-child { margin-top: 0; }
 .message.message--chat .markdown > :last-child { margin-bottom: 0; }
 .message.message--chat .markdown { min-width: 0; max-width: 100%; }
@@ -65,7 +66,7 @@
 .message .code-block pre > code { display: block; width: max-content; min-width: 100%; overflow: visible; padding: 0; }
 .message .markdown th { background: var(--soft); color: var(--ink); }
 .message .markdown th, .message .markdown td { border-color: var(--line); }
-.message.message--chat:focus-visible > .bubble, .message .bubble.has-message-menu {
+.message.message--chat:focus-visible > .message-bubble-row > .bubble, .message .bubble.has-message-menu {
   border-color: var(--blue);
   outline: 2px solid color-mix(in srgb, var(--blue) 18%, transparent);
   outline-offset: 2px;
@@ -118,11 +119,15 @@
 @media (max-width: 767px) {
   .messages:not(.is-empty) { padding: 20px 12px 16px; gap: 14px; }
   .message.message--chat, .message.message--work { max-width: 94%; }
-  .message.message--chat > .bubble { padding: 11px 13px; font-size: 15px; border-radius: 16px 16px 16px 4px; }
-  .message.message--chat.user > .bubble { border-radius: 16px 16px 4px 16px; }
+  .message.message--chat > .message-bubble-row > .bubble { padding: 11px 13px; font-size: 15px; border-radius: 16px 16px 16px 4px; }
+  .message.message--chat.user > .message-bubble-row > .bubble { border-radius: 16px 16px 4px 16px; }
 }
 @media (hover: none), (pointer: coarse) {
   .message-copy-action, .message-time { display: none; }
   .message-footer { height: auto; min-height: 0; }
   .message-footer:has(.message-feedback:empty):not(:has(small)) { display: none; }
 }
+
+.message.user .delivery-state.failed::before, .message.user .delivery-state.interrupted::before { display: none; }
+.message .message-retry { flex: 0 0 28px; display: grid; place-items: center; width: 28px; height: 28px; min-height: 28px; padding: 0; border: 0; border-radius: 50%; background: #d9363e; color: #fff; font-size: 18px; font-weight: 700; cursor: pointer; }
+.message .message-retry:hover { background: #b3262e; }

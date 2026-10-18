@@ -38,14 +38,15 @@ export function TerminalConsole({ terminalId, transport, active }: { terminalId:
       socket.onopen = () => { retries = 0; setState('已连接'); scheduleFit() }
       socket.onmessage = event => {
         try {
-          const message = JSON.parse(String(event.data)) as { type?: string; data?: string; code?: number; signal?: number }
+          const message = JSON.parse(String(event.data)) as { type?: string; data?: string; code?: number; signal?: number; exit?: { code: number; signal?: number } }
           if (message.type === 'snapshot') {
             const snapshot = message.data ?? ''
             if (!received) terminal.write(snapshot)
             else if (snapshot.startsWith(received)) terminal.write(snapshot.slice(received.length))
             else if (!snapshot.endsWith(received)) terminal.write(`\r\n[终端已重连，以下为当前输出快照]\r\n${snapshot}`)
             received = snapshot.slice(-512 * 1024)
-            if (message.code !== undefined) { terminal.write(`\r\n[进程已退出，代码 ${message.code}]\r\n`); setState('进程已退出') }
+            const exitCode = message.exit?.code ?? message.code
+            if (exitCode !== undefined) { terminal.write(`\r\n[进程已退出，代码 ${exitCode}]\r\n`); setState('进程已退出') }
           } else if (message.type === 'output' && typeof message.data === 'string') {
             terminal.write(message.data); received = `${received}${message.data}`.slice(-512 * 1024)
           } else if (message.type === 'exit') { terminal.write(`\r\n[进程已退出，代码 ${message.code ?? '未知'}]\r\n`); setState('进程已退出') }

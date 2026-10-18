@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { App as AntdApp, ConfigProvider, theme as antdTheme } from 'antd'
+import { StyleProvider } from '@ant-design/cssinjs'
 import zhCN from 'antd/locale/zh_CN'
 
 function prefersDarkTheme(): boolean {
@@ -44,13 +45,14 @@ export function PulseDesignSystem({ children }: { children: ReactNode }) {
       Input: { controlHeight: 42, activeShadow: '0 0 0 3px rgba(66,99,235,.12)' },
       InputNumber: { controlHeight: 42, activeShadow: '0 0 0 3px rgba(66,99,235,.12)' },
       Select: { controlHeight: 42, optionSelectedBg: dark ? '#30384d' : '#eef2ff' },
+      Tabs: { itemSelectedColor: dark ? '#9eafff' : '#4263eb', itemActiveColor: dark ? '#9eafff' : '#4263eb', inkBarColor: dark ? '#9eafff' : '#4263eb' },
       Card: { borderRadiusLG: 14 },
       Menu: { itemBorderRadius: 8, itemHeight: 42 },
       Modal: { borderRadiusLG: 16 },
     },
   }), [dark])
 
-  return <ConfigProvider locale={zhCN} theme={theme} button={{ autoInsertSpace: false }}>
+  return <StyleProvider layer><ConfigProvider locale={zhCN} theme={theme} button={{ autoInsertSpace: false }}>
     <AntdApp className="pulse-ant-app">{children}</AntdApp>
-  </ConfigProvider>
+  </ConfigProvider></StyleProvider>
 }

@@ -1,3 +1,4 @@
+import { PulseButton, usePulseDialogs } from './PulseControls.js'
 import { useEffect, useRef, useState } from 'react'
 import { Popover } from 'antd-mobile'
 import { Icon } from './Icon.js'
@@ -6,15 +7,31 @@ import { copyText } from './clipboard.js'
 import { useMessageActions } from './useMessageActions.js'
 import type { WebMessage } from './transport.js'
 
-export function MessageBubble({ message, mode, retry, onOpenWork }: {
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+export function MessageBubble({ message, mode, retry, onOpenWork, onFileClick }: {
   message: WebMessage
   mode: 'chat' | 'work'
   retry: () => void
   onOpenWork: (conversationId: string) => void
+  onFileClick?: ((path: string) => void) | undefined
 }) {
+  const dialogs = usePulseDialogs()
+  const retryInFlight = useRef(false)
+  const confirmRetry = async () => {
+    if (retryInFlight.current) return
+    retryInFlight.current = true
+    try { if (await dialogs.confirm('重新发送这条消息及其附件？')) retry() }
+    finally { retryInFlight.current = false }
+  }
   const actions = useMessageActions(`${mode}:${message.id}`)
   const [feedback, setFeedback] = useState('')
   const [copying, setCopying] = useState(false)
+  const [previewImage, setPreviewImage] = useState<string | null>(null)
   const feedbackTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const copyInFlight = useRef(false)
   const mounted = useRef(true)
@@ -41,15 +58,58 @@ export function MessageBubble({ message, mode, retry, onOpenWork }: {
   const timeLabel = validTime ? new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(sentAt).replaceAll('/', '-') : ''
   const timeTitle = validTime ? `${sentAt.toLocaleString('zh-CN', { hour12: false })}（本地时间）` : ''
   const copyLabel = message.role === 'user' ? '复制消息' : '复制回复'
-  return <article className={`message message--${mode} ${message.role === 'user' ? 'user' : 'assistant'}`} tabIndex={message.text.trim() ? 0 : undefined} aria-label={message.role === 'user' ? '你的消息' : 'Pulse 消息'} onKeyDown={event => { if (message.text.trim() && event.target === event.currentTarget && (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) { event.preventDefault(); actions.setAnchor({ x: 16, y: 12 }); actions.open() } }}>
-    {message.text.trim() && <div className={`bubble ${actions.menuOpen ? 'has-message-menu' : ''}`} {...actions.gesture}><Markdown text={message.text} />
-      <Popover trigger="click" visible={actions.menuOpen} onVisibleChange={actions.setMenuOpen} destroyOnHide placement={message.role === 'user' ? 'top-end' : 'top-start'} className="message-mobile-popover" content={<div>{validTime && <time className="message-menu-time" dateTime={sentAt.toISOString()} title={timeTitle}>{timeLabel}</time>}<div role="menu" aria-label="消息操作"><button type="button" role="menuitem" disabled={copying} onClick={() => void copy()}><Icon name="copy"/><span>复制</span></button></div></div>}>
-        <span className="message-menu-anchor" aria-hidden="true" style={{ left: actions.anchor.x, top: actions.anchor.y }}/>
-      </Popover>
+
+  const hasContent = Boolean(message.text.trim()) || Boolean(message.attachments?.length)
+  const canRetry = (message.deliveryState === 'failed' || message.deliveryState === 'interrupted') && Boolean(message.requestId)
+  const images = (message.attachments || []).filter(att => att.type === 'image')
+  const files = (message.attachments || []).filter(att => att.type === 'file')
+
+  return <article className={`message message--${mode} ${message.role === 'user' ? 'user' : 'assistant'}`} tabIndex={hasContent ? 0 : undefined} aria-label={message.role === 'user' ? '你的消息' : 'Pulse 消息'} onKeyDown={event => { if (hasContent && event.target === event.currentTarget && (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) { event.preventDefault(); actions.setAnchor({ x: 16, y: 12 }); actions.open() } }}>
+    {(hasContent || canRetry) && <div className="message-bubble-row">
+      {canRetry && <button type="button" className="message-retry" aria-label="发送失败，重新发送" title="发送失败，点击确认重新发送" onClick={() => void confirmRetry()}>!</button>}
+      {hasContent && <div className={`bubble ${actions.menuOpen ? 'has-message-menu' : ''}`} {...actions.gesture}>
+        {message.text.trim() && <Markdown text={message.text} onFileClick={onFileClick} />}
+        {images.length > 0 && (
+          <div className="message-attachments-grid">
+            {images.map(img => {
+              const src = img.url || (img.data ? (img.data.startsWith('data:') ? img.data : `data:${img.mediaType};base64,${img.data}`) : '')
+              return (
+                <div key={img.id} className="message-image-attachment" onClick={() => setPreviewImage(src)}>
+                  <img src={src} alt={img.name} loading="lazy" />
+                </div>
+              )
+            })}
+          </div>
+        )}
+        {files.length > 0 && (
+          <div className="message-attachments-grid">
+            {files.map(file => {
+              const href = file.url || (file.data ? (file.data.startsWith('data:') ? file.data : `data:${file.mediaType};base64,${file.data}`) : '#')
+              return (
+                <a key={file.id} href={href} download={file.name} className="message-file-card" target="_blank" rel="noopener noreferrer">
+                  <span className="file-icon">📄</span>
+                  <div className="file-info">
+                    <span className="file-name">{file.name}</span>
+                    <span className="file-size">{file.size ? formatFileSize(file.size) : file.mediaType}</span>
+                  </div>
+                </a>
+              )
+            })}
+          </div>
+        )}
+        <Popover trigger="click" visible={actions.menuOpen} onVisibleChange={actions.setMenuOpen} destroyOnHide placement={message.role === 'user' ? 'top-end' : 'top-start'} className="message-mobile-popover" content={<div>{validTime && <time className="message-menu-time" dateTime={sentAt.toISOString()} title={timeTitle}>{timeLabel}</time>}<div role="menu" aria-label="消息操作"><PulseButton type="button" role="menuitem" disabled={copying} onClick={() => void copy()}><Icon name="copy"/><span>复制</span></PulseButton></div></div>}>
+          <span className="message-menu-anchor" aria-hidden="true" style={{ left: actions.anchor.x, top: actions.anchor.y }}/>
+        </Popover>
+      </div>}
     </div>}
-    {message.deliveryState && <div className={`delivery-state ${message.deliveryState}`}><span>{message.deliveryState === 'queued' ? '排队中' : message.deliveryState === 'replying' ? '正在回复' : message.deliveryState === 'interrupted' ? '回复中断' : '发送失败'}</span>{(message.deliveryState === 'failed' || message.deliveryState === 'interrupted') && message.requestId && <button type="button" onClick={retry}>明确重试</button>}</div>}
-    {message.work && <button type="button" className={`work-message-card ${message.work.state}`} onClick={() => onOpenWork(message.work!.conversationId)}><span className="work-message-icon"><Icon name="folder"/></span><span><strong>{message.work.title}</strong><small>{workCardStatus(message.work.state)} · 查看工作会话</small>{message.work.progress && <small className="work-progress">{message.work.progress}</small>}{typeof message.work.laneCount === 'number' && <small>{message.work.laneCount} 条执行 Lane</small>}</span><Icon name="chevron"/></button>}
-    {message.text.trim() && <div className="message-footer"><button type="button" className="message-copy-action" aria-label={copyLabel} title={copyLabel} disabled={copying} onClick={() => void copy()}><Icon name="copy" size={15}/></button>{validTime && <time className="message-time" dateTime={sentAt.toISOString()} title={timeTitle} aria-label="发送时间">{timeLabel}</time>}<span className="message-feedback" role="status">{feedback}</span>{message.restored && <small>已从归档恢复答案</small>}{message.legacy && <small>旧版记录</small>}</div>}
+    {previewImage && (
+      <div className="attachment-modal-overlay" onClick={() => setPreviewImage(null)}>
+        <img src={previewImage} alt="放大预览" className="attachment-modal-image" />
+      </div>
+    )}
+    {message.deliveryState && <div className={`delivery-state ${message.deliveryState}`}><span>{message.deliveryState === 'queued' ? '排队中' : message.deliveryState === 'replying' ? '正在回复' : message.deliveryState === 'interrupted' ? '回复中断' : '发送失败'}</span></div>}
+    {message.work && <PulseButton type="button" className={`work-message-card ${message.work.state}`} onClick={() => onOpenWork(message.work!.conversationId)}><span className="work-message-icon"><Icon name="folder"/></span><span><strong>{message.work.title}</strong><small>{workCardStatus(message.work.state)} · 查看工作会话</small>{message.work.progress && <small className="work-progress">{message.work.progress}</small>}{typeof message.work.laneCount === 'number' && <small>{message.work.laneCount} 条执行 Lane</small>}</span><Icon name="chevron"/></PulseButton>}
+    {hasContent && <div className="message-footer"><PulseButton type="button" className="message-copy-action" aria-label={copyLabel} title={copyLabel} disabled={copying} onClick={() => void copy()}><Icon name="copy" size={15}/></PulseButton>{validTime && <time className="message-time" dateTime={sentAt.toISOString()} title={timeTitle} aria-label="发送时间">{timeLabel}</time>}<span className="message-feedback" role="status">{feedback}</span>{message.restored && <small>已从归档恢复答案</small>}{message.legacy && <small>旧版记录</small>}</div>}
   </article>
 }
 

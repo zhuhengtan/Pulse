@@ -1,3 +1,6 @@
+import { Icon } from './Icon.js'
+import type { ComponentProps } from 'react'
+import { PulseButton } from './PulseControls.js'
 import type { ReactElement } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { apiJson, type PulseWebTransport, type WebLane, type WebRunEvent } from './transport.js'
@@ -121,23 +124,23 @@ function str(value: unknown): string | undefined { return typeof value === 'stri
 function shorten(value: string, max = 80): string { const one = value.replace(/\s+/g, ' ').trim(); return one.length > max ? `${one.slice(0, max)}…` : one }
 
 /** One-line, human-readable description of a tool call. */
-export function summarizeTool(step: TraceStep): { icon: string; text: string } {
+export function summarizeTool(step: TraceStep): { icon: ComponentProps<typeof Icon>['name']; text: string } {
   const tool = step.tool ?? 'tool'
   const args = step.args ?? {}
   const preview = step.preview ?? {}
   const target = str(args.path) ?? str(args.file) ?? str(args.target)
   const matched = typeof preview.matched === 'number' ? ` · ${preview.matched} 处命中` : ''
-  if (tool === 'fs.read') return { icon: '📖', text: `读取 ${target ?? ''}${typeof preview.lines === 'number' ? ` · ${preview.lines} 行` : ''}`.trim() }
-  if (tool === 'fs.list') return { icon: '📂', text: `列出 ${target ?? '目录'}${matched}` }
-  if (tool === 'fs.search') return { icon: '🔍', text: `搜索 “${shorten(str(args.pattern) ?? str(args.query) ?? '', 40)}”${matched}` }
-  if (tool.startsWith('fs.') || tool === 'plan.write') return { icon: '✏️', text: `${tool === 'fs.move' ? '移动' : '修改'} ${target ?? ''}`.trim() }
+  if (tool === 'fs.read') return { icon: 'file', text: `读取 ${target ?? ''}${typeof preview.lines === 'number' ? ` · ${preview.lines} 行` : ''}`.trim() }
+  if (tool === 'fs.list') return { icon: 'folder', text: `列出 ${target ?? '目录'}${matched}` }
+  if (tool === 'fs.search') return { icon: 'search', text: `搜索 “${shorten(str(args.pattern) ?? str(args.query) ?? '', 40)}”${matched}` }
+  if (tool.startsWith('fs.') || tool === 'plan.write') return { icon: 'edit', text: `${tool === 'fs.move' ? '移动' : '修改'} ${target ?? ''}`.trim() }
   if (tool === 'shell.exec') {
     const command = [str(args.command), ...(Array.isArray(args.args) ? args.args.filter((a): a is string => typeof a === 'string') : [])].filter(Boolean).join(' ')
-    return { icon: '⌨️', text: `执行 ${shorten(command, 70)}${preview.exitCode !== undefined && preview.exitCode !== null ? ` (退出码 ${String(preview.exitCode)})` : ''}` }
+    return { icon: 'terminal', text: `执行 ${shorten(command, 70)}${preview.exitCode !== undefined && preview.exitCode !== null ? ` (退出码 ${String(preview.exitCode)})` : ''}` }
   }
-  if (tool === 'web.search') return { icon: '🌐', text: `搜索网页 “${shorten(str(args.query) ?? '', 40)}”${matched}` }
-  if (tool === 'web.fetch') return { icon: '🌐', text: `读取网页 ${shorten(str(args.url) ?? '', 60)}` }
-  return { icon: '🔧', text: tool }
+  if (tool === 'web.search') return { icon: 'web', text: `搜索网页 “${shorten(str(args.query) ?? '', 40)}”${matched}` }
+  if (tool === 'web.fetch') return { icon: 'web', text: `读取网页 ${shorten(str(args.url) ?? '', 60)}` }
+  return { icon: 'tool', text: tool }
 }
 
 function DiffText({ text }: { text: string }) {
@@ -167,11 +170,11 @@ function StepRow({ step, live }: { step: TraceStep; live: boolean }) {
     const hasDetail = Boolean(step.error || step.args || step.preview)
     const open = userOpen ?? step.status === 'failed'
     return <div className={`trace-step trace-tool trace-${step.status ?? 'running'}`}>
-      <button type="button" className="trace-row" onClick={() => setUserOpen(!open)} aria-expanded={open} disabled={!hasDetail}>
+      <PulseButton type="button" className="trace-row" onClick={() => setUserOpen(!open)} aria-expanded={open} disabled={!hasDetail}>
         <span className="trace-state">{step.status === 'running' ? <i className="trace-spin" /> : step.status === 'succeeded' ? '✓' : step.status === 'failed' ? '✕' : '–'}</span>
-        <span className="trace-icon">{icon}</span><span className="trace-text">{text}</span>
+        <span className="trace-icon"><Icon name={icon} size={14}/></span><span className="trace-text">{text}</span>
         {hasDetail && <span className="trace-caret">{open ? '▾' : '▸'}</span>}
-      </button>
+      </PulseButton>
       {open && hasDetail && <ToolDetail step={step} />}
     </div>
   }
@@ -179,12 +182,12 @@ function StepRow({ step, live }: { step: TraceStep; live: boolean }) {
   const open = userOpen ?? (live || seenLive.current)
   const task = TASK_LABEL[step.task ?? ''] ?? step.task ?? '推理'
   return <div className="trace-step trace-llm">
-    <button type="button" className="trace-row" onClick={() => setUserOpen(!open)} aria-expanded={open} disabled={!body}>
+    <PulseButton type="button" className="trace-row" onClick={() => setUserOpen(!open)} aria-expanded={open} disabled={!body}>
       <span className="trace-state">{live ? <i className="trace-spin" /> : '◆'}</span>
       <span className="trace-text">{live ? '思考中' : '思考'} · {task}</span>
       {step.modelId && <span className={`trace-model ${step.fallback ? 'is-fallback' : ''}`} title={step.fallback ? '已回退到备用模型' : undefined}>{step.modelId}{step.fallback ? ' · 回退' : ''}</span>}
       {body && <span className="trace-caret">{open ? '▾' : '▸'}</span>}
-    </button>
+    </PulseButton>
     {open && body && <div className="trace-thought">{body}</div>}
   </div>
 }
@@ -206,13 +209,13 @@ function LaneCard({ lane, depth, runActive }: { lane: TraceLane; depth: number; 
   const tools = lane.steps.filter(step => step.kind === 'tool').length
   const lastIndex = lane.steps.length - 1
   return <section className={`trace-lane trace-lane-${lane.status}`} style={{ marginLeft: depth * 14 }}>
-    <button type="button" className="trace-lane-head" onClick={() => setUserOpen(!open)} aria-expanded={open}>
+    <PulseButton type="button" className="trace-lane-head" onClick={() => setUserOpen(!open)} aria-expanded={open}>
       <span className={`trace-dot dot-${lane.status}`} />
       <span className="trace-lane-title"><strong>{lane.label}</strong>{lane.goal && <small>{shorten(lane.goal, 90)}</small>}</span>
       {badge && <span className={`trace-model ${badge.fallback ? 'is-fallback' : ''}`}>{badge.label}</span>}
       <small className="trace-lane-meta">{LANE_STATUS[lane.status] ?? lane.status}{tools ? ` · ${tools} 工具` : ''}</small>
       <span className="trace-caret">{open ? '▾' : '▸'}</span>
-    </button>
+    </PulseButton>
     {open && <div className="trace-lane-body">
       {lane.steps.length === 0 && <p className="trace-empty">等待执行…</p>}
       {lane.steps.map((step, index) => <StepRow key={step.id} step={step} live={active && index === lastIndex && step.kind === 'llm'} />)}
@@ -236,12 +239,14 @@ function summary(state: TraceState, running: boolean): string {
 }
 
 /** Collapsible main-process header plus nested lane cards. */
-export function RunTraceView({ trace, running }: { trace: TraceState; running: boolean }) {
+export function RunTraceView({ trace, running: streamRunning }: { trace: TraceState; running: boolean }) {
+  const running = streamRunning && !trace.outcome
   const [userOpen, setUserOpen] = useState<boolean | undefined>(undefined)
-  const seenRunning = useRef(running)
-  if (running) seenRunning.current = true
-  const open = userOpen ?? (running || seenRunning.current)
-  if (trace.order.length === 0 && !running) return null
+  const [wasRunning, setWasRunning] = useState(running)
+  // Reset overrides at lifecycle transitions. Late replay events must not undo
+  // the user's choice to reopen a completed run.
+  if (wasRunning !== running) { setWasRunning(running); setUserOpen(undefined) }
+  const open = wasRunning !== running ? running : userOpen ?? running
   const roots = trace.order.filter(id => { const lane = trace.lanes[id]!; return !lane.parentId || !trace.lanes[lane.parentId] })
   const render = (id: string): ReactElement[] => {
     const lane = trace.lanes[id]!
@@ -249,12 +254,12 @@ export function RunTraceView({ trace, running }: { trace: TraceState; running: b
     return [<LaneCard key={id} lane={lane} depth={laneDepth(trace, lane)} runActive={running} />, ...children.flatMap(render)]
   }
   return <div className={`run-trace ${running ? 'is-running' : ''} outcome-${trace.outcome ?? 'running'}`}>
-    <button type="button" className="run-trace-head" onClick={() => setUserOpen(!open)} aria-expanded={open}>
+    <PulseButton type="button" className="run-trace-head" onClick={() => setUserOpen(!open)} aria-expanded={open}>
       <span className={`trace-dot ${running ? 'dot-running' : trace.outcome === 'succeeded' ? 'dot-succeeded' : 'dot-failed'}`} />
       <strong>主进程</strong><span className="run-trace-summary">{summary(trace, running)}</span>
       <span className="trace-caret">{open ? '▾' : '▸'}</span>
-    </button>
-    {open && <div className="run-trace-body">
+    </PulseButton>
+    {open && <div className="run-trace-body" role="region" aria-label="执行过程" tabIndex={0}>
       {trace.order.length === 0 && <p className="trace-empty">{trace.label ?? '正在准备…'}</p>}
       {roots.flatMap(render)}
     </div>}
