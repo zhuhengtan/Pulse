@@ -21,6 +21,7 @@
     "@hunterzhu/pulse-runtime": "workspace:*",
     "@hunterzhu/pulse-tool-sdk": "workspace:*",
     "exceljs": "4.4.0",
+    "mammoth": "1.11.0",
     "pdfjs-dist": "4.10.38"
   }
 }
