@@ -17,6 +17,8 @@ import type { JsonValue } from '@hunterzhu/pulse-runtime'
 import type { AssistantEvent, ConversationSummary, LocalHost, LocalHostOptions, RunHandle } from '../index.js'
 import type { WebAttachment, WebAssistantMessageReceipt, WebLane, WebRunLanes, WebAssistantWorkInteraction, WebMessage, WebPendingInteraction, WebProject, WebRunEvent, WebRunSnapshot } from '../protocol.js'
 import { H5AuthStore } from './auth.js'
+import { createHostDirectory, hostFilesystemError, hostPathRoots, listHostPaths } from './host-filesystem.js'
+import type { HostPathMode } from '../protocol.js'
 import { compactTraceEvents, prepareRunEvent, traceWatermark } from './trace.js'
 import { AssistantConversationStore, type QueuedAssistantMessage } from './assistant.js'
 import { H5ProjectCatalog } from './projects.js'
@@ -864,6 +866,8 @@ export class H5Server {
     }
 
     const localAdmin = loopback && authedDevice?.scope === 'local'
+    const canBrowseHostPaths = Boolean(authedDevice)
+    const canRegisterProject = Boolean(authedDevice)
     const requireSameOrigin = (): boolean => {
       let origin: string | undefined
       try { origin = typeof req.headers.origin === 'string' ? new URL(req.headers.origin).origin : undefined } catch { origin = undefined }
@@ -929,7 +933,7 @@ export class H5Server {
     }
     if (pathname === '/api/session' && method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify({ ok: true, deviceId: authedDevice?.id, localAdmin, canRegisterProject: localAdmin, canUseTerminal: localAdmin, canEditConfig: localAdmin, canControlAutomation }))
+      res.end(JSON.stringify({ ok: true, deviceId: authedDevice?.id, localAdmin, canBrowseHostPaths, canRegisterProject, canUseTerminal: localAdmin, canEditConfig: localAdmin, canControlAutomation }))
       return
     }
 
@@ -1155,13 +1159,35 @@ export class H5Server {
       return
     }
 
+    if (pathname.startsWith('/api/host-filesystem/')) {
+      if (!canBrowseHostPaths || method === 'POST' && !requireSameOrigin()) {
+        res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: canBrowseHostPaths ? 'SAME_ORIGIN_REQUIRED' : 'UNAUTHORIZED' })); return
+      }
+      try {
+        let result: unknown
+        let status = 200
+        if (pathname === '/api/host-filesystem/roots' && method === 'GET') result = await hostPathRoots()
+        else if (pathname === '/api/host-filesystem/entries' && method === 'GET') {
+          result = await listHostPaths(url.searchParams.get('path'), (url.searchParams.get('mode') ?? 'both') as HostPathMode, url.searchParams.get('hidden') === '1', Number(url.searchParams.get('offset') ?? '0'))
+        } else if (pathname === '/api/host-filesystem/directories' && method === 'POST') {
+          const body = await this.parseJsonBody(req)
+          result = await createHostDirectory(body.parentPath, body.name); status = 201
+        } else { res.writeHead(404).end(); return }
+        res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
+      } catch (error) {
+        const failure = hostFilesystemError(error)
+        res.writeHead(failure.status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ error: failure.code }))
+      }
+      return
+    }
+
     if (pathname === '/api/projects' && method === 'GET') {
       const projects = await this.projects.list()
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(projects))
       return
     }
     if (pathname === '/api/projects' && method === 'POST') {
-      if (!localAdmin || !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: localAdmin ? 'SAME_ORIGIN_REQUIRED' : 'LOCAL_ADMIN_REQUIRED' })); return }
+      if (!canRegisterProject || !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: canRegisterProject ? 'SAME_ORIGIN_REQUIRED' : 'UNAUTHORIZED' })); return }
       const body = await this.parseJsonBody(req)
       if (typeof body.name !== 'string' || typeof body.cwd !== 'string') { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'PROJECT_INPUT_REQUIRED' })); return }
       try { const project = await this.projects.add(body.name, body.cwd); res.writeHead(201, { 'Content-Type': 'application/json' }).end(JSON.stringify(project)) }

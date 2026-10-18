@@ -1,3 +1,4 @@
+import { HostPathPicker } from './HostPathPicker.js'
 import { PulseButton, PulseCheckbox, PulseDisclosure, PulseInput, PulseTextArea, PulseToast, usePulseDialogs } from './PulseControls.js'
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, FormEvent, KeyboardEvent, ReactElement } from 'react'
@@ -138,7 +139,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const setRunPanelOpen = (open: boolean) => patchQuery({ task: open, ...(!open ? { lane: undefined } : { details: undefined }) })
   const selectedLaneId = route.query.get('lane') ?? undefined
   const setSelectedLaneId = (lane: string) => patchQuery({ lane, task: true, details: undefined })
-  const [sessionCapabilities, setSessionCapabilities] = useState<{ localAdmin: boolean; canUseTerminal: boolean }>({ localAdmin: false, canUseTerminal: false })
+  const [sessionCapabilities, setSessionCapabilities] = useState({ localAdmin: false, canUseTerminal: false, canBrowseHostPaths: false, canRegisterProject: false })
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false)
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<string[]>(() => { try { return JSON.parse(window.localStorage.getItem('pulse-web-collapsed-projects') ?? '[]') as string[] } catch { return [] } })
   const [atBottom, setAtBottom] = useState(true)
   const followBottom = useRef(true)
@@ -298,8 +300,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         const params = new URLSearchParams(current.search); params.delete('code')
         go(current.pathname + (params.size ? `?${params}` : ''), true, current.state)
       } else if (localHost) await apiJson(transport, '/api/session/local', jsonRequest('POST'))
-      const session = await apiJson<{ localAdmin?: boolean; canUseTerminal?: boolean }>(transport, '/api/session')
-      setSessionCapabilities({ localAdmin: session.localAdmin === true, canUseTerminal: session.canUseTerminal === true })
+      const session = await apiJson<{ localAdmin?: boolean; canUseTerminal?: boolean; canBrowseHostPaths?: boolean; canRegisterProject?: boolean }>(transport, '/api/session')
+      setSessionCapabilities({ localAdmin: session.localAdmin === true, canUseTerminal: session.canUseTerminal === true, canBrowseHostPaths: session.canBrowseHostPaths ?? session.localAdmin === true, canRegisterProject: session.canRegisterProject ?? session.localAdmin === true })
       authenticated = true
       setPaired(true)
 
@@ -868,16 +870,9 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     catch { setToast('项目列表刷新失败。') }
   }
 
-  const createProject = async () => {
-    if (!sessionCapabilities.localAdmin) return
-    let cwd = ''
-    try {
-      const selected = await apiJson<{ selected: boolean; cwd?: string; cancelled?: boolean; manualEntry?: boolean }>(transport, '/api/projects/select-directory', jsonRequest('POST'))
-      if (selected.cancelled) return
-      if (selected.selected && selected.cwd) cwd = selected.cwd
-    } catch { /* Manual path entry remains available. */ }
-    if (!cwd) cwd = (await dialogs.prompt('输入本机已有目录的绝对路径'))?.trim() ?? ''
-    if (!cwd) return
+  const createProject = async (cwd: string) => {
+    if (!sessionCapabilities.canRegisterProject) return
+    setProjectPickerOpen(false)
     const fallback = cwd.split(/[\\/]/).filter(Boolean).at(-1) ?? '新项目'
     const name = (await dialogs.prompt('项目名称', fallback))?.trim()
     if (!name) return
@@ -887,7 +882,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       setSelectedProjectId(project.id); window.localStorage.setItem('pulse-web-project', project.id)
       selectProject(project.id)
       setToast('项目已添加；磁盘目录保持不变。')
-    } catch (error) { setToast(error instanceof ApiError && error.status === 409 ? '该目录已经登记。' : '项目添加失败，请检查目录路径。') }
+    } catch (error) { setToast(error instanceof ApiError && (error.status === 409 || error.detail === 'PROJECT_ALREADY_REGISTERED') ? '该目录已经登记。' : '项目添加失败，请检查目录路径。') }
   }
 
   const renameProject = async (project: WebProject) => {
@@ -1004,10 +999,10 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const modeSwitch = <div className="surface-switch" role="tablist" aria-label="Pulse 工作模式"><PulseButton role="tab" aria-selected={surfaceMode === 'chat'} className={surfaceMode === 'chat' ? 'active' : ''} onClick={() => switchMode('chat')}>聊天</PulseButton><PulseButton role="tab" aria-selected={surfaceMode === 'work'} className={surfaceMode === 'work' ? 'active' : ''} onClick={() => switchMode('work')}>工作</PulseButton></div>
   const history = <aside className="history" aria-label="历史对话">
     <div className={`history-head ${switchInHistory ? 'has-mode-switch' : ''}`}><strong>Pulse</strong>{switchInHistory && modeSwitch}<PulseButton className="new-button" onClick={createConversation} aria-label="新建对话" title="新建对话"><Icon name="plus"/> <span>新对话</span></PulseButton></div>
-    <div className="history-primary"><PulseButton onClick={() => selectProject(undefined)}><Icon name="home"/> <span>全部对话</span></PulseButton></div>
+    <div className="history-primary"><PulseButton onClick={() => selectProject(undefined)}><Icon name="home"/><span>全部对话</span></PulseButton></div>
     <label className="history-search"><Icon name="search"/><PulseInput ref={searchRef} value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索对话" aria-label="搜索对话" /><kbd>⌘ K</kbd></label>
     <div className="history-list">
-      <section className="project-nav-group"><header><PulseButton className="project-nav-heading" aria-expanded={!collapsedProjectIds.includes('projects') || Boolean(query.trim())} onClick={() => setProjectCollapsed('projects', !collapsedProjectIds.includes('projects'))}><Icon className={collapsedProjectIds.includes('projects') && !query.trim() ? 'is-collapsed' : ''} name="chevron"/> 项目</PulseButton><PulseButton className="project-add" disabled={!sessionCapabilities.localAdmin} title="添加本机项目" onClick={() => void createProject()}><Icon name="plus"/></PulseButton></header>{(!collapsedProjectIds.includes('projects') || query.trim()) && <>
+      <section className="project-nav-group"><header><PulseButton className="project-nav-heading" aria-expanded={!collapsedProjectIds.includes('projects') || Boolean(query.trim())} onClick={() => setProjectCollapsed('projects', !collapsedProjectIds.includes('projects'))}><Icon className={collapsedProjectIds.includes('projects') && !query.trim() ? 'is-collapsed' : ''} name="chevron"/> 项目</PulseButton><PulseButton className="project-add" disabled={!sessionCapabilities.canRegisterProject || !sessionCapabilities.canBrowseHostPaths} title="添加电脑项目" aria-label="添加电脑项目" onClick={() => setProjectPickerOpen(true)}><Icon name="plus"/></PulseButton></header>{(!collapsedProjectIds.includes('projects') || query.trim()) && <>
         {orderedProjects.map((project, index) => {
           const items = visibleConversations.filter(item => item.projectId === project.id)
           if (query.trim() && !items.length && !project.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())) return null
@@ -1069,6 +1064,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   }
   return <main className={`shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''} ${workbenchOpen ? 'workbench-open' : ''}`}>
     {surfaceMode === 'work' && !drawerOpen && <div className="desktop-history">{history}</div>}
+    <HostPathPicker open={projectPickerOpen} mode="directory" allowCreateDirectory transport={transport} onCancel={() => setProjectPickerOpen(false)} onConfirm={selection => void createProject(selection.path)} />
     {surfaceMode === 'work' && <Drawer className="pulse-history-drawer" placement="left" size="min(330px,86vw)" open={drawerOpen} onClose={() => { setDrawerOpen(false); drawerTrigger.current?.focus() }} closable={false} destroyOnHidden styles={{ body: { padding: 0 } }}>{drawerOpen && history}</Drawer>}
     <section className="chat">
       <header className={`navbar surface-${surfaceMode} ${detailsOpen ? 'details-open' : ''}`}>

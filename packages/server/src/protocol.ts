@@ -125,3 +125,22 @@ export interface WebRunSnapshot {
 }
 
 export type { AutomationSessionView as WebAutomationSession } from './automation/types.js'
+
+/** Canonical paths from the machine running Pulse, independent of the browser OS. */
+export type HostPathMode = 'file' | 'directory' | 'both'
+export interface HostPathEntry {
+  name: string
+  path: string
+  kind: 'file' | 'directory'
+  symlink?: boolean
+  unavailable?: string
+}
+export interface HostPathRoots { home: string; roots: Array<{ name: string; path: string }> }
+export interface HostPathListing {
+  path: string
+  name: string
+  parent: string | null
+  breadcrumbs: Array<{ name: string; path: string }>
+  entries: HostPathEntry[]
+  nextOffset: number | null
+}
