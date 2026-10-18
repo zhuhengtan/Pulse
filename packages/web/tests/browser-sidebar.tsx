@@ -1,6 +1,6 @@
 // Isolated acceptance page: every request stays in the fixture transport.
 import { createRoot } from 'react-dom/client'
-import { PulseApp } from '../src/PulseApp.js'
+import { PulseApp } from './RouterApp.js'
 import { PulseDesignSystem } from '../src/PulseDesignSystem.js'
 import { sidebarFixture } from './fixtures/sidebar.js'
 import '../src/style.css'

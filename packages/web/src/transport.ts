@@ -1,6 +1,6 @@
-import type { WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebLane, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from '@hunterzhu/pulse-server/protocol'
+import type { WebAttachment, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebLane, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from '@hunterzhu/pulse-server/protocol'
 
-export type { WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebLane, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from '@hunterzhu/pulse-server/protocol'
+export type { WebAttachment, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebLane, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from '@hunterzhu/pulse-server/protocol'
 
 export interface PulseWebTransport {
   request(path: string, init?: RequestInit): Promise<Response>
@@ -42,6 +42,18 @@ export async function apiJson<T>(transport: PulseWebTransport, path: string, ini
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly detail?: string) { super(detail ? `HTTP_${status}: ${detail}` : `HTTP_${status}`) }
+}
+
+/** Keep deep links usable while an older running backend is upgraded separately. */
+export async function getWebConversation(transport: PulseWebTransport, id: string): Promise<WebConversation> {
+  try { return await apiJson<WebConversation>(transport, `/api/conversations/${encodeURIComponent(id)}`) }
+  catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 404 || error.detail !== 'NOT_FOUND') throw error
+    const archived = await apiJson<WebConversation[]>(transport, '/api/conversations?archived=1')
+    const conversation = archived.find(item => item.id === id)
+    if (!conversation) throw error
+    return conversation
+  }
 }
 
 export const jsonRequest = (method: string, value?: unknown): RequestInit => ({

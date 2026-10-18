@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PulseApp } from '../src/PulseApp.js'
+import { PulseApp } from './RouterApp.js'
 import { PulseDesignSystem } from '../src/PulseDesignSystem.js'
 import { sidebarFixture } from './fixtures/sidebar.js'
 
@@ -25,6 +25,33 @@ async function moveMenu(title: string) {
 }
 
 describe('project sidebar', () => {
+  it('places mode navigation in the sidebar header and keeps it reachable when the sidebar collapses', async () => {
+    const view = await show()
+    const tabs = () => screen.getByRole('tablist', { name: 'Pulse 工作模式' })
+    expect(tabs().closest('.history-head')).toBeTruthy()
+    expect(view.container.querySelector('.navbar [role="tablist"]')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '收起历史对话' }))
+    expect(tabs().closest('.navbar')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '展开历史对话' }))
+    expect(tabs().closest('.history-head')).toBeTruthy()
+    fireEvent.click(within(tabs()).getByRole('tab', { name: '聊天' }))
+    expect(tabs().closest('.navbar')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '设置' })).toBeTruthy()
+  })
+
+  it('opens settings directly from chat and returns without changing mode', async () => {
+    const { transport } = sidebarFixture()
+    render(<PulseDesignSystem><PulseApp transport={transport}/></PulseDesignSystem>)
+    await screen.findByText('我们要做什么？')
+    const tabs = screen.getByRole('tablist', { name: 'Pulse 工作模式' })
+    expect(tabs.compareDocumentPosition(screen.getByText('Pulse 助理')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '设置' }))
+    await screen.findByRole('navigation', { name: '设置分类' })
+    fireEvent.click(screen.getAllByRole('button', { name: '返回聊天' })[0]!)
+    expect(screen.getByRole('tab', { name: '聊天' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByRole('button', { name: '设置' })).toBeTruthy()
+  })
+
   it('nests conversations once, keeps other projects visible, and preserves selection while folding', async () => {
     await show()
     const pulse = screen.getByRole('region', { name: 'Pulse项目对话' })
@@ -45,6 +72,8 @@ describe('project sidebar', () => {
 
   it('moves legacy history directly into a project, expands it, and can move it back', async () => {
     const view = await show()
+    fireEvent.click(screen.getByRole('button', { name: '这个项目还是需要帮我加个自动审核' }))
+    await screen.findByText('对话内容会保留，所属项目可以随时调整。')
     fireEvent.click(screen.getByRole('button', { name: '折叠项目：Jarvis' }))
     await moveMenu('这个项目还是需要帮我加个自动审核')
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Jarvis' }))

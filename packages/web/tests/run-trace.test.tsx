@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { emptyTrace, PersistedRunTrace, reduceTrace, RunTraceView } from '../src/RunTrace.js'
-import { PulseApp } from '../src/PulseApp.js'
+import { PulseApp } from './RouterApp.js'
 import { PulseDesignSystem } from '../src/PulseDesignSystem.js'
 import type { PulseWebTransport, WebRunEvent } from '../src/transport.js'
 import { sidebarFixture } from './fixtures/sidebar.js'
@@ -36,15 +36,44 @@ describe('execution trace replay', () => {
     expect(state.lanes.root?.steps[0]?.reasoning).toBe('A'.repeat(24_000))
   })
 
-  it('keeps a live trace open after the run finishes', () => {
+  it.each(['succeeded', 'failed', 'cancelled'] as const)('collapses a %s run while retaining the header and allowing manual replay', outcome => {
     const trace = [model(1, 'A', 1), reasoning(2, '保持展开')].reduce(reduceTrace, emptyTrace)
     const view = render(<RunTraceView trace={trace} running />)
     expect(screen.getByText('保持展开')).toBeTruthy()
-    view.rerender(<RunTraceView trace={{ ...trace, outcome: 'succeeded' }} running={false} />)
+    // An explicit expansion during execution must also collapse on completion.
+    const head = screen.getByRole('button', { name: /主进程/ })
+    fireEvent.click(head)
+    fireEvent.click(head)
+    view.rerender(<RunTraceView trace={{ ...trace, outcome }} running={false} />)
+    expect(screen.queryByText('保持展开')).toBeNull()
+    expect(head.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(head)
+    fireEvent.click(screen.getByRole('button', { name: /思考 ·/ }))
+    expect(screen.getByText('保持展开')).toBeTruthy()
+    expect(screen.getByRole('region', { name: '执行过程' }).tabIndex).toBe(0)
+    view.rerender(<RunTraceView trace={{ ...trace, outcome, endedAt: 9000 }} running={false} />)
     expect(screen.getByText('保持展开')).toBeTruthy()
     view.unmount()
     render(<RunTraceView trace={trace} running={false} />)
     expect(screen.queryByText('保持展开')).toBeNull()
+  })
+
+  it('keeps an empty completed process visible and collapsed', () => {
+    const view = render(<RunTraceView trace={emptyTrace} running />)
+    view.rerender(<RunTraceView trace={{ ...emptyTrace, outcome: 'succeeded' }} running={false} />)
+    expect(screen.getByRole('button', { name: /主进程.*已完成/ }).getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('collapses when completion arrives before stream cleanup, without collapsing a manual replay again', () => {
+    const trace = [model(1, 'A', 1), reasoning(2, '原始思考')].reduce(reduceTrace, emptyTrace)
+    const view = render(<RunTraceView trace={trace} running />)
+    const finished = { ...trace, outcome: 'succeeded' as const }
+    view.rerender(<RunTraceView trace={finished} running />)
+    const head = screen.getByRole('button', { name: /主进程.*已完成/ })
+    expect(head.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(head)
+    view.rerender(<RunTraceView trace={finished} running={false} />)
+    expect(head.getAttribute('aria-expanded')).toBe('true')
   })
 
   it('uses saved event times when reopened and omits invented durations for legacy records', async () => {
@@ -98,6 +127,7 @@ describe('active work trace recovery', () => {
     expect(screen.queryByText('历史思考加载期间思考加载期间思考后续思考')).toBeNull()
     // Reopening an active conversation must hydrate the prefix again.
     fireEvent.click(screen.getByRole('button', { name: '完善项目记忆' }))
+    await screen.findByText('对话内容会保留，所属项目可以随时调整。')
     fireEvent.click(screen.getByRole('button', { name: /^正在执行的任务/ }))
     await screen.findByText('历史思考加载期间思考')
     expect(fixture.subscriptions).toHaveLength(2)

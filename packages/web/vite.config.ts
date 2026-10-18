@@ -9,7 +9,17 @@ export default defineConfig({
       '/api': {
         target: pulseH5Target,
         changeOrigin: true,
-        configure: proxy => proxy.on('proxyReq', request => request.setHeader('Origin', new URL(pulseH5Target).origin)),
+        ws: true,
+        configure: proxy => {
+          const sameOrigin = (request: import('node:http').ClientRequest) => request.setHeader('Origin', new URL(pulseH5Target).origin)
+          proxy.on('proxyReq', sameOrigin)
+          proxy.on('proxyReqWs', (request, incoming, socket) => {
+            let allowed = false
+            try { allowed = typeof incoming.headers.origin === 'string' && new URL(incoming.headers.origin).origin === `http://${incoming.headers.host}` } catch { /* Reject malformed origins. */ }
+            if (!allowed) { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); request.destroy(); return }
+            sameOrigin(request)
+          })
+        },
       },
     },
   },
