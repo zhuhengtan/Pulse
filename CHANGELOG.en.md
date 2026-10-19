@@ -2,6 +2,23 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.7.0] - 2026-10-19
+
+### Added
+
+- Added a rich-text composer with skill and file mentions, pasted and dropped attachments, and conversation-specific drafts.
+- Added paginated attachment reading for text, code, PDF, XLSX, and DOCX text; PNG/JPEG continue through image input, with stronger format, size, and parsing limits.
+- Added addressable Web pages, conversations, and workspace positions with browser history and refresh restoration; mobile clients can select host files or directories and create project folders.
+- Added desktop Web import and export for work conversations, including attachments and recovery state, with sensitive configuration removed and recovery prerequisites rechecked after transfer.
+- Review the complete plan for consistency after edits and bind confirmation to its current content, reducing contradictions and repeated revisions.
+
+### Fixed
+
+- Clear submitted drafts immediately, retain retry controls and restore the originating draft on failure, and prevent session switches, asynchronous attachment reads, and queued chat messages from overwriting one another.
+- Fixed approval loss during context compaction and task recovery, mobile confirmation failures, tool timeout handling, and missing attachment and reference fields in worker messages.
+- Improved mobile header spacing, breadcrumbs, sidebar labels and project folding, refined the stop button, and hid conversation transfer controls on phones.
+- Removed the duplicate task panel above work chats while retaining Lane activity and recovery actions in the message list; delivery files now appear compactly below their own turns, with full paths expandable on demand.
+
 ## [0.6.0] - 2026-10-17
 
 ### Added

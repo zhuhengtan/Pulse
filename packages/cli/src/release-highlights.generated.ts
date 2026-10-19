@@ -1,5 +1,43 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.7.0": [
+    {
+      "zh": "新增富文本输入框，支持技能与文件标签、粘贴及拖放附件，并按会话保存编辑草稿。",
+      "en": "Added a rich-text composer with skill and file mentions, pasted and dropped attachments, and conversation-specific drafts."
+    },
+    {
+      "zh": "附件内容可通过工具分页读取，支持文本与代码、PDF、XLSX 和 DOCX 正文；PNG/JPEG 沿用图像输入链路，并加强格式、大小与解析限额校验。",
+      "en": "Added paginated attachment reading for text, code, PDF, XLSX, and DOCX text; PNG/JPEG continue through image input, with stronger format, size, and parsing limits."
+    },
+    {
+      "zh": "Web 页面、会话和工作区位置使用独立地址，支持浏览器前进后退及刷新恢复；移动端可选择宿主机文件或目录并新建项目文件夹。",
+      "en": "Added addressable Web pages, conversations, and workspace positions with browser history and refresh restoration; mobile clients can select host files or directories and create project folders."
+    },
+    {
+      "zh": "桌面 Web 支持导入导出工作会话，携带附件与恢复所需状态，清理敏感配置并在迁移后重新校验任务恢复条件。",
+      "en": "Added desktop Web import and export for work conversations, including attachments and recovery state, with sensitive configuration removed and recovery prerequisites rechecked after transfer."
+    },
+    {
+      "zh": "计划修改后复核完整文档的一致性，将确认绑定到当前计划内容，减少局部修订造成的矛盾与重复返工。",
+      "en": "Review the complete plan for consistency after edits and bind confirmation to its current content, reducing contradictions and repeated revisions."
+    },
+    {
+      "zh": "发送消息后立即清空已提交草稿，失败时保留重试入口并恢复原会话草稿；切换会话、附件异步读取及连续聊天排队不再相互覆盖。",
+      "en": "Clear submitted drafts immediately, retain retry controls and restore the originating draft on failure, and prevent session switches, asynchronous attachment reads, and queued chat messages from overwriting one another."
+    },
+    {
+      "zh": "修复审批在上下文压缩与任务恢复时丢失、移动端确认操作异常、工具超时配置及工作进程漏传附件和引用信息的问题。",
+      "en": "Fixed approval loss during context compaction and task recovery, mobile confirmation failures, tool timeout handling, and missing attachment and reference fields in worker messages."
+    },
+    {
+      "zh": "改善移动端顶部留白、路径导航、侧栏文字和项目折叠布局，优化停止按钮，并隐藏手机端会话导入导出入口。",
+      "en": "Improved mobile header spacing, breadcrumbs, sidebar labels and project folding, refined the stop button, and hid conversation transfer controls on phones."
+    },
+    {
+      "zh": "移除工作聊天顶部重复的任务面板，在消息列表中保留 Lane 活动及任务恢复操作；交付文件改为按轮次紧凑展示，完整路径按需展开。",
+      "en": "Removed the duplicate task panel above work chats while retaining Lane activity and recovery actions in the message list; delivery files now appear compactly below their own turns, with full paths expandable on demand."
+    }
+  ],
   "0.6.0": [
     {
       "zh": "新增受管理的浏览器与桌面自动化，支持页面观察、截图操作、上传下载、暂停及人工接管，并在 CLI 和 H5 中提供入口。",
