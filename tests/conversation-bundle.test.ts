@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import { promisify } from 'node:util'
 import { pipeline } from 'node:stream/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -123,7 +123,7 @@ describe('work conversation transfer', () => {
         expect(reply.status).toBe(200)
         await vi.waitFor(async () => {
           expect(await readFile(join(executionDirectory, 'renamed.txt'), 'utf8')).toBe('portable project\n')
-          expect((await new H5WorkspaceManager(targetData).get(conversation.id))?.status).toBe('pending')
+          expect((await new H5WorkspaceManager(targetData).get(conversation.id))?.status, JSON.stringify(await (await fetch(`${base}/api/runs/${run.id}/state`, { headers })).json()).slice(0, 8_000)).toBe('pending')
         }, { timeout: 10_000 })
       } finally { await server.stop() }
     } else {
@@ -148,7 +148,7 @@ describe('work conversation transfer', () => {
 
   it.each(['/old/project', 'C:\\old\\project'])('relocates both fs.move paths from %s while preserving non-path data', source => {
     const input = { source: source + '/note.txt', destination: source + '/nested/renamed.txt', expectedHash: 'a'.repeat(64) }
-    expect(mapTransferredArguments('fs.move', input, source, '/target/project')).toEqual({ source: join('/target/project', 'note.txt'), destination: join('/target/project', 'nested', 'renamed.txt'), expectedHash: input.expectedHash })
+    expect(mapTransferredArguments('fs.move', input, source, '/target/project')).toEqual({ source: posix.join('/target/project', 'note.txt'), destination: posix.join('/target/project', 'nested', 'renamed.txt'), expectedHash: input.expectedHash })
     expect(input.source).toBe(source + '/note.txt')
     expect(mapTransferredArguments('fs.move', { source: 'note.txt', destination: 'nested/renamed.txt' }, source, '/target/project')).toEqual({ source: 'note.txt', destination: 'nested/renamed.txt' })
   })
@@ -249,7 +249,7 @@ describe('work conversation transfer', () => {
         await vi.waitFor(async () => {
           expect(await readFile(join(executionDirectory, 'result.txt'), 'utf8')).toBe('one write')
           // This simple fixture has no accepted task verifier; preserve the existing pending-integration policy.
-          expect((await new H5WorkspaceManager(targetData).get(conversation.id))?.status).toBe('pending')
+          expect((await new H5WorkspaceManager(targetData).get(conversation.id))?.status, JSON.stringify(await (await fetch(`${base}/api/runs/${run.id}/state`, { headers })).json()).slice(0, 8_000)).toBe('pending')
         }, { timeout: 10_000 })
       } finally { await server.stop() }
     } else {

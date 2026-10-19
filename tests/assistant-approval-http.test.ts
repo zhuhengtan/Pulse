@@ -14,11 +14,13 @@ it('exposes assistant approval in the persistent chat and lets the user choose i
     const session = await fetch(`${baseUrl}/api/session/local`, { method: 'POST', headers: { Origin: baseUrl } })
     const cookie = session.headers.get('set-cookie')!
     const headers = { Cookie: cookie, Origin: baseUrl, 'Content-Type': 'application/json' }
-    await fetch(`${baseUrl}/api/assistant/messages`, { method: 'POST', headers, body: JSON.stringify({ requestId: 'assistant-approval-001', text: '请调用 work.start 查看项目' }) })
+    const sent = await fetch(`${baseUrl}/api/assistant/messages`, { method: 'POST', headers, body: JSON.stringify({ requestId: 'assistant-approval-001', text: '请调用 work.start 查看项目' }) })
+    expect(sent.status).toBe(202)
+    const receipt = await sent.json() as { runId: string }
     let view: { conversation: { id: string }; workInteractions: Array<{ conversationId: string; kind: string }> }
     await vi.waitFor(async () => {
       view = await fetch(`${baseUrl}/api/assistant`, { headers }).then(response => response.json())
-      expect(view.workInteractions).toContainEqual(expect.objectContaining({ conversationId: view.conversation.id, kind: 'approval' }))
+      expect(view.workInteractions, JSON.stringify({ view, snapshot: await fetch(`${baseUrl}/api/runs/${receipt.runId}/state`, { headers }).then(r => r.json()) }).slice(0, 8_000)).toContainEqual(expect.objectContaining({ conversationId: view.conversation.id, kind: 'approval' }))
     }, { timeout: 10_000, interval: 50 })
     const policy = await fetch(`${baseUrl}/api/conversations/${view!.conversation.id}`, { method: 'PATCH', headers, body: JSON.stringify({ approvalPolicy: 'delegate' }) })
     expect(policy.status).toBe(200)
