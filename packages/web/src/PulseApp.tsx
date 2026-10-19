@@ -1,3 +1,4 @@
+import { useConversationTransfer, transferError } from './ConversationTransfer.js'
 import { createRequestId } from './requestId.js'
 import { HostPathPicker } from './HostPathPicker.js'
 import { PulseButton, PulseCheckbox, PulseDisclosure, PulseInput, PulseTextArea, PulseToast, usePulseDialogs } from './PulseControls.js'
@@ -179,6 +180,11 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const selectedIdRef = useRef<string | undefined>(undefined)
   selectedIdRef.current = selectedId
   const selected = surfaceMode === 'chat' ? assistantConversation : conversations.find(item => item.id === selectedId)
+  const transfer = useConversationTransfer({ transport, selected: surfaceMode === 'work' ? selected : undefined, projects,
+    unavailable: surfaceMode !== 'work' || running || submitting || loading || !paired || Boolean(resumingRunId),
+    onImported: conversation => { setConversations(items => [conversation, ...items.filter(item => item.id !== conversation.id)]); setDrawerOpen(false); go(workUrl(conversation.id)) },
+    notice: setToast,
+  })
   const isPairPage = route.page === 'pair'
   const routeRef = useRef(route); routeRef.current = route
   const localHost = ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)
@@ -794,7 +800,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         setConversations(items => items.map(item => item.id === conversation.id ? withoutActiveRun(item) : item))
         setToast('这轮任务没有可恢复的运行快照；原对话和记录已保留，可以发送新消息。')
       } else if (error instanceof ApiError && error.status === 409) {
-        setToast('这轮任务状态已变化或仍被占用；请刷新对话状态后重试。')
+        setToast(error.detail ? transferError(error) : '这轮任务状态已变化或仍被占用；请刷新对话状态后重试。')
       } else setToast('暂时无法继续任务；运行记录已保留，可以重试或结束这轮。')
     } finally { setResumingRunId(current => current === runId ? undefined : current) }
   }
@@ -1022,7 +1028,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const modeSwitch = <div className="surface-switch" role="tablist" aria-label="Pulse 工作模式"><PulseButton role="tab" aria-selected={surfaceMode === 'chat'} className={surfaceMode === 'chat' ? 'active' : ''} onClick={() => switchMode('chat')}>聊天</PulseButton><PulseButton role="tab" aria-selected={surfaceMode === 'work'} className={surfaceMode === 'work' ? 'active' : ''} onClick={() => switchMode('work')}>工作</PulseButton></div>
   const history = <aside className="history" aria-label="历史对话">
     <div className={`history-head ${switchInHistory ? 'has-mode-switch' : ''}`}><strong>Pulse</strong>{switchInHistory && modeSwitch}<PulseButton className="new-button" onClick={createConversation} aria-label="新建对话" title="新建对话"><Icon name="plus"/> <span>新对话</span></PulseButton></div>
-    <div className="history-primary"><PulseButton onClick={() => selectProject(undefined)}><Icon name="home"/><span>全部对话</span></PulseButton></div>
+    <div className="history-primary">{!mobileLayout && transfer.importButton}<PulseButton onClick={() => selectProject(undefined)}><Icon name="home"/><span>全部对话</span></PulseButton></div>
     <label className="history-search"><Icon name="search"/><PulseInput ref={searchRef} value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索对话" aria-label="搜索对话" /><kbd>⌘ K</kbd></label>
     <div className="history-list">
       <section className="project-nav-group"><header><PulseButton className="project-nav-heading" aria-expanded={!collapsedProjectIds.includes('projects') || Boolean(query.trim())} onClick={() => setProjectCollapsed('projects', !collapsedProjectIds.includes('projects'))}><Icon className={collapsedProjectIds.includes('projects') && !query.trim() ? 'is-collapsed' : ''} name="chevron"/> 项目</PulseButton><PulseButton className="project-add" disabled={!sessionCapabilities.canRegisterProject || !sessionCapabilities.canBrowseHostPaths} title="添加电脑项目" aria-label="添加电脑项目" onClick={() => setProjectPickerOpen(true)}><Icon name="plus"/></PulseButton></header>{(!collapsedProjectIds.includes('projects') || query.trim()) && <>
@@ -1095,7 +1101,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         {surfaceMode === 'work' && <PulseButton className="icon-button desktop-menu" onClick={() => setSidebarCollapsed(value => !value)} aria-label={sidebarCollapsed ? '展开历史对话' : '收起历史对话'}><Icon name="menu"/></PulseButton>}
         {!switchInHistory && modeSwitch}
         <div className="navbar-title"><span className={`status-dot ${paired ? '' : 'offline'}`} /><span className="title-text" title={surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}>{surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}</span></div>
-        <div className="navbar-actions">{surfaceMode === 'chat' && <PulseButton className="details-button" aria-label="设置" title="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings"/><span>设置</span></PulseButton>}{selected?.approvalPolicy === 'delegate' && surfaceMode === 'work' && <PulseButton className="delegate-pill" onClick={() => void setApprovalPolicy('manual')} aria-label="切回人工审批">代审中 · 切回人工</PulseButton>}{running && <span className="running-pill"><i />{surfaceMode === 'chat' ? '正在回复' : '运行中'}</span>}{surfaceMode === 'work' && <><PulseButton className={`run-trigger ${running ? 'is-running' : ''} ${runPanelOpen ? 'active' : ''}`} onClick={() => { patchQuery({ task: !runPanelOpen, lane: undefined, details: undefined }) }} aria-expanded={runPanelOpen} aria-label="任务状态"><Icon name="activity"/><span>任务</span></PulseButton><PulseButton className={`workbench-trigger ${workbenchOpen ? 'active' : ''}`} onClick={() => { patchQuery({ workspace: workbenchOpen ? undefined : 'files', details: undefined }) }} aria-expanded={workbenchOpen} aria-label="工作区" title="工作区"><Icon name="folder"/><span>工作区</span></PulseButton></>}<Popover open={detailsOpen} onOpenChange={open => { patchQuery({ details: open, task: undefined, lane: undefined }) }} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}><PulseButton className={`details-button ${detailsOpen ? 'active' : ''}`} aria-label="对话详情" aria-expanded={detailsOpen} title="对话详情"><Icon name="info"/><span>详情</span></PulseButton></Popover></div>
+        <div className="navbar-actions">{surfaceMode === 'work' && !mobileLayout && transfer.exportButton}{surfaceMode === 'chat' && <PulseButton className="details-button" aria-label="设置" title="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings"/><span>设置</span></PulseButton>}{selected?.approvalPolicy === 'delegate' && surfaceMode === 'work' && <PulseButton className="delegate-pill" onClick={() => void setApprovalPolicy('manual')} aria-label="切回人工审批">代审中 · 切回人工</PulseButton>}{running && <span className="running-pill"><i />{surfaceMode === 'chat' ? '正在回复' : '运行中'}</span>}{surfaceMode === 'work' && <><PulseButton className={`run-trigger ${running ? 'is-running' : ''} ${runPanelOpen ? 'active' : ''}`} onClick={() => { patchQuery({ task: !runPanelOpen, lane: undefined, details: undefined }) }} aria-expanded={runPanelOpen} aria-label="任务状态"><Icon name="activity"/><span>任务</span></PulseButton><PulseButton className={`workbench-trigger ${workbenchOpen ? 'active' : ''}`} onClick={() => { patchQuery({ workspace: workbenchOpen ? undefined : 'files', details: undefined }) }} aria-expanded={workbenchOpen} aria-label="工作区" title="工作区"><Icon name="folder"/><span>工作区</span></PulseButton></>}<Popover open={detailsOpen} onOpenChange={open => { patchQuery({ details: open, task: undefined, lane: undefined }) }} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}><PulseButton className={`details-button ${detailsOpen ? 'active' : ''}`} aria-label="对话详情" aria-expanded={detailsOpen} title="对话详情"><Icon name="info"/><span>详情</span></PulseButton></Popover></div>
 
       </header>
       {runPanelOpen && <RunCard status={status} running={running} {...(selected?.activeRunId ? { runId: selected.activeRunId } : {})} resuming={Boolean(resumingRunId)} resume={resumeInterruptedRun} endInterrupted={endInterruptedRun} selectedLaneId={selectedLaneId} onSelectLane={setSelectedLaneId} onClose={() => setRunPanelOpen(false)} />}
@@ -1111,6 +1117,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       </footer>
     </section>
     {workbenchOpen && <Suspense fallback={<div className="workbench-loading" role="status">正在打开工作区…</div>}><WorkbenchPanel project={projects.find(project => project.id === (selected?.projectId ?? selectedProjectId))} transport={transport} localAdmin={sessionCapabilities.localAdmin} canUseTerminal={sessionCapabilities.canUseTerminal} tab={workbenchTab} setTab={setWorkbenchTab} position={route.query} onNavigate={patchQuery} onClose={() => setWorkbenchOpen(false)} /></Suspense>}
+    {surfaceMode === 'work' && transfer.dialog}
     {toast && <PulseToast text={toast} />}
   </main>
 }

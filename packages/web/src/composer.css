@@ -548,3 +548,15 @@
   border-color: var(--line, #30384a);
   color: var(--ink, #e4e9f3);
 }
+
+/* Conversation transfer controls share the existing header and history surfaces. */
+.history-primary .transfer-import { display: flex; align-items: center; gap: 8px; }
+.conversation-transfer-form { display: flex; flex-direction: column; gap: 10px; overflow-wrap: anywhere; }
+.conversation-transfer-form p { margin: 0; }
+.conversation-transfer-form ul { margin: 8px 0 0; padding-left: 20px; }
+.conversation-transfer-form [role="alert"] { color: #b42318; }
+@media (max-width: 767px) {
+  .navbar-actions .transfer-export { min-width: 32px; padding: 6px; }
+  .navbar-actions .transfer-export span:not(.anticon) { display: none; }
+  .history-primary .transfer-import { display: none !important; }
+}
