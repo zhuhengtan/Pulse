@@ -174,10 +174,11 @@ describe('explicit URL navigation', () => {
     expect(view.calls.filter(call => call.method !== 'GET').map(call => call.path)).toEqual(['/api/session/local'])
   })
 
-  it('restores existing automation selection and task/details/artifact positions', async () => {
+  it('restores automation, details and artifact positions while ignoring retired task links', async () => {
     const view = show('/work/pulse-chat?workspace=automation&automation=browser-1&task=1&lane=main&artifact=reports%2Fexample-report.txt&artifactRun=fixture-run')
     await screen.findByText(/这是用于检查交付文件预览/)
-    expect(screen.getByRole('button', { name: '关闭任务状态' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '任务状态' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '关闭任务状态' })).toBeNull()
     await screen.findAllByText(/Existing document/)
     expect(view.calls.some(call => /\/control|\/observe/.test(call.path))).toBe(false)
     await navigate(view.router, '/work/pulse-chat?details=1')
@@ -251,13 +252,13 @@ describe('explicit URL navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: '返回聊天' }))
     await waitFor(() => expect(address(view.router)).toBe('/settings/archive'))
     fireEvent.click(screen.getAllByRole('button', { name: '返回聊天' })[0]!)
-    await waitFor(() => expect(address(view.router)).toBe(initial))
+    await waitFor(() => expect(address(view.router)).toBe(initial.replace('?task=1', '')))
     fireEvent.click(screen.getByRole('button', { name: '设置', exact: true }))
     fireEvent.click(await screen.findByRole('button', { name: '模型与服务商', exact: true }))
     fireEvent.click(screen.getByRole('button', { name: /分类/ }))
     expect(address(view.router)).toBe('/settings')
     await navigate(view.router, -1)
-    await waitFor(() => expect(address(view.router)).toBe(initial))
+    await waitFor(() => expect(address(view.router)).toBe(initial.replace('?task=1', '')))
   })
 
   it('shows authentication failures on a settings deep link and retries without losing its category', async () => {
@@ -276,7 +277,7 @@ describe('explicit URL navigation', () => {
     await screen.findByText('这个项目不存在或已移除，请选择其他项目。')
     await navigate(view.router, '/settings/not-a-category'); await screen.findByText('页面不存在')
     const route = parsePulseRoute('/work/busy', '?file=..%2Fsecret&offset=-2&workspace=nope&token=secret&task=1')
-    expect(route.query.toString()).toBe('task=1')
+    expect(route.query.toString()).toBe('')
     expect(parsePulseRoute('/work/%E0%A4%A').page).toBe('missing')
     expect(workUrl(undefined, '项目 & 1')).toBe('/work/new?project=%E9%A1%B9%E7%9B%AE+%26+1')
   })

@@ -1,12 +1,13 @@
+import { RunRecoveryCard, type RunRecovery } from './RunRecoveryCard.js'
 import { useConversationTransfer, transferError } from './ConversationTransfer.js'
 import { createRequestId } from './requestId.js'
 import { HostPathPicker } from './HostPathPicker.js'
 import { PulseButton, PulseCheckbox, PulseDisclosure, PulseInput, PulseTextArea, PulseToast, usePulseDialogs } from './PulseControls.js'
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, FormEvent, KeyboardEvent, ReactElement } from 'react'
+import type { FormEvent, KeyboardEvent, ReactElement } from 'react'
 import { ApiError, apiJson, browserTransport, getWebConversation, jsonRequest } from './transport.js'
 import { ConversationArtifacts } from './ConversationArtifacts.js'
-import type { ConversationList, MessageList, PulseWebTransport, WebAttachment, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebLane, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from './transport.js'
+import type { ConversationList, MessageList, PulseWebTransport, WebAttachment, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from './transport.js'
 import { Drawer, Dropdown, Popover, Select } from 'antd'
 import { MessageBubble } from './MessageBubble.js'
 import { RichComposer, emptyComposerDraft, type ComposerDraft } from './RichComposer.js'
@@ -26,7 +27,6 @@ type RunStatus =
   | { kind: 'review'; label: string }
   | { kind: 'tool'; activityId: string; label: string; state: string }
   | { kind: 'interaction'; runId: string; groupId: string; interactionKind: 'ask' | 'approval'; items: Array<{ effectId: string; input: Record<string, unknown> }>; conversationId?: string; conversationTitle?: string; projectId?: string; approvalPolicy?: 'manual' | 'delegate' }
-  | { kind: 'lanes'; available: boolean; lanes: WebLane[] }
   | { kind: 'complete'; label: string; outcome: 'succeeded' | 'failed' | 'cancelled' | 'interrupted' }
 
 const historyStorageKey = 'pulse-web-conversation'
@@ -142,7 +142,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const menuIdRef = useRef(menuId)
   menuIdRef.current = menuId
   const detailsOpen = route.query.get('details') === '1'
-  const setDetailsOpen = (open: boolean) => patchQuery({ details: open, ...(open ? { task: undefined, lane: undefined } : {}) })
+  const setDetailsOpen = (open: boolean) => patchQuery({ details: open })
   const [effectiveModel, setEffectiveModel] = useState<string>()
   const settingsOpen = route.page === 'settings'
   const archiveOpen = route.page === 'archive'
@@ -150,10 +150,6 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const workbenchTab = (route.query.get('workspace') ?? 'files') as WorkspaceTab
   const setWorkbenchOpen = (open: boolean) => patchQuery({ workspace: open ? workbenchTab : undefined })
   const setWorkbenchTab = (tab: WorkspaceTab) => patchQuery({ workspace: tab })
-  const runPanelOpen = route.page === 'work' && route.query.get('task') === '1'
-  const setRunPanelOpen = (open: boolean) => patchQuery({ task: open, ...(!open ? { lane: undefined } : { details: undefined }) })
-  const selectedLaneId = route.query.get('lane') ?? undefined
-  const setSelectedLaneId = (lane: string) => patchQuery({ lane, task: true, details: undefined })
   const [sessionCapabilities, setSessionCapabilities] = useState({ localAdmin: false, canUseTerminal: false, canBrowseHostPaths: false, canRegisterProject: false })
   const [projectPickerOpen, setProjectPickerOpen] = useState(false)
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<string[]>(() => { try { return JSON.parse(window.localStorage.getItem('pulse-web-collapsed-projects') ?? '[]') as string[] } catch { return [] } })
@@ -161,7 +157,9 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const followBottom = useRef(true)
   const scrollView = useRef<{ key: string; element: HTMLElement | null }>({ key: '', element: null })
   const [submitting, setSubmitting] = useState(false)
-  const [resumingRunId, setResumingRunId] = useState<string>()
+  const [recoveryRun, setRecoveryRun] = useState<RunRecovery>()
+  const [runActions, setRunActions] = useState<Record<string, 'resume' | 'end'>>({})
+  const runActionLocks = useRef(new Map<string, symbol>())
   const [pairing, setPairing] = useState<{ code: string; pairUrl: string; qrSvg: string; devices: Device[] }>()
   const [pairError, setPairError] = useState('')
   const [toast, setToast] = useState('')
@@ -180,6 +178,11 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const selectedIdRef = useRef<string | undefined>(undefined)
   selectedIdRef.current = selectedId
   const selected = surfaceMode === 'chat' ? assistantConversation : conversations.find(item => item.id === selectedId)
+  const selectedRunRef = useRef<{ conversationId?: string | undefined; runId?: string | undefined }>({})
+  selectedRunRef.current = { conversationId: surfaceMode === 'work' ? selected?.id : undefined, runId: selected?.activeRunId }
+  const runActionKey = selected?.activeRunId ? `${selected.id}:${selected.activeRunId}` : undefined
+  const pendingRunAction = runActionKey ? runActions[runActionKey] : undefined
+  const resumingRunId = pendingRunAction ? selected?.activeRunId : undefined
   const transfer = useConversationTransfer({ transport, selected: surfaceMode === 'work' ? selected : undefined, projects,
     unavailable: surfaceMode !== 'work' || running || submitting || loading || !paired || Boolean(resumingRunId),
     onImported: conversation => { setConversations(items => [conversation, ...items.filter(item => item.id !== conversation.id)]); setDrawerOpen(false); go(workUrl(conversation.id)) },
@@ -200,7 +203,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     if (conversation.projectId) window.localStorage.setItem('pulse-web-project', conversation.projectId)
     else window.localStorage.removeItem('pulse-web-project')
     setMenuId(undefined); setLoadError(''); setStatus([]); setReviewNote('')
-    setRunning(false); setStopping(false); setResumingRunId(undefined)
+    setRunning(false); setStopping(false); setRecoveryRun(undefined)
     if (saveSelection) window.localStorage.setItem(historyStorageKey, conversation.id)
     try {
       const result = await apiJson<MessageList>(transport, `/api/web/conversations/${encodeURIComponent(conversation.id)}/messages`)
@@ -209,11 +212,15 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       if (!conversation.activeRunId) return
       let snapshot: WebRunSnapshot
       try { snapshot = await apiJson<WebRunSnapshot>(transport, `/api/runs/${encodeURIComponent(conversation.activeRunId)}/state`) }
-      catch { snapshot = { runId: conversation.activeRunId, state: 'interrupted', seq: 0, activities: [] } }
+      catch {
+        if (requestId.current === id && selectedIdRef.current === conversation.id) setRecoveryRun({ conversationId: conversation.id, runId: conversation.activeRunId, state: 'unknown' })
+        return
+      }
       if (requestId.current !== id || selectedIdRef.current !== conversation.id) return
       const restored = snapshotStatus(snapshot)
       setStatus(restored)
       setReviewNote(snapshot.reviewNote ?? '')
+      if (snapshot.state === 'interrupted') setRecoveryRun({ conversationId: conversation.id, runId: conversation.activeRunId, state: 'interrupted' })
       if (snapshot.state === 'running') {
         setRunning(true)
         startRun(conversation.activeRunId, conversation.id, snapshot.seq)
@@ -373,11 +380,11 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   }, [drawerOpen])
 
   useEffect(() => {
-    if (!detailsOpen && !runPanelOpen) return
-    const closePanels = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape') { patchQuery({ details: undefined, task: undefined, lane: undefined }) } }
+    if (!detailsOpen) return
+    const closePanels = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape') { patchQuery({ details: undefined }) } }
     window.addEventListener('keydown', closePanels)
     return () => window.removeEventListener('keydown', closePanels)
-  }, [detailsOpen, runPanelOpen])
+  }, [detailsOpen])
 
   useEffect(() => {
     if (!detailsOpen || !sessionCapabilities.localAdmin) return
@@ -448,7 +455,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     requestId.current++
     eventClose.current?.(); eventClose.current = undefined; streamRunRef.current = undefined
     selectedIdRef.current = undefined; setSelectedId(undefined)
-    setDrawerOpen(false); setMessages([]); setStatus([]); setReviewNote(''); setRunning(false); setStopping(false); setResumingRunId(undefined)
+    setDrawerOpen(false); setMessages([]); setStatus([]); setReviewNote(''); setRunning(false); setStopping(false); setRecoveryRun(undefined)
     if (route.page === 'chat') void loaders.current.loadAssistant()
     else if (route.page === 'work') void loaders.current.loadHistory(route.conversationId)
     else setLoading(false)
@@ -473,7 +480,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const startRun = useCallback((runId: string, conversationId: string, after = 0) => {
     eventClose.current?.()
     streamRunRef.current = runId
-    if (selectedIdRef.current === conversationId) setRunning(true)
+    if (selectedIdRef.current === conversationId) { setRunning(true); setRecoveryRun(undefined) }
     let lastSeq = after
     let traceSeq = 0
     let closed = false
@@ -489,7 +496,6 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       if (event.seq <= after && (event.type === 'status' || event.type === 'tool' || event.type === 'lanes' || event.type === 'waiting' || event.type === 'interactions' || event.type === 'text')) return
       if (event.type === 'status') setStatus(current => replaceStatus(current, { kind: 'status', label: event.data.label ?? (event.data.kind === 'context' ? '正在整理上下文' : '正在处理') }))
       if (event.type === 'tool') setStatus(current => replaceStatus(current, { kind: 'tool', activityId: event.data.activityId, label: readableTool(event.data.tool), state: event.data.status }))
-      if (event.type === 'lanes') setStatus(current => replaceStatus(current, { kind: 'lanes', available: event.data.available, lanes: event.data.lanes }))
       if (event.type === 'waiting') setStatus(current => replaceStatus(current, { kind: 'interaction', runId, groupId: `effect:${event.data.effectId}`, interactionKind: event.data.input.kind === 'ask' ? 'ask' : 'approval', items: [{ effectId: event.data.effectId, input: event.data.input }] }))
       if (event.type === 'interactions') {
         setReviewNote(event.data.reviewNote ?? '')
@@ -783,42 +789,52 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
 
   const openWorkNotice = (conversationId: string) => { go(workUrl(conversationId)) }
 
-  const resumeInterruptedRun = async (runId: string) => {
-    const conversation = selected
-    if (!conversation || conversation.activeRunId !== runId || running || submitting || resumingRunId) return
-    setResumingRunId(runId); setToast('')
+  const recoverRun = async (runId: string, action: 'resume' | 'end') => {
+    const conversation = surfaceMode === 'work' ? selected : undefined
+    if (!conversation || conversation.activeRunId !== runId || running || submitting || recoveryRun?.conversationId !== conversation.id || recoveryRun.runId !== runId) return
+    const key = `${conversation.id}:${runId}`
+    if (runActionLocks.current.has(key)) return
+    const token = Symbol(key), epoch = routeEpoch.current
+    runActionLocks.current.set(key, token)
+    setRunActions(current => ({ ...current, [key]: action }))
+    const isCurrent = () => selectedIdRef.current === conversation.id && selectedRunRef.current.runId === runId && routeEpoch.current === epoch
+    const updateConversation = (nextRunId?: string) => setConversations(items => items.map(item => item.id !== conversation.id || item.activeRunId !== runId ? item : nextRunId ? { ...item, activeRunId: nextRunId } : withoutActiveRun(item)))
     try {
-      const response = await apiJson<{ runId: string }>(transport, `/api/conversations/${encodeURIComponent(conversation.id)}/runs/${encodeURIComponent(runId)}/resume`, jsonRequest('POST'))
-      setConversations(items => items.map(item => item.id === conversation.id ? { ...item, activeRunId: response.runId } : item))
-      if (selectedIdRef.current === conversation.id) {
-        setStatus([{ kind: 'status', label: '正在继续上次任务' }])
-        startRun(response.runId, conversation.id)
+      if (action === 'end' && (!await dialogs.confirm('结束这轮任务？聊天和运行记录会保留，但不会继续执行。') || !isCurrent())) return
+      if (isCurrent()) setToast('')
+      if (action === 'resume') {
+        const result = await apiJson<{ runId: string }>(transport, `/api/conversations/${encodeURIComponent(conversation.id)}/runs/${encodeURIComponent(runId)}/resume`, jsonRequest('POST'))
+        const current = isCurrent()
+        updateConversation(result.runId)
+        if (current) {
+          setRecoveryRun(undefined); setStatus([{ kind: 'status', label: '正在继续上次任务' }])
+          startRun(result.runId, conversation.id)
+        } else if (selectedIdRef.current === conversation.id && selectedRunRef.current.runId === runId) setRouteRevision(value => value + 1)
+      } else {
+        const result = await apiJson<{ cleared: boolean; activeRunId?: string }>(transport, `/api/conversations/${encodeURIComponent(conversation.id)}/runs/${encodeURIComponent(runId)}/reconcile`, jsonRequest('POST'))
+        const current = isCurrent()
+        if (result.cleared) {
+          updateConversation()
+          if (current) { setRecoveryRun(undefined); setToast('本轮已结束，原始记录已保留') }
+        } else if (result.activeRunId) {
+          updateConversation(result.activeRunId)
+          if (current) setRouteRevision(value => value + 1)
+        } else if (current) setToast('这轮任务状态已变化，请刷新对话后重试。')
       }
     } catch (error) {
-      if (selectedIdRef.current !== conversation.id) return
+      const current = isCurrent()
       if (error instanceof ApiError && error.status === 410) {
-        setConversations(items => items.map(item => item.id === conversation.id ? withoutActiveRun(item) : item))
-        setToast('这轮任务没有可恢复的运行快照；原对话和记录已保留，可以发送新消息。')
-      } else if (error instanceof ApiError && error.status === 409) {
-        setToast(error.detail ? transferError(error) : '这轮任务状态已变化或仍被占用；请刷新对话状态后重试。')
-      } else setToast('暂时无法继续任务；运行记录已保留，可以重试或结束这轮。')
-    } finally { setResumingRunId(current => current === runId ? undefined : current) }
-  }
-
-  const endInterruptedRun = async (runId: string) => {
-    const conversation = selected
-    if (!conversation || conversation.activeRunId !== runId || running || resumingRunId) return
-    if (!await dialogs.confirm('结束这轮任务？聊天和运行记录会保留，但不会继续执行。')) return
-    try {
-      const result = await apiJson<{ cleared: boolean; activeRunId?: string }>(transport, `/api/conversations/${encodeURIComponent(conversation.id)}/runs/${encodeURIComponent(runId)}/reconcile`, jsonRequest('POST'))
-      setConversations(items => items.map(item => {
-        if (item.id !== conversation.id) return item
-        return result.activeRunId ? { ...item, activeRunId: result.activeRunId } : withoutActiveRun(item)
-      }))
-      if (result.cleared) setStatus(current => replaceStatus(current, { kind: 'complete', outcome: 'interrupted', label: '本轮已结束，原始记录已保留' }))
-      else setToast('这轮任务状态已变化，请刷新对话后重试。')
-    } catch (error) {
-      setToast(error instanceof ApiError && error.status === 409 ? '任务仍在运行，未结束本轮。' : '无法结束本轮任务，请检查连接后重试。')
+        updateConversation()
+        if (current) { setRecoveryRun(undefined); setToast(action === 'resume' ? '这轮任务没有可恢复的运行快照；原对话和记录已保留，可以发送新消息。' : '本轮已结束，原始记录已保留') }
+      } else if (current) {
+        if (error instanceof ApiError && error.status === 409) setToast(error.detail ? transferError(error) : action === 'resume' ? '这轮任务状态已变化或仍被占用；请刷新对话状态后重试。' : '任务仍在运行，未结束本轮。')
+        else setToast(action === 'resume' ? '暂时无法继续任务；运行记录已保留，可以重试或结束这轮。' : '无法结束本轮任务，请检查连接后重试。')
+      }
+    } finally {
+      if (runActionLocks.current.get(key) === token) {
+        runActionLocks.current.delete(key)
+        setRunActions(current => { const next = { ...current }; delete next[key]; return next })
+      }
     }
   }
 
@@ -1073,8 +1089,15 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   if (route.page === 'missing') return <main className="empty"><h1>页面不存在</h1><PulseButton onClick={() => go('/chat', true)}>返回聊天</PulseButton></main>
 
   const activeRunId = selected?.activeRunId
+  const recoveryVisible = Boolean(surfaceMode === 'work' && !running && recoveryRun && activeRunId && recoveryRun.conversationId === selected?.id && recoveryRun.runId === activeRunId)
   const renderMessages = () => {
     const shown = new Set<string>()
+    let recoveryShown = false
+    const recoveryCard = (runId?: string) => {
+      if (!recoveryVisible || !recoveryRun || recoveryShown || runId !== recoveryRun.runId) return null
+      recoveryShown = true
+      return <RunRecoveryCard key={`recovery:${runId}`} state={recoveryRun.state} pending={pendingRunAction} resume={() => void recoverRun(recoveryRun.runId, 'resume')} end={() => void recoverRun(recoveryRun.runId, 'end')} />
+    }
     const items = messages.flatMap(message => {
       const out: ReactElement[] = []
       const runId = message.runId
@@ -1083,11 +1106,16 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         const live = traces[runId]
         if (live) out.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} />)
         else if (persistedTraceFallback) out.push(<PersistedRunTrace key={`trace:${runId}`} runId={runId} transport={transport} />)
+        const card = recoveryCard(runId); if (card) out.push(card)
       }
       out.push(<MessageBubble key={`${selectedId}:${message.id}`} mode={surfaceMode} message={message} retry={() => void (surfaceMode === 'chat' ? retryAssistantMessage(message) : retryWorkMessage(message))} onOpenWork={openWorkNotice} onFileClick={path => { patchQuery({ workspace: 'files', file: path, details: undefined }) }} />)
       return out
     })
-    if (surfaceMode === 'work') for (const [runId, live] of Object.entries(traces)) if (!shown.has(runId)) items.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} />)
+    if (surfaceMode === 'work') for (const [runId, live] of Object.entries(traces)) if (!shown.has(runId)) {
+      items.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} />)
+      const card = recoveryCard(runId); if (card) items.push(card)
+    }
+    const fallback = recoveryCard(activeRunId); if (fallback) items.push(fallback)
     if (surfaceMode === 'work' && selectedId) items.push(<ConversationArtifacts key={`artifacts:${selectedId}`} conversationId={selectedId} revision={`${selected?.updatedAt}:${messages.length}:${running}`} transport={transport} position={route.query} onNavigate={patchQuery} />)
     return items
   }
@@ -1101,18 +1129,17 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         {surfaceMode === 'work' && <PulseButton className="icon-button desktop-menu" onClick={() => setSidebarCollapsed(value => !value)} aria-label={sidebarCollapsed ? '展开历史对话' : '收起历史对话'}><Icon name="menu"/></PulseButton>}
         {!switchInHistory && modeSwitch}
         <div className="navbar-title"><span className={`status-dot ${paired ? '' : 'offline'}`} /><span className="title-text" title={surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}>{surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}</span></div>
-        <div className="navbar-actions">{surfaceMode === 'work' && !mobileLayout && transfer.exportButton}{surfaceMode === 'chat' && <PulseButton className="details-button" aria-label="设置" title="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings"/><span>设置</span></PulseButton>}{selected?.approvalPolicy === 'delegate' && surfaceMode === 'work' && <PulseButton className="delegate-pill" onClick={() => void setApprovalPolicy('manual')} aria-label="切回人工审批">代审中 · 切回人工</PulseButton>}{running && <span className="running-pill"><i />{surfaceMode === 'chat' ? '正在回复' : '运行中'}</span>}{surfaceMode === 'work' && <><PulseButton className={`run-trigger ${running ? 'is-running' : ''} ${runPanelOpen ? 'active' : ''}`} onClick={() => { patchQuery({ task: !runPanelOpen, lane: undefined, details: undefined }) }} aria-expanded={runPanelOpen} aria-label="任务状态"><Icon name="activity"/><span>任务</span></PulseButton><PulseButton className={`workbench-trigger ${workbenchOpen ? 'active' : ''}`} onClick={() => { patchQuery({ workspace: workbenchOpen ? undefined : 'files', details: undefined }) }} aria-expanded={workbenchOpen} aria-label="工作区" title="工作区"><Icon name="folder"/><span>工作区</span></PulseButton></>}<Popover open={detailsOpen} onOpenChange={open => { patchQuery({ details: open, task: undefined, lane: undefined }) }} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}><PulseButton className={`details-button ${detailsOpen ? 'active' : ''}`} aria-label="对话详情" aria-expanded={detailsOpen} title="对话详情"><Icon name="info"/><span>详情</span></PulseButton></Popover></div>
+        <div className="navbar-actions">{surfaceMode === 'work' && !mobileLayout && transfer.exportButton}{surfaceMode === 'chat' && <PulseButton className="details-button" aria-label="设置" title="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings"/><span>设置</span></PulseButton>}{selected?.approvalPolicy === 'delegate' && surfaceMode === 'work' && <PulseButton className="delegate-pill" onClick={() => void setApprovalPolicy('manual')} aria-label="切回人工审批">代审中 · 切回人工</PulseButton>}{running && <span className="running-pill"><i />{surfaceMode === 'chat' ? '正在回复' : '运行中'}</span>}{surfaceMode === 'work' && <><PulseButton className={`workbench-trigger ${workbenchOpen ? 'active' : ''}`} onClick={() => { patchQuery({ workspace: workbenchOpen ? undefined : 'files', details: undefined }) }} aria-expanded={workbenchOpen} aria-label="工作区" title="工作区"><Icon name="folder"/><span>工作区</span></PulseButton></>}<Popover open={detailsOpen} onOpenChange={open => { patchQuery({ details: open }) }} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}><PulseButton className={`details-button ${detailsOpen ? 'active' : ''}`} aria-label="对话详情" aria-expanded={detailsOpen} title="对话详情"><Icon name="info"/><span>详情</span></PulseButton></Popover></div>
 
       </header>
-      {runPanelOpen && <RunCard status={status} running={running} {...(selected?.activeRunId ? { runId: selected.activeRunId } : {})} resuming={Boolean(resumingRunId)} resume={resumeInterruptedRun} endInterrupted={endInterruptedRun} selectedLaneId={selectedLaneId} onSelectLane={setSelectedLaneId} onClose={() => setRunPanelOpen(false)} />}
       {loadError && <div className="alert" role="alert"><span>{loadError}</span><PulseButton onClick={() => { if (paired) setRouteRevision(value => value + 1); else void bootstrap() }}>重试</PulseButton></div>}
-      <section ref={messagesEl} className={`messages ${messages.length === 0 ? 'is-empty' : ''}`} aria-live="polite" aria-label="聊天消息" onScroll={event => { const el = event.currentTarget; const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 96; followBottom.current = bottom; setAtBottom(bottom) }}>
+      <section ref={messagesEl} className={`messages ${messages.length === 0 && !recoveryVisible ? 'is-empty' : ''}`} aria-live="polite" aria-label="聊天消息" onScroll={event => { const el = event.currentTarget; const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 96; followBottom.current = bottom; setAtBottom(bottom) }}>
         {loading && <div className="empty"><span className="spinner" />正在加载对话…</div>}
-        {!loading && messages.length === 0 && paired && <div className="empty"><div className="empty-mark"><Icon name="spark" size={27}/></div><h1>我们要做什么？</h1><p>在 Pulse 工作区中提问或交代任务。</p></div>}
+        {!loading && messages.length === 0 && !recoveryVisible && paired && <div className="empty"><div className="empty-mark"><Icon name="spark" size={27}/></div><h1>我们要做什么？</h1><p>在 Pulse 工作区中提问或交代任务。</p></div>}
       {renderMessages()}
       </section>
       {!atBottom && <PulseButton className="jump-bottom" onClick={() => { followBottom.current = true; setAtBottom(true); messagesEl.current?.scrollTo({ top: messagesEl.current.scrollHeight, behavior: 'smooth' }) }}>回到底部 ↓</PulseButton>}
-      <footer className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${messages.length === 0 && !activeInteraction ? 'is-empty' : ''}`}>
+      <footer className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${messages.length === 0 && !recoveryVisible && !activeInteraction ? 'is-empty' : ''}`}>
         {activeInteraction ? <InteractionPanel key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={(activeInteraction.approvalPolicy ?? selected?.approvalPolicy) === 'delegate'} running={activeInteraction.conversationId ? true : running} stopping={stopping} stop={() => void (activeInteraction.conversationId ? stopRunFor(activeInteraction.runId, activeInteraction.conversationId) : stopRun())} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} setApprovalPolicy={policy => setApprovalPolicy(policy, activeInteraction.conversationId ?? selected?.id)} /> : <><RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} onSend={async payload => await send(payload) === true} onStop={() => void stopRun()} />{route.newWork && <div className="new-chat-tools"><PulseButton type="button" className={`new-chat-approval ${newApprovalPolicy === 'delegate' ? 'active' : ''}`} aria-pressed={newApprovalPolicy === 'delegate'} title="开启后，本会话后续工具操作将持续代审；业务问题仍由你回答。" onClick={() => setNewApprovalPolicy(value => value === 'delegate' ? 'manual' : 'delegate')}><Icon name="shield"/><span>{newApprovalPolicy === 'delegate' ? '本会话代审中' : '替我审批'}</span></PulseButton><div className="new-conversation-project"><Icon name="folder"/><Select variant="borderless" aria-label="新对话所属项目" value={selectedProjectId ?? '__ungrouped__'} onChange={value => { const projectId = value === '__ungrouped__' ? undefined : value; patchQuery({ project: projectId }); setSelectedProjectId(projectId); if (projectId) window.localStorage.setItem('pulse-web-project', projectId); else window.localStorage.removeItem('pulse-web-project') }} options={[{ value: '__ungrouped__', label: '不归属项目' }, ...projects.map(project => ({ value: project.id, label: project.name }))]} popupMatchSelectWidth={false} /></div></div>}<div className="composer-hint">Pulse 可能会出错，请核对重要信息。</div></>}
       </footer>
     </section>
@@ -1127,7 +1154,6 @@ function snapshotStatus(snapshot: WebRunSnapshot): RunStatus[] {
   if (snapshot.status) items.push({ kind: 'status', label: snapshot.status.data.label ?? '正在处理' })
   if (snapshot.reviewNote) items.push({ kind: 'review', label: snapshot.reviewNote })
   for (const activity of snapshot.activities) items.push({ kind: 'tool', activityId: activity.data.activityId, label: readableTool(activity.data.tool), state: activity.data.status })
-  if (snapshot.laneState) items.push({ kind: 'lanes', available: snapshot.laneState.available, lanes: snapshot.laneState.lanes })
   if (snapshot.interactions?.length) {
     for (const group of snapshot.interactions) items.push({ kind: 'interaction', runId: snapshot.runId, groupId: group.groupId, interactionKind: group.kind, items: group.items })
   } else if (snapshot.waiting) items.push({ kind: 'interaction', runId: snapshot.runId, groupId: `effect:${snapshot.waiting.data.effectId}`, interactionKind: snapshot.waiting.data.input.kind === 'ask' ? 'ask' : 'approval', items: [{ effectId: snapshot.waiting.data.effectId, input: snapshot.waiting.data.input }] })
@@ -1142,7 +1168,6 @@ function completeStatus(outcome: 'succeeded' | 'failed' | 'cancelled', errorCode
 
 function replaceStatus(items: RunStatus[], value: RunStatus): RunStatus[] {
   if (value.kind === 'tool') return [...items.filter(item => item.kind !== 'tool' || item.activityId !== value.activityId), value]
-  if (value.kind === 'lanes') return [...items.filter(item => item.kind !== 'lanes'), value]
   if (value.kind === 'interaction') return [...items.filter(item => item.kind !== 'interaction' || item.groupId !== value.groupId), value]
   if (value.kind === 'complete') return [...items.filter(item => item.kind !== 'complete'), value]
   return [...items.filter(item => item.kind !== 'status'), value]
@@ -1178,30 +1203,6 @@ function groupConversations(items: WebConversation[]): Array<{ label: string; it
   }
   return [...groups].map(([label, conversations]) => ({ label, items: conversations }))
 }
-
-function RunCard({ status, running, runId, resuming, resume, endInterrupted, selectedLaneId, onSelectLane, onClose }: { status: RunStatus[]; running: boolean; runId?: string; resuming: boolean; resume: (runId: string) => void; endInterrupted: (runId: string) => void; selectedLaneId?: string | undefined; onSelectLane: (id: string) => void; onClose: () => void }) {
-  const interrupted = status.some((item) => item.kind === 'complete' && item.outcome === 'interrupted')
-  const current = [...status].reverse().find(item => item.kind === 'status' || item.kind === 'interaction' || item.kind === 'review' || item.kind === 'complete')
-  const outcome = [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'complete' }> => item.kind === 'complete')
-  const tools = status.filter((item): item is Extract<RunStatus, { kind: 'tool' }> => item.kind === 'tool')
-  const laneState = [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'lanes' }> => item.kind === 'lanes')
-  const selectedLane = laneState?.lanes.find(lane => lane.id === selectedLaneId)
-  return <aside className="run-panel" aria-label="任务运行状态">
-    <header><div><strong>{current?.kind === 'interaction' ? current.interactionKind === 'ask' ? '等待你的回答' : '等待审批' : current?.label ?? (running ? '正在处理' : '任务状态')}</strong><small>{runId ? `Run ${runId.slice(-8)}` : ''}{running ? ' · 运行中' : outcome?.label ? ` · ${outcome.label}` : ''}</small></div><PulseButton className="icon-button" onClick={onClose} aria-label="关闭任务状态"><Icon name="close"/></PulseButton></header>
-    {status.length === 0 && <div className="run-empty"><Icon name="activity" size={26}/><strong>没有任务记录</strong><span>开始一个任务后，执行状态和工具活动会显示在这里。</span></div>}
-    {status.some(item => item.kind === 'interaction') && <PulseButton className="run-panel-jump" onClick={onClose}>审批和回答位于底部交互面板</PulseButton>}
-    {laneState && <section className="lane-tree"><h3>Lane · {laneState.available ? laneState.lanes.length : '—'}</h3>{laneState.available ? laneState.lanes.map((lane, index) => <PulseButton className={`lane-row ${selectedLaneId === lane.id ? 'selected' : ''}`} key={lane.id} style={{ '--lane-depth': lane.parentId ? 1 : 0 } as CSSProperties} onClick={() => onSelectLane(lane.id)}><span className={`lane-state lane-${lane.status}`}>{lane.status === 'succeeded' ? '✓' : lane.status === 'failed' ? '!' : lane.status === 'waiting' ? 'Ⅱ' : lane.status === 'running' ? '◌' : '·'}</span><span><strong>{lane.label}{lane.parentId && <small> · 子任务</small>}</strong><small>{lane.activity ?? laneStatusText(lane.status)}</small></span></PulseButton>) : <p className="lane-unavailable">此历史任务没有可用的 Lane 快照。</p>}
-      {selectedLane && <div className="lane-activity-list"><strong>{selectedLane.label} · 活动</strong>{selectedLane.activities?.length ? selectedLane.activities.map(activity => <div key={activity.id}><span>{activity.label}</span><small>{laneStatusText(activity.status)}</small></div>) : <p>没有可展示的活动记录。</p>}</div>}
-    </section>}
-    {tools.length > 0 && <section className="run-tools"><h3>工具活动</h3>{tools.slice(-12).map(item => <div className="run-activity" key={item.activityId}><span className={item.state === 'succeeded' ? 'status-check' : item.state === 'failed' ? 'status-failed' : ''}>{item.state === 'succeeded' ? '✓' : item.state === 'failed' ? '!' : '·'}</span><span>{item.label}</span><small>{laneStatusText(item.state)}</small></div>)}</section>}
-    {status.filter((item): item is Extract<RunStatus, { kind: 'complete' }> => item.kind === 'complete').map(item => <div className={`run-outcome ${item.outcome}`} key={item.outcome}>{item.label}</div>)}
-    {interrupted && runId && !running && <div className="run-actions"><PulseButton type="button" className="resume-run" disabled={resuming} onClick={() => resume(runId)}>{resuming ? '正在继续…' : '▶ 继续任务'}</PulseButton><PulseButton type="button" className="end-run" disabled={resuming} onClick={() => endInterrupted(runId)}>结束这轮</PulseButton></div>}
-    {status.filter((item): item is Extract<RunStatus, { kind: 'review' }> => item.kind === 'review').map(item => <div className="run-outcome interrupted" key={item.label}>{item.label}</div>)}
-    {running && !status.some(item => item.kind === 'status' || item.kind === 'interaction') && <div className="run-status"><span className="spinner" />正在处理</div>}
-  </aside>
-}
-
-function laneStatusText(status: string): string { return status === 'succeeded' ? '已完成' : status === 'failed' ? '失败' : status === 'cancelled' ? '已取消' : status === 'waiting' ? '等待中' : status === 'running' ? '进行中' : status === 'cancelling' ? '正在停止' : status === 'closing' ? '正在收尾' : '排队中' }
 
 type InteractionAnswer = { value: string } | { values: string[] } | { text: string }
 
