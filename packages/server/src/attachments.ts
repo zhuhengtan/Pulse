@@ -8,6 +8,14 @@ import { conversationDirectory } from './security.js'
 import type { WebAttachment } from './protocol.js'
 
 const MAX_FILE = 20 * 1024 * 1024
+const INLINE_ATTACHMENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+/** Response metadata is host-owned. Bundle and client media types never choose inline active content. */
+export function attachmentDownload(meta: { mediaType?: unknown; name?: unknown }): { mediaType: string; disposition: string } {
+  const raw = typeof meta.mediaType === 'string' ? meta.mediaType.trim().toLowerCase() : ''
+  const inline = INLINE_ATTACHMENT_TYPES.has(raw)
+  const name = typeof meta.name === 'string' && meta.name.trim() ? meta.name : 'attachment'
+  return { mediaType: inline ? raw : 'application/octet-stream', disposition: `${inline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(name)}"` }
+}
 export const MAX_ATTACHMENT_REQUEST = 35 * 1024 * 1024
 const safeId = (id: string) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id) && !id.includes('..') && !/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(id)
 const fail = (code: string): never => { throw new ToolError(code, code) }

@@ -1,7 +1,8 @@
 import { AttachmentStore, MAX_ATTACHMENT_REQUEST } from './attachments.js'
 import { canReadShellArchive } from './shell-archive.js'
 import { freezeConstraintBaseline, violatedConstraints } from './constraint-baseline.js'
-import { recoveryFingerprints, prepareRecovery, finishRecovery } from './recovery-contract.js'
+import { recoveryFingerprints, prepareRecovery, finishRecovery, currentRecoveryBuild, recoveryPolicyFingerprint } from './recovery-contract.js'
+import { BundleError, createConversationBundle, transferManifestSchema, readBundleRuntime, unsafeRecoveryReasons, mapTransferredArguments, transferWorkspaceReasons, presentTransferredApproval, pendingTransferredCalls, type StagedBundle, type TransferBinding, type BundleMetadata } from './conversation-bundle.js'
 import { runPersistence } from './run-persistence.js'
 import { assertCheckEdit, candidateTestChangesAllowed, captureCheck, finishCheck, freezeCheckDefinitions, isCheck, testAdditionsRequested } from './check-receipt.js'
 import { planConfirmationOptions, requiresExplicitPlanConfirmation } from './plan-confirmation.js'
@@ -27,7 +28,7 @@ import { acceptanceFailure, assessAcceptanceValue, validateAcceptanceChecks, typ
 import { fetchText, readPublicPage, parseSearchResults } from './web.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { appendFile, copyFile, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
+import { appendFile, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { conversationDirectory, publicUrl, safeShellEnv, searchWorkspace, within } from './security.js'
@@ -1373,11 +1374,15 @@ function withEvidenceFreshness(execute: EffectExecutor, current: () => PulseRunt
   }
 }
 
-function approvedToolExecutor(registry: ToolRegistry, provider: ReturnType<typeof providerFromOptions>, approvalMode: ApprovalMode | undefined, userIntent: string, modelId: string, workspaceRoot: string, runLlm: (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => Promise<LLMResult>, guard?: (name: string, input: Record<string, JsonValue>, policy: string | undefined) => boolean | Promise<boolean>, isApproved: (id: string) => boolean = () => false, reviewer?: { modelId: string; providerId: string; timeoutMs: number; manualOnRejection?: boolean }): EffectExecutor {
+function approvedToolExecutor(registry: ToolRegistry, provider: ReturnType<typeof providerFromOptions>, approvalMode: ApprovalMode | undefined, userIntent: string, modelId: string, workspaceRoot: string, runLlm: (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => Promise<LLMResult>, guard?: (name: string, input: Record<string, JsonValue>, policy: string | undefined) => boolean | Promise<boolean>, isApproved: (id: string) => boolean = () => false, reviewer?: { modelId: string; providerId: string; timeoutMs: number; manualOnRejection?: boolean }, relocation?: { source: string; target: string }): EffectExecutor {
   const execute = createToolEffectExecutor(registry)
   return async (effect, signal, observe): Promise<EffectExecution> => {
-    const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+    let input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
     const name = typeof input.name === 'string' ? input.name : ''
+    if (relocation && input.arguments && typeof input.arguments === 'object' && !Array.isArray(input.arguments)) {
+      input = { ...input, arguments: mapTransferredArguments(name, input.arguments, relocation.source, relocation.target) as JsonValue }
+      effect = { ...effect, input }
+    }
     const policy = registry.get(name)?.manifest.sideEffectPolicy
     // The gate inspects the model's actual arguments, not the outer effect envelope
     // ({ toolCallId, name, arguments }), so a docs/plans plan write is distinguishable
@@ -1866,6 +1871,115 @@ export class LocalHost {
     manifest.updatedAt = new Date().toISOString()
     await this.saveManifest(manifest)
     return manifest
+  }
+  /** Stable capture uses the same cross-process lock as runs, compaction and deletion. */
+  async exportConversationBundle(id: string) {
+    await this.acquireConversationLock(id, `export-${randomUUID()}`)
+    try {
+      const manifest = await this.readManifest(id)
+      if (manifest.activeRunId && this.active.has(manifest.activeRunId)) throw new BundleError('CONVERSATION_BUSY', 409)
+      return await createConversationBundle(this.conversationDir(id), transferManifestSchema.parse(manifest))
+    } finally { await this.releaseConversationLock(id) }
+  }
+  async getTransferBinding(id: string): Promise<TransferBinding | undefined> {
+    try { return JSON.parse(await readFile(join(this.conversationDir(id), 'transfer.json'), 'utf8')) as TransferBinding }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
+  }
+  async inspectConversationBundle(bundle: StagedBundle, targetCwd?: string): Promise<string[]> {
+    return this.inspectTransferDirectory(join(bundle.directory, 'content/conversation'), bundle.manifest, bundle.metadata.source, bundle.metadata.blockedReasons, targetCwd)
+  }
+  private async inspectTransferDirectory(directory: string, manifest: { activeRunId?: string | undefined }, source: BundleMetadata['source'], intrinsicReasons: string[], targetCwd?: string): Promise<string[]> {
+    const reasons = [...intrinsicReasons]
+    if (targetCwd) reasons.push(...await transferWorkspaceReasons(source.stamp, targetCwd))
+    const runId = manifest.activeRunId
+    if (!runId) return [...new Set(reasons)]
+    try {
+      const { snapshot, restored } = await readBundleRuntime(directory, runId)
+      const fingerprints = snapshot.compatibility?.fingerprints
+      if (!fingerprints || fingerprints.build !== currentRecoveryBuild()) reasons.push('RECOVERY_BUILD_INCOMPATIBLE')
+      const policy = recoveryPolicyFingerprint({ approvalMode: this.options.approvalMode ?? 'ask', allowNetwork: this.options.allowNetwork ?? false, networkHosts: this.options.networkHosts ?? [], contract: 2 })
+      if (!fingerprints || fingerprints.policy !== policy) reasons.push('RECOVERY_POLICY_INCOMPATIBLE')
+      if ((this.options.approvalMode ?? 'ask') !== 'ask') reasons.push('RECOVERY_MANUAL_APPROVAL_REQUIRED')
+      reasons.push(...unsafeRecoveryReasons(snapshot))
+      const input = JSON.parse(await readFile(join(directory, 'runs', runId, 'input.json'), 'utf8')) as Record<string, unknown>
+      const sourceModel = typeof input.model === 'string' ? input.model : undefined
+      const configured = new Set([...Object.keys(this.options.providerModels ?? {}), this.options.activeModel, this.options.provider?.defaultModel].filter(Boolean))
+      if (sourceModel && !configured.has(sourceModel)) reasons.push('RECOVERY_MODEL_UNAVAILABLE')
+      if (!sourceModel && input.provider !== (this.options.provider?.provider ?? 'mock')) reasons.push('RECOVERY_MODEL_UNAVAILABLE')
+      if (input.assistantChat === true) reasons.push('WORK_SESSION_REQUIRED')
+      for (const call of pendingTransferredCalls(snapshot)) {
+        try { mapTransferredArguments(call.name, call.arguments, source.executionCwd, targetCwd ?? source.executionCwd) }
+        catch { reasons.push('RECOVERY_PATH_NOT_PORTABLE') }
+      }
+    } catch { reasons.push('RECOVERY_SNAPSHOT_INCOMPLETE') }
+    return [...new Set(reasons)]
+  }
+  async importConversationBundle(bundle: StagedBundle, project: { id: string; cwd: string }): Promise<{ conversation: ConversationSummary; blockedReasons: string[]; duplicate: boolean }> {
+    const directory = this.conversationDir(bundle.manifest.id)
+    const lockPath = join(this.dataDir, 'conversation-import.lock')
+    let lock: Awaited<ReturnType<typeof open>> | undefined
+    for (;;) {
+      try { lock = await open(lockPath, 'wx', 0o600); await lock.writeFile(JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() })); break }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        const body = await readFile(lockPath, 'utf8').catch(() => undefined)
+        let owner: { pid?: number } | undefined
+        try { owner = body ? JSON.parse(body) as { pid?: number } : undefined } catch { owner = undefined }
+        if (typeof owner?.pid === 'number') {
+          try { process.kill(owner.pid, 0); throw new BundleError('BUNDLE_IMPORT_BUSY', 409) }
+          catch (probe) { if (probe instanceof BundleError || (probe as NodeJS.ErrnoException).code !== 'ESRCH') throw probe }
+          if ((await readFile(lockPath, 'utf8').catch(() => undefined)) === body) { await rm(lockPath, { force: true }); continue }
+        }
+        const info = await stat(lockPath).catch(() => undefined)
+        if (info && Date.now() - info.mtimeMs > 5_000) { await rm(lockPath, { force: true }); continue }
+        throw new BundleError('BUNDLE_IMPORT_BUSY', 409)
+      }
+    }
+    try {
+      if (await lstat(directory).then(() => true, () => false)) {
+        const previous = await this.getTransferBinding(bundle.manifest.id)
+        if (previous?.digest === bundle.digest && previous.targetCwd === project.cwd) return { conversation: (await this.getConversation(bundle.manifest.id)).summary, blockedReasons: previous.blockedReasons, duplicate: true }
+        throw new BundleError('BUNDLE_ID_CONFLICT', 409)
+      }
+      for (const runId of bundle.manifest.runs) if (await this.findConversationByRunId(runId)) throw new BundleError('BUNDLE_RUN_ID_CONFLICT', 409)
+      const blockedReasons = await this.inspectConversationBundle(bundle, project.cwd)
+      const manifest = { ...bundle.manifest, cwd: project.cwd, executionCwd: project.cwd, jarvisWorkspace: project.cwd, projectId: project.id, approvalPolicy: 'manual' as const, pinned: false, updatedAt: new Date().toISOString() } as Manifest
+      delete manifest.projectUnassigned; delete manifest.archivedAt; delete manifest.origin
+      const binding: TransferBinding = { schemaVersion: 1, digest: bundle.digest, importedAt: new Date().toISOString(), source: bundle.metadata.source, targetCwd: project.cwd, executionCwd: project.cwd, blockedReasons, intrinsicReasons: bundle.metadata.blockedReasons, ...(manifest.activeRunId ? { runId: manifest.activeRunId } : {}) }
+      const content = join(bundle.directory, 'content/conversation')
+      // Historical audits remain readable but never become live approvals, Jarvis sync jobs or plan gates.
+      await writeFile(join(content, 'manifest.json'), JSON.stringify(manifest, null, 2), { mode: 0o600 })
+      await writeFile(join(content, 'transfer.json'), JSON.stringify(binding, null, 2), { mode: 0o600 })
+      if (await stat(join(bundle.directory, 'content/diagnostics')).then(() => true, () => false)) await rename(join(bundle.directory, 'content/diagnostics'), join(content, 'import-diagnostics'))
+      await mkdir(dirname(directory), { recursive: true })
+      await rename(content, directory)
+      return { conversation: this.publicConversation(manifest), blockedReasons, duplicate: false }
+    } finally { await lock?.close(); await rm(lockPath, { force: true }) }
+  }
+  async bindTransferredWorkspace(id: string, executionCwd: string): Promise<void> {
+    await this.acquireConversationLock(id, `transfer-${randomUUID()}`)
+    try {
+      const binding = await this.getTransferBinding(id)
+      if (!binding) throw new BundleError('BUNDLE_NOT_IMPORTED')
+      if (binding.runId && this.active.has(binding.runId)) throw new BundleError('CONVERSATION_BUSY', 409)
+      const manifest = await this.readManifest(id)
+      binding.executionCwd = executionCwd
+      manifest.executionCwd = executionCwd
+      await writeFile(join(this.conversationDir(id), 'transfer.json'), JSON.stringify(binding, null, 2), { mode: 0o600 })
+      await this.saveManifest(manifest)
+    } finally { await this.releaseConversationLock(id) }
+  }
+  async preflightTransferredRecovery(id: string, cwd: string): Promise<string[]> {
+    const binding = await this.getTransferBinding(id), manifest = await this.readManifest(id)
+    if (!binding || binding.runId !== manifest.activeRunId) return []
+    return this.inspectTransferDirectory(this.conversationDir(id), manifest, binding.source, binding.intrinsicReasons, cwd)
+  }
+  private async assertTransferredRecovery(id: string, runId: string, cwd: string): Promise<TransferBinding | undefined> {
+    const binding = await this.getTransferBinding(id)
+    if (!binding || binding.runId !== runId) return undefined
+    const reasons = await this.preflightTransferredRecovery(id, cwd)
+    if (reasons.length) throw new BundleError(reasons.join(';'), 409)
+    return binding
   }
   async exportConversation(id: string, format: 'markdown' | 'json'): Promise<string> {
     const manifest = await this.readManifest(id)
@@ -2457,6 +2571,8 @@ export class LocalHost {
   }
   private async restoreRuntimeFor(conversationId: string, runId: string, cwd: string, conversation: ConversationMessage[] = [], systemPrompt?: string, options: LocalHostOptions = this.options, assistantChat = false, jarvisSessionId?: string): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; modelBudget?: ModelAttemptBudget | undefined }> {
     const savedInput = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').catch(() => '{}')) as Record<string, unknown>
+    const transfer = await this.getTransferBinding(conversationId)
+    const relocation = transfer?.runId === runId ? { source: transfer.source.executionCwd, target: cwd } : undefined
     const userIntent = typeof savedInput.goal === 'string' ? savedInput.goal : conversation.filter(message => message.role === 'user').at(-1)?.content ?? ''
     const attachmentIndex = await new AttachmentStore(this.dataDir, conversationId).index(userIntent)
     if (attachmentIndex && !conversation.some(message => message.content === attachmentIndex)) conversation.push({ role: 'user', content: attachmentIndex })
@@ -2548,11 +2664,11 @@ export class LocalHost {
       if (!image || (image.agentId !== undefined && image.agentId !== agentId) || privacyRank(effectivePrivacy(image.privacy, image.privacyTaints)) > privacyRank(privacy)) throw new Error('IMAGE_ARTIFACT_NOT_VISIBLE')
       return image.contentBase64
     } })
-    const fingerprints = recoveryFingerprints(registry, { approvalMode: options.approvalMode ?? 'ask', allowNetwork: options.allowNetwork ?? false, networkHosts: options.networkHosts ?? [], contract: 2 })
+    const fingerprints = recoveryFingerprints(registry, { approvalMode: options.approvalMode ?? 'ask', allowNetwork: options.allowNetwork ?? false, networkHosts: options.networkHosts ?? [], contract: 2 }, relocation)
     const runLlm = (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => runLocalApproval(options.approvalReview, modelBudget, () => runtimeRef, system, instruction, signal, maxOutputTokens)
     const controllerPrograms: ReturnType<typeof buildTaskControllerProgram>[] = (['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19'] as const).map((version) => buildTaskControllerProgram({ modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(savedReuse ? { resumePlan: savedReuse.controller, reusableIds: savedReuse.reusableIds } : {}), version, system: prompt, toolNames, conversation, approvalMode: options.approvalMode ?? 'ask', maxTurns: (version === '10' || version === '11' || version === '12' || version === '13' || version === '14' || version === '15' || version === '16' || version === '17' || version === '18' || version === '19') ? modelEffectBudget ?? 256 : savedMaxTurns }))
     const recovery = await prepareRecovery(backend, this.runDir(conversationId, runId), fingerprints, options.recoveryBuildMigration)
-    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, programs: [legacyProgram, version2Program, program, ...assistantPrograms, workerProgram, ...controllerPrograms], models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, reviewContext, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: 'ollama', timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, programs: [legacyProgram, version2Program, program, ...assistantPrograms, workerProgram, ...controllerPrograms], models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, reviewContext, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: 'ollama', timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined, relocation)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     runtimeRef = runtime
     if (!assistantChat) modelBudget = await ModelAttemptBudget.open(join(this.runDir(conversationId, runId), 'model-budget.json'), modelEffectBudget ?? Math.max(4, Math.min(256, Math.floor(options.maxModelCalls ?? 256))), legacyModelCalls(runtime), options.modelBudgetPolicy)
     if (recovery.journal) { await runtime.persist(backend); await finishRecovery(recovery.journal) }
@@ -2563,7 +2679,7 @@ export class LocalHost {
     } catch (error) { capabilityController.abort(); await capabilities.dispose().catch(() => undefined); throw error }
   }
   private withCapabilityInstructions(prompt: string, instructions: string[]): string { return wrapCapabilityInstructions(prompt, instructions) }
-  private makeRunHandle(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, contextNotice?: string, frontAck?: string): RunHandle {
+  private makeRunHandle(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, contextNotice?: string, frontAck?: string, relocation?: { source: string; target: string }): RunHandle {
     const activeEntry = this.active.get(runId)
     activeEntry?.jarvis?.observe(runtime, session, activeEntry.capabilityController.signal)
     let finalized: Promise<Outcome & { text?: string }> | undefined
@@ -2742,7 +2858,7 @@ export class LocalHost {
       activeEntry?.capabilityController.abort()
       try { await activeEntry?.capabilities.dispose() } finally { await this.releaseConversationLock(conversationId) }
     })
-    const events = this.projectEvents(conversationId, runId, runtime, session, finish, () => finalTaskOutcome ?? currentTaskOutcome(), contextNotice, frontAck, activeEntry?.options.modelPricing ?? this.options.modelPricing, activeEntry?.modelBudget)
+    const events = this.projectEvents(conversationId, runId, runtime, session, finish, () => finalTaskOutcome ?? currentTaskOutcome(), contextNotice, frontAck, activeEntry?.options.modelPricing ?? this.options.modelPricing, activeEntry?.modelBudget, relocation)
     if (activeEntry) activeEntry.finish = finish
     const rememberApprovedCalls = (effectId: string): void => {
       const input = runtime.state.effects.get(effectId)?.input
@@ -2882,7 +2998,7 @@ export class LocalHost {
           if (text) await activeEntry?.jarvis?.recordUserInput(text, `reply:${answer.effectId}`).catch(() => undefined)
         }
       },
-      pendingInteractions: async () => { const pending = pendingInteractions(runtime, session); for (const group of pending) if (group.kind === 'ask') for (const item of group.items) await this.persistPlanPreview(conversationId, runId, runtime, item.effectId, item.input); return pending },
+      pendingInteractions: async () => { const pending = pendingInteractions(runtime, session).map(group => ({ ...group, items: group.items.map(item => ({ ...item, input: relocation ? presentTransferredApproval(item.input, relocation) : item.input })) })); for (const group of pending) if (group.kind === 'ask') for (const item of group.items) await this.persistPlanPreview(conversationId, runId, runtime, item.effectId, item.input); return pending },
       reviewApproval,
       submitHumanInput: async (text, targetEffectId) => { if (!text.trim()) throw new Error('MESSAGE_REQUIRED'); if (targetEffectId === undefined && /改|调整|重开|重新|change|reopen|revise|instead/i.test(text) && this.planGates.get(runId)?.required) { this.planGates.get(runId)!.open = false; await this.savePlanGate(conversationId, runId) } const inputId = `human-${randomUUID()}`; const recording = activeEntry?.jarvis?.recordUserInput(text, inputId).catch(() => undefined); const rootAgent = runtime.state.agents.get(session.agentId); const taskGlobal = rootAgent?.globalVersions.get(rootAgent.latestGlobalVersion); const steer = targetEffectId === undefined && !text.trim().startsWith('/') && taskGlobal && typeof taskGlobal === 'object' && !Array.isArray(taskGlobal) && taskGlobal.taskController; await session.submitHumanInput(inputId, { text, ...(steer ? { command: 'steer' } : {}) }, targetEffectId); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text, runId, createdAt: new Date().toISOString() }); await recording },
     }
@@ -3231,6 +3347,7 @@ export class LocalHost {
     await this.acquireConversationLock(conversationId, runId)
     let restored: Awaited<ReturnType<LocalHost['restoreRuntimeFor']>> | undefined
     try {
+      const transfer = await this.assertTransferredRecovery(conversationId, runId, manifest.executionCwd ?? manifest.cwd)
       const conversation = (await this.getConversationMessages(conversationId)).map((message): ConversationMessage => ({ role: message.role, content: message.text }))
       const lastUserMsg = conversation.filter((m) => m.role === 'user').at(-1)?.content
       const savedInput = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').catch(() => '{}')) as Record<string, unknown>
@@ -3269,7 +3386,7 @@ export class LocalHost {
       if (!agent) throw new Error('RESTORED_AGENT_NOT_FOUND')
       const session = runtime.start(agent.id)
       this.active.set(runId, { runtime, registry, session, conversationId, runId, capabilities, capabilityController, modelBudget, options: runOptions, ...(runOptions.modelPricing ? { modelPricing: structuredClone(runOptions.modelPricing) } : {}), ...(jarvis ? { jarvis } : {}) })
-      return this.makeRunHandle(conversationId, runId, runtime, session)
+      return this.makeRunHandle(conversationId, runId, runtime, session, undefined, undefined, transfer ? { source: transfer.source.executionCwd, target: manifest.executionCwd ?? manifest.cwd } : undefined)
     } catch (error) {
       const active = this.active.get(runId)
       if (active) { active.capabilityController.abort(); await active.capabilities.dispose().catch(() => undefined); this.active.delete(runId); this.planGates.delete(runId); this.surfaceConversations.delete(runId) }
@@ -3368,7 +3485,7 @@ export class LocalHost {
     const stderr = typeof shell?.stderr === 'string' ? shell.stderr.slice(0, 8_192) : ''
     return { effectId, ...(effect.ownerLaneId ? { laneId: effect.ownerLaneId } : {}), ...(effect.attemptId ? { attemptId: effect.attemptId } : {}), tool: input.name, toolCallId: effect.toolCallId ?? effectId, args, status, ...(preview === undefined ? {} : { preview }), ...(outcome.error === undefined ? commandFailed ? { result: { code: 'SHELL_COMMAND_FAILED', exitCode: shell?.code ?? null, stderr, timedOut: shell?.timedOut ?? false, aborted: shell?.aborted ?? false } } : {} : { result: outcome.error }) }
   }
-  private async *projectEvents(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, finish: () => Promise<Outcome & { text?: string }>, taskOutcome: () => TaskOutcome | undefined, contextNotice?: string, frontAck?: string, modelPricing?: LocalHostOptions['modelPricing'], modelBudget?: ModelAttemptBudget): AsyncIterable<AssistantEvent> {
+  private async *projectEvents(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, finish: () => Promise<Outcome & { text?: string }>, taskOutcome: () => TaskOutcome | undefined, contextNotice?: string, frontAck?: string, modelPricing?: LocalHostOptions['modelPricing'], modelBudget?: ModelAttemptBudget, relocation?: { source: string; target: string }): AsyncIterable<AssistantEvent> {
     let seq = 0
     if (frontAck) {
       seq++
@@ -3451,7 +3568,7 @@ export class LocalHost {
           yield { schemaVersion: 1, type: 'text', conversationId, runId, seq, data: preview }
         }
         seq++
-        yield { schemaVersion: 1, type: 'waiting', conversationId, runId, seq, data: { effectId: event.event.effectId ?? null, input: event.event.data ?? null } }
+        yield { schemaVersion: 1, type: 'waiting', conversationId, runId, seq, data: { effectId: event.event.effectId ?? null, input: relocation && asRecord(event.event.data) ? presentTransferredApproval(asRecord(event.event.data)!, relocation) : event.event.data ?? null } }
         continue
       }
       if (event.event?.type === 'effect.settled' && event.event.effectId) {

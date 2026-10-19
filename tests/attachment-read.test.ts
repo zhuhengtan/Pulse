@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { createLocalHost } from '@hunterzhu/pulse-server'
 import { ToolRegistry } from '@hunterzhu/pulse-tool-sdk'
 import { extractDocxText } from '@hunterzhu/pulse-adapters'
-import { AttachmentStore } from '../packages/server/src/attachments.js'
+import { AttachmentStore, attachmentDownload } from '../packages/server/src/attachments.js'
 
 const require = createRequire(resolve('packages/adapters/package.json'))
 const JSZip = createRequire(require.resolve('mammoth'))('jszip')
@@ -30,6 +30,13 @@ async function fixture() {
   }
   return { root, host, conversation, store, attach, read: (input: Record<string, unknown>) => registry.execute('attachment.read', input, new AbortController().signal) as Promise<any> }
 }
+it('serves only host-allowlisted images inline', () => {
+  expect(attachmentDownload({ mediaType: 'image/png', name: 'a.png' })).toMatchObject({ mediaType: 'image/png', disposition: expect.stringContaining('inline') })
+  expect(attachmentDownload({ mediaType: 'image/svg+xml', name: 'a.svg' }).mediaType).toBe('application/octet-stream')
+  expect(attachmentDownload({ mediaType: 'text/html', name: 'a.html' }).disposition).toContain('attachment')
+  expect(attachmentDownload({ mediaType: 'image/png; charset=utf-8', name: 'a.png' }).disposition).toContain('attachment')
+})
+
 it('reads text and DOCX by continuation windows, preserving Chinese paragraphs and table text', async () => {
   const f = await fixture()
   try {

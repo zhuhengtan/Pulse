@@ -1,4 +1,4 @@
-import { AttachmentStore, MAX_ATTACHMENT_REQUEST } from '../attachments.js'
+import { AttachmentStore, MAX_ATTACHMENT_REQUEST, attachmentDownload } from '../attachments.js'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createReadStream } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -27,6 +27,8 @@ import { startH5WorkWorker, type H5WorkWorkerLaunchOptions } from './work-worker
 import { SleepInhibitor } from './caffeinate.js'
 import { getLocalNetworkIp, isAllowedH5Host, isLoopbackIp } from './network.js'
 import { safeShellEnv, searchWorkspace, within } from '../security.js'
+import { BundleError, stageConversationBundle, type StagedBundle, type BundlePreview } from '../conversation-bundle.js'
+import { pipeline } from 'node:stream/promises'
 
 const execFileAsync = promisify(execFile)
 
@@ -158,6 +160,8 @@ export class H5Server {
   private readonly automationSockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
   private readonly previewSockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
   private configWriteTail: Promise<void> = Promise.resolve()
+  private readonly bundleImports = new Map<string, { bundle: StagedBundle; deviceId: string; timer: NodeJS.Timeout; expiresAt: number }>()
+  private readonly bundleUploads = new Map<string, number>()
 
   constructor(
     private readonly host: LocalHost,
@@ -292,6 +296,8 @@ export class H5Server {
 
   async stop(): Promise<void> {
     this.stopping = true
+    for (const entry of this.bundleImports.values()) { clearTimeout(entry.timer); await rm(entry.bundle.directory, { recursive: true, force: true }) }
+    this.bundleImports.clear()
     await Promise.all([...this.activeRuns.values()].map(handle => (handle.shutdown ? handle.shutdown() : handle.cancel('SERVER_STOPPED')).catch(() => undefined)))
     // A sendMessage call can still be starting and not yet appear in activeRuns.
     // The pump joins that launch and shuts it down without dispatching its queue.
@@ -474,6 +480,18 @@ export class H5Server {
   }
 
   private async resumeConversationRun(conversationId: string): Promise<RunHandle> {
+    const binding = await this.host.getTransferBinding(conversationId)
+    if (binding) {
+      const conversation = await this.host.getConversation(conversationId)
+      if (binding.runId === conversation.summary.activeRunId) {
+        const reasons = await this.host.preflightTransferredRecovery(conversationId, binding.targetCwd)
+        if (reasons.length) throw new BundleError(reasons.join(';'), 409)
+        const project = conversation.summary.projectId ? await this.projects.get(conversation.summary.projectId) : undefined
+        if (!project?.available || project.cwd !== binding.targetCwd) throw new BundleError('PROJECT_NOT_AVAILABLE', 409)
+        const prepared = await this.workspaces.prepare(conversationId, project.id, project.cwd)
+        await this.host.bindTransferredWorkspace(conversationId, prepared.cwd)
+      }
+    }
     await this.host.prepareAutomation()
     const handle = this.workWorker
       ? await startH5WorkWorker({ ...this.workWorker, runtimeOptions: this.host.getWorkWorkerOptions() }, { conversationId, text: '', resume: true })
@@ -1361,6 +1379,74 @@ export class H5Server {
       }
     }
 
+    const bundleExportMatch = pathname.match(/^\/api\/conversations\/([^/]+)\/export$/)
+    const bundleImportMatch = pathname.match(/^\/api\/conversation-imports(?:\/([a-f0-9-]+))?$/)
+    if (bundleExportMatch && method === 'POST' || bundleImportMatch && ['POST', 'DELETE'].includes(method)) {
+      if (!requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'SAME_ORIGIN_REQUIRED' })); return }
+      try {
+        if (bundleExportMatch) {
+          const id = bundleExportMatch[1]!
+          if (id === this.assistantInbox.conversationId) throw new BundleError('WORK_SESSION_REQUIRED')
+          const conversation = await this.host.getConversation(id)
+          if (conversation.summary.activeRunId && this.activeRuns.has(conversation.summary.activeRunId)) throw new BundleError('CONVERSATION_BUSY', 409)
+          const bundle = await this.host.exportConversationBundle(id)
+          try {
+            const bytes = (await stat(bundle.path)).size
+            res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': bytes, 'Content-Disposition': `attachment; filename="${bundle.filename}"`, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
+            await pipeline(createReadStream(bundle.path), res)
+          } finally { await bundle.cleanup() }
+          return
+        }
+        const token = bundleImportMatch![1]
+        if (!token) {
+          if (method !== 'POST') throw new BundleError('NOT_FOUND', 404)
+          const pendingUploads = [...this.bundleUploads.values()].reduce((sum, count) => sum + count, 0)
+          if (this.bundleImports.size + pendingUploads >= 8 || [...this.bundleImports.values()].filter(entry => entry.deviceId === authedDevice!.id).length + (this.bundleUploads.get(authedDevice!.id) ?? 0) >= 2) throw new BundleError('BUNDLE_IMPORT_BUSY', 429)
+          if (!/^application\/(?:zip|octet-stream)(?:;|$)/i.test(req.headers['content-type'] ?? '')) throw new BundleError('BUNDLE_ZIP_REQUIRED', 415)
+          const deviceId = authedDevice!.id
+          this.bundleUploads.set(deviceId, (this.bundleUploads.get(deviceId) ?? 0) + 1)
+          let bundle: StagedBundle
+          try { bundle = await stageConversationBundle(req, join(this.dataDir, 'conversation-imports')) }
+          finally { const remaining = (this.bundleUploads.get(deviceId) ?? 1) - 1; if (remaining) this.bundleUploads.set(deviceId, remaining); else this.bundleUploads.delete(deviceId) }
+          if (this.stopping) { await rm(bundle.directory, { recursive: true, force: true }); throw new BundleError('SERVER_STOPPING', 503) }
+          const token = randomUUID(), expiresAt = Date.now() + 10 * 60_000
+          const timer = setTimeout(() => { this.bundleImports.delete(token); void rm(bundle.directory, { recursive: true, force: true }) }, 10 * 60_000)
+          timer.unref()
+          this.bundleImports.set(token, { bundle, deviceId: authedDevice!.id, timer, expiresAt })
+          const preview: BundlePreview = { token, conversationId: bundle.manifest.id, title: bundle.manifest.title, runCount: bundle.manifest.runs.length, attachmentCount: bundle.metadata.files.filter(file => /^conversation\/attachments\/[^/]+\.meta\.json$/.test(file.path)).length, ...(bundle.manifest.activeRunId ? { activeRunId: bundle.manifest.activeRunId } : {}), blockedReasons: await this.host.inspectConversationBundle(bundle), redactedFiles: bundle.metadata.redactedFiles.length, expiresAt: new Date(expiresAt).toISOString() }
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(preview))
+          return
+        }
+        const staged = this.bundleImports.get(token)
+        if (!staged || staged.deviceId !== authedDevice!.id || staged.expiresAt <= Date.now()) throw new BundleError('BUNDLE_IMPORT_EXPIRED', 410)
+        if (method === 'DELETE') {
+          clearTimeout(staged.timer); this.bundleImports.delete(token)
+          await rm(staged.bundle.directory, { recursive: true, force: true })
+          res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true })); return
+        }
+        const body = await this.parseJsonBody(req)
+        const project = typeof body.projectId === 'string' ? await this.projects.get(body.projectId) : undefined
+        if (!project?.available) throw new BundleError('PROJECT_NOT_AVAILABLE', 409)
+        const current = this.bundleImports.get(token)
+        if (!current || current.deviceId !== authedDevice!.id || current.expiresAt <= Date.now()) throw new BundleError('BUNDLE_IMPORT_EXPIRED', 410)
+        if (body.preview === true) {
+          const blockedReasons = await this.host.inspectConversationBundle(current.bundle, project.cwd)
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ blockedReasons })); return
+        }
+        clearTimeout(current.timer); this.bundleImports.delete(token)
+        try {
+          const result = await this.host.importConversationBundle(current.bundle, project)
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
+        } finally { await rm(current.bundle.directory, { recursive: true, force: true }) }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : ''
+        if (!res.headersSent && (error instanceof BundleError || message === 'CONVERSATION_BUSY')) {
+          res.writeHead(error instanceof BundleError ? error.status : 409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message }))
+        } else throw error
+      }
+      return
+    }
+
     // 7. Conversations: GET /api/conversations, POST /api/conversations
     if (pathname === '/api/conversations' && method === 'GET') {
       const all = await this.host.listConversations()
@@ -1421,15 +1507,14 @@ export class H5Server {
       const metaPath = join(this.dataDir, 'conversations', conversationId, 'attachments', `${attachmentId}.meta.json`)
       try {
         const metaStr = await readFile(metaPath, 'utf8').catch(() => '{}')
-        const meta = JSON.parse(metaStr)
-        const mediaType = typeof meta.mediaType === 'string' ? meta.mediaType : 'application/octet-stream'
-        const name = typeof meta.name === 'string' ? meta.name : 'attachment'
+        const download = attachmentDownload(JSON.parse(metaStr) as { mediaType?: unknown; name?: unknown })
         const statResult = await stat(filePath)
         res.writeHead(200, {
-          'Content-Type': mediaType,
+          'Content-Type': download.mediaType,
           'Content-Length': statResult.size,
-          'Content-Disposition': `${mediaType.startsWith('image/') ? 'inline' : 'attachment'}; filename="${encodeURIComponent(name)}"`,
-          'Cache-Control': 'public, max-age=86400',
+          'Content-Disposition': download.disposition,
+          'X-Content-Type-Options': 'nosniff',
+          'Cache-Control': 'private, no-store',
         })
         createReadStream(filePath).pipe(res)
       } catch {
@@ -1535,6 +1620,7 @@ export class H5Server {
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId }))
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
+        if (error instanceof BundleError) { res.writeHead(error.status, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error.code })); return }
         if (message === 'CONVERSATION_BUSY' || message === 'NO_ACTIVE_RUN') {
           res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message }))
           return
@@ -2084,7 +2170,7 @@ function publicInteraction(interaction: { groupId: string; kind: 'ask' | 'approv
             const call = item as Record<string, JsonValue>
             const args = call.input && typeof call.input === 'object' && !Array.isArray(call.input) ? call.input as Record<string, JsonValue> : call.arguments && typeof call.arguments === 'object' && !Array.isArray(call.arguments) ? call.arguments as Record<string, JsonValue> : {}
             const details: Record<string, unknown> = {}
-            for (const key of ['path', 'command', 'cwd'] as const) if (typeof args[key] === 'string') details[key] = String(args[key]).slice(0, 2_000)
+            for (const key of ['path', 'source', 'destination', 'command', 'cwd'] as const) if (typeof args[key] === 'string') details[key] = String(args[key]).slice(0, 2_000)
             if (Array.isArray(args.args)) details.args = args.args.filter((value) => typeof value === 'string').slice(0, 20).map((value) => String(value).slice(0, 300))
             return [{ toolName: typeof call.toolName === 'string' ? call.toolName : typeof call.name === 'string' ? call.name : 'tool', details }]
           })

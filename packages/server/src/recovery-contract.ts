@@ -32,16 +32,26 @@ export function recoveryBuildFingerprint(roots: ReadonlyArray<{ name: string; di
   return digest(files)
 }
 
-export function recoveryFingerprints(registry: ToolRegistry, policy: unknown): RecoveryFingerprints {
+export function currentRecoveryBuild(): string {
   const require = createRequire(import.meta.url)
   const sourceMode = import.meta.url.endsWith('.ts')
   const dependencies = ['@hunterzhu/pulse-runtime', '@hunterzhu/pulse-adapters', '@hunterzhu/pulse-tool-sdk'].map(name => {
     const deployed = dirname(require.resolve(name)), sources = join(deployed, '..', 'src')
     return { name, directory: sourceMode && existsSync(sources) ? sources : deployed }
   })
-  return { build: recoveryBuildFingerprint([{ name: '@hunterzhu/pulse-server', directory: dirname(fileURLToPath(import.meta.url)) }, ...dependencies]),
-    tools: Object.fromEntries(registry.list().map(tool => [tool.name, digest({ input: tool.inputSchema, output: tool.outputSchema, retry: tool.retrySafety, effects: tool.sideEffectPolicy, permissions: tool.permissions ?? {} })])),
-    policy: digest([policy, source('verification-policy'), source('plan-confirmation'), source('security')]) }
+  return recoveryBuildFingerprint([{ name: '@hunterzhu/pulse-server', directory: dirname(fileURLToPath(import.meta.url)) }, ...dependencies])
+}
+export function recoveryPolicyFingerprint(policy: unknown): string {
+  return digest([policy, source('verification-policy'), source('plan-confirmation'), source('security')])
+}
+export function recoveryFingerprints(registry: ToolRegistry, policy: unknown, relocation?: { source: string; target: string }): RecoveryFingerprints {
+  return { build: currentRecoveryBuild(),
+    tools: Object.fromEntries(registry.list().map(tool => {
+      const permissions = structuredClone(tool.permissions ?? {})
+      // Compare the same workspace permission across machines without broadening the registry's actual roots.
+      if (relocation && permissions.workspaceRoots) permissions.workspaceRoots = permissions.workspaceRoots.map(root => root === relocation.target ? relocation.source : root)
+      return [tool.name, digest({ input: tool.inputSchema, output: tool.outputSchema, retry: tool.retrySafety, effects: tool.sideEffectPolicy, permissions })]
+    })), policy: recoveryPolicyFingerprint(policy) }
 }
 export function recoveryCompatibility(previous: RecoveryFingerprints | undefined, current: RecoveryFingerprints) {
   if (!previous) return { status: 'migratable' as const, reasons: ['Legacy run has no fingerprints; preserve its snapshot and bind the current contract.'] }
