@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { replaceStateFile } from '../atomic-file.js'
 import { dirname, resolve } from 'node:path'
 import type { WebAssistantMessageReceipt, WebAttachment, WebMessage } from '../protocol.js'
 
@@ -186,7 +187,7 @@ export class AssistantConversationStore {
     const temporary = `${this.path}.${randomUUID()}.tmp`
     try {
       await writeFile(temporary, JSON.stringify(state, null, 2), { flag: 'wx', mode: 0o600 })
-      await rename(temporary, this.path)
+      await replaceStateFile(temporary, this.path)
     } finally { await rm(temporary, { force: true }).catch(() => undefined) }
   }
 

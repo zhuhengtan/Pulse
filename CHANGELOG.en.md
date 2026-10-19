@@ -18,7 +18,7 @@ This file records Pulse release notes in English and is the source for `pulse --
 - Fixed approval loss during context compaction and task recovery, mobile confirmation failures, tool timeout handling, and missing attachment and reference fields in worker messages.
 - Improved mobile header spacing, breadcrumbs, sidebar labels and project folding, refined the stop button, and hid conversation transfer controls on phones.
 - Removed the duplicate task panel above work chats while retaining Lane activity and recovery actions in the message list; delivery files now appear compactly below their own turns, with full paths expandable on demand.
-- Fixed Windows path and check-inventory formats, line-ending changes in transferred workspaces, and result-cleanup races during shutdown; run platform-specific regressions early in CI.
+- Fixed Windows path and check-inventory formats, line-ending changes in transferred workspaces, send failures caused by briefly locked state files, and result-cleanup races during shutdown; run platform-specific regressions early in CI.
 
 
 ## [0.6.0] - 2026-10-17

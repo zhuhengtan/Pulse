@@ -1,4 +1,5 @@
 import { AttachmentStore, MAX_ATTACHMENT_REQUEST } from './attachments.js'
+import { replaceStateFile } from './atomic-file.js'
 import { canReadShellArchive } from './shell-archive.js'
 import { freezeConstraintBaseline, violatedConstraints } from './constraint-baseline.js'
 import { recoveryFingerprints, prepareRecovery, finishRecovery, currentRecoveryBuild, recoveryPolicyFingerprint } from './recovery-contract.js'
@@ -1853,7 +1854,7 @@ export class LocalHost {
   private async saveManifest(manifest: Manifest): Promise<void> {
     const path = this.manifestPath(manifest.id)
     const temporary = `${path}.${randomUUID()}.tmp`
-    try { await writeFile(temporary, JSON.stringify(manifest, null, 2), { flag: 'wx', mode: 0o600 }); await rename(temporary, path) }
+    try { await writeFile(temporary, JSON.stringify(manifest, null, 2), { flag: 'wx', mode: 0o600 }); await replaceStateFile(temporary, path) }
     finally { await rm(temporary, { force: true }).catch(() => undefined) }
   }
   async updateConversationTitle(id: string, title: string): Promise<void> { const manifest = await this.readManifest(id); manifest.title = title; manifest.updatedAt = new Date().toISOString(); await this.saveManifest(manifest) }

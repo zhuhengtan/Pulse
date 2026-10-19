@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { open, copyFile, lstat, mkdir, readFile, realpath, rename, rm, symlink, writeFile, readlink } from 'node:fs/promises'
+import { open, copyFile, lstat, mkdir, readFile, realpath, rm, symlink, writeFile, readlink } from 'node:fs/promises'
+import { replaceStateFile } from '../atomic-file.js'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { prepareWorkspaceDependencies } from './dependencies.js'
@@ -164,7 +165,7 @@ export class H5WorkspaceManager {
     const path = this.recordPath(record.conversationId)
     const temporary = `${path}.${randomUUID()}.tmp`
     await writeFile(temporary, JSON.stringify(record, null, 2), { flag: 'wx', mode: 0o600 })
-    try { await rename(temporary, path) } finally { await rm(temporary, { force: true }).catch(() => undefined) }
+    try { await replaceStateFile(temporary, path) } finally { await rm(temporary, { force: true }).catch(() => undefined) }
   }
 
   async prepare(conversationId: string, projectId: string, requestedCwd: string): Promise<PreparedWorkspace> {
