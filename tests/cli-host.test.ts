@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createLocalHost } from '@hunterzhu/pulse-server'
+import { createLocalHost, H5Server } from '@hunterzhu/pulse-server'
 import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 import type { CapabilityPack } from '../packages/server/src/capabilities.js'
 
@@ -432,6 +432,26 @@ describe('local CLI application host', () => {
       for await (const _event of artifactRun.events) { /* drain */ }
       await expect(artifactRun.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'recorded' })
       await expect(artifactHost.listArtifacts(artifactConversation.id)).resolves.toEqual([expect.objectContaining({ path: 'note.txt', hash: expectedHash, label: 'note', mediaType: 'text/plain' })])
+      const nextRun = await artifactHost.sendMessage(artifactConversation.id, { text: 'record again in another turn' })
+      for await (const _event of nextRun.events) { /* drain */ }
+      await expect(nextRun.outcome()).resolves.toMatchObject({ status: 'succeeded' })
+      expect(await artifactHost.listArtifacts(artifactConversation.id)).toHaveLength(1)
+      expect((await artifactHost.listArtifacts(artifactConversation.id, 'turn')).map(item => item.runId)).toEqual([artifactRun.id, nextRun.id])
+      const artifactServer = new H5Server(artifactHost, { dataDir: join(directory, 'artifact-data'), host: '127.0.0.1', port: 0 })
+      try {
+        const info = await artifactServer.start(), base = `http://127.0.0.1:${info.port}`
+        const session = await fetch(`${base}/api/session/local`, { method: 'POST', headers: { Origin: base } })
+        const headers = { Cookie: session.headers.get('set-cookie')! }
+        const endpoint = `${base}/api/conversations/${artifactConversation.id}/artifacts`
+        const list = await fetch(`${endpoint}?scope=turn`, { headers })
+        expect(list.status).toBe(200)
+        expect((await list.json() as Array<{ runId: string }>).map(item => item.runId)).toEqual([artifactRun.id, nextRun.id])
+        for (const runId of [artifactRun.id, nextRun.id]) {
+          const content = await fetch(`${endpoint}/content?${new URLSearchParams({ path: 'note.txt', runId })}`, { headers })
+          expect(content.status).toBe(200)
+          expect(await content.json()).toMatchObject({ content: 'after\n' })
+        }
+      } finally { await artifactServer.stop() }
       await host.close(); await artifactHost.close()
     } finally { await rm(directory, { recursive: true, force: true }) }
   })

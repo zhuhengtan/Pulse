@@ -6,7 +6,7 @@ import { PulseButton, PulseCheckbox, PulseDisclosure, PulseInput, PulseTextArea,
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent, ReactElement } from 'react'
 import { ApiError, apiJson, browserTransport, getWebConversation, jsonRequest } from './transport.js'
-import { ConversationArtifacts } from './ConversationArtifacts.js'
+import { ConversationArtifacts, useConversationArtifacts } from './ConversationArtifacts.js'
 import type { ConversationList, MessageList, PulseWebTransport, WebAttachment, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from './transport.js'
 import { Drawer, Dropdown, Popover, Select } from 'antd'
 import { MessageBubble } from './MessageBubble.js'
@@ -178,6 +178,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const selectedIdRef = useRef<string | undefined>(undefined)
   selectedIdRef.current = selectedId
   const selected = surfaceMode === 'chat' ? assistantConversation : conversations.find(item => item.id === selectedId)
+  const artifactIndex = useConversationArtifacts(surfaceMode === 'work' && route.conversationId === selectedId ? selectedId : undefined, `${selected?.updatedAt}:${messages.length}:${running}`, transport)
   const selectedRunRef = useRef<{ conversationId?: string | undefined; runId?: string | undefined }>({})
   selectedRunRef.current = { conversationId: surfaceMode === 'work' ? selected?.id : undefined, runId: selected?.activeRunId }
   const runActionKey = selected?.activeRunId ? `${selected.id}:${selected.activeRunId}` : undefined
@@ -475,7 +476,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     // Position loaded history before paint. Automatic following must not animate
     // across the history; only the explicit "back to bottom" action is smooth.
     if (element && !loading && ready && followBottom.current) element.scrollTo({ top: element.scrollHeight, behavior: 'instant' })
-  }, [documentKey, routeRevision, loading, selectedId, messages, status, traces])
+  }, [documentKey, routeRevision, loading, selectedId, messages, status, traces, artifactIndex.artifacts])
 
   const startRun = useCallback((runId: string, conversationId: string, after = 0) => {
     eventClose.current?.()
@@ -1090,6 +1091,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
 
   const activeRunId = selected?.activeRunId
   const recoveryVisible = Boolean(surfaceMode === 'work' && !running && recoveryRun && activeRunId && recoveryRun.conversationId === selected?.id && recoveryRun.runId === activeRunId)
+  const emptyConversation = messages.length === 0 && !recoveryVisible && !(surfaceMode === 'work' && (artifactIndex.artifacts.length > 0 || route.query.has('artifactRun')))
   const renderMessages = () => {
     const shown = new Set<string>()
     let recoveryShown = false
@@ -1098,7 +1100,14 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       recoveryShown = true
       return <RunRecoveryCard key={`recovery:${runId}`} state={recoveryRun.state} pending={pendingRunAction} resume={() => void recoverRun(recoveryRun.runId, 'resume')} end={() => void recoverRun(recoveryRun.runId, 'end')} />
     }
-    const items = messages.flatMap(message => {
+    const lastMessage = new Map<string, number>()
+    messages.forEach((message, index) => { if (message.runId) lastMessage.set(message.runId, index) })
+    const deliveriesShown = new Set<string>()
+    const deliveries = (runId: string) => {
+      deliveriesShown.add(runId)
+      return selectedId ? <ConversationArtifacts key={`artifacts:${selectedId}:${runId}`} conversationId={selectedId} runId={runId} artifacts={artifactIndex.artifacts.filter(artifact => artifact.runId === runId)} transport={transport} position={route.query} onNavigate={patchQuery} /> : null
+    }
+    const items = messages.flatMap((message, index) => {
       const out: ReactElement[] = []
       const runId = message.runId
       if (surfaceMode === 'work' && message.role === 'assistant' && runId && !shown.has(runId)) {
@@ -1109,14 +1118,22 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         const card = recoveryCard(runId); if (card) out.push(card)
       }
       out.push(<MessageBubble key={`${selectedId}:${message.id}`} mode={surfaceMode} message={message} retry={() => void (surfaceMode === 'chat' ? retryAssistantMessage(message) : retryWorkMessage(message))} onOpenWork={openWorkNotice} onFileClick={path => { patchQuery({ workspace: 'files', file: path, details: undefined }) }} />)
+      if (surfaceMode === 'work' && runId && lastMessage.get(runId) === index) { const card = deliveries(runId); if (card) out.push(card) }
       return out
     })
     if (surfaceMode === 'work') for (const [runId, live] of Object.entries(traces)) if (!shown.has(runId)) {
       items.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} />)
       const card = recoveryCard(runId); if (card) items.push(card)
+      if (!deliveriesShown.has(runId)) { const card = deliveries(runId); if (card) items.push(card) }
     }
     const fallback = recoveryCard(activeRunId); if (fallback) items.push(fallback)
-    if (surfaceMode === 'work' && selectedId) items.push(<ConversationArtifacts key={`artifacts:${selectedId}`} conversationId={selectedId} revision={`${selected?.updatedAt}:${messages.length}:${running}`} transport={transport} position={route.query} onNavigate={patchQuery} />)
+    if (surfaceMode === 'work') {
+      // Legacy/imported runs can have a delivery but no remaining transcript.
+      const runIds = new Set(artifactIndex.artifacts.map(artifact => artifact.runId))
+      const linkedRun = route.query.get('artifactRun'); if (linkedRun) runIds.add(linkedRun)
+      for (const runId of runIds) if (!deliveriesShown.has(runId)) { const card = deliveries(runId); if (card) items.push(card) }
+      if (artifactIndex.error) items.push(<p key="artifact-error" role="alert">{artifactIndex.error}</p>)
+    }
     return items
   }
   return <main className={`shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''} ${workbenchOpen ? 'workbench-open' : ''}`}>
@@ -1133,13 +1150,13 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
 
       </header>
       {loadError && <div className="alert" role="alert"><span>{loadError}</span><PulseButton onClick={() => { if (paired) setRouteRevision(value => value + 1); else void bootstrap() }}>重试</PulseButton></div>}
-      <section ref={messagesEl} className={`messages ${messages.length === 0 && !recoveryVisible ? 'is-empty' : ''}`} aria-live="polite" aria-label="聊天消息" onScroll={event => { const el = event.currentTarget; const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 96; followBottom.current = bottom; setAtBottom(bottom) }}>
+      <section ref={messagesEl} className={`messages ${emptyConversation ? 'is-empty' : ''}`} aria-live="polite" aria-label="聊天消息" onScroll={event => { const el = event.currentTarget; const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 96; followBottom.current = bottom; setAtBottom(bottom) }}>
         {loading && <div className="empty"><span className="spinner" />正在加载对话…</div>}
-        {!loading && messages.length === 0 && !recoveryVisible && paired && <div className="empty"><div className="empty-mark"><Icon name="spark" size={27}/></div><h1>我们要做什么？</h1><p>在 Pulse 工作区中提问或交代任务。</p></div>}
+        {!loading && emptyConversation && paired && <div className="empty"><div className="empty-mark"><Icon name="spark" size={27}/></div><h1>我们要做什么？</h1><p>在 Pulse 工作区中提问或交代任务。</p></div>}
       {renderMessages()}
       </section>
       {!atBottom && <PulseButton className="jump-bottom" onClick={() => { followBottom.current = true; setAtBottom(true); messagesEl.current?.scrollTo({ top: messagesEl.current.scrollHeight, behavior: 'smooth' }) }}>回到底部 ↓</PulseButton>}
-      <footer className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${messages.length === 0 && !recoveryVisible && !activeInteraction ? 'is-empty' : ''}`}>
+      <footer className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${emptyConversation && !activeInteraction ? 'is-empty' : ''}`}>
         {activeInteraction ? <InteractionPanel key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={(activeInteraction.approvalPolicy ?? selected?.approvalPolicy) === 'delegate'} running={activeInteraction.conversationId ? true : running} stopping={stopping} stop={() => void (activeInteraction.conversationId ? stopRunFor(activeInteraction.runId, activeInteraction.conversationId) : stopRun())} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} setApprovalPolicy={policy => setApprovalPolicy(policy, activeInteraction.conversationId ?? selected?.id)} /> : <><RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} onSend={async payload => await send(payload) === true} onStop={() => void stopRun()} />{route.newWork && <div className="new-chat-tools"><PulseButton type="button" className={`new-chat-approval ${newApprovalPolicy === 'delegate' ? 'active' : ''}`} aria-pressed={newApprovalPolicy === 'delegate'} title="开启后，本会话后续工具操作将持续代审；业务问题仍由你回答。" onClick={() => setNewApprovalPolicy(value => value === 'delegate' ? 'manual' : 'delegate')}><Icon name="shield"/><span>{newApprovalPolicy === 'delegate' ? '本会话代审中' : '替我审批'}</span></PulseButton><div className="new-conversation-project"><Icon name="folder"/><Select variant="borderless" aria-label="新对话所属项目" value={selectedProjectId ?? '__ungrouped__'} onChange={value => { const projectId = value === '__ungrouped__' ? undefined : value; patchQuery({ project: projectId }); setSelectedProjectId(projectId); if (projectId) window.localStorage.setItem('pulse-web-project', projectId); else window.localStorage.removeItem('pulse-web-project') }} options={[{ value: '__ungrouped__', label: '不归属项目' }, ...projects.map(project => ({ value: project.id, label: project.name }))]} popupMatchSelectWidth={false} /></div></div>}<div className="composer-hint">Pulse 可能会出错，请核对重要信息。</div></>}
       </footer>
     </section>

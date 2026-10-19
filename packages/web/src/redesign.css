@@ -429,7 +429,7 @@ body, :root { color: var(--ink); background: var(--panel); }
 .file-breadcrumb button,.file-view header button{color:var(--link)}
 .delivery-state button{color:var(--link);border-color:var(--line)}
 .conversation-artifacts{border-color:var(--line);color:var(--ink)}
-.conversation-artifacts>div>.pulse-button{min-height:36px;padding:0 10px;border-radius:8px;background:var(--soft);color:var(--link)}
+.conversation-artifacts .artifact-actions>.pulse-button{background:var(--soft);color:var(--link)}
 .map-row>div>.pulse-select{width:100%}
 .map-row>.settings-danger{align-self:start;min-height:40px}
 .archive-title,.choice-card{justify-content:stretch}

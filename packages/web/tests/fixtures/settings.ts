@@ -28,7 +28,7 @@ export function settingsFixture() {
       if (path === '/api/config/validate') return response({ valid: true, restartRequired: [] })
       if (path === '/api/automation/vision-probe') return response({ error: 'FIXTURE_PROBE_FAILURE' }, 400)
       if (path === '/api/conversations?archived=1') return response([{ id: 'audit-archived', title: '示例归档对话：检查长标题在手机上的显示效果', cwd: '/example/project-with-a-long-directory-name/workspace', createdAt: '2026-10-18T00:00:00Z', updatedAt: '2026-10-18T00:00:00Z' }])
-      if (path.endsWith('/artifacts')) return response([{ path: 'reports/example-report.txt', label: '示例报告', runId: 'fixture-run', absolutePath: '/example/project/reports/example-report.txt', workspaceState: 'project' }])
+      if (new URL(path, 'http://fixture.local').pathname.endsWith('/artifacts')) return response([{ path: 'reports/example-report.txt', label: '示例报告', runId: 'fixture-run', absolutePath: '/example/project/reports/example-report.txt', workspaceState: 'project' }])
       if (path.includes('/artifacts/content?')) return response({ content: '这是用于检查交付文件预览的示例内容。\n第二行：确认换行、滚动和折叠正常。' })
       if (method === 'DELETE' || method === 'POST' || method === 'PATCH') return response({ ok: true })
       return response({ error: 'FIXTURE_ROUTE_NOT_FOUND' }, 404)

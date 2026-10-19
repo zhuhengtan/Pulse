@@ -89,10 +89,20 @@
 .trace-code .diff-add{color:#7ee2a8;background:#2e7d5a33;display:inline-block;width:100%}.trace-code .diff-del{color:#ff9d9d;background:#c4474733;display:inline-block;width:100%}.trace-error{color:#ffb4b4}
 .trace-locations{margin:0;padding-left:18px;color:var(--muted);font-size:12px}
 .trace-empty{margin:0;padding:4px 6px;color:var(--muted);font-size:12px}
-.conversation-artifacts { margin: 16px 0; padding: 14px; border: 1px solid var(--border, #d8dce5); border-radius: 12px; }
-.conversation-artifacts > div { margin-top: 12px; }
-.artifact-location { font-size: 12px; opacity: .7; overflow-wrap: anywhere; margin: 4px 0; }
-.conversation-artifacts pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; }
+.conversation-artifacts{margin:0 0 16px;padding:10px 12px;border:1px solid var(--border,#d8dce5);border-radius:10px;min-width:0}
+.artifact-heading{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-weight:500}
+.artifact-heading>span{font-size:11px;opacity:.75}
+.artifact-row{display:flex;align-items:center;gap:12px;padding-top:8px;min-width:0}
+.artifact-row+.artifact-row{margin-top:8px;border-top:1px solid var(--line,#d8dce5)}
+.artifact-info{flex:1;min-width:0}
+.artifact-name{display:block;font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+.artifact-details{font-size:11px;line-height:1.5;color:var(--muted)}
+.artifact-details summary{cursor:pointer;width:fit-content}
+.artifact-location{font-size:11px;overflow-wrap:anywhere;margin-top:4px}
+.artifact-actions{display:flex;flex:none;gap:2px}
+.conversation-artifacts .artifact-actions>.pulse-button{min-height:32px;padding:0 8px;border-radius:6px;color:var(--link)}
+.conversation-artifacts pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto}
+@media(max-width:767px){.artifact-row{gap:6px}.conversation-artifacts .artifact-actions>.pulse-button{min-height:40px;padding:0 8px}}
 
 /* Keep mode navigation at the leading edge without overlapping either title or actions. */
 .navbar.surface-chat,.navbar.surface-work{justify-content:flex-start;padding-left:16px;padding-right:12px;gap:12px}

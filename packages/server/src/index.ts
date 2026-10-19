@@ -1989,11 +1989,11 @@ export class LocalHost {
     for (const msg of messages) md += `\n## ${msg.role === 'user' ? 'User' : 'Assistant'}\n${msg.text}\n`
     return md
   }
-  async listArtifacts(id: string): Promise<ArtifactSummary[]> {
+  async listArtifacts(id: string, scope?: 'turn'): Promise<ArtifactSummary[]> {
     const manifest = await this.readManifest(id)
     const root = manifest.executionCwd ?? manifest.cwd
     const items = new Map<string, ArtifactSummary>()
-    for (const item of manifest.artifacts ?? []) items.set(item.path, { ...item, absolutePath: resolve(root, item.path), workspaceState: root === manifest.cwd ? 'project' : 'isolated' })
+    for (const item of manifest.artifacts ?? []) items.set(scope === 'turn' ? JSON.stringify([item.runId, item.path]) : item.path, { ...item, absolutePath: resolve(root, item.path), workspaceState: root === manifest.cwd ? 'project' : 'isolated' })
     return [...items.values()]
   }
   async readArtifact(id: string, path: string, runId: string): Promise<{ content: string; path: string; absolutePath: string; workspaceState: 'isolated' | 'project' }> {

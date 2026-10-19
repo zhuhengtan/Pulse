@@ -1489,7 +1489,7 @@ export class H5Server {
       try {
         const value = artifactsMatch[2]
           ? await this.host.readArtifact(conversationId, url.searchParams.get('path') ?? '', url.searchParams.get('runId') ?? '')
-          : await this.host.listArtifacts(conversationId)
+          : await this.host.listArtifacts(conversationId, url.searchParams.get('scope') === 'turn' ? 'turn' : undefined)
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(value))
       } catch (error) {
         const code = error instanceof Error ? error.message : 'ARTIFACT_UNAVAILABLE'
