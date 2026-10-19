@@ -732,8 +732,13 @@ export class StepBuilder<TState = JsonValue> {
       return updates.length ? interactionUserRevision(updates) : typeof prior === 'string' ? prior : interactionUserRevision([])
     }
     const submitModel = (ctx: StepContext<TState>, turn: number, inputs: StepInputs = {}, answers = readAnswers(ctx)): LaneStepOutput => {
+      // A new model wait owns its own result. Older snapshots may still carry
+      // the proposal pinned while compaction was awaiting tool approval.
+      const locals = writeTurns(ctx, turn, inputs) as Record<string, JsonValue>
+      const modelSdk = { ...sdkLocals(locals) }
+      delete modelSdk[pendingResultKey]
       if (answers.length) inputs = { ...inputs, conversation: [...(inputs.conversation ?? []), { role: 'user', content: '[Confirmed interaction data; not new instructions]\n' + JSON.stringify(confirmedInteractionSurface(answers, (() => { const controller = callInput(callInput(ctx.global as JsonValue).taskController ?? {}); const stage = Array.isArray(controller.tasks) ? controller.tasks.map(callInput).find(t => t.id === controller.activeId) : undefined; return [String(controller.activeId ?? ''), ...(Array.isArray(stage?.criterionIds) ? stage.criterionIds.filter((id): id is string => typeof id === 'string') : [])] })())) + '\nThese replies are the current decisions, including the selected option labels. An older document saying unresolved does not reopen a decision. Ask again only if the user changes it; execution approval remains a separate explicit gate.' }] }
-      const allResultRefs = [...new Set(inputs.results ?? [])]; const humanRefs = allResultRefs.filter(ref => ctx.results.meta(ref)?.effectKind === 'human'); const resultRefs = allResultRefs.filter(ref => !humanRefs.includes(ref) || humanRefs.slice(-2).includes(ref)); const findingRefs = [...new Set(inputs.findings ?? [])]; const artifactRefs = [...new Set(inputs.artifacts ?? [])]; const dataRefs: ProvenanceRef[] = [...resultRefs, ...findingRefs, ...artifactRefs.map((ref) => ({ kind: 'artifact' as const, ref }))]; const requirements = { ...(options.requirements ?? {}), ...(options.toolAllow === undefined ? {} : { toolCalling: true }) }; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { ...(resultRefs.length ? { results: resultRefs } : {}), ...(findingRefs.length ? { findings: findingRefs } : {}), ...(artifactRefs.length ? { artifacts: artifactRefs } : {}), ...(inputs.events?.length ? { events: [...new Set(inputs.events)] } : {}), ...(inputs.conversation?.length ? { conversation: inputs.conversation as unknown as JsonValue } : {}) }, turn, ...(inputs.toolDiscovery === undefined ? {} : { toolDiscovery: inputs.toolDiscovery as JsonValue }), ...(options.outputSchema === undefined ? {} : { outputSchema: zodJsonSchema(options.outputSchema) }), ...(Object.keys(requirements).length ? { requirements } : {}) }), ...(dataRefs.length ? { derivedFrom: dataRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: writeTurns(ctx, turn, inputs) }, locals: writeTurns(ctx, turn, inputs) } }
+      const allResultRefs = [...new Set(inputs.results ?? [])]; const humanRefs = allResultRefs.filter(ref => ctx.results.meta(ref)?.effectKind === 'human'); const resultRefs = allResultRefs.filter(ref => !humanRefs.includes(ref) || humanRefs.slice(-2).includes(ref)); const findingRefs = [...new Set(inputs.findings ?? [])]; const artifactRefs = [...new Set(inputs.artifacts ?? [])]; const dataRefs: ProvenanceRef[] = [...resultRefs, ...findingRefs, ...artifactRefs.map((ref) => ({ kind: 'artifact' as const, ref }))]; const requirements = { ...(options.requirements ?? {}), ...(options.toolAllow === undefined ? {} : { toolCalling: true }) }; return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-turn-${turn}`, kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: options.task ?? 'reason', instruction: instruction(ctx), inputs: { ...(resultRefs.length ? { results: resultRefs } : {}), ...(findingRefs.length ? { findings: findingRefs } : {}), ...(artifactRefs.length ? { artifacts: artifactRefs } : {}), ...(inputs.events?.length ? { events: [...new Set(inputs.events)] } : {}), ...(inputs.conversation?.length ? { conversation: inputs.conversation as unknown as JsonValue } : {}) }, turn, ...(inputs.toolDiscovery === undefined ? {} : { toolDiscovery: inputs.toolDiscovery as JsonValue }), ...(options.outputSchema === undefined ? {} : { outputSchema: zodJsonSchema(options.outputSchema) }), ...(Object.keys(requirements).length ? { requirements } : {}) }), ...(dataRefs.length ? { derivedFrom: dataRefs } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: { programId: this.config.id, programVersion: this.config.version, step: `${name}:decode`, locals: { ...locals, $sdk: modelSdk } }, locals: { ...locals, $sdk: modelSdk } } }
     const invalidInputRecovery = (ctx: StepContext<TState>): LaneStepOutput | { next: NextStepTarget<TState> } | undefined => {
       const input = ctx.resumeInput
       if (!input || input.type !== 'control_error' || input.error.code !== 'INVALID_TOOL_INPUT') return undefined
@@ -927,6 +932,64 @@ export class StepBuilder<TState = JsonValue> {
       if (editedNow || settledRefs.some((ref) => ctx.results.meta(ref)?.effectKind === 'human')) nextSdk[`${name}EditRecoveries`] = 0
       delete nextSdk[skippedKey]
       return { ...output, next: `${name}:decode`, locals: { ...locals, $sdk: nextSdk } }
+    })
+    const dispatchTools = (action: RuntimeAction, locals: JsonValue, deferred: string[] = [], skippedNames: string[] = []): ReturnType<Handler> => {
+      if (action.type !== 'submit_effects') throw new Error('INVALID_TOOL_ACTION')
+      const serial = options.serialTools !== undefined && action.effects.some(effect => options.serialTools!.includes(String(callInput(effect.input ?? {}).name)))
+      const limit = serial ? 1 : Math.max(1, options.maxToolsPerTurn ?? action.effects.length)
+      const base = locals as Record<string, JsonValue>
+      const priorSdk = sdkLocals(base)
+      const usedTools = new Set(Array.isArray(priorSdk[`${name}UsedTools`]) ? (priorSdk[`${name}UsedTools`] as JsonValue[]).filter((item): item is string => typeof item === 'string') : [])
+      for (const effect of action.effects) {
+        const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
+        if (typeof input.name === 'string') usedTools.add(input.name)
+      }
+      const sdk = { ...priorSdk, [`${name}ReadGateSkipped`]: deferred, [`${name}UsedTools`]: [...usedTools], [`${name}QueuedTools`]: action.effects.slice(limit) as unknown as JsonValue, [`${name}StopAfterSerial`]: options.stopAfterFirstSerialTool === true && serial && action.effects.length > limit }
+      // Approval must retain the proposal until it is checked, then consume
+      // it once just like direct tool dispatch after compaction.
+      delete sdk[pendingResultKey]
+      if (skippedNames.length) sdk[`${name}SkippedTools`] = skippedNames
+      return { actions: [{ ...action, effects: action.effects.slice(0, limit) }], next: `${name}:tools`, locals: { ...base, $sdk: sdk } }
+    }
+    // Approval is a durable resume point, so register it when the program is built.
+    // A handler installed only during decode disappears in a new process and would
+    // fall back to the entry step, losing the approved operations.
+    this.handlers.set(`${name}:approval`, ctx => {
+      // A denied or mismatched approval is the user's decision for this lane.
+      // Stage recovery would mark one stage blocked and keep dispatching the rest.
+      const stopsLane = (code: string) => code === 'APPROVAL_DENIED' || code === 'APPROVAL_DIGEST_MISMATCH' || code === 'APPROVAL_CALLS_MISSING' || code === 'APPROVAL_RESPONSE_INVALID' || code === 'APPROVAL_RESPONSE_MISSING' || code.startsWith('TASK_MODEL_CALL_BUDGET_') || code.startsWith('AI_APPROVAL_')
+      const fail = (error: RuntimeError): ReturnType<Handler> => stopsLane(error.code) ? { next: { fail: error } } : options.onError ? { next: options.onError(error, ctx), locals: clearPendingResult(ctx) } : { next: { fail: error } }
+      const resolution = waitResolution(ctx.resumeInput)
+      const error = waitFailure(ctx)
+      if (error) return fail(error)
+      const dependency = resolution && Object.values(resolution.dependencies).find(item => item.state === 'settled' && item.outcome)
+      if (!dependency || dependency.state !== 'settled' || !dependency.outcome?.resultRef) return fail({ code: 'APPROVAL_RESPONSE_INVALID', message: 'Approval wait has no settled reply.', retryable: false })
+      const reply = z.object({ approved: z.boolean(), reason: z.string().optional() }).safeParse(readResult(ctx, dependency.outcome.resultRef))
+      if (!reply.success) return fail({ code: 'APPROVAL_RESPONSE_INVALID', message: 'Approval response must contain approved=true or false.', retryable: false })
+      if (!reply.data.approved) return options.toolApproval?.onDenied ? { next: options.toolApproval.onDenied(reply.data.reason ?? 'User denied the proposed tool call.', ctx) } : fail({ code: 'APPROVAL_DENIED', message: reply.data.reason ?? 'User denied the proposed tool call.', retryable: false })
+      const sdk = sdkLocals(ctx.lane.resume.locals), approvalKey = `${name}PendingToolCalls`, digestKey = `${name}PendingToolDigest`
+      const pending = sdk[approvalKey]
+      if (!Array.isArray(pending)) return fail({ code: 'APPROVAL_CALLS_MISSING', message: 'Approved calls are missing from persisted lane state.', retryable: false })
+      const evidenceKey = `${name}PendingToolEvidence`
+      const storedEvidence = sdk[evidenceKey]
+      const legacyDigest = storedEvidence === undefined && sdk[digestKey] === contentHash(pending)
+      if (!legacyDigest && sdk[digestKey] !== contentHash({ calls: pending, evidence: storedEvidence ?? null })) return fail({ code: 'APPROVAL_DIGEST_MISMATCH', message: 'Persisted calls differ from the approved digest.', retryable: false })
+      const evidence = legacyDigest ? {} : callInput(storedEvidence ?? {})
+      const sourceRef = typeof sdk[pendingResultKey] === 'string' ? sdk[pendingResultKey] as string : undefined
+      const sourceMeta = sourceRef ? ctx.results.meta(sourceRef) : undefined
+      const sourceEffectId = typeof evidence.sourceEffectId === 'string' ? evidence.sourceEffectId : sourceMeta?.producer.kind === 'effect' ? sourceMeta.producer.id : undefined
+      const privacy = ['public', 'cloud_allowed', 'local_only'].includes(String(evidence.sourcePrivacy)) ? evidence.sourcePrivacy as 'public' | 'cloud_allowed' | 'local_only' : sourceMeta?.privacy
+      const refs = Array.isArray(evidence.derivedFrom) ? evidence.derivedFrom.filter((ref): ref is string => typeof ref === 'string') : sourceRef ? [sourceRef] : []
+      const turns = readTurns(ctx)
+      const action: RuntimeAction = { type: 'submit_effects', effects: pending.map((raw, index) => {
+        const call = callInput(raw), toolCallId = String(call.toolCallId ?? `${name}:${turns}:${String(call.originalId)}`)
+        return { key: `${name}-tool-${turns}-${index + 1}`, toolCallId, kind: 'tool', concurrencyClass: 'tool', ...(sourceEffectId ? { llmEffectId: sourceEffectId } : {}), ...(privacy ? { privacy } : {}), ...(refs.length ? { derivedFrom: refs } : {}), input: { toolCallId, name: String(call.toolName), arguments: call.input ?? {}, ...(privacy ? { privacy } : {}), ...(refs.length ? { derivedFrom: refs } : {}) } }
+      }), wait: { onUnsatisfied: 'resume_with_error' } }
+      const locals = ordinaryLocals(ctx.lane.resume.locals)
+      const cleared = { ...locals, $sdk: { ...sdk, [approvalKey]: null, [digestKey]: null, [`${name}PendingToolEvidence`]: null } }
+      const deferred = Array.isArray(evidence.deferred) ? evidence.deferred.filter((name): name is string => typeof name === 'string') : []
+      const skipped = Array.isArray(evidence.skippedNames) ? evidence.skippedNames.filter((name): name is string => typeof name === 'string') : []
+      return dispatchTools(action, cleared, deferred, skipped)
     })
     this.handlers.set(`${name}:decode`, (ctx) => {
       const recovered = invalidInputRecovery(ctx)
@@ -1190,66 +1253,24 @@ export class StepBuilder<TState = JsonValue> {
           return { actions: [{ type: 'submit_effects', effects: askEffects as unknown as EffectSubmission[], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:tools`, locals: clearPendingResult(ctx) }
         }
         const makeToolEffects = (approvedCalls: Array<{ originalId: JsonValue; toolName: JsonValue; toolCallId?: JsonValue; input: JsonValue }>): RuntimeAction => ({ type: 'submit_effects', effects: approvedCalls.map((call, index) => ({ key: `${name}-tool-${turns}-${index + 1}`, toolCallId: String(call.toolCallId ?? `${name}:${turns}:${String(call.originalId)}`), ...(sourceEffectId === undefined ? {} : { llmEffectId: sourceEffectId }), ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }), ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}), kind: 'tool' as const, concurrencyClass: 'tool' as const, input: { toolCallId: String(call.toolCallId ?? `${name}:${turns}:${String(call.originalId)}`), name: String(call.toolName), arguments: call.input, ...(sourcePrivacy === undefined ? {} : { privacy: sourcePrivacy }), ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}) } })), wait: { onUnsatisfied: 'resume_with_error' } })
-        const dispatchTools = (action: RuntimeAction, locals: JsonValue) => {
-          if (action.type !== 'submit_effects') throw new Error('INVALID_TOOL_ACTION')
-          const serial = options.serialTools !== undefined && calls.some((call) => options.serialTools!.includes(String(call.toolName)))
-          const limit = serial ? 1 : Math.max(1, options.maxToolsPerTurn ?? action.effects.length)
-          const base = locals as Record<string, JsonValue>
-          const priorSdk = sdkLocals(base)
-          const usedTools = new Set(Array.isArray(priorSdk[`${name}UsedTools`]) ? (priorSdk[`${name}UsedTools`] as JsonValue[]).filter((item): item is string => typeof item === 'string') : [])
-          for (const effect of action.effects) {
-            const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
-            if (typeof input.name === 'string') usedTools.add(input.name)
-          }
-          const sdk = { ...priorSdk, [`${name}ReadGateSkipped`]: deferred, [`${name}UsedTools`]: [...usedTools], [`${name}QueuedTools`]: action.effects.slice(limit) as unknown as JsonValue, [`${name}StopAfterSerial`]: options.stopAfterFirstSerialTool === true && serial && action.effects.length > limit }
-          if (skippedNames.length) sdk[`${name}SkippedTools`] = skippedNames
-          return { actions: [{ ...action, effects: action.effects.slice(0, limit) }], next: `${name}:tools`, locals: { ...base, $sdk: sdk } }
-        }
+
         if (options.toolApproval && (options.toolApproval.requiresApproval?.(calls as unknown as JsonValue) ?? true)) {
           const approvalKey = `${name}PendingToolCalls`
           const digestKey = `${name}PendingToolDigest`
           const locals = ctx.lane.resume.locals && typeof ctx.lane.resume.locals === 'object' && !Array.isArray(ctx.lane.resume.locals) ? ctx.lane.resume.locals as Record<string, JsonValue> : {}
-          const digest = contentHash(calls)
+          const evidenceRecord = { sourceEffectId: sourceEffectId ?? null, sourcePrivacy: sourcePrivacy ?? null, derivedFrom: toolDerivedFrom, deferred, skippedNames }
+          const digest = contentHash({ calls, evidence: evidenceRecord })
           const listing = calls.map((call, index) => `${index + 1}. ${call.toolName} ${call.toolCallId}`).join('\n')
           const extra = typeof options.toolApproval.prompt === 'string' ? options.toolApproval.prompt : options.toolApproval.prompt(calls.map((call) => ({ name: call.toolName, toolCallId: call.originalId })) as unknown as JsonValue, ctx)
           const prompt = boundedInstruction(`Approve ${calls.length} tool call(s). Digest ${digest}.\n${listing}\n${extra}`)
-          this.handlers.set(`${name}:approval`, (approvalCtx) => {
-            const resolution = waitResolution(approvalCtx.resumeInput)
-            const dependency = resolution === undefined ? undefined : Object.values(resolution.dependencies).find((candidate) => candidate.state === 'settled')
-            const approvalError = waitFailure(approvalCtx)
-            if (approvalError) return fail(approvalError)
-            const settledDependency = dependency
-            if (settledDependency?.state !== 'settled') {
-              return fail({
-                code: 'APPROVAL_RESPONSE_MISSING',
-                message: 'Approval response was not received.',
-                retryable: false,
-                details: { dependencyState: settledDependency?.state ?? 'missing', waitId: resolution?.waitId ?? null },
-              })
-            }
-            const value = settledDependency.outcome.resultRef ? readResult(approvalCtx, settledDependency.outcome.resultRef) : undefined
-            const parsed = z.object({ approved: z.boolean(), reason: z.string().optional() }).safeParse(value)
-            if (!parsed.success) return fail({ code: 'APPROVAL_RESPONSE_INVALID', message: 'Approval response must contain approved=true or false.', retryable: false, details: parsed.error.message })
-            if (!parsed.data.approved) {
-              const reason = parsed.data.reason ?? 'User denied the proposed tool call.'
-              if (options.toolApproval?.onDenied) return { next: options.toolApproval.onDenied(reason, approvalCtx) }
-              return { next: { fail: { code: 'APPROVAL_DENIED', message: reason, retryable: false } } }
-            }
-            const pendingLocals = sdkLocals(approvalCtx.lane.resume.locals)
-            const pending = pendingLocals[approvalKey]
-            if (!Array.isArray(pending)) return fail({ code: 'APPROVAL_CALLS_MISSING', message: 'Approved tool calls were not found in the persisted lane state.', retryable: false })
-            if (pendingLocals[digestKey] !== contentHash(pending)) return fail({ code: 'APPROVAL_DIGEST_MISMATCH', message: 'Persisted tool calls no longer match the approved digest.', retryable: false })
-            const approvedCalls = pending.flatMap((item) => item && typeof item === 'object' && !Array.isArray(item) ? [{ originalId: (item as Record<string, JsonValue>).originalId ?? '', toolName: (item as Record<string, JsonValue>).toolName ?? '', toolCallId: (item as Record<string, JsonValue>).toolCallId ?? '', input: (item as Record<string, JsonValue>).input ?? {} }] : [])
-            const cleared = { ...locals, $sdk: { ...pendingLocals, [approvalKey]: null, [digestKey]: null } }
-            return dispatchTools(makeToolEffects(approvedCalls), cleared)
-          })
-          return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-approval-${turns}`, kind: 'human', concurrencyClass: 'none', input: { prompt, digest, tools: calls as unknown as JsonValue }, ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:approval`, locals: { ...locals, $sdk: { ...sdkLocals(locals), [approvalKey]: calls as unknown as JsonValue, [digestKey]: digest } } }
+
+          return { actions: [{ type: 'submit_effects', effects: [{ key: `${name}-approval-${turns}`, kind: 'human', concurrencyClass: 'none', input: { prompt, digest, tools: calls as unknown as JsonValue }, ...(toolDerivedFrom.length ? { derivedFrom: [...toolDerivedFrom] } : {}) }], wait: { onUnsatisfied: 'resume_with_error' } }], next: `${name}:approval`, locals: { ...locals, $sdk: { ...sdkLocals(locals), [approvalKey]: calls as unknown as JsonValue, [digestKey]: digest, [`${name}PendingToolEvidence`]: evidenceRecord } } }
         }
         const gatedLocals = clearPendingResult(ctx) as Record<string, JsonValue>
         const gatedSdk = { ...sdkLocals(gatedLocals) }
         if (wantsFileEdit) gatedSdk[editGateKey] = editGateReads + 1
         else delete gatedSdk[editGateKey]
-        return dispatchTools(makeToolEffects(calls), { ...gatedLocals, $sdk: gatedSdk })
+        return dispatchTools(makeToolEffects(calls), { ...gatedLocals, $sdk: gatedSdk }, deferred, skippedNames)
       }
       const answerText = typeof record?.text === 'string' ? record.text : ''
       if (toolCalls.length === 0 && looksLikeUnexecutedToolRequest(answerText)) {
