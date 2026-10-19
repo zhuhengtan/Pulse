@@ -1,3 +1,4 @@
+import { createRequestId } from './requestId.js'
 import { HostPathPicker } from './HostPathPicker.js'
 import { PulseButton, PulseCheckbox, PulseDisclosure, PulseInput, PulseTextArea, PulseToast, usePulseDialogs } from './PulseControls.js'
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -99,7 +100,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     return [...persisted, ...pending]
   }
   const [drafts, setDrafts] = useState<Record<string, ComposerDraft>>({})
-  const submittedDrafts = useRef(new Map<string, { keys: string[]; revision: number }>())
+  const submittedDrafts = useRef(new Map<string, { keys: string[]; draft: ComposerDraft; clearedRevision: number; restoredDraft?: ComposerDraft }>())
+  const interactionRequests = useRef(new Map<string, string>())
   const draft = drafts[selectedId ?? 'new']?.markdown ?? ''
   const updateDraft = (key: string, update: (current: ComposerDraft) => ComposerDraft) => setDrafts(current => {
     const previous = current[key] ?? emptyComposerDraft()
@@ -109,14 +111,26 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   })
   const rememberSubmittedDraft = (requestId: string, key: string) => {
     const source = drafts[key]
-    if (source) submittedDrafts.current.set(requestId, { keys: [key], revision: source.revision })
+    if (!source || source.processing) return
+    const clearedRevision = source.revision + 1
+    submittedDrafts.current.set(requestId, { keys: [key], draft: source, clearedRevision })
+    updateDraft(key, current => current === source ? { ...emptyComposerDraft(), revision: clearedRevision } : current)
+  }
+  const restoreSubmittedDraft = (requestId: string) => {
+    const sent = submittedDrafts.current.get(requestId)
+    if (!sent) return
+    const restored = { ...sent.draft, revision: sent.clearedRevision + 1 }
+    sent.restoredDraft = restored
+    for (const key of sent.keys) updateDraft(key, current => current.revision === sent.clearedRevision && current.processing === 0
+      ? restored : current)
   }
   const clearSubmittedDraft = (requestId: string) => {
     const sent = submittedDrafts.current.get(requestId)
     if (!sent) return
-    for (const key of sent.keys) updateDraft(key, current => current.revision === sent.revision && current.processing === 0
-      ? { ...emptyComposerDraft(), revision: current.revision + 1 }
-      : current)
+    // A successful retry can clear only the actual rollback, never a newer edit
+    // that happens to have reached the same revision number.
+    for (const key of sent.keys) updateDraft(key, current => current === sent.restoredDraft && current.processing === 0
+      ? { ...emptyComposerDraft(), revision: current.revision + 1 } : current)
     submittedDrafts.current.delete(requestId)
   }
   const [newApprovalPolicy, setNewApprovalPolicy] = useState<'manual' | 'delegate'>('manual')
@@ -599,7 +613,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     if (loading || loadError) return false
     if (surfaceMode === 'chat') {
       if ((!text && !hasAttachments) || submitting || sendLock.current || !paired || !assistantConversation) return false
-      const id = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      const id = createRequestId('send')
       const optimisticId = `msg-${id}`
       sendLock.current = true; setSubmitting(true); setLoadError('')
       rememberSubmittedDraft(id, assistantConversation.id)
@@ -639,6 +653,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         clearSubmittedDraft(id)
         return true
       } catch (error) {
+        restoreSubmittedDraft(id)
         patchLocalMessage(assistantConversation.id, optimisticId, { deliveryState: 'failed' })
         if (selectedIdRef.current === assistantConversation.id) setMessages(current => current.map(message => message.id === optimisticId ? { ...message, deliveryState: 'failed' } : message))
         if (selectedIdRef.current === assistantConversation.id && error instanceof ApiError && error.status === 401) setLoadError('此设备授权已失效，请重新配对。')
@@ -652,7 +667,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     sendLock.current = true; setSubmitting(true); setLoadError('')
     let conversationId = selectedId
     const initialSelection = selectedIdRef.current
-    const requestId = payload && 'text' in payload && payload.requestId ? payload.requestId : globalThis.crypto?.randomUUID?.() ?? `send-${Date.now()}`
+    const requestId = payload && 'text' in payload && payload.requestId ? payload.requestId : createRequestId('send')
     const pendingId = `pending-${requestId}`
     if (!(payload && 'text' in payload && payload.requestId)) rememberSubmittedDraft(requestId, initialSelection ?? 'new')
     const optimisticMessage: WebMessage = { id: pendingId, requestId, deliveryState: 'queued', role: 'user', text, createdAt: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}), ...(skills?.length ? { skills } : {}), ...(mentionedFiles?.length ? { mentionedFiles } : {}) }
@@ -698,6 +713,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       clearSubmittedDraft(requestId)
       return true
     } catch (error) {
+      restoreSubmittedDraft(requestId)
       patchLocalMessage(conversationId ?? 'new', pendingId, { deliveryState: 'failed' })
       if (selectedIdRef.current === conversationId) setMessages(current => current.map(message => message.id === pendingId ? { ...message, deliveryState: 'failed' } : message))
       if (selectedIdRef.current === conversationId && error instanceof ApiError && error.status === 401) setLoadError('此设备授权已失效，请重新配对。')
@@ -802,18 +818,25 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
 
   const answer = async (runId: string, groupId: string, answers: Array<{ effectId: string; value: Record<string, unknown> }>, conversationId = selected?.id): Promise<boolean> => {
     const requestKey = `pulse-web-interaction-request:${runId}:${groupId}`
-    const requestId = window.localStorage.getItem(requestKey) ?? crypto.randomUUID()
-    window.localStorage.setItem(requestKey, requestId)
+    let storedId: string | null = null
+    try { storedId = window.localStorage.getItem(requestKey) } catch { /* Browser storage can be blocked. */ }
+    const requestId = interactionRequests.current.get(requestKey) ?? storedId ?? createRequestId('reply')
+    interactionRequests.current.set(requestKey, requestId)
+    try { window.localStorage.setItem(requestKey, requestId) } catch { /* In-memory idempotency remains available. */ }
+    const forgetRequest = () => {
+      interactionRequests.current.delete(requestKey)
+      try { window.localStorage.removeItem(requestKey) } catch { /* Storage must not prevent an approval. */ }
+    }
     try {
       await apiJson(transport, `/api/runs/${encodeURIComponent(runId)}/replies`, jsonRequest('POST', { conversationId, groupId, requestId, answers }))
-      window.localStorage.removeItem(requestKey)
+      forgetRequest()
       const interactionKind = [...status, ...workInteractions].find((item): item is Extract<RunStatus, { kind: 'interaction' }> => item.kind === 'interaction' && item.runId === runId && item.groupId === groupId)?.interactionKind
       setStatus(items => items.filter(item => item.kind !== 'interaction' || item.groupId !== groupId))
       setWorkInteractions(items => items.filter(item => item.runId !== runId || item.groupId !== groupId))
       setToast(interactionKind === 'ask' ? '答案已统一提交。' : '审批结果已提交。')
       window.setTimeout(() => setToast(''), 2200)
       return true
-    } catch (error) { if (error instanceof ApiError && error.status >= 400 && error.status < 500) window.localStorage.removeItem(requestKey); setToast('提交失败，内容已保留，请检查连接后重试。'); return false }
+    } catch (error) { if (error instanceof ApiError && error.status >= 400 && error.status < 500) forgetRequest(); setToast('提交失败，内容已保留，请检查连接后重试。'); return false }
   }
 
   const setApprovalPolicy = async (policy: 'manual' | 'delegate', conversationId = selected?.id) => {
@@ -1212,7 +1235,7 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
     try {
       if (await submit(values)) localStorage.removeItem(key)
       else setError('提交失败，答案已保留；请检查连接后重试。')
-    } finally { setSending(false) }
+    } catch { setError('提交失败，内容已保留；请检查连接后重试。') } finally { setSending(false) }
   }
   if (interaction.interactionKind === 'approval') {
     const approvalItem = interaction.items[0]

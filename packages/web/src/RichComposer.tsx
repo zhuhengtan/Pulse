@@ -837,12 +837,14 @@ export function RichComposer({
           {running && surfaceMode === 'work' ? (
             <PulseButton
               type="button"
-              className="stop-button"
+              className="composer-stop-btn"
+              aria-label={stopping ? '正在停止' : '停止生成'}
+              aria-busy={stopping}
+              title={stopping ? '正在停止' : '停止生成'}
               disabled={stopping}
               onClick={onStop}
             >
-              {stopping ? '…' : '■'}
-              <span>{stopping ? '正在停止' : '停止'}</span>
+              <span className={stopping ? 'spinner' : 'composer-stop-icon'} aria-hidden="true" />
             </PulseButton>
           ) : (
             <button

@@ -247,7 +247,8 @@
   gap: 6px;
 }
 
-.composer-send-btn {
+.composer-send-btn,
+.composer-tools-right .composer-stop-btn {
   min-width: 36px;
   min-height: 36px;
   width: 36px;
@@ -267,6 +268,49 @@
 .composer-send-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.composer-tools-right .composer-stop-btn {
+  position: relative;
+  flex: none;
+  line-height: 1;
+  transition: filter 0.15s ease, opacity 0.15s ease;
+}
+
+/* Preserve the send button's compact shape with a 44px touch target. */
+.composer-stop-btn::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+}
+
+.composer-stop-icon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: currentColor;
+}
+
+.composer-stop-btn:not(:disabled):hover {
+  filter: brightness(1.12);
+}
+
+.composer-stop-btn:focus-visible {
+  outline: 2px solid var(--link, #3f5cce);
+  outline-offset: 3px;
+}
+
+.composer-tools-right .composer-stop-btn:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.composer-stop-btn .spinner {
+  width: 16px;
+  height: 16px;
+  border-color: rgb(255 255 255 / 35%);
+  border-top-color: #fff;
 }
 
 /* Suggestion dropdown popup */
