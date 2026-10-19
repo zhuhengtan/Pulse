@@ -36,6 +36,10 @@ export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>
     {
       "zh": "移除工作聊天顶部重复的任务面板，在消息列表中保留 Lane 活动及任务恢复操作；交付文件改为按轮次紧凑展示，完整路径按需展开。",
       "en": "Removed the duplicate task panel above work chats while retaining Lane activity and recovery actions in the message list; delivery files now appear compactly below their own turns, with full paths expandable on demand."
+    },
+    {
+      "zh": "修复 Windows 路径与检查清单格式、迁移工作区换行转换和服务关闭时的结果清理竞态，并提前执行跨平台专项回归。",
+      "en": "Fixed Windows path and check-inventory formats, line-ending changes in transferred workspaces, and result-cleanup races during shutdown; run platform-specific regressions early in CI."
     }
   ],
   "0.6.0": [

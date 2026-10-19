@@ -142,6 +142,7 @@ export class H5Server {
   private readonly inhibitor = new SleepInhibitor()
   private server: Server | undefined = undefined
   private readonly activeRuns = new Map<string, RunHandle>()
+  private readonly runConsumers = new Set<Promise<void>>()
   private readonly runConversations = new Map<string, string>()
   private readonly runEventBuffers = new Map<string, AssistantEvent[]>()
   private readonly runSseClients = new Map<string, Set<SseClient>>()
@@ -302,6 +303,7 @@ export class H5Server {
     // A sendMessage call can still be starting and not yet appear in activeRuns.
     // The pump joins that launch and shuts it down without dispatching its queue.
     await this.assistantPump?.catch(() => undefined)
+    await Promise.allSettled([...this.runConsumers])
     await this.workspaces.close()
     if (this.jarvisSyncTimer) clearInterval(this.jarvisSyncTimer)
     this.jarvisSyncTimer = undefined
@@ -1872,7 +1874,14 @@ export class H5Server {
     res.end(JSON.stringify({ error: 'NOT_FOUND' }))
   }
 
-  private async consumeRun(runId: string, handle: RunHandle): Promise<void> {
+  private consumeRun(runId: string, handle: RunHandle): Promise<void> {
+    const consuming = this.consumeRunEvents(runId, handle)
+    this.runConsumers.add(consuming)
+    void consuming.finally(() => this.runConsumers.delete(consuming)).catch(() => undefined)
+    return consuming
+  }
+
+  private async consumeRunEvents(runId: string, handle: RunHandle): Promise<void> {
     let outcome: Awaited<ReturnType<RunHandle['outcome']>> | undefined
     try {
       for await (const event of handle.events) await this.publish(runId, event)

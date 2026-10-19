@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, mkdir, rm, writeFile, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -137,4 +137,20 @@ describe('H5 isolated project workspaces', () => {
     await expect(manager.prepare('conv-shared-2', 'project-1', project)).resolves.toMatchObject({ isolated: false })
     await manager.close()
   })
+})
+
+it('does not copy cached children through a replaced directory symlink', async () => {
+  const project = await repository(), outside = await mkdtemp(join(tmpdir(), 'pulse-outside-workspace-')); roots.push(outside)
+  await mkdir(join(project, 'nested')); await writeFile(join(project, 'nested', 'file.txt'), 'tracked')
+  await git(project, 'add', '.'); await git(project, 'commit', '--quiet', '-m', 'nested baseline')
+  await rm(join(project, 'nested'), { recursive: true })
+  await writeFile(join(outside, 'file.txt'), 'outside must remain unchanged')
+  await symlink(outside, join(project, 'nested'), process.platform === 'win32' ? 'junction' : 'dir')
+  const manager = new H5WorkspaceManager(join(outside, 'data'))
+  try {
+    const workspace = await manager.prepare('conv-linked-parent', 'project', project)
+    expect(await readFile(join(outside, 'file.txt'), 'utf8')).toBe('outside must remain unchanged')
+    expect(workspace.isolated).toBe(true)
+    expect(await readFile(join(project, 'nested', 'file.txt'), 'utf8')).toBe('outside must remain unchanged')
+  } finally { await manager.close() }
 })

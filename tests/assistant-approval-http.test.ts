@@ -19,7 +19,7 @@ it('exposes assistant approval in the persistent chat and lets the user choose i
     await vi.waitFor(async () => {
       view = await fetch(`${baseUrl}/api/assistant`, { headers }).then(response => response.json())
       expect(view.workInteractions).toContainEqual(expect.objectContaining({ conversationId: view.conversation.id, kind: 'approval' }))
-    })
+    }, { timeout: 10_000, interval: 50 })
     const policy = await fetch(`${baseUrl}/api/conversations/${view!.conversation.id}`, { method: 'PATCH', headers, body: JSON.stringify({ approvalPolicy: 'delegate' }) })
     expect(policy.status).toBe(200)
     const protectedEdit = await fetch(`${baseUrl}/api/conversations/${view!.conversation.id}`, { method: 'PATCH', headers, body: JSON.stringify({ title: 'change' }) })

@@ -76,6 +76,7 @@ describe('work conversation transfer', () => {
   it.each(['json', 'h5-isolated'] as const)('resumes an approved file move only in the target workspace (%s)', async mode => {
     const directory = await root(), source = join(directory, 'source'), destination = join(directory, 'destination'), data = join(directory, 'data'), targetData = join(directory, 'target-data')
     await project(source); await project(destination)
+    if (mode === 'h5-isolated') await exec('git', ['-C', destination, 'config', 'core.autocrlf', 'true'])
     const original = host(source, data, { mockToolCalls: [{ name: 'fs.move', input: { source: join(source, 'note.txt'), destination: join(source, 'renamed.txt') } }] })
     const conversation = await original.createConversation(), run = await original.sendMessage(conversation.id, { text: 'Move note.txt to renamed.txt' })
     const iterator = run.events[Symbol.asyncIterator]()
@@ -187,6 +188,7 @@ describe('work conversation transfer', () => {
   it.each(['json', 'sqlite', 'external-files', 'h5-isolated'] as const)('resumes the same interrupted %s run at its approval boundary on another workspace', async mode => {
     const dir = await root(), source = join(dir, 'source'), destination = join(dir, 'destination'), data = join(dir, 'data'), targetData = join(dir, 'target-data')
     await project(source); await project(destination)
+    if (mode === 'h5-isolated') await exec('git', ['-C', destination, 'config', 'core.autocrlf', 'true'])
     const persistenceBackend = mode === 'h5-isolated' ? 'external-files' : mode
     const original = host(source, data, { persistenceBackend, mockToolCalls: [{ name: 'fs.write', input: { path: join(source, 'result.txt'), content: 'one write' } }] })
     const conversation = await original.createConversation()
@@ -241,7 +243,7 @@ describe('work conversation transfer', () => {
         const workspace = await new H5WorkspaceManager(targetData).get(conversation.id)
         expect(workspace?.kind).toBe('git')
         executionDirectory = workspace!.worktreeRoot
-        expect(JSON.stringify(interaction)).toContain(workspace!.worktreeRoot)
+        expect(JSON.stringify(interaction)).toContain(JSON.stringify(workspace!.worktreeRoot).slice(1, -1))
         const reply = await fetch(`${base}/api/runs/${run.id}/replies`, { method: 'POST', headers, body: JSON.stringify({ conversationId: conversation.id, groupId: interaction!.groupId, requestId: 'migration-approval-once', answers: interaction!.items.map(item => ({ effectId: item.effectId, value: { approved: true } })) }) })
         expect(reply.status).toBe(200)
         await vi.waitFor(async () => {
@@ -256,8 +258,8 @@ describe('work conversation transfer', () => {
       let approvals = 0
       for await (const event of resumed.events) if (event.type === 'waiting') {
         const groups = await resumed.pendingInteractions()
-        expect(JSON.stringify(groups)).toContain(join(destination, 'result.txt'))
-        expect(JSON.stringify(groups)).not.toContain(join(source, 'result.txt'))
+        expect(JSON.stringify(groups)).toContain(JSON.stringify(join(destination, 'result.txt')).slice(1, -1))
+        expect(JSON.stringify(groups)).not.toContain(JSON.stringify(join(source, 'result.txt')).slice(1, -1))
         for (const group of groups) for (const item of group.items) { await resumed.reply(item.effectId, { approved: true }); approvals++ }
       }
       expect(approvals).toBe(1)

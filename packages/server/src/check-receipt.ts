@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { dirname, extname, join, relative, resolve, sep } from 'node:path'
+import { dirname, extname, join, relative, resolve } from 'node:path'
 import { FilesystemTool } from '@hunterzhu/pulse-adapters'
 
 export interface CheckReceipt {
@@ -17,6 +17,7 @@ export interface CheckReceipt {
   definitionChanged: boolean
 }
 export const isCheck = (command: string, args: string[]) => /(?:--(?:test|check)|(?:test|check|verify|lint|typecheck|pytest|vitest|jest)(?:[.\s/\\-]|$))/i.test([command, ...args].join(' '))
+const portableKeys = (record: Record<string, string>) => Object.fromEntries(Object.entries(record).map(([key, value]) => [key.replaceAll('\\', '/'), value]))
 const hash = (text: string) => createHash('sha256').update(text).digest('hex')
 export function testAdditionsRequested(intent: string): boolean {
   // Regression assertions are explicit test additions too. Keep the same
@@ -159,14 +160,14 @@ function appendedTestRegistrations(suffix: string): boolean {
 
 /** Reject a destructive test patch before it can corrupt caller-owned checks. */
 export async function assertCheckEdit(root: string, store: string, path: string, proposed: string): Promise<void> {
-  const key = relative(resolve(root), resolve(root, path))
-  if (!testFile(key) || key === '..' || key.startsWith(`..${sep}`)) return
+  const key = relative(resolve(root), resolve(root, path)).replaceAll('\\', '/')
+  if (!testFile(key) || key === '..' || key.startsWith('../')) return
   let original: Record<string, string>
-  try { original = JSON.parse(await fs.readFile(join(store, 'original.json'), 'utf8')) }
+  try { original = portableKeys(JSON.parse(await fs.readFile(join(store, 'original.json'), 'utf8'))) }
   catch (error) { if ((error as { code?: string }).code === 'ENOENT') return; throw error }
   if (original[key] === undefined || hash(proposed) === original[key]) return
   let sources: Record<string, string> = {}
-  try { sources = JSON.parse(await fs.readFile(join(store, 'test-sources.json'), 'utf8')) }
+  try { sources = portableKeys(JSON.parse(await fs.readFile(join(store, 'test-sources.json'), 'utf8'))) }
   catch (error) { if ((error as { code?: string }).code !== 'ENOENT') throw error }
   if (sources[key] !== undefined && preservesTestBaseline(root, key, sources[key]!, proposed)) return
   throw Object.assign(new Error('FROZEN_TEST_CHANGE: no file written. Preserve every original import and the complete original test body, including placeholder assertions. If test additions are authorized, append new cases after that body; otherwise create a separate candidate test. Do not replace or remove the baseline.'), { code: 'FROZEN_TEST_CHANGE', details: { path: key, additionsAllowed: sources[key] !== undefined, suggestedRead: { path: key }, nextTools: ['fs.read', 'fs.apply_patch'] } })
@@ -210,8 +211,8 @@ export async function captureCheck(root: string, cwd: string, command: string, a
   for (const name of ['package.json', 'pnpm-lock.yaml', 'package-lock.json', 'tsconfig.json']) pending.push(join(cwd, name))
   let bytes = 0
   while (pending.length) {
-    const path = pending.pop()!, key = relative(root, path)
-    if (key.startsWith(`..${sep}`) || key === '..' || versions[key]) continue
+    const path = pending.pop()!, key = relative(root, path).replaceAll('\\', '/')
+    if (key.startsWith('../') || key === '..' || versions[key]) continue
     let text: string
     try { const read = await files.readLimited(path, 1_000_000); if (read.truncated) throw Object.assign(new Error('Check input exceeds per-file manifest bound.'), { code: 'CHECK_SCOPE_TOO_LARGE' }); text = read.content } catch (e) { if ((e as { code?: string }).code === 'ENOENT') continue; throw e }
     bytes += Buffer.byteLength(text)
@@ -235,6 +236,7 @@ export async function captureCheck(root: string, cwd: string, command: string, a
 
 /** First observed check definition is frozen in Host data, never in the agent workspace. */
 export async function finishCheck(root: string, before: CheckReceipt, store?: string): Promise<CheckReceipt> {
+  before.files = portableKeys(before.files); before.definitions = portableKeys(before.definitions)
   const after = await captureCheck(root, resolve(root, before.cwd), before.command, before.args)
   before.stable = JSON.stringify(before.files) === JSON.stringify(after.files)
   if (store) {
@@ -242,18 +244,18 @@ export async function finishCheck(root: string, before: CheckReceipt, store?: st
     const path = join(store, `${hash(JSON.stringify([before.command, before.args, before.cwd]))}.json`)
     let initial: Record<string, string>
     try { await fs.writeFile(path, JSON.stringify(before.definitions), { flag: 'wx', mode: 0o600 }); initial = before.definitions }
-    catch (e) { if ((e as { code?: string }).code !== 'EEXIST') throw e; initial = JSON.parse(await fs.readFile(path, 'utf8')) }
+    catch (e) { if ((e as { code?: string }).code !== 'EEXIST') throw e; initial = portableKeys(JSON.parse(await fs.readFile(path, 'utf8'))) }
     // Only explicit test-addition tasks can extend caller-owned frozen tests.
     // The baseline stays a byte-for-byte prefix, and only extra test()/it()
     // registrations may follow it. Imports, hooks and other top-level code
     // still invalidate the receipt. Host-owned assertions are never rebased.
     let sources: Record<string, string> = {}
     let additionsAllowed = false
-    try { sources = JSON.parse(await fs.readFile(join(store, 'test-sources.json'), 'utf8')); additionsAllowed = true }
+    try { sources = portableKeys(JSON.parse(await fs.readFile(join(store, 'test-sources.json'), 'utf8'))); additionsAllowed = true }
     catch (error) { if ((error as { code?: string }).code !== 'ENOENT') throw error }
     let originalDefinitions: Record<string, string> = {}
     let originalSnapshot = false
-    try { originalDefinitions = JSON.parse(await fs.readFile(join(store, 'original.json'), 'utf8')); originalSnapshot = true }
+    try { originalDefinitions = portableKeys(JSON.parse(await fs.readFile(join(store, 'original.json'), 'utf8'))); originalSnapshot = true }
     catch (error) { if ((error as { code?: string }).code !== 'ENOENT') throw error }
     let candidatePolicy: boolean | undefined
     try { candidatePolicy = JSON.parse(await fs.readFile(join(store, 'candidate-test-policy.json'), 'utf8')).mutable === true }

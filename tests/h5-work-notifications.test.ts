@@ -47,5 +47,5 @@ it.each([false, true])('finishes project work independently of chat notification
     expect((await host.getConversation(work.id)).summary.origin).toBe(assistantOrigin ? 'assistant' : undefined)
     const restored = (await view()).messages.filter(message => message.work?.conversationId === work.id)
     expect(restored.length).toBe(assistantOrigin ? 1 : 0)
-  } finally { await server.stop(); await host.close(); await rm(root, { recursive: true, force: true }) }
+  } finally { await server.stop(); await host.close(); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 }, 20_000)

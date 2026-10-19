@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { it, expect } from 'vitest'
-import { captureCheck } from '../packages/server/src/check-receipt.js'
+import { captureCheck, finishCheck, assertCheckEdit } from '../packages/server/src/check-receipt.js'
 
 it('freezes tracked and new checks without scanning ignored historical runtime data', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pulse-check-inventory-'))
@@ -22,6 +22,12 @@ it('freezes tracked and new checks without scanning ignored historical runtime d
     expect(receipt.definitions).toHaveProperty('tests/original.test.ts')
     expect(receipt.definitions).toHaveProperty('tests/new.test.ts')
     expect(receipt.files).not.toHaveProperty('tests/runs/runtime.ts')
+    const legacy = structuredClone(receipt)
+    for (const field of ['files', 'definitions'] as const) legacy[field] = Object.fromEntries(Object.entries(legacy[field]).map(([key, value]) => [key.replaceAll('/', '\\'), value]))
+    expect((await finishCheck(root, legacy)).stable).toBe(true)
+    const store = join(root, 'data'); await mkdir(store)
+    await writeFile(join(store, 'original.json'), JSON.stringify({ 'tests\\original.test.ts': receipt.definitions['tests/original.test.ts'] }))
+    await expect(assertCheckEdit(root, store, 'tests/original.test.ts', 'broken')).rejects.toThrow('FROZEN_TEST_CHANGE')
     await expect(captureCheck(root, root, 'node', ['tests/runs/runtime.ts'])).rejects.toThrow('Check input exceeds')
   } finally { await rm(root, { recursive: true, force: true }) }
 })

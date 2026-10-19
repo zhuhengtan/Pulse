@@ -44,9 +44,9 @@ async function git(cwd: string, args: string[], maxBuffer = 64 * 1024 * 1024, en
   return result.stdout
 }
 
-async function copyUntracked(sourceRoot: string, destinationRoot: string, excludedRoot?: string): Promise<void> {
+async function copyWorkingFiles(sourceRoot: string, destinationRoot: string, excludedRoot?: string): Promise<void> {
   const excluded = excludedRoot && inside(sourceRoot, excludedRoot) ? relative(sourceRoot, excludedRoot).split(sep).join('/') : undefined
-  const output = await git(sourceRoot, ['ls-files', '--others', '--exclude-standard', '-z'])
+  const output = await git(sourceRoot, ['ls-files', '--cached', '--others', '--exclude-standard', '-z'])
   for (const raw of output.split('\0')) {
     if (!raw) continue
     const path = validateRelative(raw)
@@ -54,12 +54,27 @@ async function copyUntracked(sourceRoot: string, destinationRoot: string, exclud
     const source = resolve(sourceRoot, path)
     const destination = resolve(destinationRoot, path)
     if (!inside(sourceRoot, source) || !inside(destinationRoot, destination)) throw new Error('WORKTREE_PATH_INVALID')
-    const info = await lstat(source)
+    // Cached index entries below a replaced directory symlink are deletions,
+    // not current working files. Never follow them into another directory.
+    let linkedParent = false
+    for (let parent = dirname(source); inside(sourceRoot, parent) && relative(sourceRoot, parent) !== ''; parent = dirname(parent)) {
+      const info = await lstat(parent).catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+      if (info?.isSymbolicLink()) { linkedParent = true; break }
+    }
+    if (linkedParent) continue
+    for (let parent = dirname(destination); inside(destinationRoot, parent) && relative(destinationRoot, parent) !== ''; parent = dirname(parent)) {
+      const info = await lstat(parent).catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+      if (info?.isSymbolicLink()) throw new Error('WORKTREE_PATH_INVALID')
+    }
+    const info = await lstat(source).catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+    if (!info) continue // Tracked deletions were already applied by the patch.
     await mkdir(dirname(destination), { recursive: true })
     if (info.isSymbolicLink()) {
       const target = await readlink(source)
+      await rm(destination, { force: true })
       await symlink(target, destination)
     } else if (info.isFile()) {
+      await rm(destination, { force: true })
       await copyFile(source, destination)
     }
   }
@@ -73,7 +88,9 @@ async function applyTrackedSnapshot(sourceRoot: string, destinationRoot: string,
     try { await git(destinationRoot, ['apply', '--binary', file], 128 * 1024 * 1024) }
     finally { await rm(file, { force: true }) }
   }
-  await copyUntracked(sourceRoot, destinationRoot, excludedRoot)
+  // Git checkout filters (including core.autocrlf) can change unchanged tracked
+  // bytes. Preserve the actual project content used by recovery fingerprints.
+  await copyWorkingFiles(sourceRoot, destinationRoot, excludedRoot)
 }
 
 async function commitSnapshot(cwd: string, title: string): Promise<string> {

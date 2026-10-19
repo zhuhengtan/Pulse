@@ -373,7 +373,7 @@ export function mapTransferredArguments(name: string, input: Record<string, unkn
     const target = to.replaceAll('\\', '/').replace(/\/$/, '')
     let relocated = value
     if (path === base) relocated = to
-    else if (path.startsWith(`${base}/`)) relocated = join(to, ...path.slice(base.length + 1).split('/'))
+    else if (path.startsWith(`${base}/`)) relocated = (/^(?:[A-Za-z]:[\\/]|[\\/]{2})/.test(to) ? win32 : posix).join(to, ...path.slice(base.length + 1).split('/'))
     else if (!(path === target || path.startsWith(`${target}/`))) {
       if (posix.isAbsolute(path) || win32.isAbsolute(value)) fail('RECOVERY_PATH_NOT_PORTABLE', 409)
     }

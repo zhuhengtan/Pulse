@@ -55,6 +55,13 @@ jobs:
         id: windows-sandbox
         if: runner.os == 'Windows'
         run: pnpm --filter @hunterzhu/pulse-adapters exec srt windows-install
+      - name: Verify Windows paths, transfer, and shutdown
+        if: runner.os == 'Windows'
+        timeout-minutes: 12
+        run: |
+          pnpm exec tsc -b --pretty false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm exec vitest run tests/h5-workspaces.test.ts tests/windows-path-portability.test.ts tests/host-filesystem.test.ts tests/check-inventory.test.ts tests/conversation-bundle.test.ts tests/assistant-approval-http.test.ts tests/h5-work-notifications.test.ts tests/h5-shutdown.test.ts --reporter verbose
       - name: Verify Windows sandbox toolchain
         if: runner.os == 'Windows'
         timeout-minutes: 12

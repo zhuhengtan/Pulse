@@ -1,7 +1,7 @@
 import { constants } from 'node:fs'
 import { access, mkdir, readdir, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, dirname, isAbsolute, join, parse, win32 } from 'node:path'
+import { basename, dirname, isAbsolute, join, posix, win32 } from 'node:path'
 import type { HostPathEntry, HostPathListing, HostPathMode, HostPathRoots } from '../protocol.js'
 
 export class HostFilesystemError extends Error {
@@ -25,7 +25,7 @@ export function validateDirectoryName(name: unknown, platform = process.platform
 }
 /** Breadcrumb paths are computed on the host, never using the phone's OS. */
 export function hostBreadcrumbs(path: string, windows = process.platform === 'win32') {
-  const api = windows ? win32 : { parse, join }
+  const api = windows ? win32 : posix
   const root = api.parse(path).root
   let current = root
   return [{ name: root, path: root }, ...path.slice(root.length).split(windows ? /[\\/]/ : /\//).filter(Boolean).map(name => { current = api.join(current, name); return { name, path: current } })]
