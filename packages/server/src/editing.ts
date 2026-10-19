@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { relative, resolve, sep } from 'node:path'
 import { spawn } from 'node:child_process'
+import { mkdir } from 'node:fs/promises'
 import { z } from 'zod'
 import { FilesystemTool } from '@hunterzhu/pulse-adapters'
 
@@ -177,6 +178,20 @@ export function isPlanTarget(root: string, target: string): boolean {
  */
 export class PlanWriter {
   constructor(private readonly files: FilesystemTool) {}
+  /** Set up the reserved output catalog before a planning agent inspects it. */
+  async prepareDirectory(): Promise<void> {
+    for (const path of ['docs', 'docs/plans']) {
+      try { await this.files.list(path) }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        // Check each existing parent through FilesystemTool before creating its
+        // child; never follow a docs symlink out of the workspace.
+        try { await mkdir(resolve(this.files.root, path)) }
+        catch (cause) { if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause }
+        await this.files.list(path)
+      }
+    }
+  }
   async execute(submitted: { path: string; content: string }, signal?: AbortSignal) {
     if (typeof submitted.path !== 'string' || submitted.path.length === 0) throw editingError('INVALID_PLAN_PATH', 'plan.write needs a workspace path under docs/plans.')
     if (pulsePath(submitted.path)) throw editingError('INVALID_PLAN_PATH', 'Plan writes cannot modify Pulse configuration or draft storage.')

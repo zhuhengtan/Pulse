@@ -12,19 +12,20 @@ import { deliveryChains, stageDelivery } from './delivery.js'
 import { acceptanceFailure, assessAcceptanceResult } from './acceptance.js'
 import { testAdditionsRequested, candidateTestChangesAllowed } from '../check-receipt.js'
 import { requiresExplicitPlanConfirmation } from '../plan-confirmation.js'
+import { isReadyPlanReview } from '../plan-consistency.js'
 
 type Context = StepContext<JsonValue>
 const json = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue
 // A lane delta is committed at the end of the step. Budget refresh and work
 // progress in that same step must see the previous pending lane delta.
 const pendingControllers = new WeakMap<Context, TaskControllerState>()
-function savedPlan(ctx: Context, state: TaskControllerState): { path: string; hash: string } | undefined {
+function savedPlan(ctx: Context, state: TaskControllerState): { path: string; hash: string; planReview?: JsonValue } | undefined {
   const refs = [...new Set([...ctx.history.flatMap(h => h.resultRefs), ...state.tasks.flatMap(t => [...t.evidenceRefs, ...(t.contextRefs ?? [])])])].sort((a, b) => Number(b.match(/(\d+)$/)?.[1] ?? 0) - Number(a.match(/(\d+)$/)?.[1] ?? 0))
   for (const ref of refs) {
     const meta = ctx.results.meta(ref), body = ctx.results.read(ref)
-    if (meta?.outcomeStatus !== 'succeeded' || !['plan.write', 'fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage'].includes(meta.toolName ?? '') || !body || typeof body !== 'object' || Array.isArray(body)) continue
+    if (meta?.outcomeStatus !== 'succeeded' || !['plan.write', 'fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'plan.review'].includes(meta.toolName ?? '') || !body || typeof body !== 'object' || Array.isArray(body)) continue
     const path = body.path ?? (body.committed === true ? body.target : undefined), hash = body.hash ?? body.contentHash
-    if (typeof path === 'string' && /(?:^|[/\\])docs[/\\]plans[/\\].+\.md$/i.test(path) && typeof hash === 'string') return { path, hash }
+    if (typeof path === 'string' && /(?:^|[/\\])docs[/\\]plans[/\\].+\.md$/i.test(path) && typeof hash === 'string') return { path, hash, ...(body.planReview === undefined ? {} : { planReview: body.planReview }) }
   }
 }
 function approvedPlanRef(ctx: Context, state: TaskControllerState, ref: string): boolean {
@@ -515,6 +516,12 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
         const state = stateOf(ctx), objective = taskRecordFromGlobal(ctx.global as JsonValue)?.objective ?? ctx.goal
         const plan = requiresExplicitPlanConfirmation(objective) ? savedPlan(ctx, state) : undefined
         if (plan && state.tasks.some(t => t.status === 'pending' || t.status === 'running') && (state.planConfirmation?.hash !== plan.hash || state.planConfirmation.path !== plan.path)) {
+          if (!isReadyPlanReview(plan.planReview, plan.path, plan.hash)) {
+            const detail = plan.planReview === undefined ? 'missing' : typeof plan.planReview === 'object' && plan.planReview !== null && !Array.isArray(plan.planReview) ? plan.planReview.issues : plan.planReview
+            for (const task of state.tasks) if (task.status === 'pending' || task.status === 'running') { task.status = 'blocked'; task.note = ('PLAN_REVIEW_REQUIRED: Saved plan is not executable. ' + JSON.stringify(detail)).slice(0, 700) }
+            delete state.activeId; save(ctx, state)
+            return { actions: [], next: 'report' }
+          }
           save(ctx, state)
           return { actions: [{ type: 'submit_effects', effects: [{ key: 'plan-execution', kind: 'human', concurrencyClass: 'none', input: { kind: 'ask', type: 'choice', toolName: 'ask.choice', prompt: '请审阅已保存的计划 ' + plan.path + '，是否执行？', options: [{ label: '暂不执行', value: 'defer' }, { label: '执行', value: 'execute' }], decisionScope: 'plan-execution', decisionId: 'plan-execution:' + plan.hash } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'plan-confirmation:collect', locals: { ...(ctx.lane.resume.locals as Record<string, JsonValue>), pendingPlan: plan, planConfirmationNext: step } }
         }

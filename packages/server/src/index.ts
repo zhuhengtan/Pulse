@@ -5,6 +5,7 @@ import { recoveryFingerprints, prepareRecovery, finishRecovery } from './recover
 import { runPersistence } from './run-persistence.js'
 import { assertCheckEdit, candidateTestChangesAllowed, captureCheck, finishCheck, freezeCheckDefinitions, isCheck, testAdditionsRequested } from './check-receipt.js'
 import { planConfirmationOptions, requiresExplicitPlanConfirmation } from './plan-confirmation.js'
+import { assessPlanReview, isReadyPlanReview, planReviewSystem, unavailablePlanReview, type PlanReview } from './plan-consistency.js'
 import { AutomationSessionManager } from './automation/manager.js'
 import { AutomationBroker, LocalAutomationClient, RemoteAutomationClient, type AutomationClient, type AutomationEndpoint } from './automation/broker.js'
 import { createAutomationTools } from './automation/tools.js'
@@ -680,6 +681,20 @@ ${feedback}\nDo not expose private chain-of-thought.`
       return { toolDiscovery: { limit: toolNames.length }, conversation: messages, ...((Array.isArray(parallelRefs) ? parallelRefs.filter((ref): ref is string => typeof ref === 'string') : []).length ? { results: [...new Set([...(Array.isArray(parallelRefs) ? parallelRefs.filter((ref): ref is string => typeof ref === 'string') : []), ...inheritedResults])].slice(-12) } : inheritedResults.length ? { results: inheritedResults } : {}) }
     },
     toolAllow: toolNames,
+    validateQuestion: (toolName, input, ctx) => {
+      if (toolName !== 'ask.choice' || !planConfirmationOptions(input) || !(isPreImplementationConfirmationSkill(ctx.goal) || requiresExplicitPlanConfirmation(ctx.goal))) return undefined
+      const sdk = asRecord(asRecord(ctx.lane.resume.locals)?.$sdk), retained = asRecord(sdk?.reactInputs)
+      const refs = [...new Set([...(Array.isArray(retained?.results) ? retained.results.filter((ref): ref is string => typeof ref === 'string') : []), ...ctx.history.flatMap(record => record.resultRefs)])].sort((a, b) => Number(b.match(/(\d+)$/)?.[1] ?? 0) - Number(a.match(/(\d+)$/)?.[1] ?? 0))
+      for (const ref of refs) {
+        const meta = ctx.results.meta(ref), receipt = asRecord(ctx.results.read(ref))
+        if (meta?.outcomeStatus !== 'succeeded' || !['plan.write', 'fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'plan.review'].includes(meta.toolName ?? '')) continue
+        const path = receipt?.path ?? (receipt?.committed === true ? receipt.target : undefined), hash = receipt?.hash ?? receipt?.contentHash
+        if (typeof path !== 'string' || !/(?:^|[/\\])docs[/\\]plans[/\\].+\.md$/i.test(path) || typeof hash !== 'string') continue
+        if (isReadyPlanReview(receipt?.planReview, path, hash)) return undefined
+        return `PLAN_REVIEW_REQUIRED: the saved plan is not executable. Review the ENTIRE document and resolve all reported inconsistencies before asking for execution. Saved file: ${path}. Review: ${JSON.stringify(receipt?.planReview ?? null)}. Preserve the plan and report a genuine unresolved blocker instead of repeatedly asking or promising an unavailable mechanism. Use plan.review after a re-read when review evidence is missing.`
+      }
+      return 'PLAN_REVIEW_REQUIRED: save the complete plan and obtain its whole-document consistency review before offering execution.'
+    },
     prepareQuestion: (toolName, input, ctx) => {
       if (toolName !== 'ask.choice' || !isPreImplementationConfirmationSkill(ctx.goal) || !planConfirmationOptions(input)) return input
       // Approval is a new decision for each actual saved plan version. Derive its
@@ -689,7 +704,7 @@ ${feedback}\nDo not expose private chain-of-thought.`
       const refs = [...new Set([...retainedRefs, ...ctx.history.flatMap(record => record.resultRefs)])].sort((a, b) => Number(b.match(/(\d+)$/)?.[1] ?? 0) - Number(a.match(/(\d+)$/)?.[1] ?? 0))
       for (const ref of refs) {
         const meta = ctx.results.meta(ref), receipt = asRecord(ctx.results.read(ref))
-        if (meta?.outcomeStatus !== 'succeeded' || !['plan.write', 'fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage'].includes(meta.toolName ?? '')) continue
+        if (meta?.outcomeStatus !== 'succeeded' || !['plan.write', 'fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'plan.review'].includes(meta.toolName ?? '')) continue
         const path = receipt?.path ?? (receipt?.committed === true ? receipt.target : undefined), hash = receipt?.hash ?? receipt?.contentHash
         if (typeof path === 'string' && /(?:^|[/\\])docs[/\\]plans[/\\].+\.md$/i.test(path) && typeof hash === 'string') return { ...asRecord(input), decisionScope: 'plan-execution', decisionId: `plan-execution:${hash}` }
       }
@@ -1586,11 +1601,61 @@ export class LocalHost {
   private manifestPath(id: string): string { return join(this.conversationDir(id), 'manifest.json') }
   private messagesPath(id: string): string { return join(this.conversationDir(id), 'messages.jsonl') }
   private runDir(conversationId: string, runId: string): string { return join(this.conversationDir(conversationId), 'runs', runId) }
-  private async seedPlanGate(conversationId: string, runId: string, required: boolean): Promise<void> {
+  private async seedPlanGate(conversationId: string, runId: string, required: boolean, writableCwd?: string): Promise<void> {
     const saved = await readFile(join(this.runDir(conversationId, runId), 'plan-gate.json'), 'utf8').then(text => JSON.parse(text)).catch(() => undefined)
     const binding = saved?.schemaVersion === 2 && saved?.binding?.runId === runId && typeof saved.binding.path === 'string' && typeof saved.binding.hash === 'string' && typeof saved.binding.previewRef === 'string' && typeof saved.binding.effectId === 'string' && typeof saved.binding.cwd === 'string' && saved.binding.scope === 'this-run' ? saved.binding : undefined
     // Old unbound approvals cannot authorize new writes after restore.
-    this.planGates.set(runId, { required, open: required && !!binding && saved?.implementationAllowed === true, ...(binding ? { binding } : {}) })
+    const reviewed = binding ? await this.readPlanReview(conversationId, runId, binding.path) : 'missing'
+    const reviewReady = !!binding && isReadyPlanReview(reviewed, binding.path, binding.hash)
+    // Runs approved before plan reviews existed have no review file. Keep that grant;
+    // a present but unready review still closes it.
+    const grandfathered = !!binding && saved?.implementationAllowed === true && reviewed === 'missing'
+    this.planGates.set(runId, { required, open: required && !!binding && saved?.implementationAllowed === true && (reviewReady || grandfathered), ...(binding ? { binding } : {}) })
+    if (required && writableCwd) await new PlanWriter(new FilesystemTool(writableCwd)).prepareDirectory()
+  }
+  private planReviewPath(conversationId: string, runId: string, path: string): string {
+    return join(this.runDir(conversationId, runId), 'plan-reviews', createHash('sha256').update(path).digest('hex') + '.json')
+  }
+  private async readPlanReview(conversationId: string, runId: string, path: string): Promise<PlanReview | 'missing'> {
+    try { return JSON.parse(await readFile(this.planReviewPath(conversationId, runId, path), 'utf8')) as PlanReview }
+    catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : unavailablePlanReview(path, '', 'PLAN_REVIEW_INVALID') }
+  }
+  private async reviewSavedPlan(conversationId: string, runId: string, cwd: string, path: string, signal: AbortSignal, runReview: (system: string, instruction: string, signal: AbortSignal) => Promise<LLMResult>): Promise<PlanReview> {
+    if (!isAllowedPlanWrite('plan.write', { path }, cwd)) throw editingError('PLAN_PATH_INVALID', '只复核当前工作区 docs/plans 下的计划。')
+    const files = new FilesystemTool(cwd)
+    const read = await files.readLimited(path, PLAN_BYTES)
+    if (read.truncated || Buffer.byteLength(read.content) > PLAN_BYTES) throw editingError('PLAN_TOO_LARGE', '计划超出完整复核大小上限。')
+    const content = read.content, hash = createHash('sha256').update(content).digest('hex')
+    const gate = this.planGates.get(runId)
+    const approvedHash = gate?.open && gate.binding?.path === path ? gate.binding.hash : undefined
+    if (gate?.open) { gate.open = false; await this.savePlanGate(conversationId, runId) }
+    let review: PlanReview
+    try {
+      const messages = (await this.getConversationMessages(conversationId)).filter(message => message.role === 'user').slice(-8).map(message => message.text.slice(-4000))
+      const directory = this.runDir(conversationId, runId)
+      const original = await readFile(join(directory, 'check-definitions/original.json'), 'utf8').then(text => JSON.parse(text) as Record<string, string>).catch(() => ({}))
+      const additionsAllowed = await stat(join(directory, 'check-definitions/test-sources.json')).then(() => true).catch(() => false)
+      const frozenTests = Object.keys(original).filter(path => /(?:^|\/)tests?\/|\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path))
+      const policy = { existingTestExtensionsAllowed: additionsAllowed, frozenTestFiles: frozenTests.slice(0, 100), frozenTestListTruncated: frozenTests.length > 100, allowedChange: 'preserve full original test body; append registrations only when authorized', rewritingExistingAssertions: 'not provided by test-sources.json or a new task; requires a separate caller-controlled workflow', workspace: cwd }
+      const runtime = this.active.get(runId)?.runtime
+      const decisions = runtime ? [...runtime.state.effects.values()].filter(effect => effect.kind === 'human' && effect.outcome?.status === 'succeeded' && asRecord(effect.input)?.kind === 'ask').slice(-24).map(effect => ({ question: effect.input, answer: effect.outcome?.resultRef ? runtime.state.results.get(effect.outcome.resultRef)?.value : null, resultRef: effect.outcome?.resultRef })) : []
+      const result = await runReview(planReviewSystem, JSON.stringify({ currentRequests: messages, confirmedDecisions: decisions, hostPolicy: policy, savedPlan: { path, hash, content } }), signal)
+      review = result.finishReason === 'stop' && !result.toolCalls?.length ? assessPlanReview(path, hash, content, result.text ?? '') : unavailablePlanReview(path, hash, 'PLAN_REVIEW_INCOMPLETE')
+    } catch { review = unavailablePlanReview(path, hash, 'PLAN_REVIEW_UNAVAILABLE') }
+    if (await files.hash(path).catch(() => undefined) !== hash) review = unavailablePlanReview(path, hash, 'PLAN_CHANGED_DURING_REVIEW')
+    const target = this.planReviewPath(conversationId, runId, path)
+    await mkdir(dirname(target), { recursive: true })
+    const temp = `${target}.${randomUUID()}.tmp`
+    await writeFile(temp, JSON.stringify(review), { mode: 0o600 }); await rename(temp, target)
+    if (approvedHash === hash && gate && isReadyPlanReview(review, path, hash)) { gate.open = true; await this.savePlanGate(conversationId, runId) }
+    return review
+  }
+  private async reviewPlanWrite(execution: EffectExecution, conversationId: string, runId: string, cwd: string, name: string, signal: AbortSignal, runReview: (system: string, instruction: string, signal: AbortSignal) => Promise<LLMResult>): Promise<EffectExecution> {
+    if (!this.planGates.get(runId)?.required || execution.status === 'failed' || execution.status === 'cancelled' || !['plan.write', 'fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage'].includes(name)) return execution
+    const receipt = asRecord(execution.value), path = receipt?.path ?? (receipt?.committed === true ? receipt.target : undefined)
+    if (typeof path !== 'string' || typeof (receipt?.hash ?? receipt?.contentHash) !== 'string' || !isAllowedPlanWrite('plan.write', { path }, cwd)) return execution
+    const review = await this.reviewSavedPlan(conversationId, runId, cwd, path, signal, runReview)
+    return { ...execution, value: { ...receipt, planReview: json(review) } }
   }
   private async planGateDenies(runId: string, name: string, args: Record<string, JsonValue>, policy: string | undefined, cwd: string): Promise<boolean> {
     const gate = this.planGates.get(runId)
@@ -1632,6 +1697,11 @@ export class LocalHost {
       gate.binding = { ...binding, hash, previewRef }
       await this.savePlanGate(conversationId, runId)
       throw editingError('PLAN_CHANGED_RECONFIRM_REQUIRED', '计划在预览后发生变化，已展示最新版本；请重新阅读后再次明确选择。')
+    }
+    const review = await this.readPlanReview(conversationId, runId, binding.path)
+    if (!isReadyPlanReview(review, binding.path, hash)) {
+      gate.open = false; await this.savePlanGate(conversationId, runId)
+      throw editingError('PLAN_REVIEW_REQUIRED', '这份计划尚未通过整份自洽复核；请先修订或补齐复核，不能开始实施。')
     }
     // Persist before opening memory; a failed durable write cannot authorize writes.
     this.planGates.set(runId, { ...gate, open: true })
@@ -2033,7 +2103,7 @@ export class LocalHost {
   }
   private async appendMessage(id: string, message: StoredMessage): Promise<void> { await writeFile(this.messagesPath(id), `${JSON.stringify(message)}\n`, { flag: 'a' }) }
   private async runtimeFor(conversationId: string, runId: string, cwd: string, userIntent = '', skillInput = '', options: LocalHostOptions = this.options, assistantChat = false, jarvisSessionId?: string, modelBudget?: ModelAttemptBudget): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; modelBudget?: ModelAttemptBudget | undefined }> {
-    await this.seedPlanGate(conversationId, runId, !assistantChat && (isPreImplementationConfirmationSkill(skillInput) || requiresExplicitPlanConfirmation(skillInput)))
+    await this.seedPlanGate(conversationId, runId, !assistantChat && (isPreImplementationConfirmationSkill(skillInput) || requiresExplicitPlanConfirmation(skillInput)), options.approvalMode === 'read-only' ? undefined : cwd)
     const registry = new ToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) })
     if (assistantChat) {
       registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId))
@@ -2073,6 +2143,8 @@ export class LocalHost {
     if (!assistantChat) this.registerTaskInspection(registry, () => runtimeRef!, conversationId, runId, cwd, true)
 
     registry.register(defineTool({ name: 'fs.stage.capacity', description: 'Preflight new-file bytes against remaining actual model calls. Does not increase budgets. Choose chunks that fit the model output token limit.', tags: ['files', 'read'], input: z.object({ bytes: z.number().int().min(0).max(500_000) }), output: z.object({ chunkBytes: z.number(), toolSteps: z.number(), remainingCalls: z.number(), feasible: z.boolean() }), sideEffectPolicy: 'read', execute: async ({ bytes }) => { const chunkBytes = Math.min(STREAM_BYTES, Math.max(512, (provider.model.capabilities.maxOutputTokens ?? 4096) * 2)); const toolSteps = Math.max(1, Math.ceil(bytes / chunkBytes)) + 1; const remainingCalls = Math.max(0, (modelBudget?.limit ?? 256) - (modelBudget?.used ?? 0) - (modelBudget?.accounting.policy?.verificationReserve ?? 0)); return { chunkBytes, toolSteps, remainingCalls, feasible: toolSteps + 1 <= remainingCalls } } }))
+    const runPlanReview = (system: string, instruction: string, signal: AbortSignal) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens: Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096) })
+    if (this.planGates.get(runId)?.required) registry.register(defineTool({ name: 'plan.review', description: 'Re-read and independently review the ENTIRE saved docs/plans document. Returns a hash-bound review of dependencies, prerequisites, state, scope and validation. Review failure preserves the plan and never authorizes implementation.', tags: ['files', 'read', 'plan'], input: z.object({ path: z.string() }), output: z.object({ path: z.string(), hash: z.string(), planReview: z.unknown() }), sideEffectPolicy: 'read', execute: async ({ path }, context) => { const planReview = await this.reviewSavedPlan(conversationId, runId, cwd, path, context.signal, runPlanReview); return { path, hash: planReview.hash, planReview } } }))
     const toolVersions = Object.fromEntries(registry.list().map((tool) => [tool.name, tool.version]))
     const executeModelEffect = createModelEffectExecutor({ router, providers, beforeProviderAttempt: async purpose => { assertRunCanContinue(runtimeRef); await modelBudget?.reserve(purpose) }, afterProviderAttempt: (usage, receiptId) => modelBudget?.recordUsage(usage, receiptId) ?? Promise.resolve(), modelBudget: () => ({ limit: modelBudget?.limit ?? 256, used: modelBudget?.used ?? 0 }), resolveImage: (ref, agentId, privacy) => {
       const image = runtimeRef?.state.artifacts.get(ref)
@@ -2081,7 +2153,7 @@ export class LocalHost {
     } })
     const fingerprints = recoveryFingerprints(registry, { approvalMode: options.approvalMode ?? 'ask', allowNetwork: options.allowNetwork ?? false, networkHosts: options.networkHosts ?? [], contract: 2 })
     const runLlm = (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => runLocalApproval(options.approvalReview, modelBudget, () => runtimeRef, system, instruction, signal, maxOutputTokens)
-    const runtime = new PulseRuntime({ sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), programs: [], budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return approvedToolExecutor(registry, provider, options.approvalMode, userIntent, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: 'ollama', timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined)(effect, signal, observe) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    const runtime = new PulseRuntime({ sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), programs: [], budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, userIntent, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: 'ollama', timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     runtimeRef = runtime
     const budget = historyBudget(provider.model.capabilities)
     runtime.state.historySoftTokens = budget.historySoftTokens
@@ -2396,6 +2468,8 @@ export class LocalHost {
       } catch { /* Missing or out-of-scope references never authorize expanded reads. */ }
     }
     this.surfaceConversations.set(runId, conversation)
+    const needsPreImplementationConfirmation = !assistantChat && (isPreImplementationConfirmationSkill(typeof savedInput.goal === 'string' ? savedInput.goal : '') || requiresExplicitPlanConfirmation(typeof savedInput.goal === 'string' ? savedInput.goal : ''))
+    await this.seedPlanGate(conversationId, runId, needsPreImplementationConfirmation, options.approvalMode === 'read-only' ? undefined : cwd)
     const registry = new ToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) })
     if (assistantChat) {
       registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId))
@@ -2438,6 +2512,8 @@ export class LocalHost {
     const reviewContext = safetyReviewContext(cwd, userIntent, conversation)
     let runtimeRef: PulseRuntime | undefined
     if (!assistantChat) this.registerTaskInspection(registry, () => runtimeRef!, conversationId, runId, cwd, savedInput.deliveryProtocol === 1 || ['14', '15', '16', '17', '18', '19'].includes(String(savedInput.controllerVersion)))
+    const runPlanReview = (system: string, instruction: string, signal: AbortSignal) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens: Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096) })
+    if (this.planGates.get(runId)?.required) registry.register(defineTool({ name: 'plan.review', description: 'Re-read and independently review the ENTIRE saved docs/plans document. Returns a hash-bound review of dependencies, prerequisites, state, scope and validation. Review failure preserves the plan and never authorizes implementation.', tags: ['files', 'read', 'plan'], input: z.object({ path: z.string() }), output: z.object({ path: z.string(), hash: z.string(), planReview: z.unknown() }), sideEffectPolicy: 'read', execute: async ({ path }, context) => { const planReview = await this.reviewSavedPlan(conversationId, runId, cwd, path, context.signal, runPlanReview); return { path, hash: planReview.hash, planReview } } }))
     const toolNames = isStatusOnlyTurn(userIntent) ? [] : registry.list().map((tool) => tool.name)
     const readOnlyToolNames = registry.list().filter((tool) => tool.sideEffectPolicy === 'read' && !tool.name.startsWith('task.')).map((tool) => tool.name)
     // Preserve the opt-in lane shape only when restoring an older persisted run.
@@ -2457,8 +2533,6 @@ export class LocalHost {
     // The controller programs come from the run's own persisted mode, not the skill text: a
     // pre-fix /grill-and-plan run persisted taskController=true and still needs its historical
     // programs to resume. Only new runs avoid the controller at start time.
-    const needsPreImplementationConfirmation = !assistantChat && (isPreImplementationConfirmationSkill(typeof savedInput.goal === 'string' ? savedInput.goal : '') || requiresExplicitPlanConfirmation(typeof savedInput.goal === 'string' ? savedInput.goal : ''))
-    await this.seedPlanGate(conversationId, runId, needsPreImplementationConfirmation)
     const savedMaxModelCalls = Number(savedInput.maxModelCalls)
     // Prefer the run's own persisted cumulative budget (now written for every work run and the
     // controller). Runs persisted before this field existed fall back to the historical controller
@@ -2478,7 +2552,7 @@ export class LocalHost {
     const runLlm = (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => runLocalApproval(options.approvalReview, modelBudget, () => runtimeRef, system, instruction, signal, maxOutputTokens)
     const controllerPrograms: ReturnType<typeof buildTaskControllerProgram>[] = (['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19'] as const).map((version) => buildTaskControllerProgram({ modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(savedReuse ? { resumePlan: savedReuse.controller, reusableIds: savedReuse.reusableIds } : {}), version, system: prompt, toolNames, conversation, approvalMode: options.approvalMode ?? 'ask', maxTurns: (version === '10' || version === '11' || version === '12' || version === '13' || version === '14' || version === '15' || version === '16' || version === '17' || version === '18' || version === '19') ? modelEffectBudget ?? 256 : savedMaxTurns }))
     const recovery = await prepareRecovery(backend, this.runDir(conversationId, runId), fingerprints, options.recoveryBuildMigration)
-    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, programs: [legacyProgram, version2Program, program, ...assistantPrograms, workerProgram, ...controllerPrograms], models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return approvedToolExecutor(registry, provider, options.approvalMode, reviewContext, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: 'ollama', timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined)(effect, signal, observe) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, programs: [legacyProgram, version2Program, program, ...assistantPrograms, workerProgram, ...controllerPrograms], models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, reviewContext, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: 'ollama', timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     runtimeRef = runtime
     if (!assistantChat) modelBudget = await ModelAttemptBudget.open(join(this.runDir(conversationId, runId), 'model-budget.json'), modelEffectBudget ?? Math.max(4, Math.min(256, Math.floor(options.maxModelCalls ?? 256))), legacyModelCalls(runtime), options.modelBudgetPolicy)
     if (recovery.journal) { await runtime.persist(backend); await finishRecovery(recovery.journal) }
@@ -3252,7 +3326,7 @@ export class LocalHost {
     const cwd = manifest.executionCwd ?? manifest.cwd
     for (const effect of [...runtime.state.effects.values()].reverse()) {
       const args = asRecord(effect.input)
-      if (effect.kind !== 'tool' || effect.outcome?.status !== 'succeeded' || !effect.outcome.resultRef || !['plan.write', 'fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage'].includes(String(args?.name))) continue
+      if (effect.kind !== 'tool' || effect.outcome?.status !== 'succeeded' || !effect.outcome.resultRef || !['plan.write', 'fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'plan.review'].includes(String(args?.name))) continue
       const receipt = asRecord(runtime.state.results.get(effect.outcome.resultRef)?.value)
       const path = receipt?.path ?? (receipt?.committed === true ? receipt.target : undefined)
       const hash = receipt?.hash ?? receipt?.contentHash

@@ -1,3 +1,4 @@
+import { consistentPlanReview } from './helpers/plan-review-provider.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -144,7 +145,9 @@ describe('progress and decision identity', () => {
 
 async function scenario(sequence: any[], onWait: (r: any) => Promise<void>) {
   const cwd = await root(); let calls = 0
-  vi.stubGlobal('fetch', vi.fn(async () => {
+  vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+    const review = consistentPlanReview(String(init.body))
+    if (review) return new Response(JSON.stringify({ choices: [{ message: review, finish_reason: 'stop' }] }), { headers: { 'content-type': 'application/json' } })
     const message = sequence[calls++] ?? { content: 'done' }
     return new Response(JSON.stringify({ choices: [{ message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }] }), { headers: { 'content-type': 'application/json' } })
   }))
@@ -162,13 +165,10 @@ const plan = call('plan_write', { path: 'docs/plans/feature.md', content: '# Pla
 const confirm = call('ask_choice', { prompt: '计划已预览，是否执行？', options: finalOptions })
 const implement = call('fs_write', { path: 'feature.txt', content: 'implementation' })
 describe('concrete plan authorization', () => {
-  it('refuses execute when the model skipped plan persistence/preview', async () => {
-    const result = await scenario([confirm, implement], async ({ run, item }) => {
-      await expect(run.reply(item.effectId, { value: 'execute' })).rejects.toMatchObject({ code: 'PLAN_PREVIEW_REQUIRED' })
-      expect((await run.pendingInteractions())[0].items[0].effectId).toBe(item.effectId)
-      await run.reply(item.effectId, { value: 'hold' })
-    })
-    await expect(readFile(join(result.cwd, 'feature.txt'))).rejects.toMatchObject({ code: 'ENOENT' }); expect(result.calls).toBe(1)
+  it('blocks the execution question itself when the model skipped persistence/whole-plan review', async () => {
+    const result = await scenario([confirm, implement], async () => { throw new Error('An unreviewed plan must not offer execution') })
+    await expect(readFile(join(result.cwd, 'feature.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(result.calls).toBeLessThanOrEqual(4)
   })
   it('requires fresh explicit confirmation after external plan change', async () => {
     const result = await scenario([plan, confirm, implement], async ({ cwd, host, run, conversation, item }) => {
@@ -177,9 +177,10 @@ describe('concrete plan authorization', () => {
       await expect(run.reply(item.effectId, { value: 'execute' })).rejects.toMatchObject({ code: 'PLAN_CHANGED_RECONFIRM_REQUIRED' })
       await expect(readFile(join(cwd, 'feature.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
       expect((await host.getConversationMessages(conversation.id)).some((m: any) => m.text === changed)).toBe(true)
-      await run.reply(item.effectId, { value: 'execute' })
+      await expect(run.reply(item.effectId, { value: 'execute' })).rejects.toMatchObject({ code: 'PLAN_REVIEW_REQUIRED' })
+      await run.reply(item.effectId, { value: 'hold' })
     })
-    expect(await readFile(join(result.cwd, 'feature.txt'), 'utf8')).toBe('implementation')
+    await expect(readFile(join(result.cwd, 'feature.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
   it('revokes authorization when a plan changes after the reply but before a write', async () => {
     const result = await scenario([plan, confirm, implement], async ({ cwd, run, item }) => {

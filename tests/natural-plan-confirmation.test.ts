@@ -1,3 +1,4 @@
+import { consistentPlanReview } from './helpers/plan-review-provider.js'
 import { afterEach, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -42,6 +43,8 @@ it.each([
   const tool = (name: string, args: object) => chat({ content: '', tool_calls: [{ id: 'call-' + stage + '-' + turns[stage], function: { name, arguments: JSON.stringify(args) } }] })
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
     const request = JSON.parse(String(init.body)), blob = currentRequestText(request.messages)
+    const review = consistentPlanReview(String(init.body))
+    if (review) return chat(review)
     const refs = request.messages.filter((m: any) => m.name === 'results').flatMap((m: any) => JSON.parse(m.content)).map((r: any) => r.id)
     if (blob.includes('Create an executable plan')) return chat(JSON.stringify({ tasks: [
       { id: 'plan', kind: 'edit', goal: (atomic ? 'Update' : 'Write') + ' docs/plans/feature.md', check: 'Concrete plan saved', dependsOn: [], criterionIds: ids },

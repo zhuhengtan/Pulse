@@ -1,3 +1,4 @@
+import { consistentPlanReview } from './helpers/plan-review-provider.js'
 import { afterEach, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -20,6 +21,8 @@ it.each([['暂不执行', false], ['执行', false], ['暂不执行', true], ['�
   vi.stubGlobal('fetch', vi.fn(async (_url, options) => {
     calls++
     messages.push(String(options.body))
+    const review = consistentPlanReview(String(options.body))
+    if (review) return new Response(JSON.stringify({ choices: [{ message: review, finish_reason: 'stop' }] }), { headers: { 'content-type': 'application/json' } })
     if (String(options.body).includes('Summarize the older conversation and tool history')) return new Response(JSON.stringify({ choices: [{ message: { content: 'The project was read, interview answered, existing plan preserved and new plan saved. Final execution confirmation is pending.' }, finish_reason: 'stop' }] }), { headers: { 'content-type': 'application/json' } })
     story++
     const sequence = [
