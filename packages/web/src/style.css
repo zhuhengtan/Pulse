@@ -110,3 +110,19 @@
 .navbar.surface-chat .navbar-title,.navbar.surface-work .navbar-title{position:static;left:auto;right:auto;flex:1;max-width:none;justify-content:flex-start;padding-left:0}
 .navbar.surface-chat .navbar-actions,.navbar.surface-work .navbar-actions{position:static;flex:none;margin-left:auto;max-width:none}
 @media(max-width:767px){.navbar.surface-chat,.navbar.surface-work{gap:8px;padding-right:6px;padding-left:10px}.navbar.surface-work{padding-left:54px}.navbar.surface-work .navbar-title{display:none}.navbar.surface-chat .navbar-title{font-size:13px}.navbar .running-pill{display:none}.navbar .delegate-pill{max-width:70px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}
+
+.question-background { margin: 8px 0 16px; color: var(--muted); font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+.question-options button { text-align: left; white-space: normal; height: auto; }
+.question-options button > span { display: block; }
+.question-option-description { display: block; margin-top: 4px; font-size: 12px; font-weight: 400; color: var(--muted); line-height: 1.5; }
+.question-custom { display: grid; gap: 8px; margin-top: 18px; font-size: 13px; }
+.question-custom textarea { width: 100%; resize: vertical; }
+.approval-policy-select { min-width: 118px; max-width: 160px; }
+.run-progress { display: grid; gap: 10px; margin: 0 0 12px; font-size: 13px; line-height: 1.65; }
+.progress-note { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.progress-result { display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--muted); overflow-wrap: anywhere; }
+.progress-result-state { flex-shrink: 0; font-size: 12px; }
+.progress-result pre { flex-basis: 100%; margin: 4px 0; padding: 8px 12px; max-height: 180px; overflow: auto; white-space: pre-wrap; background: var(--soft); border-radius: 8px; }
+.progress-result p { flex-basis: 100%; margin: 0; }
+.progress-failed { color: #b44747; }
+.question-options .pulse-button { flex-direction: column; align-items: flex-start; gap: 4px; }

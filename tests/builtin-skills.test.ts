@@ -17,6 +17,9 @@ describe('built-in skills', () => {
     const content = readBuiltinSkill('grill-and-plan')?.content ?? ''
     expect(content).toContain('ONE plan-changing question per turn')
     expect(content).toContain('ask.choice')
+    expect(content).toContain('（推荐）')
+    expect(content).toContain('description explaining its consequence')
+    expect(content).toContain('Do not add a blank or Other option')
     expect(content).toContain('执行')
     expect(content).toContain('暂不执行')
     expect(content).toContain('keeps the already-written plan')

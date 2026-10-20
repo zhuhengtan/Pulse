@@ -162,3 +162,15 @@ describe('active work trace recovery', () => {
     expect(screen.queryByText('不应串入其他会话')).toBeNull()
   })
 })
+
+it('keeps public progress notes and observed tool results visible after completion', () => {
+  const trace = [
+    { type: 'trace', runId: 'progress', seq: 1, data: { kind: 'note', effectId: 'step', task: 'reason', text: '已确认入口，接下来验证提交回显。' } },
+    { type: 'tool', runId: 'progress', seq: 2, data: { activityId: 'check', effectId: 'check', tool: 'shell.exec', status: 'succeeded', args: { command: 'pnpm', args: ['test'] }, preview: { output: '4 tests passed', exitCode: 0 } } },
+    { type: 'complete', runId: 'progress', seq: 3, data: { status: 'succeeded' } },
+  ].reduce((state, event) => reduceTrace(state, event as WebRunEvent), emptyTrace)
+  const view = render(<RunTraceView trace={trace} running={false} />)
+  expect(view.getByRole('button', { name: /主进程/ }).getAttribute('aria-expanded')).toBe('false')
+  expect(view.getByRole('log', { name: '工作进展' }).textContent).toContain('已确认入口，接下来验证提交回显。')
+  expect(view.getByText('4 tests passed')).toBeTruthy()
+})

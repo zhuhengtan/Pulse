@@ -136,3 +136,31 @@ it('keeps approval retries idempotent when request storage is unavailable', asyn
     await waitFor(() => expect(view.queryByRole('button', { name: '允许本次' })).toBeNull())
   } finally { router.dispose() }
 })
+
+it('shows question, background and option descriptions separately and submits a textarea answer', async () => {
+  const submit = vi.fn(async () => true)
+  const ask = { kind: 'interaction' as const, runId: 'ask-custom', groupId: 'custom', interactionKind: 'ask' as const, items: [{ effectId: 'question', input: { type: 'choice', prompt: '选择迁移方式？', context: '需要保留现有会话。', options: [{ label: '渐进调整（推荐）', value: 'incremental', description: '逐步验证，便于回退。' }, { label: '', value: '' }] } }] }
+  const view = render(<PulseDesignSystem><InteractionPanel interaction={ask} reviewNote="" delegated={false} running={false} stopping={false} stop={() => {}} submit={submit} setApprovalPolicy={async () => true} /></PulseDesignSystem>)
+  expect(view.getByRole('heading', { name: '选择迁移方式？' }).textContent).toBe('选择迁移方式？')
+  expect(view.getByText('需要保留现有会话。').className).toBe('question-background')
+  expect(view.getByRole('button', { name: /渐进调整（推荐）/ }).textContent).toContain('逐步验证，便于回退。')
+  expect(view.container.querySelectorAll('.question-options button')).toHaveLength(1)
+  const input = view.getByRole('textbox', { name: '自行回答' })
+  expect(input.tagName).toBe('TEXTAREA')
+  fireEvent.change(input, { target: { value: '按模块迁移。\n保留旧入口。' } })
+  fireEvent.click(view.getByRole('button', { name: '检查答案' }))
+  expect(view.getByText('按模块迁移。 保留旧入口。')).toBeTruthy()
+  fireEvent.click(view.getByRole('button', { name: '统一提交' }))
+  await waitFor(() => expect(submit).toHaveBeenCalledWith([{ effectId: 'question', value: { text: '按模块迁移。\n保留旧入口。' } }]))
+})
+
+it('selects the new conversation approval mode from a dropdown', async () => {
+  const app = await open('new')
+  try {
+    const select = app.view.getByRole('combobox', { name: '审核模式' })
+    fireEvent.mouseDown(select)
+    fireEvent.click(await screen.findByText('自动审核', { selector: '.ant-select-item-option-content' }))
+    expect(app.view.container.querySelector('.approval-policy-select')?.textContent).toContain('自动审核')
+    expect(select.getAttribute('aria-pressed')).toBeNull()
+  } finally { app.router.dispose() }
+})

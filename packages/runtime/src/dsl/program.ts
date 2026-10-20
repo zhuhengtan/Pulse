@@ -1039,6 +1039,7 @@ export class StepBuilder<TState = JsonValue> {
         return { actions: [], next: '$compact:summarize', locals: { ...locals, $sdk: { ...sdk, compactPending: true, compactReturnStep: `${name}:decode`, [pendingResultKey]: ref } } }
       }
       if (finishReason === 'tool_calls') {
+        if (typeof record?.text === 'string' && record.text.trim()) ctx.trace({ kind: 'react.progress', data: { text: record.text.slice(0, 2_000), ...(ref ? { resultRef: ref } : {}) } })
         // The last permitted turn may still carry the write that finishes the stage.
         // A further tool request after that batch is the actual turn limit.
         if (toolCalls.length === 0 || turns > maxTurns) return maxTurnsReached()
@@ -1219,6 +1220,10 @@ export class StepBuilder<TState = JsonValue> {
           if (typeof rawInput.prompt === 'string' && rawInput.prompt.length > 2_000) return fail({ code: 'ASK_PROMPT_TOO_LARGE', message: 'Ask prompts must be 2000 characters or fewer.', retryable: false })
           const prompt = typeof rawInput.prompt === 'string' && rawInput.prompt.trim() ? rawInput.prompt : `Pulse needs your input for ${askType}.`
           const askInput: Record<string, JsonValue> = { kind: 'ask', type: askType, toolName: String(call.toolName), toolCallId: String(call.toolCallId), prompt, interactionRevision: questionUserRevision(ctx) }
+          if (rawInput.context !== undefined) {
+            if (typeof rawInput.context !== 'string' || rawInput.context.length > 2_000) return fail({ code: 'ASK_PROMPT_TOO_LARGE', message: 'Ask context must be a string of at most 2000 characters.', retryable: false })
+            askInput.context = rawInput.context
+          }
           for (const field of ['decisionId', 'decisionScope', 'decisionPriority']) if (rawInput[field] !== undefined) { if (typeof rawInput[field] !== 'string' || rawInput[field].length > 120 || !rawInput[field].trim()) return fail({ code: 'INVALID_DECISION_ID', message: 'Decision identity must be a nonempty string of at most 120 characters.', retryable: false }); askInput[field] = rawInput[field] }
           if (askType === 'choice' || askType === 'multi') {
             const rawOptions = Array.isArray(rawInput.options) ? rawInput.options : []
@@ -1229,7 +1234,7 @@ export class StepBuilder<TState = JsonValue> {
               if (!item || typeof item.label !== 'string' || typeof item.value !== 'string') return []
               if (item.label.length === 0 || item.label.length > 500 || item.value.length === 0 || item.value.length > 500 || seen.has(item.value)) return []
               seen.add(item.value)
-              return [{ label: item.label, value: item.value }]
+              return [{ label: item.label, value: item.value, ...(typeof item.description === 'string' ? { description: item.description.slice(0, 2_000) } : {}) }]
             })
             if (options.length === 0) return fail({ code: 'ASK_OPTIONS_REQUIRED', message: 'ask.choice and ask.multi require at least one valid option.', retryable: false })
             askInput.options = options

@@ -89,7 +89,8 @@ export interface AskRequest {
   toolName: string
   type: AskType
   prompt: string
-  options?: Array<{ label: string; value: string }> | undefined
+  context?: string | undefined
+  options?: Array<{ label: string; value: string; description?: string }> | undefined
   min?: number | undefined
   max?: number | undefined
   placeholder?: string | undefined

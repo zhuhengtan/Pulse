@@ -556,7 +556,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     }
   }, [transport, queueTrace])
 
-  const historicalTraceKey = surfaceMode === 'work' && selectedId
+  const historicalTraceKey = selectedId
     ? [...new Set(messages.flatMap(message => message.role === 'assistant' && message.runId ? [message.runId] : []))].join('\n')
     : ''
 
@@ -856,6 +856,18 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       const interactionKind = [...status, ...workInteractions].find((item): item is Extract<RunStatus, { kind: 'interaction' }> => item.kind === 'interaction' && item.runId === runId && item.groupId === groupId)?.interactionKind
       setStatus(items => items.filter(item => item.kind !== 'interaction' || item.groupId !== groupId))
       setWorkInteractions(items => items.filter(item => item.runId !== runId || item.groupId !== groupId))
+      if (interactionKind === 'ask' && conversationId) {
+        void apiJson<MessageList>(transport, `/api/web/conversations/${encodeURIComponent(conversationId)}/messages`).then(result => {
+          if (selectedIdRef.current !== conversationId) return
+          setMessages(current => {
+            // The run can continue while this fetch is in flight. Merge only
+            // the accepted Q&A, so an older snapshot cannot erase a new reply.
+            const additions = result.filter(message => message.id.startsWith('ask-') && !current.some(item => item.id === message.id))
+            const streaming = current.findIndex(message => message.id === `stream-${runId}`)
+            return streaming < 0 ? [...current, ...additions] : [...current.slice(0, streaming), ...additions, ...current.slice(streaming)]
+          })
+        }).catch(() => undefined)
+      }
       setToast(interactionKind === 'ask' ? '答案已统一提交。' : '审批结果已提交。')
       window.setTimeout(() => setToast(''), 2200)
       return true
@@ -1110,7 +1122,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     const items = messages.flatMap((message, index) => {
       const out: ReactElement[] = []
       const runId = message.runId
-      if (surfaceMode === 'work' && message.role === 'assistant' && runId && !shown.has(runId)) {
+      if (message.role === 'assistant' && runId && !shown.has(runId)) {
         shown.add(runId)
         const live = traces[runId]
         if (live) out.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} />)
@@ -1121,7 +1133,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       if (surfaceMode === 'work' && runId && lastMessage.get(runId) === index) { const card = deliveries(runId); if (card) out.push(card) }
       return out
     })
-    if (surfaceMode === 'work') for (const [runId, live] of Object.entries(traces)) if (!shown.has(runId)) {
+    for (const [runId, live] of Object.entries(traces)) if (!shown.has(runId)) {
       items.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} />)
       const card = recoveryCard(runId); if (card) items.push(card)
       if (!deliveriesShown.has(runId)) { const card = deliveries(runId); if (card) items.push(card) }
@@ -1146,7 +1158,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         {surfaceMode === 'work' && <PulseButton className="icon-button desktop-menu" onClick={() => setSidebarCollapsed(value => !value)} aria-label={sidebarCollapsed ? '展开历史对话' : '收起历史对话'}><Icon name="menu"/></PulseButton>}
         {!switchInHistory && modeSwitch}
         <div className="navbar-title"><span className={`status-dot ${paired ? '' : 'offline'}`} /><span className="title-text" title={surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}>{surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}</span></div>
-        <div className="navbar-actions">{surfaceMode === 'work' && !mobileLayout && transfer.exportButton}{surfaceMode === 'chat' && <PulseButton className="details-button" aria-label="设置" title="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings"/><span>设置</span></PulseButton>}{selected?.approvalPolicy === 'delegate' && surfaceMode === 'work' && <PulseButton className="delegate-pill" onClick={() => void setApprovalPolicy('manual')} aria-label="切回人工审批">代审中 · 切回人工</PulseButton>}{running && <span className="running-pill"><i />{surfaceMode === 'chat' ? '正在回复' : '运行中'}</span>}{surfaceMode === 'work' && <><PulseButton className={`workbench-trigger ${workbenchOpen ? 'active' : ''}`} onClick={() => { patchQuery({ workspace: workbenchOpen ? undefined : 'files', details: undefined }) }} aria-expanded={workbenchOpen} aria-label="工作区" title="工作区"><Icon name="folder"/><span>工作区</span></PulseButton></>}<Popover open={detailsOpen} onOpenChange={open => { patchQuery({ details: open }) }} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}><PulseButton className={`details-button ${detailsOpen ? 'active' : ''}`} aria-label="对话详情" aria-expanded={detailsOpen} title="对话详情"><Icon name="info"/><span>详情</span></PulseButton></Popover></div>
+        <div className="navbar-actions">{surfaceMode === 'work' && !mobileLayout && transfer.exportButton}{surfaceMode === 'chat' && <PulseButton className="details-button" aria-label="设置" title="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings"/><span>设置</span></PulseButton>}{selected && <ApprovalPolicySelect value={selected.approvalPolicy ?? 'manual'} onChange={policy => { void setApprovalPolicy(policy) }} />}{running && <span className="running-pill"><i />{surfaceMode === 'chat' ? '正在回复' : '运行中'}</span>}{surfaceMode === 'work' && <><PulseButton className={`workbench-trigger ${workbenchOpen ? 'active' : ''}`} onClick={() => { patchQuery({ workspace: workbenchOpen ? undefined : 'files', details: undefined }) }} aria-expanded={workbenchOpen} aria-label="工作区" title="工作区"><Icon name="folder"/><span>工作区</span></PulseButton></>}<Popover open={detailsOpen} onOpenChange={open => { patchQuery({ details: open }) }} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}><PulseButton className={`details-button ${detailsOpen ? 'active' : ''}`} aria-label="对话详情" aria-expanded={detailsOpen} title="对话详情"><Icon name="info"/><span>详情</span></PulseButton></Popover></div>
 
       </header>
       {loadError && <div className="alert" role="alert"><span>{loadError}</span><PulseButton onClick={() => { if (paired) setRouteRevision(value => value + 1); else void bootstrap() }}>重试</PulseButton></div>}
@@ -1157,7 +1169,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       </section>
       {!atBottom && <PulseButton className="jump-bottom" onClick={() => { followBottom.current = true; setAtBottom(true); messagesEl.current?.scrollTo({ top: messagesEl.current.scrollHeight, behavior: 'smooth' }) }}>回到底部 ↓</PulseButton>}
       <footer className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${emptyConversation && !activeInteraction ? 'is-empty' : ''}`}>
-        {activeInteraction ? <InteractionPanel key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={(activeInteraction.approvalPolicy ?? selected?.approvalPolicy) === 'delegate'} running={activeInteraction.conversationId ? true : running} stopping={stopping} stop={() => void (activeInteraction.conversationId ? stopRunFor(activeInteraction.runId, activeInteraction.conversationId) : stopRun())} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} setApprovalPolicy={policy => setApprovalPolicy(policy, activeInteraction.conversationId ?? selected?.id)} /> : <><RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} onSend={async payload => await send(payload) === true} onStop={() => void stopRun()} />{route.newWork && <div className="new-chat-tools"><PulseButton type="button" className={`new-chat-approval ${newApprovalPolicy === 'delegate' ? 'active' : ''}`} aria-pressed={newApprovalPolicy === 'delegate'} title="开启后，本会话后续工具操作将持续代审；业务问题仍由你回答。" onClick={() => setNewApprovalPolicy(value => value === 'delegate' ? 'manual' : 'delegate')}><Icon name="shield"/><span>{newApprovalPolicy === 'delegate' ? '本会话代审中' : '替我审批'}</span></PulseButton><div className="new-conversation-project"><Icon name="folder"/><Select variant="borderless" aria-label="新对话所属项目" value={selectedProjectId ?? '__ungrouped__'} onChange={value => { const projectId = value === '__ungrouped__' ? undefined : value; patchQuery({ project: projectId }); setSelectedProjectId(projectId); if (projectId) window.localStorage.setItem('pulse-web-project', projectId); else window.localStorage.removeItem('pulse-web-project') }} options={[{ value: '__ungrouped__', label: '不归属项目' }, ...projects.map(project => ({ value: project.id, label: project.name }))]} popupMatchSelectWidth={false} /></div></div>}<div className="composer-hint">Pulse 可能会出错，请核对重要信息。</div></>}
+        {activeInteraction ? <InteractionPanel key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={(activeInteraction.approvalPolicy ?? selected?.approvalPolicy) === 'delegate'} running={activeInteraction.conversationId ? true : running} stopping={stopping} stop={() => void (activeInteraction.conversationId ? stopRunFor(activeInteraction.runId, activeInteraction.conversationId) : stopRun())} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} setApprovalPolicy={policy => setApprovalPolicy(policy, activeInteraction.conversationId ?? selected?.id)} /> : <><RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} onSend={async payload => await send(payload) === true} onStop={() => void stopRun()} />{route.newWork && <div className="new-chat-tools"><ApprovalPolicySelect value={newApprovalPolicy} onChange={setNewApprovalPolicy} /><div className="new-conversation-project"><Icon name="folder"/><Select variant="borderless" aria-label="新对话所属项目" value={selectedProjectId ?? '__ungrouped__'} onChange={value => { const projectId = value === '__ungrouped__' ? undefined : value; patchQuery({ project: projectId }); setSelectedProjectId(projectId); if (projectId) window.localStorage.setItem('pulse-web-project', projectId); else window.localStorage.removeItem('pulse-web-project') }} options={[{ value: '__ungrouped__', label: '不归属项目' }, ...projects.map(project => ({ value: project.id, label: project.name }))]} popupMatchSelectWidth={false} /></div></div>}<div className="composer-hint">Pulse 可能会出错，请核对重要信息。</div></>}
       </footer>
     </section>
     {workbenchOpen && <Suspense fallback={<div className="workbench-loading" role="status">正在打开工作区…</div>}><WorkbenchPanel project={projects.find(project => project.id === (selected?.projectId ?? selectedProjectId))} transport={transport} localAdmin={sessionCapabilities.localAdmin} canUseTerminal={sessionCapabilities.canUseTerminal} tab={workbenchTab} setTab={setWorkbenchTab} position={route.query} onNavigate={patchQuery} onClose={() => setWorkbenchOpen(false)} /></Suspense>}
@@ -1221,6 +1233,10 @@ function groupConversations(items: WebConversation[]): Array<{ label: string; it
   return [...groups].map(([label, conversations]) => ({ label, items: conversations }))
 }
 
+function ApprovalPolicySelect({ value, disabled, onChange }: { value: 'manual' | 'delegate'; disabled?: boolean; onChange: (value: 'manual' | 'delegate') => void }) {
+  return <Select className="approval-policy-select" aria-label="审核模式" value={value} disabled={disabled ?? false} onChange={onChange} options={[{ value: 'manual', label: '人工审核' }, { value: 'delegate', label: '自动审核' }]} popupMatchSelectWidth={false} />
+}
+
 type InteractionAnswer = { value: string } | { values: string[] } | { text: string }
 
 export function InteractionPanel({ interaction, context, reviewNote, delegated, running, stopping, stop, submit, setApprovalPolicy }: { interaction: Extract<RunStatus, { kind: 'interaction' }>; context?: string | undefined; reviewNote: string; delegated: boolean; running: boolean; stopping: boolean; stop: () => void; submit: (answers: Array<{ effectId: string; value: Record<string, unknown> }>) => Promise<boolean>; setApprovalPolicy: (policy: 'manual' | 'delegate') => Promise<boolean> }) {
@@ -1239,11 +1255,12 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
   const [error, setError] = useState('')
   const item = interaction.items[index]
   const input = item?.input ?? {}
-  const options = Array.isArray(input.options) ? input.options as Array<string | { value: string; label?: string }> : []
+  const options = (Array.isArray(input.options) ? input.options as Array<string | { value: string; label?: string; description?: string }> : []).filter(option => typeof option === 'string' ? option.trim() : option.value?.trim() && (option.label ?? option.value).trim())
   const selected = item ? answers[item.effectId] : undefined
   const persist = (next: Record<string, InteractionAnswer>) => { setAnswers(next); localStorage.setItem(key, JSON.stringify(next)); setError('') }
   const answerValid = (question: { effectId: string; input: Record<string, unknown> }) => {
     const answer = answers[question.effectId]
+    if (answer && 'text' in answer) return Boolean(answer.text.trim()) && answer.text.length <= 4000
     if (question.input.type === 'choice') return Boolean(answer && 'value' in answer && answer.value.length > 0)
     if (question.input.type === 'multi') {
       const values = answer && 'values' in answer ? answer.values : []
@@ -1251,7 +1268,7 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
       const max = typeof question.input.max === 'number' ? question.input.max : Number.POSITIVE_INFINITY
       return values.length >= min && values.length <= max
     }
-    return Boolean(answer && 'text' in answer)
+    return false
   }
   const updateCurrent = (value: InteractionAnswer) => { if (item) persist({ ...answers, [item.effectId]: value }) }
   const submitBatch = async (values: Array<{ effectId: string; value: Record<string, unknown> }>) => {
@@ -1275,7 +1292,7 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
       {tools.some(tool => Object.keys(tool.details ?? {}).some(key => key !== 'path' && key !== 'command')) && <PulseDisclosure className="technical-details" label={"更多操作细节"}>{tools.map((tool, i) => <pre key={i}>{JSON.stringify(tool.details, null, 2)}</pre>)}</PulseDisclosure>}
       {reviewNote && <p className="review-note" role="status">{reviewNote}</p>}
       {error && <p className="interaction-error" role="alert">{error}</p>}
-      <div className="interaction-actions"><PulseButton type="button" className="primary" disabled={sending || policyPending} onClick={approve}>允许本次</PulseButton><PulseButton type="button" className="secondary" disabled={sending || policyPending} onClick={deny}>拒绝</PulseButton>{!delegated && <PulseButton type="button" className="delegate-action" disabled={sending || policyPending} onClick={async () => { setPolicyPending(true); try { if (!await setApprovalPolicy('delegate')) setError('代审暂不可用，请人工确认或稍后重试。') } finally { setPolicyPending(false) } }}>{policyPending ? '正在审查…' : '替我审批'}</PulseButton>}{running && <PulseButton type="button" className="stop-button" disabled={stopping || policyPending} onClick={stop}>{stopping ? '正在停止…' : '停止任务'}</PulseButton>}</div>
+      <div className="interaction-actions"><PulseButton type="button" className="primary" disabled={sending || policyPending} onClick={approve}>允许本次</PulseButton><PulseButton type="button" className="secondary" disabled={sending || policyPending} onClick={deny}>拒绝</PulseButton><ApprovalPolicySelect value={delegated ? 'delegate' : 'manual'} disabled={sending || policyPending} onChange={async policy => { setPolicyPending(true); try { if (!await setApprovalPolicy(policy)) setError('审核模式切换失败，请重试。') } finally { setPolicyPending(false) } }} />{running && <PulseButton type="button" className="stop-button" disabled={stopping || policyPending} onClick={stop}>{stopping ? '正在停止…' : '停止任务'}</PulseButton>}</div>
     </section>
   }
   const count = interaction.items.length
@@ -1285,9 +1302,11 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
     <div className="question-scroll">
       {review ? <div className="answer-overview">{interaction.items.map((question, i) => <article key={question.effectId}><div><strong>{i + 1}. {String(question.input.prompt ?? '请回答')}</strong><PulseButton type="button" onClick={() => { setIndex(i); setReview(false) }}>修改</PulseButton></div><p>{formatInteractionAnswer(answers[question.effectId], question.input)}</p></article>)}</div> : <>
         <h3>{String(input.prompt ?? '请回答')}</h3>
-        {input.type === 'choice' && <div className="question-options">{options.map(option => { const choice = typeof option === 'string' ? { value: option, label: option } : option; const active = Boolean(selected && 'value' in selected && selected.value === choice.value); return <PulseButton type="button" className={active ? 'selected' : ''} disabled={sending} key={choice.value} onClick={() => updateCurrent({ value: choice.value })}>{choice.label ?? choice.value}</PulseButton> })}</div>}
-        {input.type === 'multi' && <><p className="question-hint">可多选{typeof input.min === 'number' && input.min > 0 ? `，至少 ${input.min} 项` : ''}{typeof input.max === 'number' ? `，最多 ${input.max} 项` : ''}</p><div className="question-options multi">{options.map(option => { const choice = typeof option === 'string' ? { value: option, label: option } : option; const current = selected && 'values' in selected ? selected.values : []; const max = typeof input.max === 'number' ? input.max : Number.POSITIVE_INFINITY; const atLimit = !current.includes(choice.value) && current.length >= max; return <div key={choice.value}><PulseCheckbox  disabled={sending || atLimit} checked={current.includes(choice.value)} onChange={() => updateCurrent({ values: current.includes(choice.value) ? current.filter(value => value !== choice.value) : [...current, choice.value] })}>{choice.label ?? choice.value}</PulseCheckbox></div> })}</div></>}
-        {input.type === 'input' && <PulseTextArea className="question-input" value={selected && 'text' in selected ? selected.text : typeof input.defaultValue === 'string' ? input.defaultValue : ''} disabled={sending} placeholder={typeof input.placeholder === 'string' ? input.placeholder : '请输入'} onChange={event => updateCurrent({ text: event.target.value })} />}
+        {typeof input.context === 'string' && input.context && <p className="question-background">{input.context}</p>}
+        {input.type === 'choice' && <div className="question-options">{options.map(option => { const choice = typeof option === 'string' ? { value: option, label: option } : option; const active = Boolean(selected && 'value' in selected && selected.value === choice.value); return <PulseButton type="button" className={active ? 'selected' : ''} disabled={sending} key={choice.value} onClick={() => updateCurrent({ value: choice.value })}><strong>{choice.label ?? choice.value}</strong>{choice.description && <span className="question-option-description">{choice.description}</span>}</PulseButton> })}</div>}
+        {input.type === 'multi' && <><p className="question-hint">可多选{typeof input.min === 'number' && input.min > 0 ? `，至少 ${input.min} 项` : ''}{typeof input.max === 'number' ? `，最多 ${input.max} 项` : ''}</p><div className="question-options multi">{options.map(option => { const choice = typeof option === 'string' ? { value: option, label: option } : option; const current = selected && 'values' in selected ? selected.values : []; const max = typeof input.max === 'number' ? input.max : Number.POSITIVE_INFINITY; const atLimit = !current.includes(choice.value) && current.length >= max; return <div key={choice.value}><PulseCheckbox  disabled={sending || atLimit} checked={current.includes(choice.value)} onChange={() => updateCurrent({ values: current.includes(choice.value) ? current.filter(value => value !== choice.value) : [...current, choice.value] })}><strong>{choice.label ?? choice.value}</strong>{choice.description && <span className="question-option-description">{choice.description}</span>}</PulseCheckbox></div> })}</div></>}
+        {(input.type === 'choice' || input.type === 'multi') && <label className="question-custom"><span>自行回答</span><PulseTextArea aria-label="自行回答" maxLength={4000} rows={3} value={selected && 'text' in selected ? selected.text : ''} disabled={sending} placeholder="也可以直接输入你的答案…" onChange={event => updateCurrent({ text: event.target.value })} /></label>}
+        {input.type === 'input' && <PulseTextArea aria-label="你的答案" maxLength={4000} rows={4} className="question-input" value={selected && 'text' in selected ? selected.text : typeof input.defaultValue === 'string' ? input.defaultValue : ''} disabled={sending} placeholder={typeof input.placeholder === 'string' ? input.placeholder : '请输入'} onChange={event => updateCurrent({ text: event.target.value })} />}
       </>}
     </div>
     {error && <p className="interaction-error" role="alert">{error}</p>}
@@ -1298,7 +1317,7 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
 function formatInteractionAnswer(answer: InteractionAnswer | undefined, input: Record<string, unknown>): string {
   if (!answer) return '尚未填写'
   if ('text' in answer) return answer.text || '（空）'
-  const options = Array.isArray(input.options) ? input.options as Array<string | { value: string; label?: string }> : []
+  const options = (Array.isArray(input.options) ? input.options as Array<string | { value: string; label?: string; description?: string }> : []).filter(option => typeof option === 'string' ? option.trim() : option.value?.trim() && (option.label ?? option.value).trim())
   const label = (value: string) => { const option = options.find(item => (typeof item === 'string' ? item : item.value) === value); return typeof option === 'string' ? option : option?.label ?? value }
   return 'value' in answer ? label(answer.value) : answer.values.length ? answer.values.map(label).join('、') : '未选择'
 }

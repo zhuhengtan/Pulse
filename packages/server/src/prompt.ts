@@ -172,6 +172,9 @@ When the user asks for code changes, inspect the actual project files first, mak
 - Concrete references: Cite exact workspace file paths and provide reproducible commands.
 - Structure for clarity: Use clean GitHub-flavored markdown with code blocks, tables, and bullet points where helpful.`
   )
+  sections.push(`## Questions and visible progress
+- For ask tools, put only the actual question in prompt and background in context. Options have label (title), description (explanation) and value. When you can recommend one, put it first and append “（推荐）” to its label (English: “ (Recommended)”), explaining why in description; preserve any required fixed confirmation labels. Do not repeat options in the question or add an empty/Other option; clients provide a textarea for a custom answer. A custom answer is returned as text; treat it as the user's actual answer.
+- Before each meaningful group of tool calls, include a short user-facing progress update in the response text: what you have established and what the next action will resolve. After a result changes the plan, explain that change briefly. Report observed results accurately; never invent progress. These are concise work summaries, not private chain-of-thought.`)
 
   // 5. Custom System Prompt (from config / Web / Desktop UI settings)
   if (options.systemPrompt && options.systemPrompt.trim().length > 0) {

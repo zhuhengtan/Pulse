@@ -238,6 +238,21 @@ function summary(state: TraceState, running: boolean): string {
   return `${head} · ${lanes} 个 Lane · ${tools} 次工具调用${seconds ? ` · 耗时 ${seconds}s` : ''}`
 }
 
+/** Public work updates and observed results remain visible outside technical details. */
+function RunProgress({ trace }: { trace: TraceState }) {
+  const steps = trace.order.flatMap(id => trace.lanes[id]?.steps ?? [])
+  const visible = steps.filter(step => step.note?.trim() || step.kind === 'tool')
+  if (!visible.length) return null
+  return <div className="run-progress" role="log" aria-label="工作进展" aria-live="polite" aria-relevant="additions text">
+    {visible.map(step => step.kind === 'tool' ? <div className={`progress-result progress-${step.status ?? 'running'}`} key={step.id}>
+      <span className="progress-result-state">{step.status === 'running' ? '进行中' : step.status === 'succeeded' ? '已完成' : step.status === 'failed' ? '失败' : '已停止'}</span>
+      <span>{summarizeTool(step).text}</span>
+      {typeof step.preview?.output === 'string' && <pre>{step.preview.output}</pre>}
+      {step.error && <p>{String(step.error.message ?? step.error.code ?? '操作失败')}</p>}
+    </div> : <p className="progress-note" key={step.id}>{step.note}</p>)}
+  </div>
+}
+
 /** Collapsible main-process header plus nested lane cards. */
 export function RunTraceView({ trace, running: streamRunning }: { trace: TraceState; running: boolean }) {
   const running = streamRunning && !trace.outcome
@@ -254,6 +269,7 @@ export function RunTraceView({ trace, running: streamRunning }: { trace: TraceSt
     return [<LaneCard key={id} lane={lane} depth={laneDepth(trace, lane)} runActive={running} />, ...children.flatMap(render)]
   }
   return <div className={`run-trace ${running ? 'is-running' : ''} outcome-${trace.outcome ?? 'running'}`}>
+    <RunProgress trace={trace} />
     <PulseButton type="button" className="run-trace-head" onClick={() => setUserOpen(!open)} aria-expanded={open}>
       <span className={`trace-dot ${running ? 'dot-running' : trace.outcome === 'succeeded' ? 'dot-succeeded' : 'dot-failed'}`} />
       <strong>主进程</strong><span className="run-trace-summary">{summary(trace, running)}</span>

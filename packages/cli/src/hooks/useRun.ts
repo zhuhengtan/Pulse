@@ -186,7 +186,7 @@ export function useRun({
                 ? input.options.flatMap((option) => {
                     if (!option || typeof option !== 'object' || Array.isArray(option)) return [];
                     const item = option as Record<string, unknown>;
-                    return typeof item.label === 'string' && typeof item.value === 'string' ? [{ label: item.label, value: item.value }] : [];
+                    return typeof item.label === 'string' && typeof item.value === 'string' ? [{ label: item.label, value: item.value, ...(typeof item.description === 'string' ? { description: item.description } : {}) }] : [];
                   })
                 : undefined;
               enqueueInteraction({ kind: 'ask', request: {
@@ -194,6 +194,7 @@ export function useRun({
                 toolName: typeof input.toolName === 'string' ? input.toolName : `ask.${input.type}`,
                 type: input.type,
                 prompt: typeof input.prompt === 'string' ? input.prompt : '请输入你的回答。',
+                ...(typeof input.context === 'string' ? { context: input.context } : {}),
                 ...(options && options.length ? { options } : {}),
                 ...(typeof input.min === 'number' ? { min: input.min } : {}),
                 ...(typeof input.max === 'number' ? { max: input.max } : {}),

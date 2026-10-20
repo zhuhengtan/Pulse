@@ -1987,7 +1987,11 @@ export class H5Server {
         reviewed.add(next.effectId)
         const result = await handle.reviewApproval(next.effectId, controller.signal)
         if (controller.signal.aborted) return
-        if (result.status === 'manual') this.reviewNotes.set(runId, '需要你决定；代审无法确认本次操作。')
+        if (result.status === 'manual') {
+          const reasons: Record<string, string> = { reviewer_not_configured: '尚未配置本机审核模型', reviewer_must_be_local: '审核模型需要使用本机服务', review_timeout: '本机审核模型响应超时', review_failed: '本机审核模型调用失败', review_output_truncated: '审核回复不完整', review_not_explicitly_approved: '审核模型未明确批准本次操作', risk_requires_user: '本次操作涉及风险或尚未支持的工具', path_outside_workspace: '目标路径超出当前工作区', invalid_shell_syntax: '命令格式需要人工确认' }
+          reasons.reviewer_unavailable = '本机审核服务未启动或无法连接'
+          this.reviewNotes.set(runId, `需要你决定：${reasons[result.reason] ?? '代审无法确认本次操作'}。`)
+        }
         else this.reviewNotes.delete(runId)
       }
     } finally {
@@ -2167,7 +2171,7 @@ function publicInteraction(interaction: { groupId: string; kind: 'ask' | 'approv
     items: interaction.items.map(({ effectId, input }) => {
       const safe: Record<string, unknown> = {}
       if (interaction.kind === 'ask') {
-        for (const key of ['kind', 'type', 'prompt', 'placeholder', 'defaultValue', 'min', 'max'] as const) if (input[key] !== undefined) safe[key] = input[key]
+        for (const key of ['kind', 'type', 'prompt', 'context', 'placeholder', 'defaultValue', 'min', 'max'] as const) if (input[key] !== undefined) safe[key] = input[key]
         if (Array.isArray(input.options)) safe.options = input.options.filter(item => typeof item === 'string' || Boolean(item && typeof item === 'object' && !Array.isArray(item) && typeof (item as Record<string, JsonValue>).value === 'string'))
       } else {
         safe.kind = 'approval'

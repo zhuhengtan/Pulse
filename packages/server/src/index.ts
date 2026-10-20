@@ -29,7 +29,7 @@ import { acceptanceFailure, assessAcceptanceValue, validateAcceptanceChecks, typ
 import { fetchText, readPublicPage, parseSearchResults } from './web.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { appendFile, copyFile, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
+import { appendFile, copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { conversationDirectory, publicUrl, safeShellEnv, searchWorkspace, within } from './security.js'
@@ -411,14 +411,14 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
   registry.register(defineTool({
     name: 'plan.write', description: 'Write one complete docs/plans markdown plan in a single call, up to 16384 UTF-8 bytes. Use this instead of fs.write or fs.stage for a plan. The path must be a .md file under docs/plans; the parent directory is created automatically and an existing plan is never overwritten.', tags: ['files', 'write', 'plan'], input: z.object({ path: z.string(), content: z.string() }), output: z.object({ path: z.string(), bytes: z.number(), hash: z.string() }), sideEffectPolicy: 'write', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: writeToolTimeoutMs, permissions: { workspaceRoots: [root] }, execute: async ({ path, content }, context) => { if (approvalMode === 'read-only') throw new Error('WRITE_DISABLED_READ_ONLY'); if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:plan.write'); return new PlanWriter(fsTool).execute({ path, content }, context.signal) }, summarize: (output) => output,
   }))
-  const askOption = z.union([z.string(), z.object({ label: z.string().min(1), value: z.string().min(1) })])
+  const askOption = z.union([z.string().min(1), z.object({ label: z.string().min(1).max(500), value: z.string().min(1).max(500), description: z.string().max(2_000).optional() })])
   const askOptions = z.array(askOption).min(1).max(50)
-  const decisionFields = { decisionId: z.string().min(1).max(120).optional(), decisionScope: z.string().min(1).max(120).optional(), decisionPriority: z.enum(['constraint', 'stage', 'normal']).optional() }
+  const decisionFields = { context: z.string().max(2_000).optional(), decisionId: z.string().min(1).max(120).optional(), decisionScope: z.string().min(1).max(120).optional(), decisionPriority: z.enum(['constraint', 'stage', 'normal']).optional() }
   registry.register(defineTool({
-    name: 'ask.choice', description: 'Ask exactly one unresolved decision. Provide a stable decisionId and decisionScope; do not rename an answered decision to repeat it. Reopen only after an explicit new user instruction.', tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000), options: askOptions }), output: z.object({ value: z.string() }), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
+    name: 'ask.choice', description: 'Ask exactly one unresolved decision. prompt is only the question; context is separate background. Each option has label (short title), description (trade-off), and stable value. Mark the recommended option title with （推荐） (English: (Recommended)) and put it first when justified. Never repeat options in prompt or add an empty/Other option: the UI always provides a free-text answer. Replies contain either value or text. Provide stable decisionId and decisionScope; reopen an answered decision only after explicit new user instruction.', tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000), options: askOptions }), output: z.union([z.object({ value: z.string() }), z.object({ text: z.string() })]), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
   }))
   registry.register(defineTool({
-    name: 'ask.multi', description: 'Ask the human to choose one or more options before continuing.', tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000), options: askOptions, min: z.number().int().min(0).optional(), max: z.number().int().positive().optional() }), output: z.object({ values: z.array(z.string()) }), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
+    name: 'ask.multi', description: 'Ask the human to choose options. prompt is only the question, context is background; options use label, description and value. Never list options in prompt or add an empty/Other option. The UI also accepts a standalone free-text answer, returned as text instead of values.', tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000), options: askOptions, min: z.number().int().min(0).optional(), max: z.number().int().positive().optional() }), output: z.union([z.object({ values: z.array(z.string()) }), z.object({ text: z.string() })]), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
   }))
   registry.register(defineTool({
     name: 'ask.input', description: 'Ask the human to provide free-form text before continuing.', tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000), placeholder: z.string().max(500).optional(), defaultValue: z.string().max(2_000).optional() }), output: z.object({ text: z.string() }), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
@@ -1191,6 +1191,26 @@ function isBoundedWorkspaceWrite(toolName: string): boolean {
   return toolName === 'fs.stage' || toolName === 'fs.write' || toolName === 'fs.apply_patch' || toolName === 'fs.apply_patches' || toolName === 'plan.write' || toolName === 'fs.move'
 }
 
+// A new artifact may have several missing parent directories. Check the
+// nearest existing ancestor without treating a dangling symlink as missing.
+async function withinApprovalTarget(root: string, target: string): Promise<void> {
+  let candidate = target
+  for (;;) {
+    const info = await lstat(candidate).catch((cause: NodeJS.ErrnoException) => { if (cause.code !== 'ENOENT') throw cause; return undefined })
+    if (info?.isSymbolicLink()) {
+      const resolved = await realpath(candidate).catch(() => { throw new Error('PATH_OUTSIDE_WORKSPACE') })
+      await within(root, resolved)
+      return
+    }
+    try { await within(root, candidate); return } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      const parent = dirname(candidate)
+      if (parent === candidate) throw error
+      candidate = parent
+    }
+  }
+}
+
 function isActiveEffectState(state: string): boolean {
   return state === 'queued' || state === 'running' || state === 'retry_wait' || state === 'reconcile_required'
 }
@@ -1427,6 +1447,10 @@ export function validateAskReply(effectInput: JsonValue | undefined, value: Json
   if (input.kind !== 'ask') return
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('ASK_RESPONSE_INVALID')
   const reply = value as Record<string, JsonValue>
+  if (typeof reply.text === 'string' && reply.value === undefined && reply.values === undefined) {
+    if (!reply.text.trim() || reply.text.length > 4_000) throw new Error('ASK_RESPONSE_INVALID:text')
+    return
+  }
   if (input.type === 'choice') {
     if (typeof reply.value !== 'string' || reply.value.length === 0 || !askOptionValues(input).has(reply.value)) throw new Error('ASK_RESPONSE_INVALID:choice')
   }
@@ -2870,6 +2894,22 @@ export class LocalHost {
         if (call && typeof call === 'object' && !Array.isArray(call) && typeof (call as Record<string, JsonValue>).toolCallId === 'string') approvedIds.add((call as Record<string, JsonValue>).toolCallId as string)
       }
     }
+    const persistAskAnswer = async (effectId: string, value: JsonValue): Promise<void> => {
+      const input = asRecord(runtime.state.effects.get(effectId)?.input)
+      if (input?.kind !== 'ask') return
+      const reply = asRecord(value) ?? {}
+      const options = Array.isArray(input.options) ? input.options : []
+      const label = (value: JsonValue): string => {
+        const option = options.find(option => typeof option === 'string' ? option === value : asRecord(option)?.value === value)
+        return typeof option === 'string' ? option : String(asRecord(option)?.label ?? value)
+      }
+      const answer = typeof reply.text === 'string' ? reply.text : Array.isArray(reply.values) ? reply.values.map(label).join('、') || '未选择' : label(reply.value ?? '')
+      const existing = new Set((await this.getConversationMessages(conversationId)).map(message => message.id))
+      for (const message of [
+        { id: `ask-question-${runId}-${effectId}`, role: 'assistant' as const, text: [String(input.prompt ?? ''), typeof input.context === 'string' ? input.context : ''].filter(Boolean).join('\n\n') },
+        { id: `ask-answer-${runId}-${effectId}`, role: 'user' as const, text: answer },
+      ]) if (!existing.has(message.id)) await this.appendMessage(conversationId, { ...message, runId, createdAt: new Date().toISOString(), displayVersion: 1 })
+    }
     const replyOne = async (effectId: string, value: JsonValue): Promise<void> => {
       const effect = runtime.state.effects.get(effectId)
       if (!effect || effect.kind !== 'human' || effect.outcome) throw new Error('EFFECT_NOT_REPLYABLE')
@@ -2885,6 +2925,7 @@ export class LocalHost {
         if (!runtime.state.effects.get(effectId)?.outcome) for (const id of grants ?? []) if (!previousGrants.has(id)) grants?.delete(id)
         throw error
       }
+      await persistAskAnswer(effectId, value)
       await recording
     }
     const reviewApproval = async (effectId: string, externalSignal?: AbortSignal): Promise<{ status: 'approved' | 'manual'; reason: string }> => {
@@ -2901,7 +2942,8 @@ export class LocalHost {
         if (!effect || effect.kind !== 'human' || effect.outcome || !input || calls.length === 0) { reason = 'interaction_changed'; return result = { status: 'manual', reason } }
         const manifest = await this.readManifest(conversationId)
         const dangerous = /\b(rm|rmdir|del|format|mkfs|sudo|chmod|chown|kill|shutdown|launchctl|security|keychain|curl|wget|ssh|scp|publish|git\s+push)\b|\.env|\.ssh|id_rsa|credentials|password|token/i
-        const allowed = new Set(['fs.write', 'fs.apply_patch', 'fs.apply_patches', 'shell.exec', 'artifact.record', 'web.search', 'web.fetch'])
+        const sensitivePath = /(^|[\\/])(?:\.git|\.ssh|\.aws|\.codex|\.pulse|\.env(?:\.[^\\/]*)?|id_(?:rsa|ed25519)(?:\.pub)?|(?:credentials?|passwords?|tokens?|secrets?)(?:\.(?:json|ya?ml|toml|txt|ini|pem|key))?)(?:[\\/]|$)/i
+        const allowed = new Set(['fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'plan.write', 'fs.move', 'shell.exec', 'artifact.record', 'web.search', 'web.fetch'])
         const safeReads = new Set(['fs.list', 'fs.read', 'fs.search', 'task.audit', 'shell.output', 'fs.stage.capacity', 'task.decisions', 'task.evidence', 'task.conversation', 'task.history', 'task.recall', 'task.surface'])
         const reviewedCalls: typeof calls = []
         let verifiedCommand = false
@@ -2909,14 +2951,20 @@ export class LocalHost {
           const name = typeof call.toolName === 'string' ? call.toolName : typeof call.name === 'string' ? call.name : ''
           const args = call.input && typeof call.input === 'object' && !Array.isArray(call.input) ? call.input as Record<string, JsonValue> : call.arguments && typeof call.arguments === 'object' && !Array.isArray(call.arguments) ? call.arguments as Record<string, JsonValue> : {}
           if (name === 'shell.exec') { try { validateShellInvocation(String(args.command ?? ''), Array.isArray(args.args) ? args.args as string[] : []) } catch { return result = { status: 'manual', reason: 'invalid_shell_syntax' } } }
-          const serialized = JSON.stringify(args)
+          // File contents and search queries are data, not shell commands. A
+          // code fragment mentioning "token" must not bypass task review by
+          // being prematurely sent to the human as a secret-access operation.
+          const riskyInput = name === 'shell.exec' ? dangerous.test(JSON.stringify(args)) : Object.entries(args).some(([key, value]) => typeof value === 'string' && (['path', 'source', 'destination', 'target', 'cwd'].includes(key) ? sensitivePath.test(value) : key === 'url' && dangerous.test(value)))
           const policy = safeReads.has(name) ? 'read' : allowed.has(name) ? 'write' : undefined
           const shellCommand = name === 'shell.exec' && typeof args.command === 'string' ? basename(args.command).toLowerCase() : ''
           const intent = runtime.state.agents.get(session.agentId)?.goal ?? ''
           const verification = name === 'shell.exec' && await isNecessaryVerification(manifest.executionCwd ?? manifest.cwd, args, intent)
-          if (!policy || (!verification && (dangerous.test(serialized) || shellCommand === 'env' || shellCommand === 'printenv'))) { reason = 'risk_requires_user'; return result = { status: 'manual', reason } }
-          const targetPath = typeof args.path === 'string' ? resolve(manifest.executionCwd ?? manifest.cwd, args.path) : typeof args.cwd === 'string' && name === 'shell.exec' ? resolve(manifest.executionCwd ?? manifest.cwd, args.cwd) : undefined
-          if (targetPath) { try { await within(manifest.executionCwd ?? manifest.cwd, targetPath) } catch { reason = 'path_outside_workspace'; return result = { status: 'manual', reason } } }
+          if (!policy || (!verification && (riskyInput || shellCommand === 'env' || shellCommand === 'printenv'))) { reason = 'risk_requires_user'; return result = { status: 'manual', reason } }
+          for (const field of ['path', 'source', 'destination', 'target', 'cwd']) {
+            if (typeof args[field] !== 'string') continue
+            const targetPath = resolve(manifest.executionCwd ?? manifest.cwd, args[field] as string)
+            try { await withinApprovalTarget(manifest.executionCwd ?? manifest.cwd, targetPath) } catch { reason = 'path_outside_workspace'; return result = { status: 'manual', reason } }
+          }
           verifiedCommand ||= verification
           if (policy !== 'read' && !verification) reviewedCalls.push(call)
         }
@@ -2967,7 +3015,7 @@ export class LocalHost {
         const messageCode = /^(PROVIDER_[A-Z0-9_]+|[A-Z][A-Z0-9_]{2,79})(?::|$)/.exec(rawMessage)?.[1]
         diagnosticCode = typeof rawCode === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(rawCode) ? rawCode : messageCode
         diagnosticMessage = rawMessage.replace(/https?:\/\/[^\s"'<>]+/gi, '[url]').replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[credential]').replace(/(authorization\s*[:=]\s*bearer\s+)[\w.-]+/gi, '$1[redacted]').slice(0, 240)
-        reason = error instanceof Error && error.message === 'review_timeout' ? 'review_timeout' : error instanceof Error && error.message === 'review_cancelled' ? 'review_cancelled' : 'review_failed'
+        reason = error instanceof Error && error.message === 'review_timeout' ? 'review_timeout' : error instanceof Error && error.message === 'review_cancelled' ? 'review_cancelled' : diagnosticCode === 'OUTPUT_TRUNCATED' ? 'review_output_truncated' : /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT/.test(rawMessage) ? 'reviewer_unavailable' : 'review_failed'
         result = { status: 'manual', reason }
       } finally {
         const logPath = join(this.runDir(conversationId, runId), 'approval-reviews.jsonl')
@@ -2993,6 +3041,7 @@ export class LocalHost {
           await this.observePlanConfirmation(runId, conversationId, answer.effectId, effect?.input, answer.value)
         }
         await session.replyBatch(groupId, answers)
+        for (const answer of answers) await persistAskAnswer(answer.effectId, answer.value)
         for (const answer of answers) if (answer.value && typeof answer.value === 'object' && !Array.isArray(answer.value) && (answer.value as Record<string, JsonValue>).approved === true) rememberApprovedCalls(answer.effectId)
         for (const answer of answers) {
           const text = answer.value && typeof answer.value === 'object' && !Array.isArray(answer.value) && typeof (answer.value as Record<string, JsonValue>).text === 'string' ? (answer.value as Record<string, JsonValue>).text as string : undefined
@@ -3505,6 +3554,11 @@ export class LocalHost {
       if (event.kind === 'observation') {
         const observation = event.observation as Record<string, JsonValue>
         const trace = observation.data && typeof observation.data === 'object' && !Array.isArray(observation.data) ? observation.data as Record<string, JsonValue> : undefined
+        if (observation.type === 'trace' && trace?.kind === 'react.progress') {
+          const progress = asRecord(trace.data)
+          if (typeof progress?.text === 'string') yield { schemaVersion: 1, type: 'observation', conversationId, runId, seq, data: { kind: 'note', effectId: typeof progress.resultRef === 'string' ? `progress:${progress.resultRef}` : `progress:${seq}`, ...(typeof observation.laneId === 'string' ? { laneId: observation.laneId } : {}), task: 'reason', text: progress.text } }
+          continue
+        }
         if (observation.type === 'trace' && trace?.kind === 'task.progress') {
           const progress = trace.data as Record<string, JsonValue>
           const key = JSON.stringify({ revision: progress.revision, tasks: progress.tasks })

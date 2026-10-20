@@ -101,13 +101,14 @@ export function AskPrompt({ request, disabled = false, onReply, onCancel }: Prop
     <Box borderStyle="double" borderColor={theme.primary} flexDirection="column" paddingX={1} marginTop={1}>
       <Text color={theme.primary} bold>✦ 需要你的回答 · {request.toolName}</Text>
       <Text color="white">{request.prompt}</Text>
+      {request.context ? <Text dimColor>{request.context}</Text> : null}
       {hint ? <Text color="yellow">{hint}</Text> : null}
       {isList && typed ? <Text color="yellow">已输入：{typed}</Text> : null}
       {request.type === 'choice' && (
         <Box flexDirection="column" marginTop={1}>
           {options.map((option, optionIndex) => (
             <Text key={`${optionIndex}:${option.value}`} {...(optionIndex === clampedIndex ? { color: theme.primary } : {})}>
-              {optionIndex === clampedIndex ? '› ' : '  '}{option.label}
+              {optionIndex === clampedIndex ? '› ' : '  '}{option.label}{option.description ? `\n  ${option.description}` : ''}
             </Text>
           ))}
           <Text dimColor>↑↓ 移动，Enter 确认；Esc 或输入 /cancel 取消</Text>
@@ -117,7 +118,7 @@ export function AskPrompt({ request, disabled = false, onReply, onCancel }: Prop
         <Box flexDirection="column" marginTop={1}>
           {options.map((option, optionIndex) => (
             <Text key={`${optionIndex}:${option.value}`} {...(optionIndex === clampedIndex ? { color: theme.primary } : {})}>
-              {optionIndex === clampedIndex ? '› ' : '  '}{selected.includes(option.value) ? '[x] ' : '[ ] '}{option.label}
+              {optionIndex === clampedIndex ? '› ' : '  '}{selected.includes(option.value) ? '[x] ' : '[ ] '}{option.label}{option.description ? `\n  ${option.description}` : ''}
             </Text>
           ))}
           <Text dimColor>↑↓ 移动，空格选择，Enter 确认{request.min ? `（至少 ${request.min} 项）` : ''}；Esc 或输入 /cancel 取消</Text>
