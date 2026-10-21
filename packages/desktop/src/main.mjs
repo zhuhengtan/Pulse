@@ -21,7 +21,7 @@ else {
         window.webContents.send(channel, value); };
     const allowedPath = path => { if (typeof path !== 'string' || !path.startsWith('/api/') || path.startsWith('//') || path.includes('\\') || path.length > 4096)
         throw new Error('API_PATH_INVALID'); return path; };
-    const localQuery = path => /^\/api\/(assistant(?:\?|$)|conversations(?:\?|$|\/[^/]+$)|projects$|data\/conversations\/[^/]+\/(?:messages|body|search)(?:\?|$)|runs\/[^/]+\/state$)/.test(path);
+    const localQuery = path => /^\/api\/(approval-policy$|assistant(?:\?|$)|conversations(?:\?|$|\/[^/]+$)|projects$|data\/conversations\/[^/]+\/(?:messages|body|search)(?:\?|$)|runs\/[^/]+\/state$)/.test(path);
     function query(path) { return new Promise((resolveQuery, reject) => { if (pendingReads.size >= 64) {
         reject(new Error('LOCAL_QUERY_QUEUE_FULL'));
         return;

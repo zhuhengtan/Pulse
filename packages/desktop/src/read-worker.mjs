@@ -9,7 +9,9 @@ parentPort.on('message', async ({ id, path }) => {
     try {
         const url = new URL(path, 'http://pulse.local');
         let body;
-        if (url.pathname === '/api/assistant')
+        if (url.pathname === '/api/approval-policy')
+            body = { policy: get().readState('approval-policy')?.policy === 'delegate' ? 'delegate' : 'manual' };
+        else if (url.pathname === '/api/assistant')
             body = get().assistantView(url.searchParams.get('before') ?? undefined);
         else if (url.pathname === '/api/conversations') {
             const assistant = get().readState('assistant-inbox')?.conversationId;

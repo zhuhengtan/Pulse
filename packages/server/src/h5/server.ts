@@ -1012,6 +1012,17 @@ export class H5Server {
       return
     }
 
+    if (pathname === '/api/approval-policy' && (method === 'GET' || method === 'PUT')) {
+      if (method === 'PUT') {
+        if (!requireSameOrigin()) { res.writeHead(403).end(); return }
+        const { policy } = await this.parseJsonBody(req)
+        if (policy !== 'manual' && policy !== 'delegate') { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'APPROVAL_POLICY_INVALID' })); return }
+        await this.setGlobalApprovalPolicy(policy)
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ policy: await this.globalApprovalPolicy() }))
+      return
+    }
+
     if (pathname === '/api/skills' && method === 'GET') {
       const skills = await this.host.listSkills()
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
@@ -1615,17 +1626,8 @@ export class H5Server {
           ...(hasArchive ? body.archived ? { archivedAt: new Date().toISOString() } : { clearArchive: true } : {}),
         })
       }
-      const activeRunId = (await this.host.getConversation(conversationId)).summary.activeRunId
-      if (policy === 'manual' && activeRunId) {
-        this.approvalReviewControllers.get(activeRunId)?.abort()
-        this.approvalReviewControllers.delete(activeRunId)
-        this.approvalReviewAgain.delete(activeRunId)
-        this.reviewNotes.delete(activeRunId)
-      }
-      if (policy === 'delegate' && activeRunId) {
-        await this.reviewPendingApprovals(activeRunId)
-        await this.pushInteractionSnapshot(activeRunId, (this.runEventBuffers.get(activeRunId)?.at(-1)?.seq ?? 0) + 0.25)
-      }
+      // Older clients still send a conversation PATCH; the preference is global.
+      if (policy === 'manual' || policy === 'delegate') await this.setGlobalApprovalPolicy(policy)
       res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(await this.host.getConversation(conversationId).then(item => item.summary)))
       return
     }
@@ -2007,8 +2009,7 @@ export class H5Server {
         const items = await handle.pendingInteractions()
         const currentSeq = (event.seq ?? 0) + 0.25
         this.pushEvent(runId, { runId, conversationId: handle.conversationId, seq: currentSeq, type: 'interactions', data: { interactions: items.map(publicInteraction), ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}) } })
-        const summary = await this.host.getConversation(handle.conversationId).then((item) => item.summary).catch(() => undefined)
-        if (summary?.approvalPolicy === 'delegate') {
+        if (await this.globalApprovalPolicy() === 'delegate') {
           void this.reviewPendingApprovals(runId).then(() => this.pushInteractionSnapshot(runId, currentSeq + 0.25)).catch(() => undefined)
         }
       }
@@ -2056,9 +2057,34 @@ export class H5Server {
     this.pushEvent(runId, { runId, conversationId: handle.conversationId, seq, type: 'interactions', data: { interactions: items.map(publicInteraction), ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}) } })
   }
 
+  private async globalApprovalPolicy(): Promise<'manual' | 'delegate'> {
+    const saved = await this.host.conversationData.call<{ policy?: string } | undefined>('readState', 'approval-policy')
+    return saved?.policy === 'delegate' ? 'delegate' : 'manual'
+  }
+
+  private async setGlobalApprovalPolicy(policy: 'manual' | 'delegate'): Promise<void> {
+    // One shared preference, independent of conversation creation or navigation.
+    await this.host.conversationData.call('saveState', 'approval-policy', { policy })
+    for (const runId of this.activeRuns.keys()) {
+      if (policy === 'manual') {
+        this.approvalReviewControllers.get(runId)?.abort()
+        this.approvalReviewControllers.delete(runId)
+        this.approvalReviewAgain.delete(runId)
+        this.reviewNotes.delete(runId)
+      }
+      const update = async () => {
+        if (policy === 'delegate') await this.reviewPendingApprovals(runId)
+        await this.pushInteractionSnapshot(runId, (this.runEventBuffers.get(runId)?.at(-1)?.seq ?? 0) + 0.25)
+      }
+      // Saving the choice must not wait for the local review model to respond.
+      void update().catch(() => undefined)
+    }
+  }
+
   private async reviewPendingApprovals(runId: string): Promise<void> {
     const handle = this.activeRuns.get(runId)
     if (!handle) return
+    if (await this.globalApprovalPolicy() !== 'delegate') return
     if (this.approvalReviewControllers.has(runId)) {
       this.approvalReviewAgain.add(runId)
       return
@@ -2068,6 +2094,7 @@ export class H5Server {
     const reviewed = new Set<string>()
     try {
       while (!controller.signal.aborted) {
+        if (await this.globalApprovalPolicy() !== 'delegate' || controller.signal.aborted) return
         this.approvalReviewAgain.delete(runId)
         const groups = await handle.pendingInteractions()
         const next = groups.filter((group) => group.kind === 'approval').flatMap((group) => group.items).find((item) => !reviewed.has(item.effectId))

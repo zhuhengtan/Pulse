@@ -14,7 +14,7 @@ const categories: Category[] = [
   { id: 'models', label: '模型与服务商', description: '在各服务商下管理模型，并设置默认模型和助理聊天模型。密钥只读取环境变量状态。', paths: ['providers', 'models', 'activeModel', 'assistantModel'] },
   { id: 'routing', label: '模型路由', description: '按任务配置首选模型和回退顺序。', paths: ['taskRouting'] },
   { id: 'front', label: '即时预回复', description: '选择已登记的服务商和模型作为即时预回复模型。', paths: ['frontModel'] },
-  { id: 'approval', label: '审批与代审', description: '全局审批模式和本机 Ollama 审批复核模型；会话代审仍在各对话中单独设置。', paths: ['approvalMode', 'approvalReview'] },
+  { id: 'approval', label: '审批与代审', description: '工具审批策略和本机 Ollama 复核模型；聊天栏的审核方式全局保存。', paths: ['approvalMode', 'approvalReview'] },
   { id: 'jarvis', label: 'Jarvis', description: '记忆服务、连接地址、上下文预算和候选记忆策略。访问令牌会脱敏。', paths: ['jarvis'] },
   { id: 'tools', label: '工具与技能', description: '已启用能力、技能选择及受信任的技能目录。', paths: ['capabilities.enabled', 'capabilities.skills', 'capabilities.trustedSkillRoots'] },
   { id: 'mcp', label: 'MCP', description: '服务命令和参数会启动本机进程。环境变量值默认保留为脱敏占位。', paths: ['capabilities.mcpServers'] },
@@ -339,7 +339,7 @@ function FeatureEditor({ category, config, onChange }: { category: string; confi
   }
   if (category === 'approval') {
     const review = asObject(config.approvalReview), providers = asObject(config.providers)
-    return <div className="specialized-editor"><section className="editor-section"><h2>全局审批模式</h2><p>仅影响新任务的工具审批；会话级代审可在聊天中单独切换。</p><SelectControl label="全局审批模式" value={config.approvalMode ?? 'ask'} options={[{value:'read-only',label:'只读'},{value:'ask',label:'人工审核'},{value:'auto',label:'自动审核'}]} onChange={value=>patch('approvalMode',value)} /></section><section className="editor-section"><h2>审批复核模型</h2><p>只使用本机 Ollama；业务问题、风险不明和模型错误会转回人工。</p><ModelPicker providers={providers} value={review.model} localOllamaOnly onChange={value => patch('approvalReview.model', value)} /><NumberControl label="超时时间" value={review.timeoutMs ?? 15000} unit="毫秒" min={1000} max={60000} onChange={value => patch('approvalReview.timeoutMs', value)} /></section></div>
+    return <div className="specialized-editor"><section className="editor-section"><h2>全局审批模式</h2><p>仅影响新任务的工具审批；聊天栏的人工／自动审核选择全局生效并自动保存。</p><SelectControl label="全局审批模式" value={config.approvalMode ?? 'ask'} options={[{value:'read-only',label:'只读'},{value:'ask',label:'人工审核'},{value:'auto',label:'自动审核'}]} onChange={value=>patch('approvalMode',value)} /></section><section className="editor-section"><h2>审批复核模型</h2><p>只使用本机 Ollama；业务问题、风险不明和模型错误会转回人工。</p><ModelPicker providers={providers} value={review.model} localOllamaOnly onChange={value => patch('approvalReview.model', value)} /><NumberControl label="超时时间" value={review.timeoutMs ?? 15000} unit="毫秒" min={1000} max={60000} onChange={value => patch('approvalReview.timeoutMs', value)} /></section></div>
   }
   if (category === 'jarvis') {
     const jarvis = asObject(config.jarvis)

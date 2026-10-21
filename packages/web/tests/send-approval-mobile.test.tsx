@@ -154,13 +154,51 @@ it('shows question, background and option descriptions separately and submits a 
   await waitFor(() => expect(submit).toHaveBeenCalledWith([{ effectId: 'question', value: { text: '按模块迁移。\n保留旧入口。' } }]))
 })
 
-it('selects the new conversation approval mode from a dropdown', async () => {
+it('persists approval globally across new, existing and chat conversations and remounts', async () => {
   const app = await open('new')
   try {
-    const select = app.view.getByRole('combobox', { name: '审核模式' })
-    fireEvent.mouseDown(select)
-    fireEvent.click(await screen.findByText('自动审核', { selector: '.ant-select-item-option-content' }))
-    expect(app.view.container.querySelector('.approval-policy-select')?.textContent).toContain('自动审核')
-    expect(select.getAttribute('aria-pressed')).toBeNull()
+    const select = app.view.getByRole('button', { name: '审核模式：人工审核' })
+    await waitFor(() => expect(select.hasAttribute('disabled')).toBe(false))
+    fireEvent.click(select)
+    expect(await screen.findByText('如何审核 Pulse 的操作？')).toBeTruthy()
+    expect(screen.getByText('全局生效，切换会话和重启后保留')).toBeTruthy()
+    fireEvent.click(screen.getByRole('menuitem', { name: /自动审核/ }))
+    await app.view.findByRole('button', { name: '审核模式：自动审核' })
+    for (const path of ['/work/pulse-chat', '/chat', '/work/new']) {
+      await act(async () => { await app.router.navigate(path) })
+      expect(await app.view.findByRole('button', { name: '审核模式：自动审核' })).toBeTruthy()
+    }
+    app.view.unmount(); app.router.dispose()
+    const router = createMemoryRouter([{ path: '*', element: <PulseApp transport={app.fixture.transport} /> }], { initialEntries: ['/work/new'] })
+    try {
+      const view = render(<PulseDesignSystem><RouterProvider router={router} /></PulseDesignSystem>)
+      expect(await view.findByRole('button', { name: '审核模式：自动审核' })).toBeTruthy()
+    } finally { router.dispose() }
+  } finally { app.router.dispose() }
+})
+
+it('keeps the confirmed approval policy when saving fails', async () => {
+  const app = await open('new', (path, init) => path === '/api/approval-policy' && init?.method === 'PUT' ? Promise.resolve(Response.json({ error: 'OFFLINE' }, { status: 503 })) : undefined)
+  try {
+    const select = app.view.getByRole('button', { name: '审核模式：人工审核' })
+    await waitFor(() => expect(select.hasAttribute('disabled')).toBe(false))
+    fireEvent.click(select); fireEvent.click(await screen.findByRole('menuitem', { name: /自动审核/ }))
+    await app.view.findByText('审核方式保存失败，请检查连接后重试。')
+    expect(app.view.getByRole('button', { name: '审核模式：人工审核' }).hasAttribute('disabled')).toBe(false)
+  } finally { app.router.dispose() }
+})
+
+it('keeps the menu clickable and permits retry when the global preference cannot be loaded', async () => {
+  let reads = 0
+  const app = await open('new', (path, init) => path === '/api/approval-policy' && !init?.method
+    ? Promise.resolve(++reads === 1 ? Response.json({ error: 'OFFLINE' }, { status: 503 }) : Response.json({ policy: 'delegate' })) : undefined)
+  try {
+    const trigger = await app.view.findByRole('button', { name: '审核模式：尚未读取' })
+    expect(trigger.hasAttribute('disabled')).toBe(false)
+    fireEvent.click(trigger)
+    expect(await screen.findByText('尚未读取审核设置')).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: /人工审核/ }).getAttribute('aria-disabled')).toBe('true')
+    fireEvent.click(screen.getByRole('button', { name: '重试', exact: true }))
+    expect(await app.view.findByRole('button', { name: '审核模式：自动审核' })).toBeTruthy()
   } finally { app.router.dispose() }
 })

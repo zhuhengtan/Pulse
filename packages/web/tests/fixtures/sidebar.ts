@@ -14,9 +14,14 @@ export function sidebarFixture() {
   ]
   const patches: Array<{ id: string; body: Record<string, unknown> }> = []
   let rejectMove = false
+  let approvalPolicy: 'manual' | 'delegate' = 'manual'
   const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
   const transport: PulseWebTransport = {
     async request(path, init) {
+      if (path === '/api/approval-policy') {
+        if (init?.method === 'PUT') approvalPolicy = JSON.parse(String(init.body)).policy
+        return response({ policy: approvalPolicy })
+      }
       if (path === '/api/session/local' || path === '/api/session') return response({ localAdmin: true, canUseTerminal: false })
       if (path === '/api/assistant') return response({ conversation: { id: 'assistant', title: 'Pulse 助理', cwd: '/example', createdAt: now, updatedAt: now }, messages: [], receipts: [], workInteractions: [] })
       if (path === '/api/projects') return response(projects)

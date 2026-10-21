@@ -223,9 +223,25 @@
 .composer-add-button { justify-content: center; width: 36px; height: 36px; padding: 0; color: var(--ink); }
 .composer-add-menu.ant-dropdown-menu { min-width: 210px; padding: 6px; border-radius: 12px; }
 .composer-add-menu .ant-dropdown-menu-item { min-height: 40px; border-radius: 7px; }
-.approval-policy-select.is-borderless { min-width: 128px; max-width: 170px; border: 0; box-shadow: none; background: transparent; }
-.approval-policy-select.is-borderless .ant-select-selector { border: 0!important; box-shadow: none!important; background: transparent!important; }
+.approval-policy-select { display:inline-flex; align-items:center; justify-content:center; gap:7px; min-height:32px; padding:4px 10px; border:0; border-radius:18px; background:var(--soft); color:var(--ink); font:inherit; font-size:13px; cursor:pointer; }
+.approval-policy-select.is-borderless { min-width:0; max-width:170px; border:0; box-shadow:none; background:transparent; }
+.approval-policy-select:hover:not(:disabled),.approval-policy-select[aria-expanded="true"] { background:var(--soft); }
+.approval-policy-select:disabled { opacity:.5; cursor:default; }
 .composer-tools-left .approval-policy-select { flex: 0 1 auto; }
+.approval-policy-popup { width:370px; max-width:calc(100vw - 24px); padding:8px; border:1px solid var(--line); border-radius:18px; background:var(--panel); box-shadow:0 10px 36px #00000016; }
+.approval-policy-heading { display:grid; gap:4px; padding:9px 12px 11px; color:var(--muted); }
+.approval-policy-heading strong { font-size:13px; font-weight:500; }
+.approval-policy-heading small { font-size:11px; }
+.approval-policy-retry { display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:12px; }
+.approval-policy-retry button { min-height:28px; padding:2px 7px; border:0; background:transparent; color:var(--blue); cursor:pointer; }
+.approval-policy-popup .ant-dropdown-menu { padding:0; border-radius:12px; background:transparent; box-shadow:none; }
+.approval-policy-popup .ant-dropdown-menu-item { padding:11px 12px; border-radius:12px; color:var(--ink); }
+.approval-policy-popup .ant-dropdown-menu-item-selected { color:var(--ink); background:var(--soft); }
+.approval-mode-option { display:grid; grid-template-columns:22px minmax(0,1fr) 18px; align-items:center; gap:10px; }
+.approval-mode-option>span:not(.approval-mode-check):not(.pulse-icon) { display:grid; gap:3px; }
+.approval-mode-option strong { font-size:15px; font-weight:550; line-height:1.5; }
+.approval-mode-option small { color:var(--muted); font-size:12px; line-height:1.55; white-space:normal; }
+.approval-mode-check { color:var(--blue); font-size:19px; }
 
 .composer-tool-btn {
   display: inline-flex;

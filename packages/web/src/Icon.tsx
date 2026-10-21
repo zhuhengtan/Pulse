@@ -1,6 +1,7 @@
 import type { CSSProperties, ComponentType } from 'react'
 import {
   ArrowLeftOutlined,
+  AuditOutlined,
   BulbOutlined,
   CloseOutlined,
   CopyOutlined,
@@ -51,6 +52,7 @@ const icons = {
   home: HomeOutlined,
   more: MoreOutlined,
   shield: SafetyOutlined,
+  audit: AuditOutlined,
   attachment: PaperClipOutlined,
 } satisfies Record<string, ComponentType<{ className?: string; style?: CSSProperties; 'aria-hidden'?: boolean }>>
 

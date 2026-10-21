@@ -19,6 +19,7 @@ import { copyText } from './clipboard.js'
 import { SettingsPage } from './SettingsPage.js'
 import { ArchivePage } from './ArchivePage.js'
 import { Icon } from './Icon.js'
+import { ApprovalPolicySelect, useApprovalPolicy } from './ApprovalPolicyMenu.js'
 import { useBlocker } from 'react-router'
 import { usePulseNavigation, workUrl, parsePulseRoute, type WorkspaceTab } from './routing.js'
 const WorkbenchPanel = lazy(() => import('./WorkbenchPanel.js').then(module => ({ default: module.WorkbenchPanel })))
@@ -67,6 +68,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const [serviceConnected, setServiceConnected] = useState(true)
   useEffect(() => transport.onConnection?.(setServiceConnected), [transport])
   const [paired, setPaired] = useState(false)
+  const { policy: approvalPolicy, ready: approvalReady, pending: approvalSaving, save: saveApprovalPolicy, retry: retryApprovalPolicy } = useApprovalPolicy(transport, paired)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [mobileLayout, setMobileLayout] = useState(() => window.matchMedia('(max-width: 767px)').matches)
@@ -151,7 +153,6 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       ? { ...emptyComposerDraft(), revision: current.revision + 1 } : current)
     submittedDrafts.current.delete(requestId)
   }
-  const [newApprovalPolicy, setNewApprovalPolicy] = useState<'manual' | 'delegate'>('manual')
   const [query, setQuery] = useState('')
   const [editingId, setEditingId] = useState<string>()
   const [editingTitle, setEditingTitle] = useState('')
@@ -443,7 +444,6 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   useEffect(() => { if (isPairPage) void loadPairing() }, [isPairPage, loadPairing])
 
   const createConversation = () => {
-    setNewApprovalPolicy('manual')
     window.localStorage.removeItem(historyStorageKey)
     go(workUrl(undefined, selectedProjectId))
     setDrawerOpen(false)
@@ -770,10 +770,6 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
           go(workUrl(conversationId), true)
         }
         setConversations(items => [created, ...items])
-        if (newApprovalPolicy === 'delegate') {
-          created = await apiJson<WebConversation>(transport, `/api/conversations/${encodeURIComponent(created.id)}`, jsonRequest('PATCH', { approvalPolicy: 'delegate' }))
-          setConversations(items => items.map(item => item.id === created.id ? created : item))
-        }
       }
       const response = await apiJson<{ runId: string }>(
         transport,
@@ -942,20 +938,10 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     } catch (error) { if (error instanceof ApiError && error.status >= 400 && error.status < 500) forgetRequest(); setToast('提交失败，内容已保留，请检查连接后重试。'); return false }
   }
 
-  const setApprovalPolicy = async (policy: 'manual' | 'delegate', conversationId = selected?.id) => {
-    if (!conversationId) return false
-    const current = conversationId === selected?.id ? selected.approvalPolicy : conversations.find(item => item.id === conversationId)?.approvalPolicy
-    if ((current ?? 'manual') === policy) return true
+  const setApprovalPolicy = async (policy: 'manual' | 'delegate') => {
     try {
-      const updated = await apiJson<WebConversation>(transport, `/api/conversations/${encodeURIComponent(conversationId)}`, jsonRequest('PATCH', { approvalPolicy: policy }))
-      setConversations(items => items.map(item => item.id === conversationId ? updated : item))
-      setWorkInteractions(items => items.map(item => item.conversationId === conversationId ? { ...item, approvalPolicy: policy } : item))
-      if (selected?.id === conversationId && selected.activeRunId) {
-        const snapshot = await apiJson<WebRunSnapshot>(transport, `/api/runs/${encodeURIComponent(selected.activeRunId)}/state`)
-        if (selectedIdRef.current === selected.id) { setStatus(snapshotStatus(snapshot)); setReviewNote(snapshot.reviewNote ?? '') }
-      }
-      return true
-    } catch { setToast(policy === 'delegate' ? '无法启动本会话代审；请检查本地审核模型。' : '切回人工失败，请检查连接。'); return false }
+      return await saveApprovalPolicy(policy)
+    } catch { setToast('审核方式保存失败，请检查连接后重试。'); return false }
   }
 
   const renameConversation = async (conversation: WebConversation) => {
@@ -1050,7 +1036,6 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   }
 
   const selectProject = (projectId?: string) => {
-    setNewApprovalPolicy('manual')
     setSelectedProjectId(projectId)
     if (projectId) window.localStorage.setItem('pulse-web-project', projectId)
     else window.localStorage.removeItem('pulse-web-project')
@@ -1160,7 +1145,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     <div className="history-foot"><PulseButton onClick={() => { openPage('/archive'); setDrawerOpen(false) }}><Icon name="archive"/><span>归档对话</span></PulseButton><PulseButton onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings"/><span>设置</span></PulseButton></div>
   </aside>
 
-  const detailsPanel = <section className="details-popover" role="dialog" aria-label="对话详情"><header><div><strong>对话详情</strong><small>当前会话与工作区信息</small></div><PulseButton className="icon-button" onClick={() => setDetailsOpen(false)} aria-label="关闭"><Icon name="close"/></PulseButton></header><div className="detail-group"><small>项目</small><strong>{projects.find(project => project.id === selected?.projectId)?.name ?? (selected?.projectId ? '项目不可用' : '未分组对话')}</strong></div><div className="detail-group"><small>工作目录</small><code title={selected?.cwd ?? projects.find(project => project.id === selectedProjectId)?.cwd}>{selected?.cwd ?? projects.find(project => project.id === selectedProjectId)?.cwd ?? '发送首条消息后确定'}</code><PulseButton className="detail-copy" onClick={() => void copyText(selected?.cwd ?? projects.find(project => project.id === selectedProjectId)?.cwd ?? '')} disabled={!selected?.cwd && !selectedProjectId}><Icon name="copy"/>复制路径</PulseButton></div><div className="detail-group"><small>默认模型</small><strong>{effectiveModel ?? (sessionCapabilities.localAdmin ? '当前配置未返回实际模型' : '本机管理会话可查看')}</strong><span>这是服务端默认模型；单次任务若有独立路由，以任务路由为准。</span></div><div className="detail-group"><small>审批方式</small><strong>{selected?.approvalPolicy === 'delegate' ? '本会话代审中' : '由用户逐项审批'}</strong><span>审批设置仅影响当前会话。</span></div></section>
+  const detailsPanel = <section className="details-popover" role="dialog" aria-label="对话详情"><header><div><strong>对话详情</strong><small>当前会话与工作区信息</small></div><PulseButton className="icon-button" onClick={() => setDetailsOpen(false)} aria-label="关闭"><Icon name="close"/></PulseButton></header><div className="detail-group"><small>项目</small><strong>{projects.find(project => project.id === selected?.projectId)?.name ?? (selected?.projectId ? '项目不可用' : '未分组对话')}</strong></div><div className="detail-group"><small>工作目录</small><code title={selected?.cwd ?? projects.find(project => project.id === selectedProjectId)?.cwd}>{selected?.cwd ?? projects.find(project => project.id === selectedProjectId)?.cwd ?? '发送首条消息后确定'}</code><PulseButton className="detail-copy" onClick={() => void copyText(selected?.cwd ?? projects.find(project => project.id === selectedProjectId)?.cwd ?? '')} disabled={!selected?.cwd && !selectedProjectId}><Icon name="copy"/>复制路径</PulseButton></div><div className="detail-group"><small>默认模型</small><strong>{effectiveModel ?? (sessionCapabilities.localAdmin ? '当前配置未返回实际模型' : '本机管理会话可查看')}</strong><span>这是服务端默认模型；单次任务若有独立路由，以任务路由为准。</span></div><div className="detail-group"><small>审批方式</small><strong>{approvalPolicy === 'delegate' ? '自动审核' : '人工审核'}</strong><span>全局生效，聊天、工作与新会话统一使用此设置。</span></div></section>
 
   const messageHandlers = useRef({ retryAssistantMessage, retryWorkMessage, openWorkNotice, patchQuery })
   messageHandlers.current = { retryAssistantMessage, retryWorkMessage, openWorkNotice, patchQuery }
@@ -1178,9 +1163,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const activeRunId = selected?.activeRunId
   const recoveryVisible = Boolean(surfaceMode === 'work' && !running && recoveryRun && activeRunId && recoveryRun.conversationId === selected?.id && recoveryRun.runId === activeRunId)
   const emptyConversation = messages.length === 0 && !recoveryVisible && !(surfaceMode === 'work' && (artifactIndex.artifacts.length > 0 || route.query.has('artifactRun')))
-  const composerApproval = route.newWork
-    ? <ApprovalPolicySelect borderless value={newApprovalPolicy} onChange={setNewApprovalPolicy} />
-    : selected && <ApprovalPolicySelect borderless value={selected.approvalPolicy ?? 'manual'} onChange={policy => { void setApprovalPolicy(policy) }} />
+  const composerApproval = <ApprovalPolicySelect borderless value={approvalPolicy} unavailable={!approvalReady} onRetry={retryApprovalPolicy} disabled={approvalSaving} onChange={policy => { void setApprovalPolicy(policy) }} />
   const renderMessages = () => {
     const shown = new Set<string>()
     let recoveryShown = false
@@ -1248,7 +1231,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       </section>
       {!atBottom && <PulseButton className="jump-bottom" onClick={() => { followBottom.current = true; setAtBottom(true); messagesEl.current?.scrollTo({ top: messagesEl.current.scrollHeight, behavior: 'smooth' }) }}>回到底部 ↓</PulseButton>}
       <footer className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${emptyConversation && !activeInteraction ? 'is-empty' : ''}`}>
-        {activeInteraction ? <InteractionPanel key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={(activeInteraction.approvalPolicy ?? selected?.approvalPolicy) === 'delegate'} running={activeInteraction.conversationId ? true : running} stopping={stopping} stop={() => void (activeInteraction.conversationId ? stopRunFor(activeInteraction.runId, activeInteraction.conversationId) : stopRun())} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} setApprovalPolicy={policy => setApprovalPolicy(policy, activeInteraction.conversationId ?? selected?.id)} /> : <><RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || !serviceConnected || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} onSend={async payload => await send(payload) === true} onStop={() => void stopRun()} toolbarExtra={composerApproval} /></>}
+        {activeInteraction ? <InteractionPanel key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={approvalPolicy === 'delegate'} running={activeInteraction.conversationId ? true : running} stopping={stopping} stop={() => void (activeInteraction.conversationId ? stopRunFor(activeInteraction.runId, activeInteraction.conversationId) : stopRun())} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} setApprovalPolicy={setApprovalPolicy} /> : <><RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || !serviceConnected || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} onSend={async payload => await send(payload) === true} onStop={() => void stopRun()} toolbarExtra={composerApproval} /></>}
         <div className={`composer-meta ${route.newWork ? 'new-chat-tools' : ''}`}>
           {activeInteraction && composerApproval}
           {route.newWork ? <div className="new-conversation-project"><Icon name="folder"/><Select variant="borderless" aria-label="新对话所属项目" value={selectedProjectId ?? '__ungrouped__'} onChange={value => { const projectId = value === '__ungrouped__' ? undefined : value; patchQuery({ project: projectId }); setSelectedProjectId(projectId); if (projectId) window.localStorage.setItem('pulse-web-project', projectId); else window.localStorage.removeItem('pulse-web-project') }} options={[{ value: '__ungrouped__', label: '不归属项目' }, ...projects.map(project => ({ value: project.id, label: project.name }))]} popupMatchSelectWidth={false} /></div> : !activeInteraction && <div className="composer-hint">Pulse 可能会出错，请核对重要信息。</div>}
@@ -1316,10 +1299,6 @@ function groupConversations(items: WebConversation[]): Array<{ label: string; it
   return [...groups].map(([label, conversations]) => ({ label, items: conversations }))
 }
 
-function ApprovalPolicySelect({ value, disabled, onChange, borderless = false }: { value: 'manual' | 'delegate'; disabled?: boolean; onChange: (value: 'manual' | 'delegate') => void; borderless?: boolean }) {
-  return <Select className={`approval-policy-select ${borderless ? 'is-borderless' : ''}`} variant={borderless ? 'borderless' : 'outlined'} prefix={borderless ? <Icon name="shield" size={16} /> : undefined} aria-label="审核模式" value={value} disabled={disabled ?? false} onChange={onChange} options={[{ value: 'manual', label: '人工审核' }, { value: 'delegate', label: '自动审核' }]} popupMatchSelectWidth={false} />
-}
-
 type InteractionAnswer = { value: string } | { values: string[] } | { text: string }
 
 export function InteractionPanel({ interaction, context, reviewNote, delegated, running, stopping, stop, submit, setApprovalPolicy }: { interaction: Extract<RunStatus, { kind: 'interaction' }>; context?: string | undefined; reviewNote: string; delegated: boolean; running: boolean; stopping: boolean; stop: () => void; submit: (answers: Array<{ effectId: string; value: Record<string, unknown> }>) => Promise<boolean>; setApprovalPolicy: (policy: 'manual' | 'delegate') => Promise<boolean> }) {
@@ -1369,7 +1348,7 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
     const approve = () => void submitBatch([{ effectId: approvalItem!.effectId, value: { approved: true } }])
     const deny = () => void submitBatch([{ effectId: approvalItem!.effectId, value: { approved: false, reason: '用户拒绝' } }])
     return <section className="interaction-panel approval-panel" aria-label="待审批操作">
-      <div className="interaction-heading"><strong>需要你的确认</strong>{delegated && <span className="delegate-state">本会话代审中</span>}</div>{context && <small className="interaction-context">{context}</small>}
+      <div className="interaction-heading"><strong>需要你的确认</strong>{delegated && <span className="delegate-state">全局自动审核</span>}</div>{context && <small className="interaction-context">{context}</small>}
       <p>{typeof approvalInput.prompt === 'string' ? approvalInput.prompt : 'Pulse 需要你确认以下操作。'}{typeof approvalInput.operationCount === 'number' ? ` 共 ${approvalInput.operationCount} 项操作。` : ''}</p>
       <div className="approval-operations">{tools.map((tool, i) => <div className="approval-operation" key={`${tool.toolName}-${i}`}><strong>{readableTool(tool.toolName ?? '')}</strong>{typeof tool.details?.path === 'string' && <code>{tool.details.path}</code>}{typeof tool.details?.command === 'string' && <code>{tool.details.command}</code>}</div>)}</div>
       {tools.some(tool => Object.keys(tool.details ?? {}).some(key => key !== 'path' && key !== 'command')) && <PulseDisclosure className="technical-details" label={"更多操作细节"}>{tools.map((tool, i) => <pre key={i}>{JSON.stringify(tool.details, null, 2)}</pre>)}</PulseDisclosure>}
