@@ -36,6 +36,23 @@ describe('execution trace replay', () => {
     expect(state.lanes.root?.steps[0]?.reasoning).toBe('A'.repeat(24_000))
   })
 
+  it('deduplicates one model while preserving fallback identity and meaningful progress', () => {
+    const trace = [model(1, 'A', 1), reasoning(2, '执行详情')].reduce(reduceTrace, emptyTrace)
+    const lane = trace.lanes.root!
+    const view = render(<RunTraceView trace={{ ...trace, label: '阶段进度: 0/0, 0 项受阻' }} running />)
+    expect(screen.getByRole('button', { name: /主进程/ }).textContent).toContain('正在推理')
+    expect(screen.getByRole('button', { name: /主进程/ }).textContent).not.toMatch(/0\/0|0 次工具调用/)
+    expect(view.container.querySelectorAll('.trace-model')).toHaveLength(1)
+    expect(screen.getByText('执行详情')).toBeTruthy()
+
+    const fallback = { ...lane.steps[0]!, id: 'fallback', modelId: 'B', fallback: true, reasoning: '备用模型详情' }
+    view.rerender(<RunTraceView trace={{ ...trace, label: '阶段进度: 1/3, 1 项受阻', lanes: { root: { ...lane, steps: [...lane.steps, fallback] } } }} running />)
+    expect(screen.getByRole('button', { name: /主进程/ }).textContent).toContain('阶段进度: 1/3, 1 项受阻')
+    expect(view.container.querySelectorAll('.trace-row .trace-model')).toHaveLength(2)
+    expect(screen.getByText('B · 回退')).toBeTruthy()
+    expect(screen.getByText('备用模型详情')).toBeTruthy()
+  })
+
   it.each(['succeeded', 'failed', 'cancelled'] as const)('collapses a %s run while retaining the header and allowing manual replay', outcome => {
     const trace = [model(1, 'A', 1), reasoning(2, '保持展开')].reduce(reduceTrace, emptyTrace)
     const view = render(<RunTraceView trace={trace} running />)
@@ -181,7 +198,7 @@ it('groups consecutive tools between updates and keeps failures visible while fo
   const trace = {
     order: ['main'], outcome: 'failed' as const,
     lanes: { main: { id: 'main', label: '主任务', status: 'failed' as const, steps: [
-      { id: 'note', kind: 'llm' as const, note: '先检查入口。' },
+      { id: 'note', kind: 'llm' as const, note: '先检查 `entry.ts` 入口。' },
       { id: 'read-a', kind: 'tool' as const, tool: 'fs.read', status: 'succeeded' as const, args: { path: 'a.ts' } },
       { id: 'read-b', kind: 'tool' as const, tool: 'fs.read', status: 'succeeded' as const, args: { path: 'b.ts' } },
       { id: 'next', kind: 'llm' as const, note: '现在运行验证。' },
@@ -189,7 +206,7 @@ it('groups consecutive tools between updates and keeps failures visible while fo
     ] } },
   }
   const view = render(<RunTraceView trace={trace} running={false} />)
-  expect(view.getByText('先检查入口。')).toBeTruthy()
+  expect(view.container.querySelector('.progress-note code')?.textContent).toBe('entry.ts')
   expect(view.getByText('现在运行验证。')).toBeTruthy()
   const tools = view.getByRole('button', { name: /读取文件 2/ })
   expect(tools.getAttribute('aria-expanded')).toBe('false')

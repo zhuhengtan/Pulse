@@ -1,4 +1,5 @@
 import { Icon } from './Icon.js'
+import { Markdown } from './Markdown.js'
 import type { ComponentProps } from 'react'
 import { PulseButton } from './PulseControls.js'
 import type { ReactElement } from 'react'
@@ -161,7 +162,7 @@ function ToolDetail({ step }: { step: TraceStep }) {
   </div>
 }
 
-function StepRow({ step, live }: { step: TraceStep; live: boolean }) {
+function StepRow({ step, live, showModel = true }: { step: TraceStep; live: boolean; showModel?: boolean }) {
   const [userOpen, setUserOpen] = useState<boolean | undefined>(undefined)
   const seenLive = useRef(false)
   if (live) seenLive.current = true
@@ -185,7 +186,7 @@ function StepRow({ step, live }: { step: TraceStep; live: boolean }) {
     <PulseButton type="button" className="trace-row" onClick={() => setUserOpen(!open)} aria-expanded={open} disabled={!body}>
       <span className="trace-state">{live ? <i className="trace-spin" /> : '◆'}</span>
       <span className="trace-text">{live ? '思考中' : '思考'} · {task}</span>
-      {step.modelId && <span className={`trace-model ${step.fallback ? 'is-fallback' : ''}`} title={step.fallback ? '已回退到备用模型' : undefined}>{step.modelId}{step.fallback ? ' · 回退' : ''}</span>}
+      {showModel && step.modelId && <span className={`trace-model ${step.fallback ? 'is-fallback' : ''}`} title={step.fallback ? '已回退到备用模型' : undefined}>{step.modelId}{step.fallback ? ' · 回退' : ''}</span>}
       {body && <span className="trace-caret">{open ? '▾' : '▸'}</span>}
     </PulseButton>
     {open && body && <div className="trace-thought">{body}</div>}
@@ -206,19 +207,20 @@ function LaneCard({ lane, depth, runActive }: { lane: TraceLane; depth: number; 
   const [userOpen, setUserOpen] = useState<boolean | undefined>(undefined)
   const open = userOpen ?? (active || depth === 0)
   const badge = modelBadge(lane)
+  const multipleModels = new Set(lane.steps.flatMap(step => step.modelId ? [step.modelId] : [])).size > 1
   const tools = lane.steps.filter(step => step.kind === 'tool').length
   const lastIndex = lane.steps.length - 1
   return <section className={`trace-lane trace-lane-${lane.status}`} style={{ marginLeft: depth * 14 }}>
     <PulseButton type="button" className="trace-lane-head" onClick={() => setUserOpen(!open)} aria-expanded={open}>
       <span className={`trace-dot dot-${lane.status}`} />
       <span className="trace-lane-title"><strong>{lane.label}</strong>{lane.goal && <small>{shorten(lane.goal, 90)}</small>}</span>
-      {badge && <span className={`trace-model ${badge.fallback ? 'is-fallback' : ''}`}>{badge.label}</span>}
+      {badge && <span className={`trace-model ${badge.fallback ? 'is-fallback' : ''}`} title={badge.fallback ? '本任务使用过备用模型' : badge.label}>{badge.label}</span>}
       <small className="trace-lane-meta">{LANE_STATUS[lane.status] ?? lane.status}{tools ? ` · ${tools} 工具` : ''}</small>
       <span className="trace-caret">{open ? '▾' : '▸'}</span>
     </PulseButton>
     {open && <div className="trace-lane-body">
       {lane.steps.length === 0 && <p className="trace-empty">等待执行…</p>}
-      {lane.steps.map((step, index) => <StepRow key={step.id} step={step} live={active && index === lastIndex && step.kind === 'llm'} />)}
+      {lane.steps.map((step, index) => <StepRow key={step.id} step={step} live={active && index === lastIndex && step.kind === 'llm'} showModel={multipleModels || Boolean(step.fallback)} />)}
     </div>}
   </section>
 }
@@ -233,9 +235,13 @@ function laneDepth(state: TraceState, lane: TraceLane): number {
 function summary(state: TraceState, running: boolean): string {
   const lanes = state.order.length
   const tools = state.order.reduce((sum, id) => sum + (state.lanes[id]?.steps.filter(step => step.kind === 'tool').length ?? 0), 0)
-  const head = running ? (state.label ?? '执行中') : state.outcome === 'succeeded' ? '已完成' : state.outcome === 'cancelled' ? '已停止' : state.outcome === 'failed' ? '未完成' : '已结束'
+  const emptyProgress = /^阶段进度[:：]0\/0(?:[,，·]0项受阻)?$/.test(state.label?.replace(/\s/g, '') ?? '')
+  const latest = state.order.flatMap(id => state.lanes[id]?.steps ?? []).at(-1)
+  const phase = latest?.kind === 'llm' ? TASK_LABEL[latest.task ?? ''] : undefined
+  const label = emptyProgress ? undefined : state.label
+  const head = running ? (label ?? (phase ? `正在${phase}` : '执行中')) : state.outcome === 'succeeded' ? '已完成' : state.outcome === 'cancelled' ? '已停止' : state.outcome === 'failed' ? '未完成' : '已结束'
   const seconds = state.startedAt !== undefined && state.endedAt !== undefined ? Math.max(1, Math.round((state.endedAt - state.startedAt) / 1000)) : undefined
-  return `${head} · ${lanes} 个 Lane · ${tools} 次工具调用${seconds ? ` · 耗时 ${seconds}s` : ''}`
+  return `${head} · ${lanes} 个 Lane${tools ? ` · ${tools} 次工具调用` : ''}${seconds ? ` · 耗时 ${seconds}s` : ''}`
 }
 
 function progressState(step: TraceStep): string {
@@ -289,7 +295,7 @@ function RunProgress({ trace }: { trace: TraceState }) {
   }
   if (!groups.length) return null
   return <div className="run-progress" role="log" aria-label="工作进展" aria-live="polite" aria-relevant="additions text">
-    {groups.map(group => group.kind === 'tools' ? <ProgressTools key={group.id} steps={group.steps} /> : <p className="progress-note" key={group.id}>{group.note}</p>)}
+    {groups.map(group => group.kind === 'tools' ? <ProgressTools key={group.id} steps={group.steps} /> : <div className="progress-note" key={group.id}><Markdown text={group.note} /></div>)}
   </div>
 }
 
