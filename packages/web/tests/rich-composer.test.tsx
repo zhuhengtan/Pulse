@@ -5,6 +5,7 @@ import type { Editor } from '@tiptap/core'
 import { RichComposer, emptyComposerDraft, type ComposerDraft, type ComposerPayload } from '../src/RichComposer.js'
 
 beforeAll(() => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList
   Range.prototype.getClientRects = () => [] as unknown as DOMRectList
   Range.prototype.getBoundingClientRect = () => ({ x: 0, y: 0, top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, toJSON() {} })
@@ -70,15 +71,16 @@ it('routes a late send and late file read to their originating draft', async () 
   fireEvent.click(view.getByText('切换会话'))
   expect(await view.findByText('late.txt')).toBeTruthy()
 })
-it.each(['/ Skill', '@ File'])('opens %s and accepts keyboard/mouse selection', async label => {
+it.each(['Skill 技能', '引用项目文件'])('opens %s from the add menu and accepts keyboard/mouse selection', async label => {
   const view = render(<Harness send={async () => false} />)
-  fireEvent.click(view.getByText(label))
+  fireEvent.click(view.getByRole('button', { name: '更多功能' }))
+  fireEvent.click(await view.findByRole('menuitem', { name: label === 'Skill 技能' ? /Skill 技能/ : /引用项目文件/ }))
   const menu = await view.findByRole('listbox')
-  expect(menu.textContent).toContain(label === '/ Skill' ? 'grill-and-plan' : '中文目录/a.ts')
-  if (label === '/ Skill') fireEvent.keyDown(view.container.querySelector('.tiptap')!, { key: 'Enter' })
+  expect(menu.textContent).toContain(label === 'Skill 技能' ? 'grill-and-plan' : '中文目录/a.ts')
+  if (label === 'Skill 技能') fireEvent.keyDown(view.container.querySelector('.tiptap')!, { key: 'Enter' })
   else fireEvent.mouseDown(view.getByRole('option'))
   await waitFor(() => expect(view.queryByRole('listbox')).toBeNull())
-  expect(editorOf(view).getJSON().content?.[0]?.content?.[0]?.type).toBe(label === '/ Skill' ? 'skillChip' : 'fileChip')
+  expect(editorOf(view).getJSON().content?.[0]?.content?.[0]?.type).toBe(label === 'Skill 技能' ? 'skillChip' : 'fileChip')
 })
 it('updates placeholder after authorization', async () => {
   const send = async () => false

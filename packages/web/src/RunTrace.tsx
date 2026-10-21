@@ -238,18 +238,58 @@ function summary(state: TraceState, running: boolean): string {
   return `${head} · ${lanes} 个 Lane · ${tools} 次工具调用${seconds ? ` · 耗时 ${seconds}s` : ''}`
 }
 
-/** Public work updates and observed results remain visible outside technical details. */
+function progressState(step: TraceStep): string {
+  return step.status === 'succeeded' ? '已完成' : step.status === 'failed' ? '失败' : step.status === 'cancelled' ? '已停止' : '进行中'
+}
+
+function ProgressFailure({ step }: { step: TraceStep }) {
+  return <div className="progress-failure">
+    <span className="progress-failure-mark" aria-hidden="true">!</span>
+    <div><strong>{summarizeTool(step).text}</strong><p>{String(step.error?.message ?? step.error?.code ?? '操作失败')}</p></div>
+  </div>
+}
+
+/** Consecutive tool calls stay inspectable without turning updates into a log wall. */
+function ProgressTools({ steps }: { steps: TraceStep[] }) {
+  const [open, setOpen] = useState(false)
+  const active = [...steps].reverse().find(step => !step.status || step.status === 'running')
+  const failures = steps.filter(step => step.status === 'failed')
+  const counts = new Map<string, number>()
+  const verbs: Record<string, string> = { 'fs.read': '读取文件', 'fs.list': '查看目录', 'fs.search': '搜索文件', 'shell.exec': '运行命令', 'web.search': '搜索网页', 'web.fetch': '读取网页' }
+  for (const step of steps) { const verb = verbs[step.tool ?? ''] ?? '工具操作'; counts.set(verb, (counts.get(verb) ?? 0) + 1) }
+  const label = active ? summarizeTool(active).text : steps.length === 1 ? summarizeTool(steps[0]!).text : [...counts].map(([verb, count]) => `${verb} ${count}`).join(' · ')
+  return <div className="progress-tools">
+    <button type="button" className="progress-batch-head" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+      <span className={`progress-batch-state ${failures.length ? 'has-failure' : ''}`} aria-label={active ? '进行中' : failures.length ? '有操作失败' : '操作记录'}>{active ? <i className="trace-spin" /> : <Icon name={summarizeTool(steps[steps.length - 1]!).icon} size={14}/>}</span>
+      <span className="progress-batch-label">{label}</span>
+      {failures.length > 0 && <small>{failures.length} 项失败</small>}
+      <Icon className={open ? 'progress-batch-caret is-open' : 'progress-batch-caret'} name="chevron" size={11}/>
+    </button>
+    {open && <div className="progress-tool-list">
+      {steps.map(step => <div className={`progress-result progress-${step.status ?? 'running'}`} key={step.id}>
+        <span className="progress-result-state">{progressState(step)}</span><span>{summarizeTool(step).text}</span>
+        {typeof step.preview?.output === 'string' && <pre>{step.preview.output}</pre>}
+        {step.error && <p>{String(step.error.message ?? step.error.code ?? '操作失败')}</p>}
+      </div>)}
+    </div>}
+    {!open && failures.map(step => <ProgressFailure key={step.id} step={step} />)}
+  </div>
+}
+
+/** Public progress prose remains visible alongside compact tool summaries. */
 function RunProgress({ trace }: { trace: TraceState }) {
-  const steps = trace.order.flatMap(id => trace.lanes[id]?.steps ?? [])
-  const visible = steps.filter(step => step.note?.trim() || step.kind === 'tool')
-  if (!visible.length) return null
+  const groups: Array<{ kind: 'note'; id: string; note: string } | { kind: 'tools'; id: string; lane: string; steps: TraceStep[] }> = []
+  for (const laneId of trace.order) for (const step of trace.lanes[laneId]?.steps ?? []) {
+    const id = `${laneId}:${step.id}`
+    if (step.kind === 'tool') {
+      const last = groups[groups.length - 1]
+      if (last?.kind === 'tools' && last.lane === laneId) last.steps.push(step)
+      else groups.push({ kind: 'tools', id, lane: laneId, steps: [step] })
+    } else if (step.note?.trim()) groups.push({ kind: 'note', id, note: step.note })
+  }
+  if (!groups.length) return null
   return <div className="run-progress" role="log" aria-label="工作进展" aria-live="polite" aria-relevant="additions text">
-    {visible.map(step => step.kind === 'tool' ? <div className={`progress-result progress-${step.status ?? 'running'}`} key={step.id}>
-      <span className="progress-result-state">{step.status === 'running' ? '进行中' : step.status === 'succeeded' ? '已完成' : step.status === 'failed' ? '失败' : '已停止'}</span>
-      <span>{summarizeTool(step).text}</span>
-      {typeof step.preview?.output === 'string' && <pre>{step.preview.output}</pre>}
-      {step.error && <p>{String(step.error.message ?? step.error.code ?? '操作失败')}</p>}
-    </div> : <p className="progress-note" key={step.id}>{step.note}</p>)}
+    {groups.map(group => group.kind === 'tools' ? <ProgressTools key={group.id} steps={group.steps} /> : <p className="progress-note" key={group.id}>{group.note}</p>)}
   </div>
 }
 

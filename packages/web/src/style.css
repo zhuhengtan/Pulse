@@ -118,11 +118,29 @@
 .question-custom { display: grid; gap: 8px; margin-top: 18px; font-size: 13px; }
 .question-custom textarea { width: 100%; resize: vertical; }
 .approval-policy-select { min-width: 118px; max-width: 160px; }
-.run-progress { display: grid; gap: 10px; margin: 0 0 12px; font-size: 13px; line-height: 1.65; }
+.run-progress { display: grid; gap: 14px; margin: 0 0 12px; font-size: 14px; line-height: 1.75; }
 .progress-note { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .progress-result { display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--muted); overflow-wrap: anywhere; }
 .progress-result-state { flex-shrink: 0; font-size: 12px; }
 .progress-result pre { flex-basis: 100%; margin: 4px 0; padding: 8px 12px; max-height: 180px; overflow: auto; white-space: pre-wrap; background: var(--soft); border-radius: 8px; }
 .progress-result p { flex-basis: 100%; margin: 0; }
 .progress-failed { color: #b44747; }
+.run-trace { border:0; border-radius:0; background:transparent; overflow:visible; }
+.run-trace-head { border-radius:8px; color:var(--muted); background:var(--soft); }
+.progress-tools { min-width:0; }
+.progress-batch-head { display:flex; align-items:center; gap:8px; max-width:100%; min-height:28px; padding:2px 0; border:0; background:transparent; color:var(--muted); font:inherit; font-size:12px; text-align:left; cursor:pointer; }
+.progress-batch-head:hover { color:var(--ink); }
+.progress-batch-head:focus-visible { outline:2px solid var(--blue); outline-offset:3px; border-radius:4px; }
+.progress-batch-state { display:flex; align-items:center; flex:0 0 16px; }
+.progress-batch-state.has-failure,.progress-batch-head small { color:#b44747; }
+.progress-batch-label { min-width:0; overflow-wrap:anywhere; }
+.progress-batch-head small { flex:none; font-size:11px; }
+.progress-batch-caret { flex:none; transition:transform .15s ease; }
+.progress-batch-caret.is-open { transform:rotate(90deg); }
+.progress-tool-list { display:grid; gap:7px; margin:6px 0 2px 7px; padding:3px 0 3px 15px; border-left:1px solid var(--line); font-size:12px; }
+.progress-failure { display:flex; align-items:flex-start; gap:8px; margin:6px 0 0; padding:8px 10px; border-left:2px solid #b44747; background:var(--soft); border-radius:0 6px 6px 0; font-size:12px; line-height:1.6; }
+.progress-failure-mark { flex:none; color:#b44747; font-weight:600; }
+.progress-failure>div { min-width:0; }
+.progress-failure strong { display:block; font-weight:500; overflow-wrap:anywhere; }
+.progress-failure p { margin:3px 0 0; color:var(--muted); overflow-wrap:anywhere; }
 .question-options .pulse-button { flex-direction: column; align-items: flex-start; gap: 4px; }

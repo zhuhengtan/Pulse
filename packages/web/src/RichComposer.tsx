@@ -6,6 +6,7 @@ import { Markdown } from 'tiptap-markdown'
 import { Node, Extension, mergeAttributes, type JSONContent } from '@tiptap/core'
 import { Suggestion, type SuggestionProps, type SuggestionKeyDownProps } from '@tiptap/suggestion'
 import { PluginKey } from '@tiptap/pm/state'
+import { Dropdown } from 'antd'
 import { Icon } from './Icon.js'
 import { PulseButton } from './PulseControls.js'
 import { apiJson, type PulseWebTransport, type WebAttachment } from './transport.js'
@@ -49,6 +50,7 @@ export interface RichComposerProps {
   transport: PulseWebTransport
   onSend: (payload: ComposerPayload) => Promise<boolean>
   onStop?: (() => void) | undefined
+  toolbarExtra?: React.ReactNode
   onChange: (update: (current: ComposerDraft) => ComposerDraft) => void
 }
 
@@ -235,6 +237,7 @@ export function RichComposer({
   transport,
   onSend,
   onStop,
+  toolbarExtra,
   onChange,
 }: RichComposerProps) {
   const { markdown: value, attachments } = draft
@@ -246,6 +249,7 @@ export function RichComposer({
   const sendingRef = useRef(false)
   const setAttachments = (update: (current: AttachmentDraft[]) => AttachmentDraft[]) => onChange(current => ({ ...current, attachments: update(current.attachments), revision: current.revision + 1 }))
   const [isDragOver, setIsDragOver] = useState(false)
+  const [toolsOpen, setToolsOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [hasContent, setHasContent] = useState(Boolean(value.trim()))
@@ -797,40 +801,32 @@ export function RichComposer({
               }
             }}
           />
-          <button
-            type="button"
-            className="composer-tool-btn"
-            title="添加附件或图片 (上限 20MB, 最多 10 个)"
-            disabled={disabled || submitting}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <Icon name="attachment" size={15} />
-            <span>附件</span>
-          </button>
-          <button
-            type="button"
-            className="composer-tool-btn"
-            title="快捷调用 Skill (/)"
-            disabled={disabled || submitting}
-            onClick={() => {
-              if (!editor) return
-              editor.chain().focus().insertContent('/').run()
+          <Dropdown
+            trigger={['click']}
+            placement="topLeft"
+            open={toolsOpen}
+            onOpenChange={setToolsOpen}
+            menu={{
+              className: 'composer-add-menu',
+              items: [
+                { key: 'attachment', icon: <Icon name="attachment" size={17} />, label: '添加附件或图片' },
+                { key: 'skill', icon: <Icon name="spark" size={17} />, label: 'Skill 技能', extra: '/' },
+                { key: 'file', icon: <Icon name="file" size={17} />, label: '引用项目文件', extra: '@', disabled: !projectId },
+              ],
+              onClick: ({ key }) => {
+                setToolsOpen(false)
+                if (key === 'attachment') fileInputRef.current?.click()
+                else if (editor) editor.chain().focus().insertContent(key === 'skill' ? '/' : '@').run()
+              },
             }}
           >
-            <span>/ Skill</span>
-          </button>
-          <button
-            type="button"
-            className="composer-tool-btn"
-            title={projectId ? "快速引用项目文件 (@)" : "工作模式关联项目后可快捷引用文件"}
-            disabled={disabled || submitting || !projectId}
-            onClick={() => {
-              if (!editor) return
-              editor.chain().focus().insertContent('@').run()
-            }}
-          >
-            <span>@ File</span>
-          </button>
+            <button type="button" className="composer-tool-btn composer-add-button"
+              aria-label="更多功能" aria-haspopup="menu" aria-expanded={toolsOpen}
+              title="添加附件、Skill 或文件引用" disabled={disabled || submitting}>
+              <Icon name="plus" size={22} />
+            </button>
+          </Dropdown>
+          {toolbarExtra}
         </div>
 
         <div className="composer-tools-right">

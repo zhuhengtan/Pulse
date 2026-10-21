@@ -86,6 +86,8 @@ body, :root { color: var(--ink); background: var(--panel); }
 .composer textarea { min-height:42px; padding:11px 13px; color:var(--ink); }
 .composer button[type="submit"] { min-width:38px; min-height:38px; width:38px; height:38px; margin:5px; border-radius:11px!important; background:var(--blue)!important; }
 .composer-hint { color:#969ba4; }
+.composer-meta { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:5px 5px 0; }
+.composer-meta .composer-hint { flex:1; min-width:0; margin:0; text-align:center; }
 .navbar.details-open { z-index:23; }
 .popover-scrim { position:fixed; z-index:7; inset:0; border:0; background:transparent; }
 .details-popover { position:fixed; z-index:14; top:calc(65px + var(--pulse-safe-top,0px)); right:12px; width:min(380px,calc(100vw - 24px)); max-height:min(76dvh,640px); overflow:auto; padding:0; border:1px solid var(--line); border-radius:14px; background:var(--surface-raised); box-shadow:var(--shadow); color:var(--ink); }

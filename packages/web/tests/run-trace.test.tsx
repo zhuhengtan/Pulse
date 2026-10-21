@@ -163,7 +163,7 @@ describe('active work trace recovery', () => {
   })
 })
 
-it('keeps public progress notes and observed tool results visible after completion', () => {
+it('keeps public progress prose visible and tool output inspectable after completion', () => {
   const trace = [
     { type: 'trace', runId: 'progress', seq: 1, data: { kind: 'note', effectId: 'step', task: 'reason', text: '已确认入口，接下来验证提交回显。' } },
     { type: 'tool', runId: 'progress', seq: 2, data: { activityId: 'check', effectId: 'check', tool: 'shell.exec', status: 'succeeded', args: { command: 'pnpm', args: ['test'] }, preview: { output: '4 tests passed', exitCode: 0 } } },
@@ -172,5 +172,30 @@ it('keeps public progress notes and observed tool results visible after completi
   const view = render(<RunTraceView trace={trace} running={false} />)
   expect(view.getByRole('button', { name: /主进程/ }).getAttribute('aria-expanded')).toBe('false')
   expect(view.getByRole('log', { name: '工作进展' }).textContent).toContain('已确认入口，接下来验证提交回显。')
+  expect(view.queryByText('4 tests passed')).toBeNull()
+  fireEvent.click(view.getByRole('button', { name: /执行 pnpm test/ }))
   expect(view.getByText('4 tests passed')).toBeTruthy()
+})
+
+it('groups consecutive tools between updates and keeps failures visible while folded', () => {
+  const trace = {
+    order: ['main'], outcome: 'failed' as const,
+    lanes: { main: { id: 'main', label: '主任务', status: 'failed' as const, steps: [
+      { id: 'note', kind: 'llm' as const, note: '先检查入口。' },
+      { id: 'read-a', kind: 'tool' as const, tool: 'fs.read', status: 'succeeded' as const, args: { path: 'a.ts' } },
+      { id: 'read-b', kind: 'tool' as const, tool: 'fs.read', status: 'succeeded' as const, args: { path: 'b.ts' } },
+      { id: 'next', kind: 'llm' as const, note: '现在运行验证。' },
+      { id: 'check', kind: 'tool' as const, tool: 'shell.exec', status: 'failed' as const, args: { command: 'pnpm', args: ['test'] }, error: { message: '服务暂时不可用' } },
+    ] } },
+  }
+  const view = render(<RunTraceView trace={trace} running={false} />)
+  expect(view.getByText('先检查入口。')).toBeTruthy()
+  expect(view.getByText('现在运行验证。')).toBeTruthy()
+  const tools = view.getByRole('button', { name: /读取文件 2/ })
+  expect(tools.getAttribute('aria-expanded')).toBe('false')
+  expect(view.queryByText('读取 a.ts')).toBeNull()
+  expect(view.getByText('服务暂时不可用')).toBeTruthy()
+  fireEvent.click(tools)
+  expect(view.getByText('读取 a.ts')).toBeTruthy()
+  expect(view.getByText('读取 b.ts')).toBeTruthy()
 })
