@@ -292,6 +292,7 @@ function parseHumanArbitrationDecision(value: unknown): HumanArbitrationDecision
   if (candidate.targetLaneId !== undefined && typeof candidate.targetLaneId !== 'string') return undefined
   if (candidate.targetEffectId !== undefined && typeof candidate.targetEffectId !== 'string') return undefined
   if (candidate.reason !== undefined && typeof candidate.reason !== 'string') return undefined
+  if (candidate.response !== undefined && typeof candidate.response !== 'string') return undefined
   return {
     schemaVersion: 1,
     decisionId: candidate.decisionId,
@@ -302,6 +303,7 @@ function parseHumanArbitrationDecision(value: unknown): HumanArbitrationDecision
     ...(candidate.targetEffectId === undefined ? {} : { targetEffectId: candidate.targetEffectId }),
     ...(candidate.reason === undefined ? {} : { reason: candidate.reason }),
     modelId: candidate.modelId,
+    ...(candidate.response === undefined ? {} : { response: candidate.response }),
   }
 }
 
@@ -907,7 +909,7 @@ export class PulseRuntime {
     const effects = [...this.state.effects.values()].filter((effect) => effect.agentId === agent.id || this.ownsAgentForRuntime(effect.agentId, agent.id)).map((effect) => ({ effectId: effect.id, agentId: effect.agentId, laneId: effect.ownerLaneId, kind: effect.kind, state: effect.state, ...(effect.sideEffectPolicy === undefined ? {} : { sideEffectPolicy: effect.sideEffectPolicy }), sideEffectState: effect.sideEffectState }))
     const llmLimit = this.state.maxRunning.llm
     const availableLLMSlots = Number.isFinite(llmLimit) ? Math.max(0, llmLimit - this.runningCount('llm') - 1) : Number.POSITIVE_INFINITY
-    return { schemaVersion: 1, decisionId: `human-decision-${this.sessionId}-${this.humanArbitrationRequestSeq}`, agentId: agent.id, input: structuredClone(input), lanes, effects, availableLLMSlots }
+    return { schemaVersion: 1, decisionId: `human-decision-${this.sessionId}-${input.id}-${this.humanArbitrationRequestSeq}`, agentId: agent.id, input: structuredClone(input), lanes, effects, availableLLMSlots }
   }
   private ownsAgentForRuntime(candidateAgentId: string, ancestorAgentId: string): boolean {
     let current = this.state.agents.get(candidateAgentId)
@@ -922,7 +924,7 @@ export class PulseRuntime {
     else next.decisionReason = decision.reason
     next.decisionModelId = decision.modelId
     next.decidedAt = this.state.now
-    const event = { type: eventType, agentId: record.agentId, data: { inputId: record.id, action: decision.action, modelId: decision.modelId, ...(decision.reason === undefined ? {} : { reason: decision.reason }), ...(decision.targetLaneId === undefined ? {} : { targetLaneId: decision.targetLaneId }), ...(decision.targetEffectId === undefined ? {} : { targetEffectId: decision.targetEffectId }) } }
+    const event = { type: eventType, agentId: record.agentId, data: { inputId: record.id, action: decision.action, modelId: decision.modelId, ...(decision.reason === undefined ? {} : { reason: decision.reason }), ...(decision.response === undefined ? {} : { response: decision.response }), ...(decision.targetLaneId === undefined ? {} : { targetLaneId: decision.targetLaneId }), ...(decision.targetEffectId === undefined ? {} : { targetEffectId: decision.targetEffectId }) } }
     const mutations: Mutation[] = [{ op: 'setHumanInput', inputId: record.id, record: next }, { op: 'appendEvent', event }]
     this.assertStorageAdmission(mutations)
     commitMutationTransaction(this.state, this.mutationLog, `human-input:${record.id}:decision:${decision.action}`, mutations, this.state.now, this.sessionId)
@@ -978,7 +980,7 @@ export class PulseRuntime {
         const parentAgent = this.state.agents.get(record.agentId)
         const parentLane = parentAgent === undefined ? undefined : this.state.lanes.get(parentAgent.rootLaneId)
         const inheritedResults = parentLane?.visibleResultRefs === undefined ? [] : [...parentLane.visibleResultRefs].slice(-64)
-        const child = this.createAgent({ goal: `Human input: ${typeof record.value === 'string' ? record.value : JSON.stringify(record.value)}`, program: this.humanInputProgram, priority: 'urgent', parentAgentId: record.agentId, warmStart: { agentId: record.agentId, globalVersion: 'latest', include: 'facts_and_findings', ...(inheritedResults.length ? { relevanceRefs: inheritedResults } : {}) } })
+        const child = this.createAgent({ goal: `Human input: ${typeof record.value === 'string' ? record.value : record.value && typeof record.value === 'object' && !Array.isArray(record.value) && typeof record.value.text === 'string' ? record.value.text : JSON.stringify(record.value)}`, program: this.humanInputProgram, priority: 'urgent', parentAgentId: record.agentId, warmStart: { agentId: record.agentId, globalVersion: 'latest', include: 'facts_and_findings', ...(inheritedResults.length ? { relevanceRefs: inheritedResults } : {}) } })
         const next = structuredClone(record); next.status = 'consumed'; next.handledByLaneId = child.laneId
         this.commitHumanInputDecision(record, decision)
         const mutations: Mutation[] = [{ op: 'setHumanInput', inputId: record.id, record: next }, { op: 'appendEvent', event: { type: 'human.input.dispatched', agentId: record.agentId, laneId: child.laneId, data: { inputId: record.id, decision: 'spawn', childAgentId: child.agentId } } }]
@@ -1010,14 +1012,15 @@ export class PulseRuntime {
     const requestId = request.decisionId
     this.humanArbitrationRequestSeq++
     this.humanArbitrationRequests.set(requestId, { agentId: agent.id, inputId: input.id })
+    const failed = () => {
+      this.humanArbitrationRequests.delete(requestId)
+      try { this.enqueueFact({ type: 'human_arbitration', decision: strictJsonValue({ schemaVersion: 1, decisionId: requestId, inputId: input.id, agentId: agent.id, action: 'defer', reason: 'Human arbitration failed or timed out.', response: '暂时无法处理这条新输入，内容已保留；当前任务没有因此自动停止。请重试。', modelId: this.humanArbitrationModelId ?? 'model' }) }, `human-arbitration:${requestId}:failure`, true) } catch { /* runtime shutdown */ }
+    }
     const accepted = coordinator.request(request, (decision) => {
+      if (decision.decisionId !== requestId || decision.inputId !== input.id || decision.agentId !== agent.id || decision.modelId !== this.humanArbitrationModelId) { failed(); return }
       this.humanArbitrationRequests.delete(requestId)
-      if (decision.decisionId !== requestId || decision.inputId !== input.id || decision.agentId !== agent.id || decision.modelId !== this.humanArbitrationModelId) return
-      try { this.enqueueFact({ type: 'human_arbitration', decision: strictJsonValue(decision) }, `human-arbitration:${requestId}`, true) } catch { /* malformed model output is handled as a deferred input */ }
-    }, () => {
-      this.humanArbitrationRequests.delete(requestId)
-      try { this.enqueueFact({ type: 'human_arbitration', decision: strictJsonValue({ schemaVersion: 1, decisionId: requestId, inputId: input.id, agentId: agent.id, action: 'defer', reason: 'Human arbitration timed out.', modelId: this.humanArbitrationModelId ?? 'model' }) }, `human-arbitration:${requestId}:timeout`, true) } catch { /* runtime shutdown */ }
-    })
+      try { this.enqueueFact({ type: 'human_arbitration', decision: strictJsonValue(decision) }, `human-arbitration:${requestId}`, true) } catch { failed() }
+    }, failed)
     if (!accepted) this.humanArbitrationRequests.delete(requestId)
     return accepted
   }
@@ -1765,6 +1768,12 @@ export class PulseRuntime {
       timer.callback()
       tickOperations++
     }
+    // Model requests are transient; a durable pending input is redispatched after restore.
+    if (this.humanArbitrationCoordinator) for (const input of this.state.humanInputs.values()) {
+      if (input.status !== 'pending' || input.targetEffectId || [...this.humanArbitrationRequests.values()].some(request => request.inputId === input.id)) continue
+      const agent = this.state.agents.get(input.agentId)
+      if (agent) this.requestHumanArbitration(agent, input)
+    }
     // A restored snapshot may contain a settled Effect and its still-pending
     // Wait when the process stopped between the two persistence writes. Re-run
     // wait resolution after recovery timers have fired so the Lane receives its
@@ -1929,6 +1938,7 @@ export class PulseRuntime {
       if (this.executionYieldPending.size) { this.executionYieldPending.clear(); await new Promise<void>((resolve) => setImmediate(resolve)) }
       const root = this.state.lanes.get(agent.rootLaneId)
       if (root && ['succeeded', 'failed', 'cancelled'].includes(root.status)) {
+        if ([...this.humanArbitrationRequests.values()].some(input => input.agentId === agentId)) { await this.waitForFact(); continue }
         const status: 'succeeded' | 'failed' | 'cancelled' = root.status === 'succeeded' ? 'succeeded' : root.status === 'cancelled' ? 'cancelled' : 'failed'
         this.commitAgentState(agent.id, status, `agent:${agent.id}:run-agent-settled:${root.version}`)
         const effectIds = new Set([...this.state.effects.values()].filter((effect) => effect.agentId === agentId).map((effect) => effect.id))
@@ -2154,7 +2164,7 @@ export class PulseRuntime {
     }
     return false
   }
-  private hasPendingHostInteraction(agentId?: string): boolean { return [...this.state.effects.values()].some((effect) => effect.kind === 'human' && !effect.outcome && (agentId === undefined || effect.agentId === agentId)) }
+  private hasPendingHostInteraction(agentId?: string): boolean { return [...this.humanArbitrationRequests.values()].some(input => agentId === undefined || input.agentId === agentId) || [...this.state.effects.values()].some((effect) => effect.kind === 'human' && !effect.outcome && (agentId === undefined || effect.agentId === agentId)) }
   private waitForFact(): Promise<void> { return new Promise((resolve) => this.factWaiters.push(resolve)) }
 
   /** Wait for a state or observation change without polling the event loop. */

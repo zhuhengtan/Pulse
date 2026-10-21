@@ -7,6 +7,7 @@ import { Node, Extension, mergeAttributes, type JSONContent } from '@tiptap/core
 import { Suggestion, type SuggestionProps, type SuggestionKeyDownProps } from '@tiptap/suggestion'
 import { PluginKey } from '@tiptap/pm/state'
 import { Dropdown } from 'antd'
+import type { FollowupBehavior } from './MessageQueue.js'
 import { Icon } from './Icon.js'
 import { PulseButton } from './PulseControls.js'
 import { apiJson, type PulseWebTransport, type WebAttachment } from './transport.js'
@@ -48,7 +49,8 @@ export interface RichComposerProps {
   surfaceMode: 'chat' | 'work'
   projectId?: string | undefined
   transport: PulseWebTransport
-  onSend: (payload: ComposerPayload) => Promise<boolean>
+  followupBehavior?: FollowupBehavior | undefined
+  onSend: (payload: ComposerPayload, behavior?: FollowupBehavior) => Promise<boolean>
   onStop?: (() => void) | undefined
   toolbarExtra?: React.ReactNode
   onChange: (update: (current: ComposerDraft) => ComposerDraft) => void
@@ -235,6 +237,7 @@ export function RichComposer({
   surfaceMode,
   projectId,
   transport,
+  followupBehavior = 'queue',
   onSend,
   onStop,
   toolbarExtra,
@@ -291,8 +294,8 @@ export function RichComposer({
     }
   }, [transport])
 
-  const handleSend = async () => {
-    if (disabled || submitting || sendingRef.current || draft.processing || surfaceMode === 'work' && running) return
+  const handleSend = async (behavior?: FollowupBehavior) => {
+    if (disabled || submitting || sendingRef.current || draft.processing) return
     const currentMarkdown = (editor?.storage as any)?.markdown?.getMarkdown?.() ?? ''
     const trimmed = currentMarkdown.trim()
     if (!trimmed && attachments.length === 0) return
@@ -352,7 +355,7 @@ export function RichComposer({
     sendingRef.current = true
     setSendError('')
     try {
-      if (await onSend(payload)) {
+      if (await onSend(payload, behavior ?? followupBehavior)) {
         onChange(current => current.revision === snapshotRevision ? { ...emptyComposerDraft(), revision: current.revision + 1 } : current)
         if (draftRef.current.revision === snapshotRevision && !editor?.isDestroyed) {
           editor?.commands.setContent('', { emitUpdate: false })
@@ -672,7 +675,7 @@ export function RichComposer({
 
   const sendRef = useRef(handleSend)
   sendRef.current = handleSend
-  const canSubmit = (hasContent || attachments.length > 0) && !draft.processing && !submitting && !disabled && !(surfaceMode === 'work' && running)
+  const canSubmit = (hasContent || attachments.length > 0) && !draft.processing && !submitting && !disabled
 
   return (
     <div
@@ -830,7 +833,7 @@ export function RichComposer({
         </div>
 
         <div className="composer-tools-right">
-          {running && surfaceMode === 'work' ? (
+          {running && (
             <PulseButton
               type="button"
               className="composer-stop-btn"
@@ -842,17 +845,18 @@ export function RichComposer({
             >
               <span className={stopping ? 'spinner' : 'composer-stop-icon'} aria-hidden="true" />
             </PulseButton>
-          ) : (
-            <button
+          )}
+          {running && <button type="button" className="composer-alternate-send" disabled={!canSubmit} onClick={() => void handleSend(followupBehavior === 'queue' ? 'immediate' : 'queue')}>{followupBehavior === 'queue' ? '立即发送' : '加入队列'}</button>}
+          <button
               type="button"
               className="composer-send-btn"
               disabled={!canSubmit}
-              aria-label="发送"
+              aria-label={running ? followupBehavior === 'queue' ? '加入队列' : '立即发送' : '发送'}
+              title={running ? followupBehavior === 'queue' ? '加入队列' : '立即交给主线程' : '发送'}
               onClick={() => void handleSend()}
             >
               {submitting ? <span className="spinner" /> : <Icon name="send" size={17} />}
             </button>
-          )}
         </div>
       </div>
     </div>

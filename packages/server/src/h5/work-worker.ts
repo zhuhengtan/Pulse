@@ -165,7 +165,7 @@ class RemoteWorkRun {
         if (signal?.aborted) throw new Error('APPROVAL_REVIEW_ABORTED')
         return await this.rpc('reviewApproval', [effectId]) as Awaited<ReturnType<RunHandle['reviewApproval']>>
       },
-      submitHumanInput: async (text, targetEffectId) => { await this.rpc('submitHumanInput', [text, targetEffectId]) },
+      submitHumanInput: async (text, targetEffectId, options) => { await this.rpc('submitHumanInput', [text, targetEffectId, options]) },
       shutdown: async () => {
         if (!this.settledValue && this.child.connected) await this.rpc('cancel', ['H5_SERVER_SHUTDOWN'], 2_000).catch(() => undefined)
         const timer = setTimeout(() => {
@@ -335,7 +335,7 @@ export async function runH5WorkWorker(host: LocalHost, conversationId: string): 
           case 'replyBatch': await handle.replyBatch(String(request.args[0] ?? ''), request.args[1] as Array<{ effectId: string; value: JsonValue }>); break
           case 'pendingInteractions': value = await handle.pendingInteractions(); break
           case 'reviewApproval': value = await handle.reviewApproval(String(request.args[0] ?? '')); break
-          case 'submitHumanInput': await handle.submitHumanInput(String(request.args[0] ?? ''), typeof request.args[1] === 'string' ? request.args[1] : undefined); break
+          case 'submitHumanInput': await handle.submitHumanInput(String(request.args[0] ?? ''), typeof request.args[1] === 'string' ? request.args[1] : undefined, request.args[2] as import('../index.js').HumanInputOptions | undefined); break
           default: throw new Error('WORKER_RPC_UNSUPPORTED')
         }
         await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'rpcResult', requestId: request.requestId, ok: true, ...(value === undefined ? {} : { value }) })

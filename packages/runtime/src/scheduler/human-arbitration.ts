@@ -41,6 +41,7 @@ export interface HumanArbitrationDecision {
   targetEffectId?: string
   reason?: string
   modelId: string
+  response?: string
 }
 
 export interface HumanArbitrationModel {
@@ -55,26 +56,32 @@ export interface HumanArbitrationConfig {
 
 export class HumanArbitrationCoordinator {
   private outstanding = 0
+  private tail: Promise<void> = Promise.resolve()
+  private stopped = false
   private readonly controllers = new Set<AbortController>()
   constructor(private readonly model: HumanArbitrationModel, private readonly timeoutMs: number) {}
   get pending(): number { return this.outstanding }
   request(request: HumanArbitrationRequest, onDecision: (decision: HumanArbitrationDecision) => void, onFailure: () => void): boolean {
-    if (this.outstanding > 0) return false
-    const controller = new AbortController()
-    this.controllers.add(controller)
+    if (this.stopped) return false
     this.outstanding++
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs)
-    void Promise.resolve().then(() => this.model.decide(structuredClone(request), controller.signal)).then((decision) => {
-      if (decision && typeof decision === 'object') onDecision(structuredClone(decision))
-      else onFailure()
-    }, () => onFailure()).finally(() => {
-      clearTimeout(timer)
-      this.controllers.delete(controller)
-      this.outstanding--
-    })
+    // Preserve user-input order, without waiting for any execution Effect.
+    this.tail = this.tail.then(async () => {
+      if (this.stopped) return
+      const controller = new AbortController()
+      this.controllers.add(controller)
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        const timeout = new Promise<never>((_, reject) => { controller.signal.addEventListener('abort', () => reject(new Error('HUMAN_INPUT_ABORTED')), { once: true }); timer = setTimeout(() => controller.abort(), this.timeoutMs) })
+        const decision = await Promise.race([this.model.decide(structuredClone(request), controller.signal), timeout])
+        if (!this.stopped && decision && typeof decision === 'object') onDecision(structuredClone(decision))
+        else if (!this.stopped) onFailure()
+      } catch { if (!this.stopped) onFailure() }
+      finally { clearTimeout(timer); this.controllers.delete(controller) }
+    }).finally(() => { this.outstanding-- })
     return true
   }
-  cancel(): void { for (const controller of this.controllers) controller.abort(); this.controllers.clear() }
+  cancel(): void { this.stopped = true; for (const controller of this.controllers) controller.abort(); this.controllers.clear() }
+
 }
 
 /** Deterministic, side-effect-safe control grammar used before model arbitration. */
@@ -84,7 +91,7 @@ export function ruleHumanArbitration(value: JsonValue, agentId: string, inputId:
   const command = typeof object?.command === 'string' ? object.command : text?.startsWith('/') ? text.slice(1).split(/\s+/, 1)[0] : undefined
   const targetLaneId = typeof object?.laneId === 'string' ? object.laneId : undefined
   const targetEffectId = typeof object?.effectId === 'string' ? object.effectId : undefined
-  if (!command && text) {
+  if (!command && text && object?.modelFirst !== true) {
     const normalizedText = text.toLowerCase().replace(/[\s，。！？!?、,.]+/g, '')
     const isContinuation = /^(继续|继续处理|接着做|往下做|恢复任务|resume|continue|goon|keepgoing)$/.test(normalizedText)
     const isStatusCheck = /^(你还活着吗|还在吗|有进展吗|进展呢|现在怎么样|areyoualive|areyoustillthere|anyupdate|status)$/.test(normalizedText)

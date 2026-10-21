@@ -298,9 +298,9 @@ export class H5Server {
           process.stderr.write(`h5 request failed: ${message}\n`)
         }
         if (!res.headersSent) {
-          const status = message === 'PAYLOAD_TOO_LARGE' ? 413 : message === 'INVALID_JSON' ? 400 : message === 'REQUEST_ID_REUSED' || message === 'ASSISTANT_MESSAGE_ALREADY_COMPLETED' ? 409 : 500
+          const status = message === 'PAYLOAD_TOO_LARGE' ? 413 : message === 'INVALID_JSON' ? 400 : message === 'CONVERSATION_BUSY' || message === 'REQUEST_ID_REUSED' || message === 'ASSISTANT_MESSAGE_ALREADY_COMPLETED' ? 409 : 500
           res.writeHead(status, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: message === 'PAYLOAD_TOO_LARGE' || message === 'INVALID_JSON' || message === 'REQUEST_ID_REUSED' || message === 'ASSISTANT_MESSAGE_ALREADY_COMPLETED' ? message : 'INTERNAL_ERROR' }))
+          res.end(JSON.stringify({ error: message === 'PAYLOAD_TOO_LARGE' || message === 'INVALID_JSON' || message === 'CONVERSATION_BUSY' || message === 'REQUEST_ID_REUSED' || message === 'ASSISTANT_MESSAGE_ALREADY_COMPLETED' ? message : 'INTERNAL_ERROR' }))
         } else if (!res.writableEnded) {
           res.destroy(err instanceof Error ? err : undefined)
         }
@@ -515,7 +515,7 @@ export class H5Server {
     if (conversationId === this.assistantInbox.conversationId) throw new Error('WORK_SESSION_REQUIRED')
     const conversation = await this.host.getConversation(conversationId)
     const active = conversation.summary.activeRunId ? this.activeRuns.get(conversation.summary.activeRunId) : undefined
-    if (active) throw new Error('WORK_SESSION_BUSY_USE_INTERACTION')
+    if (active) { await active.submitHumanInput(text); return }
     await this.startConversationRun(conversationId, text)
   }
 
@@ -648,7 +648,7 @@ export class H5Server {
           try {
             const result = await this.dispatchChatRequest(req, path.pathname + path.search, frame.method ?? 'GET', frame.body)
             this.sendChat(client, { type: 'response', id: frame.id, ...result })
-          } catch (error) { this.sendChat(client, { type: 'response', id: frame.id, status: 400, body: { error: error instanceof Error ? error.message : 'CHAT_FAILED' } }) }
+          } catch (error) { this.sendChat(client, { type: 'response', id: frame.id, status: error instanceof Error && ['CONVERSATION_BUSY', 'REQUEST_ID_REUSED'].includes(error.message) ? 409 : 400, body: { error: error instanceof Error ? error.message : 'CHAT_FAILED' } }) }
           finally { inFlight-- }
         })().catch(() => client.close(1003, 'Invalid chat request')) })
         void this.host.conversationData.call<number>('revision').then(revision => this.sendChat(client, { type: 'changed', revision }))
@@ -1008,7 +1008,7 @@ export class H5Server {
     }
     if (pathname === '/api/session' && method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify({ ok: true, deviceId: authedDevice?.id, localAdmin, canBrowseHostPaths, canRegisterProject, canUseTerminal: localAdmin, canEditConfig: localAdmin, canControlAutomation }))
+      res.end(JSON.stringify({ ok: true, queueScope: createHash('sha256').update(resolve(this.dataDir)).digest('hex').slice(0, 32), deviceId: authedDevice?.id, localAdmin, canBrowseHostPaths, canRegisterProject, canUseTerminal: localAdmin, canEditConfig: localAdmin, canControlAutomation }))
       return
     }
 
@@ -1047,6 +1047,25 @@ export class H5Server {
       const mentionedFiles = Array.isArray(body.mentionedFiles) ? body.mentionedFiles.filter((f): f is string => typeof f === 'string') : undefined
       if ((!text && attachments.length === 0) || text.length > 20_000 || !/^[A-Za-z0-9._:-]{8,128}$/.test(requestId)) {
         res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: (!text && attachments.length === 0) ? 'MESSAGE_REQUIRED' : 'ASSISTANT_REQUEST_INVALID' })); return
+      }
+      if (body.delivery === 'immediate' || body.delivery === 'whenIdle') {
+        const conversationId = this.assistantInbox.conversationId
+        const previous = (await this.host.getConversationMessages(conversationId)).find(message => message.id === `msg-${requestId}`)
+        if (previous?.runId) {
+          if (previous.text !== text || JSON.stringify(previous.attachments ?? []) !== JSON.stringify(attachments) || JSON.stringify(previous.skills ?? []) !== JSON.stringify(skills ?? []) || JSON.stringify(previous.mentionedFiles ?? []) !== JSON.stringify(mentionedFiles ?? [])) throw new Error('REQUEST_ID_REUSED')
+          const receipt = this.assistantInbox.list().find(item => item.messageId === requestId)
+          if (!(body.retry === true && receipt && ['failed', 'interrupted'].includes(receipt.state))) { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ conversationId, messageId: requestId, runId: receipt?.runId ?? previous.runId, state: receipt?.state ?? (this.activeRuns.has(previous.runId) ? 'replying' : 'completed'), duplicate: true })); return }
+        }
+        const conversation = await this.host.getConversation(conversationId)
+        const active = conversation.summary.activeRunId ? this.activeRuns.get(conversation.summary.activeRunId) : undefined
+        if (active && body.delivery === 'immediate') {
+          await active.submitHumanInput(text, undefined, { requestId, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}) })
+          await this.assistantInbox.acceptInput({ requestId, text, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}) }, active.id)
+          res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ conversationId, messageId: requestId, runId: active.id, state: this.assistantInbox.list().find(item => item.messageId === requestId)?.state ?? 'replying' })); return
+        }
+        const existing = this.assistantInbox.list().find(item => item.messageId === requestId)
+        if (!active && [...this.activeRuns.values()].some(handle => handle.conversationId === conversationId)) throw new Error('CONVERSATION_BUSY')
+        if (!existing && (conversation.summary.activeRunId || this.assistantPendingRuns.size || this.assistantInbox.hasQueued())) throw new Error('CONVERSATION_BUSY')
       }
       const accepted = body.retry === true
         ? await this.assistantInbox.retry(requestId, text, attachments.length ? attachments : undefined, skills, mentionedFiles)
@@ -1748,6 +1767,15 @@ export class H5Server {
           return
         }
 
+        if (body.delivery === 'immediate' || body.delivery === 'whenIdle') {
+          const conversation = await this.host.getConversation(convId)
+          const active = conversation.summary.activeRunId ? this.activeRuns.get(conversation.summary.activeRunId) : undefined
+          if (active && body.delivery === 'immediate') {
+            await active.submitHumanInput(text, undefined, { ...(requestId ? { requestId } : {}), ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}) })
+            res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId: active.id })); return
+          }
+          if (conversation.summary.activeRunId || [...this.activeRuns.values()].some(handle => handle.conversationId === convId)) throw new Error('CONVERSATION_BUSY')
+        }
         const handle = await this.startConversationRun(convId, text, {
           ...(requestId ? { requestId } : {}),
           ...(attachments.length ? { attachments } : {}),
@@ -2144,7 +2172,7 @@ export class H5Server {
       else if (event.type === 'lanes') laneState = event.data
       else if (event.type === 'complete') { complete = event; waiting = undefined; interactions = [] }
     }
-    const state = complete?.data.status ?? (active ? 'running' : events.length ? 'interrupted' : 'interrupted')
+    const state = active ? 'running' : complete?.data.status ?? 'interrupted'
     return { runId, state, seq, ...(status ? { status } : {}), activities: [...activities.values()].slice(-30), ...(waiting ? { waiting } : {}), ...(interactions ? { interactions } : {}), ...(laneState ? { laneState } : {}), ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}), ...(complete ? { complete } : {}) }
   }
 
@@ -2335,6 +2363,7 @@ function enrichLanesFromSnapshot(runId: string, lanes: WebRunLanes, fact: Record
 
 function publicH5Event(event: AssistantEvent): WebRunEvent | undefined {
   const base = { ...(event.conversationId ? { conversationId: event.conversationId } : {}), runId: event.runId, seq: event.seq }
+  if (event.type === 'observation' && event.data && typeof event.data === 'object' && !Array.isArray(event.data) && event.data.kind === 'input_response') return { ...base, type: 'input_response', data: { messageId: String(event.data.messageId), text: String(event.data.text) } }
   if (event.type === 'text' && typeof event.data === 'string') return { ...base, type: 'text', activityId: `${event.runId}:answer`, data: event.data }
   if (event.type === 'notice' && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
     const kind = (event.data as Record<string, JsonValue>).kind

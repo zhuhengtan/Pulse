@@ -1,3 +1,5 @@
+import { MessageQueuePanel, useMessageQueue } from './MessageQueuePanel.js'
+import type { FollowupBehavior } from './MessageQueue.js'
 import { ConversationCache } from './ConversationCache.js'
 import { WindowedMessages } from './WindowedMessages.js'
 import { RunRecoveryCard, type RunRecovery } from './RunRecoveryCard.js'
@@ -68,6 +70,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const [serviceConnected, setServiceConnected] = useState(true)
   useEffect(() => transport.onConnection?.(setServiceConnected), [transport])
   const [paired, setPaired] = useState(false)
+  const [queueScope, setQueueScope] = useState<string>()
   const { policy: approvalPolicy, ready: approvalReady, pending: approvalSaving, save: saveApprovalPolicy, retry: retryApprovalPolicy } = useApprovalPolicy(transport, paired)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -121,6 +124,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   }
   const [drafts, setDrafts] = useState<Record<string, ComposerDraft>>({})
   const submittedDrafts = useRef(new Map<string, { keys: string[]; draft: ComposerDraft; clearedRevision: number; restoredDraft?: ComposerDraft }>())
+  const submittedDelivery = useRef(new Map<string, FollowupBehavior>())
   const interactionRequests = useRef(new Map<string, string>())
   const draft = drafts[selectedId ?? 'new']?.markdown ?? ''
   const updateDraft = (key: string, update: (current: ComposerDraft) => ComposerDraft) => setDrafts(current => {
@@ -347,7 +351,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         const params = new URLSearchParams(current.search); params.delete('code')
         go(current.pathname + (params.size ? `?${params}` : ''), true, current.state)
       } else if (localHost) await apiJson(transport, '/api/session/local', jsonRequest('POST'))
-      const session = await apiJson<{ connected?: boolean; localAdmin?: boolean; canUseTerminal?: boolean; canBrowseHostPaths?: boolean; canRegisterProject?: boolean }>(transport, '/api/session')
+      const session = await apiJson<{ queueScope?: string; connected?: boolean; localAdmin?: boolean; canUseTerminal?: boolean; canBrowseHostPaths?: boolean; canRegisterProject?: boolean }>(transport, '/api/session')
+      setQueueScope(session.queueScope ?? window.location.origin)
       setServiceConnected(session.connected !== false)
       setSessionCapabilities({ localAdmin: session.localAdmin === true, canUseTerminal: session.canUseTerminal === true, canBrowseHostPaths: session.canBrowseHostPaths ?? session.localAdmin === true, canRegisterProject: session.canRegisterProject ?? session.localAdmin === true })
       authenticated = true
@@ -545,6 +550,11 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
           return [...kept, ...groups]
         })
       }
+      if (event.type === 'input_response') {
+        const message: WebMessage = { id: event.data.messageId, role: 'assistant', text: event.data.text, runId, createdAt: new Date().toISOString() }
+        rememberMessage(conversationId, message)
+        setMessages(current => [...current.filter(item => item.id !== message.id), message])
+      }
       if (event.type === 'text') setMessages(current => replaceRunMessage(current, runId, event.data))
       if (event.type === 'complete') {
         const outcome = event.data.status
@@ -648,7 +658,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
           setMessages(current => {
             const streaming = current.filter(message => message.id.startsWith('stream-') && message.runId)
             const persisted = mergeMessages(view.conversation.id, view.messages.filter(message => message.role !== 'system'))
-            return [...persisted.filter(message => message.role !== 'assistant' || message.id.startsWith('ask-') || !streaming.some(item => item.runId === message.runId)), ...streaming]
+            return [...persisted.filter(message => message.role !== 'assistant' || message.id.startsWith('ask-') || message.id.startsWith('input-response-') || !streaming.some(item => item.runId === message.runId)), ...streaming]
           })
         }
         if (active && streamRunRef.current !== active.runId && selectedIdRef.current === view.conversation.id) {
@@ -667,6 +677,21 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     return () => { stopped = true; controller.abort(); off?.(); clearTimeout(timer); if (poll !== undefined) window.clearInterval(poll) }
   }, [paired, route.page, startRun, transport])
 
+  const messageQueue = useMessageQueue(transport, queueScope, paired && serviceConnected, (queue, entry, runId) => {
+    const message: WebMessage = { text: entry.payload.text, ...(entry.payload.attachments?.length ? { attachments: entry.payload.attachments } : {}), ...(entry.payload.skills?.length ? { skills: entry.payload.skills } : {}), ...(entry.payload.mentionedFiles?.length ? { mentionedFiles: entry.payload.mentionedFiles } : {}), id: `msg-${entry.requestId}`, requestId: entry.requestId, runId, role: 'user', deliveryState: 'replying', createdAt: entry.createdAt }
+    rememberMessage(queue.conversationId, message)
+    setConversations(items => items.map(item => item.id === queue.conversationId ? { ...item, activeRunId: runId } : item))
+    if (queue.surface === 'chat') {
+      setAssistantConversation(item => item?.id === queue.conversationId ? { ...item, activeRunId: runId } : item)
+      setAssistantReceipts(items => [...items.filter(item => item.messageId !== entry.requestId), { messageId: entry.requestId, runId, state: 'replying', createdAt: entry.createdAt, updatedAt: new Date().toISOString() }])
+    }
+    if (selectedIdRef.current === queue.conversationId) {
+      setMessages(items => [...items.filter(item => item.requestId !== entry.requestId && item.id !== message.id), message])
+      if (streamRunRef.current !== runId) startRun(runId, queue.conversationId)
+    }
+  })
+  const currentQueue = messageQueue.queues.find(queue => queue.conversationId === selected?.id)
+
   const loadOlderMessages = async () => {
     const conversationId = selectedIdRef.current
     if (!conversationId || !olderCursor || loadingOlder || !transport.messages) return
@@ -682,7 +707,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     } finally { setLoadingOlder(false) }
   }
 
-  const send = async (payload?: { text: string; attachments?: WebAttachment[] | undefined; skills?: string[] | undefined; mentionedFiles?: string[] | undefined; requestId?: string | undefined } | FormEvent) => {
+  const send = async (payload?: { text: string; attachments?: WebAttachment[] | undefined; skills?: string[] | undefined; mentionedFiles?: string[] | undefined; requestId?: string | undefined } | FormEvent, behavior: FollowupBehavior = messageQueue.behavior) => {
     if (payload && 'preventDefault' in payload) payload.preventDefault()
     const text = payload && 'text' in payload ? payload.text.trim() : draft.trim()
     const attachments = payload && 'text' in payload ? payload.attachments : undefined
@@ -692,9 +717,20 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
 
     const sendEpoch = routeEpoch.current
     if (loading || loadError) return false
+    const busy = Boolean(running || selected?.activeRunId)
+    const hasQueued = Boolean(currentQueue?.entries.length)
+    if (behavior === 'queue' && (busy || hasQueued) && selected?.id) {
+      if ((!text && !hasAttachments) || !paired || !serviceConnected || submitting) return false
+      if (!messageQueue.controller) { setToast('本地队列尚未就绪，草稿已保留。'); return false }
+      try {
+        await messageQueue.controller.enqueue(selected.id, surfaceMode, { text, attachments, skills, mentionedFiles }, selected.activeRunId)
+        return true
+      } catch { setToast('队列未能保存，草稿和附件已保留。'); return false }
+    }
     if (surfaceMode === 'chat') {
       if ((!text && !hasAttachments) || submitting || sendLock.current || !paired || !assistantConversation) return false
-      const id = createRequestId('send')
+      const id = payload && 'text' in payload && payload.requestId ? payload.requestId : createRequestId('send')
+      submittedDelivery.current.set(id, behavior)
       const optimisticId = `msg-${id}`
       sendLock.current = true; setSubmitting(true); setLoadError('')
       rememberSubmittedDraft(id, assistantConversation.id)
@@ -717,6 +753,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
           '/api/assistant/messages',
           jsonRequest('POST', {
             requestId: id,
+            delivery: behavior === 'immediate' ? 'immediate' : 'whenIdle',
             text,
             ...(attachments?.length ? { attachments } : {}),
             ...(skills?.length ? { skills } : {}),
@@ -730,10 +767,19 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
           return { ...rest, runId: receipt.runId, ...(deliveryState ? { deliveryState } : {}) }
         }))
         setAssistantReceipts(current => [...current.filter(item => item.messageId !== id), { messageId: id, runId: receipt.runId, state: receipt.state, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }])
-        if (selectedIdRef.current === assistantConversation.id && sendEpoch === routeEpoch.current && receipt.state === 'replying') startRun(receipt.runId, assistantConversation.id)
+        if (receipt.state === 'replying') setAssistantConversation(item => item?.id === assistantConversation.id ? { ...item, activeRunId: receipt.runId } : item)
+        if (selectedIdRef.current === assistantConversation.id && sendEpoch === routeEpoch.current && receipt.state === 'replying' && streamRunRef.current !== receipt.runId) startRun(receipt.runId, assistantConversation.id)
         clearSubmittedDraft(id)
         return true
       } catch (error) {
+        if (behavior === 'queue' && error instanceof ApiError && error.status === 409 && error.detail === 'CONVERSATION_BUSY' && messageQueue.controller) {
+          try {
+            await messageQueue.controller.enqueue(assistantConversation.id, 'chat', { text, attachments, skills, mentionedFiles }, undefined, id)
+            localMessages.current.set(assistantConversation.id, (localMessages.current.get(assistantConversation.id) ?? []).filter(message => message.id !== optimisticId))
+            if (selectedIdRef.current === assistantConversation.id) setMessages(items => items.filter(message => message.id !== optimisticId))
+            clearSubmittedDraft(id); return true
+          } catch { /* Restore the original draft if durable caching failed. */ }
+        }
         restoreSubmittedDraft(id)
         patchLocalMessage(assistantConversation.id, optimisticId, { deliveryState: 'failed' })
         if (selectedIdRef.current === assistantConversation.id) setMessages(current => current.map(message => message.id === optimisticId ? { ...message, deliveryState: 'failed' } : message))
@@ -741,7 +787,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       } finally { sendLock.current = false; setSubmitting(false) }
       return
     }
-    if ((!text && !hasAttachments) || running || submitting || resumingRunId || selected?.activeRunId || sendLock.current || !paired) {
+    if ((!text && !hasAttachments) || submitting || resumingRunId || (behavior !== 'immediate' && selected?.activeRunId) || sendLock.current || !paired) {
       if (selected?.activeRunId && !running && !resumingRunId) setToast('请先继续任务或结束这轮，再发送新消息。')
       return false
     }
@@ -749,6 +795,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     let conversationId = selectedId
     const initialSelection = selectedIdRef.current
     const requestId = payload && 'text' in payload && payload.requestId ? payload.requestId : createRequestId('send')
+    submittedDelivery.current.set(requestId, behavior)
     const pendingId = `pending-${requestId}`
     if (!(payload && 'text' in payload && payload.requestId)) rememberSubmittedDraft(requestId, initialSelection ?? 'new')
     const optimisticMessage: WebMessage = { id: pendingId, requestId, deliveryState: 'queued', role: 'user', text, createdAt: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}), ...(skills?.length ? { skills } : {}), ...(mentionedFiles?.length ? { mentionedFiles } : {}) }
@@ -775,7 +822,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         transport,
         `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
         jsonRequest('POST', {
-          text, requestId,
+          text, requestId, delivery: behavior === 'immediate' ? 'immediate' : 'whenIdle',
           ...(attachments?.length ? { attachments } : {}),
           ...(skills?.length ? { skills } : {}),
           ...(mentionedFiles?.length ? { mentionedFiles } : {}),
@@ -784,12 +831,20 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       patchLocalMessage(conversationId, pendingId, { deliveryState: 'replying', runId: response.runId })
       if (selectedIdRef.current === conversationId) {
         setMessages(current => current.map(message => message.id === pendingId ? { ...message, deliveryState: 'replying', runId: response.runId } : message))
-        startRun(response.runId, conversationId)
+        if (streamRunRef.current !== response.runId) startRun(response.runId, conversationId)
       }
       setConversations(items => items.map(item => item.id === conversationId ? { ...item, activeRunId: response.runId } : item))
       clearSubmittedDraft(requestId)
       return true
     } catch (error) {
+      if (behavior === 'queue' && error instanceof ApiError && error.status === 409 && error.detail === 'CONVERSATION_BUSY' && messageQueue.controller && conversationId) {
+        try {
+          await messageQueue.controller.enqueue(conversationId, 'work', { text, attachments, skills, mentionedFiles }, undefined, requestId)
+          localMessages.current.set(conversationId, (localMessages.current.get(conversationId) ?? []).filter(message => message.id !== pendingId))
+          if (selectedIdRef.current === conversationId) setMessages(items => items.filter(message => message.id !== pendingId))
+          clearSubmittedDraft(requestId); return true
+        } catch { /* Restore the original draft if durable caching failed. */ }
+      }
       restoreSubmittedDraft(requestId)
       patchLocalMessage(conversationId ?? 'new', pendingId, { deliveryState: 'failed' })
       if (selectedIdRef.current === conversationId) setMessages(current => current.map(message => message.id === pendingId ? { ...message, deliveryState: 'failed' } : message))
@@ -801,6 +856,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const stopRunFor = async (runId: string, conversationId: string) => {
     if (stopping) return
     setStopping(true)
+    if (messageQueue.queues.some(queue => queue.conversationId === conversationId)) await messageQueue.controller?.pause(conversationId, true).catch(() => setToast('队列暂停未保存，正在停止任务。'))
     try {
       await apiJson(transport, `/api/runs/${encodeURIComponent(runId)}/cancel`, jsonRequest('POST'))
       setToast('已发送停止请求。')
@@ -810,6 +866,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const stopRun = async () => {
     if (!selected?.activeRunId || stopping) return
     setStopping(true)
+    if (currentQueue) await messageQueue.controller?.pause(selected.id, true).catch(() => setToast('队列暂停未保存，正在停止任务。'))
     try { await apiJson(transport, surfaceMode === 'chat' ? `/api/assistant/runs/${encodeURIComponent(selected.activeRunId)}/cancel` : `/api/runs/${encodeURIComponent(selected.activeRunId)}/cancel`, jsonRequest('POST')) }
     catch { setStopping(false); setToast('停止请求未送达，请检查连接。') }
   }
@@ -820,7 +877,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     if (!conversationId) { await send({ text: message.text, requestId: message.requestId, attachments: message.attachments, skills: message.skills, mentionedFiles: message.mentionedFiles }); return }
     sendLock.current = true; setSubmitting(true)
     try {
-      const response = await apiJson<{ runId: string }>(transport, `/api/conversations/${encodeURIComponent(conversationId)}/messages`, jsonRequest('POST', { requestId: message.requestId, text: message.text, attachments: message.attachments, skills: message.skills, mentionedFiles: message.mentionedFiles }))
+      const response = await apiJson<{ runId: string }>(transport, `/api/conversations/${encodeURIComponent(conversationId)}/messages`, jsonRequest('POST', { requestId: message.requestId, delivery: submittedDelivery.current.get(message.requestId) === 'immediate' ? 'immediate' : 'whenIdle', text: message.text, attachments: message.attachments, skills: message.skills, mentionedFiles: message.mentionedFiles }))
       patchLocalMessage(conversationId, message.id, { deliveryState: 'replying', runId: response.runId })
       if (selectedIdRef.current === conversationId) { setMessages(items => items.map(item => item.id === message.id ? { ...item, deliveryState: 'replying', runId: response.runId } : item)); setLoadError(''); startRun(response.runId, conversationId) }
       setConversations(items => items.map(item => item.id === conversationId ? { ...item, activeRunId: response.runId } : item))
@@ -836,7 +893,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     const isCurrent = () => selectedIdRef.current === conversationId && routeEpoch.current === retryEpoch
     sendLock.current = true; setSubmitting(true)
     try {
-      const receipt = await apiJson<{ conversationId: string; messageId: string; runId: string; state: WebAssistantMessageReceipt['state'] }>(transport, '/api/assistant/messages', jsonRequest('POST', { requestId: message.requestId, text: message.text, retry: true, attachments: message.attachments, skills: message.skills, mentionedFiles: message.mentionedFiles }))
+      const receipt = await apiJson<{ conversationId: string; messageId: string; runId: string; state: WebAssistantMessageReceipt['state'] }>(transport, '/api/assistant/messages', jsonRequest('POST', { requestId: message.requestId, delivery: submittedDelivery.current.get(message.requestId) === 'immediate' ? 'immediate' : 'whenIdle', text: message.text, retry: true, attachments: message.attachments, skills: message.skills, mentionedFiles: message.mentionedFiles }))
       const deliveryState = receipt.state === 'failed' ? 'failed' : receipt.state === 'interrupted' ? 'interrupted' : receipt.state === 'queued' ? 'queued' : receipt.state === 'replying' ? 'replying' : undefined
       const updateMessage = (item: WebMessage): WebMessage => {
         if (item.id !== message.id) return item
@@ -1231,7 +1288,9 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       </section>
       {!atBottom && <PulseButton className="jump-bottom" onClick={() => { followBottom.current = true; setAtBottom(true); messagesEl.current?.scrollTo({ top: messagesEl.current.scrollHeight, behavior: 'smooth' }) }}>回到底部 ↓</PulseButton>}
       <footer className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${emptyConversation && !activeInteraction ? 'is-empty' : ''}`}>
-        {activeInteraction ? <InteractionPanel key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={approvalPolicy === 'delegate'} running={activeInteraction.conversationId ? true : running} stopping={stopping} stop={() => void (activeInteraction.conversationId ? stopRunFor(activeInteraction.runId, activeInteraction.conversationId) : stopRun())} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} setApprovalPolicy={setApprovalPolicy} /> : <><RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || !serviceConnected || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} onSend={async payload => await send(payload) === true} onStop={() => void stopRun()} toolbarExtra={composerApproval} /></>}
+        <MessageQueuePanel queue={currentQueue} controller={messageQueue.controller} onError={setToast} />
+        {activeInteraction && <InteractionPanel key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={approvalPolicy === 'delegate'} running={activeInteraction.conversationId ? true : running} stopping={stopping} stop={() => void (activeInteraction.conversationId ? stopRunFor(activeInteraction.runId, activeInteraction.conversationId) : stopRun())} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} setApprovalPolicy={setApprovalPolicy} />}
+        <RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || !serviceConnected || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} followupBehavior={messageQueue.behavior} onSend={async (payload, behavior) => await send(payload, behavior) === true} onStop={() => void stopRun()} toolbarExtra={composerApproval} />
         <div className={`composer-meta ${route.newWork ? 'new-chat-tools' : ''}`}>
           {activeInteraction && composerApproval}
           {route.newWork ? <div className="new-conversation-project"><Icon name="folder"/><Select variant="borderless" aria-label="新对话所属项目" value={selectedProjectId ?? '__ungrouped__'} onChange={value => { const projectId = value === '__ungrouped__' ? undefined : value; patchQuery({ project: projectId }); setSelectedProjectId(projectId); if (projectId) window.localStorage.setItem('pulse-web-project', projectId); else window.localStorage.removeItem('pulse-web-project') }} options={[{ value: '__ungrouped__', label: '不归属项目' }, ...projects.map(project => ({ value: project.id, label: project.name }))]} popupMatchSelectWidth={false} /></div> : !activeInteraction && <div className="composer-hint">Pulse 可能会出错，请核对重要信息。</div>}
@@ -1298,6 +1357,8 @@ function groupConversations(items: WebConversation[]): Array<{ label: string; it
   }
   return [...groups].map(([label, conversations]) => ({ label, items: conversations }))
 }
+
+
 
 type InteractionAnswer = { value: string } | { values: string[] } | { text: string }
 

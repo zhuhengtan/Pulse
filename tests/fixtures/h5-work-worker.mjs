@@ -23,6 +23,11 @@ process.on('message', (message) => {
   process.on('message', (rpc) => {
     if (rpc?.schemaVersion !== 1 || rpc.type !== 'rpc') return
     if (rpc.method === 'pendingInteractions') process.send({ schemaVersion: 1, type: 'rpcResult', requestId: rpc.requestId, ok: true, value: [] })
+    else if (rpc.method === 'submitHumanInput') {
+      const dataDir = process.argv[process.argv.indexOf('--data-dir') + 1]
+      writeFileSync(join(dataDir, 'worker-human-input.json'), JSON.stringify(rpc.args))
+      process.send({ schemaVersion: 1, type: 'rpcResult', requestId: rpc.requestId, ok: true })
+    }
     else process.send({ schemaVersion: 1, type: 'rpcResult', requestId: rpc.requestId, ok: true })
   })
   process.on('disconnect', () => clearTimeout(settle))

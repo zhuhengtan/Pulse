@@ -167,12 +167,29 @@ program selection and model budget.
 
 ## Interruption and recovery
 
-Ordinary input to a running controlled task is routed as steering. A checkpoint
-after the active effect settles records its evidence, invalidates queued tool
-calls, archives the old plan and requests a revised plan. It does not pretend an
-in-flight write was cancelled or replay it. Explicit cancellation continues to
-use the Runtime cancellation protocol. Pending human approvals still need a
+Immediate input to a running task is handled with priority by the primary
+model, independently of outstanding work effects. The model sees recent
+conversation, the task contract and execution state, and chooses to respond
+without changing work, steer the task, or cancel it. Assistant work-management
+requests may use the assistant tool loop, including `work.send` on a running
+session. Ordinary input does not answer pending asks or approvals.
+
+Only a model-selected steer reaches the controller checkpoint: after the active
+effect settles it records evidence, invalidates queued tool calls, archives the
+old plan and requests a revised plan. It does not pretend an in-flight write was
+undone or replay it. Explicit stop and model-selected cancellation use the
+Runtime cancellation protocol. Pending human approvals still need a targeted
 response before their continuation can reach a checkpoint.
+
+Web and desktop frontends default busy sends to a per-conversation IndexedDB
+queue. Settings can change the default to immediate input; both actions remain
+available in the composer. Queues dispatch one message per successful round,
+after the run is released and no ask is pending. Assistant round completion
+does not wait for background work sessions. Failure, cancellation and interruption
+pause that conversation's queue. Fixed request IDs and transactional leases
+protect retries and concurrent browser tabs. Ask replies never drain the queue.
+The frontend must remain open for automatic dispatch; reconnect rechecks server
+state before dispatching.
 
 State lives in `global.taskController`, committed with Runtime steps. It records
 revision, stages, dependencies, attempts, evidence, updates and budget usage.

@@ -87,6 +87,7 @@ export type WebTraceData =
 type WebRunEventPayload =
   | { type: 'resync'; runId: string; seq: number; data: WebRunSnapshot }
   | { type: 'status'; runId: string; seq: number; data: { kind: 'working' | 'context'; label?: string } }
+  | { type: 'input_response'; runId: string; seq: number; data: { messageId: string; text: string } }
   | { type: 'text'; runId: string; seq: number; data: string; activityId?: string }
   | { type: 'tool'; runId: string; seq: number; data: { activityId: string; effectId: string; attemptId?: string; laneId?: string; tool: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled'; args?: Record<string, unknown>; preview?: Record<string, unknown>; error?: Record<string, unknown> } }
   | { type: 'trace'; runId: string; seq: number; data: WebTraceData }

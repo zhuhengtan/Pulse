@@ -45,7 +45,7 @@ export class AssistantConversationStore {
       const state = this.requireState()
       const existing = state.messages.find(item => item.messageId === input.requestId)
       if (existing) {
-        if (existing.text !== input.text) throw new Error('REQUEST_ID_REUSED')
+        if (JSON.stringify({ text: existing.text, attachments: existing.attachments ?? [], skills: existing.skills ?? [], mentionedFiles: existing.mentionedFiles ?? [] }) !== JSON.stringify({ text: input.text, attachments: input.attachments ?? [], skills: input.skills ?? [], mentionedFiles: input.mentionedFiles ?? [] })) throw new Error('REQUEST_ID_REUSED')
         return { message: structuredClone(existing), duplicate: true }
       }
       const now = new Date().toISOString()
@@ -63,6 +63,16 @@ export class AssistantConversationStore {
       state.messages.push(message)
       await this.save()
       return { message: structuredClone(message), duplicate: false }
+    })
+  }
+
+  async acceptInput(input: { requestId: string; text: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }, runId: string): Promise<void> {
+    await this.serial(async () => {
+      const state = this.requireState()
+      if (state.messages.some(message => message.messageId === input.requestId)) return
+      const now = new Date().toISOString()
+      state.messages.push({ messageId: input.requestId, text: input.text, runId, state: state.messages.find(message => message.runId === runId)?.state ?? 'replying', createdAt: now, updatedAt: now, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}) })
+      await this.save()
     })
   }
 
@@ -117,12 +127,12 @@ export class AssistantConversationStore {
 
   async update(runId: string, state: WebAssistantMessageReceipt['state'], error?: string): Promise<void> {
     await this.serial(async () => {
-      const message = this.requireState().messages.find(item => item.runId === runId)
-      if (!message) return
-      message.state = state
-      message.updatedAt = new Date().toISOString()
-      if (error) message.error = error.slice(0, 240)
-      else delete message.error
+      for (const message of this.requireState().messages.filter(item => item.runId === runId)) {
+        message.state = state
+        message.updatedAt = new Date().toISOString()
+        if (error) message.error = error.slice(0, 240)
+        else delete message.error
+      }
       await this.save()
     })
   }

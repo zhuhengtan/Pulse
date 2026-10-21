@@ -584,3 +584,15 @@
   .navbar-actions .transfer-export span:not(.anticon) { display: none; }
   .history-primary .transfer-import { display: none !important; }
 }
+
+.message-queue { width: 100%; max-height: 260px; overflow: auto; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.message-queue header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.message-queue ol { margin: 6px 0 0; padding-left: 22px; }
+.message-queue li { padding: 5px 0; overflow-wrap: anywhere; }
+.message-queue summary { cursor: pointer; }
+.message-queue p { margin: 5px 0; }
+.queue-message-text { white-space: pre-wrap; }
+.queue-actions, .queue-edit { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.queue-edit textarea { width: 100%; min-height: 70px; color: inherit; background: transparent; }
+.composer-alternate-send { border: 0; background: transparent; color: inherit; cursor: pointer; white-space: nowrap; font-size: 12px; padding: 4px 8px; }
+.composer-alternate-send:disabled { opacity: .45; cursor: default; }

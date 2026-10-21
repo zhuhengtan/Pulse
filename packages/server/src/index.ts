@@ -1,3 +1,4 @@
+import { createFollowupModel } from './followup.js'
 import { ConversationData, type MessagePage } from '@hunterzhu/pulse-data'
 import { AttachmentStore, MAX_ATTACHMENT_REQUEST } from './attachments.js'
 import { replaceStateFile } from './atomic-file.js'
@@ -217,6 +218,7 @@ export interface AssistantEvent {
   seq: number
   data?: JsonValue
 }
+export interface HumanInputOptions { requestId?: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }
 export interface RunHandle {
   readonly id: string
   readonly conversationId: string
@@ -231,7 +233,7 @@ export interface RunHandle {
   pendingInteractions(): Promise<Array<{ groupId: string; kind: 'ask' | 'approval'; items: Array<{ effectId: string; input: Record<string, JsonValue> }> }>>
   reviewApproval(effectId: string, signal?: AbortSignal): Promise<{ status: 'approved' | 'manual'; reason: string }>
   /** Submit a human message while this run is active. */
-  submitHumanInput(text: string, targetEffectId?: string): Promise<void>
+  submitHumanInput(text: string, targetEffectId?: string, options?: HumanInputOptions): Promise<void>
   /** Gracefully stop an isolated host process when its supervising server shuts down. */
   shutdown?(): Promise<void>
 }
@@ -1158,9 +1160,9 @@ export function isSafetyApproval(text: string): boolean {
   return text.trim().toUpperCase() === 'APPROVE'
 }
 
-async function runLlmRequestAsRuntimeEffect(input: { models: InMemoryModelRegistry; router: ModelRouter; execute: ReturnType<typeof createModelEffectExecutor>; system: string; instruction: string; outputInstruction?: string; signal: AbortSignal; maxOutputTokens: number }): Promise<LLMResult> {
+async function runLlmRequestAsRuntimeEffect(input: { models: InMemoryModelRegistry; router: ModelRouter; execute: ReturnType<typeof createModelEffectExecutor>; system: string; instruction: string; outputInstruction?: string; signal: AbortSignal; maxOutputTokens: number; task?: 'reason' | 'verify' }): Promise<LLMResult> {
   const program = defineReActLane({
-    id: 'pulse.host-llm-effect', version: '1', task: 'verify', system: input.system,
+    id: 'pulse.host-llm-effect', version: '1', task: input.task ?? 'verify', system: input.system,
     instruction: input.outputInstruction ?? 'Return the requested result without tools.', inputs: () => ({ conversation: [{ role: 'user', content: input.instruction }] }),
     maxTurns: 1, requirements: { maxOutputTokens: input.maxOutputTokens },
     onFinish: (ref, ctx) => ({ complete: { value: ctx.results.read(ref) ?? null, derivedFrom: [ref] } }),
@@ -2300,7 +2302,11 @@ export class LocalHost {
     } })
     const fingerprints = recoveryFingerprints(registry, { approvalMode: options.approvalMode ?? 'ask', allowNetwork: options.allowNetwork ?? false, networkHosts: options.networkHosts ?? [], contract: 2 })
     const runLlm = (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => runLocalApproval(options.approvalReview, modelBudget, () => runtimeRef, system, instruction, signal, maxOutputTokens)
-    const runtime = new PulseRuntime({ sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), programs: [], budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, userIntent, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: 'ollama', timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    const runtime = new PulseRuntime({ sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), programs: [], budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, ...(provider.adapter.id === 'mock' ? {} : { humanArbitration: { timeoutMs: 60_000, model: createFollowupModel({ assistant: assistantChat, context: async request => {
+      const agent = runtimeRef?.state.agents.get(request.agentId)
+      const global = agent?.globalVersions.get(agent.latestGlobalVersion)
+      return { conversation: (await this.getConversationMessages(conversationId)).slice(-16).map(message => ({ role: message.role, text: message.text, ...(message.attachments ? { attachments: message.attachments } : {}) })), goal: agent?.goal, task: global && asRecord(global)?.taskRecord, controller: global && asRecord(global)?.taskController }
+    }, run: (system, instruction, signal) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens: Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096), task: 'reason' }) }) } }), effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, userIntent, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: 'ollama', timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     runtimeRef = runtime
     const budget = historyBudget(provider.model.capabilities)
     runtime.state.historySoftTokens = budget.historySoftTokens
@@ -2456,7 +2462,7 @@ export class LocalHost {
       execute: async ({ conversationId }) => requireHandlers().status(conversationId), normalize: normalizeAssistantToolOutput, summarize: normalizeAssistantToolOutput,
     }))
     registry.register(defineTool({
-      name: 'work.send', description: 'Send a new instruction to an idle work session. If it is still running or waiting for approval/input, use the matching interaction instead.',
+      name: 'work.send', description: 'Send a new instruction to a work session, including while it is running. Its primary model decides whether to continue, adjust or stop the work. Ask and approval answers use their matching interaction.',
       input: z.object({ conversationId: z.string().min(1), text: z.string().min(1).max(10_000) }), output: z.unknown(), sideEffectPolicy: 'external', retrySafety: 'unsafe',
       execute: async ({ conversationId, text }) => { await requireHandlers().send(conversationId, text); return { accepted: true, conversationId } }, normalize: normalizeAssistantToolOutput, summarize: normalizeAssistantToolOutput,
     }))
@@ -2701,7 +2707,11 @@ export class LocalHost {
     const runLlm = (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => runLocalApproval(options.approvalReview, modelBudget, () => runtimeRef, system, instruction, signal, maxOutputTokens)
     const controllerPrograms: ReturnType<typeof buildTaskControllerProgram>[] = (['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19'] as const).map((version) => buildTaskControllerProgram({ modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(savedReuse ? { resumePlan: savedReuse.controller, reusableIds: savedReuse.reusableIds } : {}), version, system: prompt, toolNames, conversation, approvalMode: options.approvalMode ?? 'ask', maxTurns: (version === '10' || version === '11' || version === '12' || version === '13' || version === '14' || version === '15' || version === '16' || version === '17' || version === '18' || version === '19') ? modelEffectBudget ?? 256 : savedMaxTurns }))
     const recovery = await prepareRecovery(backend, this.runDir(conversationId, runId), fingerprints, options.recoveryBuildMigration)
-    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, programs: [legacyProgram, version2Program, program, ...assistantPrograms, workerProgram, ...controllerPrograms], models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, reviewContext, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: 'ollama', timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined, relocation)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, programs: [legacyProgram, version2Program, program, ...assistantPrograms, workerProgram, ...controllerPrograms], models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, ...(provider.adapter.id === 'mock' ? {} : { humanArbitration: { timeoutMs: 60_000, model: createFollowupModel({ assistant: assistantChat, context: async request => {
+      const agent = runtimeRef?.state.agents.get(request.agentId)
+      const global = agent?.globalVersions.get(agent.latestGlobalVersion)
+      return { conversation: (await this.getConversationMessages(conversationId)).slice(-16).map(message => ({ role: message.role, text: message.text, ...(message.attachments ? { attachments: message.attachments } : {}) })), goal: agent?.goal, task: global && asRecord(global)?.taskRecord, controller: global && asRecord(global)?.taskController }
+    }, run: (system, instruction, signal) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens: Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096), task: 'reason' }) }) } }), effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, reviewContext, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: 'ollama', timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined, relocation)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     runtimeRef = runtime
     if (!assistantChat) modelBudget = await ModelAttemptBudget.open(join(this.runDir(conversationId, runId), 'model-budget.json'), modelEffectBudget ?? Math.max(4, Math.min(256, Math.floor(options.maxModelCalls ?? 256))), legacyModelCalls(runtime), options.modelBudgetPolicy)
     if (recovery.journal) { await runtime.persist(backend); await finishRecovery(recovery.journal) }
@@ -2714,6 +2724,7 @@ export class LocalHost {
   private withCapabilityInstructions(prompt: string, instructions: string[]): string { return wrapCapabilityInstructions(prompt, instructions) }
   private makeRunHandle(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, contextNotice?: string, frontAck?: string, relocation?: { source: string; target: string }): RunHandle {
     const activeEntry = this.active.get(runId)
+    const humanSubmissions = new Map<string, { digest: string; promise: Promise<void> }>()
     activeEntry?.jarvis?.observe(runtime, session, activeEntry.capabilityController.signal)
     let finalized: Promise<Outcome & { text?: string }> | undefined
     let finalTaskOutcome: TaskOutcome | undefined
@@ -3058,7 +3069,35 @@ export class LocalHost {
       },
       pendingInteractions: async () => { const pending = pendingInteractions(runtime, session).map(group => ({ ...group, items: group.items.map(item => ({ ...item, input: relocation ? presentTransferredApproval(item.input, relocation) : item.input })) })); for (const group of pending) if (group.kind === 'ask') for (const item of group.items) await this.persistPlanPreview(conversationId, runId, runtime, item.effectId, item.input); return pending },
       reviewApproval,
-      submitHumanInput: async (text, targetEffectId) => { if (!text.trim()) throw new Error('MESSAGE_REQUIRED'); if (targetEffectId === undefined && /改|调整|重开|重新|change|reopen|revise|instead/i.test(text) && this.planGates.get(runId)?.required) { this.planGates.get(runId)!.open = false; await this.savePlanGate(conversationId, runId) } const inputId = `human-${randomUUID()}`; const recording = activeEntry?.jarvis?.recordUserInput(text, inputId).catch(() => undefined); const rootAgent = runtime.state.agents.get(session.agentId); const taskGlobal = rootAgent?.globalVersions.get(rootAgent.latestGlobalVersion); const steer = targetEffectId === undefined && !text.trim().startsWith('/') && taskGlobal && typeof taskGlobal === 'object' && !Array.isArray(taskGlobal) && taskGlobal.taskController; await session.submitHumanInput(inputId, { text, ...(steer ? { command: 'steer' } : {}) }, targetEffectId); await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'user', text, runId, createdAt: new Date().toISOString() }); await recording },
+      submitHumanInput: async (text, targetEffectId, inputOptions = {}) => {
+        if (!text.trim() && !inputOptions.attachments?.length) throw new Error('MESSAGE_REQUIRED')
+        const requestId = inputOptions.requestId ?? randomUUID()
+        if (!/^[A-Za-z0-9._:-]{8,128}$/.test(requestId)) throw new Error('REQUEST_ID_INVALID')
+        const digest = createHash('sha256').update(JSON.stringify({ text, targetEffectId, inputOptions })).digest('hex')
+        const submitted = humanSubmissions.get(requestId)
+        if (submitted) { if (submitted.digest !== digest) throw new Error('REQUEST_ID_REUSED'); return submitted.promise }
+        const promise = (async () => {
+          const inputId = `human-${requestId}`, messageId = `msg-${requestId}`
+          const fingerprint = (message: { text: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }) => JSON.stringify({ text: message.text, attachments: (message.attachments ?? []).map(item => item.id), skills: message.skills ?? [], mentionedFiles: message.mentionedFiles ?? [] })
+          const previous = (await this.getConversationMessages(conversationId)).find(message => message.id === messageId)
+          if (previous && fingerprint(previous) !== fingerprint({ text, ...inputOptions })) throw new Error('REQUEST_ID_REUSED')
+          const attachments = inputOptions.attachments?.length ? await new AttachmentStore(this.dataDir, conversationId).save(inputOptions.attachments) : undefined
+          if (inputOptions.skills?.length) { const known = await this.listSkills(); for (const skill of inputOptions.skills) if (!known.includes(skill)) throw new Error(`SKILL_NOT_FOUND:${skill}`) }
+          const index = attachments?.length ? `[Attachments]\n${JSON.stringify(attachments)}` : ''
+          const selectedSkills = inputOptions.skills?.map(skill => '/' + skill).join(' ')
+          const files = inputOptions.mentionedFiles?.length ? `[Mentioned files]\n${JSON.stringify(inputOptions.mentionedFiles)}` : ''
+          const inputText = [selectedSkills, text, index, files].filter(Boolean).join('\n')
+          if (!previous && finalized) throw new Error('CONVERSATION_BUSY')
+          // Admit synchronously before yielding, so root completion cannot race past this input.
+          const admitted = session.submitHumanInput(inputId, { text: inputText, modelFirst: true, ...(inputOptions.skills ? { skills: inputOptions.skills } : {}), ...(inputOptions.mentionedFiles ? { mentionedFiles: inputOptions.mentionedFiles } : {}) }, targetEffectId)
+          if (!previous) await this.appendMessage(conversationId, { id: messageId, role: 'user', text, runId, createdAt: new Date().toISOString(), ...(attachments ? { attachments } : {}), ...(inputOptions.skills ? { skills: inputOptions.skills } : {}), ...(inputOptions.mentionedFiles ? { mentionedFiles: inputOptions.mentionedFiles } : {}) })
+          await admitted
+          await runtime.flushPersistence()
+          if (!previous) await activeEntry?.jarvis?.recordUserInput(text, inputId).catch(() => undefined)
+        })()
+        humanSubmissions.set(requestId, { digest, promise })
+        try { await promise } catch (error) { humanSubmissions.delete(requestId); throw error }
+      },
     }
   }
   private clarificationHandle(conversationId: string, runId: string, question: string, modelCalls = 0): RunHandle {
@@ -3616,6 +3655,15 @@ export class LocalHost {
       if (event.kind === 'gap') {
         yield { schemaVersion: 1, type: 'gap', conversationId, runId, seq, data: { fromSeq: event.fromSeq ?? 0, toSeq: event.toSeq ?? 0 } }
         continue
+      }
+      if (event.event?.type?.startsWith('human.input.') && asRecord(event.event.data)?.response) {
+        const data = asRecord(event.event.data)!
+        const messageId = `input-response-${runId}-${String(data.inputId)}`
+        const response = String(data.response)
+        if (!(await this.getConversationMessages(conversationId)).some(message => message.id === messageId)) await this.appendMessage(conversationId, { id: messageId, role: 'assistant', text: response, runId, createdAt: new Date().toISOString(), displayVersion: 1 })
+        if (data.action === 'steer' && this.planGates.get(runId)?.required) { this.planGates.get(runId)!.open = false; await this.savePlanGate(conversationId, runId) }
+        yield { schemaVersion: 1, type: 'observation', conversationId, runId, seq, data: { kind: 'input_response', messageId, text: response } }
+        seq++
       }
       if (event.event?.type === 'human.requested') {
         const liveEffect = event.event.effectId === undefined ? undefined : this.active.get(runId)?.runtime.state.effects.get(event.event.effectId)

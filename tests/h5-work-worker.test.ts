@@ -34,6 +34,16 @@ describe('H5 work worker IPC', () => {
     await expect(handle.usage()).resolves.toMatchObject({ modelCalls: 1, outputTokens: 2 })
   })
 
+  it('forwards fixed input IDs, attachments and references through the worker RPC', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'pulse-worker-input-'))
+    temporaryDirectories.push(dataDir)
+    const handle = await startH5WorkWorker({ entry: fileURLToPath(new URL('./fixtures/h5-work-worker.mjs', import.meta.url)), dataDir, approvalMode: 'ask' }, { conversationId: 'conv-input-fixture', text: 'work' })
+    const options = { requestId: 'fixed-followup-id', attachments: [{ id: 'note', name: 'note.txt', type: 'file' as const, size: 4, mediaType: 'text/plain', data: 'data:text/plain;base64,dGVzdA==' }], skills: ['example'], mentionedFiles: ['src/example.ts'] }
+    await handle.submitHumanInput('latest user input', undefined, options)
+    expect(JSON.parse(await readFile(join(dataDir, 'worker-human-input.json'), 'utf8'))).toEqual(['latest user input', null, options])
+    await handle.outcome()
+  })
+
   it('rejects delivery when a worker reports success but exits with a cleanup failure', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'pulse-worker-cleanup-'))
     temporaryDirectories.push(dataDir)
