@@ -1,10 +1,10 @@
 import { AttachmentStore, MAX_ATTACHMENT_REQUEST, attachmentDownload } from '../attachments.js'
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { createServer, IncomingMessage, type Server, ServerResponse } from 'node:http'
 import { createReadStream } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { normalizeModelConfig, parseModelSelectionId } from '../model-config.js'
 import { execFile } from 'node:child_process'
-import { access, chmod, copyFile, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { access, chmod, copyFile, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { extname, basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Duplex } from 'node:stream'
@@ -155,8 +155,15 @@ export class H5Server {
   private readonly terminals = new Map<string, TerminalSession>()
   private readonly assistantPendingRuns = new Set<string>()
   private assistantPump: Promise<void> | undefined
+  private serviceLock: Awaited<ReturnType<typeof open>> | undefined
   private stopping = false
   private jarvisSyncTimer: NodeJS.Timeout | undefined
+  private readonly chatSockets = new WebSocketServer({ noServer: true, maxPayload: MAX_ATTACHMENT_REQUEST })
+  private readonly chatSubscriptions = new Map<WebSocket, Map<string, number>>()
+  private dataChanged: (() => void) | undefined
+  private readonly runSnapshots = new Map<string, WebRunSnapshot>()
+  private readonly projectionWrites = new Map<string, Promise<unknown>>()
+  private readonly projectionTimers = new Map<string, NodeJS.Timeout>()
   private readonly terminalSockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
   private readonly automationSockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
   private readonly previewSockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
@@ -244,14 +251,43 @@ export class H5Server {
     return Object.fromEntries(vars.filter(name => process.env[name] !== undefined).map(name => [name, { source: 'environment', active: true }]))
   }
 
+  private async acquireService(): Promise<void> {
+    await mkdir(this.dataDir, { recursive: true })
+    const path = join(this.dataDir, 'service.lock')
+    for (;;) {
+      try { this.serviceLock = await open(path, 'wx', 0o600); await this.serviceLock.writeFile(JSON.stringify({ pid: process.pid, protocol: 1 })); return }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        const previous = await readFile(path, 'utf8')
+        const owner = JSON.parse(previous) as { pid: number }
+        try { process.kill(owner.pid, 0); throw new Error('PULSE_SERVICE_ALREADY_RUNNING') }
+        catch (probe) { if ((probe as NodeJS.ErrnoException).code !== 'ESRCH') throw probe }
+        if (await readFile(path, 'utf8') === previous) await rm(path, { force: true })
+      }
+    }
+  }
+  private async releaseService(): Promise<void> {
+    if (!this.serviceLock) return
+    await this.serviceLock.close(); this.serviceLock = undefined
+    await rm(join(this.dataDir, 'service.json'), { force: true })
+    await rm(join(this.dataDir, 'service.lock'), { force: true })
+  }
+
   async start(): Promise<{ port: number; lanIp: string; pairUrl: string }> {
     this.stopping = false
+    await this.acquireService()
+    try {
     await this.auth.init()
     const assistantId = await this.assistantInbox.init(async () => (await this.host.createConversation({ title: 'Pulse 助理' })).id)
-    for (const message of this.assistantInbox.transcript()) {
-      await this.host.appendAssistantUserMessage(assistantId, { id: `msg-${message.requestId}`, runId: message.runId, text: message.text, createdAt: message.createdAt })
+    for (const message of this.assistantInbox.transcript(true)) {
+      await this.host.appendAssistantUserMessage(assistantId, { id: `msg-${message.requestId}`, runId: message.runId, text: message.text, createdAt: message.createdAt, ...(message.attachments ? { attachments: message.attachments } : {}), ...(message.skills ? { skills: message.skills } : {}), ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}) })
     }
-    await this.projects.migrate((await this.host.listConversations()).filter(conversation => conversation.id !== assistantId))
+    const initialConversations = (await this.host.listConversations()).filter(conversation => conversation.id !== assistantId)
+    await this.projects.migrate(initialConversations)
+    for (const conversation of initialConversations) if (!conversation.projectId && !conversation.projectUnassigned && !conversation.archivedAt) {
+      const project = await this.projects.findByCwd(conversation.cwd)
+      if (project) await this.host.updateConversationOrganization(conversation.id, { projectId: project.id })
+    }
     for (const candidate of webDistCandidates) {
       if (await access(resolve(candidate, 'index.html')).then(() => true, () => false)) { this.webDistDirectory = candidate; break }
     }
@@ -271,7 +307,8 @@ export class H5Server {
       })
     })
     server.on('upgrade', (req, socket, head) => {
-      if ((req.url ?? '').startsWith('/api/automation/socket')) void this.handleAutomationUpgrade(req, socket, head)
+      if ((req.url ?? '').startsWith('/api/chat/socket')) void this.handleChatUpgrade(req, socket, head)
+      else if ((req.url ?? '').startsWith('/api/automation/socket')) void this.handleAutomationUpgrade(req, socket, head)
       else if ((req.url ?? '').startsWith('/preview/')) void this.handlePreviewUpgrade(req, socket, head)
       else void this.handleTerminalUpgrade(req, socket, head)
     })
@@ -281,6 +318,9 @@ export class H5Server {
       server.on('error', reject)
     })
     this.server = server
+    this.dataChanged = this.host.conversationData.onChange(revision => {
+      for (const client of this.chatSockets.clients) this.sendChat(client, { type: 'changed', revision })
+    })
     void this.pumpAssistantInbox()
     void this.host.retryJarvisSync()
     this.jarvisSyncTimer = setInterval(() => { void this.host.retryJarvisSync() }, 15_000)
@@ -292,11 +332,18 @@ export class H5Server {
     const pairing = this.auth.createPairingCode()
     const pairUrl = `http://${lanIp}:${this.effectivePort}/?code=${pairing.code}`
 
+    await writeFile(join(this.dataDir, 'service.json'), JSON.stringify({ protocol: 1, pid: process.pid, port: this.effectivePort, dataDir: this.dataDir }), { mode: 0o600 })
     return { port: this.effectivePort, lanIp, pairUrl }
+    } catch (error) { await this.releaseService(); throw error }
   }
 
   async stop(): Promise<void> {
     this.stopping = true
+    this.dataChanged?.(); this.dataChanged = undefined
+    for (const timer of this.projectionTimers.values()) clearTimeout(timer)
+    this.projectionTimers.clear()
+    for (const client of this.chatSockets.clients) client.close(1001, 'Service stopped')
+    this.chatSubscriptions.clear()
     for (const entry of this.bundleImports.values()) { clearTimeout(entry.timer); await rm(entry.bundle.directory, { recursive: true, force: true }) }
     this.bundleImports.clear()
     await Promise.all([...this.activeRuns.values()].map(handle => (handle.shutdown ? handle.shutdown() : handle.cancel('SERVER_STOPPED')).catch(() => undefined)))
@@ -304,6 +351,8 @@ export class H5Server {
     // The pump joins that launch and shuts it down without dispatching its queue.
     await this.assistantPump?.catch(() => undefined)
     await Promise.allSettled([...this.runConsumers])
+    await Promise.allSettled([...this.runSnapshots].map(([runId, snapshot]) => this.host.conversationData.call('saveState', `run:${runId}`, snapshot)))
+    this.assistantInbox.close()
     await this.workspaces.close()
     if (this.jarvisSyncTimer) clearInterval(this.jarvisSyncTimer)
     this.jarvisSyncTimer = undefined
@@ -330,6 +379,7 @@ export class H5Server {
       await new Promise<void>((resolve) => this.server?.close(() => resolve()))
       this.server = undefined
     }
+    await this.releaseService()
   }
 
   private attachRun(handle: RunHandle, consume = true): void {
@@ -502,71 +552,9 @@ export class H5Server {
     return handle
   }
 
-  private async assistantView(): Promise<{ conversation: unknown; messages: unknown[]; receipts: WebAssistantMessageReceipt[]; workInteractions: WebAssistantWorkInteraction[] }> {
-    const id = this.assistantInbox.conversationId
-    const base = (await this.host.getConversation(id)).summary
-    const receipts = this.assistantInbox.list()
-    const receiptById = new Map(receipts.map(receipt => [receipt.messageId, receipt]))
-    const messages = (await this.host.getWebConversationMessages(id)).map(message => {
-      if (message.role !== 'user' || !message.id.startsWith('msg-')) return message
-      const receipt = receiptById.get(message.id.slice(4))
-      if (!receipt) return message
-      if (receipt.state === 'completed') return { ...message, runId: receipt.runId }
-      return { ...message, runId: receipt.runId, deliveryState: receipt.state === 'failed' ? 'failed' as const : receipt.state === 'interrupted' ? 'interrupted' as const : receipt.state === 'queued' ? 'queued' as const : 'replying' as const, requestId: receipt.messageId }
-    })
-    const seen = new Set(messages.map(message => message.id))
-    const queued = this.assistantInbox.transcript().filter(message => !seen.has(`msg-${message.requestId}`)).map(message => {
-      const receipt = receiptById.get(message.requestId)
-      return {
-        id: `msg-${message.requestId}`,
-        runId: receipt?.runId ?? message.runId,
-        role: 'user' as const,
-        text: message.text,
-        createdAt: message.createdAt,
-        ...(receipt && receipt.state !== 'completed' ? {
-          deliveryState: receipt.state === 'failed' ? 'failed' as const : receipt.state === 'interrupted' ? 'interrupted' as const : receipt.state === 'queued' ? 'queued' as const : 'replying' as const,
-          requestId: receipt.messageId,
-        } : {}),
-      }
-    })
-    const workInteractions: WebAssistantWorkInteraction[] = []
-    const liveWorkMessages: Array<{ id: string; role: 'assistant'; text: string; createdAt: string; work: NonNullable<WebMessage['work']> }> = []
-    const workConversations = await this.host.listConversations()
-    const assistantWorkIds = new Set(workConversations.filter(work => work.origin === 'assistant').map(work => work.id))
-    for (const work of workConversations) {
-      if (work.id !== id && !assistantWorkIds.has(work.id)) continue
-      if (work.archivedAt || !work.activeRunId) continue
-      const handle = this.activeRuns.get(work.activeRunId)
-      const pending = handle && handle.conversationId === work.id ? await handle.pendingInteractions() : []
-      for (const interaction of pending) workInteractions.push({
-        ...publicInteraction(interaction),
-        runId: work.activeRunId,
-        conversationId: work.id,
-        title: work.title,
-        ...(work.projectId ? { projectId: work.projectId } : {}),
-        approvalPolicy: work.approvalPolicy ?? 'manual',
-      })
-      if (work.id === id) continue
-      const laneState = handle && handle.conversationId === work.id ? await this.host.getPublicRunLanes(work.id, work.activeRunId).catch(() => undefined) : undefined
-      const activeLane = laneState?.lanes.find(lane => lane.status === 'running' || lane.status === 'waiting')
-      liveWorkMessages.push({
-        id: `work-live-${work.activeRunId}`,
-        role: 'assistant',
-        text: '',
-        createdAt: work.updatedAt,
-        work: {
-          conversationId: work.id,
-          ...(work.projectId ? { projectId: work.projectId } : {}),
-          title: work.title,
-          state: !handle ? 'interrupted' : pending.length ? 'waiting' : 'running',
-          ...(activeLane ? { progress: (activeLane.activity ?? activeLane.label).slice(0, 200) } : {}),
-          ...(laneState?.available ? { laneCount: laneState.lanes.length } : {}),
-        },
-      })
-    }
-    const notices = this.assistantInbox.workNotices().filter(message => message.work && assistantWorkIds.has(message.work.conversationId))
-    const combined = [...messages, ...queued, ...notices, ...liveWorkMessages].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-    return { conversation: { ...base, kind: 'assistant' }, messages: combined, receipts, workInteractions }
+  private async assistantView(before?: string): Promise<{ conversation: unknown; messages: unknown[]; receipts: WebAssistantMessageReceipt[]; workInteractions: WebAssistantWorkInteraction[]; before?: string; revision: number }> {
+    await Promise.allSettled([...this.projectionWrites.values()])
+    return this.host.conversationData.call('assistantView', before)
   }
 
   private async handlePreviewUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
@@ -612,6 +600,73 @@ export class H5Server {
         upstream.on('close', () => closeBoth())
       })
     } catch { reject(400, 'Bad Request') }
+  }
+
+  private sendChat(client: WebSocket, value: unknown): void {
+    if (client.readyState !== WebSocket.OPEN) return
+    if (client.bufferedAmount > 2 * 1024 * 1024) { client.close(1013, 'Resync required'); return }
+    client.send(JSON.stringify(value))
+  }
+
+  private async handleChatUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
+    const reject = () => socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+    try {
+      const host = req.headers.host, origin = req.headers.origin
+      if (typeof host !== 'string' || !isAllowedH5Host(host) || typeof origin !== 'string' || new URL(origin).origin !== `http://${host}` || new URL(req.url!, `http://${host}`).pathname !== '/api/chat/socket') { reject(); return }
+      const token = this.parseCookies(req).pulse_device
+      if (!await this.auth.authenticateToken(token)) { reject(); return }
+      this.chatSockets.handleUpgrade(req, socket, head, client => {
+        const subscriptions = new Map<string, number>(); this.chatSubscriptions.set(client, subscriptions)
+        let inFlight = 0
+        client.on('error', () => {})
+        client.on('close', () => this.chatSubscriptions.delete(client))
+        client.on('message', raw => { void (async () => {
+          if (!await this.auth.authenticateToken(token)) { client.close(1008, 'Authorization revoked'); return }
+          const frame = JSON.parse(raw.toString()) as { id?: string; type?: string; path?: string; method?: string; body?: unknown; runId?: string; after?: number }
+          if (frame.type === 'ping') { this.sendChat(client, { type: 'pong' }); return }
+          if (frame.type === 'unsubscribe' && frame.runId) { subscriptions.delete(frame.runId); return }
+          if (frame.type === 'subscribe' && frame.runId) {
+            const id = await this.host.findConversationByRunId(frame.runId)
+            if (id !== this.assistantInbox.conversationId && !this.assistantPendingRuns.has(frame.runId)) throw new Error('CHAT_RUN_REQUIRED')
+            const after = Math.max(0, Number(frame.after) || 0)
+            subscriptions.set(frame.runId, after)
+            const events = this.runEventBuffers.get(frame.runId) as unknown as WebRunEvent[] | undefined
+            if (!events?.length || after > 0 && (events[0]?.seq ?? 0) > after + 1) {
+              const snapshot = await this.snapshotRun(frame.runId, (events ?? []) as unknown as AssistantEvent[], this.activeRuns.has(frame.runId) || this.assistantPendingRuns.has(frame.runId))
+              this.sendChat(client, { type: 'event', event: { type: 'resync', runId: frame.runId, seq: snapshot.seq, data: snapshot } }); subscriptions.set(frame.runId, snapshot.seq)
+              return
+            }
+            for (const event of events ?? []) if ((event.seq ?? 0) > after) { this.sendChat(client, { type: 'event', event }); subscriptions.set(frame.runId, event.seq ?? 0) }
+            if (!this.activeRuns.has(frame.runId) && !this.assistantPendingRuns.has(frame.runId)) this.sendChat(client, { type: 'event', event: { type: 'run_finished', runId: frame.runId, seq: Math.max(after, events?.at(-1)?.seq ?? 0) + 1 } })
+            return
+          }
+          if (frame.type !== 'request' || typeof frame.id !== 'string' || frame.id.length > 128 || typeof frame.path !== 'string' || inFlight >= 32) throw new Error('CHAT_REQUEST_INVALID')
+          const path = new URL(frame.path, 'http://pulse.local')
+          const allowed = path.pathname === '/api/assistant' || path.pathname === '/api/assistant/messages' || /^\/api\/assistant\/runs\/[^/]+\/cancel$/.test(path.pathname) || /^\/api\/data\/conversations\/[^/]+\/(messages|body|search)$/.test(path.pathname) || path.pathname === '/api/conversations'
+          if (!allowed || !['GET','POST'].includes(frame.method ?? 'GET')) throw new Error('CHAT_METHOD_INVALID')
+          inFlight++
+          try {
+            const result = await this.dispatchChatRequest(req, path.pathname + path.search, frame.method ?? 'GET', frame.body)
+            this.sendChat(client, { type: 'response', id: frame.id, ...result })
+          } catch (error) { this.sendChat(client, { type: 'response', id: frame.id, status: 400, body: { error: error instanceof Error ? error.message : 'CHAT_FAILED' } }) }
+          finally { inFlight-- }
+        })().catch(() => client.close(1003, 'Invalid chat request')) })
+        void this.host.conversationData.call<number>('revision').then(revision => this.sendChat(client, { type: 'changed', revision }))
+      })
+    } catch { reject() }
+  }
+
+  /** Reuse the same authenticated route handlers without making a loopback HTTP request. */
+  private dispatchChatRequest(source: IncomingMessage, path: string, method: string, body: unknown): Promise<{ status: number; body: unknown }> {
+    return new Promise((resolveRequest, rejectRequest) => {
+      const req = new IncomingMessage(source.socket)
+      req.complete = true
+      req.url = path; req.method = method; req.headers = { ...source.headers, 'content-type': 'application/json' }
+      if (body !== undefined) req.push(JSON.stringify(body)); req.push(null)
+      const res = new ServerResponse(req)
+      res.end = ((chunk?: string | Buffer) => { let value: unknown = null; try { value = JSON.parse(String(chunk ?? 'null')) } catch { value = String(chunk ?? '') }; resolveRequest({ status: res.statusCode, body: value }); return res }) as typeof res.end
+      void this.handleRequest(req, res).catch(rejectRequest)
+    })
   }
 
   private async handleTerminalUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
@@ -965,7 +1020,7 @@ export class H5Server {
     }
 
     if (pathname === '/api/assistant' && method === 'GET') {
-      const view = await this.assistantView()
+      const view = await this.assistantView(url.searchParams.get('before') ?? undefined)
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
       res.end(JSON.stringify(view))
       return
@@ -1452,17 +1507,7 @@ export class H5Server {
     // 7. Conversations: GET /api/conversations, POST /api/conversations
     if (pathname === '/api/conversations' && method === 'GET') {
       const all = await this.host.listConversations()
-      await this.projects.migrate(all.filter(conversation => conversation.id !== this.assistantInbox.conversationId && !conversation.archivedAt))
-      const list: ConversationSummary[] = []
-      for (const conversation of all.filter(item => item.id !== this.assistantInbox.conversationId)) {
-        let current = conversation
-        if (!current.projectId && !current.projectUnassigned && !current.archivedAt) {
-          const project = await this.projects.findByCwd(current.cwd)
-          if (project) current = await this.host.updateConversationOrganization(current.id, { projectId: project.id })
-        }
-        const archived = Boolean(current.archivedAt)
-        if (archived === (url.searchParams.get('archived') === '1')) list.push(current)
-      }
+      const list = all.filter(item => item.id !== this.assistantInbox.conversationId && Boolean(item.archivedAt) === (url.searchParams.get('archived') === '1'))
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(list))
       return
@@ -1523,6 +1568,16 @@ export class H5Server {
         res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'ATTACHMENT_NOT_FOUND' }))
       }
       return
+    }
+
+    const pageMatch = pathname.match(/^\/api\/data\/conversations\/([^/]+)\/(messages|body|search)$/)
+    if (pageMatch && method === 'GET') {
+      const id = decodeURIComponent(pageMatch[1]!)
+      await this.host.getConversation(id)
+      const result = pageMatch[2] === 'messages' ? await this.host.getMessagePage(id, url.searchParams.get('before') ?? undefined, Number(url.searchParams.get('limit') ?? 50))
+        : pageMatch[2] === 'body' ? await this.host.conversationData.call('body', id, url.searchParams.get('id'))
+        : await this.host.conversationData.call('search', id, url.searchParams.get('q') ?? '')
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result)); return
     }
 
     const conversationMatch = pathname.match(/^\/api\/conversations\/([^/]+)$/)
@@ -1721,7 +1776,7 @@ export class H5Server {
       const buffer = this.runEventBuffers.get(runId) ?? []
       const snapshot = await this.snapshotRun(runId, buffer, this.activeRuns.has(runId) || this.assistantPendingRuns.has(runId))
       const conversationId = this.runConversations.get(runId) ?? await this.host.findConversationByRunId(runId)
-      snapshot.laneState = conversationId ? await this.host.getPublicRunLanes(conversationId, runId) : { runId, available: false, lanes: [] }
+      snapshot.laneState ??= { runId, available: false, lanes: [] }
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(snapshot))
       return
     }
@@ -1741,8 +1796,13 @@ export class H5Server {
 
         const buffer = this.runEventBuffers.get(runId) ?? []
         const afterParam = Number(url.searchParams.get('after') ?? 0)
-        const after = Number.isSafeInteger(afterParam) && afterParam > 0 ? afterParam : 0
-        const firstUnseen = buffer.findIndex((event) => event.seq > after)
+        const after = Number.isFinite(afterParam) && afterParam > 0 ? afterParam : 0
+        let cursor = after
+        if (!buffer.length || after > 0 && (buffer[0]?.seq ?? 0) > after + 1) {
+          const snapshot = await this.snapshotRun(runId, buffer, this.activeRuns.has(runId) || this.assistantPendingRuns.has(runId))
+          this.writeSse(res, { type: 'resync', runId, seq: snapshot.seq, data: snapshot }); cursor = snapshot.seq
+        }
+        const firstUnseen = buffer.findIndex((event) => event.seq > cursor)
         const client: SseClient = { res, sent: firstUnseen < 0 ? buffer.length : firstUnseen }
         const clients = this.runSseClients.get(runId)
         if (clients) {
@@ -1756,7 +1816,7 @@ export class H5Server {
         }
         if (!this.activeRuns.has(runId) && !this.assistantPendingRuns.has(runId)) {
           const conversationId = this.runConversations.get(runId)
-          this.writeSse(res, { type: 'run_finished', runId, seq: (buffer.at(-1)?.seq ?? 0) + 1, ...(conversationId ? { conversationId } : {}) })
+          this.writeSse(res, { type: 'run_finished', runId, seq: Math.max(cursor, buffer.at(-1)?.seq ?? 0) + 1, ...(conversationId ? { conversationId } : {}) })
           try { res.end() } catch { /* already closed */ }
           clients?.delete(client)
           return
@@ -1889,6 +1949,7 @@ export class H5Server {
     } catch (error) {
       process.stderr.write(`[pulse] run stream failed: ${String(error).slice(0, 180)}\n`)
     } finally {
+      try {
       const receipt = this.assistantInbox.receiptByRun(runId)
       if (receipt) await this.assistantInbox.update(runId, outcome?.status === 'succeeded' ? 'completed' : outcome?.status === 'cancelled' ? 'failed' : 'failed', outcome?.status === 'cancelled' ? '回复已停止' : outcome?.status === 'failed' ? '回复失败' : outcome ? undefined : '回复状态未能确认').catch(() => undefined)
       const conversationId = this.runConversations.get(runId)
@@ -1906,7 +1967,7 @@ export class H5Server {
           }
         }
         if (link && conversation?.summary.origin === 'assistant') {
-          const messages = await this.host.getWebConversationMessages(conversationId).catch(() => [])
+          const messages = (await this.host.getMessagePage(conversationId, undefined, 100).catch(() => ({ items: [] }))).items
           const answer = [...messages].reverse().find(message => message.role === 'assistant')?.text ?? outcome.text ?? ''
           const state = workspaceResult?.status === 'conflict' ? 'conflict' : workspaceResult?.status === 'pending' ? 'pending' : outcome.status === 'succeeded' ? 'succeeded' : outcome.status === 'cancelled' ? 'cancelled' : 'failed'
           const artifacts = await this.host.listArtifacts(conversationId).catch(() => [])
@@ -1919,9 +1980,14 @@ export class H5Server {
           }).catch(() => undefined)
         }
       }
+      } catch (error) {
+        process.stderr.write(`[pulse] run finalization failed: ${error instanceof Error ? error.message.slice(0, 180) : 'unknown'}\n`)
+        this.pushEvent(runId, { type: 'error', runId, seq: (this.runEventBuffers.get(runId)?.at(-1)?.seq ?? 0) + 0.5, data: { message: '工作收尾未完成，请检查运行记录。' } })
+      } finally {
       this.assistantPendingRuns.delete(runId)
       this.finishStream(runId)
       this.inhibitor.release()
+      }
     }
   }
 
@@ -1931,11 +1997,11 @@ export class H5Server {
     let projected = publicH5Event(event)
     const fact = event.type === 'fact' && event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data as Record<string, JsonValue> : undefined
     if (fact?.type === 'lane.snapshot' && event.conversationId) {
-      const data = await this.host.getPublicRunLanes(event.conversationId, runId)
+      const data = this.runSnapshots.get(runId)?.laneState ?? { runId, available: false, lanes: [] }
       projected = { runId, conversationId: event.conversationId, seq: event.seq, type: 'lanes', data: enrichLanesFromSnapshot(runId, data, fact) }
     }
     if (projected) this.pushEvent(runId, projected)
-    if (event.type === 'waiting') {
+    if (event.type === 'waiting') void (async () => {
       const handle = this.activeRuns.get(runId)
       if (handle) {
         const items = await handle.pendingInteractions()
@@ -1943,19 +2009,44 @@ export class H5Server {
         this.pushEvent(runId, { runId, conversationId: handle.conversationId, seq: currentSeq, type: 'interactions', data: { interactions: items.map(publicInteraction), ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}) } })
         const summary = await this.host.getConversation(handle.conversationId).then((item) => item.summary).catch(() => undefined)
         if (summary?.approvalPolicy === 'delegate') {
-          await this.reviewPendingApprovals(runId)
-          await this.pushInteractionSnapshot(runId, currentSeq + 0.25)
+          void this.reviewPendingApprovals(runId).then(() => this.pushInteractionSnapshot(runId, currentSeq + 0.25)).catch(() => undefined)
         }
       }
-    }
+    })().catch(() => undefined)
   }
 
   private pushEvent(runId: string, event: WebRunEvent): void {
     const buffer = this.runEventBuffers.get(runId)
     if (!buffer) return
     buffer.push(prepareRunEvent(event, (buffer[0] as unknown as WebRunEvent | undefined)?.runStartedAt) as unknown as AssistantEvent)
+    const previous = this.runSnapshots.get(runId) ?? { runId, state: 'running' as const, seq: 0, activities: [] }
+    const next: WebRunSnapshot = { ...previous, seq: Math.max(previous.seq, event.seq ?? 0) }
+    if (event.type === 'status') next.status = event
+    if (event.type === 'tool') next.activities = [...next.activities.filter(item => item.data.activityId !== event.data.activityId), event].slice(-30)
+    if (event.type === 'waiting') next.waiting = event
+    if (event.type === 'interactions') { if (event.data.reviewNote) next.reviewNote = event.data.reviewNote; else delete next.reviewNote; next.interactions = event.data.interactions; if (!next.interactions.length) delete next.waiting }
+    if (event.type === 'lanes') next.laneState = event.data
+    if (event.type === 'complete') { next.complete = event; next.state = event.data.status; delete next.waiting; next.interactions = [] }
+    this.runSnapshots.set(runId, next)
+    if (event.type === 'interactions' || event.type === 'waiting' || event.type === 'complete') {
+      const timer = this.projectionTimers.get(runId); if (timer) clearTimeout(timer); this.projectionTimers.delete(runId)
+      const writing = this.host.conversationData.call('saveState', `run:${runId}`, next)
+      this.projectionWrites.set(runId, writing)
+      void writing.finally(() => { if (this.projectionWrites.get(runId) === writing) this.projectionWrites.delete(runId) }).catch(() => undefined)
+    } else if (!this.projectionTimers.has(runId)) this.projectionTimers.set(runId, setTimeout(() => {
+      this.projectionTimers.delete(runId)
+      void this.host.conversationData.call('saveState', `run:${runId}`, this.runSnapshots.get(runId)).catch(() => undefined)
+    }, 100))
+    for (const [client, subscriptions] of this.chatSubscriptions) if (subscriptions.has(runId) && (event.seq ?? 0) > subscriptions.get(runId)!) {
+      this.sendChat(client, { type: 'event', event }); subscriptions.set(runId, event.seq ?? 0)
+    }
     const clients = this.runSseClients.get(runId)
     if (clients) for (const client of [...clients]) this.flushClient(client, buffer, clients)
+    if (buffer.length > 5000) {
+      const removed = buffer.length - 4000
+      buffer.splice(0, removed)
+      if (clients) for (const client of clients) client.sent = Math.max(0, client.sent - removed)
+    }
   }
 
   private async pushInteractionSnapshot(runId: string, seq: number): Promise<void> {
@@ -2006,6 +2097,9 @@ export class H5Server {
   }
 
   private async snapshotRun(runId: string, events: AssistantEvent[], active: boolean): Promise<WebRunSnapshot> {
+    await this.projectionWrites.get(runId)?.catch(() => undefined)
+    const projected = this.runSnapshots.get(runId) ?? await this.host.conversationData.call<WebRunSnapshot | undefined>('readState', `run:${runId}`)
+    if (projected) return { ...projected, ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}), ...(active ? { state: 'running' as const } : projected.state === 'running' ? { state: 'interrupted' as const } : {}) }
     let status: WebRunSnapshot['status']
     let complete: WebRunSnapshot['complete']
     let waiting: WebRunSnapshot['waiting']
@@ -2022,12 +2116,6 @@ export class H5Server {
       else if (event.type === 'interactions') { interactions = event.data.interactions; if (event.data.reviewNote) this.reviewNotes.set(runId, event.data.reviewNote); else this.reviewNotes.delete(runId) }
       else if (event.type === 'lanes') laneState = event.data
       else if (event.type === 'complete') { complete = event; waiting = undefined; interactions = [] }
-    }
-    const handle = this.activeRuns.get(runId)
-    if (handle) {
-      const current = await handle.pendingInteractions()
-      interactions = current.map(publicInteraction)
-      if (current.length === 0) waiting = undefined
     }
     const state = complete?.data.status ?? (active ? 'running' : events.length ? 'interrupted' : 'interrupted')
     return { runId, state, seq, ...(status ? { status } : {}), activities: [...activities.values()].slice(-30), ...(waiting ? { waiting } : {}), ...(interactions ? { interactions } : {}), ...(laneState ? { laneState } : {}), ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}), ...(complete ? { complete } : {}) }
@@ -2057,7 +2145,7 @@ export class H5Server {
   private async persistRunTrace(runId: string): Promise<void> {
     const conversationId = this.runConversations.get(runId)
     const buffer = this.runEventBuffers.get(runId)
-    if (!conversationId || !buffer || conversationId === this.assistantInbox.conversationId) return
+    if (!conversationId || !buffer) return
     const events = compactTraceEvents(buffer as unknown as WebRunEvent[])
     if (events.length === 0) return
     await mkdir(join(this.dataDir, 'conversations', conversationId, 'runs', runId), { recursive: true })
@@ -2081,7 +2169,7 @@ export class H5Server {
 
   /** One response for the visible history, instead of a request per assistant message. */
   private async loadConversationTraces(conversationId: string): Promise<Array<{ runId: string; events: WebRunEvent[]; seq: number }>> {
-    const messages = await this.host.getWebConversationMessages(conversationId).catch(() => [])
+    const messages = (await this.host.getMessagePage(conversationId, undefined, 100).catch(() => ({ items: [] }))).items
     const runIds: string[] = []
     for (const message of [...messages].reverse()) {
       if (!message.runId || runIds.includes(message.runId) || !isSafePathId(message.runId)) continue
@@ -2109,6 +2197,8 @@ export class H5Server {
   }
 
   private finishStream(runId: string): void {
+    const lastSeq = this.runEventBuffers.get(runId)?.at(-1)?.seq ?? 0
+    for (const [client, subscriptions] of this.chatSubscriptions) if (subscriptions.has(runId)) this.sendChat(client, { type: 'event', event: { type: 'run_finished', runId, seq: lastSeq + 1 } })
     this.approvalReviewControllers.get(runId)?.abort()
     this.approvalReviewControllers.delete(runId)
     this.approvalReviewAgain.delete(runId)
@@ -2133,6 +2223,7 @@ export class H5Server {
     const timer = setTimeout(() => {
       this.runEventBuffers.delete(runId)
       this.runConversations.delete(runId)
+      this.runSnapshots.delete(runId)
       this.bufferTimers.delete(runId)
     }, 60_000)
     timer.unref()

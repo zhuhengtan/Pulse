@@ -1,3 +1,4 @@
+import { writeConversationFixture } from './conversation-fixtures.js'
 import { describe, it, expect } from 'vitest'
 import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -100,7 +101,7 @@ describe('real batch entry with an offline fake CLI', () => {
       await save(join(f.out, 'batch.json'), batch)
       const dataDir = join(f.out, 'pulse-data/code-01/trial-2'), conversation = join(dataDir, 'conversations/conv-original')
       await mkdir(join(conversation, 'runs/run-original'), { recursive: true })
-      await save(join(conversation, 'manifest.json'), { activeRunId: 'run-original', runs: ['run-original'] })
+      await writeConversationFixture(join(conversation, 'manifest.json'), JSON.stringify({ id: 'conv-original', updatedAt: new Date().toISOString(), activeRunId: 'run-original', runs: ['run-original'] }))
       await save(join(conversation, 'runs/run-original/model-budget.json'), { schemaVersion: 1, limit: 16, used: 2 })
       if (expired) {
         await expect(f.run(['--resume'])).rejects.toThrow('EVAL_TRIAL_DEADLINE_EXPIRED')
@@ -144,7 +145,7 @@ describe('real batch entry with an offline fake CLI', () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-eval-budget-mismatch-'))
     try {
       const dir = join(root, 'conversations/conv-fake/runs/run-fake'); await mkdir(dir, { recursive: true })
-      await save(join(root, 'conversations/conv-fake/manifest.json'), { activeRunId: 'run-fake' })
+      await writeConversationFixture(join(root, 'conversations/conv-fake/manifest.json'), JSON.stringify({ id: 'conv-fake', updatedAt: new Date().toISOString(), activeRunId: 'run-fake' }))
       await save(join(dir, 'model-budget.json'), { schemaVersion: 1, limit: 16, used: 7 })
       await expect(recoverTrial(root, { maxModelCalls: 8 })).rejects.toThrow('BUDGET_MISMATCH')
       expect((await json(join(dir, 'model-budget.json'))).used).toBe(7)

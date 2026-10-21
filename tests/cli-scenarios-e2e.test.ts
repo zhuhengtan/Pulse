@@ -1,3 +1,4 @@
+import { readConversationFixture } from './conversation-fixtures.js'
 import { describe, expect, it, afterEach } from 'vitest'
 import { spawn } from 'node:child_process'
 import { mkdtempSync } from 'node:fs'
@@ -679,7 +680,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
 
     // Verify session record file and manifest on disk
     const messagesFile = join(dataDir, 'conversations', convId, 'messages.jsonl')
-    const messagesContent = await readFile(messagesFile, 'utf8')
+    const messagesContent = await readConversationFixture(messagesFile, 'utf8')
     const messages = messagesContent
       .split('\n')
       .filter(Boolean)
@@ -694,7 +695,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
     expect(messagesContent).toContain('全链路打通')
 
     const manifestFile = join(dataDir, 'conversations', convId, 'manifest.json')
-    const manifest = JSON.parse(await readFile(manifestFile, 'utf8'))
+    const manifest = JSON.parse(await readConversationFixture(manifestFile, 'utf8'))
     expect(manifest.id).toBe(convId)
     expect(manifest.runs.length).toBe(3)
   })

@@ -17,7 +17,7 @@ await mkdir(join(stage, 'pulse/bin'), { recursive: true })
 await mkdir(join(stage, 'pulse/app/node_modules/@hunterzhu'), { recursive: true })
 await mkdir(join(stage, 'pulse/LICENSES'), { recursive: true })
 
-for (const name of ['cli', 'server', 'runtime', 'adapters', 'tool-sdk']) {
+for (const name of ['cli', 'server', 'data', 'runtime', 'adapters', 'tool-sdk']) {
   const source = join(repo, `packages/${name}`)
   const packageName = JSON.parse(await readFile(join(source, 'package.json'), 'utf8')).name
   const target = join(stage, 'pulse/app/node_modules', packageName)
@@ -115,7 +115,7 @@ for (const [name, dependency] of Object.entries(dependencyRoot.dependencies ?? {
 // `pnpm list --filter pulse-cli` nests server/runtime/adapter dependencies
 // below workspace links. Walk each bundled workspace package explicitly so
 // its production dependencies are copied beside the package that imports them.
-for (const packageName of ['cli', 'server', 'runtime', 'adapters', 'tool-sdk']) {
+for (const packageName of ['cli', 'server', 'data', 'runtime', 'adapters', 'tool-sdk']) {
   const source = join(repo, `packages/${packageName}`)
   const packageManifest = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'))
   const target = join(stage, 'pulse/app/node_modules', packageManifest.name)
@@ -228,7 +228,7 @@ const dirty = spawnSync('git', ['status', '--porcelain'], { cwd: repo, encoding:
 await writeFile(join(stage, 'pulse/manifest.json'), JSON.stringify({ schemaVersion: 1, version, revision, dirty }, null, 2))
 await writeFile(join(stage, 'pulse/README.md'), `# Pulse CLI ${version}
 
-Requires Node >=22.
+Requires Node >=22.13.
 
 ## Run without installing
 

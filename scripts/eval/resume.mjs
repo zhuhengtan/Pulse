@@ -1,3 +1,4 @@
+import { ConversationData } from '../../packages/data/dist/index.js'
 import { readFile, writeFile, rename, open, unlink, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -84,7 +85,9 @@ export async function recoverTrial(dataDir, state) {
   try { entries = await readdir(conversations, { withFileTypes: true }) } catch (error) { if (error.code === 'ENOENT') throw new Error('EVAL_INTERRUPTED_TRIAL_REQUIRES_AUDIT'); throw error }
   const ids = entries.filter(entry => entry.isDirectory()).map(entry => entry.name)
   if (ids.length !== 1) throw new Error('EVAL_INTERRUPTED_TRIAL_IDENTITY_AMBIGUOUS')
-  const id = ids[0], manifest = await readJson(join(conversations, id, 'manifest.json'))
+  const id = ids[0], data = new ConversationData(dataDir)
+  let manifest
+  try { manifest = await data.call('get', id) } finally { data.close() }
   const runId = manifest.activeRunId ?? manifest.runs?.at(-1)
   if (!/^run-[\w-]+$/.test(runId ?? '')) throw new Error('EVAL_INTERRUPTED_RUN_MISSING')
   if (state.runId && state.runId !== runId) throw new Error('EVAL_INTERRUPTED_RUN_CHANGED')

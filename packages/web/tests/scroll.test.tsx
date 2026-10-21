@@ -59,7 +59,7 @@ it('waits for history to load and opens the assistant directly at the bottom wit
   expect(calls.every(call => call.behavior === 'instant')).toBe(true)
 })
 
-it('resets a previous history-reading position when switching conversations or returning from settings', async () => {
+it('opens a new conversation at the latest message and restores cached reading positions', async () => {
   const { router } = show('/chat')
   await screen.findByText('最新助手消息')
   messages().scrollTop = 120; fireEvent.scroll(messages())
@@ -71,7 +71,8 @@ it('resets a previous history-reading position when switching conversations or r
   messages().scrollTop = 80; fireEvent.scroll(messages())
   await navigate(router, '/settings/appearance')
   await navigate(router, '/chat'); await screen.findByText('最新助手消息')
-  expect(messages().scrollTop).toBe(4500)
+  expect(messages().scrollTop).toBe(120)
+  expect(screen.getByRole('button', { name: '回到底部 ↓' })).toBeTruthy()
   expect(calls.every(call => call.behavior === 'instant')).toBe(true)
 })
 

@@ -1,3 +1,4 @@
+import { readConversationFixture, writeConversationFixture } from './conversation-fixtures.js'
 import { createServer, request as httpRequest } from 'node:http'
 import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -835,9 +836,9 @@ describe('H5Server End-to-End', () => {
       const created = await host.createConversation({ title: 'Interrupted' })
       const runId = 'run-interrupted-without-outcome'
       const manifestPath = join(dir, 'conversations', created.id, 'manifest.json')
-      const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
+      const manifest = JSON.parse(await readConversationFixture(manifestPath, 'utf8')) as Record<string, unknown>
       manifest.activeRunId = runId
-      await writeFile(manifestPath, JSON.stringify(manifest, null, 2))
+      await writeConversationFixture(manifestPath, JSON.stringify(manifest, null, 2))
 
       const snapshot = await fetch(`${baseUrl}/api/runs/${runId}/state`, { headers: { Cookie: cookie } })
       expect(await snapshot.json()).toMatchObject({ runId, state: 'interrupted' })
@@ -864,14 +865,14 @@ describe('H5Server End-to-End', () => {
     const conversation = await host.createConversation({ title: 'Interrupted' })
     const runId = 'run-explicit-resume'
     const manifestPath = join(dir, 'conversations', conversation.id, 'manifest.json')
-    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
+    const manifest = JSON.parse(await readConversationFixture(manifestPath, 'utf8')) as Record<string, unknown>
     manifest.activeRunId = runId
-    await writeFile(manifestPath, JSON.stringify(manifest, null, 2))
+    await writeConversationFixture(manifestPath, JSON.stringify(manifest, null, 2))
     const events = (async function* () {
       yield { schemaVersion: 1 as const, type: 'text' as const, conversationId: conversation.id, runId, seq: 1, data: '恢复后完成' }
       yield { schemaVersion: 1 as const, type: 'complete' as const, conversationId: conversation.id, runId, seq: 2, data: { status: 'succeeded' } }
     })()
-    const handle = { id: runId, conversationId: conversation.id, events, outcome: async () => ({ status: 'succeeded' }) } as unknown as RunHandle
+    const handle = { id: runId, conversationId: conversation.id, events, outcome: async () => ({ status: 'succeeded' }), taskOutcome: async () => undefined } as unknown as RunHandle
     host.resumeRun = async () => handle
     const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1' })
     const info = await server.start()
@@ -892,7 +893,7 @@ describe('H5Server End-to-End', () => {
     }
   })
 
-  it('restores only an accepted archived answer and marks unrecoverable legacy replies', async () => {
+  it('reads saved answers without restoring or parsing Runtime archives', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'h5-web-history-'))
     temporaryDirectories.push(dir)
     const host = createLocalHost({ cwd: dir, dataDir: dir })
@@ -901,15 +902,15 @@ describe('H5Server End-to-End', () => {
     const runId = 'run-accepted'
     const runDir = join(conversationDir, 'runs', runId)
     await mkdir(runDir, { recursive: true })
-    await writeFile(join(conversationDir, 'messages.jsonl'), [
+    await writeConversationFixture(join(conversationDir, 'messages.jsonl'), [
       { id: 'old', role: 'assistant', text: '旧候选答案加验收报告', runId, createdAt: '2026-01-01T00:00:00.000Z' },
       { id: 'unknown', role: 'assistant', text: '无法确认的旧回复', runId: 'run-missing', createdAt: '2026-01-01T00:00:01.000Z' },
     ].map(message => JSON.stringify(message)).join('\n') + '\n')
     await writeFile(join(runDir, 'outcome.json'), JSON.stringify({ taskOutcome: { status: 'accepted', candidateResultRef: 'result-verified' } }))
     await writeFile(join(runDir, 'runtime.json'), JSON.stringify({ state: { state: { results: [['result-verified', { value: { text: '已验收的最终答案\n\n---\n\n**阶段报告**\n内部验收说明\n任务逐项验收通过。' } }]] } } }))
     const history = await host.getWebConversationMessages(conversation.id)
-    expect(history[0]).toMatchObject({ id: 'old', text: '已验收的最终答案', restored: true })
-    expect(history[1]).toMatchObject({ id: 'unknown', text: '无法确认的旧回复', legacy: true })
+    expect(history[0]).toMatchObject({ id: 'old', text: '旧候选答案加验收报告' })
+    expect(history[1]).toMatchObject({ id: 'unknown', text: '无法确认的旧回复' })
     await host.close()
   })
 

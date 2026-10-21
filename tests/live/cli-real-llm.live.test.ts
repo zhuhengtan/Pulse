@@ -1,3 +1,4 @@
+import { readConversationFixture } from '../conversation-fixtures.js'
 import { describe, expect, it, afterEach } from 'vitest'
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -491,7 +492,7 @@ describe.skipIf(!liveConfig)('Pulse CLI Real LLM Integration Suite (Live API)', 
 
     // Verify session persistence has all 8 dialogue turns (4 user + 4 assistant)
     const messagesFile = join(dataDir, 'conversations', convId, 'messages.jsonl')
-    const messages = (await readFile(messagesFile, 'utf8'))
+    const messages = (await readConversationFixture(messagesFile, 'utf8'))
       .split('\n')
       .filter(Boolean)
       .map((l) => JSON.parse(l))

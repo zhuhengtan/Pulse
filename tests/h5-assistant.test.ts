@@ -1,3 +1,4 @@
+import { ConversationData } from '../packages/data/src/index.js'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,6 +22,7 @@ describe('assistant inbox', () => {
     expect(duplicate.message.runId).toBe(first.message.runId)
     expect((await store.next())?.messageId).toBe(first.message.messageId)
     expect((await store.next())?.messageId).toBe(second.message.messageId)
+    store.close()
   })
 
   it('does not replay an interrupted reply after restart', async () => {
@@ -35,7 +37,9 @@ describe('assistant inbox', () => {
     await restored.init(async () => 'should-not-create')
     expect(restored.receiptByRun(active.message.runId)?.state).toBe('interrupted')
     expect(restored.hasQueued()).toBe(true)
-    expect(JSON.parse(await readFile(join(dir, 'assistant-inbox.json'), 'utf8')).conversationId).toBe('assistant-conversation')
+    const data = new ConversationData(dir)
+    expect((await data.call<{ conversationId: string }>('readState', 'assistant-inbox')).conversationId).toBe('assistant-conversation')
+    data.close(); store.close(); restored.close()
   })
 })
 

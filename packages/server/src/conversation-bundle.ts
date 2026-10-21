@@ -161,7 +161,7 @@ async function safeTree(root: string, prefix = ''): Promise<string[]> {
   return paths
 }
 
-export async function createConversationBundle(directory: string, manifest: TransferManifest): Promise<{ path: string; filename: string; cleanup(): Promise<void> }> {
+export async function createConversationBundle(directory: string, manifest: TransferManifest, virtualFiles: Record<string, string> = {}): Promise<{ path: string; filename: string; cleanup(): Promise<void> }> {
   const temporary = await mkdtemp(join(tmpdir(), 'pulse-export-'))
   const spool = join(temporary, 'files')
   const files: BundleMetadata['files'] = []; const redactedFiles: string[] = []; const blockedReasons: string[] = []
@@ -170,6 +170,7 @@ export async function createConversationBundle(directory: string, manifest: Tran
     const sourceRoot = manifest.executionCwd ?? manifest.cwd
     const beforeStamp = await workspaceStamp(sourceRoot)
     for (const path of await safeTree(directory)) {
+      if (Object.hasOwn(virtualFiles, path)) continue
       let name: string
       if (allowedConversationFile(path, manifest)) name = `conversation/${path}`
       else if (path.startsWith('import-diagnostics/')) name = `diagnostics/${path.slice('import-diagnostics/'.length)}`
@@ -196,6 +197,17 @@ export async function createConversationBundle(directory: string, manifest: Tran
         redactedFiles.push(name)
         if (/runtime|input\.json|model-budget|checkpoint|check-definitions/.test(path)) blockedReasons.push('RECOVERY_DATA_REDACTED')
       }
+      files.push({ path: name, bytes: (await stat(output)).size, sha256: await fileHash(output) })
+    }
+    for (const [path, text] of Object.entries(virtualFiles)) {
+      if (!['manifest.json', 'messages.jsonl'].includes(path)) fail('BUNDLE_FILE_FORBIDDEN')
+      const name = `conversation/${path}`, output = join(spool, name)
+      await mkdir(dirname(output), { recursive: true })
+      const body = Buffer.from(text), next = redactFile(path, body)
+      if (changedByRedaction(path, body, next)) redactedFiles.push(name)
+      await writeFile(output, next, { mode: 0o600 })
+      const previous = files.findIndex(file => file.path === name)
+      if (previous >= 0) files.splice(previous, 1)
       files.push({ path: name, bytes: (await stat(output)).size, sha256: await fileHash(output) })
     }
     // Validate external bodies and native integrity before advertising the active run as resumable.

@@ -1,3 +1,4 @@
+import { ConversationData, type MessagePage } from '@hunterzhu/pulse-data'
 import { AttachmentStore, MAX_ATTACHMENT_REQUEST } from './attachments.js'
 import { replaceStateFile } from './atomic-file.js'
 import { canReadShellArchive } from './shell-archive.js'
@@ -1518,11 +1519,24 @@ function snapshotHostOptions(source: LocalHostOptions): LocalHostOptions {
 }
 
 export class LocalHost {
+  private readonly manifestBaselines = new WeakMap<Manifest, Manifest>()
+  readonly conversationData: ConversationData
+  private readonly persistenceCache = new Map<string, Promise<import('@hunterzhu/pulse-runtime').RuntimePersistenceBackend>>()
   private readonly runBackends = new Set<import('@hunterzhu/pulse-runtime').RuntimePersistenceBackend>()
   private async persistenceFor(conversationId: string, runId: string, kind = this.options.persistenceBackend) {
-    const backend = await runPersistence(this.runDir(conversationId, runId), kind)
-    this.runBackends.add(backend)
-    return backend
+    const key = `${conversationId}:${runId}:${kind ?? ''}`
+    let pending = this.persistenceCache.get(key)
+    if (!pending) {
+      pending = runPersistence(this.runDir(conversationId, runId), kind).then(backend => { this.runBackends.add(backend); return backend }).catch(error => { this.persistenceCache.delete(key); throw error })
+      this.persistenceCache.set(key, pending)
+      if (this.persistenceCache.size > 32) for (const [oldKey, old] of this.persistenceCache) {
+        if (oldKey === key || this.active.has(oldKey.split(':')[1]!)) continue
+        this.persistenceCache.delete(oldKey)
+        void old.then(async backend => { this.runBackends.delete(backend); await backend.close?.() }).catch(() => undefined)
+        if (this.persistenceCache.size <= 32) break
+      }
+    }
+    return pending
   }
   readonly automation: AutomationSessionManager
   private readonly automationBroker: AutomationBroker
@@ -1551,6 +1565,7 @@ export class LocalHost {
     this.usesDefaultDataDir = options.dataDir === undefined && process.env.PULSE_DATA_DIR === undefined
     this.shouldMigrateLegacyData = this.usesDefaultDataDir && process.env.PULSE_HOME === undefined
     this.dataDir = resolve(options.dataDir ?? process.env.PULSE_DATA_DIR ?? pulseDataPath())
+    this.conversationData = new ConversationData(this.dataDir)
     this.logDir = resolve(options.logDir ?? process.env.PULSE_LOG_DIR ?? pulseLogPath())
     this.options = options
     this.automation = new AutomationSessionManager(this.dataDir, options.automation, options.allowNetwork === true, undefined, options.networkHosts)
@@ -1757,13 +1772,13 @@ export class LocalHost {
     }
   }
   private async releaseConversationLock(conversationId: string): Promise<void> { const handle = this.conversationLocks.get(conversationId); if (!handle) return; this.conversationLocks.delete(conversationId); await handle.close().catch(() => undefined); await rm(this.lockPath(conversationId), { force: true }).catch(() => undefined) }
-  private async readManifest(id: string): Promise<Manifest> { const manifest = JSON.parse(await readFile(this.manifestPath(id), 'utf8')) as Manifest; manifest.approvalPolicy = manifest.approvalPolicy === 'delegate' ? 'delegate' : 'manual'; return manifest }
+  private async readManifest(id: string): Promise<Manifest> { this.conversationDir(id); const manifest = await this.conversationData.call<Manifest>('get', id).catch(error => { if (error instanceof Error && error.message === 'CONVERSATION_NOT_FOUND') Object.assign(error, { code: 'ENOENT' }); throw error }); manifest.approvalPolicy = manifest.approvalPolicy === 'delegate' ? 'delegate' : 'manual'; this.manifestBaselines.set(manifest, structuredClone(manifest)); return manifest }
   private publicConversation(manifest: Manifest): ConversationSummary {
     const { executionCwd: _executionCwd, jarvisWorkspace: _jarvisWorkspace, ...summary } = manifest
     return summary
   }
   async createConversation(input: CreateConversationInput = {}): Promise<ConversationHandle> { const id = `conv-${randomUUID()}`; const now = new Date().toISOString(); const cwd = resolve(input.cwd ?? this.root); const manifest: Manifest = { schemaVersion: 1, id, title: input.title ?? 'New conversation', cwd, createdAt: now, updatedAt: now, approvalPolicy: 'manual', ...(input.projectId ? { projectId: input.projectId } : input.projectId === null ? { projectUnassigned: true } : {}), ...(input.origin === 'assistant' ? { origin: 'assistant' as const } : {}), pinned: false, runs: [], artifacts: [] }; await mkdir(this.conversationDir(id), { recursive: true }); await this.saveManifest(manifest); return { id, summary: this.publicConversation(manifest) } }
-  async listConversations(): Promise<ConversationSummary[]> { await this.init(); const entries = await readdir(join(this.dataDir, 'conversations'), { withFileTypes: true }).catch(() => []); const summaries: ConversationSummary[] = []; for (const entry of entries) { if (!entry.isDirectory()) continue; try { summaries.push(this.publicConversation(await this.readManifest(entry.name))) } catch { /* ignore incomplete directories */ } } return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) }
+  async listConversations(): Promise<ConversationSummary[]> { return (await this.conversationData.call<Manifest[]>('list')).map(manifest => this.publicConversation(manifest)) }
   async findConversationByRunId(runId: string): Promise<string | undefined> {
     for (const summary of await this.listConversations()) {
       if (summary.activeRunId === runId) return summary.id
@@ -1792,6 +1807,7 @@ export class LocalHost {
       // Remove the data files while the lock is held. This avoids deleting an
       // open lock file, which is rejected by Windows, and makes the directory
       // unusable before the lock is released.
+      await this.conversationData.call('remove', id)
       await rm(this.manifestPath(id), { force: true })
       await rm(this.messagesPath(id), { force: true })
       await rm(`${this.messagesPath(id)}.bak`, { force: true })
@@ -1807,30 +1823,20 @@ export class LocalHost {
       })
     }
   }
-  async getConversationMessages(id: string): Promise<Array<{id: string, role: 'user' | 'assistant' | 'system', text: string, runId?: string, createdAt: string, displayVersion?: 1, attachments?: WebAttachment[], skills?: string[], mentionedFiles?: string[]}>> { const content = await readFile(this.messagesPath(id), 'utf8').catch(() => ''); return parseStoredMessages(content) }
-  async getWebConversationMessages(id: string): Promise<Array<{id: string, role: 'user' | 'assistant' | 'system', text: string, runId?: string, createdAt: string, legacy?: boolean, restored?: boolean, attachments?: WebAttachment[], skills?: string[], mentionedFiles?: string[]}>> {
-    const messages = await this.getConversationMessages(id)
-    const archiveCache = new Map<string, Promise<string | undefined>>()
-    return Promise.all(messages.map(async (message) => {
-      if (message.role !== 'assistant' || message.displayVersion === 1) return message
-      const key = message.runId
-      if (!key) return { ...message, legacy: true }
-      let candidate = archiveCache.get(key)
-      if (!candidate) { candidate = this.archivedAcceptedAnswer(id, key); archiveCache.set(key, candidate) }
-      const restored = await candidate
-      return restored ? { ...message, text: restored, restored: true } : { ...message, legacy: true }
-    }))
-  }
+  async getConversationMessages(id: string): Promise<StoredMessage[]> { this.conversationDir(id); return this.conversationData.call<StoredMessage[]>('messages', id) }
+  async getWebConversationMessages(id: string): Promise<StoredMessage[]> { return this.getConversationMessages(id) }
+  async getMessagePage(id: string, before?: string, limit = 50): Promise<MessagePage<StoredMessage>> { this.conversationDir(id); return this.conversationData.call('page', id, before, limit) }
   async appendAssistantUserMessage(conversationId: string, message: { id: string; runId: string; text: string; createdAt: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }): Promise<void> {
     if (!message.id || !message.runId || (!message.text.trim() && !message.attachments?.length)) throw new Error('MESSAGE_REQUIRED')
     await this.acquireConversationLock(conversationId, message.runId)
     try {
-      const existing = await this.getConversationMessages(conversationId)
-      if (existing.some(item => item.id === message.id)) return
+      const existing = await this.conversationData.call<StoredMessage | undefined>('body', conversationId, message.id).catch(error => { if (error instanceof Error && error.message === 'MESSAGE_NOT_FOUND') return undefined; throw error })
+      if (existing) return
+      const hadMessages = (await this.getMessagePage(conversationId, undefined, 1)).items.length > 0
       await this.appendMessage(conversationId, { ...message, role: 'user' })
       const manifest = await this.readManifest(conversationId)
       manifest.updatedAt = message.createdAt
-      if (existing.length === 0) manifest.title = message.text.length > 50 ? `${message.text.slice(0, 50)}...` : message.text
+      if (!hadMessages) manifest.title = message.text.length > 50 ? `${message.text.slice(0, 50)}...` : message.text
       await this.saveManifest(manifest)
     } finally { await this.releaseConversationLock(conversationId) }
   }
@@ -1876,10 +1882,13 @@ export class LocalHost {
     return undefined
   }
   private async saveManifest(manifest: Manifest): Promise<void> {
-    const path = this.manifestPath(manifest.id)
-    const temporary = `${path}.${randomUUID()}.tmp`
-    try { await writeFile(temporary, JSON.stringify(manifest, null, 2), { flag: 'wx', mode: 0o600 }); await replaceStateFile(temporary, path) }
-    finally { await rm(temporary, { force: true }).catch(() => undefined) }
+    const baseline = this.manifestBaselines.get(manifest)
+    if (!baseline) { await this.conversationData.call('save', manifest); return }
+    const next = manifest as unknown as Record<string, unknown>, previous = baseline as unknown as Record<string, unknown>
+    const fields = Object.fromEntries(Object.entries(next).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(previous[key])))
+    const unset = Object.keys(previous).filter(key => !Object.hasOwn(next, key))
+    await this.conversationData.call('patch', manifest.id, fields, unset)
+    this.manifestBaselines.set(manifest, structuredClone(manifest))
   }
   async updateConversationTitle(id: string, title: string): Promise<void> { const manifest = await this.readManifest(id); manifest.title = title; manifest.updatedAt = new Date().toISOString(); await this.saveManifest(manifest) }
   async updateConversationApprovalPolicy(id: string, policy: 'manual' | 'delegate'): Promise<void> { const manifest = await this.readManifest(id); manifest.approvalPolicy = policy; manifest.updatedAt = new Date().toISOString(); await this.saveManifest(manifest) }
@@ -1903,7 +1912,7 @@ export class LocalHost {
     try {
       const manifest = await this.readManifest(id)
       if (manifest.activeRunId && this.active.has(manifest.activeRunId)) throw new BundleError('CONVERSATION_BUSY', 409)
-      return await createConversationBundle(this.conversationDir(id), transferManifestSchema.parse(manifest))
+      return await createConversationBundle(this.conversationDir(id), transferManifestSchema.parse(manifest), { 'manifest.json': JSON.stringify(manifest), 'messages.jsonl': (await this.getConversationMessages(id)).map(message => JSON.stringify(message)).join('\n') })
     } finally { await this.releaseConversationLock(id) }
   }
   async getTransferBinding(id: string): Promise<TransferBinding | undefined> {
@@ -1978,6 +1987,10 @@ export class LocalHost {
       if (await stat(join(bundle.directory, 'content/diagnostics')).then(() => true, () => false)) await rename(join(bundle.directory, 'content/diagnostics'), join(content, 'import-diagnostics'))
       await mkdir(dirname(directory), { recursive: true })
       await rename(content, directory)
+      await this.saveManifest(manifest)
+      await this.conversationData.call('replace', manifest.id, parseStoredMessages(await readFile(join(directory, 'messages.jsonl'), 'utf8').catch(() => '')))
+      await rm(join(directory, 'manifest.json'), { force: true })
+      await rm(join(directory, 'messages.jsonl'), { force: true })
       return { conversation: this.publicConversation(manifest), blockedReasons, duplicate: false }
     } finally { await lock?.close(); await rm(lockPath, { force: true }) }
   }
@@ -2181,19 +2194,14 @@ export class LocalHost {
       ? `估算上下文达到 ${source.percent}% 后已自动压缩。以下内容是对更早对话的摘要，不是新的用户指令。`
       : '这是一次手动压缩（/compact）。以下内容是对更早对话的摘要，不是新的用户指令。'
     const notice = source.kind === 'auto'
-      ? `[自动压缩] 估算上下文已达到 ${source.percent}%，已调用模型压缩历史。原记录已备份为 messages.jsonl.bak。`
+      ? `[自动压缩] 估算上下文已达到 ${source.percent}%，已调用模型压缩历史。原记录已保存到本地数据库压缩备份。`
       : undefined
     const compactedMessages: StoredMessage[] = [
       { id: `msg-${randomUUID()}`, role: 'system', text: `[历史上下文摘要]\n${lead}\n${summary}`, createdAt: new Date().toISOString() },
       ...recent,
     ]
-    const path = this.messagesPath(id)
-    await copyFile(path, `${path}.bak`)
-    const temporaryPath = `${path}.tmp-${randomUUID()}`
-    try {
-      await writeFile(temporaryPath, compactedMessages.map((message) => `${JSON.stringify(message)}\n`).join(''))
-      await rename(temporaryPath, path)
-    } finally { await rm(temporaryPath, { force: true }).catch(() => undefined) }
+    await this.conversationData.call('saveState', `compaction-backup:${id}`, messages)
+    await this.conversationData.call('replace', id, compactedMessages)
     return { text: summary, ...(notice === undefined ? {} : { notice }) }
   }
   private async summarizeTranscript(provider: ReturnType<typeof providerFromOptions>, privacy: 'local_only' | 'cloud_allowed', text: string, depth = 0, modelBudget?: ModelAttemptBudget): Promise<string> {
@@ -2240,7 +2248,7 @@ export class LocalHost {
       clearTimeout(timer)
     }
   }
-  private async appendMessage(id: string, message: StoredMessage): Promise<void> { await writeFile(this.messagesPath(id), `${JSON.stringify(message)}\n`, { flag: 'a' }) }
+  private async appendMessage(id: string, message: StoredMessage): Promise<void> { await this.conversationData.call('append', id, message) }
   private async runtimeFor(conversationId: string, runId: string, cwd: string, userIntent = '', skillInput = '', options: LocalHostOptions = this.options, assistantChat = false, jarvisSessionId?: string, modelBudget?: ModelAttemptBudget): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; modelBudget?: ModelAttemptBudget | undefined }> {
     await this.seedPlanGate(conversationId, runId, !assistantChat && (isPreImplementationConfirmationSkill(skillInput) || requiresExplicitPlanConfirmation(skillInput)), options.approvalMode === 'read-only' ? undefined : cwd)
     const registry = new ToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) })
@@ -3114,8 +3122,8 @@ export class LocalHost {
       }
       if (!input.assistantChat) await this.retryJarvisForConversation(conversationId).catch(() => undefined)
       const contextNotice = input.assistantChat ? undefined : await this.maybeCompactConversationLocked(conversationId, modelBudget)
-      const previous = await readFile(this.messagesPath(conversationId), 'utf8').catch(() => '')
-      const conversation = parseStoredMessages(previous).map((message): ConversationMessage => ({ role: message.role, content: message.text }))
+      const previous = await this.getConversationMessages(conversationId)
+      const conversation = previous.map((message): ConversationMessage => ({ role: message.role, content: message.text }))
       const priorRunId = input.assistantChat ? undefined : manifest.runs.at(-1)
       if (priorRunId) {
         try {
@@ -3263,7 +3271,7 @@ export class LocalHost {
       await new AttachmentStore(this.dataDir, conversationId).remember()
       const attachmentIndex = await new AttachmentStore(this.dataDir, conversationId).index(input.text)
       if (attachmentIndex) conversation.push({ role: 'user', content: attachmentIndex })
-      const titleCandidate = input.text.trim() || (input.attachments?.length ? `[附件] ${input.attachments[0]?.name}` : '新对话'); if (parseStoredMessages(previous).length === 0) manifest.title = titleCandidate.length > 50 ? titleCandidate.slice(0, 50) + '...' : titleCandidate;
+      const titleCandidate = input.text.trim() || (input.attachments?.length ? `[附件] ${input.attachments[0]?.name}` : '新对话'); if (previous.length === 0) manifest.title = titleCandidate.length > 50 ? titleCandidate.slice(0, 50) + '...' : titleCandidate;
       if (reuse) await writeFile(join(this.runDir(conversationId, runId), 'reuse-checkpoint.json'), JSON.stringify(reuse))
       if (runJarvisClient && !input.assistantChat) {
         try {
@@ -3689,6 +3697,8 @@ export class LocalHost {
     this.active.clear()
     await Promise.allSettled([...this.runBackends].map(backend => backend.close?.()))
     this.runBackends.clear()
+    this.persistenceCache.clear()
+    this.conversationData.close()
     this.approvedToolCalls.clear()
     for (const conversationId of [...this.conversationLocks.keys()]) await this.releaseConversationLock(conversationId)
   }

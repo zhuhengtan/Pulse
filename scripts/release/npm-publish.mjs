@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 const repo = fileURLToPath(new URL('../../', import.meta.url))
 const stage = await mkdtemp(join(tmpdir(), 'pulse-npm-release-'))
-const order = ['runtime', 'tool-sdk', 'adapters', 'server', 'cli']
+const order = ['data', 'runtime', 'tool-sdk', 'adapters', 'server', 'cli']
 const manifests = new Map()
 for (const name of order) manifests.set(name, JSON.parse(await readFile(join(repo, `packages/${name}/package.json`), 'utf8')))
 const versions = new Map([...manifests.values()].map((data) => [data.name, data.version]))

@@ -1,3 +1,4 @@
+import { createPulseSocket } from './transport.js'
 import { createRequestId } from './requestId.js'
 import { PulseButton, PulseCheckbox, PulseDisclosure, PulseInput, PulseSelect, PulseTextArea } from './PulseControls.js'
 import { useEffect, useRef, useState } from 'react'
@@ -31,7 +32,7 @@ export function AutomationPanel({ transport, projectId, localAdmin, selectedSess
   useEffect(()=>{if(session && session.state!=='human')setLease('')},[session?.state])
   useEffect(()=>{
     if(typeof WebSocket==='undefined')return
-    const socket=new WebSocket(`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/api/automation/socket`)
+    const socket=createPulseSocket('/api/automation/socket')
     socket.onmessage=event=>{try{const message=JSON.parse(String(event.data));if(message.type==='automation')setSessions(message.sessions)}catch{}}
     return()=>socket.close()
   },[transport])

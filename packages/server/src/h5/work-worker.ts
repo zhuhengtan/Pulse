@@ -52,7 +52,12 @@ class EventQueue implements AsyncIterable<AssistantEvent>, AsyncIterator<Assista
   push(value: AssistantEvent): void {
     const waiter = this.waiters.shift()
     if (waiter) waiter.resolve({ done: false, value })
-    else this.values.push(value)
+    else if (this.values.length < 4096) this.values.push(value)
+    else if (value.type === 'text' || value.type === 'notice') {
+      const index = this.values.findLastIndex(item => item.type === value.type && item.runId === value.runId)
+      if (index >= 0) this.values[index] = value
+      else this.fail(new Error('WORK_EVENT_QUEUE_OVERFLOW'))
+    } else this.fail(new Error('WORK_EVENT_QUEUE_OVERFLOW'))
   }
   close(): void {
     this.ended = true

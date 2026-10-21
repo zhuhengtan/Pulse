@@ -479,7 +479,7 @@ export function App({
         addAssistantMessage({
           id: `compact-done-${Date.now()}`,
           role: 'system',
-          text: `模型上下文压缩完成。替换前的记录已备份为 messages.jsonl.bak。\n\n${res.text}`,
+          text: `模型上下文压缩完成。替换前的记录已保存到本地数据库压缩备份。\n\n${res.text}`,
           createdAt: new Date().toISOString(),
         });
       } catch (err) {

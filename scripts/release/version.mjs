@@ -12,7 +12,7 @@ const changelogVersions = parseChangelog(
 )
 if (!changelogVersions.get(version)?.length) throw new Error(`RELEASE_CHANGELOG_MISSING:${version}; add bilingual notes to CHANGELOG.md first`)
 await syncCliHighlights()
-for (const name of ['runtime', 'tool-sdk', 'adapters', 'server', 'cli']) {
+for (const name of ['data', 'runtime', 'tool-sdk', 'adapters', 'server', 'cli', 'desktop']) {
   const path = join(repo, `packages/${name}/package.json`)
   const data = JSON.parse(await readFile(path, 'utf8')); data.version = version
   await writeFile(path, `${JSON.stringify(data, null, 2)}\n`)

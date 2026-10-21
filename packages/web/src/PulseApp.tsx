@@ -1,3 +1,5 @@
+import { ConversationCache } from './ConversationCache.js'
+import { WindowedMessages } from './WindowedMessages.js'
 import { RunRecoveryCard, type RunRecovery } from './RunRecoveryCard.js'
 import { useConversationTransfer, transferError } from './ConversationTransfer.js'
 import { createRequestId } from './requestId.js'
@@ -5,7 +7,7 @@ import { HostPathPicker } from './HostPathPicker.js'
 import { PulseButton, PulseCheckbox, PulseDisclosure, PulseInput, PulseTextArea, PulseToast, usePulseDialogs } from './PulseControls.js'
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent, ReactElement } from 'react'
-import { ApiError, apiJson, browserTransport, getWebConversation, jsonRequest } from './transport.js'
+import { ApiError, apiJson, readLatestMessages, browserTransport, getWebConversation, jsonRequest } from './transport.js'
 import { ConversationArtifacts, useConversationArtifacts } from './ConversationArtifacts.js'
 import type { ConversationList, MessageList, PulseWebTransport, WebAttachment, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from './transport.js'
 import { Drawer, Dropdown, Popover, Select } from 'antd'
@@ -53,10 +55,17 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const [archivedConversations, setArchivedConversations] = useState<WebConversation[]>([])
   const [projects, setProjects] = useState<WebProject[]>([])
   const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>(() => window.localStorage.getItem('pulse-web-project') ?? undefined)
+  const historyCache = useRef(new ConversationCache())
+  const historyAbort = useRef<AbortController | undefined>(undefined)
+  const [olderCursor, setOlderCursor] = useState<string>()
+  const [loadingOlder, setLoadingOlder] = useState(false)
   const [messages, setMessages] = useState<WebMessage[]>([])
+  const messagesRef = useRef(messages); messagesRef.current = messages
   const [selectedId, setSelectedId] = useState<string>()
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
+  const [serviceConnected, setServiceConnected] = useState(true)
+  useEffect(() => transport.onConnection?.(setServiceConnected), [transport])
   const [paired, setPaired] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -76,8 +85,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const traceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const queueTrace = useCallback((runId: string, event: WebRunEvent) => {
     traceQueue.current.push({ runId, event })
-    if (traceTimer.current !== undefined) return
-    traceTimer.current = setTimeout(() => {
+    const flush = () => {
       traceTimer.current = undefined
       const batch = traceQueue.current.splice(0)
       setTraces(current => {
@@ -85,7 +93,12 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         for (const item of batch) next[item.runId] = reduceTrace(next[item.runId] ?? emptyTrace, item.event)
         return next
       })
-    }, 60)
+    }
+    if (event.type === 'complete' || event.type === 'error') {
+      if (traceTimer.current !== undefined) clearTimeout(traceTimer.current)
+      flush()
+    } else if (traceTimer.current === undefined) traceTimer.current = setTimeout(flush, 100)
+
   }, [])
   const [reviewNote, setReviewNote] = useState('')
   const localMessages = useRef(new Map<string, WebMessage[]>())
@@ -98,7 +111,11 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const mergeMessages = (key: string, persisted: WebMessage[]) => {
     const pending = (localMessages.current.get(key) ?? []).filter(message => !persisted.some(item => item.id === message.id || message.requestId && (item.requestId === message.requestId || item.id === `msg-${message.requestId}`)))
     localMessages.current.set(key, pending)
-    return [...persisted, ...pending]
+    const previous = selectedIdRef.current === key ? messagesRef.current : historyCache.current.get(key)?.messages ?? []
+    const byId = new Map(previous.map(message => [message.id, message]))
+    const first = persisted.find(message => message.sequence !== undefined)?.sequence
+    const older = first !== undefined ? previous.filter(message => message.sequence !== undefined && message.sequence < first) : []
+    return [...older, ...persisted, ...pending].map(message => { const old = byId.get(message.id); return old && JSON.stringify(old) === JSON.stringify(message) ? old : message })
   }
   const [drafts, setDrafts] = useState<Record<string, ComposerDraft>>({})
   const submittedDrafts = useRef(new Map<string, { keys: string[]; draft: ComposerDraft; clearedRevision: number; restoredDraft?: ComposerDraft }>())
@@ -191,7 +208,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   })
   const isPairPage = route.page === 'pair'
   const routeRef = useRef(route); routeRef.current = route
-  const localHost = ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)
+  const localHost = Boolean(window.pulseDesktop) || ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)
 
   const openConversation = useCallback(async (conversation: WebConversation, saveSelection = true) => {
     if (saveSelection) { go(workUrl(conversation.id)); return }
@@ -203,13 +220,19 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     setSelectedProjectId(conversation.projectId)
     if (conversation.projectId) window.localStorage.setItem('pulse-web-project', conversation.projectId)
     else window.localStorage.removeItem('pulse-web-project')
+    const cached = historyCache.current.get(conversation.id)
+    if (cached) { setMessages(cached.messages); setOlderCursor(cached.before); setLoading(false) }
+    historyAbort.current?.abort(); const controller = new AbortController(); historyAbort.current = controller
     setMenuId(undefined); setLoadError(''); setStatus([]); setReviewNote('')
     setRunning(false); setStopping(false); setRecoveryRun(undefined)
     if (saveSelection) window.localStorage.setItem(historyStorageKey, conversation.id)
     try {
-      const result = await apiJson<MessageList>(transport, `/api/web/conversations/${encodeURIComponent(conversation.id)}/messages`)
+      const page = transport.messages ? await transport.messages(conversation.id, undefined, controller.signal) : { before: undefined, items: await apiJson<MessageList>(transport, `/api/web/conversations/${encodeURIComponent(conversation.id)}/messages`, { signal: controller.signal }) }
+      const result = page.items
       if (requestId.current !== id || selectedIdRef.current !== conversation.id) return
       setMessages(mergeMessages(conversation.id, result.filter(message => message.role !== 'system')))
+      setOlderCursor(page.before)
+      historyCache.current.set(conversation.id, { messages: result, ...(page.before ? { before: page.before } : {}), ...(cached?.scrollTop !== undefined ? { scrollTop: cached.scrollTop } : {}) })
       if (!conversation.activeRunId) return
       let snapshot: WebRunSnapshot
       try { snapshot = await apiJson<WebRunSnapshot>(transport, `/api/runs/${encodeURIComponent(conversation.activeRunId)}/state`) }
@@ -238,10 +261,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     if (showLoading) setLoading(true)
     setLoadError('')
     try {
-      const [view, projectList] = await Promise.all([
-        apiJson<{ conversation: WebConversation; messages: MessageList; receipts: WebAssistantMessageReceipt[]; workInteractions: WebAssistantWorkInteraction[] }>(transport, '/api/assistant'),
-        apiJson<WebProject[]>(transport, '/api/projects').catch(() => [] as WebProject[]),
-      ])
+      void apiJson<WebProject[]>(transport, '/api/projects').then(projectList => { if (id === requestId.current) setProjects(projectList) }).catch(() => undefined)
+      const view = await apiJson<{ conversation: WebConversation; messages: MessageList; receipts: WebAssistantMessageReceipt[]; workInteractions: WebAssistantWorkInteraction[]; before?: string }>(transport, '/api/assistant')
       if (id !== requestId.current) return
       assistantIdRef.current = view.conversation.id
       const active = [...view.receipts].reverse().find(item => item.state === 'replying')
@@ -249,7 +270,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       setAssistantConversation({ ...assistantSummary, ...(active ? { activeRunId: active.runId } : {}), kind: 'assistant' })
       setAssistantReceipts(view.receipts)
       setWorkInteractions(view.workInteractions.map(interaction => ({ kind: 'interaction', runId: interaction.runId, conversationId: interaction.conversationId, conversationTitle: interaction.title, ...(interaction.projectId ? { projectId: interaction.projectId } : {}), approvalPolicy: interaction.approvalPolicy, groupId: interaction.groupId, interactionKind: interaction.kind, items: interaction.items })))
-      setProjects(projectList)
+      setOlderCursor(view.before)
       selectedIdRef.current = view.conversation.id
       setSelectedId(view.conversation.id)
       setMessages(mergeMessages(view.conversation.id, view.messages.filter(message => message.role !== 'system')))
@@ -269,10 +290,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     const id = ++requestId.current
     setLoading(true); setLoadError('')
     try {
-      // Listing conversations can register legacy projects; load their catalog afterward.
-      const list = await apiJson<ConversationList>(transport, '/api/conversations')
-      if (id !== requestId.current) return
-      const projectList = await apiJson<WebProject[]>(transport, '/api/projects')
+      const [list, projectList] = await Promise.all([apiJson<ConversationList>(transport, '/api/conversations'), apiJson<WebProject[]>(transport, '/api/projects')])
       if (id !== requestId.current) return
       const current = routeRef.current
       if (!preferred && !current.newWork) {
@@ -328,7 +346,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         const params = new URLSearchParams(current.search); params.delete('code')
         go(current.pathname + (params.size ? `?${params}` : ''), true, current.state)
       } else if (localHost) await apiJson(transport, '/api/session/local', jsonRequest('POST'))
-      const session = await apiJson<{ localAdmin?: boolean; canUseTerminal?: boolean; canBrowseHostPaths?: boolean; canRegisterProject?: boolean }>(transport, '/api/session')
+      const session = await apiJson<{ connected?: boolean; localAdmin?: boolean; canUseTerminal?: boolean; canBrowseHostPaths?: boolean; canRegisterProject?: boolean }>(transport, '/api/session')
+      setServiceConnected(session.connected !== false)
       setSessionCapabilities({ localAdmin: session.localAdmin === true, canUseTerminal: session.canUseTerminal === true, canBrowseHostPaths: session.canBrowseHostPaths ?? session.localAdmin === true, canRegisterProject: session.canRegisterProject ?? session.localAdmin === true })
       authenticated = true
       setPaired(true)
@@ -455,24 +474,34 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     traceTimer.current = undefined; traceQueue.current = []; setTraces({}); setPersistedTraceFallback(false)
     requestId.current++
     eventClose.current?.(); eventClose.current = undefined; streamRunRef.current = undefined
+    const previousId = selectedIdRef.current
+    if (previousId) historyCache.current.set(previousId, { messages, ...(olderCursor ? { before: olderCursor } : {}), ...(messagesEl.current ? { scrollTop: messagesEl.current.scrollTop, atBottom: followBottom.current } : {}) })
+    historyAbort.current?.abort()
+    const target = route.page === 'chat' ? assistantIdRef.current : route.conversationId
+    const cached = target ? historyCache.current.get(target) : undefined
     selectedIdRef.current = undefined; setSelectedId(undefined)
-    setDrawerOpen(false); setMessages([]); setStatus([]); setReviewNote(''); setRunning(false); setStopping(false); setRecoveryRun(undefined)
+    setOlderCursor(cached?.before)
+    setDrawerOpen(false); setMessages(cached?.messages ?? []); setStatus([]); setReviewNote(''); setRunning(false); setStopping(false); setRecoveryRun(undefined)
     if (route.page === 'chat') void loaders.current.loadAssistant()
     else if (route.page === 'work') void loaders.current.loadHistory(route.conversationId)
     else setLoading(false)
   }, [paired, documentKey, routeRevision])
 
   useLayoutEffect(() => {
+    const ready = route.page === 'chat'
+      ? Boolean(selectedId) && selectedId === assistantConversation?.id
+      : route.page === 'work' && (route.newWork ? selectedId === undefined : Boolean(route.conversationId) && selectedId === route.conversationId)
+    if (!ready) return
     const element = messagesEl.current
     const key = `${documentKey}:${routeRevision}`
     if (scrollView.current.key !== key || scrollView.current.element !== element) {
       scrollView.current = { key, element }
-      followBottom.current = true
-      setAtBottom(true)
+      const cached = selectedId ? historyCache.current.get(selectedId) : undefined
+      const position = cached?.scrollTop
+      followBottom.current = cached?.atBottom ?? position === undefined
+      setAtBottom(cached?.atBottom ?? position === undefined)
+      if (element && position !== undefined) element.scrollTop = position
     }
-    const ready = route.page === 'chat'
-      ? Boolean(selectedId) && selectedId === assistantConversation?.id
-      : route.page === 'work' && (route.newWork ? selectedId === undefined : Boolean(route.conversationId) && selectedId === route.conversationId)
     // Position loaded history before paint. Automatic following must not animate
     // across the history; only the explicit "back to bottom" action is smooth.
     if (element && !loading && ready && followBottom.current) element.scrollTo({ top: element.scrollHeight, behavior: 'instant' })
@@ -488,6 +517,16 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     let unsubscribe: (() => void) | undefined
     eventClose.current = () => { closed = true; unsubscribe?.() }
     const onEvent = (event: WebRunEvent) => {
+      if (event.type === 'resync' && event.runId === runId && selectedIdRef.current === conversationId) {
+        lastSeq = event.seq
+        if (event.data.laneState) queueTrace(runId, { type: 'lanes', runId, seq: event.seq, data: event.data.laneState })
+        if (event.data.complete) queueTrace(runId, event.data.complete)
+        setStatus(snapshotStatus(event.data)); setRunning(event.data.state === 'running')
+        setReviewNote(event.data.reviewNote ?? '')
+        if (event.data.state === 'interrupted') setRecoveryRun({ conversationId, runId, state: 'interrupted' })
+        if (conversationId !== assistantIdRef.current) void readLatestMessages(transport, conversationId).then(items => { if (selectedIdRef.current === conversationId) setMessages(mergeMessages(conversationId, items)) }).catch(() => undefined)
+        return
+      }
       if ((event.conversationId && event.conversationId !== conversationId) || event.runId !== runId || event.seq <= lastSeq) return
       lastSeq = event.seq
       if (selectedIdRef.current !== conversationId) return
@@ -525,7 +564,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
             setWorkInteractions(view.workInteractions.map(interaction => ({ kind: 'interaction', runId: interaction.runId, conversationId: interaction.conversationId, conversationTitle: interaction.title, ...(interaction.projectId ? { projectId: interaction.projectId } : {}), approvalPolicy: interaction.approvalPolicy, groupId: interaction.groupId, interactionKind: interaction.kind, items: interaction.items })))
             if (selectedIdRef.current === conversationId) setMessages(mergeMessages(conversationId, view.messages.filter(message => message.role !== 'system')))
           }).catch(() => undefined)
-        } else void apiJson<MessageList>(transport, `/api/web/conversations/${encodeURIComponent(conversationId)}/messages`).then(result => {
+        } else void readLatestMessages(transport, conversationId).then(result => {
           if (selectedIdRef.current === conversationId) setMessages(mergeMessages(conversationId, result.filter(message => message.role !== 'system')))
         }).catch(() => undefined)
         if (selectedIdRef.current === conversationId) { setRunning(false); setStopping(false) }
@@ -534,7 +573,11 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     const subscribe = (cursor: number) => {
       if (closed || selectedIdRef.current !== conversationId) return
       lastSeq = cursor
-      unsubscribe = transport.subscribe(`/api/runs/${encodeURIComponent(runId)}/events?after=${cursor}`, onEvent, () => {
+      const onError = () => {
+        setToast('连接中断，正在尝试恢复…')
+        window.setTimeout(() => setToast(''), 3000)
+      }
+      unsubscribe = conversationId === assistantIdRef.current && transport.subscribeChat ? transport.subscribeChat(runId, cursor, onEvent, onError) : transport.subscribe(`/api/runs/${encodeURIComponent(runId)}/events?after=${cursor}`, onEvent, () => {
         setToast('连接中断，正在尝试恢复…')
         window.setTimeout(() => setToast(''), 3000)
       })
@@ -587,9 +630,15 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
 
   useEffect(() => {
     if (!paired || route.page !== 'chat') return
+    let stopped = false, inFlight = false, again = false
+    const controller = new AbortController()
     const refreshAssistantQueue = async () => {
+      if (stopped) return
+      if (inFlight) { again = true; return }
+      inFlight = true
       try {
-        const view = await apiJson<{ conversation: WebConversation; messages: MessageList; receipts: WebAssistantMessageReceipt[]; workInteractions: WebAssistantWorkInteraction[] }>(transport, '/api/assistant')
+        const view = await apiJson<{ conversation: WebConversation; messages: MessageList; receipts: WebAssistantMessageReceipt[]; workInteractions: WebAssistantWorkInteraction[] }>(transport, '/api/assistant', { signal: controller.signal })
+        if (stopped || routeRef.current.page !== 'chat') return
         setAssistantReceipts(view.receipts)
         setWorkInteractions(view.workInteractions.map(interaction => ({ kind: 'interaction', runId: interaction.runId, conversationId: interaction.conversationId, conversationTitle: interaction.title, ...(interaction.projectId ? { projectId: interaction.projectId } : {}), approvalPolicy: interaction.approvalPolicy, groupId: interaction.groupId, interactionKind: interaction.kind, items: interaction.items })))
         const active = [...view.receipts].reverse().find(item => item.state === 'replying')
@@ -599,7 +648,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
           setMessages(current => {
             const streaming = current.filter(message => message.id.startsWith('stream-') && message.runId)
             const persisted = mergeMessages(view.conversation.id, view.messages.filter(message => message.role !== 'system'))
-            return [...persisted.filter(message => !streaming.some(item => item.runId === message.runId)), ...streaming]
+            return [...persisted.filter(message => message.role !== 'assistant' || message.id.startsWith('ask-') || !streaming.some(item => item.runId === message.runId)), ...streaming]
           })
         }
         if (active && streamRunRef.current !== active.runId && selectedIdRef.current === view.conversation.id) {
@@ -607,12 +656,31 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
           setStatus(snapshotStatus(snapshot))
           startRun(active.runId, view.conversation.id, snapshot.seq)
         } else if (!active && selectedIdRef.current === view.conversation.id) setRunning(false)
-      } catch { /* Keep the last displayed messages if a transient poll fails. */ }
+      } catch { /* Retain cached messages during a reconnect. */ }
+      finally { inFlight = false; if (again && !stopped) { again = false; void refreshAssistantQueue() } }
     }
-    const timer = window.setInterval(() => { void refreshAssistantQueue() }, 900)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const changed = () => { if (!timer) timer = setTimeout(() => { timer = undefined; void refreshAssistantQueue() }, 100) }
+    const off = transport.onChange?.(changed)
+    const poll = transport.onChange ? undefined : window.setInterval(changed, 2500)
     void refreshAssistantQueue()
-    return () => window.clearInterval(timer)
+    return () => { stopped = true; controller.abort(); off?.(); clearTimeout(timer); if (poll !== undefined) window.clearInterval(poll) }
   }, [paired, route.page, startRun, transport])
+
+  const loadOlderMessages = async () => {
+    const conversationId = selectedIdRef.current
+    if (!conversationId || !olderCursor || loadingOlder || !transport.messages) return
+    setLoadingOlder(true)
+    const element = messagesEl.current, height = element?.scrollHeight ?? 0
+    try {
+      const page = await transport.messages(conversationId, olderCursor)
+      if (selectedIdRef.current !== conversationId) return
+      followBottom.current = false
+      setMessages(current => [...page.items.filter(item => !current.some(existing => existing.id === item.id)), ...current])
+      setOlderCursor(page.before)
+      requestAnimationFrame(() => { if (element && selectedIdRef.current === conversationId) element.scrollTop += element.scrollHeight - height })
+    } finally { setLoadingOlder(false) }
+  }
 
   const send = async (payload?: { text: string; attachments?: WebAttachment[] | undefined; skills?: string[] | undefined; mentionedFiles?: string[] | undefined; requestId?: string | undefined } | FormEvent) => {
     if (payload && 'preventDefault' in payload) payload.preventDefault()
@@ -857,7 +925,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       setStatus(items => items.filter(item => item.kind !== 'interaction' || item.groupId !== groupId))
       setWorkInteractions(items => items.filter(item => item.runId !== runId || item.groupId !== groupId))
       if (interactionKind === 'ask' && conversationId) {
-        void apiJson<MessageList>(transport, `/api/web/conversations/${encodeURIComponent(conversationId)}/messages`).then(result => {
+        void readLatestMessages(transport, conversationId).then(result => {
           if (selectedIdRef.current !== conversationId) return
           setMessages(current => {
             // The run can continue while this fetch is in flight. Merge only
@@ -1094,6 +1162,12 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
 
   const detailsPanel = <section className="details-popover" role="dialog" aria-label="对话详情"><header><div><strong>对话详情</strong><small>当前会话与工作区信息</small></div><PulseButton className="icon-button" onClick={() => setDetailsOpen(false)} aria-label="关闭"><Icon name="close"/></PulseButton></header><div className="detail-group"><small>项目</small><strong>{projects.find(project => project.id === selected?.projectId)?.name ?? (selected?.projectId ? '项目不可用' : '未分组对话')}</strong></div><div className="detail-group"><small>工作目录</small><code title={selected?.cwd ?? projects.find(project => project.id === selectedProjectId)?.cwd}>{selected?.cwd ?? projects.find(project => project.id === selectedProjectId)?.cwd ?? '发送首条消息后确定'}</code><PulseButton className="detail-copy" onClick={() => void copyText(selected?.cwd ?? projects.find(project => project.id === selectedProjectId)?.cwd ?? '')} disabled={!selected?.cwd && !selectedProjectId}><Icon name="copy"/>复制路径</PulseButton></div><div className="detail-group"><small>默认模型</small><strong>{effectiveModel ?? (sessionCapabilities.localAdmin ? '当前配置未返回实际模型' : '本机管理会话可查看')}</strong><span>这是服务端默认模型；单次任务若有独立路由，以任务路由为准。</span></div><div className="detail-group"><small>审批方式</small><strong>{selected?.approvalPolicy === 'delegate' ? '本会话代审中' : '由用户逐项审批'}</strong><span>审批设置仅影响当前会话。</span></div></section>
 
+  const messageHandlers = useRef({ retryAssistantMessage, retryWorkMessage, openWorkNotice, patchQuery })
+  messageHandlers.current = { retryAssistantMessage, retryWorkMessage, openWorkNotice, patchQuery }
+  const retryBubble = useCallback((message: WebMessage, mode: 'chat' | 'work') => { void (mode === 'chat' ? messageHandlers.current.retryAssistantMessage(message) : messageHandlers.current.retryWorkMessage(message)) }, [])
+  const openBubbleWork = useCallback((id: string) => messageHandlers.current.openWorkNotice(id), [])
+  const openBubbleFile = useCallback((path: string) => messageHandlers.current.patchQuery({ workspace: 'files', file: path, details: undefined }), [])
+
   if (isPairPage) return <PairingPage pairing={pairing} error={pairError} refresh={loadPairing} transport={transport} />
   if (!paired && (settingsOpen || archiveOpen)) return <main className="empty">{loading ? <p role="status">正在验证设备…</p> : <div role="alert"><p>{loadError}</p><PulseButton onClick={() => void bootstrap()}>重试</PulseButton></div>}</main>
   if (settingsOpen) return <SettingsPage transport={transport} canEditConfig={sessionCapabilities.localAdmin} category={route.category} onCategoryChange={category => { if (category) go(`/settings/${category}`, false, location.state); else backToSettings() }} onDirtyChange={setSettingsDirty} onClose={() => backToSource()} onOpenArchive={() => openPage('/archive')} />
@@ -1129,7 +1203,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         else if (persistedTraceFallback) out.push(<PersistedRunTrace key={`trace:${runId}`} runId={runId} transport={transport} />)
         const card = recoveryCard(runId); if (card) out.push(card)
       }
-      out.push(<MessageBubble key={`${selectedId}:${message.id}`} mode={surfaceMode} message={message} retry={() => void (surfaceMode === 'chat' ? retryAssistantMessage(message) : retryWorkMessage(message))} onOpenWork={openWorkNotice} onFileClick={path => { patchQuery({ workspace: 'files', file: path, details: undefined }) }} />)
+      out.push(<MessageBubble key={`${selectedId}:${message.id}`} mode={surfaceMode} message={message} retry={retryBubble} onOpenWork={openBubbleWork} onFileClick={openBubbleFile} transport={transport} conversationId={selectedId} />)
       if (surfaceMode === 'work' && runId && lastMessage.get(runId) === index) { const card = deliveries(runId); if (card) out.push(card) }
       return out
     })
@@ -1161,15 +1235,17 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         <div className="navbar-actions">{surfaceMode === 'work' && !mobileLayout && transfer.exportButton}{surfaceMode === 'chat' && <PulseButton className="details-button" aria-label="设置" title="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings"/><span>设置</span></PulseButton>}{selected && <ApprovalPolicySelect value={selected.approvalPolicy ?? 'manual'} onChange={policy => { void setApprovalPolicy(policy) }} />}{running && <span className="running-pill"><i />{surfaceMode === 'chat' ? '正在回复' : '运行中'}</span>}{surfaceMode === 'work' && <><PulseButton className={`workbench-trigger ${workbenchOpen ? 'active' : ''}`} onClick={() => { patchQuery({ workspace: workbenchOpen ? undefined : 'files', details: undefined }) }} aria-expanded={workbenchOpen} aria-label="工作区" title="工作区"><Icon name="folder"/><span>工作区</span></PulseButton></>}<Popover open={detailsOpen} onOpenChange={open => { patchQuery({ details: open }) }} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}><PulseButton className={`details-button ${detailsOpen ? 'active' : ''}`} aria-label="对话详情" aria-expanded={detailsOpen} title="对话详情"><Icon name="info"/><span>详情</span></PulseButton></Popover></div>
 
       </header>
+      {!serviceConnected && window.pulseDesktop && <div className="alert" role="status"><span>后台服务未连接，仍可浏览本地记录。</span><PulseButton onClick={() => { void apiJson(transport, '/api/desktop/reconnect', jsonRequest('POST')).then(() => bootstrap()).catch(() => setToast('暂时无法连接后台服务')) }}>重新连接</PulseButton></div>}
       {loadError && <div className="alert" role="alert"><span>{loadError}</span><PulseButton onClick={() => { if (paired) setRouteRevision(value => value + 1); else void bootstrap() }}>重试</PulseButton></div>}
       <section ref={messagesEl} className={`messages ${emptyConversation ? 'is-empty' : ''}`} aria-live="polite" aria-label="聊天消息" onScroll={event => { const el = event.currentTarget; const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 96; followBottom.current = bottom; setAtBottom(bottom) }}>
         {loading && <div className="empty"><span className="spinner" />正在加载对话…</div>}
         {!loading && emptyConversation && paired && <div className="empty"><div className="empty-mark"><Icon name="spark" size={27}/></div><h1>我们要做什么？</h1><p>在 Pulse 工作区中提问或交代任务。</p></div>}
-      {renderMessages()}
+      {olderCursor && <PulseButton onClick={() => void loadOlderMessages()} disabled={loadingOlder}>{loadingOlder ? '加载中…' : '加载更早消息'}</PulseButton>}
+      <WindowedMessages items={renderMessages()} container={messagesEl} follow={followBottom} />
       </section>
       {!atBottom && <PulseButton className="jump-bottom" onClick={() => { followBottom.current = true; setAtBottom(true); messagesEl.current?.scrollTo({ top: messagesEl.current.scrollHeight, behavior: 'smooth' }) }}>回到底部 ↓</PulseButton>}
       <footer className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${emptyConversation && !activeInteraction ? 'is-empty' : ''}`}>
-        {activeInteraction ? <InteractionPanel key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={(activeInteraction.approvalPolicy ?? selected?.approvalPolicy) === 'delegate'} running={activeInteraction.conversationId ? true : running} stopping={stopping} stop={() => void (activeInteraction.conversationId ? stopRunFor(activeInteraction.runId, activeInteraction.conversationId) : stopRun())} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} setApprovalPolicy={policy => setApprovalPolicy(policy, activeInteraction.conversationId ?? selected?.id)} /> : <><RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} onSend={async payload => await send(payload) === true} onStop={() => void stopRun()} />{route.newWork && <div className="new-chat-tools"><ApprovalPolicySelect value={newApprovalPolicy} onChange={setNewApprovalPolicy} /><div className="new-conversation-project"><Icon name="folder"/><Select variant="borderless" aria-label="新对话所属项目" value={selectedProjectId ?? '__ungrouped__'} onChange={value => { const projectId = value === '__ungrouped__' ? undefined : value; patchQuery({ project: projectId }); setSelectedProjectId(projectId); if (projectId) window.localStorage.setItem('pulse-web-project', projectId); else window.localStorage.removeItem('pulse-web-project') }} options={[{ value: '__ungrouped__', label: '不归属项目' }, ...projects.map(project => ({ value: project.id, label: project.name }))]} popupMatchSelectWidth={false} /></div></div>}<div className="composer-hint">Pulse 可能会出错，请核对重要信息。</div></>}
+        {activeInteraction ? <InteractionPanel key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={(activeInteraction.approvalPolicy ?? selected?.approvalPolicy) === 'delegate'} running={activeInteraction.conversationId ? true : running} stopping={stopping} stop={() => void (activeInteraction.conversationId ? stopRunFor(activeInteraction.runId, activeInteraction.conversationId) : stopRun())} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} setApprovalPolicy={policy => setApprovalPolicy(policy, activeInteraction.conversationId ?? selected?.id)} /> : <><RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || !serviceConnected || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} onSend={async payload => await send(payload) === true} onStop={() => void stopRun()} />{route.newWork && <div className="new-chat-tools"><ApprovalPolicySelect value={newApprovalPolicy} onChange={setNewApprovalPolicy} /><div className="new-conversation-project"><Icon name="folder"/><Select variant="borderless" aria-label="新对话所属项目" value={selectedProjectId ?? '__ungrouped__'} onChange={value => { const projectId = value === '__ungrouped__' ? undefined : value; patchQuery({ project: projectId }); setSelectedProjectId(projectId); if (projectId) window.localStorage.setItem('pulse-web-project', projectId); else window.localStorage.removeItem('pulse-web-project') }} options={[{ value: '__ungrouped__', label: '不归属项目' }, ...projects.map(project => ({ value: project.id, label: project.name }))]} popupMatchSelectWidth={false} /></div></div>}<div className="composer-hint">Pulse 可能会出错，请核对重要信息。</div></>}
       </footer>
     </section>
     {workbenchOpen && <Suspense fallback={<div className="workbench-loading" role="status">正在打开工作区…</div>}><WorkbenchPanel project={projects.find(project => project.id === (selected?.projectId ?? selectedProjectId))} transport={transport} localAdmin={sessionCapabilities.localAdmin} canUseTerminal={sessionCapabilities.canUseTerminal} tab={workbenchTab} setTab={setWorkbenchTab} position={route.query} onNavigate={patchQuery} onClose={() => setWorkbenchOpen(false)} /></Suspense>}

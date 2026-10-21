@@ -282,18 +282,19 @@ describe('explicit URL navigation', () => {
     expect(workUrl(undefined, '项目 & 1')).toBe('/work/new?project=%E9%A1%B9%E7%9B%AE+%26+1')
   })
 
-  it('waits for conversation project migration before loading the project catalog', async () => {
+  it('loads the project catalog while the conversation directory is still pending', async () => {
     const fixture = routingFixture(), request = fixture.transport.request
-    let migrated = false
+    let release!: () => void, projectsRequested = false
+    const barrier = new Promise<void>(resolve => { release = resolve })
     fixture.transport.request = async (path, init) => {
-      if (path === '/api/projects' && !migrated) return new Response('[]')
-      const result = await request(path, init)
-      if (path === '/api/conversations') migrated = true
-      return result
+      if (path === '/api/conversations') await barrier
+      if (path === '/api/projects') projectsRequested = true
+      return request(path, init)
     }
     show('/work/pulse-chat?workspace=files&file=README.md', fixture)
+    await waitFor(() => expect(projectsRequested).toBe(true))
+    release()
     await screen.findByText('Verified workspace document')
-    expect(fixture.calls.findIndex(call => call.path === '/api/conversations')).toBeLessThan(fixture.calls.findIndex(call => call.path === '/api/projects'))
   })
 
   it('keeps a mobile history drawer opened during a slow conversation load', async () => {

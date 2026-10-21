@@ -6,7 +6,7 @@
   ],
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "scripts": {
     "ci:local": "node scripts/ci/local.mjs",
@@ -40,7 +40,15 @@
     "web:dev": "pnpm --filter @hunterzhu/pulse-web dev",
     "web:dev:server": "node scripts/web/dev-server.mjs",
     "web:build": "pnpm --filter @hunterzhu/pulse-web build && node scripts/web/stage.mjs",
-    "desktop:build": "node scripts/automation/build-desktop.mjs"
+    "desktop:build": "node scripts/automation/build-desktop.mjs",
+    "data:migrate": "node scripts/data/migrate.mjs",
+    "desktop:app:prepare": "node scripts/desktop/prepare.mjs",
+    "desktop:app:dev": "pnpm --filter @hunterzhu/pulse-desktop dev",
+    "desktop:app:pack": "pnpm --filter @hunterzhu/pulse-desktop run pack",
+    "desktop:app:dist": "pnpm --filter @hunterzhu/pulse-desktop run dist",
+    "desktop:app:smoke": "node scripts/desktop/smoke.mjs",
+    "desktop:app:startup-smoke": "node scripts/desktop/startup-smoke.mjs",
+    "data:benchmark": "node scripts/data/benchmark.mjs"
   },
   "devDependencies": {
     "@hunterzhu/pulse-cli": "workspace:*",

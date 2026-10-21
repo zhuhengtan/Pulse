@@ -1,3 +1,4 @@
+import { readConversationFixture, writeConversationFixture } from './conversation-fixtures.js'
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 import { FileRuntimeContentStore, hydrateRuntimeResultBodies } from '@hunterzhu/pulse-runtime'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -20,13 +21,13 @@ describe('whole-run provider attempt budget', () => {
       const conversation = await host.createConversation()
       const path = join(root, 'data/conversations', conversation.id, 'messages.jsonl')
       const history = Array.from({ length: 10 }, (_, i) => JSON.stringify({ id: `old-${i}`, role: i % 2 ? 'assistant' : 'user', text: 'Historical fact '.repeat(1000), createdAt: '2026-01-01T00:00:00.000Z' }) + '\n').join('')
-      await writeFile(path, history)
+      await writeConversationFixture(path, history)
       await expect(host.sendMessage(conversation.id, { text: 'Check the project' })).rejects.toMatchObject({ code: 'TASK_MODEL_CALL_BUDGET_EXHAUSTED' })
       expect(calls).toBe(4)
-      expect(await readFile(path, 'utf8')).toBe(history)
+      expect(await readConversationFixture(path, 'utf8')).toBe(history)
       const saved = await host.getConversation(conversation.id)
       expect(saved.summary.activeRunId).toBeUndefined()
-      const manifest = JSON.parse(await readFile(join(root, 'data/conversations', conversation.id, 'manifest.json'), 'utf8'))
+      const manifest = JSON.parse(await readConversationFixture(join(root, 'data/conversations', conversation.id, 'manifest.json'), 'utf8'))
       expect(manifest.runs).toHaveLength(1)
       const runDir = join(root, 'data/conversations', conversation.id, 'runs', manifest.runs[0])
       expect(JSON.parse(await readFile(join(runDir, 'outcome.json'), 'utf8'))).toMatchObject({ status: 'failed', error: { code: 'TASK_MODEL_CALL_BUDGET_EXHAUSTED' }, usage: { modelCalls: 4 } })

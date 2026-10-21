@@ -1,3 +1,4 @@
+import { writeConversationFixture } from './conversation-fixtures.js'
 import { createRequire } from 'node:module'
 import { mkdtemp, readFile, writeFile, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -47,7 +48,7 @@ it('reads text and DOCX by continuation windows, preserving Chinese paragraphs a
     const first = await f.read({ id: word.id, maxChars: 4 }), second = await f.read({ id: word.id, offset: first.nextOffset })
     expect(first.text + second.text).toContain('中文正文\n\n表格单元格')
     await f.store.remember()
-    await writeFile(join(f.root, 'data', 'conversations', f.conversation.id, 'messages.jsonl'), '')
+    await writeConversationFixture(join(f.root, 'data', 'conversations', f.conversation.id, 'messages.jsonl'), '')
     const cold = new AttachmentStore(join(f.root, 'data'), f.conversation.id)
     expect(await cold.index()).toContain(word.id)
   } finally { await f.host.close() }

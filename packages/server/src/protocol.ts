@@ -52,6 +52,9 @@ export interface WebAttachment {
 }
 
 export interface WebMessage {
+  sequence?: number
+  bodyTruncated?: boolean
+  bodyLength?: number
   id: string
   role: 'user' | 'assistant' | 'system'
   text: string
@@ -82,6 +85,7 @@ export type WebTraceData =
   | { kind: 'reasoning' | 'note'; effectId?: string; laneId?: string; attemptId?: string; attemptNo?: number; task: string; modelId?: string; text: string }
 
 type WebRunEventPayload =
+  | { type: 'resync'; runId: string; seq: number; data: WebRunSnapshot }
   | { type: 'status'; runId: string; seq: number; data: { kind: 'working' | 'context'; label?: string } }
   | { type: 'text'; runId: string; seq: number; data: string; activityId?: string }
   | { type: 'tool'; runId: string; seq: number; data: { activityId: string; effectId: string; attemptId?: string; laneId?: string; tool: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled'; args?: Record<string, unknown>; preview?: Record<string, unknown>; error?: Record<string, unknown> } }

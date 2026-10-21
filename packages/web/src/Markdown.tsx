@@ -1,5 +1,5 @@
 import { PulseButton } from './PulseControls.js'
-import type { ReactNode } from 'react'
+import { memo, type ReactNode } from 'react'
 import hljs from 'highlight.js/lib/core'
 import bash from 'highlight.js/lib/languages/bash'
 import css from 'highlight.js/lib/languages/css'
@@ -81,7 +81,7 @@ function isTableSeparator(row: string): boolean {
   return row.includes('|') && cells.length > 0 && cells.every(cell => /^:?-{3,}:?$/.test(cell))
 }
 
-export function Markdown({ text, onFileClick }: { text: string; onFileClick?: ((path: string) => void) | undefined }) {
+export const Markdown = memo(function Markdown({ text, onFileClick }: { text: string; onFileClick?: ((path: string) => void) | undefined }) {
   const rows = text.split('\n')
   const blocks: ReactNode[] = []
   for (let index = 0; index < rows.length;) {
@@ -125,4 +125,4 @@ export function Markdown({ text, onFileClick }: { text: string; onFileClick?: ((
     }
   }
   return <div className="markdown">{blocks}</div>
-}
+})

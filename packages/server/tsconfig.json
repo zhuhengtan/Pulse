@@ -1,10 +1,24 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "rootDir": "src", "outDir": "dist" },
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
   "references": [
-    { "path": "../runtime" },
-    { "path": "../tool-sdk" },
-    { "path": "../adapters" }
+    {
+      "path": "../data"
+    },
+    {
+      "path": "../runtime"
+    },
+    {
+      "path": "../tool-sdk"
+    },
+    {
+      "path": "../adapters"
+    }
   ],
-  "include": ["src/**/*.ts"]
+  "include": [
+    "src/**/*.ts"
+  ]
 }

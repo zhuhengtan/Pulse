@@ -1,8 +1,14 @@
+import { createDesktopTransport } from './desktopTransport.js'
+import { ChatChannel } from './ChatChannel.js'
 import type { WebAttachment, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebLane, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from '@hunterzhu/pulse-server/protocol'
 
 export type { WebAttachment, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebLane, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from '@hunterzhu/pulse-server/protocol'
 
 export interface PulseWebTransport {
+  messages?(id: string, before?: string, signal?: AbortSignal): Promise<{ items: WebMessage[]; before?: string; revision: number }>
+  onConnection?(listener: (connected: boolean) => void): () => void
+  onChange?(listener: () => void): () => void
+  subscribeChat?(runId: string, after: number, onEvent: (event: WebRunEvent) => void, onError: () => void): () => void
   request(path: string, init?: RequestInit): Promise<Response>
   subscribe(path: string, onEvent: (event: WebRunEvent) => void, onError: () => void): () => void
 }
@@ -28,7 +34,17 @@ export function createBrowserTransport(
   }
 }
 
-export const browserTransport = createBrowserTransport()
+const httpTransport = createBrowserTransport()
+const channel = typeof window !== 'undefined' && typeof WebSocket !== 'undefined'
+  ? new ChatChannel(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/chat/socket`) : undefined
+const webTransport: PulseWebTransport = {
+  ...httpTransport,
+  messages: async (id, before, signal) => apiJson(httpTransport, `/api/data/conversations/${encodeURIComponent(id)}/messages${before ? `?before=${encodeURIComponent(before)}` : ''}`, signal ? { signal } : {}),
+  request: (path, init) => channel && path.startsWith('/api/assistant') ? channel.request(path, init) : httpTransport.request(path, init),
+  ...(channel ? { onChange: (listener: () => void) => channel.changes(listener), subscribeChat: (runId: string, after: number, onEvent: (event: WebRunEvent) => void, onError: () => void) => channel.subscribe(runId, after, onEvent, onError) } : {}),
+}
+
+export const browserTransport = typeof window !== 'undefined' && window.pulseDesktop ? createDesktopTransport(window.pulseDesktop) : webTransport
 
 export async function apiJson<T>(transport: PulseWebTransport, path: string, init?: RequestInit): Promise<T> {
   const response = await transport.request(path, init)
@@ -64,3 +80,26 @@ export const jsonRequest = (method: string, value?: unknown): RequestInit => ({
 
 export type ConversationList = WebConversation[]
 export type MessageList = WebMessage[]
+
+export async function readLatestMessages(transport: PulseWebTransport, id: string): Promise<MessageList> {
+  return transport.messages ? (await transport.messages(id)).items : apiJson<MessageList>(transport, `/api/web/conversations/${encodeURIComponent(id)}/messages`)
+}
+
+export function createPulseSocket(path: string): WebSocket {
+  const bridge = window.pulseDesktop
+  if (!bridge?.openSocket || !bridge.sockets) return new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${path}`)
+  const id = crypto.randomUUID()
+  const socket = { readyState: 0, onopen: null, onmessage: null, onerror: null, onclose: null,
+    send: (value: string) => { void bridge.sendSocket?.(id, value) },
+    close: () => { Object.assign(socket, { readyState: 3 }); off(); void bridge.closeSocket?.(id) },
+  } as unknown as WebSocket
+  const off = bridge.sockets(value => {
+    if (value.id !== id) return
+    if (value.type === 'open') { Object.assign(socket, { readyState: 1 }); socket.onopen?.call(socket, new Event('open')) }
+    if (value.type === 'message') socket.onmessage?.call(socket, new MessageEvent('message', { data: value.data ?? '' }))
+    if (value.type === 'error') socket.onerror?.call(socket, new Event('error'))
+    if (value.type === 'close') { Object.assign(socket, { readyState: 3 }); off(); socket.onclose?.call(socket, new CloseEvent('close')) }
+  })
+  void bridge.openSocket(id, path).catch(() => { socket.onerror?.call(socket, new Event('error')); socket.close() })
+  return socket
+}

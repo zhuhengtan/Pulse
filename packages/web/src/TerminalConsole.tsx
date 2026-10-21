@@ -1,3 +1,4 @@
+import { createPulseSocket } from './transport.js'
 import { useEffect, useRef, useState } from 'react'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
@@ -33,8 +34,7 @@ export function TerminalConsole({ terminalId, transport, active }: { terminalId:
     const connect = () => {
       if (disposed || shouldStop) return
       setState(retries ? '正在重新连接…' : '正在连接…')
-      const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      socket = new WebSocket(`${scheme}//${window.location.host}/api/terminals/${encodeURIComponent(terminalId)}/socket`)
+      socket = createPulseSocket(`/api/terminals/${encodeURIComponent(terminalId)}/socket`)
       socket.onopen = () => { retries = 0; setState('已连接'); scheduleFit() }
       socket.onmessage = event => {
         try {

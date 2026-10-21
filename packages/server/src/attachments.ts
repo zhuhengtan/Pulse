@@ -1,3 +1,4 @@
+import { ConversationData } from '@hunterzhu/pulse-data'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile, lstat } from 'node:fs/promises'
 import { join, extname } from 'node:path'
@@ -85,7 +86,11 @@ export class AttachmentStore {
   }
   async accessible(): Promise<Map<string, WebAttachment>> {
     const root = conversationDirectory(this.dataDir, this.conversationId)
-    const messages = (await Promise.all(['messages.jsonl', 'messages.jsonl.bak'].map(name => readFile(join(root, name), 'utf8').catch(() => '')))).join('\n')
+    const data = new ConversationData(this.dataDir)
+    let records: Array<{ attachments?: WebAttachment[] }>
+    try { records = [...await data.call<Array<{ attachments?: WebAttachment[] }>>('messages', this.conversationId), ...await data.call<Array<{ attachments?: WebAttachment[] }> | undefined>('readState', `compaction-backup:${this.conversationId}`) ?? []] }
+    finally { data.close() }
+    const messages = records.map(message => JSON.stringify(message)).join('\n')
     const remembered = JSON.parse(await readFile(join(root, 'attachment-references.json'), 'utf8').catch(() => '[]')) as WebAttachment[]
     const allowed = new Map<string, WebAttachment>(remembered.filter(item => safeId(item.id)).map(item => [item.id, item]))
     for (const line of messages.split('\n')) {

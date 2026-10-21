@@ -1,3 +1,4 @@
+import { ConversationData } from '@hunterzhu/pulse-data'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { replaceStateFile } from '../atomic-file.js'
@@ -15,18 +16,15 @@ interface AssistantQueueFile { schemaVersion: 1; conversationId: string; message
 /** Durable inbox for the single assistant conversation. Entries marked replying at
  * process startup are interrupted rather than replayed because a tool may have run. */
 export class AssistantConversationStore {
-  private readonly path: string
+  private readonly data: ConversationData
   private state: AssistantQueueFile | undefined
   private tail: Promise<void> = Promise.resolve()
 
-  constructor(dataDir: string) { this.path = resolve(dataDir, 'assistant-inbox.json') }
+  constructor(dataDir: string) { this.data = new ConversationData(dataDir) }
 
   async init(createConversation: () => Promise<string>): Promise<string> {
     if (!this.state) {
-      const saved = await readFile(this.path, 'utf8').then(text => JSON.parse(text) as AssistantQueueFile).catch((error: unknown) => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-        throw error
-      })
+      const saved = await this.data.call<AssistantQueueFile | undefined>('readState', 'assistant-inbox')
       this.state = saved?.schemaVersion === 1 && typeof saved.conversationId === 'string' && Array.isArray(saved.messages)
         ? saved
         : { schemaVersion: 1, conversationId: await createConversation(), messages: [] }
@@ -133,8 +131,8 @@ export class AssistantConversationStore {
     return this.requireState().messages.map(({ text: _text, ...message }) => structuredClone(message))
   }
 
-  transcript(): Array<{ requestId: string; runId: string; text: string; createdAt: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }> {
-    return this.requireState().messages.map(message => ({
+  transcript(pendingOnly = false): Array<{ requestId: string; runId: string; text: string; createdAt: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }> {
+    return this.requireState().messages.filter(message => !pendingOnly || message.state === 'queued' || message.state === 'interrupted').map(message => ({
       requestId: message.messageId,
       runId: message.runId,
       text: message.text,
@@ -182,14 +180,10 @@ export class AssistantConversationStore {
   }
 
   private async save(): Promise<void> {
-    const state = this.requireState()
-    await mkdir(dirname(this.path), { recursive: true })
-    const temporary = `${this.path}.${randomUUID()}.tmp`
-    try {
-      await writeFile(temporary, JSON.stringify(state, null, 2), { flag: 'wx', mode: 0o600 })
-      await replaceStateFile(temporary, this.path)
-    } finally { await rm(temporary, { force: true }).catch(() => undefined) }
+    await this.data.call('saveState', 'assistant-inbox', this.requireState())
   }
+
+  close(): void { this.data.close() }
 
   private async serial<T>(operation: () => Promise<T>): Promise<T> {
     const previous = this.tail

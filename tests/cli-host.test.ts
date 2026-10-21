@@ -1,3 +1,4 @@
+import { readConversationFixture, writeConversationFixture } from './conversation-fixtures.js'
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 import { defineTool } from '@hunterzhu/pulse-tool-sdk'
 import { z } from 'zod'
@@ -72,7 +73,7 @@ describe('local CLI application host', () => {
     const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', approvalReview: { provider: 'ollama', model: 'local-test-review', baseURL: 'http://127.0.0.1:11434', timeoutMs: 30000 }, provider: { provider: 'openai', defaultModel: 'test' } })
     try {
       const conversation = await host.createConversation()
-      await writeFile(join(directory, 'data', 'conversations', conversation.id, 'messages.jsonl'), JSON.stringify({ id: 'prior-plan', role: 'assistant', text: '1. Add lint. 2. Check Node and pnpm versions before validation.', createdAt: new Date().toISOString() }) + '\n')
+      await writeConversationFixture(join(directory, 'data', 'conversations', conversation.id, 'messages.jsonl'), JSON.stringify({ id: 'prior-plan', role: 'assistant', text: '1. Add lint. 2. Check Node and pnpm versions before validation.', createdAt: new Date().toISOString() }) + '\n')
       const run = await host.sendMessage(conversation.id, { text: '1、2你帮我加一下' })
       for await (const _event of run.events) { /* consume */ }
       const safetyMessages = JSON.parse(safetyPrompt) as Array<{ role: string; content: string }>
@@ -110,7 +111,7 @@ describe('local CLI application host', () => {
       const outcomeFile = join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'outcome.json')
       expect(JSON.parse(await readFile(outcomeFile, 'utf8')).usage).toMatchObject({ completeness: 'unavailable' })
       expect(JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'runs', run.id, 'usage.json'), 'utf8'))).toMatchObject({ completeness: 'unavailable' })
-      expect(JSON.parse(await readFile(join(directory, 'data', 'conversations', conversation.id, 'manifest.json'), 'utf8')).activeRunId).toBeUndefined()
+      expect(JSON.parse(await readConversationFixture(join(directory, 'data', 'conversations', conversation.id, 'manifest.json'), 'utf8')).activeRunId).toBeUndefined()
       await host.close()
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
@@ -192,7 +193,7 @@ describe('local CLI application host', () => {
       const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), mockResponse: 'context handled' })
       const conversation = await host.createConversation()
       const messagesPath = join(directory, 'data', 'conversations', conversation.id, 'messages.jsonl')
-      await writeFile(messagesPath, `${JSON.stringify({ id: 'msg-old', role: 'user', text: '历史内容 '.repeat(2_000), createdAt: new Date(0).toISOString() })}\n`)
+      await writeConversationFixture(messagesPath, `${JSON.stringify({ id: 'msg-old', role: 'user', text: '历史内容 '.repeat(2_000), createdAt: new Date(0).toISOString() })}\n`)
       const run = await host.sendMessage(conversation.id, { text: '继续处理' })
       for await (const _event of run.events) { /* drain */ }
       await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'context handled' })
@@ -603,10 +604,10 @@ describe('local CLI application host', () => {
         { id: 'msg-2', role: 'assistant', text: 'middle decision', createdAt: '2026-01-01T00:00:01.000Z' },
         { id: 'msg-3', role: 'user', text: 'latest request', createdAt: '2026-01-01T00:00:02.000Z' },
       ].map((message) => `${JSON.stringify(message)}\n`).join('')
-      await writeFile(messagesPath, original)
+      await writeConversationFixture(messagesPath, original)
 
       await expect(host.compactConversation(conversation.id)).rejects.toThrow('COMPACT_REQUIRES_PROVIDER')
-      await expect(readFile(messagesPath, 'utf8')).resolves.toBe(original)
+      await expect(readConversationFixture(messagesPath, 'utf8')).resolves.toBe(original)
       await host.close()
     } finally {
       await rm(directory, { recursive: true, force: true })
@@ -625,7 +626,7 @@ describe('local CLI application host', () => {
       })
       const conversation = await host.createConversation()
       const messagesPath = join(dataDir, 'conversations', conversation.id, 'messages.jsonl')
-      await writeFile(messagesPath, '{"id":"msg-1","role":"user","text":"keep","createdAt":"2026-01-01T00:00:00.000Z"}\n{not-json}\n{"id":"msg-2","role":"assistant","text":"also","createdAt":"2026-01-01T00:00:01.000Z"}\n')
+      await writeConversationFixture(messagesPath, '{"id":"msg-1","role":"user","text":"keep","createdAt":"2026-01-01T00:00:00.000Z"}\n{not-json}\n{"id":"msg-2","role":"assistant","text":"also","createdAt":"2026-01-01T00:00:01.000Z"}\n')
       await expect(host.getConversationMessages(conversation.id)).resolves.toMatchObject([
         { text: 'keep' },
         { text: 'also' },
@@ -668,14 +669,14 @@ describe('local CLI application host', () => {
         storedMessage('msg-2', 'assistant', 'y'.repeat(400)),
         storedMessage('msg-3', 'user', 'keep'),
       ].join('')
-      await writeFile(messagesPath, original)
+      await writeConversationFixture(messagesPath, original)
 
       const run = await host.sendMessage(conversation.id, { text: 'continue' })
       const notices = []
       for await (const event of run.events) {
         if (event.type === 'notice') notices.push(event)
       }
-      const stored = await readFile(messagesPath, 'utf8')
+      const stored = await readConversationFixture(messagesPath, 'utf8')
       expect(notices).toEqual([])
       expect(stored).toContain('x'.repeat(400))
       expect(stored).toContain('continue')
@@ -714,7 +715,7 @@ describe('local CLI application host', () => {
         storedMessage('msg-2', 'assistant', kept),
         storedMessage('msg-3', 'user', 'tail'),
       ].join('')
-      await writeFile(messagesPath, original)
+      await writeConversationFixture(messagesPath, original)
 
       const run = await host.sendMessage(conversation.id, { text: 'continue' })
       const events = []
@@ -731,7 +732,7 @@ describe('local CLI application host', () => {
       expect(stored.some((message) => message.text === dropped)).toBe(false)
       expect(stored.some((message) => message.text === kept)).toBe(true)
       expect(stored.some((message) => message.text === 'tail')).toBe(true)
-      await expect(readFile(`${messagesPath}.bak`, 'utf8')).resolves.toBe(original)
+      await expect(readConversationFixture(`${messagesPath}.bak`, 'utf8')).resolves.toBe(original)
       await host.close()
     } finally {
       await server.close()
@@ -765,7 +766,7 @@ describe('local CLI application host', () => {
       })
       const conversation = await host.createConversation()
       const huge = 'z'.repeat(20_000)
-      await writeFile(join(dataDir, 'conversations', conversation.id, 'messages.jsonl'), [
+      await writeConversationFixture(join(dataDir, 'conversations', conversation.id, 'messages.jsonl'), [
         `${JSON.stringify({ id: 'msg-summary', role: 'system', text: '[历史上下文摘要]\n已自动压缩\nolder facts', createdAt: '2026-01-01T00:00:00.000Z' })}\n`,
         storedMessage('msg-kept', 'assistant', huge),
         storedMessage('msg-tail', 'user', huge),
@@ -808,7 +809,7 @@ describe('local CLI application host', () => {
         storedMessage('msg-2', 'assistant', 'middle decision'),
         storedMessage('msg-3', 'user', 'latest request'),
       ].join('')
-      await writeFile(messagesPath, original)
+      await writeConversationFixture(messagesPath, original)
 
       const run = await host.sendMessage(conversation.id, { text: 'continue' })
       const notices = []
@@ -816,7 +817,7 @@ describe('local CLI application host', () => {
         if (event.type === 'notice') notices.push(event)
       }
       expect(notices).toEqual([])
-      expect(await readFile(messagesPath, 'utf8')).toContain('first constraint')
+      expect(await readConversationFixture(messagesPath, 'utf8')).toContain('first constraint')
 
       const compacted = await host.compactConversation(conversation.id)
       expect(compacted.text).toBe('kept the constraint')

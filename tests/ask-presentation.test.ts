@@ -1,3 +1,4 @@
+import { readConversationFixture } from './conversation-fixtures.js'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -49,7 +50,7 @@ it('exposes Ask presentation through HTTP and records a textarea answer idempote
     for (let i = 0; i < 2; i++) expect((await fetch(`${base}/api/runs/${sent.runId}/replies`, { method: 'POST', headers, body })).status).toBe(200)
     const messages = await fetch(`${base}/api/web/conversations/${conversation.id}/messages`, { headers }).then(response => response.json()) as any[]
     expect(messages.filter(message => message.text === '使用隔离环境验证。')).toHaveLength(1)
-    const stored = await readFile(join(root, 'conversations', conversation.id, 'messages.jsonl'), 'utf8')
+    const stored = await readConversationFixture(join(root, 'conversations', conversation.id, 'messages.jsonl'), 'utf8')
     expect(stored).toContain('选择部署方式？')
   } finally { await server.stop(); await host.close(); await rm(root, { recursive: true, force: true }) }
 })

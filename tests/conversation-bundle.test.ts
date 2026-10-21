@@ -1,3 +1,4 @@
+import { readConversationFixture, writeConversationFixture } from './conversation-fixtures.js'
 import { execFile } from 'node:child_process'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
@@ -166,7 +167,7 @@ describe('work conversation transfer', () => {
     const fixture = await completed(storage)
     const target = host(fixture.target, fixture.targetData)
     const existing = await target.createConversation({ title: '目标机已有会话' })
-    const before = await readFile(join(fixture.targetData, 'conversations', existing.id, 'manifest.json'))
+    const before = await readConversationFixture(join(fixture.targetData, 'conversations', existing.id, 'manifest.json'))
     const staged = await stage(fixture.exported.path, fixture.targetData)
     expect(staged.metadata.redactedFiles).toEqual([])
     expect(staged.metadata.blockedReasons).toEqual([])
@@ -180,7 +181,7 @@ describe('work conversation transfer', () => {
     const duplicate = await stage(fixture.exported.path, fixture.targetData)
     expect((await target.importConversationBundle(duplicate, { id: 'target-project', cwd: fixture.target })).duplicate).toBe(true)
     await expect(target.importConversationBundle(await stage(fixture.exported.path, fixture.targetData), { id: 'wrong-project', cwd: fixture.source })).rejects.toThrow('BUNDLE_ID_CONFLICT')
-    expect(await readFile(join(fixture.targetData, 'conversations', existing.id, 'manifest.json'))).toEqual(before)
+    expect(await readConversationFixture(join(fixture.targetData, 'conversations', existing.id, 'manifest.json'))).toEqual(before)
     const next = await target.sendMessage(fixture.conversation.id, { text: '继续新消息' })
     await expect(next.outcome()).resolves.toMatchObject({ status: 'succeeded' })
   }, 30_000)
@@ -288,12 +289,12 @@ describe('work conversation transfer', () => {
     expect(await target.inspectConversationBundle(staged)).toContain('RECOVERY_BUILD_INCOMPATIBLE')
     expect(currentRecoveryBuild()).not.toBe('old-build')
     const messagesPath = join(fixture.data, 'conversations', fixture.conversation.id, 'messages.jsonl')
-    await writeFile(messagesPath, JSON.stringify({ id: 'secret', role: 'user', text: 'Authorization: Bearer private-auth-value', createdAt: new Date().toISOString() }) + '\n')
+    await writeConversationFixture(messagesPath, JSON.stringify({ id: 'secret', role: 'user', text: 'Authorization: Bearer private-auth-value', createdAt: new Date().toISOString() }) + '\n')
     const exported = await fixture.original.exportConversationBundle(fixture.conversation.id); cleanups.push(exported.cleanup)
     const redacted = await stage(exported.path, fixture.targetData)
     expect(redacted.metadata.redactedFiles).toContain('conversation/messages.jsonl')
     expect(await readFile(join(redacted.directory, 'content/conversation/messages.jsonl'), 'utf8')).not.toContain('private-auth-value')
-    expect(await readFile(messagesPath, 'utf8')).toContain('private-auth-value')
+    expect(await readConversationFixture(messagesPath, 'utf8')).toContain('private-auth-value')
   }, 30_000)
 
   it('rejects symlink sources and incomplete or modified external bodies', async () => {
@@ -349,14 +350,14 @@ describe('ZIP boundary and HTTP', () => {
     await expect(stage(oversized, fixture.targetData)).rejects.toMatchObject({ status: 413 })
   }, 30_000)
 
-  it('exports valid history around a partial JSONL write and redacts command-line credentials', async () => {
+  it('exports database history despite stale JSONL files and redacts command-line credentials', async () => {
     const fixture = await completed('json'), conversation = join(fixture.data, 'conversations', fixture.conversation.id)
     await writeFile(join(conversation, 'messages.jsonl'), '{"id":"partial","text":"incomplete', { flag: 'a' })
     await writeFile(join(conversation, 'runs', fixture.run.id, 'diagnostic.json'), JSON.stringify({ command: 'test --token private-flag-value', args: ['--api-key', 'private-argv-value'] }))
     const exported = await fixture.original.exportConversationBundle(fixture.conversation.id); cleanups.push(exported.cleanup)
     const staged = await stage(exported.path, fixture.targetData)
     expect(await readFile(join(staged.directory, 'content/chat.md'), 'utf8')).toContain('read complete')
-    expect(await readFile(join(staged.directory, 'content/conversation/messages.jsonl'), 'utf8')).toContain('incomplete')
+    expect(await readFile(join(staged.directory, 'content/conversation/messages.jsonl'), 'utf8')).not.toContain('incomplete')
     const diagnostic = await readFile(join(staged.directory, 'content/conversation/runs', fixture.run.id, 'diagnostic.json'), 'utf8')
     expect(diagnostic).not.toContain('private-flag-value'); expect(diagnostic).not.toContain('private-argv-value')
   }, 30_000)

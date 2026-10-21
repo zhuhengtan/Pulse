@@ -15,3 +15,6 @@ native/desktop-helper/__pycache__/
 packages/server/native/
 # Local real-task evaluation files and generated run artifacts
 /tests/real-task/
+artifacts/desktop/
+artifacts/desktop-runtime/
+artifacts/desktop-connection-fix/

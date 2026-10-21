@@ -1,10 +1,23 @@
 {
   "files": [],
   "references": [
-    { "path": "./packages/runtime" },
-    { "path": "./packages/tool-sdk" },
-    { "path": "./packages/adapters" },
-    { "path": "./packages/server" },
-    { "path": "./packages/cli" }
+    {
+      "path": "./packages/data"
+    },
+    {
+      "path": "./packages/runtime"
+    },
+    {
+      "path": "./packages/tool-sdk"
+    },
+    {
+      "path": "./packages/adapters"
+    },
+    {
+      "path": "./packages/server"
+    },
+    {
+      "path": "./packages/cli"
+    }
   ]
 }

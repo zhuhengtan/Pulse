@@ -1,5 +1,8 @@
 packages:
   - packages/*
 allowBuilds:
+  electron-winstaller: false
   esbuild@0.21.5: true
   node-pty: true
+minimumReleaseAgeExclude:
+  - electron@44.9.2

@@ -1,0 +1,28 @@
+{
+  "name": "@hunterzhu/pulse-data",
+  "version": "0.7.0",
+  "type": "module",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./sqlite": "./dist/sqlite.mjs"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  }
+}
