@@ -12,7 +12,7 @@ export class LocalAutomationClient implements AutomationClient {
   constructor(private readonly manager: AutomationSessionManager) {}
   async request(method: string, args: any[], signal?: AbortSignal): Promise<any> {
     if (signal) { if (method === 'observe' || method === 'wait') args[2] = signal; if (method === 'command') args[4] = signal; if (method === 'act') args[6] = signal }
-    if (!['list', 'open', 'observe', 'command', 'act', 'wait', 'control', 'closeOwner'].includes(method)) throw automationError('AUTOMATION_METHOD_NOT_ALLOWED')
+    if (!['list', 'open', 'observe', 'command', 'act', 'wait', 'control', 'closeOwner', 'releaseOwner'].includes(method)) throw automationError('AUTOMATION_METHOD_NOT_ALLOWED')
     return (this.manager[method as keyof AutomationSessionManager] as Function).apply(this.manager, args)
   }
 }

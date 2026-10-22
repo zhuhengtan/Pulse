@@ -25,6 +25,7 @@ function show(emptyMessages = false) {
       { id: 'u2', role: 'user', text: '第二轮', runId: 'run-2' },
       { id: 'a3', role: 'assistant', text: '第二轮完成', runId: 'run-2' },
     ].map(m => ({ ...m, createdAt: '2026-10-19T00:00:00Z' })))
+    if (path.includes('/artifacts/raw?')) return new Response(`正文 ${new URL(path, 'http://fixture').searchParams.get('runId')}`, { headers: { 'Content-Type': 'text/plain' } })
     if (path.startsWith('/api/conversations/pulse-chat/artifacts') && !path.includes('/content?')) {
       artifactCalls.push(path)
       return response([artifact('run-1', 'docs/first.md'), artifact('run-2', 'docs/second.md')])
@@ -50,13 +51,15 @@ it('places each delivery after the last message of its run and before the next t
   expect(within(cards[0] as HTMLElement).queryByText('docs/second.md')).toBeNull()
   expect(view.artifactCalls).toHaveLength(1)
 })
-it('opens a preview only in its owning turn and restores it through browser history', async () => {
+it('opens the owning turn artifact in the right panel and restores it through browser history', async () => {
   const view = show()
   await screen.findAllByText(/docs\/second\.md/)
   const first = screen.getByText('docs/first.md').closest('section')!
   fireEvent.click(within(first).getByRole('button', { name: '查看' }))
   await screen.findByText('正文 run-1')
   expect(view.router.state.location.search).toContain('artifactRun=run-1')
+  expect(view.router.state.location.search).toContain('workspace=preview')
+  expect(within(screen.getByLabelText('独立工作区')).getByText('正文 run-1')).toBeTruthy()
   expect(within(screen.getByText('docs/second.md').closest('section')!).queryByText('正文 run-1')).toBeNull()
   await act(async () => { await view.router.navigate(-1) })
   await waitFor(() => expect(screen.queryByText('正文 run-1')).toBeNull())

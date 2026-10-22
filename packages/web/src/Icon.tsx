@@ -1,6 +1,7 @@
 import type { CSSProperties, ComponentType } from 'react'
 import {
   ArrowLeftOutlined,
+  ReloadOutlined,
   AuditOutlined,
   BulbOutlined,
   CloseOutlined,
@@ -41,6 +42,7 @@ const icons = {
   download: DownloadOutlined,
   upload: UploadOutlined,
   back: ArrowLeftOutlined,
+  reload: ReloadOutlined,
   chevron: RightOutlined,
   terminal: ThunderboltOutlined,
   file: FileOutlined,

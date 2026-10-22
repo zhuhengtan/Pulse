@@ -104,19 +104,6 @@ describe('Ant Design controls and workbench behavior', () => {
     expect(view.container.querySelector('.git-file-status')?.textContent).toBe('A')
   })
 
-  it('enables preview immediately after registering its URL without waiting for a project-list refresh', async () => {
-    const view = render(<PulseDesignSystem><Workbench /></PulseDesignSystem>)
-    await screen.findByText('docs')
-    fireEvent.click(screen.getByRole('tab', { name: '预览', exact: true }))
-    fireEvent.change(screen.getByPlaceholderText('http://127.0.0.1:5173'), { target: { value: 'http://127.0.0.1:5179' } })
-    fireEvent.click(screen.getByRole('button', { name: '登记', exact: true }))
-    await screen.findByTitle('Pulse 预览')
-    expect((screen.getByRole('button', { name: '刷新', exact: true }) as HTMLButtonElement).disabled).toBe(false)
-    expect(screen.queryByText(/登记本机项目开发服务器后即可预览/)).toBeNull()
-    view.rerender(<PulseDesignSystem><Workbench project={{ ...workbenchProject, previewUrl: 'http://127.0.0.1:5179' }} /></PulseDesignSystem>)
-    expect(screen.getByTitle('Pulse 预览')).toBeTruthy()
-  })
-
   it('waits for an explicit Ant Design confirmation and does not delete on cancel', async () => {
     const fixture = workbenchFixture()
     render(<PulseDesignSystem><ArchivePage transport={fixture.transport} onBack={() => {}} onChanged={() => {}} onOpen={() => {}} /></PulseDesignSystem>)

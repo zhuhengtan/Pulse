@@ -7,7 +7,7 @@ export type WorkspaceTab = typeof workspaceTabs[number]
 export type QueryPatch = Record<string, string | number | boolean | undefined>
 export type PulseRoute = { page: 'chat' | 'work' | 'settings' | 'archive' | 'pair' | 'missing'; conversationId?: string; newWork: boolean; category?: string; query: URLSearchParams }
 
-const queryKeys = new Set(['project', 'workspace', 'path', 'file', 'offset', 'staged', 'diff', 'terminal', 'automation', 'details', 'artifact', 'artifactRun', 'code'])
+const queryKeys = new Set(['project', 'workspace', 'path', 'file', 'offset', 'staged', 'diff', 'terminal', 'automation', 'details', 'artifact', 'artifactRun', 'code', 'previewHidden'])
 const pathKeys = new Set(['path', 'file', 'diff', 'artifact'])
 export function safeRelativePath(value: string): boolean { return !value.startsWith('/') && !value.includes('\\') && !value.includes('\0') && !value.split('/').includes('..') }
 

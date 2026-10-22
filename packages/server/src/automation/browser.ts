@@ -16,8 +16,8 @@ export class BrowserBackend implements AutomationBackend {
   private viewport = { width: 1280, height: 800 }
   constructor(config: NonNullable<AutomationConfig['browser']>, private readonly workspace: string, profile: string, private readonly allowNetwork: boolean, private readonly networkHosts?: string[]) {
     this.dedicated = config.mode !== 'existing'
-    this.outputDir = resolve(workspace, '.pulse', 'automation-downloads')
-    this.observationDir = resolve(workspace, '.pulse', 'automation-observations')
+    this.outputDir = resolve(workspace, '.pulse', 'automation-downloads', createHash('sha256').update(profile).digest('hex').slice(0, 16))
+    this.observationDir = resolve(workspace, '.pulse', 'automation-observations', createHash('sha256').update(profile).digest('hex').slice(0, 16))
     this.client = new McpStdioClient({ command: config.command ?? process.execPath, args: config.args ?? [resolve(createRequire(import.meta.url).resolve('@playwright/mcp/package.json'), '../cli.js'), ...(config.mode === 'existing' ? ['--extension'] : ['--user-data-dir', profile, ...(config.channel ? ['--browser', config.channel] : []), '--viewport-size', '1280,800']), '--caps', 'vision', '--image-responses', 'allow', '--output-dir', this.outputDir], cwd: workspace, maxLineBytes: 8 * 1024 * 1024, timeoutMs: 60000, shutdownTimeoutMs: 3000 })
   }
   private async start(): Promise<void> {
@@ -38,12 +38,21 @@ export class BrowserBackend implements AutomationBackend {
     return this.client.callTool(name, args as never, signal ? { signal } : {})
   }
   async call(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
-    if (method === 'tabs') return this.tool('browser_tabs', { action: 'list' }, signal)
-    if (method === 'selectTab') return this.tool('browser_tabs', { action: 'select', index: params.index }, signal)
-    if (method === 'navigate') {
+    if (method === 'tabs') return this.readTabs(signal)
+    if (method === 'selectTab' || method === 'closeTab') {
+      const tabs = await this.readTabs(signal)
+      if (params.revision && params.revision !== tabs.revision) throw automationError('STALE_BROWSER_TABS')
+      if (!Number.isInteger(params.index) || !tabs.items.some(item => item.index === params.index)) throw automationError('BROWSER_TAB_NOT_FOUND')
+      await this.tool('browser_tabs', { action: method === 'selectTab' ? 'select' : 'close', index: params.index }, signal)
+      return this.readTabs(signal)
+    }
+    if (method === 'reload') return this.tool('browser_press_key', { key: 'ControlOrMeta+r' }, signal)
+    if (method === 'back') return this.tool('browser_navigate_back', {}, signal)
+    if (method === 'navigate' || method === 'newTab') {
+      if (method === 'newTab' && (!params.url || params.url === 'about:blank')) return this.tool('browser_tabs', { action: 'new' }, signal)
       const url = new URL(String(params.url))
       if (!['http:', 'https:'].includes(url.protocol) || (!this.allowNetwork || (this.networkHosts !== undefined && !this.networkHosts.some(host => host.toLowerCase() === url.hostname.toLowerCase())))) throw automationError('BROWSER_NETWORK_NOT_ALLOWED')
-      return this.tool('browser_navigate', { url: url.href }, signal)
+      return method === 'newTab' ? this.tool('browser_tabs', { action: 'new', url: url.href }, signal) : this.tool('browser_navigate', { url: url.href }, signal)
     }
     if (method === 'upload') {
       const files = await Promise.all((params.files as string[]).map(async file => {
@@ -55,6 +64,12 @@ export class BrowserBackend implements AutomationBackend {
     }
     if (method === 'downloads') return Promise.all((await readdir(this.outputDir).catch(() => [])).map(async name => { const path = resolve(this.outputDir, name); const info = await stat(path); return { name, path, bytes: info.size } }))
     throw automationError('UNKNOWN_BROWSER_METHOD')
+  }
+  private async readTabs(signal?: AbortSignal) {
+    const result = await this.tool('browser_tabs', { action: 'list' }, signal) as { content?: Array<{ type: string; text?: string }> }
+    const text = (result.content ?? []).filter(item => item.type === 'text').map(item => item.text ?? '').join('\n')
+    const items = [...text.matchAll(/^- (\d+): (\(current\) )?\[([^\n]*)\]\(([^\n]*)\)$/gm)].map(match => ({ index: Number(match[1]), active: Boolean(match[2]), title: match[3]!, url: match[4]! }))
+    return { revision: createHash('sha256').update(JSON.stringify(items)).digest('hex'), items }
   }
   async observe(signal?: AbortSignal): Promise<BackendObservation> {
     const snapshot = await this.tool('browser_snapshot', {}, signal) as { content?: Array<{ type: string; text?: string }> }
@@ -69,7 +84,7 @@ export class BrowserBackend implements AutomationBackend {
     this.viewport = { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) }
     const rawUrl = text.match(/Page URL: (.+)/)?.[1]?.trim()
     const url = rawUrl && /^https?:/.test(rawUrl) ? new URL(rawUrl) : undefined
-    return { ...this.viewport, title: text.match(/Page Title: (.+)/)?.[1]?.trim() ?? 'Browser', text: text.slice(0, 16000), ...(url ? { url: `${url.origin}${url.pathname}` } : {}), geometry: createHash('sha256').update(JSON.stringify([this.viewport, text])).digest('hex'), image: { mediaType: 'image/png', data: image.data } }
+    return { ...this.viewport, tabs: await this.readTabs(signal), title: text.match(/Page Title: (.+)/)?.[1]?.trim() ?? 'Browser', text: text.slice(0, 16000), ...(url ? { url: `${url.origin}${url.pathname}` } : {}), geometry: createHash('sha256').update(JSON.stringify([this.viewport, text])).digest('hex'), image: { mediaType: 'image/png', data: image.data } }
   }
   async act(action: AutomationAction, observation: BackendObservation, signal?: AbortSignal): Promise<void> {
     if (observation.url) { const host = new URL(observation.url).hostname; if (!this.allowNetwork || (this.networkHosts !== undefined && !this.networkHosts.includes(host))) throw automationError('BROWSER_NETWORK_NOT_ALLOWED') }

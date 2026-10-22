@@ -16,6 +16,7 @@ fixture.transport.request = async (path, init) => {
     { id: 'u2', role: 'user', text: '补充移动端验收步骤，再给我一份。', runId: 'run-2' },
     { id: 'a2', role: 'assistant', text: '已补充手机端布局、文件查看和会话切换的验收步骤。修订文件放在本轮回复下方。', runId: 'run-2' },
   ].map(item => ({ ...item, createdAt: '2026-10-19T06:00:00Z' })))
+  if (path.includes('/artifacts/raw?')) return new Response('# 项目计划\n\n本轮交付文件正文。\n\n- 桌面布局\n- 手机布局\n- 会话切换', { headers: { 'Content-Type': 'text/markdown' } })
   if (path.includes('/artifacts/content?')) return Response.json({ content: '# 项目计划\n\n本轮交付文件正文。\n\n- 桌面布局\n- 手机布局\n- 会话切换' })
   if (path.includes('/artifacts')) return Response.json([
     { runId: 'run-1', path: 'docs/plans/project-plan.md', absolutePath: '/example/Pulse/.workspaces/conversation/docs/plans/project-plan.md', workspaceState: 'isolated' },

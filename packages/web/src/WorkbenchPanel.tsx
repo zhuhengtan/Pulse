@@ -1,3 +1,4 @@
+import { DiffViewer } from './DiffViewer.js'
 import { PulseButton, PulseInput, usePulseDialogs } from './PulseControls.js'
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
@@ -15,9 +16,10 @@ interface FileResult { path: string; binary: boolean; size: number; offset?: num
 interface GitStatus { isGit: boolean; branch?: string; entries?: Array<{ index: string; worktree: string; path: string }> }
 interface TerminalInfo { id: string; projectId: string; exited?: { code: number } }
 
-export function WorkbenchPanel({ project, transport, localAdmin, canUseTerminal, tab, setTab, onClose, position, onNavigate }: { project?: WebProject | undefined; transport: PulseWebTransport; localAdmin: boolean; canUseTerminal: boolean; tab: 'files' | 'git' | 'preview' | 'terminal' | 'automation'; setTab: (tab: 'files' | 'git' | 'preview' | 'terminal' | 'automation') => void; onClose: () => void; position?: URLSearchParams; onNavigate?: (patch: QueryPatch, replace?: boolean) => void }) {
+export function WorkbenchPanel({ project, conversationId, transport, localAdmin, canUseTerminal, tab, setTab, onClose, position, onNavigate, embedded = false }: { project?: WebProject | undefined; conversationId?: string | undefined; transport: PulseWebTransport; localAdmin: boolean; canUseTerminal: boolean; tab: 'files' | 'git' | 'preview' | 'terminal' | 'automation'; setTab: (tab: 'files' | 'git' | 'preview' | 'terminal' | 'automation') => void; onClose: () => void; position?: URLSearchParams; onNavigate?: ((patch: QueryPatch, replace?: boolean) => void) | undefined; embedded?: boolean }) {
   const dialogs = usePulseDialogs()
-  const [panelWidth, setPanelWidth] = useState(() => Number(window.localStorage.getItem('pulse-web-workbench-width')) || 410)
+  const widthKey = `pulse-web-workbench-width:${conversationId ?? project?.id ?? 'default'}`
+  const [panelWidth, setPanelWidth] = useState(() => Number(window.localStorage.getItem(widthKey) ?? window.localStorage.getItem('pulse-web-workbench-width')) || 410)
   const [panelHeight, setPanelHeight] = useState(() => Number(window.localStorage.getItem('pulse-web-terminal-height')) || 340)
   const resizeCleanup = useRef<(() => void) | undefined>(undefined)
   const [localPath, setPath] = useState('.')
@@ -31,10 +33,6 @@ export function WorkbenchPanel({ project, transport, localAdmin, canUseTerminal,
   const [diff, setDiff] = useState('')
   const [localStaged, setStaged] = useState(false)
   const staged = position ? position.get('staged') === '1' : localStaged
-  const [previewInput, setPreviewInput] = useState(project?.previewUrl ?? '')
-  const [previewUrl, setPreviewUrl] = useState('')
-  const [previewRegistration, setPreviewRegistration] = useState({ projectId: project?.id, url: project?.previewUrl ?? '' })
-  const registeredPreview = previewRegistration.projectId === project?.id ? previewRegistration.url : ''
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [terminals, setTerminals] = useState<TerminalInfo[]>([])
@@ -44,7 +42,7 @@ export function WorkbenchPanel({ project, transport, localAdmin, canUseTerminal,
   const fileRequest = useRef(0), gitRequest = useRef(0), diffRequest = useRef(0)
   const selectTerminal = (id?: string) => { if (onNavigate) onNavigate({ terminal: id }); else setActiveTerminalId(id) }
 
-  useEffect(() => { window.localStorage.setItem('pulse-web-workbench-width', String(panelWidth)) }, [panelWidth])
+  useEffect(() => { window.localStorage.setItem(widthKey, String(panelWidth)) }, [panelWidth, widthKey])
   useEffect(() => { window.localStorage.setItem('pulse-web-terminal-height', String(panelHeight)) }, [panelHeight])
   useEffect(() => () => resizeCleanup.current?.(), [])
   const beginResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -72,7 +70,7 @@ export function WorkbenchPanel({ project, transport, localAdmin, canUseTerminal,
   }
   const openFile = async (filePath: string, offset = 0, navigate = true) => {
     if (!project) return
-    if (onNavigate && navigate) { const parent = filePath.split('/').slice(0, -1).join('/'); onNavigate({ path: parent || undefined, file: filePath, offset: offset || undefined }); return }
+    if (onNavigate && navigate) { const parent = filePath.split('/').slice(0, -1).join('/'); onNavigate({ workspace: 'preview', diff: undefined, path: parent || undefined, file: filePath, artifact: undefined, artifactRun: undefined, automation: undefined, offset: offset || undefined }); return }
     const request = ++fileRequest.current
     setFile(undefined)
     setBusy(true); setError(''); setFileOffset(offset)
@@ -108,14 +106,7 @@ export function WorkbenchPanel({ project, transport, localAdmin, canUseTerminal,
     return () => { fileRequest.current++ }
   }, [project?.id, tab, routePath, routeFile, routeOffset])
   useEffect(() => { if (!position) return; if (tab === 'git' && routeDiff) void loadDiff(routeDiff, staged, false); else if (position) setDiff(''); return () => { diffRequest.current++ } }, [project?.id, tab, routeDiff, staged])
-  useEffect(() => {
-    const url = project?.previewUrl ?? ''
-    // A directory refresh can echo a URL already registered in this panel.
-    if (previewRegistration.projectId === project?.id && previewRegistration.url === url) return
-    setPreviewRegistration({ projectId: project?.id, url }); setPreviewInput(url); setPreviewUrl('')
-  }, [project?.id, project?.previewUrl])
   useEffect(() => { if (tab === 'git') void loadGit() }, [tab, project?.id])
-  useEffect(() => { if (tab === 'preview' && registeredPreview) void refreshPreview() }, [tab, project?.id, registeredPreview])
   useEffect(() => { if (tab === 'terminal') void loadTerminals() }, [tab, project?.id, canUseTerminal])
 
   const runSearch = async () => {
@@ -125,23 +116,6 @@ export function WorkbenchPanel({ project, transport, localAdmin, canUseTerminal,
     catch (reason) { setError(workspaceError(reason, '搜索失败。')) }
     finally { setBusy(false) }
   }
-  const savePreview = async () => {
-    if (!project || !localAdmin) return
-    setBusy(true); setError('')
-    try {
-      const value = await apiJson<WebProject>(transport, projectApi, jsonRequest('PATCH', { previewUrl: previewInput.trim() || null }))
-      setPreviewInput(value.previewUrl ?? ''); setPreviewRegistration({ projectId: project.id, url: value.previewUrl ?? '' }); setPreviewUrl('')
-    } catch { setError('仅支持登记本机回环地址和明确端口，例如 http://127.0.0.1:5173。') }
-    finally { setBusy(false) }
-  }
-  const refreshPreview = async () => {
-    if (!registeredPreview) return
-    setBusy(true); setError('')
-    try { const value = await apiJson<{ url: string }>(transport, `${projectApi}/preview-ticket`, jsonRequest('POST')); setPreviewUrl(value.url) }
-    catch { setError('预览无法加载，请检查项目开发服务器和登记地址。') }
-    finally { setBusy(false) }
-  }
-
   const loadTerminals = async () => {
     if (!project || !canUseTerminal) return
     try {
@@ -174,15 +148,13 @@ export function WorkbenchPanel({ project, transport, localAdmin, canUseTerminal,
     finally { setBusy(false) }
   }
 
-  if (!project && tab !== 'automation') return <aside className={`workbench-panel ${tab === 'terminal' ? 'terminal-dock' : ''}`} style={{ '--workbench-width': `${panelWidth}px`, '--workbench-height': `${panelHeight}px` } as CSSProperties}><PulseButton className="workbench-resize" onPointerDown={beginResize} aria-label={tab === 'terminal' ? '调整终端高度' : '调整工作区宽度'} /><header className="workbench-header"><strong>工作区</strong><PulseButton className="icon-button" onClick={onClose} aria-label="关闭工作区"><Icon name="close"/></PulseButton></header><div className="workbench-empty"><Icon name="folder" size={30}/><strong>选择一个项目</strong><span>登记本机目录后，可在这里查看文件、Git 差异和预览。</span></div></aside>
-  const visibleGitEntries = git?.entries?.filter(entry => staged ? entry.index !== ' ' && entry.index !== '?' : entry.worktree !== ' ') ?? []
+  if (!project && tab !== 'automation') return <div className="workbench-empty"><Icon name="folder" size={30}/><strong>选择一个项目</strong><span>选择项目后查看文件、变更和终端。</span></div>
+
   const parentPath = path === '.' ? undefined : path.split('/').slice(0, -1).join('/') || '.'
+  const visibleGitEntries = (git?.entries ?? []).filter(entry => staged ? entry.index !== ' ' && entry.index !== '?' : entry.worktree !== ' ')
   const crumbs = path === '.' ? [] : path.split('/').filter(Boolean)
-  return <aside className={`workbench-panel ${tab === 'terminal' ? 'terminal-dock' : ''}`} style={{ '--workbench-width': `${panelWidth}px`, '--workbench-height': `${panelHeight}px` } as CSSProperties} aria-label="工作区面板">
-    <PulseButton className="workbench-resize" onPointerDown={beginResize} aria-label={tab === 'terminal' ? '调整终端高度' : '调整工作区宽度'} />
-    <header className="workbench-header"><div><strong>{project?.name}</strong><small title={project?.cwd}>{project?.cwd}</small></div><PulseButton className="icon-button" onClick={onClose} aria-label="关闭工作区"><Icon name="close"/></PulseButton></header>
-    <Tabs className="workbench-tabs" activeKey={tab} onChange={value => setTab(value as typeof tab)} items={[{ key: 'files', label: '文件' }, { key: 'git', label: 'Git' }, { key: 'preview', label: '预览' }, { key: 'terminal', label: '终端' }, { key: 'automation', label: '自动化' }]} />
-    {!project?.available && <p className="workbench-alert">这个目录当前不可用；历史聊天和记录仍保留。</p>}
+  const content = <>
+    {project && !project.available && <p className="workbench-alert">这个目录当前不可用；历史聊天和记录仍保留。</p>}
     {error && <p className="workbench-alert" role="alert">{error}</p>}
     {tab === 'automation' && <AutomationPanel transport={transport} projectId={project?.id} localAdmin={localAdmin} selectedSession={position?.get('automation') ?? undefined} onSelectSession={onNavigate ? (automation, replace) => onNavigate({ automation }, replace) : undefined} />}
     {tab === 'files' && <div className="workbench-content">
@@ -190,12 +162,18 @@ export function WorkbenchPanel({ project, transport, localAdmin, canUseTerminal,
       {searchResults.length > 0 && <div className="search-results">{searchResults.map((result, index) => <PulseButton key={`${result.path}-${result.line}-${index}`} onClick={() => { void openFile(result.path); setSearchResults([]) }}><strong>{result.path}:{result.line}</strong><span>{result.text}</span></PulseButton>)}</div>}
       {file ? <section className="file-view"><header><PulseButton onClick={() => { if (onNavigate) onNavigate({ file: undefined, offset: undefined }); else setFile(undefined) }}>← 文件列表</PulseButton><strong title={file.path}>{file.path}</strong><PulseButton onClick={() => void navigator.clipboard?.writeText(file.content ?? '')}>复制</PulseButton></header>{file.binary ? <p>这是二进制文件，暂不支持预览（{formatBytes(file.size)}）。</p> : <><pre><code>{file.content}</code></pre>{(fileOffset > 0 || (file.totalLines ?? 0) > fileOffset + 1000) && <footer><PulseButton disabled={fileOffset <= 0} onClick={() => void openFile(file.path, Math.max(0, fileOffset - 1000))}>上一页</PulseButton><span>{fileOffset + 1}–{Math.min(fileOffset + 1000, file.totalLines ?? fileOffset + 1000)} / {file.totalLines}</span><PulseButton disabled={fileOffset + 1000 >= (file.totalLines ?? 0)} onClick={() => void openFile(file.path, fileOffset + 1000)}>下一页</PulseButton></footer>}</>}</section> : <><Breadcrumb className="file-breadcrumb path-breadcrumb" items={[{ title: <PulseButton onClick={() => void loadDirectory('.')}>项目</PulseButton> }, ...crumbs.map((crumb, index) => ({ title: <PulseButton onClick={() => void loadDirectory(crumbs.slice(0, index + 1).join('/'))}>{crumb}</PulseButton> }))]} />{parentPath && <PulseButton className="file-entry parent" onClick={() => void loadDirectory(parentPath)}>↑ 上一级</PulseButton>}{busy && !directory ? <p>正在读取文件…</p> : <Tree.DirectoryTree className="workspace-file-tree" blockNode showIcon expandAction={false} selectedKeys={[]} treeData={(directory?.entries ?? []).map(entry => ({ key: entry.path, isLeaf: true, icon: <Icon name={entry.type === 'directory' ? 'folder' : 'file'} />, title: <span className="workspace-file-title"><strong>{entry.name}</strong><small>{entry.type === 'file' ? formatBytes(entry.size) : ''}</small></span>, disabled: entry.type === 'other' }))} onSelect={keys => { const entry = directory?.entries.find(item => item.path === keys[0]); if (entry?.type === 'directory') void loadDirectory(entry.path); else if (entry?.type === 'file') void openFile(entry.path) }} />}</>}
     </div>}
-    {tab === 'git' && <div className="workbench-content git-view"><div className="git-heading"><strong>{git?.isGit ? `分支 · ${git.branch}` : 'Git 状态'}</strong><PulseButton onClick={() => void loadGit()}>刷新</PulseButton></div>{git?.isGit === false ? <p>这个项目目录不是 Git 仓库。</p> : <><Segmented className="git-stage-tabs" value={staged ? 'staged' : 'unstaged'} options={[{ value: 'unstaged', label: '未暂存' }, { value: 'staged', label: '已暂存' }]} onChange={value => { const next = value === 'staged'; setStaged(next); void loadDiff(undefined, next) }} />{visibleGitEntries.length ? visibleGitEntries.map(entry => <PulseButton className="git-file" key={`${entry.index}${entry.worktree}${entry.path}`} onClick={() => void loadDiff(entry.path, staged)}><span className="git-file-status">{staged ? entry.index : entry.worktree}</span><span className="git-file-path" title={entry.path}>{entry.path}</span></PulseButton>) : <p>{staged ? '没有已暂存的变更。' : '没有未暂存的变更。'}</p>}{diff && <pre className="git-diff">{diff}</pre>}</>}</div>}
-    {tab === 'preview' && <div className="workbench-content preview-view"><div className="preview-controls"><PulseInput value={previewInput} disabled={!localAdmin} onChange={event => setPreviewInput(event.target.value)} placeholder="http://127.0.0.1:5173"/>{localAdmin && <PulseButton disabled={busy} onClick={() => void savePreview()}>登记</PulseButton>}<PulseButton disabled={busy || !registeredPreview} onClick={() => void refreshPreview()}>刷新</PulseButton></div>{!registeredPreview ? <p>{localAdmin ? '登记本机项目开发服务器后即可预览。Pulse 不会自动运行项目脚本。' : '此项目尚未登记预览服务。'}</p> : previewUrl ? <iframe title={`${project?.name} 预览`} sandbox="allow-scripts" referrerPolicy="no-referrer" src={previewUrl}/> : <p>使用受限预览代理；页面不能读取 Pulse 会话或设置。</p>}</div>}
+    {tab === 'git' && <div className="workbench-content git-view"><div className="git-heading"><strong>{git?.isGit ? `分支 · ${git.branch}` : 'Git 状态'}</strong><PulseButton onClick={() => void loadGit()}>刷新</PulseButton></div>{git?.isGit === false ? <p>这个项目目录不是 Git 仓库。</p> : <><Segmented className="git-stage-tabs" value={staged ? 'staged' : 'unstaged'} options={[{ value: 'unstaged', label: '未暂存' }, { value: 'staged', label: '已暂存' }]} onChange={value => { const next = value === 'staged'; setStaged(next); void loadDiff(undefined, next) }} />{visibleGitEntries.length ? visibleGitEntries.map(entry => <PulseButton className="git-file" key={`${entry.index}${entry.worktree}${entry.path}`} onClick={() => void loadDiff(entry.path, staged)}><span className="git-file-status">{staged ? entry.index : entry.worktree}</span><span className="git-file-path" title={entry.path}>{entry.path}</span></PulseButton>) : <p>{staged ? '没有已暂存的变更。' : '没有未暂存的变更。'}</p>}{diff && <DiffViewer text={diff} />}</>}</div>}
     {tab === 'terminal' && <div className="workbench-content terminal-view">{canUseTerminal ? <>
       <div className="terminal-tabs">{terminals.map((terminal, index) => <div className={`terminal-tab ${activeTerminalId === terminal.id ? 'active' : ''}`} key={terminal.id}><PulseButton onClick={() => selectTerminal(terminal.id)} title={`终端 ${index + 1}`}>终端 {index + 1}{terminal.exited ? ` · 已退出 ${terminal.exited.code}` : ''}</PulseButton><PulseButton aria-label={`关闭终端 ${index + 1}`} disabled={busy} onClick={() => void closeTerminal(terminal)}>×</PulseButton></div>)}<PulseButton className="terminal-new" disabled={busy || terminals.length >= 3} onClick={() => void createTerminal()}>＋ 新终端</PulseButton></div>
       {terminals.length === 0 ? <div className="terminal-empty"><strong>交互终端</strong><p>终端绑定到“{project?.name}”的目录，与聊天任务和审批事件隔离。</p><PulseButton disabled={busy} onClick={() => void createTerminal()}>打开终端</PulseButton></div> : <div className="terminal-stages"><Suspense fallback={<p>正在加载终端…</p>}>{terminals.map(terminal => <div className="terminal-stage" key={terminal.id} hidden={activeTerminalId !== terminal.id}><TerminalConsole terminalId={terminal.id} transport={transport} active={activeTerminalId === terminal.id} /></div>)}</Suspense></div>}
     </> : <p>交互终端仅限本机管理浏览器使用。</p>}</div>}
+  </>
+  if (embedded) return <section className="workspace-tool-content">{content}</section>
+  return <aside className={`workbench-panel ${tab === 'terminal' ? 'terminal-dock' : ''}`} style={{ '--workbench-width': `${panelWidth}px`, '--workbench-height': `${panelHeight}px` } as CSSProperties} aria-label="工作区面板">
+    <PulseButton className="workbench-resize" onPointerDown={beginResize} aria-label={tab === 'terminal' ? '调整终端高度' : '调整工作区宽度'} />
+    <header className="workbench-header"><div><strong>{project?.name ?? '工作区'}</strong><small>{project?.cwd}</small></div><PulseButton className="icon-button" onClick={onClose} aria-label="关闭工作区"><Icon name="close"/></PulseButton></header>
+    <Tabs className="workbench-tabs" activeKey={tab} onChange={value => setTab(value as typeof tab)} items={[{ key: 'files', label: '文件' }, { key: 'git', label: 'Git' }, { key: 'terminal', label: '终端' }, { key: 'automation', label: '自动化' }]} />
+    {content}
   </aside>
 }
 

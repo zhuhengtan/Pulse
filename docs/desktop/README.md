@@ -15,6 +15,8 @@ pnpm desktop:app:prepare
 pnpm desktop:app:dev
 ```
 
+`pnpm desktop:app:dev` 打开连接本地 Vite（默认 `http://127.0.0.1:5174`）的 Electron 开发窗口，前端代码与样式保存后自动更新，无需重新构建。Vite 未启动时会自动启动；已存在的 Vite 会直接复用。默认使用 `.pulse-dev/h5/data` 与 `.pulse-dev/electron`，通过开发数据目录的 `service.json` 复用后台，不影响安装版数据。可用 `PULSE_DESKTOP_DEV_URL` 指定带明确端口的本机 HTTP 地址；打包应用忽略此变量。
+
 `desktop:build` 仍负责原有桌面自动化辅助程序。应用的新命令为：
 
 ```sh

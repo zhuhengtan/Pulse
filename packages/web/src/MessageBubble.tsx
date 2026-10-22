@@ -13,7 +13,7 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-export const MessageBubble = memo(function MessageBubble({ message, mode, retry, onOpenWork, onFileClick, transport = browserTransport, conversationId }: {
+export const MessageBubble = memo(function MessageBubble({ message, mode, retry, onOpenWork, onFileClick, onDiffClick, transport = browserTransport, conversationId }: {
   message: WebMessage
   mode: 'chat' | 'work'
   retry: (message: WebMessage, mode: 'chat' | 'work') => void
@@ -21,6 +21,7 @@ export const MessageBubble = memo(function MessageBubble({ message, mode, retry,
   conversationId?: string | undefined
   onOpenWork: (conversationId: string) => void
   onFileClick?: ((path: string) => void) | undefined
+  onDiffClick?: ((path: string) => void) | undefined
 }) {
   const [fullText, setFullText] = useState<string>()
   const [bodyLoading, setBodyLoading] = useState(false)
@@ -81,7 +82,7 @@ export const MessageBubble = memo(function MessageBubble({ message, mode, retry,
     {(hasContent || canRetry) && <div className="message-bubble-row">
       {canRetry && <button type="button" className="message-retry" aria-label="发送失败，重新发送" title="发送失败，点击确认重新发送" onClick={() => void confirmRetry()}>!</button>}
       {hasContent && <div className={`bubble ${actions.menuOpen ? 'has-message-menu' : ''}`} {...actions.gesture}>
-        {message.text.trim() && <Markdown text={text} onFileClick={onFileClick} />}
+        {message.text.trim() && <Markdown text={text} onFileClick={onFileClick} onDiffClick={onDiffClick} />}
         {message.bodyTruncated && fullText === undefined && <div><PulseButton onClick={() => void loadBody()} disabled={bodyLoading}>{bodyLoading ? '加载中…' : '展开完整消息'}</PulseButton>{bodyError && <span role="alert">{bodyError}</span>}</div>}
         {images.length > 0 && (
           <div className="message-attachments-grid">

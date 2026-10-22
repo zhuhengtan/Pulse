@@ -215,6 +215,9 @@ importers:
       highlight.js:
         specifier: ^11.12.0
         version: 11.12.0
+      pdfjs-dist:
+        specifier: ^4.10.38
+        version: 4.10.38
       react:
         specifier: ^19.0.0
         version: 19.3.0

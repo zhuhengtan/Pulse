@@ -8,6 +8,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { desktopDataDirectory, saveDesktopDataDirectory, assertDesktopDataReady, desktopServiceMessage } from './data-directory.mjs';
+import { desktopPageUrl, isDesktopPageUrl } from './dev-url.mjs';
+const pageUrl = desktopPageUrl(app.isPackaged, process.env.PULSE_DESKTOP_DEV_URL);
 if (process.env.PULSE_DESKTOP_USER_DATA)
     app.setPath('userData', resolve(process.env.PULSE_DESKTOP_USER_DATA));
 protocol.registerSchemesAsPrivileged([{ scheme: 'pulse', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
@@ -149,7 +151,7 @@ else {
         app.relaunch();
         app.quit();
     }
-    function trusted(event) { if (event.sender !== window?.webContents || event.senderFrame !== window?.webContents.mainFrame || !event.senderFrame?.url.startsWith('pulse://app/'))
+    function trusted(event) { if (event.sender !== window?.webContents || event.senderFrame !== window?.webContents.mainFrame || !isDesktopPageUrl(event.senderFrame?.url ?? '', pageUrl))
         throw new Error('IPC_SENDER_INVALID'); }
     app.whenReady().then(async () => {
         directory = await desktopDataDirectory(app.getPath('userData'), process.env, homedir());
@@ -174,10 +176,10 @@ else {
             const url = new URL(request.url);
             if (url.host !== 'app')
                 return new Response('Forbidden', { status: 403 });
-            if (url.pathname.startsWith('/api/')) {
+            if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/file-preview/')) {
                 try {
-                    const response = await http(url.pathname + url.search);
-                    return new Response(await response.arrayBuffer(), { status: response.status, headers: { 'Content-Type': response.headers.get('content-type') ?? 'application/octet-stream', 'Content-Disposition': response.headers.get('content-disposition') ?? 'inline' } });
+                    const response = url.pathname.startsWith('/file-preview/') ? await fetch(base + url.pathname + url.search, { redirect: 'error', signal: AbortSignal.timeout(10000) }) : await http(url.pathname + url.search);
+                    return new Response(await response.arrayBuffer(), { status: response.status, headers: { 'Content-Type': response.headers.get('content-type') ?? 'application/octet-stream', 'Content-Disposition': response.headers.get('content-disposition') ?? 'inline', ...(response.headers.get('content-security-policy') ? { 'Content-Security-Policy': response.headers.get('content-security-policy') } : {}), 'X-Content-Type-Options': 'nosniff' } });
                 }
                 catch {
                     return new Response('Service unavailable', { status: 503 });
@@ -223,7 +225,7 @@ else {
             if (path.startsWith('/api/assistant'))
                 return chatRequest(path, init);
             const response = await http(path, init);
-            const headers = { 'Content-Type': response.headers.get('content-type') ?? 'application/octet-stream', ...(response.headers.get('content-disposition') ? { 'Content-Disposition': response.headers.get('content-disposition') } : {}) };
+            const headers = { 'Content-Type': response.headers.get('content-type') ?? 'application/octet-stream', ...(response.headers.get('content-length') ? { 'Content-Length': response.headers.get('content-length') } : {}), ...(response.headers.get('content-disposition') ? { 'Content-Disposition': response.headers.get('content-disposition') } : {}) };
             if (headers['Content-Type'].includes('application/json')) {
                 const body = await response.json();
                 if (/^\/api\/projects\/[^/]+\/preview-ticket$/.test(path) && typeof body.url === 'string' && /^\/preview\/[0-9a-f-]{36}\/$/.test(body.url)) body.url = base + body.url;
@@ -307,15 +309,15 @@ else {
         ipcMain.handle('pulse:unsubscribe', (event, id) => { trusted(event); const sub = subscriptions.get(id); sub?.controller.abort(); subscriptions.delete(id); if (sub?.kind === 'chat' && chat?.readyState === WebSocket.OPEN)
             chat.send(JSON.stringify({ type: 'unsubscribe', runId: sub.runId })); });
         function createWindow() {
-            window = new BrowserWindow({ width: 1200, height: 850, minWidth: 390, minHeight: 600, title: 'Pulse', webPreferences: { preload: fileURLToPath(new URL('./preload.cjs', import.meta.url)), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+            window = new BrowserWindow({ width: pageUrl.startsWith('http:') ? 1440 : 1200, height: pageUrl.startsWith('http:') ? 950 : 850, minWidth: 390, minHeight: 600, title: pageUrl.startsWith('http:') ? 'Pulse · 开发预览' : 'Pulse', webPreferences: { preload: fileURLToPath(new URL('./preload.cjs', import.meta.url)), contextIsolation: true, nodeIntegration: false, sandbox: true } });
             window.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//.test(url))
                 void shell.openExternal(url); return { action: 'deny' }; });
-            window.webContents.on('will-navigate', (event, url) => { if (!url.startsWith('pulse://app/'))
+            window.webContents.on('will-navigate', (event, url) => { if (!isDesktopPageUrl(url, pageUrl))
                 event.preventDefault(); });
             window.on('closed', () => { window = undefined; for (const socket of nativeSockets.values())
                 socket.close(); nativeSockets.clear(); for (const sub of subscriptions.values())
                 sub.controller.abort(); subscriptions.clear(); });
-            void window.loadURL('pulse://app/chat');
+            void window.loadURL(pageUrl);
         }
         Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Pulse', submenu: [{ label: '数据目录…', click: () => void chooseDataDirectory() }, { label: '后台服务状态', click: () => void dialog.showMessageBox(window, { message: base ? '后台服务运行中' : desktopServiceMessage(serviceError), detail: `数据目录：${directory}${base ? `\n服务地址：${base}` : ''}` }) }, { label: '停止后台服务…', click: async () => { const result = await dialog.showMessageBox(window, { message: '停止后台服务会中断执行中的任务。', buttons: ['取消', '停止'], defaultId: 0, cancelId: 0 }); if (result.response === 1 && base) {
                             const descriptor = JSON.parse(await readFile(join(directory, 'service.json'), 'utf8'));

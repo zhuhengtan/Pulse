@@ -1,3 +1,4 @@
+import { readPreviewFile, fileMediaType } from './file-preview.js'
 import { createFollowupModel } from './followup.js'
 import { ConversationData, type MessagePage } from '@hunterzhu/pulse-data'
 import { AttachmentStore, MAX_ATTACHMENT_REQUEST } from './attachments.js'
@@ -32,7 +33,7 @@ import { fetchText, readPublicPage, parseSearchResults } from './web.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { appendFile, copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
-import { basename, dirname, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { conversationDirectory, publicUrl, safeShellEnv, searchWorkspace, within } from './security.js'
 import { summarizeSearchResult } from './search-summary.js'
@@ -449,7 +450,7 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
     name: 'fs.move', description: 'Move a file without overwriting an existing destination.', tags: ['files', 'write', 'organize'], input: z.object({ source: z.string(), destination: z.string(), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }), output: z.object({ source: z.string(), destination: z.string(), bytes: z.number(), hash: z.string() }), sideEffectPolicy: 'write', resolveResources: ({ source, destination }) => [{ resource: 'workspace', mode: 'shared' }, ...Array.from(new Set([source, destination])).map((path) => ({ resource: `file:${resolve(root, path)}`, mode: 'exclusive' as const }))], retrySafety: 'unsafe', defaultTimeoutMs: writeToolTimeoutMs, permissions: { workspaceRoots: [root] }, execute: async ({ source, destination, expectedHash }, context) => { if (approvalMode === 'read-only') throw new Error('WRITE_DISABLED_READ_ONLY'); if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:fs.move'); const moved = await fsTool.move(source, destination, expectedHash, context.signal); return { source, destination, ...moved } }, summarize: (output) => output,
   }))
   registry.register(defineTool({
-    name: 'artifact.record', description: 'Record a bounded text file as a user-visible artifact.', tags: ['artifact', 'files', 'read'], input: z.object({ path: z.string(), mediaType: z.string().default('text/plain'), label: z.string().max(200).optional() }), output: z.object({ path: z.string(), mediaType: z.string(), label: z.string(), bytes: z.number(), hash: z.string() }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ path, mediaType, label }) => { const read = await fsTool.readLimited(path, 200_000); if (read.truncated) throw new Error('FILE_TOO_LARGE'); return { path, mediaType: mediaType ?? 'text/plain', label: label ?? path, bytes: Buffer.byteLength(read.content), hash: await fsTool.hash(path) } }, summarize: (output) => output,
+    name: 'artifact.record', description: 'Record a workspace file (text, image, PDF or other binary, up to 128 MiB) as a user-visible artifact.', tags: ['artifact', 'files', 'read'], input: z.object({ path: z.string(), mediaType: z.string().optional(), label: z.string().max(200).optional() }), output: z.object({ path: z.string(), mediaType: z.string(), label: z.string(), bytes: z.number(), hash: z.string() }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ path, mediaType, label }) => { const read = await readPreviewFile(root, path); const recordedPath = relative(await realpath(root), read.absolutePath).split(sep).join('/'); return { path: recordedPath, mediaType: mediaType ?? fileMediaType(path), label: label ?? path, bytes: read.size, hash: read.hash } }, summarize: (output) => output,
   }))
   registry.register(defineTool({
     name: 'shell.exec', description: 'Run an authorized local command with argv arguments. cwd defaults to the workspace; relative paths and absolute paths inside the workspace are allowed.', tags: ['shell', 'system'], input: z.object({ command: z.string().min(1), args: z.array(z.string()).default([]), cwd: z.string().default('.'), timeoutMs: z.number().int().positive().max(300_000).optional() }), output: z.object({ code: z.number().nullable(), stdout: z.string(), stderr: z.string(), truncated: z.boolean(), timedOut: z.boolean(), aborted: z.boolean(), outputArchive: z.unknown().optional(), checkReceipt: z.unknown().optional() }), sideEffectPolicy: 'external', resolveResources: () => [{ resource: 'workspace', mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: shellToolTimeoutMs, resolveTimeoutMs: ({ timeoutMs }) => process.platform === 'win32' ? shellToolTimeoutMs : (timeoutMs ?? 30_000) + 120_000, permissions: { workspaceRoots: [root] }, execute: async ({ command, args, cwd, timeoutMs }, context) => { if (approvalMode === 'read-only') throw new Error('SHELL_DISABLED_READ_ONLY'); if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:shell.exec'); let archiveBytes = 0; if (runData) for (const entry of await readdir(join(runData, 'shell-output')).catch(error => { if (error.code === 'ENOENT') return []; throw error })) archiveBytes += (await stat(join(runData, 'shell-output', entry))).size; const options = { cwd: await within(root, cwd ?? '.'), signal: context.signal, env: safeShellEnv(), allowedDomains: allowNetwork ? networkHosts ?? [] : [], maxOutputBytes: 64 * 1024, ...(runData ? { outputDirectory: join(runData, 'shell-output'), maxArchiveBytes: Math.min(16 * 1024 * 1024, Math.max(0, Math.floor((64 * 1024 * 1024 - archiveBytes) / 2))) } : {}), ...(timeoutMs === undefined ? { timeoutMs: 30_000 } : { timeoutMs }) }; const receipt = isCheck(command, args ?? []) ? await captureCheck(root, options.cwd, command, args ?? []) : undefined; const result = await runShell(command, args, options); return { ...result, ...(receipt ? { checkReceipt: await finishCheck(root, receipt, runData ? join(runData, 'check-definitions') : undefined) } : {}) } }, summarize: (output) => ({ code: output.code, stdout: output.stdout.length > 2000 ? output.stdout.slice(0, 1000) + '\n[... read original output with shell.output ...]\n' + output.stdout.slice(-1000) : output.stdout, stderr: output.stderr.length > 2000 ? output.stderr.slice(0, 1000) + '\n[... read original output with shell.output ...]\n' + output.stderr.slice(-1000) : output.stderr, truncated: output.truncated, ...(output.outputArchive ? { outputArchive: json(output.outputArchive) } : {}) }),
@@ -2047,6 +2048,15 @@ export class LocalHost {
     if (createHash('sha256').update(read.content).digest('hex') !== artifact.hash) throw new Error('ARTIFACT_CHANGED')
     return { content: read.content, path, absolutePath, workspaceState: root === manifest.cwd ? 'project' : 'isolated' }
   }
+  async getConversationWorkspace(id: string): Promise<string> { const manifest = await this.readManifest(id); return manifest.executionCwd ?? manifest.cwd }
+  async artifactFile(id: string, path: string, runId: string) {
+    const manifest = await this.readManifest(id)
+    const artifact = (manifest.artifacts ?? []).find(item => item.path === path && item.runId === runId)
+    if (!artifact) throw new Error('ARTIFACT_NOT_FOUND')
+    const root = manifest.executionCwd ?? manifest.cwd
+    const value = await readPreviewFile(root, path, artifact.hash)
+    return { ...value, root }
+  }
   setReasoningEffort(effort?: 'low' | 'medium' | 'high'): void {
     if (!this.options.provider) this.options.provider = { provider: 'mock' }
     if (effort) this.options.provider.reasoningEffort = effort
@@ -2274,11 +2284,11 @@ export class LocalHost {
       ? (options.enabledCapabilityPacks ?? []).filter(id => id === 'skills' || id === 'builtin-skills')
       : (options.enabledCapabilityPacks ?? []).filter(id => (id !== 'browser' && id !== 'computer') || options.capabilityPacks?.some(pack => pack.manifest.id === id))
     const capabilities = await capabilityRegistry.activate(activatedPackIds, { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: await this.selectedSkillsFor(skillInput) })
-    if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) capabilities.tools.push(...createAutomationTools(this.automationClient, cwd, options.enabledCapabilityPacks.filter(id => !options.capabilityPacks?.some(pack => pack.manifest.id === id)), runId))
+    if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) capabilities.tools.push(...createAutomationTools(this.automationClient, cwd, options.enabledCapabilityPacks.filter(id => !options.capabilityPacks?.some(pack => pack.manifest.id === id)), runId, conversationId, (await this.readManifest(conversationId)).projectId))
     if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) {
       const dispose = capabilities.dispose.bind(capabilities)
       capabilities.dispose = async () => {
-        try { const sessions = await this.automationClient.request('list', []); for (const session of sessions) if (session.owner.startsWith(runId + ':') && session.state !== 'closed') await this.automationClient.request('closeOwner', [session.owner]) } finally { await dispose() }
+        try { const sessions = await this.automationClient.request('list', []); for (const session of sessions) if (session.owner.startsWith(runId + ':') && session.state !== 'closed') await this.automationClient.request('releaseOwner', [session.owner]) } finally { await dispose() }
       }
     }
     try { registerCapabilityTools(registry, capabilities, options.approvalMode ?? 'ask') } catch (error) { capabilityController.abort(); await capabilities.dispose(); throw error }
@@ -2648,11 +2658,11 @@ export class LocalHost {
       ? (options.enabledCapabilityPacks ?? []).filter(id => id === 'skills' || id === 'builtin-skills')
       : (options.enabledCapabilityPacks ?? []).filter(id => (id !== 'browser' && id !== 'computer') || options.capabilityPacks?.some(pack => pack.manifest.id === id))
     const capabilities = await capabilityRegistry.activate(activatedPackIds, { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: await this.selectedSkillsFor(typeof savedInput.goal === 'string' ? savedInput.goal : userIntent) })
-    if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) capabilities.tools.push(...createAutomationTools(this.automationClient, cwd, options.enabledCapabilityPacks.filter(id => !options.capabilityPacks?.some(pack => pack.manifest.id === id)), runId))
+    if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) capabilities.tools.push(...createAutomationTools(this.automationClient, cwd, options.enabledCapabilityPacks.filter(id => !options.capabilityPacks?.some(pack => pack.manifest.id === id)), runId, conversationId, (await this.readManifest(conversationId)).projectId))
     if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) {
       const dispose = capabilities.dispose.bind(capabilities)
       capabilities.dispose = async () => {
-        try { const sessions = await this.automationClient.request('list', []); for (const session of sessions) if (session.owner.startsWith(runId + ':') && session.state !== 'closed') await this.automationClient.request('closeOwner', [session.owner]) } finally { await dispose() }
+        try { const sessions = await this.automationClient.request('list', []); for (const session of sessions) if (session.owner.startsWith(runId + ':') && session.state !== 'closed') await this.automationClient.request('releaseOwner', [session.owner]) } finally { await dispose() }
       }
     }
     try { registerCapabilityTools(registry, capabilities, options.approvalMode ?? 'ask') } catch (error) { capabilityController.abort(); await capabilities.dispose(); throw error }

@@ -10,6 +10,7 @@ export function workbenchFixture(readOnly = false) {
       const url = new URL(path, 'http://fixture.local')
       let value: unknown = { error: 'FIXTURE_ROUTE_NOT_FOUND' }, status = 200
       if (url.pathname.endsWith('/files')) value = { path: url.searchParams.get('path'), entries: url.searchParams.get('path') === 'docs' ? [entry('plan.md', 'docs/plan.md', 'file')] : [entry('docs', 'docs', 'directory'), entry('packages', 'packages', 'directory'), entry('README.md', 'README.md', 'file')] }
+      else if (url.pathname.endsWith('/file-raw')) return new Response('Verified workspace document', { headers: { 'Content-Type': 'text/markdown' } })
       else if (url.pathname.endsWith('/file')) value = { path: url.searchParams.get('path'), binary: false, size: 128, totalLines: 1, content: 'Verified workspace document' }
       else if (url.pathname.endsWith('/git/status')) value = { isGit: true, branch: 'main', entries: [{ index: ' ', worktree: 'M', path: 'packages/runtime/src/dsl/program.ts' }, { index: 'A', worktree: ' ', path: 'staged.ts' }, { index: 'M', worktree: 'M', path: 'both.ts' }, { index: '?', worktree: '?', path: 'new.ts' }] }
       else if (url.pathname.endsWith('/git/diff')) value = { diff: '+verified diff' }

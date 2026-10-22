@@ -6,6 +6,8 @@ export default defineConfig({
   base: '/',
   server: {
     proxy: {
+      '/file-preview': { target: pulseH5Target, changeOrigin: true },
+      '/preview': { target: pulseH5Target, changeOrigin: true, ws: true },
       '/api': {
         target: pulseH5Target,
         changeOrigin: true,

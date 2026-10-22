@@ -5,6 +5,7 @@ import { WindowedMessages } from './WindowedMessages.js'
 import { RunRecoveryCard, type RunRecovery } from './RunRecoveryCard.js'
 import { useConversationTransfer, transferError } from './ConversationTransfer.js'
 import { createRequestId } from './requestId.js'
+import { previewKey, readPreviewState } from './previewState.js'
 import { HostPathPicker } from './HostPathPicker.js'
 import { PulseButton, PulseCheckbox, PulseDisclosure, PulseInput, PulseTextArea, PulseToast, usePulseDialogs } from './PulseControls.js'
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -23,8 +24,8 @@ import { ArchivePage } from './ArchivePage.js'
 import { Icon } from './Icon.js'
 import { ApprovalPolicySelect, useApprovalPolicy } from './ApprovalPolicyMenu.js'
 import { useBlocker } from 'react-router'
-import { usePulseNavigation, workUrl, parsePulseRoute, type WorkspaceTab } from './routing.js'
-const WorkbenchPanel = lazy(() => import('./WorkbenchPanel.js').then(module => ({ default: module.WorkbenchPanel })))
+import { usePulseNavigation, workUrl, parsePulseRoute } from './routing.js'
+const PreviewDock = lazy(() => import('./PreviewDock.js').then(module => ({ default: module.PreviewDock })))
 
 interface Device { id: string; name: string; createdAt: string; lastUsedAt: string }
 type RunStatus =
@@ -169,9 +170,31 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const settingsOpen = route.page === 'settings'
   const archiveOpen = route.page === 'archive'
   const workbenchOpen = route.page === 'work' && route.query.has('workspace')
-  const workbenchTab = (route.query.get('workspace') ?? 'files') as WorkspaceTab
-  const setWorkbenchOpen = (open: boolean) => patchQuery({ workspace: open ? workbenchTab : undefined })
-  const setWorkbenchTab = (tab: WorkspaceTab) => patchQuery({ workspace: tab })
+  useEffect(() => { if (route.page === 'work' && route.query.has('artifact') && !route.query.has('workspace') && route.query.get('previewHidden') !== '1') patchQuery({ workspace: 'preview' }, true) }, [route.page, route.query.toString(), patchQuery])
+  const browserPanelRoute = useRef({ selectedId, route, patchQuery })
+  browserPanelRoute.current = { selectedId, route, patchQuery }
+  const surfacedBrowser = useRef(new Set<string>())
+  useEffect(() => {
+    if (!selectedId || route.page !== 'work') return
+    let active = true
+    const refresh = async () => {
+      try {
+        const result = await apiJson<{ sessions: Array<{ id: string; kind: string; state: string; conversationId?: string; owner: string }> }>(transport, '/api/automation/sessions')
+        const current = browserPanelRoute.current
+        if (!active || current.selectedId !== selectedId) return
+        for (const session of result.sessions) {
+          if (session.kind !== 'browser' || session.conversationId !== selectedId || session.state === 'closed' || session.owner.startsWith('device:') || surfacedBrowser.current.has(session.id)) continue
+          surfacedBrowser.current.add(session.id)
+          const saved = readPreviewState(selectedId), savedTarget = saved.tabs.find(item => previewKey(item) === saved.active)
+          if (current.route.query.get('previewHidden') === '1' || session.owner.startsWith('conversation:') && (current.route.query.has('artifact') || current.route.query.has('file') || current.route.query.has('diff') || savedTarget && savedTarget.kind !== 'browser')) continue
+          current.patchQuery({ workspace: 'preview', automation: session.id, diff: undefined, file: undefined, artifact: undefined, artifactRun: undefined }, true)
+          break
+        }
+      } catch { /* Unavailable/disabled automation does not affect file previews. */ }
+    }
+    void refresh(); const timer = window.setInterval(() => void refresh(), 2000)
+    return () => { active = false; window.clearInterval(timer) }
+  }, [selectedId, route.page, transport])
   const [sessionCapabilities, setSessionCapabilities] = useState({ localAdmin: false, canUseTerminal: false, canBrowseHostPaths: false, canRegisterProject: false })
   const [projectPickerOpen, setProjectPickerOpen] = useState(false)
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<string[]>(() => { try { return JSON.parse(window.localStorage.getItem('pulse-web-collapsed-projects') ?? '[]') as string[] } catch { return [] } })
@@ -1208,7 +1231,20 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   messageHandlers.current = { retryAssistantMessage, retryWorkMessage, openWorkNotice, patchQuery }
   const retryBubble = useCallback((message: WebMessage, mode: 'chat' | 'work') => { void (mode === 'chat' ? messageHandlers.current.retryAssistantMessage(message) : messageHandlers.current.retryWorkMessage(message)) }, [])
   const openBubbleWork = useCallback((id: string) => messageHandlers.current.openWorkNotice(id), [])
-  const openBubbleFile = useCallback((path: string) => messageHandlers.current.patchQuery({ workspace: 'files', file: path, details: undefined }), [])
+  const openBubbleFile = useCallback((input: string, runId?: string) => {
+    const path = input.replace(/:\d+(?::\d+)?$/, '')
+    const artifact = artifactIndex.artifacts.find(item => (!runId || item.runId === runId) && (item.path === path || item.absolutePath === path))
+    const relative = path.startsWith((selected?.cwd ?? '') + '/') ? path.slice(selected!.cwd.length + 1) : path.replace(/^\.\//, '')
+    messageHandlers.current.patchQuery({ workspace: 'preview', file: artifact ? undefined : relative, artifact: artifact?.path, artifactRun: artifact?.runId, automation: undefined, diff: undefined, details: undefined })
+  }, [selected?.cwd, artifactIndex.artifacts])
+
+  const openBubbleDiff = useCallback((input: string) => {
+    const path = input.replace(/:\d+(?::\d+)?$/, '').replaceAll('\\', '/')
+    const artifact = artifactIndex.artifacts.find(item => item.absolutePath.replaceAll('\\', '/') === path)
+    const cwd = selected?.cwd.replaceAll('\\', '/') ?? ''
+    const relative = artifact?.path ?? (path.startsWith(cwd + '/') ? path.slice(cwd.length + 1) : path.replace(/^\.\//, ''))
+    messageHandlers.current.patchQuery({ workspace: 'preview', diff: relative, staged: undefined, artifact: undefined, artifactRun: undefined, file: undefined, automation: undefined, previewHidden: undefined })
+  }, [selected?.cwd, artifactIndex.artifacts])
 
   if (isPairPage) return <PairingPage pairing={pairing} error={pairError} refresh={loadPairing} transport={transport} />
   if (!paired && (settingsOpen || archiveOpen)) return <main className="empty">{loading ? <p role="status">正在验证设备…</p> : <div role="alert"><p>{loadError}</p><PulseButton onClick={() => void bootstrap()}>重试</PulseButton></div>}</main>
@@ -1242,16 +1278,16 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       if (message.role === 'assistant' && runId && !shown.has(runId)) {
         shown.add(runId)
         const live = traces[runId]
-        if (live) out.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} />)
-        else if (persistedTraceFallback) out.push(<PersistedRunTrace key={`trace:${runId}`} runId={runId} transport={transport} />)
+        if (live) out.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} onDiffClick={surfaceMode === 'work' ? openBubbleDiff : undefined} />)
+        else if (persistedTraceFallback) out.push(<PersistedRunTrace key={`trace:${runId}`} runId={runId} transport={transport} onDiffClick={surfaceMode === 'work' ? openBubbleDiff : undefined} />)
         const card = recoveryCard(runId); if (card) out.push(card)
       }
-      out.push(<MessageBubble key={`${selectedId}:${message.id}`} mode={surfaceMode} message={message} retry={retryBubble} onOpenWork={openBubbleWork} onFileClick={openBubbleFile} transport={transport} conversationId={selectedId} />)
+      out.push(<MessageBubble key={`${selectedId}:${message.id}`} mode={surfaceMode} message={message} retry={retryBubble} onOpenWork={openBubbleWork} onFileClick={path => openBubbleFile(path, message.runId)} onDiffClick={surfaceMode === 'work' && message.role === 'assistant' ? openBubbleDiff : undefined} transport={transport} conversationId={selectedId} />)
       if (surfaceMode === 'work' && runId && lastMessage.get(runId) === index) { const card = deliveries(runId); if (card) out.push(card) }
       return out
     })
     for (const [runId, live] of Object.entries(traces)) if (!shown.has(runId)) {
-      items.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} />)
+      items.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} onDiffClick={surfaceMode === 'work' ? openBubbleDiff : undefined} />)
       const card = recoveryCard(runId); if (card) items.push(card)
       if (!deliveriesShown.has(runId)) { const card = deliveries(runId); if (card) items.push(card) }
     }
@@ -1275,7 +1311,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         {surfaceMode === 'work' && <PulseButton className="icon-button desktop-menu" onClick={() => setSidebarCollapsed(value => !value)} aria-label={sidebarCollapsed ? '展开历史对话' : '收起历史对话'}><Icon name="menu"/></PulseButton>}
         {!switchInHistory && modeSwitch}
         <div className="navbar-title"><span className={`status-dot ${paired ? '' : 'offline'}`} /><span className="title-text" title={surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}>{surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}</span></div>
-        <div className="navbar-actions">{surfaceMode === 'work' && !mobileLayout && transfer.exportButton}{surfaceMode === 'chat' && <PulseButton className="details-button" aria-label="设置" title="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings"/><span>设置</span></PulseButton>}{running && <span className="running-pill"><i />{surfaceMode === 'chat' ? '正在回复' : '运行中'}</span>}{surfaceMode === 'work' && <><PulseButton className={`workbench-trigger ${workbenchOpen ? 'active' : ''}`} onClick={() => { patchQuery({ workspace: workbenchOpen ? undefined : 'files', details: undefined }) }} aria-expanded={workbenchOpen} aria-label="工作区" title="工作区"><Icon name="folder"/><span>工作区</span></PulseButton></>}<Popover open={detailsOpen} onOpenChange={open => { patchQuery({ details: open }) }} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}><PulseButton className={`details-button ${detailsOpen ? 'active' : ''}`} aria-label="对话详情" aria-expanded={detailsOpen} title="对话详情"><Icon name="info"/><span>详情</span></PulseButton></Popover></div>
+        <div className="navbar-actions">{surfaceMode === 'work' && !mobileLayout && transfer.exportButton}{surfaceMode === 'chat' && <PulseButton className="details-button" aria-label="设置" title="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings"/><span>设置</span></PulseButton>}{running && <span className="running-pill"><i />{surfaceMode === 'chat' ? '正在回复' : '运行中'}</span>}{surfaceMode === 'work' && <><PulseButton className={`workbench-trigger ${workbenchOpen ? 'active' : ''}`} onClick={() => { patchQuery({ workspace: 'preview', previewHidden: undefined, details: undefined }) }} aria-label="工作区" title="打开工作窗口"><Icon name="folder"/><span>工作区</span></PulseButton></>}<Popover open={detailsOpen} onOpenChange={open => { patchQuery({ details: open }) }} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}><PulseButton className={`details-button ${detailsOpen ? 'active' : ''}`} aria-label="对话详情" aria-expanded={detailsOpen} title="对话详情"><Icon name="info"/><span>详情</span></PulseButton></Popover></div>
 
       </header>
       {!serviceConnected && window.pulseDesktop && <div className="alert" role="status"><span>后台服务未连接，仍可浏览本地记录。</span><PulseButton onClick={() => { void apiJson(transport, '/api/desktop/reconnect', jsonRequest('POST')).then(() => bootstrap()).catch(() => setToast('暂时无法连接后台服务')) }}>重新连接</PulseButton></div>}
@@ -1297,7 +1333,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         </div>
       </footer>
     </section>
-    {workbenchOpen && <Suspense fallback={<div className="workbench-loading" role="status">正在打开工作区…</div>}><WorkbenchPanel project={projects.find(project => project.id === (selected?.projectId ?? selectedProjectId))} transport={transport} localAdmin={sessionCapabilities.localAdmin} canUseTerminal={sessionCapabilities.canUseTerminal} tab={workbenchTab} setTab={setWorkbenchTab} position={route.query} onNavigate={patchQuery} onClose={() => setWorkbenchOpen(false)} /></Suspense>}
+    {workbenchOpen && <Suspense fallback={<div className="workbench-loading" role="status">正在打开工作窗口…</div>}><PreviewDock key={selectedId ?? selectedProjectId ?? 'unassigned'} scope={selectedId ?? selectedProjectId ?? 'unassigned'} conversationId={selectedId} projectId={selected?.projectId ?? selectedProjectId} project={projects.find(project => project.id === (selected?.projectId ?? selectedProjectId))} transport={transport} localAdmin={sessionCapabilities.localAdmin} canUseTerminal={sessionCapabilities.canUseTerminal} position={route.query} onNavigate={patchQuery} onClose={() => patchQuery({ workspace: undefined, previewHidden: '1' })} /></Suspense>}
     {surfaceMode === 'work' && transfer.dialog}
     {toast && <PulseToast text={toast} />}
   </main>

@@ -4,6 +4,7 @@ import { createMemoryRouter, RouterProvider } from 'react-router'
 import { PulseApp } from '../src/PulseApp.js'
 import { PulseDesignSystem } from '../src/PulseDesignSystem.js'
 import { parsePulseRoute, settingsCategories, workUrl, workspaceTabs } from '../src/routing.js'
+import { previewKey, savePreviewState } from '../src/previewState.js'
 import { routingFixture } from './fixtures/routing.js'
 
 vi.mock('../src/TerminalConsole.js', () => ({ TerminalConsole: ({ terminalId }: { terminalId: string }) => <div>已连接 {terminalId}</div> }))
@@ -153,12 +154,13 @@ describe('explicit URL navigation', () => {
     await screen.findByText('我们要做什么？'); expect(address(view.router)).toBe('/chat')
   })
 
-  it('restores workspace files, pages and directories through URL history without reloading messages', async () => {
+  it('opens legacy file links as document tabs and restores them through history without reloading messages', async () => {
     const view = show('/work/pulse-chat?workspace=files&path=docs&file=docs%2Fplan.md&offset=1000')
     await screen.findByText('Verified workspace document')
-    expect(view.calls.some(call => call.path.includes('/file?path=docs%2Fplan.md&offset=1000'))).toBe(true)
-    fireEvent.click(screen.getByRole('button', { name: '← 文件列表' }))
-    await screen.findByText('plan.md'); expect(new URLSearchParams(view.router.state.location.search).get('file')).toBeNull()
+    expect(view.calls.some(call => call.path.includes('/file-raw?path=docs%2Fplan.md'))).toBe(true)
+    expect(screen.getByRole('tab', { name: 'plan.md', exact: true }).getAttribute('aria-selected')).toBe('true')
+    await navigate(view.router, '/work/pulse-chat?workspace=files&path=docs')
+    await screen.findByText('plan.md', { selector: '.workspace-file-title strong' })
     await navigate(view.router, -1); await screen.findByText('Verified workspace document')
     expect(view.calls.filter(call => call.path === '/api/web/conversations/pulse-chat/messages')).toHaveLength(1)
   })
@@ -166,24 +168,38 @@ describe('explicit URL navigation', () => {
   it('restores all workspace tabs, Git stage and selected diff without invoking host actions', async () => {
     const view = show('/work/pulse-chat?workspace=git&staged=1&diff=staged.ts')
     await screen.findByText('+verified diff')
-    expect(view.calls.some(call => call.path.includes('/git/diff?staged=1&path=staged.ts'))).toBe(true)
-    for (const tab of workspaceTabs) {
+    expect(view.calls.some(call => call.path.includes('/git/diff?path=staged.ts&staged=1'))).toBe(true)
+    for (const tab of workspaceTabs.filter(value => value !== 'preview')) {
       await navigate(view.router, `/work/pulse-chat?workspace=${tab}`)
-      expect((await screen.findByRole('tab', { name: { files: '文件', git: 'Git', preview: '预览', terminal: '终端', automation: '自动化' }[tab], exact: true })).getAttribute('aria-selected')).toBe('true')
+      await waitFor(() => expect(screen.getByRole('tab', { name: { files: '文件', git: '变更', terminal: '终端', automation: '自动化' }[tab], exact: true }).getAttribute('aria-selected')).toBe('true'))
     }
     expect(view.calls.filter(call => call.method !== 'GET').map(call => call.path)).toEqual(['/api/session/local'])
   })
 
   it('restores automation, details and artifact positions while ignoring retired task links', async () => {
     const view = show('/work/pulse-chat?workspace=automation&automation=browser-1&task=1&lane=main&artifact=reports%2Fexample-report.txt&artifactRun=fixture-run')
-    await screen.findByText(/这是用于检查交付文件预览/)
+    await waitFor(() => expect(screen.getByRole('region', { name: '预览 reports/example-report.txt' }).textContent).toContain('这是用于检查交付文件预览'))
     expect(screen.queryByRole('button', { name: '任务状态' })).toBeNull()
     expect(screen.queryByRole('button', { name: '关闭任务状态' })).toBeNull()
-    await screen.findAllByText(/Existing document/)
+    expect(screen.getByRole('tab', { name: 'example-report.txt', exact: true })).toBeTruthy()
     expect(view.calls.some(call => /\/control|\/observe/.test(call.path))).toBe(false)
     await navigate(view.router, '/work/pulse-chat?details=1')
     await screen.findByRole('dialog', { name: '对话详情' })
     expect(screen.queryByRole('button', { name: '关闭任务状态' })).toBeNull()
+  })
+
+  it('restores a chosen document without a retained browser stealing focus after reload', async () => {
+    const target = { kind: 'file' as const, path: 'README.md', projectId: 'pulse' }
+    savePreviewState('pulse-chat', [target], previewKey(target))
+    const fixture = routingFixture(), request = fixture.transport.request
+    fixture.transport.request = async (path, init) => path === '/api/automation/sessions'
+      ? Response.json({ sessions: [{ id:'kept', kind:'browser', state:'human', owner:'conversation:pulse-chat', conversationId:'pulse-chat' }], enabled:['browser'], approvalMode:'ask' })
+      : request(path, init)
+    const view = show('/work/pulse-chat?workspace=preview', fixture)
+    await screen.findByText('Verified workspace document')
+    expect(screen.getByRole('tab', { name:'README.md', exact:true }).getAttribute('aria-selected')).toBe('true')
+    expect(address(view.router)).not.toContain('automation=')
+    expect(view.calls.some(call => /\/control|\/observe/.test(call.path))).toBe(false)
   })
 
   it('reconnects a running conversation on refresh without any task mutation', async () => {

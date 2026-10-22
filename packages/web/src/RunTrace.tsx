@@ -3,7 +3,7 @@ import { Markdown } from './Markdown.js'
 import type { ComponentProps } from 'react'
 import { PulseButton } from './PulseControls.js'
 import type { ReactElement } from 'react'
-import { useEffect, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { apiJson, type PulseWebTransport, type WebLane, type WebRunEvent } from './transport.js'
 
 export interface TraceStep {
@@ -144,6 +144,22 @@ export function summarizeTool(step: TraceStep): { icon: ComponentProps<typeof Ic
   return { icon: 'tool', text: tool }
 }
 
+const OpenDiffContext = createContext<((path: string) => void) | undefined>(undefined)
+export function changedToolPaths(step: TraceStep): string[] {
+  if (step.kind !== 'tool' || step.status !== 'succeeded') return []
+  const tools = new Set(['fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'fs.move', 'plan.write'])
+  if (!tools.has(step.tool ?? '')) return []
+  if (step.tool === 'fs.stage' && step.args?.operation !== 'commit' && step.preview?.committed !== true) return []
+  const path = str(step.preview?.path) ?? str(step.args?.destination) ?? str(step.args?.path)
+  return path ? [path] : []
+}
+function TraceDiffLinks({ steps }: { steps: TraceStep[] }) {
+  const open = useContext(OpenDiffContext)
+  if (!open) return null
+  const paths = [...new Set(steps.flatMap(changedToolPaths))]
+  return paths.length ? <div className="trace-diff-links">{paths.map(path => <PulseButton key={path} type="button" onClick={() => open(path)} aria-label={`查看 ${path} 的差异`}><Icon name="edit" size={12}/>查看差异 · {path}</PulseButton>)}</div> : null
+}
+
 function DiffText({ text }: { text: string }) {
   return <pre className="trace-code">{text.split('\n').slice(0, 200).map((line, i) => <span key={i} className={line.startsWith('+') && !line.startsWith('+++') ? 'diff-add' : line.startsWith('-') && !line.startsWith('---') ? 'diff-del' : undefined}>{line}{'\n'}</span>)}</pre>
 }
@@ -278,6 +294,7 @@ function ProgressTools({ steps }: { steps: TraceStep[] }) {
         {step.error && <p>{String(step.error.message ?? step.error.code ?? '操作失败')}</p>}
       </div>)}
     </div>}
+    <TraceDiffLinks steps={steps} />
     {!open && failures.map(step => <ProgressFailure key={step.id} step={step} />)}
   </div>
 }
@@ -300,7 +317,7 @@ function RunProgress({ trace }: { trace: TraceState }) {
 }
 
 /** Collapsible main-process header plus nested lane cards. */
-export function RunTraceView({ trace, running: streamRunning }: { trace: TraceState; running: boolean }) {
+export function RunTraceView({ trace, running: streamRunning, onDiffClick }: { trace: TraceState; running: boolean; onDiffClick?: ((path: string) => void) | undefined }) {
   const running = streamRunning && !trace.outcome
   const [userOpen, setUserOpen] = useState<boolean | undefined>(undefined)
   const [wasRunning, setWasRunning] = useState(running)
@@ -314,7 +331,7 @@ export function RunTraceView({ trace, running: streamRunning }: { trace: TraceSt
     const children = trace.order.filter(childId => trace.lanes[childId]?.parentId === id)
     return [<LaneCard key={id} lane={lane} depth={laneDepth(trace, lane)} runActive={running} />, ...children.flatMap(render)]
   }
-  return <div className={`run-trace ${running ? 'is-running' : ''} outcome-${trace.outcome ?? 'running'}`}>
+  return <OpenDiffContext.Provider value={onDiffClick}><div className={`run-trace ${running ? 'is-running' : ''} outcome-${trace.outcome ?? 'running'}`}>
     <RunProgress trace={trace} />
     <PulseButton type="button" className="run-trace-head" onClick={() => setUserOpen(!open)} aria-expanded={open}>
       <span className={`trace-dot ${running ? 'dot-running' : trace.outcome === 'succeeded' ? 'dot-succeeded' : 'dot-failed'}`} />
@@ -325,11 +342,11 @@ export function RunTraceView({ trace, running: streamRunning }: { trace: TraceSt
       {trace.order.length === 0 && <p className="trace-empty">{trace.label ?? '正在准备…'}</p>}
       {roots.flatMap(render)}
     </div>}
-  </div>
+  </div></OpenDiffContext.Provider>
 }
 
 /** Loads the persisted trace of a finished run and shows it collapsed. */
-export function PersistedRunTrace({ runId, transport }: { runId: string; transport: PulseWebTransport }) {
+export function PersistedRunTrace({ runId, transport, onDiffClick }: { runId: string; transport: PulseWebTransport; onDiffClick?: ((path: string) => void) | undefined }) {
   const [trace, setTrace] = useState<TraceState | undefined>(undefined)
   useEffect(() => {
     let cancelled = false
@@ -339,5 +356,5 @@ export function PersistedRunTrace({ runId, transport }: { runId: string; transpo
     return () => { cancelled = true }
   }, [runId, transport])
   if (!trace || trace.order.length === 0) return null
-  return <RunTraceView trace={trace} running={false} />
+  return <RunTraceView trace={trace} running={false} onDiffClick={onDiffClick} />
 }

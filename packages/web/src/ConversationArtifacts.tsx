@@ -1,3 +1,4 @@
+import { downloadPreview } from './previewState.js'
 import { PulseButton, PulseDisclosure } from './PulseControls.js'
 import { useEffect, useState } from 'react'
 import type { QueryPatch } from './routing.js'
@@ -27,7 +28,7 @@ export function ConversationArtifacts({ conversationId, runId, artifacts, transp
   useEffect(() => {
     if (!position) return
     setPreview(undefined); setError('')
-    if (!artifactPath) return
+    if (!artifactPath || onNavigate && position.get('workspace') === 'preview') return
     let current = true
     void apiJson<{ content: string }>(transport, `/api/conversations/${encodeURIComponent(conversationId)}/artifacts/content?${new URLSearchParams({ path: artifactPath, runId })}`)
       .then(value => { if (current) setPreview({ path: artifactPath, content: value.content }) })
@@ -35,14 +36,12 @@ export function ConversationArtifacts({ conversationId, runId, artifacts, transp
     return () => { current = false }
   }, [conversationId, artifactPath, runId, transport])
   const read = async (artifact: ConversationArtifact, download: boolean) => {
-    if (!download && onNavigate) { onNavigate({ artifact: artifact.path, artifactRun: artifact.runId }); return }
+    if (!download && onNavigate) { onNavigate({ workspace: 'preview', diff: undefined, artifact: artifact.path, artifactRun: artifact.runId, file: undefined, automation: undefined }); return }
     setError('')
     try {
+      if (download) { await downloadPreview(await transport.request(`/api/conversations/${encodeURIComponent(conversationId)}/artifacts/raw?${new URLSearchParams({ path: artifact.path, runId: artifact.runId, download: '1' })}`), artifact.path); return }
       const value = await apiJson<{ content: string }>(transport, `/api/conversations/${encodeURIComponent(conversationId)}/artifacts/content?${new URLSearchParams({ path: artifact.path, runId: artifact.runId })}`)
-      if (!download) { setPreview({ path: artifact.path, content: value.content }); return }
-      const url = URL.createObjectURL(new Blob([value.content], { type: 'text/plain;charset=utf-8' }))
-      const link = document.createElement('a'); link.href = url; link.download = artifact.path.split('/').at(-1) ?? 'artifact.txt'; link.click()
-      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      setPreview({ path: artifact.path, content: value.content })
     } catch { setError('文件不可用或已发生变化，请核对本次工作的文件位置。') }
   }
   if (!artifacts.length && !error && !artifactPath) return null

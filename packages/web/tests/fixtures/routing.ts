@@ -28,6 +28,7 @@ export function routingFixture(options: { canUseTerminal?: boolean } = {}) {
       if (path.startsWith('/api/web/conversations/')) return response([{ id: 'message', role: 'assistant', text: `消息：${path.split('/')[4]}`, createdAt: now }])
       if (path.endsWith('/state')) return response({ runId: 'run-busy', state: 'running', seq: 0, activities: [] })
       if (path.endsWith('/trace')) return response({ events: [], seq: 0 })
+      if (url.pathname.endsWith('/git/diff')) return workspace.transport.request(path.replace(/^\/api\/conversations\/[^/]+/, '/api/projects/pulse'), init)
       if (path.startsWith('/api/projects/pulse/') || path.startsWith('/api/automation/')) return workspace.transport.request(path, init)
       if (path.startsWith('/api/terminals')) return response(options.canUseTerminal ? [{ id: 'term-1', projectId: 'pulse' }, { id: 'term-2', projectId: 'pulse' }] : [])
       return sidebar.transport.request(path, init)

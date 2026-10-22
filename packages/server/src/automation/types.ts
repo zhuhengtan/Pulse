@@ -15,6 +15,7 @@ export interface AutomationConfig {
   computer?: { helperPath?: string; displayId?: string }
 }
 export interface BackendObservation {
+  tabs?: NonNullable<AutomationSessionView['tabs']>
   title?: string
   url?: string
   text?: string
@@ -34,6 +35,10 @@ export interface AutomationSessionView {
   id: string
   kind: 'browser' | 'computer'
   owner: string
+  conversationId?: string
+  projectId?: string
+  reconnectRequired?: boolean
+  tabs?: { revision: string; items: Array<{ index: number; title: string; url: string; active: boolean }> }
   workspace: string
   mode: string
   state: 'ai' | 'paused' | 'human' | 'closed' | 'unknown'

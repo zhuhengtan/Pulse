@@ -1,3 +1,5 @@
+import { readGitDiff } from '../git-diff.js'
+import { FilePreviewServer, readPreviewFile, sendPreviewBytes } from '../file-preview.js'
 import { AttachmentStore, MAX_ATTACHMENT_REQUEST, attachmentDownload } from '../attachments.js'
 import { createServer, IncomingMessage, type Server, ServerResponse } from 'node:http'
 import { createReadStream } from 'node:fs'
@@ -58,7 +60,7 @@ const webDistCandidates = [
   resolve(fileURLToPath(new URL('../web/', import.meta.url))),
   resolve(fileURLToPath(new URL('../../../web/dist/', import.meta.url))),
 ]
-const assetTypes: Record<string, string> = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2' }
+const assetTypes: Record<string, string> = { '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2' }
 const KEEP_SECRET = '__PULSE_KEEP_SECRET__'
 const require = createRequire(import.meta.url)
 
@@ -151,6 +153,7 @@ export class H5Server {
   private readonly approvalReviewControllers = new Map<string, AbortController>()
   private readonly approvalReviewAgain = new Set<string>()
   private readonly batchReplyLocks = new Map<string, Promise<void>>()
+  private readonly filePreviews = new FilePreviewServer()
   private readonly previewTickets = new Map<string, { projectId: string; origin: string; expiresAt: number }>()
   private readonly terminals = new Map<string, TerminalSession>()
   private readonly assistantPendingRuns = new Set<string>()
@@ -338,6 +341,7 @@ export class H5Server {
   }
 
   async stop(): Promise<void> {
+    await this.filePreviews.close()
     this.stopping = true
     this.dataChanged?.(); this.dataChanged = undefined
     for (const timer of this.projectionTimers.values()) clearTimeout(timer)
@@ -842,6 +846,8 @@ export class H5Server {
       return
     }
 
+    if (pathname.startsWith('/file-preview/')) { await this.filePreviews.serve(req.url ?? '', res, method); return }
+
     const previewResource = pathname.match(/^\/preview\/([0-9a-f-]{36})(?:\/(.*))?$/i)
     if (previewResource?.[1] && method === 'GET') {
       const ticket = this.previewTickets.get(previewResource[1])
@@ -986,7 +992,9 @@ export class H5Server {
           if (!['browser', 'computer'].includes(String(body.kind)) || !options.enabled.includes(String(body.kind)) || (body.mode !== undefined && !['dedicated','existing'].includes(String(body.mode)))) { res.writeHead(400).end(); return }
           const project = typeof body.projectId === 'string' ? await this.projects.get(body.projectId) : undefined
           if (!project) { res.writeHead(400).end(); return }
-          value = await manager.open(body.kind as 'browser' | 'computer', `device:${authedDevice!.id}`, project.cwd, body.mode as 'dedicated' | 'existing' | undefined)
+          const conversation = typeof body.conversationId === 'string' ? await this.host.getConversation(body.conversationId) : undefined
+          if (body.conversationId && (!conversation || resolve(conversation.summary.cwd) !== resolve(project.cwd))) { res.writeHead(403).end(); return }
+          value = await manager.open(body.kind as 'browser' | 'computer', `device:${authedDevice!.id}`, conversation ? await this.host.getConversationWorkspace(conversation.id) : project.cwd, body.mode as 'dedicated' | 'existing' | undefined, conversation ? { conversationId: conversation.id, projectId: project.id } : undefined)
         } else if (target && method === 'GET' && target[2] === 'frame') {
           const frame = await manager.frame(target[1]!)
           res.writeHead(200, { 'Content-Type': frame.mediaType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }).end(frame.bytes); return
@@ -1328,6 +1336,19 @@ export class H5Server {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ url: `/preview/${id}/`, expiresAt }))
       return
     }
+    const projectPreview = pathname.match(/^\/api\/projects\/([^/]+)\/(file-raw|file-preview-ticket)$/)
+    if (projectPreview && (method === 'GET' || method === 'POST')) {
+      try {
+        if (projectPreview[2] === 'file-preview-ticket' && (method !== 'POST' || !requireSameOrigin())) { res.writeHead(403).end(); return }
+        const project = await this.projects.get(decodeURIComponent(projectPreview[1]!))
+        if (!project) { res.writeHead(404).end(); return }
+        const path = url.searchParams.get('path') ?? ''
+        const value = await readPreviewFile(project.cwd, path)
+        if (projectPreview[2] === 'file-raw') sendPreviewBytes(res, value, url.searchParams.get('download') === '1')
+        else res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.filePreviews.ticket(project.cwd, path)))
+      } catch { res.writeHead(404).end() }
+      return
+    }
     const projectMatch = pathname.match(/^\/api\/projects\/([^/]+)$/)
     if (projectMatch?.[1] && method === 'PATCH') {
       if (!requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'SAME_ORIGIN_REQUIRED' })); return }
@@ -1445,15 +1466,8 @@ export class H5Server {
           return
         }
         if (view === 'git/diff') {
-          const requestedPath = url.searchParams.get('path')
-          const staged = url.searchParams.get('staged') === '1'
-          const args = ['diff', ...(staged ? ['--cached'] : []), '--']
-          if (requestedPath) {
-            const safePath = await within(project.cwd, requestedPath)
-            args.push(relative(project.cwd, safePath))
-          }
-          const result = await execFileAsync('git', args, { cwd: project.cwd, timeout: 8_000, maxBuffer: 2 * 1024 * 1024 })
-          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ diff: result.stdout }))
+          const result = await readGitDiff(project.cwd, url.searchParams.get('path') ?? undefined, url.searchParams.get('staged') === '1')
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
           return
         }
       } catch (error) {
@@ -1560,10 +1574,31 @@ export class H5Server {
       return
     }
 
-    const artifactsMatch = pathname.match(/^\/api\/conversations\/([^/]+)\/artifacts(?:\/(content))?$/)
-    if (artifactsMatch && method === 'GET') {
+    const conversationDiff = pathname.match(/^\/api\/conversations\/([^/]+)\/git\/diff$/)
+    if (conversationDiff && method === 'GET') {
+      try {
+        const root = await this.host.getConversationWorkspace(decodeURIComponent(conversationDiff[1]!))
+        const result = await readGitDiff(root, url.searchParams.get('path') ?? undefined, url.searchParams.get('staged') === '1')
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : ''
+        const code = message.includes('not a git repository') ? 'NOT_GIT_REPOSITORY' : message === 'PATH_OUTSIDE_WORKSPACE' ? message : 'DIFF_UNAVAILABLE'
+        res.writeHead(code === 'PATH_OUTSIDE_WORKSPACE' ? 403 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ error: code }))
+      }
+      return
+    }
+
+    const artifactsMatch = pathname.match(/^\/api\/conversations\/([^/]+)\/artifacts(?:\/(content|raw|preview-ticket))?$/)
+    if (artifactsMatch && (method === 'GET' || method === 'POST' && artifactsMatch[2] === 'preview-ticket')) {
       const conversationId = artifactsMatch[1]!
       try {
+        if (artifactsMatch[2] === 'raw' || artifactsMatch[2] === 'preview-ticket') {
+          if (artifactsMatch[2] === 'preview-ticket' && !requireSameOrigin()) { res.writeHead(403).end(); return }
+          const value = await this.host.artifactFile(conversationId, url.searchParams.get('path') ?? '', url.searchParams.get('runId') ?? '')
+          if (artifactsMatch[2] === 'raw') sendPreviewBytes(res, value, url.searchParams.get('download') === '1')
+          else res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.filePreviews.ticket(value.root, value.path, value.hash)))
+          return
+        }
         const value = artifactsMatch[2]
           ? await this.host.readArtifact(conversationId, url.searchParams.get('path') ?? '', url.searchParams.get('runId') ?? '')
           : await this.host.listArtifacts(conversationId, url.searchParams.get('scope') === 'turn' ? 'turn' : undefined)

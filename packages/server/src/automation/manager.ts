@@ -53,10 +53,12 @@ export class AutomationSessionManager {
       const stored = await readFile(join(directory, name), 'utf8').then(text => JSON.parse(text)).catch(() => undefined)
       const view = stored?.view as AutomationSessionView | undefined
       if (stored?.version !== 1 || !view || name !== view.id + '.json' || !['browser', 'computer'].includes(view.kind) || typeof view.owner !== 'string' || typeof view.workspace !== 'string' || typeof stored.resource !== 'string' || !Array.isArray(stored.receipts) || view.state === 'closed') continue
-      const profile = resolve(this.config.browser?.profileDir ?? join(this.dataDir, 'automation', 'profiles', createHash('sha256').update(view.workspace).digest('hex').slice(0, 20)))
+      const profile = this.profile(view.workspace, view.conversationId)
       const config = structuredClone(this.config)
       if (view.kind === 'browser') config.browser = { ...config.browser, mode: view.mode === 'existing' ? 'existing' : 'dedicated' }
-      delete view.frameId; delete view.controller
+      delete view.frameId; delete view.controller; delete view.tabs
+      view.reconnectRequired = true
+      if (view.kind === 'browser' && view.conversationId) view.owner = `conversation:${view.conversationId}`
       view.state = stored.receipts.some((entry: any) => entry?.[1]?.status === 'unknown') ? 'unknown' : 'paused'
       this.sessions.set(view.id, { view, backend: this.backend(view.kind, config, view.workspace, profile), tail: Promise.resolve(), releaseLock: async () => undefined, actionIds: new Map(stored.receipts), unchanged: 0, recovering: true, resource: stored.resource })
     }
@@ -84,19 +86,34 @@ export class AutomationSessionManager {
     session.tail = work
     return work
   }
-  async open(kind: 'browser' | 'computer', owner: string, workspace: string, mode?: 'dedicated' | 'existing'): Promise<AutomationSessionView> {
+  private profile(workspace: string, conversationId?: string): string {
+    const base = this.config.browser?.profileDir ?? join(this.dataDir, 'automation', 'profiles')
+    return resolve(conversationId ? join(base, createHash('sha256').update(workspace + '\0' + conversationId).digest('hex').slice(0, 20)) : this.config.browser?.profileDir ?? join(base, createHash('sha256').update(workspace).digest('hex').slice(0, 20)))
+  }
+  async open(kind: 'browser' | 'computer', owner: string, workspace: string, mode?: 'dedicated' | 'existing', scope?: { conversationId: string; projectId?: string }): Promise<AutomationSessionView> {
     await this.init()
     if (!['browser', 'computer'].includes(kind) || !owner) throw automationError('INVALID_AUTOMATION_SESSION')
     workspace = resolve(workspace)
+    if (kind === 'browser' && scope) {
+      const existing = [...this.sessions.values()].find(item => item.view.kind === 'browser' && item.view.conversationId === scope.conversationId && item.view.state !== 'closed')
+      if (existing) {
+        if (existing.view.workspace !== workspace || mode && existing.view.mode !== mode) throw automationError('AUTOMATION_SESSION_SCOPE_CONFLICT')
+        if (existing.view.owner !== owner && !existing.view.owner.startsWith('conversation:') && !existing.view.owner.startsWith('device:')) throw automationError('AUTOMATION_RESOURCE_BUSY')
+        if (!owner.startsWith('device:') && existing.view.state !== 'human') await this.control(existing.view.id, 'resume', owner)
+        existing.view.owner = owner
+        await this.save(existing)
+        return { ...existing.view }
+      }
+    }
     const config = structuredClone(this.config)
     if (kind === 'browser' && mode) config.browser = { ...config.browser, mode }
-    const profile = resolve(config.browser?.profileDir ?? join(this.dataDir, 'automation', 'profiles', createHash('sha256').update(workspace).digest('hex').slice(0, 20)))
+    const profile = this.profile(workspace, scope?.conversationId)
     const resource = kind === 'computer' ? `desktop:${process.env.XDG_SESSION_ID ?? 'local'}` : config.browser?.mode === 'existing' ? 'browser:existing' : `browser:${profile}`
     const releaseLock = await acquireLock(resource)
     try {
       await mkdir(join(this.dataDir, 'automation', 'frames'), { recursive: true, mode: 0o700 })
       if (kind === 'browser' && config.browser?.mode !== 'existing') await mkdir(profile, { recursive: true, mode: 0o700 })
-      const view: AutomationSessionView = { id: randomUUID(), kind, owner, workspace, mode: kind === 'browser' ? config.browser?.mode ?? 'dedicated' : 'desktop', state: [...this.sessions.values()].some(session => session.view.state === 'human') ? 'paused' : 'ai', actionCount: 0 }
+      const view: AutomationSessionView = { id: randomUUID(), kind, owner, workspace, ...(scope ?? {}), mode: kind === 'browser' ? config.browser?.mode ?? 'dedicated' : 'desktop', state: owner.startsWith('device:') || [...this.sessions.values()].some(session => session.view.state === 'human') ? 'paused' : 'ai', actionCount: 0 }
       const session: Session = { view, backend: this.backend(kind, config, workspace, profile), tail: Promise.resolve(), releaseLock, actionIds: new Map(), unchanged: 0, resource }
       this.sessions.set(view.id, session)
       await this.save(session)
@@ -120,7 +137,7 @@ export class AutomationSessionManager {
       const hash = createHash('sha256').update(bytes).digest('hex')
       session.unchanged = session.hash === hash ? session.unchanged : 0
       session.hash = hash; session.observation = observation
-      Object.assign(session.view, { frameId, frameWidth: observation.width, frameHeight: observation.height, title: observation.title, url: observation.url, observedAt: new Date().toISOString() })
+      Object.assign(session.view, { frameId, frameWidth: observation.width, frameHeight: observation.height, title: observation.title, url: observation.url, observedAt: new Date().toISOString(), ...(observation.tabs ? { tabs: observation.tabs } : {}) })
       return { ...session.view, text: observation.text ?? '', geometry: observation.geometry ?? '', ...(includeImage ? { pulseImage: observation.image } : {}) }
     })
   }
@@ -137,7 +154,8 @@ export class AutomationSessionManager {
       const controller = session.activeController = new AbortController()
       let result: unknown
       try { result = await session.backend.call(method, params, signal ? AbortSignal.any([signal, controller.signal]) : controller.signal) } finally { delete session.activeController }
-      delete session.view.frameId; delete session.observation
+      if (method === 'tabs') session.view.tabs = result as NonNullable<AutomationSessionView['tabs']>
+      else { delete session.view.frameId; delete session.observation; delete session.view.tabs }
       return result
     })
   }
@@ -202,9 +220,10 @@ export class AutomationSessionManager {
         session.releaseLock = await acquireLock(session.resource)
         const config = structuredClone(this.config)
         if (session.view.kind === 'browser') config.browser = { ...config.browser, mode: session.view.mode === 'existing' ? 'existing' : 'dedicated' }
-        const profile = resolve(config.browser?.profileDir ?? join(this.dataDir, 'automation', 'profiles', createHash('sha256').update(session.view.workspace).digest('hex').slice(0,20)))
+        const profile = this.profile(session.view.workspace, session.view.conversationId)
         session.backend = this.backend(session.view.kind, config, session.view.workspace, profile)
         session.recovering = false
+        delete session.view.reconnectRequired
       }
       await session.backend.release()
       if (action === 'takeover') { session.view.state = 'human'; session.view.controller = device; session.lease = randomUUID(); session.leaseUntil = Date.now() + 30000 }
@@ -213,6 +232,15 @@ export class AutomationSessionManager {
       await this.save(session)
       return { ...session.view, ...(session.lease ? { lease: session.lease } : {}) }
     })
+  }
+  async releaseOwner(owner: string): Promise<void> {
+    for (const view of this.list(owner).filter(item => item.state !== 'closed')) {
+      if (view.kind !== 'browser' || !view.conversationId) { await this.control(view.id, 'close', owner); continue }
+      const session = this.session(view.id, owner)
+      if (session.view.state !== 'human') await this.control(view.id, 'pause', owner)
+      session.view.owner = `conversation:${view.conversationId}`
+      await this.save(session)
+    }
   }
   async closeOwner(owner: string): Promise<void> { await Promise.all(this.list(owner).filter(session => session.state !== 'closed').map(session => this.control(session.id, 'close', owner))) }
   heartbeat(id: string, device: string, lease: string): void { const session = this.session(id); if (session.view.controller !== device || session.lease !== lease || session.view.state !== 'human') throw automationError('AUTOMATION_CONTROL_REQUIRED'); session.leaseUntil = Date.now() + 30000 }
@@ -228,13 +256,14 @@ export class AutomationSessionManager {
     })
   }
   async manualCommand(id: string, method: string, params: Record<string, unknown>, device: string, lease: string): Promise<unknown> {
-    if (!['navigate', 'selectTab', 'tabs', 'selectWindow', 'windows', 'displays', 'downloads'].includes(method)) throw automationError('AUTOMATION_METHOD_NOT_ALLOWED')
+    if (!['navigate', 'newTab', 'closeTab', 'selectTab', 'reload', 'back', 'tabs', 'selectWindow', 'windows', 'displays', 'downloads'].includes(method)) throw automationError('AUTOMATION_METHOD_NOT_ALLOWED')
     this.heartbeat(id, device, lease)
     const session = this.session(id)
     return this.serial(session, async () => {
       this.heartbeat(id, device, lease)
       const result = await session.backend.call(method, params)
-      delete session.view.frameId; delete session.observation
+      if (method === 'tabs') session.view.tabs = result as NonNullable<AutomationSessionView['tabs']>
+      else { delete session.view.frameId; delete session.observation; delete session.view.tabs }
       return result
     })
   }

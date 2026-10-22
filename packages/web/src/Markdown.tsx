@@ -21,7 +21,7 @@ function safeHref(value: string): string | undefined {
   } catch { return undefined }
 }
 
-function inline(source: string, onFileClick?: (path: string) => void): ReactNode[] {
+function inline(source: string, onFileClick?: (path: string) => void, onDiffClick?: (path: string) => void): ReactNode[] {
   const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\)|(?:^|\s)\/(?:skill:)?([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?=\s|$|[.,!?;:])|(?:^|\s)@([a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*)(?=\s|$|[.,!?;:]))/g
   const result: ReactNode[] = []
   let offset = 0
@@ -38,7 +38,8 @@ function inline(source: string, onFileClick?: (path: string) => void): ReactNode
     } else if (token.startsWith('[')) {
       const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
       const href = link?.[2] ? safeHref(link[2].trim()) : undefined
-      result.push(href && link ? <a key={index} href={href} target="_blank" rel="noopener noreferrer">{link[1]}</a> : token)
+      const fileLink = link && !/^[a-z][a-z0-9+.-]*:|^#/i.test(link[2]!) && !link[2]!.startsWith('//')
+      result.push(fileLink && onFileClick ? <span className="markdown-file-actions" key={index}><button className="markdown-file-link" type="button" onClick={() => onFileClick(link![2]!)}>{link![1]}</button>{onDiffClick && <PulseButton type="button" className="markdown-diff-link" aria-label={`查看 ${link![2]} 的差异`} onClick={() => onDiffClick(link![2]!)}>查看差异</PulseButton>}</span> : href && link ? <a key={index} href={href} target="_blank" rel="noopener noreferrer">{link[1]}</a> : token)
     } else {
       const leadingSpace = token.match(/^\s+/)?.[0] ?? ''
       const rest = token.slice(leadingSpace.length)
@@ -53,14 +54,13 @@ function inline(source: string, onFileClick?: (path: string) => void): ReactNode
       } else if (rest.startsWith('@')) {
         const filePath = rest.slice(1)
         result.push(
-          <span
-            key={index}
+          <span key={index} className="markdown-file-actions"><span
             className="mention-chip file-chip"
             title={`文件: ${filePath}`}
             onClick={onFileClick ? () => onFileClick(filePath) : undefined}
           >
             @{filePath}
-          </span>
+          </span>{onDiffClick && <PulseButton type="button" className="markdown-diff-link" aria-label={`查看 ${filePath} 的差异`} onClick={() => onDiffClick(filePath)}>查看差异</PulseButton>}</span>
         )
       } else {
         result.push(token)
@@ -81,7 +81,7 @@ function isTableSeparator(row: string): boolean {
   return row.includes('|') && cells.length > 0 && cells.every(cell => /^:?-{3,}:?$/.test(cell))
 }
 
-export const Markdown = memo(function Markdown({ text, onFileClick }: { text: string; onFileClick?: ((path: string) => void) | undefined }) {
+export const Markdown = memo(function Markdown({ text, onFileClick, onDiffClick }: { text: string; onFileClick?: ((path: string) => void) | undefined; onDiffClick?: ((path: string) => void) | undefined }) {
   const rows = text.split('\n')
   const blocks: ReactNode[] = []
   for (let index = 0; index < rows.length;) {
@@ -98,30 +98,30 @@ export const Markdown = memo(function Markdown({ text, onFileClick }: { text: st
     } else if (!row.trim()) index++
     else if (/^#{1,4}\s/.test(row)) {
       const depth = (row.match(/^#+/)?.[0].length ?? 1) as 1 | 2 | 3 | 4
-      const content = inline(row.replace(/^#{1,4}\s+/, ''), onFileClick)
+      const content = inline(row.replace(/^#{1,4}\s+/, ''), onFileClick, onDiffClick)
       blocks.push(depth === 1 ? <h1 key={index}>{content}</h1> : depth === 2 ? <h2 key={index}>{content}</h2> : depth === 3 ? <h3 key={index}>{content}</h3> : <h4 key={index}>{content}</h4>)
       index++
     } else if (/^\s*[-*]\s+/.test(row)) {
       const items: ReactNode[] = []
-      while (index < rows.length && /^\s*[-*]\s+/.test(rows[index] ?? '')) items.push(<li key={index}>{inline((rows[index++] ?? '').replace(/^\s*[-*]\s+/, ''), onFileClick)}</li>)
+      while (index < rows.length && /^\s*[-*]\s+/.test(rows[index] ?? '')) items.push(<li key={index}>{inline((rows[index++] ?? '').replace(/^\s*[-*]\s+/, ''), onFileClick, onDiffClick)}</li>)
       blocks.push(<ul key={`ul-${index}`}>{items}</ul>)
     } else if (/^\s*\d+[.)]\s+/.test(row)) {
       const items: ReactNode[] = []
-      while (index < rows.length && /^\s*\d+[.)]\s+/.test(rows[index] ?? '')) items.push(<li key={index}>{inline((rows[index++] ?? '').replace(/^\s*\d+[.)]\s+/, ''), onFileClick)}</li>)
+      while (index < rows.length && /^\s*\d+[.)]\s+/.test(rows[index] ?? '')) items.push(<li key={index}>{inline((rows[index++] ?? '').replace(/^\s*\d+[.)]\s+/, ''), onFileClick, onDiffClick)}</li>)
       blocks.push(<ol key={`ol-${index}`}>{items}</ol>)
     } else if (index + 1 < rows.length && isTableSeparator(rows[index + 1] ?? '')) {
       const headings = tableCells(row)
       index += 2
       const body: string[][] = []
       while (index < rows.length && (rows[index] ?? '').includes('|')) body.push(tableCells(rows[index++] ?? ''))
-      blocks.push(<div className="table-scroll" key={`table-${index}`}><table><thead><tr>{headings.map((cell, column) => <th key={column}>{inline(cell, onFileClick)}</th>)}</tr></thead><tbody>{body.map((cells, rowIndex) => <tr key={rowIndex}>{headings.map((_, column) => <td key={column}>{inline(cells[column] ?? '', onFileClick)}</td>)}</tr>)}</tbody></table></div>)
+      blocks.push(<div className="table-scroll" key={`table-${index}`}><table><thead><tr>{headings.map((cell, column) => <th key={column}>{inline(cell, onFileClick, onDiffClick)}</th>)}</tr></thead><tbody>{body.map((cells, rowIndex) => <tr key={rowIndex}>{headings.map((_, column) => <td key={column}>{inline(cells[column] ?? '', onFileClick, onDiffClick)}</td>)}</tr>)}</tbody></table></div>)
     } else if (row.startsWith('> ')) {
-      blocks.push(<blockquote key={index}>{inline(row.slice(2), onFileClick)}</blockquote>); index++
+      blocks.push(<blockquote key={index}>{inline(row.slice(2), onFileClick, onDiffClick)}</blockquote>); index++
     } else {
       const paragraph = [row]
       index++
       while (index < rows.length && rows[index]?.trim() && !/^```|^#{1,4}\s|^\s*[-*]\s+|^\s*\d+[.)]\s+|^> /.test(rows[index] ?? '')) paragraph.push(rows[index++] ?? '')
-      blocks.push(<p key={index}>{paragraph.map((line, part) => <span key={part}>{part > 0 && <br />}{inline(line, onFileClick)}</span>)}</p>)
+      blocks.push(<p key={index}>{paragraph.map((line, part) => <span key={part}>{part > 0 && <br />}{inline(line, onFileClick, onDiffClick)}</span>)}</p>)
     }
   }
   return <div className="markdown">{blocks}</div>
