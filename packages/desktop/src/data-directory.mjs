@@ -6,7 +6,7 @@ export async function desktopDataDirectory(userData, env, home) {
     if (explicit) return resolve(explicit);
     const saved = await readFile(join(userData, 'desktop-settings.json'), 'utf8').then(JSON.parse).catch(() => undefined);
     if (typeof saved?.dataDir === 'string' && isAbsolute(saved.dataDir)) return resolve(saved.dataDir);
-    return join(env.PULSE_HOME ?? home, '.pulse', 'data');
+    return join(env.PULSE_HOME ?? join(home, '.pulse'), 'data');
 }
 
 export async function saveDesktopDataDirectory(userData, directory) {

@@ -51,11 +51,13 @@ jobs:
         run: |
           pnpm desktop:app:smoke
           pnpm desktop:app:startup-smoke
+          pnpm desktop:app:install-smoke
       - name: Native Linux desktop smoke
         if: runner.os == 'Linux'
         run: |
           xvfb-run --auto-servernum pnpm desktop:app:smoke
           xvfb-run --auto-servernum pnpm desktop:app:startup-smoke
+          xvfb-run --auto-servernum pnpm desktop:app:install-smoke
       - name: Build native packages
         run: pnpm --filter @hunterzhu/pulse-desktop run dist --${{ matrix.arch }}
       - uses: actions/upload-artifact@v4

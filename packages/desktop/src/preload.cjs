@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 const subscribe = (channel, listener) => { const receive = (_event, value) => listener(value); ipcRenderer.on(channel, receive); return () => ipcRenderer.removeListener(channel, receive); };
 contextBridge.exposeInMainWorld('pulseDesktop', {
+    installation: true,
     request: (path, init) => ipcRenderer.invoke('pulse:request', path, init),
     connections: listener => subscribe('pulse:connection', listener),
     changes: listener => subscribe('pulse:changed', listener),

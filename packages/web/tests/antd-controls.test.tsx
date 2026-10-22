@@ -84,9 +84,8 @@ describe('Ant Design controls and workbench behavior', () => {
     await waitFor(() => expect(screen.getByRole('combobox', { name: '浏览器连接模式' }).closest('.ant-select')?.textContent).toContain('现有 Chrome/Edge'))
     expect((screen.getByRole('button', { name: '打开浏览器' }) as HTMLButtonElement).disabled).toBe(true)
     expect((screen.getByRole('button', { name: '连接桌面' }) as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.click(screen.getByText('配对设备控制权限'))
-    const checkbox = await screen.findByRole('checkbox', { name: 'Test phone' })
-    expect((checkbox as HTMLInputElement).checked).toBe(false)
+    expect(screen.queryByText('配对设备控制权限')).toBeNull()
+    expect(screen.queryByRole('checkbox', { name: 'Test phone' })).toBeNull()
   })
 
   it('separates staged, unstaged and untracked Git entries without changing Git state', async () => {

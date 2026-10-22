@@ -24,6 +24,9 @@ export function settingsFixture() {
     async request(path, init) {
       const method = init?.method ?? 'GET'
       if (method !== 'GET') writes.push({ path, method })
+      if (path === '/api/pair/qr') return response({ qrSvg: '<svg xmlns="http://www.w3.org/2000/svg"/>', pairUrl: 'http://example.local/?code=fixture', expiresAt: Date.now() + 300000 })
+      if (path === '/api/devices') return response([])
+      if (path === '/api/session') return response({ deviceId: 'fixture-local', localAdmin: true })
       if (path === '/api/config') return response({ path: '/example/config.json', config, version: 'fixture', sources: {}, environment: { SAMPLE_API_KEY: true }, backupAvailable: true, active: { provider: 'sample', model: 'sample/chat' } })
       if (path === '/api/config/validate') return response({ valid: true, restartRequired: [] })
       if (path === '/api/automation/vision-probe') return response({ error: 'FIXTURE_PROBE_FAILURE' }, 400)

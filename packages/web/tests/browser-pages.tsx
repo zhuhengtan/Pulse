@@ -7,7 +7,7 @@ import { PulseButton } from '../src/PulseControls.js'
 import { SettingsPage } from '../src/SettingsPage.js'
 import { ConversationArtifacts } from '../src/ConversationArtifacts.js'
 import { ArchivePage } from '../src/ArchivePage.js'
-import { InteractionPanel, PairingPage } from '../src/PulseApp.js'
+import { InteractionPanel } from '../src/PulseApp.js'
 import { PulseApp } from './RouterApp.js'
 import { RunTraceView, type TraceState } from '../src/RunTrace.js'
 import { settingsFixture } from './fixtures/settings.js'
@@ -35,7 +35,7 @@ function Review() {
     {page==='归档' && <ArchivePage transport={fixture.transport} onBack={()=>setPage('设置')} onChanged={()=>setResult('归档状态已更新')} onOpen={()=>setResult('已打开示例归档')}/>}
     {page==='执行过程' && <div className="messages" style={{height:'100%',margin:'auto'}}><PulseButton onClick={()=>setDone(!done)}>切换执行完成</PulseButton><RunTraceView trace={done?{...trace,outcome:'succeeded'}:trace} running={!done}/></div>}
     {(page==='问答'||page==='审批') && <div className="composer-wrap" style={{margin:'40px auto',width:'min(900px,100%)'}}><InteractionPanel key={page} interaction={interaction} context="示例项目 · 页面检查" reviewNote="" delegated={false} running stopping={false} stop={()=>setResult('已停止示例任务')} submit={async()=>{setResult('已提交示例答案');return true}} setApprovalPolicy={async()=>{setResult('示例代审设置已更新');return true}}/></div>}
-    {page==='配对' && <PairingPage transport={fixture.transport} error="" refresh={async()=>{setResult('示例二维码已刷新')}} pairing={{code:'TEST1234',pairUrl:'http://example.local/pair?code=TEST1234',qrSvg:'<svg xmlns="http://www.w3.org/2000/svg" width="220" height="220"><rect width="220" height="220" fill="white"/><rect x="20" y="20" width="180" height="180" fill="#222"/><text x="110" y="115" text-anchor="middle" fill="white">测试二维码</text></svg>',devices:[{id:'test-device',name:'用于检查布局的示例手机',createdAt:'',lastUsedAt:''}]}}/>}
+    {page==='配对' && <SettingsPage transport={fixture.transport} canEditConfig category="devices" onCategoryChange={()=>{}} onClose={()=>setPage('设置')}/>}
     {page==='连接错误' && <PulseApp transport={fixture.transport}/>}
   </div></PulseDesignSystem>
 }

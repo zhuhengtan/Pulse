@@ -1,4 +1,6 @@
-import { app, BrowserWindow, ipcMain, protocol, net, Menu, dialog, shell } from 'electron';
+import { DesktopInstallation } from './installation.mjs';
+import { deviceSessionPartition, restoreDeviceCookie, saveDeviceCookie } from './device-session.mjs';
+import { app, BrowserWindow, ipcMain, protocol, net, Menu, dialog, shell, session as electronSession } from 'electron';
 import { Worker } from 'node:worker_threads';
 import { spawn } from 'node:child_process';
 import { readFile, mkdir, open, rm } from 'node:fs/promises';
@@ -17,7 +19,7 @@ if (!app.requestSingleInstanceLock())
     app.quit();
 else {
     let directory;
-    let window, reader, cookie = '', base = '', serviceError = '', ownedPid;
+    let window, reader, installation, setupPending, backendInfo, cookie = '', apiSession, base = '', serviceError = '', ownedPid;
     const pendingReads = new Map(), pendingChat = new Map(), subscriptions = new Map(), nativeSockets = new Map();
     const send = (channel, value) => { if (window && !window.isDestroyed())
         window.webContents.send(channel, value); };
@@ -31,11 +33,13 @@ else {
     async function http(path, init = {}) {
         if (!base)
             throw new Error(serviceError || 'PULSE_SERVICE_UNAVAILABLE');
-        const headers = { 'Origin': base, 'Cookie': cookie, ...(init.body ? { 'Content-Type': 'application/json' } : {}) };
+        const headers = { 'Origin': base, 'Cookie': cookie, 'X-Pulse-Client': 'electron', 'User-Agent': `Pulse Electron/${app.getVersion()} (${process.platform})`, ...(init.body ? { 'Content-Type': 'application/json' } : {}) };
         const response = await fetch(base + allowedPath(path), { method: init.method ?? 'GET', headers, ...(typeof init.body === 'string' ? { body: init.body } : {}), signal: AbortSignal.timeout(10000), redirect: 'error' });
         const setCookie = response.headers.get('set-cookie');
-        if (setCookie)
+        if (setCookie) {
             cookie = setCookie.split(';')[0];
+            if (apiSession) await saveDeviceCookie(apiSession.cookies, base, setCookie);
+        }
         return response;
     }
     let chat, chatConnecting, retry;
@@ -109,12 +113,12 @@ else {
             }
         }
         if (!base) {
-            const entry = app.isPackaged ? join(process.resourcesPath, 'runtime/app/node_modules/@hunterzhu/pulse-cli/dist/bin.js') : fileURLToPath(new URL('../../cli/dist/bin.js', import.meta.url));
-            const runtime = app.isPackaged ? join(process.resourcesPath, 'runtime', process.platform === 'win32' ? 'node.exe' : 'node') : process.execPath;
-            const child = spawn(runtime, [entry, 'h5', 'start', '--port', '0', '--data-dir', directory], { detached: true, stdio: 'ignore', cwd: homedir(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PULSE_DATA_DIR: directory, PULSE_H5_HOST: '127.0.0.1' } });
+            const entry = installation.entry;
+            const runtime = installation.node;
+            const child = spawn(runtime, [entry, 'h5', 'start', '--port', '0', '--data-dir', directory], { detached: true, stdio: 'ignore', cwd: homedir(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PULSE_DATA_DIR: directory, PULSE_H5_HOST: '127.0.0.1', ...(installation.source ? { PULSE_HOME: installation.root, PULSE_CONFIG: installation.state.configPath, PULSE_RUNTIME_ID: installation.state.runtimeId, ...(installation.browserExecutable ? { PULSE_BROWSER_EXECUTABLE: installation.browserExecutable } : {}) } : {}) } });
             child.unref();
             child.on('error', () => { });
-            for (let i = 0; i < 160; i++) {
+            for (let i = 0; i < 600; i++) {
                 const descriptor = await readFile(join(directory, 'service.json'), 'utf8').then(JSON.parse).catch(() => undefined);
                 if (descriptor?.protocol === 1 && descriptor.pid === child.pid) {
                     base = `http://127.0.0.1:${descriptor.port}`;
@@ -126,9 +130,33 @@ else {
             if (!base)
                 throw new Error('PULSE_SERVICE_START_FAILED');
         }
+        apiSession = electronSession.fromPartition(deviceSessionPartition(directory));
+        cookie = await restoreDeviceCookie(apiSession.cookies, base);
         const session = await http('/api/session/local', { method: 'POST' });
         if (!session.ok) { base = ''; throw new Error('PULSE_SERVICE_AUTH_FAILED'); }
+        const info = await http('/api/session');
+        if (!info.ok) throw new Error('PULSE_SERVICE_AUTH_FAILED');
+        const sessionInfo = await info.json();
+        backendInfo = { connected: true, version: sessionInfo.serverVersion, pid: sessionInfo.serverPid, outdated: Boolean(installation.source && (sessionInfo.serverVersion !== installation.state.version || sessionInfo.runtimeId !== installation.state.runtimeId)) };
         void connectChat().catch(() => { });
+    }
+    function setupSnapshot() { return { ...installation.snapshot(), dataDirectory: directory, service: { ...backendInfo, connected: Boolean(base), error: serviceError } }; }
+    async function prepareDesktop(full = false) {
+        if (setupPending) return setupPending;
+        setupPending = (async () => {
+            try {
+                await installation.prepare({ full });
+                installation.step('server', '启动本机后台', 'running');
+                await ensureService(); serviceError = '';
+                installation.step('server', '启动本机后台', backendInfo.outdated ? 'warning' : 'ready', backendInfo.outdated ? '当前后台仍在使用之前的版本，已有任务保持运行。可在此应用后台更新。' : '本机服务已连接');
+                installation.state.phase = 'ready';
+            } catch (error) {
+                base = ''; serviceError = error.message; installation.state.phase = 'error';
+                if (!installation.state.error) installation.step('server', '启动本机后台', 'error', desktopServiceMessage(serviceError));
+            }
+            return setupSnapshot();
+        })().finally(() => { setupPending = undefined; });
+        return setupPending;
     }
     async function chooseDataDirectory() {
         const selected = await dialog.showOpenDialog(window, {
@@ -155,6 +183,9 @@ else {
         throw new Error('IPC_SENDER_INVALID'); }
     app.whenReady().then(async () => {
         directory = await desktopDataDirectory(app.getPath('userData'), process.env, homedir());
+        const root = resolve(process.env.PULSE_DESKTOP_INSTALL_ROOT ?? process.env.PULSE_HOME ?? join(homedir(), '.pulse'));
+        const source = app.isPackaged ? join(process.resourcesPath, 'runtime') : process.env.PULSE_DESKTOP_RUNTIME_DIR;
+        installation = new DesktopInstallation({ root, userData: app.getPath('userData'), source, dataDirectory: directory, packaged: app.isPackaged, node: process.execPath, entry: fileURLToPath(new URL('../../cli/dist/bin.js', import.meta.url)), shellHome: process.env.PULSE_DESKTOP_SHELL_HOME ?? (source && !app.isPackaged ? join(app.getPath('userData'), 'shell-profile') : homedir()) });
         reader = new Worker(new URL('./read-worker.mjs', import.meta.url), { workerData: { directory } });
         reader.on('message', value => { const item = pendingReads.get(value.id); if (item) {
             clearTimeout(item.timer);
@@ -165,13 +196,6 @@ else {
             clearTimeout(item.timer);
             item.reject(error);
         } pendingReads.clear(); });
-        try {
-            await ensureService();
-        }
-        catch (error) {
-            base = '';
-            serviceError = error.message;
-        }
         protocol.handle('pulse', async (request) => {
             const url = new URL(request.url);
             if (url.host !== 'app')
@@ -199,6 +223,20 @@ else {
             allowedPath(path);
             if (!['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].includes(init.method ?? 'GET') || init.body && typeof init.body !== 'string')
                 throw new Error('API_REQUEST_INVALID');
+            if (path === '/api/desktop/setup' && (init.method ?? 'GET') === 'GET') return { status: 200, body: setupSnapshot() };
+            if (path === '/api/desktop/setup/data-directory' && init.method === 'POST') { void chooseDataDirectory(); return { status: 202, body: setupSnapshot() }; }
+            if (path === '/api/desktop/setup/repair' && init.method === 'POST') { void prepareDesktop(true); return { status: 202, body: setupSnapshot() }; }
+            if (path === '/api/desktop/setup/complete' && init.method === 'POST') { await installation.complete(); return { status: 200, body: setupSnapshot() }; }
+            if (path === '/api/desktop/setup/restart-service' && init.method === 'POST') {
+                const confirmation = await dialog.showMessageBox(window, { type: 'question', message: '应用后台更新？', detail: '后台会短暂重启，执行中的任务会被中断；聊天记录和配置会保留。', buttons: ['取消', '重启后台'], defaultId: 0, cancelId: 0 });
+                if (confirmation.response !== 1) return { status: 200, body: setupSnapshot() };
+                const descriptor = JSON.parse(await readFile(join(directory, 'service.json'), 'utf8'));
+                if (!backendInfo?.pid || descriptor.pid !== backendInfo.pid || Number(new URL(base).port) !== descriptor.port) return { status: 409, body: { error: 'SERVICE_IDENTITY_UNVERIFIED' } };
+                chat?.close(); process.kill(descriptor.pid, 'SIGTERM');
+                for (let i = 0; i < 200; i++) { try { process.kill(descriptor.pid, 0); } catch (error) { if (error.code === 'ESRCH') break; throw error; } await new Promise(resolve => setTimeout(resolve, 50)); }
+                try { process.kill(descriptor.pid, 0); return { status: 409, body: { error: 'SERVICE_STILL_RUNNING' } }; } catch (error) { if (error.code !== 'ESRCH') throw error; }
+                base = ''; void prepareDesktop(); return { status: 202, body: setupSnapshot() };
+            }
             if ((init.method ?? 'GET') === 'GET' && localQuery(path))
                 return query(path);
             if (path === '/api/desktop/reconnect') {
@@ -319,16 +357,13 @@ else {
                 sub.controller.abort(); subscriptions.clear(); });
             void window.loadURL(pageUrl);
         }
-        Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Pulse', submenu: [{ label: '数据目录…', click: () => void chooseDataDirectory() }, { label: '后台服务状态', click: () => void dialog.showMessageBox(window, { message: base ? '后台服务运行中' : desktopServiceMessage(serviceError), detail: `数据目录：${directory}${base ? `\n服务地址：${base}` : ''}` }) }, { label: '停止后台服务…', click: async () => { const result = await dialog.showMessageBox(window, { message: '停止后台服务会中断执行中的任务。', buttons: ['取消', '停止'], defaultId: 0, cancelId: 0 }); if (result.response === 1 && base) {
+        Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Pulse', submenu: [{ label: '环境检查与修复…', click: () => { if (window) void window.loadURL(pageUrl.startsWith('http:') ? new URL('/settings/desktop', pageUrl).href : 'pulse://app/settings/desktop'); } }, { label: '数据目录…', click: () => void chooseDataDirectory() }, { label: '后台服务状态', click: () => void dialog.showMessageBox(window, { message: base ? '后台服务运行中' : desktopServiceMessage(serviceError), detail: `数据目录：${directory}${base ? `\n服务地址：${base}` : ''}` }) }, { label: '停止后台服务…', click: async () => { const result = await dialog.showMessageBox(window, { message: '停止后台服务会中断执行中的任务。', buttons: ['取消', '停止'], defaultId: 0, cancelId: 0 }); if (result.response === 1 && base) {
                             const descriptor = JSON.parse(await readFile(join(directory, 'service.json'), 'utf8'));
                             process.kill(descriptor.pid, 'SIGTERM');
                             base = '';
                         } } }, { type: 'separator' }, { role: 'quit' }] }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }]));
         createWindow();
-        if (serviceError === 'DATA_MIGRATION_REQUIRED' || serviceError === 'DATA_MIGRATION_IN_PROGRESS') {
-            void dialog.showMessageBox(window, { type: 'warning', message: desktopServiceMessage(serviceError), detail: `数据目录：${directory}`, buttons: ['选择数据目录…', '稍后'], defaultId: 0, cancelId: 1 })
-                .then(result => { if (result.response === 0) return chooseDataDirectory(); });
-        }
+        void prepareDesktop();
         app.on('activate', () => { if (!BrowserWindow.getAllWindows().length)
             createWindow(); });
         app.on('second-instance', () => { if (window) {

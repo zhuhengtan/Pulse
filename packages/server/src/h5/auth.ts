@@ -3,7 +3,8 @@ import { readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 export interface H5DeviceRecord {
-  automationControl?: boolean
+  /** Display metadata only; never used to grant privileges. */
+  clientType?: 'web' | 'h5' | 'electron'
   id: string
   tokenHash: string
   name: string
@@ -44,7 +45,11 @@ export class H5AuthStore {
         this.devices = parsed.filter(
           (d): d is H5DeviceRecord =>
             Boolean(d && typeof d.id === 'string' && typeof d.tokenHash === 'string')
-        ).map(device => ({ ...device, scope: device.scope === 'local' ? 'local' : 'paired' }))
+        ).map(device => {
+          const { clientType: _storedType, ...record } = device
+          const clientType = ['web', 'h5', 'electron'].includes(device.clientType ?? '') ? device.clientType : /Mobile|Android|iPhone|iPad/i.test(device.name ?? '') ? 'h5' : /^Mozilla\//.test(device.name ?? '') ? 'web' : undefined
+          return { ...record, ...(clientType ? { clientType } : {}), scope: device.scope === 'local' ? 'local' : 'paired' }
+        })
       }
     } catch {
       this.devices = []
@@ -89,7 +94,9 @@ export class H5AuthStore {
 
   async pairDeviceWithCode(
     code: string,
-    deviceName: string = 'Mobile Browser'
+    deviceName: string = 'Mobile Browser',
+    existingToken?: string,
+    clientType?: H5DeviceRecord['clientType']
   ): Promise<{ device: H5DeviceRecord; token: string } | undefined> {
     await this.init()
     const info = this.getPairingCode(code)
@@ -98,6 +105,13 @@ export class H5AuthStore {
     // Single use: remove code immediately
     this.activePairingCodes.delete(info.code)
 
+    const existing = await this.authenticateToken(existingToken)
+    if (existing) {
+      if (clientType) existing.clientType = clientType
+      existing.lastUsedAt = new Date().toISOString()
+      await this.persist()
+      return { device: existing, token: existingToken! }
+    }
     const token = randomBytes(32).toString('hex')
     const tokenHash = this.hashToken(token)
     const now = new Date().toISOString()
@@ -106,6 +120,7 @@ export class H5AuthStore {
       id: `dev-${randomUUID()}`,
       tokenHash,
       name: deviceName.slice(0, 80),
+      ...(clientType ? { clientType } : {}),
       createdAt: now,
       lastUsedAt: now,
       scope: 'paired',
@@ -116,16 +131,20 @@ export class H5AuthStore {
     return { device, token }
   }
 
-  async getOrCreateLocalDevice(existingToken?: string): Promise<{ device: H5DeviceRecord; token: string }> {
+  async getOrCreateLocalDevice(existingToken?: string, clientType: NonNullable<H5DeviceRecord['clientType']> = 'web'): Promise<{ device: H5DeviceRecord; token: string }> {
     await this.init()
     const existing = await this.authenticateToken(existingToken)
-    if (existing && existing.scope === 'local') return { device: existing, token: existingToken! }
+    if (existing && existing.scope === 'local') {
+      if (existing.clientType !== clientType) { existing.clientType = clientType; await this.persist() }
+      return { device: existing, token: existingToken! }
+    }
     const token = randomBytes(32).toString('hex')
     const now = new Date().toISOString()
     const device: H5DeviceRecord = {
       id: `dev-${randomUUID()}`,
       tokenHash: this.hashToken(token),
-      name: 'Pulse 本机浏览器',
+      name: clientType === 'electron' ? 'Pulse Electron' : clientType === 'h5' ? 'Pulse H5' : 'Pulse Web',
+      clientType,
       createdAt: now,
       lastUsedAt: now,
       scope: 'local',
@@ -135,16 +154,18 @@ export class H5AuthStore {
     return { device, token }
   }
 
-  async authenticateToken(token?: string): Promise<H5DeviceRecord | undefined> {
+  async authenticateToken(token?: string, clientType?: H5DeviceRecord['clientType']): Promise<H5DeviceRecord | undefined> {
     if (!token?.trim()) return undefined
     await this.init()
     const hash = this.hashToken(token)
     const device = this.devices.find((d) => d.tokenHash === hash)
     if (!device) return undefined
 
+    const changedType = Boolean(clientType && device.clientType !== clientType)
+    if (clientType) device.clientType = clientType
     // Update lastUsedAt if more than 1 minute since last update
     const last = new Date(device.lastUsedAt).getTime()
-    if (Date.now() - last > 60_000) {
+    if (changedType || Date.now() - last > 60_000) {
       device.lastUsedAt = new Date().toISOString()
       this.persist().catch(() => undefined)
     }
@@ -153,12 +174,13 @@ export class H5AuthStore {
 
   async listDevices(): Promise<Array<Omit<H5DeviceRecord, 'tokenHash'>>> {
     await this.init()
-    return this.devices.map(({ id, name, createdAt, lastUsedAt, automationControl }) => ({
+    return this.devices.map(({ id, name, createdAt, lastUsedAt, clientType, scope }) => ({
       id,
       name,
       createdAt,
       lastUsedAt,
-      automationControl: automationControl === true,
+      ...(clientType ? { clientType } : {}),
+      scope: scope ?? 'paired',
     }))
   }
 
@@ -173,12 +195,4 @@ export class H5AuthStore {
     return false
   }
 
-  async setAutomationControl(deviceId: string, enabled: boolean): Promise<boolean> {
-    await this.init()
-    const device = this.devices.find(device => device.id === deviceId)
-    if (!device) return false
-    device.automationControl = enabled
-    await this.persist()
-    return true
-  }
 }

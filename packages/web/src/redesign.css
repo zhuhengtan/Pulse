@@ -464,3 +464,49 @@ body, :root { color: var(--ink); background: var(--panel); }
 .run-recovery-actions .primary { background:var(--blue); color:var(--button-ink,#fff); border-color:var(--blue); }
 .run-recovery-actions .pulse-button:disabled { opacity:.6; cursor:wait; }
 .run-recovery-actions .pulse-button:focus-visible { outline:2px solid var(--blue); outline-offset:3px; }
+
+/* Authorized clients are managed independently from workspace automation. */
+.device-explanation { margin:0 0 18px; color:var(--muted); line-height:1.65; }
+.device-toolbar { display:flex; gap:10px; }
+.device-toolbar .ant-input-affix-wrapper { flex:1; min-width:0; }
+.device-count { color:var(--muted); font-size:13px; margin:18px 0 6px; }
+.managed-device { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:20px 0; border-bottom:1px solid var(--line); }
+.managed-device-info { display:grid; min-width:0; gap:7px; }
+.managed-device-info strong { overflow-wrap:anywhere; }
+.managed-device-info .ant-tag { margin-inline-start:8px; }
+.managed-device-info code,.managed-device-info small,.device-admin-note { color:var(--muted); font-size:12px; }
+.managed-device-actions { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:18px; }
+.managed-device-actions label { display:flex; align-items:center; gap:8px; font-size:13px; }
+.device-pagination { margin-top:20px; justify-content:flex-end; }
+.device-empty { padding:24px 0; color:var(--muted); text-align:center; }
+@media(max-width:767px) {
+  .managed-device { align-items:flex-start; flex-direction:column; gap:14px; }
+  .managed-device-actions { width:100%; justify-content:space-between; }
+}
+.device-toolbar .ant-input-affix-wrapper input.ant-input:focus-visible { outline:none; }
+.device-connect { display:flex; align-items:center; justify-content:space-between; gap:16px; padding-bottom:20px; margin-bottom:20px; border-bottom:1px solid var(--line); }
+.device-connect p,.device-history-note { margin:6px 0 0; color:var(--muted); font-size:12px; line-height:1.6; }
+.device-pairing { display:grid; justify-items:center; gap:12px; padding:8px 0; }
+.device-pairing>img { width:220px; max-width:100%; background:white; padding:8px; border-radius:8px; }
+.device-pairing p { margin:0; color:var(--muted); line-height:1.6; }
+@media(max-width:767px) { .device-connect { align-items:flex-start; flex-direction:column; } }
+.desktop-welcome { min-height:100dvh; display:grid; place-content:center; padding:32px 20px; background:var(--surface-subtle); }
+.desktop-welcome-card { width:min(720px,calc(100vw - 40px)); padding:32px; border:1px solid var(--line); border-radius:20px; background:var(--surface-raised); box-shadow:0 16px 60px #18243b0a; }
+.desktop-setup-intro { display:flex; align-items:center; gap:16px; margin-bottom:24px; }
+.desktop-setup-mark { width:48px; height:48px; display:grid; place-content:center; flex-shrink:0; color:var(--blue); border-radius:14px; background:var(--accent-soft); font-size:32px; }
+.desktop-setup-intro h2 { margin:0 0 6px; font-size:24px; }
+.desktop-setup-intro p,.desktop-setup-note,.desktop-model-intro p,.desktop-setup-version { margin:0; color:var(--muted); font-size:13px; line-height:1.7; }
+.desktop-setup-note { margin:14px 0; overflow-wrap:anywhere; }
+.desktop-setup-note code { display:inline; font-size:12px; }
+.desktop-setup-step { display:flex; align-items:center; gap:12px; padding:16px 0; border-bottom:1px solid var(--line); }
+.desktop-setup-step>span:first-child { color:var(--muted); width:22px; flex-shrink:0; }
+.desktop-setup-step.ready>span:first-child { color:#16865d; }
+.desktop-setup-step>div { flex:1; min-width:0; }
+.desktop-setup-step strong { display:block; font-size:14px; }
+.desktop-setup-step small { display:block; margin-top:5px; line-height:1.6; color:var(--muted); overflow-wrap:anywhere; }
+.desktop-setup-paths { display:grid; gap:8px; margin:20px 0; font-size:12px; color:var(--muted); }
+.desktop-setup-paths code { display:block; margin-top:4px; overflow-wrap:anywhere; }
+.desktop-model-intro { margin-top:22px; padding:16px; border-radius:12px; background:var(--surface-subtle); }
+.desktop-model-intro p { margin-top:6px; }
+.desktop-setup-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:10px; margin-top:24px; }
+@media(max-width:767px) { .desktop-welcome-card { padding:20px; } .desktop-setup-actions>button { flex:1 1 45%; } }

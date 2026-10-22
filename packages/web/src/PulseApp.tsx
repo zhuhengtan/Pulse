@@ -27,7 +27,6 @@ import { useBlocker } from 'react-router'
 import { usePulseNavigation, workUrl, parsePulseRoute } from './routing.js'
 const PreviewDock = lazy(() => import('./PreviewDock.js').then(module => ({ default: module.PreviewDock })))
 
-interface Device { id: string; name: string; createdAt: string; lastUsedAt: string }
 type RunStatus =
   | { kind: 'status'; label: string }
   | { kind: 'review'; label: string }
@@ -205,8 +204,6 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const [recoveryRun, setRecoveryRun] = useState<RunRecovery>()
   const [runActions, setRunActions] = useState<Record<string, 'resume' | 'end'>>({})
   const runActionLocks = useRef(new Map<string, symbol>())
-  const [pairing, setPairing] = useState<{ code: string; pairUrl: string; qrSvg: string; devices: Device[] }>()
-  const [pairError, setPairError] = useState('')
   const [toast, setToast] = useState('')
   const eventClose = useRef<(() => void) | undefined>(undefined)
   const streamRunRef = useRef<string | undefined>(undefined)
@@ -235,6 +232,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     notice: setToast,
   })
   const isPairPage = route.page === 'pair'
+  useEffect(() => { if (isPairPage) { const code = new URLSearchParams(location.search).get('code'); go(code ? `/chat?${new URLSearchParams({ code })}` : '/settings/devices', true) } }, [isPairPage, location.search, go])
   const routeRef = useRef(route); routeRef.current = route
   const localHost = Boolean(window.pulseDesktop) || ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)
 
@@ -460,16 +458,6 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     window.addEventListener('keydown', key)
     return () => window.removeEventListener('keydown', key)
   }, [])
-
-  const loadPairing = useCallback(async () => {
-    setPairError('')
-    try {
-      const result = await apiJson<{ code: string; pairUrl: string; qrSvg: string }>(transport, '/api/pair/qr')
-      const devices = await apiJson<Device[]>(transport, '/api/devices')
-      setPairing({ ...result, devices })
-    } catch { setPairError('请在运行 Pulse 的电脑上打开配对页面。') }
-  }, [transport])
-  useEffect(() => { if (isPairPage) void loadPairing() }, [isPairPage, loadPairing])
 
   const createConversation = () => {
     window.localStorage.removeItem(historyStorageKey)
@@ -1246,7 +1234,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     messageHandlers.current.patchQuery({ workspace: 'preview', diff: relative, staged: undefined, artifact: undefined, artifactRun: undefined, file: undefined, automation: undefined, previewHidden: undefined })
   }, [selected?.cwd, artifactIndex.artifacts])
 
-  if (isPairPage) return <PairingPage pairing={pairing} error={pairError} refresh={loadPairing} transport={transport} />
+  if (isPairPage) return <main role="status">正在打开设备管理…</main>
   if (!paired && (settingsOpen || archiveOpen)) return <main className="empty">{loading ? <p role="status">正在验证设备…</p> : <div role="alert"><p>{loadError}</p><PulseButton onClick={() => void bootstrap()}>重试</PulseButton></div>}</main>
   if (settingsOpen) return <SettingsPage transport={transport} canEditConfig={sessionCapabilities.localAdmin} category={route.category} onCategoryChange={category => { if (category) go(`/settings/${category}`, false, location.state); else backToSettings() }} onDirtyChange={setSettingsDirty} onClose={() => backToSource()} onOpenArchive={() => openPage('/archive')} />
   if (archiveOpen) return <ArchivePage transport={transport} onBack={() => backToSource()} onChanged={() => { void apiJson<ConversationList>(transport, '/api/conversations').then(setConversations); void refreshProjects() }} onOpen={conversation => { void openConversation(conversation) }} />
@@ -1479,13 +1467,4 @@ function formatInteractionAnswer(answer: InteractionAnswer | undefined, input: R
   const options = (Array.isArray(input.options) ? input.options as Array<string | { value: string; label?: string; description?: string }> : []).filter(option => typeof option === 'string' ? option.trim() : option.value?.trim() && (option.label ?? option.value).trim())
   const label = (value: string) => { const option = options.find(item => (typeof item === 'string' ? item : item.value) === value); return typeof option === 'string' ? option : option?.label ?? value }
   return 'value' in answer ? label(answer.value) : answer.values.length ? answer.values.map(label).join('、') : '未选择'
-}
-
-export function PairingPage({ pairing, error, refresh, transport }: { pairing: { code: string; pairUrl: string; qrSvg: string; devices: Device[] } | undefined; error: string; refresh: () => Promise<void>; transport: PulseWebTransport }) {
-  const [message, setMessage] = useState('')
-  const revoke = async (device: Device) => {
-    try { await apiJson(transport, `/api/devices/${encodeURIComponent(device.id)}/revoke`, jsonRequest('POST')); setMessage('设备授权已撤销。'); await refresh() }
-    catch { setMessage('撤销失败，请检查本机连接。') }
-  }
-  return <main className="pair-page"><section className="pair-card"><div className="pair-header"><div className="brand-mark">✳</div><h1>连接 Pulse</h1><p>手机和电脑连接同一 Wi-Fi 后，扫描二维码即可开始聊天。</p></div>{pairing && <><img className="qr" src={`data:image/svg+xml,${encodeURIComponent(pairing.qrSvg)}`} alt="Pulse 手机配对二维码" /><div className="pair-code">{pairing.code.match(/.{1,4}/g)?.join(' ')}</div><p className="pair-url">{pairing.pairUrl}</p><PulseButton className="refresh-pair" onClick={() => void refresh()}>刷新二维码</PulseButton><div className="devices"><h2>已授权设备</h2>{pairing.devices.length === 0 ? <p>还没有已授权设备</p> : pairing.devices.map(device => <div className="device-row" key={device.id}><span>{device.name}</span><PulseButton onClick={() => void revoke(device)}>撤销</PulseButton></div>)}</div></>}{(error || message) && <p className="pair-error" role="status">{error || message}</p>}</section></main>
 }

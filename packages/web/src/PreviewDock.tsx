@@ -69,8 +69,10 @@ export function PreviewDock({ scope, projectId, project, conversationId, transpo
       const url = browserAddress(value)
       if (!projectId) throw new Error('请先选择项目，再打开浏览器。')
       const existing = tabs.find((item): item is Extract<PreviewTarget, { kind: 'browser' }> => item.kind === 'browser' && Boolean(item.sessionId))
-      const sessions = existing ? await apiJson<{ sessions: Array<{ id: string; state: string }> }>(transport, '/api/automation/sessions') : undefined
-      const session = sessions?.sessions.find(item => item.id === existing?.sessionId && item.state !== 'closed') ?? await apiJson<{ id: string; state: string }>(transport, '/api/automation/sessions', jsonRequest('POST', { projectId, conversationId, kind: 'browser' }))
+      const sessions = await apiJson<{ sessions: Array<{ id: string; state: string }>; enabled: string[]; approvalMode: string; manualBrowser?: boolean }>(transport, '/api/automation/sessions')
+      if (sessions.approvalMode === 'read-only') throw new Error('当前为只读模式，无法打开浏览器。')
+      if (!sessions.manualBrowser && !sessions.enabled.includes('browser')) throw new Error('当前后台尚未支持手动浏览网页，请更新并重启开发后台后重试。')
+      const session = sessions.sessions.find(item => item.id === existing?.sessionId && item.state !== 'closed') ?? await apiJson<{ id: string; state: string }>(transport, '/api/automation/sessions', jsonRequest('POST', { projectId, conversationId, kind: 'browser', manual: true }))
       if (session.state === 'ai') throw new Error('AI 正在操作浏览器，请先切换到浏览器标签并接管。')
       const control = await apiJson<{ lease: string }>(transport, `/api/automation/sessions/${session.id}/control`, jsonRequest('POST', { action: 'takeover' }))
       leases.current[session.id] = control.lease
@@ -79,7 +81,7 @@ export function PreviewDock({ scope, projectId, project, conversationId, transpo
       if (current?.kind === 'start') setTabs(items => items.filter(item => previewKey(item) !== previewKey(current)))
       select({ kind: 'browser', sessionId: session.id }); clearRoute(); setAddress('')
     } catch (reason) {
-      setError(reason instanceof Error && (reason.message.startsWith('请') || reason.message.startsWith('AI ')) ? reason.message : describeAutomationError(reason))
+      setError(reason instanceof Error && (reason.message.startsWith('请') || reason.message.startsWith('AI ') || reason.message.startsWith('当前')) ? reason.message : describeAutomationError(reason))
       throw reason
     } finally { setOpening(false) }
   }

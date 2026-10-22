@@ -18,7 +18,7 @@ export class BrowserBackend implements AutomationBackend {
     this.dedicated = config.mode !== 'existing'
     this.outputDir = resolve(workspace, '.pulse', 'automation-downloads', createHash('sha256').update(profile).digest('hex').slice(0, 16))
     this.observationDir = resolve(workspace, '.pulse', 'automation-observations', createHash('sha256').update(profile).digest('hex').slice(0, 16))
-    this.client = new McpStdioClient({ command: config.command ?? process.execPath, args: config.args ?? [resolve(createRequire(import.meta.url).resolve('@playwright/mcp/package.json'), '../cli.js'), ...(config.mode === 'existing' ? ['--extension'] : ['--user-data-dir', profile, ...(config.channel ? ['--browser', config.channel] : []), '--viewport-size', '1280,800']), '--caps', 'vision', '--image-responses', 'allow', '--output-dir', this.outputDir], cwd: workspace, maxLineBytes: 8 * 1024 * 1024, timeoutMs: 60000, shutdownTimeoutMs: 3000 })
+    this.client = new McpStdioClient({ command: config.command ?? process.execPath, args: config.args ?? [resolve(createRequire(import.meta.url).resolve('@playwright/mcp/package.json'), '../cli.js'), ...(config.mode === 'existing' ? ['--extension'] : ['--user-data-dir', profile, ...(config.channel ? ['--browser', config.channel] : process.env.PULSE_BROWSER_EXECUTABLE ? ['--executable-path', process.env.PULSE_BROWSER_EXECUTABLE] : []), '--viewport-size', '1280,800']), '--caps', 'vision', '--image-responses', 'allow', '--output-dir', this.outputDir], cwd: workspace, maxLineBytes: 8 * 1024 * 1024, timeoutMs: 60000, shutdownTimeoutMs: 3000 })
   }
   private async start(): Promise<void> {
     if (this.started) return

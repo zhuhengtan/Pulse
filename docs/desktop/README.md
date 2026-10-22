@@ -24,6 +24,7 @@ pnpm desktop:app:pack     # 生成应用目录
 pnpm desktop:app:dist     # 生成当前平台安装包
 pnpm desktop:app:smoke    # 隔离数据、模拟模型的真实 Electron 验收
 pnpm desktop:app:startup-smoke # 无已有服务时启动独立后台
+pnpm desktop:app:install-smoke # 无系统 Node/Chrome 的隔离首启与修复验收
 ```
 
 产物位于 `artifacts/desktop/`。macOS 为 DMG/ZIP，Windows 为 NSIS/ZIP，Linux 为 AppImage/DEB。未配置签名凭据时产物仅作为测试包。`.github/workflows/desktop.yml` 提供 macOS arm64/x64、Windows x64、Linux x64 的原生构建和验收矩阵；通过 workflow_dispatch 运行，不自动发布。Runner 标签来源：https://github.com/actions/runner-images 。
@@ -39,6 +40,20 @@ PULSE_DESKTOP_DATA_DIR="$PWD/.pulse-dev/h5/data" pnpm desktop:app:dev
 ```
 
 优先级是 `PULSE_DESKTOP_DATA_DIR`、`PULSE_DATA_DIR`、桌面保存的目录、默认目录。菜单选择目录会替换本次启动的环境变量覆盖值，并重启窗口。
+
+## 安装与首次启动
+
+完整安装包包含 Node、Pulse CLI、Server、网页资源、原生依赖和 Chromium。用户安装客户端并打开即可准备本机运行环境，无须另装 Node/npm、全局 npm 包或 Chrome，也不需要管理员权限。首次窗口显示准备进度；完成后可以进入 Pulse，或前往“模型与服务商”配置模型。云模型仍需用户自己的账号和 API Key，现有模型配置通过环境变量引用密钥；安装包不会提供模型额度，也不会安装 Ollama 等独立模型服务。
+
+默认运行文件放在 `~/.pulse/desktop/runtimes/<版本>-<构建标识>/`，用户配置为 `~/.pulse/config.json`，数据为 `~/.pulse/data/`。首次安装只创建缺失的配置，不覆盖已有设置或聊天。新客户端版本会准备其自带的运行版本；若已有后台正在运行，保留它并显示版本提示，点击“应用后台更新”并确认后才重启。此流程不包含在线下载客户端更新。
+
+首次启动会创建用户级 `~/.pulse/bin/pulse`（Windows 为 `pulse.cmd`），写入当前用户的终端 PATH；打开新终端后运行 `pulse --version`。macOS/Linux 修改对应 shell 配置中的 `Pulse Desktop CLI` 标记块，Windows 仅修改用户 PATH。已有其他 CLI 命令和非托管文件会保留，界面显示桌面版命令的完整路径；入口冲突时使用 `pulse-desktop` 等备用名称。符号链接管理的 shell 配置不会被覆盖，PATH 无法自动配置时显示手动操作路径。
+
+“设置 → 桌面环境”及应用菜单“环境检查与修复…”显示安装状态、实际路径和后台版本。“检查并修复”校验完整运行文件并补回损坏组件，使用新的运行目录，不覆盖正在运行的版本，不删除配置、聊天或停止后台。旧运行目录暂时保留，避免破坏仍在执行的进程。退出窗口后后台继续运行。
+
+开发模式默认只使用仓库运行环境，不注册用户命令或修改终端配置。测试可通过 `PULSE_DESKTOP_RUNTIME_DIR` 指向准备好的运行包启用完整首启，通过 `PULSE_DESKTOP_INSTALL_ROOT`、`PULSE_DESKTOP_SHELL_HOME`、`PULSE_DESKTOP_USER_DATA` 和 `PULSE_DESKTOP_DATA_DIR` 隔离安装、shell 配置、窗口配置和数据；打包应用始终使用随包运行资源。打包默认包含 Chromium，可设置 `PULSE_DESKTOP_BUNDLE_BROWSER=0` 构建精简测试包，此时浏览器需要用户自己准备，不属于完整安装体验。
+
+安装验收脚本使用临时目录与限制后的 PATH，检查首启、命令调用、内置浏览器、设备记忆以及修复时保留配置/数据/原后台。可设置 `PULSE_DESKTOP_EXECUTABLE` 为打包应用的可执行文件路径，检查真实资源路径。安装包需要在目标操作系统与处理器上分别构建和验收；本地未签名测试不能替代签名、下载后首次启动或跨平台验收。
 
 ## 一次性迁移
 

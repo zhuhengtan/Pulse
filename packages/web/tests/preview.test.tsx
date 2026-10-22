@@ -79,3 +79,31 @@ it('normalizes browser addresses and rejects credentials and non-web protocols',
   expect(() => browserAddress('file:///etc/passwd')).toThrow()
   expect(() => browserAddress('https://user:password@example.com')).toThrow()
 })
+
+it('opens a manual browser with AI tools disabled and normalizes the entered address', async () => {
+  const writes: Array<{ path: string; body: any }> = []
+  const request = vi.fn(async (path: string, init?: RequestInit) => {
+    if (init?.method === 'POST') writes.push({ path, body: JSON.parse(String(init.body)) })
+    if (path === '/api/automation/sessions') return Response.json(init?.method === 'POST' ? { id: 'manual', state: 'paused' } : { sessions: [], enabled: [], manualBrowser: true, approvalMode: 'ask' })
+    if (path.endsWith('/control')) return Response.json({ lease: 'manual-lease' })
+    return Response.json({ ok: true })
+  })
+  render(<PulseDesignSystem><PreviewDock scope="manual" projectId="pulse" transport={{ request, subscribe: () => () => {} }} localAdmin /></PulseDesignSystem>)
+  fireEvent.change(screen.getByRole('textbox', { name: '浏览器地址' }), { target: { value: 'www.baidu.com' } })
+  fireEvent.click(screen.getByRole('button', { name: '前往', exact: true }))
+  await waitFor(() => expect(writes).toHaveLength(3))
+  expect(writes[0]).toEqual({ path: '/api/automation/sessions', body: { kind: 'browser', manual: true, projectId: 'pulse' } })
+  expect(writes[2]).toEqual({ path: '/api/automation/sessions/manual/command', body: { lease: 'manual-lease', method: 'newTab', params: { url: 'https://www.baidu.com/' } } })
+})
+it.each([
+  [{ enabled: [], approvalMode: 'ask' }, '当前后台尚未支持手动浏览网页，请更新并重启开发后台后重试。'],
+  [{ enabled: [], approvalMode: 'read-only', manualBrowser: true }, '当前为只读模式，无法打开浏览器。'],
+])('explains an unavailable browser before sending a mutation', async (options, message) => {
+  const request = vi.fn(async () => Response.json({ sessions: [], ...options }))
+  render(<PulseDesignSystem><PreviewDock scope="blocked" projectId="pulse" transport={{ request, subscribe: () => () => {} }} localAdmin /></PulseDesignSystem>)
+  fireEvent.change(screen.getByRole('textbox', { name: '浏览器地址' }), { target: { value: 'www.baidu.com' } })
+  fireEvent.click(screen.getByRole('button', { name: '前往', exact: true }))
+  await screen.findByText(message)
+  expect(request).toHaveBeenCalledTimes(1)
+  expect(request).toHaveBeenCalledWith('/api/automation/sessions', undefined)
+})

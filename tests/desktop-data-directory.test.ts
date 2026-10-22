@@ -9,6 +9,7 @@ it('persists an explicit desktop data selection without changing the default dat
     try {
         const profile = join(root, 'profile'), dev = join(root, 'dev');
         expect(await desktopDataDirectory(profile, {}, root)).toBe(join(root, '.pulse/data'));
+        expect(await desktopDataDirectory(profile, { PULSE_HOME: join(root, 'custom-home') }, root)).toBe(join(root, 'custom-home/data'));
         await saveDesktopDataDirectory(profile, dev);
         expect(await desktopDataDirectory(profile, {}, root)).toBe(dev);
         expect(await desktopDataDirectory(profile, { PULSE_DESKTOP_DATA_DIR: join(root, 'override') }, root)).toBe(join(root, 'override'));

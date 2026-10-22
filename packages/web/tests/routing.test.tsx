@@ -237,6 +237,14 @@ describe('explicit URL navigation', () => {
     expect(screen.queryByText('消息：old')).toBeNull()
   })
 
+  it('routes the old pairing entry to device settings without generating a QR automatically', async () => {
+    const view = show('/pair')
+    await screen.findByRole('heading', { name: '设备管理', exact: true })
+    expect(address(view.router)).toBe('/settings/devices')
+    expect(screen.getByRole('button', { name: '扫码连接', exact: true })).toBeTruthy()
+    expect(view.calls.some(call => call.path === '/api/pair/qr')).toBe(false)
+  })
+
   it('consumes a pairing code once, removes only that parameter, and keeps the deep link', async () => {
     const view = show('/work/pulse-chat?workspace=files&file=README.md&code=TEST1234')
     await screen.findByText('Verified workspace document')

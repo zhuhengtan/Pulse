@@ -1,7 +1,7 @@
 import { useCallback, useRef } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 
-export const settingsCategories = ['appearance', 'messages', 'models', 'routing', 'front', 'approval', 'jarvis', 'tools', 'mcp', 'network', 'instructions', 'runtime', 'archive', 'advanced'] as const
+export const settingsCategories = ['appearance', 'desktop', 'devices', 'messages', 'models', 'routing', 'front', 'approval', 'jarvis', 'tools', 'mcp', 'network', 'instructions', 'runtime', 'archive', 'advanced'] as const
 export const workspaceTabs = ['files', 'git', 'preview', 'terminal', 'automation'] as const
 export type WorkspaceTab = typeof workspaceTabs[number]
 export type QueryPatch = Record<string, string | number | boolean | undefined>

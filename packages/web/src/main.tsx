@@ -1,3 +1,4 @@
+import { DesktopSetupBoundary } from './DesktopSetup.js'
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { PulseApp } from './PulseApp.js'
@@ -19,5 +20,5 @@ try {
 
 const root = document.getElementById('root')
 if (!root) throw new Error('PULSE_WEB_ROOT_NOT_FOUND')
-const router = createBrowserRouter([{ path: '*', element: <PulseApp /> }])
+const router = createBrowserRouter([{ path: '*', element: <DesktopSetupBoundary><PulseApp /></DesktopSetupBoundary> }])
 createRoot(root).render(<React.StrictMode><PulseDesignSystem><RouterProvider router={router} /></PulseDesignSystem></React.StrictMode>)

@@ -21,7 +21,7 @@ export function workbenchFixture(readOnly = false) {
       else if (url.pathname.endsWith('/observe')) value = { ...automationSession, frameId: 'fixture-frame' }
       else if (url.pathname.endsWith('/frame')) return new Response('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="240"><rect width="640" height="240" fill="#dfe7ff"/><text x="20" y="60" fill="#222">Fixture browser frame</text></svg>', { headers: { 'Content-Type': 'image/svg+xml' } })
       else if (url.pathname === '/api/automation/doctor') value = { browser: { installed: true }, desktop: { installed: false } }
-      else if (url.pathname === '/api/devices') value = [{ id: 'phone', name: 'Test phone', automationControl: false }]
+      else if (url.pathname === '/api/devices') value = [{ id: 'phone', name: 'Test phone', clientType: 'h5' }]
       else if (url.pathname === '/api/conversations') value = [{ id: 'archived', title: 'Archived conversation', cwd: '/example', createdAt: '2026-10-18T00:00:00Z', updatedAt: '2026-10-18T00:00:00Z' }]
       else if (init?.method === 'DELETE') value = { ok: true }
       else status = 404

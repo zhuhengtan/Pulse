@@ -48,6 +48,7 @@
     "desktop:app:dist": "pnpm --filter @hunterzhu/pulse-desktop run dist",
     "desktop:app:smoke": "node scripts/desktop/smoke.mjs",
     "desktop:app:startup-smoke": "node scripts/desktop/startup-smoke.mjs",
+    "desktop:app:install-smoke": "node scripts/desktop/install-smoke.mjs",
     "data:benchmark": "node scripts/data/benchmark.mjs"
   },
   "devDependencies": {

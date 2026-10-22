@@ -1,5 +1,6 @@
 import type { PulseWebTransport, WebRunEvent, WebMessage } from './transport.js';
 interface DesktopBridge {
+    installation?: boolean;
     request(path: string, init?: {
         method?: string;
         body?: string;

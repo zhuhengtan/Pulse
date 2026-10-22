@@ -714,7 +714,7 @@ export class H5Server {
       const host = req.headers.host, origin = req.headers.origin
       if (typeof host !== 'string' || !isAllowedH5Host(host) || typeof origin !== 'string' || new URL(origin).origin !== `http://${host}` || req.url !== '/api/automation/socket') { reject(); return }
       const token = this.parseCookies(req).pulse_device
-      const allowed = async () => { const device = await this.auth.authenticateToken(token); return device && ((device.scope === 'local' && isLoopbackIp(req.socket.remoteAddress)) || device.automationControl === true) ? device : undefined }
+      const allowed = async () => this.auth.authenticateToken(token)
       if (!await allowed()) { reject(); return }
       this.automationSockets.handleUpgrade(req, socket, head, client => {
         let sequence = 0, previous = '', pending = false
@@ -722,8 +722,10 @@ export class H5Server {
           if (pending || client.readyState !== WebSocket.OPEN) return
           pending = true
           try {
-            if (!await allowed()) { client.close(1008, 'Permission revoked'); return }
-            const data = this.host.automation.list(), serialized = JSON.stringify(data)
+            const device = await allowed()
+            if (!device) { client.close(1008, 'Permission revoked'); return }
+            const localAdmin = device.scope === 'local' && isLoopbackIp(req.socket.remoteAddress)
+            const data = this.host.automation.list().filter(item => localAdmin || item.kind === 'browser'), serialized = JSON.stringify(data)
             if (serialized !== previous) { previous = serialized; client.send(JSON.stringify({ type: 'automation', seq: ++sequence, sessions: data })) }
           } finally { pending = false }
         }
@@ -885,6 +887,9 @@ export class H5Server {
       return
     }
 
+    // Client type is display metadata, independent from server-assigned credential scope.
+    const clientType = req.headers['x-pulse-client'] === 'electron' ? 'electron' : /Mobile|Android|iPhone|iPad/i.test(String(req.headers['user-agent'] ?? '')) ? 'h5' : 'web'
+
     // Local browser session bootstrap is restricted to a real loopback connection and same-origin POST.
     if (pathname === '/api/session/local' && method === 'POST') {
       if (!loopback) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'LOCAL_ONLY' })); return }
@@ -893,7 +898,7 @@ export class H5Server {
       try { sameOrigin = typeof origin === 'string' && new URL(origin).origin === `http://${hostHeader}` } catch { sameOrigin = false }
       if (!sameOrigin) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'SAME_ORIGIN_REQUIRED' })); return }
       const cookies = this.parseCookies(req)
-      const local = await this.auth.getOrCreateLocalDevice(cookies.pulse_device)
+      const local = await this.auth.getOrCreateLocalDevice(cookies.pulse_device, clientType)
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Set-Cookie': `pulse_device=${local.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000` })
       res.end(JSON.stringify({ ok: true, deviceId: local.device.id, scope: 'local' }))
       return
@@ -903,7 +908,7 @@ export class H5Server {
       const body = await this.parseJsonBody(req)
       const code = typeof body.code === 'string' ? body.code : ''
       const name = typeof body.name === 'string' ? body.name : req.headers['user-agent'] ?? 'Mobile Device'
-      const paired = await this.auth.pairDeviceWithCode(code, name)
+      const paired = await this.auth.pairDeviceWithCode(code, name, this.parseCookies(req).pulse_device, clientType)
       if (!paired) {
         res.writeHead(400, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'INVALID_OR_EXPIRED_PAIRING_CODE' }))
@@ -937,7 +942,7 @@ export class H5Server {
     const authHeader = req.headers.authorization
     const bearer = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined
     const token = cookies.pulse_device || bearer
-    const authedDevice = await this.auth.authenticateToken(token)
+    const authedDevice = await this.auth.authenticateToken(token, clientType)
 
     // Allow loopback access to manage devices without token
     if (!authedDevice && !(loopback && pathname.startsWith('/api/devices'))) {
@@ -955,16 +960,7 @@ export class H5Server {
       return Boolean(origin && origin === `http://${hostHeader}`)
     }
 
-    const canControlAutomation = localAdmin || authedDevice?.automationControl === true
-    const automationPermission = pathname.match(/^\/api\/devices\/([^/]+)\/automation$/)
-    if (automationPermission && method === 'POST') {
-      if (!localAdmin || !requireSameOrigin()) { res.writeHead(403).end(); return }
-      const body = await this.parseJsonBody(req)
-      if (typeof body.enabled !== 'boolean') { res.writeHead(400).end(); return }
-      const ok = await this.auth.setAutomationControl(automationPermission[1]!, body.enabled)
-      res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ ok }))
-      return
-    }
+    const canControlAutomation = Boolean(authedDevice)
     if (pathname === '/api/automation/vision-probe' && method === 'POST') {
       if (!localAdmin || !requireSameOrigin()) { res.writeHead(403).end(); return }
       const body = await this.parseJsonBody(req)
@@ -984,12 +980,19 @@ export class H5Server {
           res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.host.requestAutomationPermissions())); return
         }
         const target = pathname.match(/^\/api\/automation\/sessions\/([^/]+)(?:\/(observe|frame|control|input|heartbeat|command))?$/)
+        if (target && !localAdmin && manager.list().find(item => item.id === target[1])?.kind === 'computer') { res.writeHead(403).end(); return }
         let value: unknown
-        if (pathname === '/api/automation/sessions' && method === 'GET') value = { sessions: manager.list(), ...options }
+        if (pathname === '/api/automation/sessions' && method === 'GET') value = { sessions: manager.list().filter(item => localAdmin || item.kind === 'browser'), ...options, manualBrowser: true }
         else if (pathname === '/api/automation/sessions' && method === 'POST') {
           if (!requireSameOrigin() || options.approvalMode === 'read-only') { res.writeHead(403).end(); return }
           const body = await this.parseJsonBody(req)
-          if (!['browser', 'computer'].includes(String(body.kind)) || !options.enabled.includes(String(body.kind)) || (body.mode !== undefined && !['dedicated','existing'].includes(String(body.mode)))) { res.writeHead(400).end(); return }
+          if (!['browser', 'computer'].includes(String(body.kind)) || (body.mode !== undefined && !['dedicated','existing'].includes(String(body.mode)))) { res.writeHead(400).end(); return }
+          if (body.kind === 'computer' && !localAdmin) { res.writeHead(403).end(); return }
+          // A user opening a workspace webpage does not enable AI browser tools.
+          // Device grants, same-origin, read-only and backend network policy still apply.
+          if (!options.enabled.includes(String(body.kind)) && !(body.kind === 'browser' && body.manual === true)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'AUTOMATION_CAPABILITY_DISABLED' })); return
+          }
           const project = typeof body.projectId === 'string' ? await this.projects.get(body.projectId) : undefined
           if (!project) { res.writeHead(400).end(); return }
           const conversation = typeof body.conversationId === 'string' ? await this.host.getConversation(body.conversationId) : undefined
@@ -1016,7 +1019,7 @@ export class H5Server {
     }
     if (pathname === '/api/session' && method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify({ ok: true, queueScope: createHash('sha256').update(resolve(this.dataDir)).digest('hex').slice(0, 32), deviceId: authedDevice?.id, localAdmin, canBrowseHostPaths, canRegisterProject, canUseTerminal: localAdmin, canEditConfig: localAdmin, canControlAutomation }))
+      res.end(JSON.stringify({ ok: true, serverVersion: (require('../../package.json') as { version: string }).version, serverPid: process.pid, runtimeId: process.env.PULSE_RUNTIME_ID, queueScope: createHash('sha256').update(resolve(this.dataDir)).digest('hex').slice(0, 32), deviceId: authedDevice?.id, localAdmin, canBrowseHostPaths, canRegisterProject, canUseTerminal: localAdmin, canEditConfig: localAdmin, canControlAutomation }))
       return
     }
 
@@ -1169,6 +1172,7 @@ export class H5Server {
 
     // 6. Devices management: GET /api/devices, POST /api/devices/:id/revoke
     if (pathname === '/api/devices' && method === 'GET') {
+      if (!localAdmin) { res.writeHead(403).end(); return }
       const devices = await this.auth.listDevices()
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(devices))
@@ -1177,6 +1181,7 @@ export class H5Server {
 
     const revokeMatch = pathname.match(/^\/api\/devices\/([^/]+)\/revoke$/)
     if (revokeMatch && method === 'POST') {
+      if (!localAdmin || !requireSameOrigin()) { res.writeHead(403).end(); return }
       const deviceId = revokeMatch[1]
       if (deviceId) {
         const ok = await this.auth.revokeDevice(deviceId)
