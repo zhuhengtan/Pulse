@@ -38,6 +38,10 @@ export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>
       "en": "Fixed npm lifecycle startup through isolated PATH entries in the macOS sandbox while retaining explicit workspace and environment script-shell settings."
     },
     {
+      "zh": "复用消息时间格式化器并延迟创建未打开的消息菜单，减少长历史切换的渲染开销；修复虚拟列表首次挂载的滚动监听和高度变化后的定位。",
+      "en": "Reuse message date formatters and defer unopened message menus to reduce rendering work when switching long histories; fix initial scroll listeners and position restoration after virtual-row height changes."
+    },
+    {
       "zh": "修复工作区合入对已忽略数据目录的处理，收紧 Git 读取和配对设备权限，并阻止 pnpm 隐式重装依赖。",
       "en": "Fixed merging ignored data directories from workspaces, tightened Git reads and paired-device permissions, and prevented implicit pnpm dependency reinstalls."
     },
