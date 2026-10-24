@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, parse, resolve, sep } from 'node:path'
-import { mkdtemp, realpath, rm } from 'node:fs/promises'
+import { lstat, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { SandboxManager, checkWindowsDependenciesAsync, resolveSrtWin, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
@@ -107,7 +107,241 @@ export function encodeSandboxCommand(command: string, args: string[], platform: 
   return `exec ${[command, ...args].map(quotePosix).join(' ')}`
 }
 
-async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolchainRoots: string[] = [], scratch?: string, dependencyRoots: string[] = []): Promise<SandboxRuntimeConfig> {
+/**
+ * Read-only git commands in a linked worktree need the main repository's
+ * metadata: `.git/worktrees/<id>` plus the common directory (`objects`, `refs`,
+ * `HEAD`). Both live outside the worktree, so the sandbox hides them and git
+ * reports "not a git repository". Granting a parent directory instead would
+ * expose sibling projects, and trusting the `.git` file alone would let any
+ * forged file redirect the grant. Ownership is therefore proven with git's own
+ * backlinks, which can only be written by a process that already holds write
+ * access inside the main repository - something this sandbox never grants.
+ */
+async function worktreeGitMetadataRoots(cwd: string): Promise<string[]> {
+  const dotGit = join(cwd, '.git')
+  // `lstat` never follows the marker. A symlink pointing at another worktree's
+  // `.git` file would otherwise satisfy the backlink comparison below and be
+  // mistaken for ownership of that worktree's metadata.
+  const dotGitStat = await lstat(dotGit).catch(() => undefined)
+  // A regular repository keeps metadata inside the workspace, which is already
+  // readable; a directory grant must not be widened by this helper.
+  if (!dotGitStat?.isFile()) return []
+  const marker = /^gitdir:[ \t]*(\S.*?)[ \t\r]*$/mu.exec(await readFile(dotGit, 'utf8').catch(() => ''))
+  const declared = marker?.[1]
+  if (!declared) return []
+  const worktreeAdmin = await realpath(resolve(cwd, declared)).catch(() => undefined)
+  if (!worktreeAdmin) return []
+  const adminRoot = dirname(worktreeAdmin)
+  if (basename(adminRoot) !== 'worktrees' || !basename(dirname(adminRoot)).endsWith('.git')) return []
+  const commonDir = await realpath(dirname(adminRoot)).catch(() => undefined)
+  if (!commonDir) return []
+  // `commondir` must resolve to exactly the parent that contains the
+  // `worktrees` directory, so it cannot point at an unrelated tree.
+  const commondirFile = await readFile(join(worktreeAdmin, 'commondir'), 'utf8').catch(() => undefined)
+  if (commondirFile === undefined) return []
+  const declaredCommon = await realpath(resolve(worktreeAdmin, commondirFile.trim())).catch(() => undefined)
+  if (declaredCommon !== commonDir) return []
+  // Ownership proof: the admin directory records the `.git` path of the very
+  // worktree being sandboxed. A forged `.git` file cannot satisfy this.
+  const backlink = await readFile(join(worktreeAdmin, 'gitdir'), 'utf8').catch(() => undefined)
+  const backlinkTarget = backlink === undefined
+    ? undefined
+    : await realpath(resolve(worktreeAdmin, backlink.trim())).catch(() => undefined)
+  // cwd was resolved with realpath and the marker is a regular file, so its
+  // literal path is the ownership identity. Resolving it would follow exactly
+  // the symlink this helper must not trust.
+  const expectedBacklink = dotGit
+  if (!backlinkTarget || backlinkTarget !== expectedBacklink) return []
+  const head = await stat(join(commonDir, 'HEAD')).catch(() => undefined)
+  if (!head?.isFile()) return []
+  // Keep the guard rails of the workspace grant: never reopen a path that is a
+  // filesystem root, the home directory, or an ancestor of home, and skip
+  // metadata that already sits inside the workspace.
+  const root = parse(commonDir).root
+  if (commonDir === root || commonDir === homedir() || homedir().startsWith(commonDir + sep)) return []
+  if (commonDir === cwd || commonDir.startsWith(cwd + sep) || worktreeAdmin.startsWith(cwd + sep)) return []
+  return [worktreeAdmin, commonDir]
+}
+
+// System installation directories whose `git` is not writable by the model.
+// User-writable prefixes (/usr/local, /opt/homebrew) are deliberately absent:
+// a shadow there is indistinguishable from an attacker-controlled binary.
+const TRUSTED_GIT_DIRECTORIES = ['/usr/bin', '/bin', '/Library/Developer/CommandLineTools/usr/bin', '/Applications/Xcode.app/Contents/Developer/usr/bin']
+
+/**
+ * Read-only porcelain limited to the three subcommands this exception actually
+ * needs. `config` is excluded on purpose: it prints configuration bodies, which
+ * is exactly what this exception must not hand out.
+ */
+// Builtin names always win over aliases, so a repository alias can never be
+// reached through this list; an unknown name is not on the list at all, and an
+// unlisted name never receives the public `.git` reads.
+const READ_ONLY_GIT_SUBCOMMANDS = new Set([
+  // Only these three metadata reads are granted. Everything else is absent on
+  // purpose: `cat-file --filters` and `blame` apply filter/textconv drivers taken
+  // from repository config or attributes, so they would inherit this grant only
+  // to start a workspace-writable program, and no other plumbing needs `.git`.
+  'status', 'rev-parse', 'diff',
+])
+
+/**
+ * The repository config is readable for this one invocation, so it must not be
+ * able to launch anything: empty values disable the drivers, `--no-pager` and a
+ * discarded `core.hooksPath` close the pager and hook paths. These flags are
+ * prepended after validation, so model argv can never suppress them.
+ */
+const GIT_NEUTRALIZING_ARGUMENTS = [
+  '--no-pager',
+  '-c', 'core.fsmonitor=',
+  '-c', 'core.hooksPath=/dev/null',
+  '-c', 'core.pager=cat',
+  '-c', 'diff.external=',
+  '-c', 'diff.trustExitCode=false',
+]
+
+/**
+ * Porcelain diff commands also apply external diff and textconv drivers named by
+ * `.gitattributes`, which `-c` cannot enumerate; these flags override both.
+ */
+const GIT_DIFF_NEUTRALIZING_ARGUMENTS = ['--no-ext-diff', '--no-textconv']
+// `log`, `show` and `whatchanged` are not granted above; only `diff` can reach
+// this branch, and it must still carry the overrides against `.gitattributes`.
+const GIT_TEXT_DIFF_SUBCOMMANDS = new Set(['diff'])
+// Subcommands that run `filter.<name>.clean`/`process`: `status` refreshes the
+// index through the clean filter, `diff` converts the worktree through it.
+// `rev-parse` reads no file content and is deliberately absent, so its grant
+// never depends on the enumeration below succeeding.
+const GIT_FILTER_SUBCOMMANDS = new Set(['status', 'diff'])
+
+/** Arguments that relocate the repository, inject config, or run external programs. */
+const GIT_REDIRECT_ARGUMENT = /^(?:-C|--git-dir|--work-tree|--namespace|--config-env|--exec-path|--super-prefix|--no-index|--ext-diff|--textconv)(?:=|$)/
+
+/** Environment that relocates the repository or injects configuration. */
+const GIT_REDIRECT_ENVIRONMENT = /^(?:GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_OBJECT_DIRECTORY|GIT_ALTERNATE_OBJECT_DIRECTORIES|GIT_NAMESPACE|GIT_EXEC_PATH|GIT_EXTERNAL_DIFF|GIT_CONFIG|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_NOSYSTEM|GIT_CEILING_DIRECTORIES|GIT_DISCOVERY_ACROSS_FILESYSTEM)$/
+
+/**
+ * Identity check for the executable that will actually run. A bare name is
+ * resolved through the very PATH the child receives, so a workspace or pnpm
+ * shadow wins that lookup and thereby loses the grant; an explicit path must
+ * resolve into a trusted installation directory.
+ */
+async function trustedGitExecutable(command: string, executable: string, cwd: string, pathValue: string): Promise<string | undefined> {
+  if (process.platform === 'win32' || basename(command) !== 'git') return undefined
+  const trusted = (await Promise.all(TRUSTED_GIT_DIRECTORIES.map((dir) => realpath(dir).catch(() => undefined)))).filter((dir): dir is string => dir !== undefined)
+  const trustedParent = async (resolved: string): Promise<string | undefined> => {
+    const parent = await realpath(dirname(resolved)).catch(() => undefined)
+    return parent && trusted.includes(parent) ? resolved : undefined
+  }
+  if (executable.includes('/') || executable.includes(sep)) {
+    const resolved = await realpath(executable).catch(() => undefined)
+    return resolved ? trustedParent(resolved) : undefined
+  }
+  for (const entry of pathValue.split(delimiter)) {
+    const directory = entry === '' ? cwd : entry
+    const resolved = await realpath(join(directory, 'git')).catch(() => undefined)
+    if (!resolved) continue
+    // The first hit on PATH is the binary that runs; judge only that one.
+    return trustedParent(resolved)
+  }
+  return undefined
+}
+
+function readOnlyGitArguments(args: string[]): boolean {
+  const subcommand = args[0]
+  // Global options (`-c`, `-C`, `--git-dir`) may only appear before the
+  // subcommand, so requiring the subcommand first rejects them outright.
+  if (!subcommand || subcommand.startsWith('-')) return false
+  if (!READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) return false
+  // `git rev-parse --git-dir` only prints where the repository lives: it is a
+  // query, not a redirect. Only the bare flag placed after the subcommand is
+  // let through; `--git-dir=<path>`, a pre-subcommand `--git-dir`/`-C` and every
+  // other redirect keep hitting GIT_REDIRECT_ARGUMENT below.
+  if (subcommand === 'rev-parse' && args.length === 2 && args[1] === '--git-dir') return true
+  return !args.some((arg) => GIT_REDIRECT_ARGUMENT.test(arg))
+}
+
+/**
+ * `git status` refreshes the index and `git diff` converts worktree files
+ * through the `filter.<name>.clean` or
+ * `filter.<name>.process` command named by repository config, and neither
+ * `--no-textconv` nor `--no-ext-diff` touches those drivers. The driver names are
+ * enumerated through the already verified executable with `--name-only`, so only
+ * key names are read: no value, and therefore no credential, is printed or
+ * stored. Each key is blanked afterwards, which leaves Git with no command to
+ * run for it; a driver that is `required` makes the call fail instead, which is
+ * the safe outcome. `undefined` means the enumeration itself failed, and the
+ * caller then drops the grant rather than hand the reads to drivers this
+ * exception cannot neutralise.
+ */
+async function gitFilterNeutralizingArguments(cwd: string, executable: string, pathValue: string): Promise<string[] | undefined> {
+  try {
+    // The granted subprocess reads exactly this configuration surface, so the
+    // enumeration follows it: `--includes` honours `include.path`, and dropping
+    // `--local` adds the linked-worktree file that `status` and `diff` also see.
+    // Global and system files stay out through the environment below, so a driver
+    // defined outside the repository is never enumerated and never reachable.
+    // `-z` keeps key names NUL separated, so a driver name containing a dot
+    // (`filter.pulse.probe.clean`) is read whole instead of being cut in two.
+    const { stdout } = await promisify(execFile)(executable, ['--no-pager', 'config', '--includes', '--list', '--name-only', '-z'], {
+      cwd,
+      timeout: 5000,
+      maxBuffer: 1 << 20,
+      // Only the computed PATH travels, so no inherited GIT_* variable can point
+      // this read at a different repository.
+      env: { PATH: pathValue, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' },
+    })
+    const neutralizing: string[] = []
+    for (const key of stdout.split('\0')) {
+      if (key === '') continue
+      // `.+` rather than `[^.]+`: a driver may legitimately be called
+      // `pulse.probe`, and a key this enumeration cannot match would otherwise
+      // stay live for the granted call. Anything that still looks unusable
+      // drops the whole grant instead of being skipped silently.
+      if (!/^filter\..+\.(?:clean|process)$/.test(key)) continue
+      if (key.includes('=')) return undefined
+      neutralizing.push('-c', `${key}=`)
+    }
+    return neutralizing
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Public Git metadata is readable for exactly one confirmed invocation: a
+ * trusted Git executable, a read-only subcommand, no argument or environment
+ * that redirects the repository or spawns external programs, and a worktree
+ * whose ownership backlinks check out. Anything else keeps the plain workspace
+ * grants, so a forged `.git` file or a fake `git` widens nothing.
+ */
+interface GitMetadataApproval { roots: string[]; globalArguments: string[]; subcommandArguments: string[]; executable?: string }
+
+async function approvedGitMetadata(cwd: string, command: string, executable: string, args: string[], env: NodeJS.ProcessEnv, pathValue: string): Promise<GitMetadataApproval> {
+  const denied: GitMetadataApproval = { roots: [], globalArguments: [], subcommandArguments: [] }
+  // The verified executable is kept, not just its verdict: the launch below
+  // reuses this exact resolved path, so the binary that runs is the binary that
+  // was checked.
+  const trusted = await trustedGitExecutable(command, executable, cwd, pathValue)
+  if (!trusted) return denied
+  if (!readOnlyGitArguments(args)) return denied
+  if (Object.keys(env).some((key) => GIT_REDIRECT_ENVIRONMENT.test(key))) return denied
+  const roots = await worktreeGitMetadataRoots(cwd)
+  if (roots.length === 0) return denied
+  // A granted call cannot keep a driver alive that the grant just made
+  // reachable, so the neutralising flags travel with the roots. Git accepts
+  // `-c`/`--no-pager` only before the subcommand and `--no-ext-diff`/
+  // `--no-textconv` only after it, so the two groups stay apart.
+  const textDiff = GIT_TEXT_DIFF_SUBCOMMANDS.has(String(args[0]))
+  const runsFilters = GIT_FILTER_SUBCOMMANDS.has(String(args[0]))
+  // Convert drivers are blanked through global `-c` options, which must precede
+  // the subcommand, so they join the neutralising group instead of the diff group.
+  const filterArguments = runsFilters ? await gitFilterNeutralizingArguments(cwd, trusted, pathValue) : []
+  if (filterArguments === undefined) return denied
+  const subcommandArguments = textDiff ? [...GIT_DIFF_NEUTRALIZING_ARGUMENTS] : []
+  return { roots, globalArguments: [...GIT_NEUTRALIZING_ARGUMENTS, ...filterArguments], subcommandArguments, executable: trusted }
+}
+
+async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolchainRoots: string[] = [], scratch?: string, dependencyRoots: string[] = [], gitMetadataRoots: string[] = []): Promise<SandboxRuntimeConfig> {
   // Linux invokes this trusted helper *inside* the read-restricted namespace.
   // A user-local npm install otherwise hides it together with the home directory.
   const seccompPath = process.platform === 'linux'
@@ -129,7 +363,10 @@ async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolcha
   // cwd. Root workspaces cannot be carved this way and are rejected upstream.
   if (parent !== parse(cwd).root && parent !== cwd) denyRead.add(parent)
   if (process.platform === 'win32') for (const boundary of windowsReadDenyRoots(cwd, dependencyRoots)) denyRead.add(boundary)
-  const allowRead = [cwd, ...toolchainRoots, ...(scratch ? [scratch] : []), ...(seccompPath ? [seccompPath] : [])]
+  // Linked-worktree metadata arrives only for a confirmed read-only git
+  // invocation (see approvedGitMetadataRoots), so no other program here gains
+  // those reads and a plain git workspace keeps exactly the grants it had.
+  const allowRead = [cwd, ...gitMetadataRoots, ...toolchainRoots, ...(scratch ? [scratch] : []), ...(seccompPath ? [seccompPath] : [])]
   // Reads default to the system toolchain plus this workspace. Writes are
   // limited to the workspace; srt adds only its required stdio/temp paths.
   return {
@@ -231,7 +468,11 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     try {
     const baseEnv = shellEnvironment(options.env)
     const pathKey = Object.keys(baseEnv).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH'
-    const executionEnv = { [pathKey]: [...(pnpmHome ? [pnpmHome] : []), nodeBin, join(cwd, 'node_modules', '.bin'), baseEnv[pathKey] ?? ''].join(delimiter),
+    // An explicit record type keeps the computed PATH key and the
+    // `GIT_OPTIONAL_LOCKS` override writable without an index signature.
+    // pnpm exec/run must not silently install or replace a prepared dependency tree.
+    // An explicit install command remains subject to the normal approval/sandbox policy.
+    const executionEnv: Record<string, string | undefined> = { pnpm_config_verify_deps_before_run: 'false', [pathKey]: [...(pnpmHome ? [pnpmHome] : []), nodeBin, join(cwd, 'node_modules', '.bin'), baseEnv[pathKey] ?? ''].join(delimiter),
       ...(process.platform === 'win32' ? {} : { HOME: scratch, TMPDIR: scratch, TMP: scratch, TEMP: scratch, XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }) }
     let executable = command
     let executableArgs = args
@@ -248,7 +489,20 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       if (resolved) { executable = resolved.executable; executableArgs = [...resolved.prefixArgs, ...args] }
     }
     const invocationId = randomUUID()
-    const policy = await sandboxConfig(cwd, options.allowedDomains ?? [], toolchainRoots, scratch, dependencyRoots)
+    const gitApproval = await approvedGitMetadata(cwd, command, executable, args, baseEnv, String(executionEnv[pathKey] ?? ''))
+    // A granted call launches the path that was verified, so a `./git` or a PATH
+    // entry swapped in after the check can no longer become the running binary.
+    // Ungranted calls keep their own argv untouched.
+    if (gitApproval.executable) executable = gitApproval.executable
+    if (gitApproval.globalArguments.length > 0) {
+      // Global options precede the subcommand; per-subcommand options must
+      // follow it, or Git rejects them as unknown global options.
+      executableArgs = [...gitApproval.globalArguments, ...executableArgs.slice(0, 1), ...gitApproval.subcommandArguments, ...executableArgs.slice(1)]
+      // A status refresh would otherwise take the index lock; the grant is
+      // read-only, so optional locks are switched off for this child only.
+      executionEnv.GIT_OPTIONAL_LOCKS = '0'
+    }
+    const policy = await sandboxConfig(cwd, options.allowedDomains ?? [], toolchainRoots, scratch, dependencyRoots, gitApproval.roots)
     let child: ReturnType<typeof spawn> | undefined
     const archive = new ShellOutput(max, options.outputDirectory, options.maxArchiveBytes, options.outputDirectory !== undefined)
     const outputBytes = { stdout: 0, stderr: 0 }
