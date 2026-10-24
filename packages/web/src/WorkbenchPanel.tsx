@@ -156,7 +156,7 @@ export function WorkbenchPanel({ project, conversationId, transport, localAdmin,
   const content = <>
     {project && !project.available && <p className="workbench-alert">这个目录当前不可用；历史聊天和记录仍保留。</p>}
     {error && <p className="workbench-alert" role="alert">{error}</p>}
-    {tab === 'automation' && <AutomationPanel transport={transport} projectId={project?.id} localAdmin={localAdmin} selectedSession={position?.get('automation') ?? undefined} onSelectSession={onNavigate ? (automation, replace) => onNavigate({ automation }, replace) : undefined} />}
+    {tab === 'automation' && window.pulseDesktop?.nativeBrowser && <AutomationPanel transport={transport} projectId={project?.id} localAdmin={localAdmin} selectedSession={position?.get('automation') ?? undefined} onSelectSession={onNavigate ? (automation, replace) => onNavigate({ automation }, replace) : undefined} />}
     {tab === 'files' && <div className="workbench-content">
       <form className="file-search" onSubmit={event => { event.preventDefault(); void runSearch() }}><PulseInput value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索项目文件"/><PulseButton disabled={busy || !search.trim()}>搜索</PulseButton></form>
       {searchResults.length > 0 && <div className="search-results">{searchResults.map((result, index) => <PulseButton key={`${result.path}-${result.line}-${index}`} onClick={() => { void openFile(result.path); setSearchResults([]) }}><strong>{result.path}:{result.line}</strong><span>{result.text}</span></PulseButton>)}</div>}
@@ -172,7 +172,7 @@ export function WorkbenchPanel({ project, conversationId, transport, localAdmin,
   return <aside className={`workbench-panel ${tab === 'terminal' ? 'terminal-dock' : ''}`} style={{ '--workbench-width': `${panelWidth}px`, '--workbench-height': `${panelHeight}px` } as CSSProperties} aria-label="工作区面板">
     <PulseButton className="workbench-resize" onPointerDown={beginResize} aria-label={tab === 'terminal' ? '调整终端高度' : '调整工作区宽度'} />
     <header className="workbench-header"><div><strong>{project?.name ?? '工作区'}</strong><small>{project?.cwd}</small></div><PulseButton className="icon-button" onClick={onClose} aria-label="关闭工作区"><Icon name="close"/></PulseButton></header>
-    <Tabs className="workbench-tabs" activeKey={tab} onChange={value => setTab(value as typeof tab)} items={[{ key: 'files', label: '文件' }, { key: 'git', label: 'Git' }, { key: 'terminal', label: '终端' }, { key: 'automation', label: '自动化' }]} />
+    <Tabs className="workbench-tabs" activeKey={tab} onChange={value => setTab(value as typeof tab)} items={[{ key: 'files', label: '文件' }, { key: 'git', label: 'Git' }, { key: 'terminal', label: '终端' }]} />
     {content}
   </aside>
 }

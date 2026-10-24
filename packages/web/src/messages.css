@@ -4,8 +4,8 @@
   --work-body-font-size: 15px;
   --work-body-line-height: 1.75;
   --message-incoming: #f2f3f5;
-  --message-outgoing: #edf1ff;
-  --message-outgoing-text: #27365d;
+  --message-outgoing: #f3f3f3;
+  --message-outgoing-text: #202020;
   --adm-color-primary: var(--blue);
   --adm-color-text: var(--ink);
   --adm-color-text-secondary: var(--muted);
@@ -17,14 +17,14 @@
 :root[data-interface-scale="large"] { --work-body-font-size:17px; }
 :root[data-theme="dark"] {
   --message-incoming: #272b32;
-  --message-outgoing: #2b3654;
-  --message-outgoing-text: #e4eaff;
+  --message-outgoing: #2d2d2d;
+  --message-outgoing-text: #ededed;
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] {
     --message-incoming: #272b32;
-    --message-outgoing: #2b3654;
-    --message-outgoing-text: #e4eaff;
+    --message-outgoing: #2d2d2d;
+    --message-outgoing-text: #ededed;
   }
 }
 .message.message--chat, .message.message--work {
@@ -144,3 +144,12 @@
 .message.user .delivery-state.failed::before, .message.user .delivery-state.interrupted::before { display: none; }
 .message .message-retry { flex: 0 0 28px; display: grid; place-items: center; width: 28px; height: 28px; min-height: 28px; padding: 0; border: 0; border-radius: 50%; background: #d9363e; color: #fff; font-size: 18px; font-weight: 700; cursor: pointer; }
 .message .message-retry:hover { background: #b3262e; }
+.markdown .markdown-image{max-width:100%;max-height:560px;object-fit:contain;border-radius:10px;cursor:zoom-in;vertical-align:middle;}
+.markdown-image-fallback{display:inline-block;padding:12px;border:1px dashed var(--line);border-radius:8px;color:var(--muted);}
+.markdown .katex-display{overflow-x:auto;overflow-y:hidden;max-width:100%;padding:4px 0;}
+.markdown .katex{font-size:1.1em;}
+.markdown li>p{margin:.2em 0;}
+.markdown :is(h5,h6){font-size:1em;margin:.8em 0 .4em;}
+.markdown .contains-task-list{list-style:none;padding-left:1em;}
+.markdown .task-list-item input{margin-right:.5em;}
+.image-preview-close{position:absolute;right:20px;top:20px;width:44px;height:44px;border:0;border-radius:50%;font-size:28px;background:var(--panel);color:var(--ink);cursor:pointer;}

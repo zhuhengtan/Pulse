@@ -53,7 +53,7 @@ export function followupFixture(surface: 'chat' | 'work', ask = false) {
       const runId = conversation.activeRunId ?? `run-fixture-${++ordinal}`
       conversation.activeRunId = runId
       const prior = messages.find(message => message.id === `msg-${body.requestId}`)
-      if (!prior) messages.push({ id: `msg-${body.requestId}`, requestId: body.requestId, role: 'user', text: body.text, runId, createdAt: now, ...(body.attachments ? { attachments: body.attachments } : {}) })
+      if (!prior) messages.push({ id: `msg-${body.requestId}`, requestId: body.requestId, role: 'user', text: body.text, runId, createdAt: now, ...(body.attachments ? { attachments: body.attachments } : {}), ...(body.richContent ? { richContent: body.richContent } : {}), ...(body.skills ? { skills: body.skills } : {}), ...(body.mentionedFiles ? { mentionedFiles: body.mentionedFiles } : {}) })
       receipts.push({ messageId: body.requestId, runId, state: 'replying', createdAt: now, updatedAt: now })
       states.set(runId, { runId, state: 'running', seq, activities: [], interactions: interactions() })
       notify()

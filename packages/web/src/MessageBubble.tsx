@@ -1,3 +1,5 @@
+import { AttachmentCards } from './AttachmentCards.js'
+import { RichMessage } from './RichMessage.js'
 import { PulseButton, usePulseDialogs } from './PulseControls.js'
 import { memo, useEffect, useRef, useState } from 'react'
 import { Popover } from 'antd-mobile'
@@ -7,14 +9,10 @@ import { copyText } from './clipboard.js'
 import { useMessageActions } from './useMessageActions.js'
 import { apiJson, browserTransport, type WebMessage, type PulseWebTransport } from './transport.js'
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
 
-export const MessageBubble = memo(function MessageBubble({ message, mode, retry, onOpenWork, onFileClick, onDiffClick, transport = browserTransport, conversationId }: {
+export const MessageBubble = memo(function MessageBubble({ message, mode, retry, imageApi, onOpenWork, onFileClick, onDiffClick, transport = browserTransport, conversationId }: {
   message: WebMessage
+  imageApi?: ((source: string) => string | undefined) | undefined
   mode: 'chat' | 'work'
   retry: (message: WebMessage, mode: 'chat' | 'work') => void
   transport?: PulseWebTransport
@@ -75,43 +73,16 @@ export const MessageBubble = memo(function MessageBubble({ message, mode, retry,
 
   const hasContent = Boolean(message.text.trim()) || Boolean(message.attachments?.length)
   const canRetry = (message.deliveryState === 'failed' || message.deliveryState === 'interrupted') && Boolean(message.requestId)
-  const images = (message.attachments || []).filter(att => att.type === 'image')
-  const files = (message.attachments || []).filter(att => att.type === 'file')
 
   return <article className={`message message--${mode} ${message.role === 'user' ? 'user' : 'assistant'}`} tabIndex={hasContent ? 0 : undefined} aria-label={message.role === 'user' ? '你的消息' : 'Pulse 消息'} onKeyDown={event => { if (hasContent && event.target === event.currentTarget && (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) { event.preventDefault(); actions.setAnchor({ x: 16, y: 12 }); actions.open() } }}>
     {(hasContent || canRetry) && <div className="message-bubble-row">
       {canRetry && <button type="button" className="message-retry" aria-label="发送失败，重新发送" title="发送失败，点击确认重新发送" onClick={() => void confirmRetry()}>!</button>}
       {hasContent && <div className={`bubble ${actions.menuOpen ? 'has-message-menu' : ''}`} {...actions.gesture}>
-        {message.text.trim() && <Markdown text={text} onFileClick={onFileClick} onDiffClick={onDiffClick} />}
+        {message.role === 'user' && <AttachmentCards items={message.attachments ?? []} onPreview={setPreviewImage}/>}
+        {message.text.trim() && (message.role === 'user' ? <RichMessage content={message.richContent} fallback={text} onFileClick={onFileClick} onDiffClick={onDiffClick}/> : <Markdown text={text} imageApi={imageApi} transport={transport} onFileClick={onFileClick} onDiffClick={onDiffClick} />)}
         {message.bodyTruncated && fullText === undefined && <div><PulseButton onClick={() => void loadBody()} disabled={bodyLoading}>{bodyLoading ? '加载中…' : '展开完整消息'}</PulseButton>{bodyError && <span role="alert">{bodyError}</span>}</div>}
-        {images.length > 0 && (
-          <div className="message-attachments-grid">
-            {images.map(img => {
-              const src = img.url || (img.data ? (img.data.startsWith('data:') ? img.data : `data:${img.mediaType};base64,${img.data}`) : '')
-              return (
-                <div key={img.id} className="message-image-attachment" onClick={() => setPreviewImage(src)}>
-                  <img src={src} alt={img.name} loading="lazy" />
-                </div>
-              )
-            })}
-          </div>
-        )}
-        {files.length > 0 && (
-          <div className="message-attachments-grid">
-            {files.map(file => {
-              const href = file.url || (file.data ? (file.data.startsWith('data:') ? file.data : `data:${file.mediaType};base64,${file.data}`) : '#')
-              return (
-                <a key={file.id} href={href} download={file.name} className="message-file-card" target="_blank" rel="noopener noreferrer">
-                  <span className="file-icon">📄</span>
-                  <div className="file-info">
-                    <span className="file-name">{file.name}</span>
-                    <span className="file-size">{file.size ? formatFileSize(file.size) : file.mediaType}</span>
-                  </div>
-                </a>
-              )
-            })}
-          </div>
-        )}
+        {message.role !== 'user' && <AttachmentCards items={message.attachments ?? []} onPreview={setPreviewImage}/>}
+
         <Popover trigger="click" visible={actions.menuOpen} onVisibleChange={actions.setMenuOpen} destroyOnHide placement={message.role === 'user' ? 'top-end' : 'top-start'} className="message-mobile-popover" content={<div>{validTime && <time className="message-menu-time" dateTime={sentAt.toISOString()} title={timeTitle}>{timeLabel}</time>}<div role="menu" aria-label="消息操作"><PulseButton type="button" role="menuitem" disabled={copying} onClick={() => void copy()}><Icon name="copy"/><span>复制</span></PulseButton></div></div>}>
           <span className="message-menu-anchor" aria-hidden="true" style={{ left: actions.anchor.x, top: actions.anchor.y }}/>
         </Popover>

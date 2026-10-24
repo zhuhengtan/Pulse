@@ -1,6 +1,12 @@
+export interface NativeBrowserState { id: string; tabs: { revision: string; items: Array<{ index: number; title: string; url: string; active: boolean }> }; error?: string }
 import type { PulseWebTransport, WebRunEvent, WebMessage } from './transport.js';
 interface DesktopBridge {
     installation?: boolean;
+    nativeBrowser?: boolean;
+    browserLayout?(id: string, bounds: { x: number; y: number; width: number; height: number } | null): Promise<void>;
+    browserDispose?(id: string): Promise<void>;
+    browserState?(id: string): Promise<NativeBrowserState | undefined>;
+    browserEvents?(listener: (value: NativeBrowserState) => void): () => void;
     request(path: string, init?: {
         method?: string;
         body?: string;

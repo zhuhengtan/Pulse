@@ -9,7 +9,7 @@ import { ConversationArtifacts } from '../src/ConversationArtifacts.js'
 import { PulseDesignSystem } from '../src/PulseDesignSystem.js'
 import type { PulseWebTransport } from '../src/transport.js'
 beforeEach(() => { vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} }); vi.stubGlobal('WebSocket', class { close() {} }); localStorage.clear(); Object.defineProperty(window, 'matchMedia', { value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }), configurable: true }) })
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); delete window.pulseDesktop; vi.unstubAllGlobals() })
 const transport: PulseWebTransport = { request: async path => new Response(path.includes('runId=second') ? 'Second result' : '# First result', { headers: { 'Content-Type': 'text/markdown' } }), subscribe: () => () => {} }
 it('keeps same-name artifacts in distinct tabs, persists selection, and closes without deleting files', async () => {
   const navigate = vi.fn()
@@ -65,12 +65,14 @@ it('opens tools in the same standalone window without nested tabs or an expansio
   await screen.findByText('README.md')
   expect(readPreviewState('new').tabs).toEqual([{ kind:'tool', tool:'files' }])
 })
-it('keeps an empty new page available after closing the final document', async () => {
-  render(<PreviewDock scope="last" projectId="p" transport={transport} localAdmin position={new URLSearchParams('file=report.md')} />)
+it('closes the panel and clears saved tabs after closing the final document', async () => {
+  const onClose = vi.fn()
+  render(<PreviewDock scope="last" projectId="p" transport={transport} localAdmin position={new URLSearchParams('file=report.md')} onClose={onClose} />)
   await screen.findByRole('heading', { name: 'First result' })
   fireEvent.click(screen.getByRole('button', { name: '关闭 report.md 标签' }))
-  await screen.findByRole('heading', { name: '工具' })
-  expect(screen.getByRole('textbox', { name: '浏览器地址' })).toBeTruthy()
+  await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+  expect(screen.queryByRole('complementary', { name: '独立工作区' })).toBeNull()
+  expect(readPreviewState('last').tabs).toEqual([])
 })
 it('normalizes browser addresses and rejects credentials and non-web protocols', () => {
   expect(browserAddress('localhost:5173')).toBe('http://localhost:5173/')
@@ -80,25 +82,28 @@ it('normalizes browser addresses and rejects credentials and non-web protocols',
   expect(() => browserAddress('https://user:password@example.com')).toThrow()
 })
 
+const nativeBrowser = () => { window.pulseDesktop = { nativeBrowser: true, browserLayout: async () => {}, browserState: async () => undefined, browserEvents: () => () => {} } as unknown as NonNullable<Window['pulseDesktop']> }
 it('opens a manual browser with AI tools disabled and normalizes the entered address', async () => {
+  nativeBrowser()
   const writes: Array<{ path: string; body: any }> = []
   const request = vi.fn(async (path: string, init?: RequestInit) => {
     if (init?.method === 'POST') writes.push({ path, body: JSON.parse(String(init.body)) })
-    if (path === '/api/automation/sessions') return Response.json(init?.method === 'POST' ? { id: 'manual', state: 'paused' } : { sessions: [], enabled: [], manualBrowser: true, approvalMode: 'ask' })
+    if (path === '/api/automation/sessions') return Response.json(init?.method === 'POST' ? { id: 'manual', state: 'paused' } : { sessions: [], enabled: [], manualBrowser: true, nativeBrowser: true, approvalMode: 'ask' })
     if (path.endsWith('/control')) return Response.json({ lease: 'manual-lease' })
     return Response.json({ ok: true })
   })
-  render(<PulseDesignSystem><PreviewDock scope="manual" projectId="pulse" transport={{ request, subscribe: () => () => {} }} localAdmin /></PulseDesignSystem>)
+  render(<PulseDesignSystem><PreviewDock scope="manual" transport={{ request, subscribe: () => () => {} }} localAdmin /></PulseDesignSystem>)
   fireEvent.change(screen.getByRole('textbox', { name: '浏览器地址' }), { target: { value: 'www.baidu.com' } })
   fireEvent.click(screen.getByRole('button', { name: '前往', exact: true }))
   await waitFor(() => expect(writes).toHaveLength(3))
-  expect(writes[0]).toEqual({ path: '/api/automation/sessions', body: { kind: 'browser', manual: true, projectId: 'pulse' } })
-  expect(writes[2]).toEqual({ path: '/api/automation/sessions/manual/command', body: { lease: 'manual-lease', method: 'newTab', params: { url: 'https://www.baidu.com/' } } })
+  expect(writes[0]).toEqual({ path: '/api/automation/sessions', body: { kind: 'browser', manual: true } })
+  expect(writes[2]).toEqual({ path: '/api/automation/sessions/manual/command', body: { lease: 'manual-lease', method: 'navigate', params: { url: 'https://www.baidu.com/' } } })
 })
 it.each([
-  [{ enabled: [], approvalMode: 'ask' }, '当前后台尚未支持手动浏览网页，请更新并重启开发后台后重试。'],
-  [{ enabled: [], approvalMode: 'read-only', manualBrowser: true }, '当前为只读模式，无法打开浏览器。'],
+  [{ enabled: [], approvalMode: 'ask' }, '当前后台尚未连接原生浏览器，请更新并重启开发后台及 Electron 后重试。'],
+  [{ enabled: [], approvalMode: 'read-only', manualBrowser: true, nativeBrowser: true }, '当前为只读模式，无法打开浏览器。'],
 ])('explains an unavailable browser before sending a mutation', async (options, message) => {
+  nativeBrowser()
   const request = vi.fn(async () => Response.json({ sessions: [], ...options }))
   render(<PulseDesignSystem><PreviewDock scope="blocked" projectId="pulse" transport={{ request, subscribe: () => () => {} }} localAdmin /></PulseDesignSystem>)
   fireEvent.change(screen.getByRole('textbox', { name: '浏览器地址' }), { target: { value: 'www.baidu.com' } })
@@ -106,4 +111,40 @@ it.each([
   await screen.findByText(message)
   expect(request).toHaveBeenCalledTimes(1)
   expect(request).toHaveBeenCalledWith('/api/automation/sessions', undefined)
+})
+
+it('closes the only empty tab without leaving another launcher behind', async () => {
+ const onClose = vi.fn()
+ render(<PreviewDock scope="blank" transport={transport} localAdmin onClose={onClose}/>)
+ fireEvent.click(screen.getByRole('button', {name:'关闭 新标签页 标签'}))
+ await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+ expect(readPreviewState('blank').tabs).toEqual([])
+})
+it('closes a newly created session when navigation fails so retrying does not leak a browser lock', async () => {
+ nativeBrowser()
+ const writes: any[] = []
+ const request = async (path: string, init?: RequestInit) => {
+  const body = init?.body ? JSON.parse(String(init.body)) : undefined
+  if (body) writes.push({ path, body })
+  if (path === '/api/automation/sessions') return Response.json(body ? {id:'failed',state:'paused'} : {sessions:[],enabled:[],manualBrowser:true,nativeBrowser:true,approvalMode:'ask'})
+  if (path.endsWith('/command')) return Response.json({error:'BROWSER_NETWORK_NOT_ALLOWED'},{status:409})
+  return Response.json({lease:'lease'})
+ }
+ render(<PreviewDock scope="failed" transport={{request,subscribe:()=>()=>{}}} localAdmin/>)
+ fireEvent.change(screen.getByRole('textbox',{name:'浏览器地址'}),{target:{value:'example.com'}})
+ fireEvent.click(screen.getByRole('button',{name:'前往',exact:true}))
+ await screen.findByRole('alert')
+ expect(writes.at(-1)).toEqual({path:'/api/automation/sessions/failed/control',body:{action:'close'}})
+})
+
+it('offers files and diffs on Web without Browser Use or restored screenshot tabs', async () => {
+ localStorage.setItem('pulse-preview:web', JSON.stringify({tabs:[{kind:'browser',sessionId:'old'}],active:'browser:old'}))
+ const request = vi.fn()
+ render(<PreviewDock scope="web" transport={{request,subscribe:()=>()=>{}}} localAdmin position={new URLSearchParams('workspace=preview&automation=old')}/>)
+ expect(screen.queryByRole('textbox',{name:'浏览器地址'})).toBeNull()
+ expect(screen.queryByRole('button',{name:'打开浏览器'})).toBeNull()
+ expect(screen.queryByRole('button',{name:'自动化'})).toBeNull()
+ expect(screen.getByRole('button',{name:'文件'})).toBeTruthy()
+ expect(screen.getByRole('button',{name:'变更'})).toBeTruthy()
+ expect(request).not.toHaveBeenCalled()
 })

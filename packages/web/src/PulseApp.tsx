@@ -1,3 +1,11 @@
+import { ProjectHoverCard } from './ProjectHoverCard.js'
+import { ProjectEditor } from './ProjectEditor.js'
+import { HoverTitle } from './HoverTitle.js'
+import { useProjectDrag } from './useProjectDrag.js'
+import { useResizableHistory } from './useResizableHistory.js'
+import { InteractionPanel, type PendingInteraction } from './InteractionPanel.js'
+export { InteractionPanel } from './InteractionPanel.js'
+import { ChatSurface, ChatActionArea, deriveChatState } from './ChatSurface.js'
 import { MessageQueuePanel, useMessageQueue } from './MessageQueuePanel.js'
 import type { FollowupBehavior } from './MessageQueue.js'
 import { ConversationCache } from './ConversationCache.js'
@@ -5,17 +13,17 @@ import { WindowedMessages } from './WindowedMessages.js'
 import { RunRecoveryCard, type RunRecovery } from './RunRecoveryCard.js'
 import { useConversationTransfer, transferError } from './ConversationTransfer.js'
 import { createRequestId } from './requestId.js'
-import { previewKey, readPreviewState } from './previewState.js'
+import { previewKey, readPreviewState, fileApi } from './previewState.js'
 import { HostPathPicker } from './HostPathPicker.js'
 import { PulseButton, PulseCheckbox, PulseDisclosure, PulseInput, PulseTextArea, PulseToast, usePulseDialogs } from './PulseControls.js'
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent, ReactElement } from 'react'
-import { ApiError, apiJson, readLatestMessages, browserTransport, getWebConversation, jsonRequest } from './transport.js'
+import { ApiError, apiJson, submitWorkMessage, readLatestMessages, browserTransport, getWebConversation, jsonRequest } from './transport.js'
 import { ConversationArtifacts, useConversationArtifacts } from './ConversationArtifacts.js'
 import type { ConversationList, MessageList, PulseWebTransport, WebAttachment, WebAssistantMessageReceipt, WebAssistantWorkInteraction, WebConversation, WebMessage, WebProject, WebRunEvent, WebRunSnapshot } from './transport.js'
-import { Drawer, Dropdown, Popover, Select } from 'antd'
+import { Drawer, Dropdown, Popover, Select, Modal, type MenuProps } from 'antd'
 import { MessageBubble } from './MessageBubble.js'
-import { RichComposer, emptyComposerDraft, type ComposerDraft } from './RichComposer.js'
+import { RichComposer, emptyComposerDraft, type ComposerDraft, type ComposerPayload } from './RichComposer.js'
 import { emptyTrace, isTraceEvent, PersistedRunTrace, reduceTrace, RunTraceView } from './RunTrace.js'
 import type { TraceState } from './RunTrace.js'
 import { copyText } from './clipboard.js'
@@ -31,7 +39,7 @@ type RunStatus =
   | { kind: 'status'; label: string }
   | { kind: 'review'; label: string }
   | { kind: 'tool'; activityId: string; label: string; state: string }
-  | { kind: 'interaction'; runId: string; groupId: string; interactionKind: 'ask' | 'approval'; items: Array<{ effectId: string; input: Record<string, unknown> }>; conversationId?: string; conversationTitle?: string; projectId?: string; approvalPolicy?: 'manual' | 'delegate' }
+  | PendingInteraction
   | { kind: 'complete'; label: string; outcome: 'succeeded' | 'failed' | 'cancelled' | 'interrupted' }
 
 const historyStorageKey = 'pulse-web-conversation'
@@ -73,7 +81,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const [queueScope, setQueueScope] = useState<string>()
   const { policy: approvalPolicy, ready: approvalReady, pending: approvalSaving, save: saveApprovalPolicy, retry: retryApprovalPolicy } = useApprovalPolicy(transport, paired)
   const [drawerOpen, setDrawerOpen] = useState(false)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const historyLayout = useResizableHistory()
+  const sidebarCollapsed = historyLayout.collapsed
   const [mobileLayout, setMobileLayout] = useState(() => window.matchMedia('(max-width: 767px)').matches)
   useEffect(() => {
     const media = window.matchMedia('(max-width: 767px)')
@@ -83,6 +92,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   }, [])
   const [running, setRunning] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [stopError, setStopError] = useState('')
+  const stopLock = useRef(false)
   const [status, setStatus] = useState<RunStatus[]>([])
   const [traces, setTraces] = useState<Record<string, TraceState>>({})
   const [persistedTraceFallback, setPersistedTraceFallback] = useState(false)
@@ -160,7 +171,16 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const [query, setQuery] = useState('')
   const [editingId, setEditingId] = useState<string>()
   const [editingTitle, setEditingTitle] = useState('')
+  const [renameSaving, setRenameSaving] = useState(false)
+  const [renameError, setRenameError] = useState('')
+  const [editingProject, setEditingProject] = useState<WebProject>()
+  const [projectOrderSaving, setProjectOrderSaving] = useState(false)
+  const projectOrderLock = useRef(false)
   const [menuId, setMenuId] = useState<string>()
+  const [sidebarGrouping, setSidebarGrouping] = useState(() => localStorage.getItem('pulse-sidebar-grouping') === 'merged' ? 'merged' : 'projects')
+  const [sidebarSort, setSidebarSort] = useState(() => localStorage.getItem('pulse-sidebar-sort') === 'created' ? 'created' : 'updated')
+  useEffect(() => { localStorage.setItem('pulse-sidebar-grouping', sidebarGrouping) }, [sidebarGrouping])
+  useEffect(() => { localStorage.setItem('pulse-sidebar-sort', sidebarSort) }, [sidebarSort])
   const menuIdRef = useRef(menuId)
   menuIdRef.current = menuId
   const detailsOpen = route.query.get('details') === '1'
@@ -174,15 +194,15 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   browserPanelRoute.current = { selectedId, route, patchQuery }
   const surfacedBrowser = useRef(new Set<string>())
   useEffect(() => {
-    if (!selectedId || route.page !== 'work') return
+    if (!window.pulseDesktop?.nativeBrowser || !selectedId || route.page !== 'work') return
     let active = true
     const refresh = async () => {
       try {
-        const result = await apiJson<{ sessions: Array<{ id: string; kind: string; state: string; conversationId?: string; owner: string }> }>(transport, '/api/automation/sessions')
+        const result = await apiJson<{ sessions: Array<{ id: string; kind: string; mode: string; state: string; conversationId?: string; owner: string }> }>(transport, '/api/automation/sessions')
         const current = browserPanelRoute.current
         if (!active || current.selectedId !== selectedId) return
         for (const session of result.sessions) {
-          if (session.kind !== 'browser' || session.conversationId !== selectedId || session.state === 'closed' || session.owner.startsWith('device:') || surfacedBrowser.current.has(session.id)) continue
+          if (session.kind !== 'browser' || session.mode !== 'native' || session.conversationId !== selectedId || session.state === 'closed' || session.owner.startsWith('device:') || surfacedBrowser.current.has(session.id)) continue
           surfacedBrowser.current.add(session.id)
           const saved = readPreviewState(selectedId), savedTarget = saved.tabs.find(item => previewKey(item) === saved.active)
           if (current.route.query.get('previewHidden') === '1' || session.owner.startsWith('conversation:') && (current.route.query.has('artifact') || current.route.query.has('file') || current.route.query.has('diff') || savedTarget && savedTarget.kind !== 'browser')) continue
@@ -250,7 +270,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     if (cached) { setMessages(cached.messages); setOlderCursor(cached.before); setLoading(false) }
     historyAbort.current?.abort(); const controller = new AbortController(); historyAbort.current = controller
     setMenuId(undefined); setLoadError(''); setStatus([]); setReviewNote('')
-    setRunning(false); setStopping(false); setRecoveryRun(undefined)
+    setRunning(false); setStopping(false); setStopError(''); stopLock.current = false; setRecoveryRun(undefined)
     if (saveSelection) window.localStorage.setItem(historyStorageKey, conversation.id)
     try {
       const page = transport.messages ? await transport.messages(conversation.id, undefined, controller.signal) : { before: undefined, items: await apiJson<MessageList>(transport, `/api/web/conversations/${encodeURIComponent(conversation.id)}/messages`, { signal: controller.signal }) }
@@ -497,7 +517,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     const cached = target ? historyCache.current.get(target) : undefined
     selectedIdRef.current = undefined; setSelectedId(undefined)
     setOlderCursor(cached?.before)
-    setDrawerOpen(false); setMessages(cached?.messages ?? []); setStatus([]); setReviewNote(''); setRunning(false); setStopping(false); setRecoveryRun(undefined)
+    setDrawerOpen(false); setMessages(cached?.messages ?? []); setStatus([]); setReviewNote(''); setRunning(false); setStopping(false); setStopError(''); stopLock.current = false; setRecoveryRun(undefined)
     if (route.page === 'chat') void loaders.current.loadAssistant()
     else if (route.page === 'work') void loaders.current.loadHistory(route.conversationId)
     else setLoading(false)
@@ -588,7 +608,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         } else void readLatestMessages(transport, conversationId).then(result => {
           if (selectedIdRef.current === conversationId) setMessages(mergeMessages(conversationId, result.filter(message => message.role !== 'system')))
         }).catch(() => undefined)
-        if (selectedIdRef.current === conversationId) { setRunning(false); setStopping(false) }
+        if (selectedIdRef.current === conversationId) { setRunning(false); setStopping(false); setStopError(''); stopLock.current = false }
       }
     }
     const subscribe = (cursor: number) => {
@@ -689,7 +709,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   }, [paired, route.page, startRun, transport])
 
   const messageQueue = useMessageQueue(transport, queueScope, paired && serviceConnected, (queue, entry, runId) => {
-    const message: WebMessage = { text: entry.payload.text, ...(entry.payload.attachments?.length ? { attachments: entry.payload.attachments } : {}), ...(entry.payload.skills?.length ? { skills: entry.payload.skills } : {}), ...(entry.payload.mentionedFiles?.length ? { mentionedFiles: entry.payload.mentionedFiles } : {}), id: `msg-${entry.requestId}`, requestId: entry.requestId, runId, role: 'user', deliveryState: 'replying', createdAt: entry.createdAt }
+    const message: WebMessage = { text: entry.payload.text, ...(entry.payload.attachments?.length ? { attachments: entry.payload.attachments } : {}), ...(entry.payload.skills?.length ? { skills: entry.payload.skills } : {}), ...(entry.payload.richContent ? { richContent: entry.payload.richContent } : {}), ...(entry.payload.mentionedFiles?.length ? { mentionedFiles: entry.payload.mentionedFiles } : {}), id: `msg-${entry.requestId}`, requestId: entry.requestId, runId, role: 'user', deliveryState: 'replying', createdAt: entry.createdAt }
     rememberMessage(queue.conversationId, message)
     setConversations(items => items.map(item => item.id === queue.conversationId ? { ...item, activeRunId: runId } : item))
     if (queue.surface === 'chat') {
@@ -718,23 +738,24 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     } finally { setLoadingOlder(false) }
   }
 
-  const send = async (payload?: { text: string; attachments?: WebAttachment[] | undefined; skills?: string[] | undefined; mentionedFiles?: string[] | undefined; requestId?: string | undefined } | FormEvent, behavior: FollowupBehavior = messageQueue.behavior) => {
+  const send = async (payload?: (ComposerPayload & { requestId?: string | undefined }) | FormEvent, behavior: FollowupBehavior = messageQueue.behavior) => {
     if (payload && 'preventDefault' in payload) payload.preventDefault()
     const text = payload && 'text' in payload ? payload.text.trim() : draft.trim()
     const attachments = payload && 'text' in payload ? payload.attachments : undefined
     const skills = payload && 'text' in payload ? payload.skills : undefined
     const mentionedFiles = payload && 'text' in payload ? payload.mentionedFiles : undefined
+    const richContent = payload && 'text' in payload ? payload.richContent : undefined
     const hasAttachments = Boolean(attachments?.length)
 
     const sendEpoch = routeEpoch.current
-    if (loading || loadError) return false
+    if (loading || loadError || stopping || stopLock.current) return false
     const busy = Boolean(running || selected?.activeRunId)
     const hasQueued = Boolean(currentQueue?.entries.length)
     if (behavior === 'queue' && (busy || hasQueued) && selected?.id) {
       if ((!text && !hasAttachments) || !paired || !serviceConnected || submitting) return false
       if (!messageQueue.controller) { setToast('本地队列尚未就绪，草稿已保留。'); return false }
       try {
-        await messageQueue.controller.enqueue(selected.id, surfaceMode, { text, attachments, skills, mentionedFiles }, selected.activeRunId)
+        await messageQueue.controller.enqueue(selected.id, surfaceMode, { text, attachments, skills, mentionedFiles, richContent }, selected.activeRunId)
         return true
       } catch { setToast('队列未能保存，草稿和附件已保留。'); return false }
     }
@@ -754,7 +775,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         createdAt: new Date().toISOString(),
         ...(attachments?.length ? { attachments } : {}),
         ...(skills?.length ? { skills } : {}),
-        ...(mentionedFiles?.length ? { mentionedFiles } : {}),
+        ...(mentionedFiles?.length ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}),
       }
       rememberMessage(assistantConversation.id, optimisticMessage)
       setMessages(current => [...current.filter(message => message.id !== optimisticId), optimisticMessage])
@@ -768,7 +789,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
             text,
             ...(attachments?.length ? { attachments } : {}),
             ...(skills?.length ? { skills } : {}),
-            ...(mentionedFiles?.length ? { mentionedFiles } : {}),
+            ...(mentionedFiles?.length ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}),
           })
         )
         setMessages(current => current.map(message => {
@@ -785,7 +806,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       } catch (error) {
         if (behavior === 'queue' && error instanceof ApiError && error.status === 409 && error.detail === 'CONVERSATION_BUSY' && messageQueue.controller) {
           try {
-            await messageQueue.controller.enqueue(assistantConversation.id, 'chat', { text, attachments, skills, mentionedFiles }, undefined, id)
+            await messageQueue.controller.enqueue(assistantConversation.id, 'chat', { text, attachments, skills, mentionedFiles, richContent }, undefined, id)
             localMessages.current.set(assistantConversation.id, (localMessages.current.get(assistantConversation.id) ?? []).filter(message => message.id !== optimisticId))
             if (selectedIdRef.current === assistantConversation.id) setMessages(items => items.filter(message => message.id !== optimisticId))
             clearSubmittedDraft(id); return true
@@ -809,7 +830,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     submittedDelivery.current.set(requestId, behavior)
     const pendingId = `pending-${requestId}`
     if (!(payload && 'text' in payload && payload.requestId)) rememberSubmittedDraft(requestId, initialSelection ?? 'new')
-    const optimisticMessage: WebMessage = { id: pendingId, requestId, deliveryState: 'queued', role: 'user', text, createdAt: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}), ...(skills?.length ? { skills } : {}), ...(mentionedFiles?.length ? { mentionedFiles } : {}) }
+    const optimisticMessage: WebMessage = { id: pendingId, requestId, deliveryState: 'queued', role: 'user', text, createdAt: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}), ...(skills?.length ? { skills } : {}), ...(mentionedFiles?.length ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}) }
     rememberMessage(initialSelection ?? 'new', optimisticMessage)
     setMessages(current => [...current.filter(message => message.id !== pendingId), optimisticMessage])
     try {
@@ -829,15 +850,13 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         }
         setConversations(items => [created, ...items])
       }
-      const response = await apiJson<{ runId: string }>(
-        transport,
-        `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
-        jsonRequest('POST', {
+      const response = await submitWorkMessage(
+        transport, conversationId, {
           text, requestId, delivery: behavior === 'immediate' ? 'immediate' : 'whenIdle',
           ...(attachments?.length ? { attachments } : {}),
           ...(skills?.length ? { skills } : {}),
-          ...(mentionedFiles?.length ? { mentionedFiles } : {}),
-        })
+          ...(mentionedFiles?.length ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}),
+        }
       )
       patchLocalMessage(conversationId, pendingId, { deliveryState: 'replying', runId: response.runId })
       if (selectedIdRef.current === conversationId) {
@@ -850,7 +869,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     } catch (error) {
       if (behavior === 'queue' && error instanceof ApiError && error.status === 409 && error.detail === 'CONVERSATION_BUSY' && messageQueue.controller && conversationId) {
         try {
-          await messageQueue.controller.enqueue(conversationId, 'work', { text, attachments, skills, mentionedFiles }, undefined, requestId)
+          await messageQueue.controller.enqueue(conversationId, 'work', { text, attachments, skills, mentionedFiles, richContent }, undefined, requestId)
           localMessages.current.set(conversationId, (localMessages.current.get(conversationId) ?? []).filter(message => message.id !== pendingId))
           if (selectedIdRef.current === conversationId) setMessages(items => items.filter(message => message.id !== pendingId))
           clearSubmittedDraft(requestId); return true
@@ -864,31 +883,22 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     return false
   }
 
-  const stopRunFor = async (runId: string, conversationId: string) => {
-    if (stopping) return
-    setStopping(true)
-    if (messageQueue.queues.some(queue => queue.conversationId === conversationId)) await messageQueue.controller?.pause(conversationId, true).catch(() => setToast('队列暂停未保存，正在停止任务。'))
-    try {
-      await apiJson(transport, `/api/runs/${encodeURIComponent(runId)}/cancel`, jsonRequest('POST'))
-      setToast('已发送停止请求。')
-    } catch { setStopping(false); setToast('停止请求未送达，请检查连接。') }
-  }
-
   const stopRun = async () => {
-    if (!selected?.activeRunId || stopping) return
-    setStopping(true)
+    if (!selected?.activeRunId || stopping || stopLock.current) return
+    const stoppingConversation = selected.id, stoppingEpoch = routeEpoch.current
+    stopLock.current = true; setStopping(true); setStopError('')
     if (currentQueue) await messageQueue.controller?.pause(selected.id, true).catch(() => setToast('队列暂停未保存，正在停止任务。'))
     try { await apiJson(transport, surfaceMode === 'chat' ? `/api/assistant/runs/${encodeURIComponent(selected.activeRunId)}/cancel` : `/api/runs/${encodeURIComponent(selected.activeRunId)}/cancel`, jsonRequest('POST')) }
-    catch { setStopping(false); setToast('停止请求未送达，请检查连接。') }
+    catch { if (selectedIdRef.current === stoppingConversation && routeEpoch.current === stoppingEpoch) { stopLock.current = false; setStopping(false); setStopError('停止请求未送达，请检查连接后重试。') } }
   }
 
   const retryWorkMessage = async (message: WebMessage) => {
     const conversationId = selectedId
     if (!message.requestId || submitting || sendLock.current) return
-    if (!conversationId) { await send({ text: message.text, requestId: message.requestId, attachments: message.attachments, skills: message.skills, mentionedFiles: message.mentionedFiles }); return }
+    if (!conversationId) { await send({ text: message.text, requestId: message.requestId, attachments: message.attachments, skills: message.skills, richContent: message.richContent, mentionedFiles: message.mentionedFiles }); return }
     sendLock.current = true; setSubmitting(true)
     try {
-      const response = await apiJson<{ runId: string }>(transport, `/api/conversations/${encodeURIComponent(conversationId)}/messages`, jsonRequest('POST', { requestId: message.requestId, delivery: submittedDelivery.current.get(message.requestId) === 'immediate' ? 'immediate' : 'whenIdle', text: message.text, attachments: message.attachments, skills: message.skills, mentionedFiles: message.mentionedFiles }))
+      const response = await submitWorkMessage(transport, conversationId, { requestId: message.requestId, delivery: submittedDelivery.current.get(message.requestId) === 'immediate' ? 'immediate' : 'whenIdle', text: message.text, ...(message.attachments ? { attachments: message.attachments } : {}), ...(message.skills ? { skills: message.skills } : {}), ...(message.mentionedFiles ? { richContent: message.richContent, mentionedFiles: message.mentionedFiles } : {}) })
       patchLocalMessage(conversationId, message.id, { deliveryState: 'replying', runId: response.runId })
       if (selectedIdRef.current === conversationId) { setMessages(items => items.map(item => item.id === message.id ? { ...item, deliveryState: 'replying', runId: response.runId } : item)); setLoadError(''); startRun(response.runId, conversationId) }
       setConversations(items => items.map(item => item.id === conversationId ? { ...item, activeRunId: response.runId } : item))
@@ -904,7 +914,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     const isCurrent = () => selectedIdRef.current === conversationId && routeEpoch.current === retryEpoch
     sendLock.current = true; setSubmitting(true)
     try {
-      const receipt = await apiJson<{ conversationId: string; messageId: string; runId: string; state: WebAssistantMessageReceipt['state'] }>(transport, '/api/assistant/messages', jsonRequest('POST', { requestId: message.requestId, delivery: submittedDelivery.current.get(message.requestId) === 'immediate' ? 'immediate' : 'whenIdle', text: message.text, retry: true, attachments: message.attachments, skills: message.skills, mentionedFiles: message.mentionedFiles }))
+      const receipt = await apiJson<{ conversationId: string; messageId: string; runId: string; state: WebAssistantMessageReceipt['state'] }>(transport, '/api/assistant/messages', jsonRequest('POST', { requestId: message.requestId, delivery: submittedDelivery.current.get(message.requestId) === 'immediate' ? 'immediate' : 'whenIdle', text: message.text, retry: true, attachments: message.attachments, skills: message.skills, richContent: message.richContent, mentionedFiles: message.mentionedFiles }))
       const deliveryState = receipt.state === 'failed' ? 'failed' : receipt.state === 'interrupted' ? 'interrupted' : receipt.state === 'queued' ? 'queued' : receipt.state === 'replying' ? 'replying' : undefined
       const updateMessage = (item: WebMessage): WebMessage => {
         if (item.id !== message.id) return item
@@ -1000,10 +1010,19 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
           })
         }).catch(() => undefined)
       }
-      setToast(interactionKind === 'ask' ? '答案已统一提交。' : '审批结果已提交。')
+      setToast(interactionKind === 'ask' ? '答案已提交。' : '审批结果已提交。')
       window.setTimeout(() => setToast(''), 2200)
       return true
-    } catch (error) { if (error instanceof ApiError && error.status >= 400 && error.status < 500) forgetRequest(); setToast('提交失败，内容已保留，请检查连接后重试。'); return false }
+    } catch (error) {
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500) forgetRequest()
+      if (error instanceof ApiError && ['RUN_NOT_ACTIVE', 'RUN_NOT_FOUND', 'INTERACTION_GROUP_MISMATCH', 'EFFECT_NOT_REPLYABLE'].includes(error.detail ?? '')) {
+        setStatus(items => items.filter(item => item.kind !== 'interaction' || item.runId !== runId || item.groupId !== groupId))
+        setWorkInteractions(items => items.filter(item => item.runId !== runId || item.groupId !== groupId))
+        setToast('此请求已处理或已过期。')
+        return false
+      }
+      setToast('提交失败，内容已保留，请检查连接后重试。'); return false
+    }
   }
 
   const setApprovalPolicy = async (policy: 'manual' | 'delegate') => {
@@ -1012,15 +1031,21 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     } catch { setToast('审核方式保存失败，请检查连接后重试。'); return false }
   }
 
-  const renameConversation = async (conversation: WebConversation) => {
-    if (editingId !== conversation.id) { setEditingId(conversation.id); setEditingTitle(conversation.title); setMenuId(undefined); return }
+  const beginRenameConversation = (conversation: WebConversation) => {
+    setEditingId(conversation.id); setEditingTitle(conversation.title); setRenameError(''); setMenuId(undefined)
+  }
+  const renameConversation = async () => {
+    const conversation = conversations.find(item => item.id === editingId)
     const title = editingTitle.trim()
-    if (!title || title === conversation.title) { setEditingId(undefined); return }
+    if (!conversation || !title || renameSaving) return
+    if (title === conversation.title) { setEditingId(undefined); return }
+    setRenameSaving(true); setRenameError('')
     try {
       const updated = await apiJson<WebConversation>(transport, `/api/conversations/${encodeURIComponent(conversation.id)}`, jsonRequest('PATCH', { title }))
       setConversations(items => items.map(item => item.id === conversation.id ? { ...item, title: updated.title } : item))
       setEditingId(undefined)
-    } catch { setToast('标题更新失败，请重试。') }
+    } catch { setRenameError('标题更新失败，请重试。') }
+    finally { setRenameSaving(false) }
   }
 
   const togglePinned = async (conversation: WebConversation) => {
@@ -1065,32 +1090,27 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     } catch (error) { setToast(error instanceof ApiError && (error.status === 409 || error.detail === 'PROJECT_ALREADY_REGISTERED') ? '该目录已经登记。' : '项目添加失败，请检查目录路径。') }
   }
 
-  const renameProject = async (project: WebProject) => {
-    const name = (await dialogs.prompt('项目名称', project.name))?.trim()
-    if (!name || name === project.name) return
-    try {
-      const updated = await apiJson<WebProject>(transport, `/api/projects/${encodeURIComponent(project.id)}`, jsonRequest('PATCH', { name }))
-      setProjects(items => items.map(item => item.id === project.id ? updated : item))
-    } catch { setToast('项目名称更新失败。') }
-  }
 
   const toggleProjectPinned = async (project: WebProject) => {
     try {
       const updated = await apiJson<WebProject>(transport, `/api/projects/${encodeURIComponent(project.id)}`, jsonRequest('PATCH', { pinned: !project.pinned }))
-      setProjects(items => items.map(item => item.id === project.id ? updated : item)); setMenuId(undefined)
+      setProjects(items => updated.pinned ? [updated, ...items.filter(item => item.id !== updated.id)] : items.map(item => item.id === updated.id ? updated : item)); setMenuId(undefined)
     } catch { setToast('项目置顶状态更新失败。') }
   }
 
-  const reorderProject = async (project: WebProject, direction: -1 | 1) => {
-    const index = orderedProjects.findIndex(item => item.id === project.id)
-    const nextIndex = index + direction
-    if (index < 0 || nextIndex < 0 || nextIndex >= orderedProjects.length) return
-    const next = [...orderedProjects]; [next[index], next[nextIndex]] = [next[nextIndex]!, next[index]!]
-    try {
-      await apiJson(transport, '/api/projects/order', jsonRequest('POST', { ids: next.map(item => item.id) }))
-      setProjects(next); setMenuId(undefined)
-    } catch { setToast('项目排序保存失败。') }
+  const reorderProject = async (source: string, target: string, after: boolean) => {
+    if (source === target || projectOrderLock.current) return
+    const moved = projects.find(item => item.id === source)
+    if (!moved || !projects.some(item => item.id === target)) return
+    const next = projects.filter(item => item.id !== source)
+    next.splice(next.findIndex(item => item.id === target) + (after ? 1 : 0), 0, moved)
+    if (next.every((item, index) => item.id === projects[index]?.id)) return
+    projectOrderLock.current = true; setProjectOrderSaving(true); setProjects(next); setMenuId(undefined)
+    try { await apiJson(transport, '/api/projects/order', jsonRequest('POST', { ids: next.map(item => item.id) })) }
+    catch { setToast('项目排序保存失败，已重新读取原顺序。'); await refreshProjects() }
+    finally { projectOrderLock.current = false; setProjectOrderSaving(false) }
   }
+  const projectDrag = useProjectDrag((source, target, after) => void reorderProject(source, target, after), projectOrderSaving)
 
   const removeProject = async (project: WebProject) => {
     if (!await dialogs.confirm(`移除项目“${project.name}”？对话会归档，目录和文件不会删除。`)) return
@@ -1099,7 +1119,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       setProjects(items => items.filter(item => item.id !== project.id))
       setConversations(items => items.filter(item => item.projectId !== project.id))
       if (selectedProjectId === project.id || selected?.projectId === project.id) selectProject(undefined)
-      setToast('项目已移除，对话已归档，目录文件仍保留。')
+      setToast('项目已移除，对话已归档，目录文件仍保留。'); return true
     } catch (error) { setToast(error instanceof ApiError && error.status === 409 ? '项目中有运行中或待恢复的对话，暂时不能移除。' : '项目移除失败。') }
   }
 
@@ -1149,31 +1169,42 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     : [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'interaction' }> => item.kind === 'interaction')
   const visibleConversations = useMemo(() => conversations
     .filter(item => `${item.title} ${item.cwd} ${projects.find(project => project.id === item.projectId)?.name ?? ''}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
-    .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.updatedAt.localeCompare(a.updatedAt)), [conversations, projects, query])
-  const orderedProjects = useMemo(() => [...projects].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))), [projects])
-  const ungroupedConversations = visibleConversations.filter(item => !projects.some(project => project.id === item.projectId))
+    .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || (sidebarSort === 'created' ? b.createdAt.localeCompare(a.createdAt) : b.updatedAt.localeCompare(a.updatedAt))), [conversations, projects, query, sidebarSort])
+  const orderedProjects = projects
+  const ungroupedConversations = sidebarGrouping === 'merged' ? visibleConversations : visibleConversations.filter(item => !projects.some(project => project.id === item.projectId))
   const pinnedConversations = ungroupedConversations.filter(item => item.pinned)
-  const groupedHistory = groupConversations(ungroupedConversations.filter(item => !item.pinned))
-  const conversationRows = (items: WebConversation[]) => items.map(conversation => <div key={conversation.id} className={`history-row ${conversation.id === selectedId ? 'selected' : ''}`}>
-    {editingId === conversation.id ? <form className="rename-form" onSubmit={event => { event.preventDefault(); void renameConversation(conversation) }}><PulseInput value={editingTitle} autoFocus maxLength={80} onChange={event => setEditingTitle(event.target.value)} aria-label="对话标题" /><PulseButton aria-label="保存标题">✓</PulseButton><PulseButton type="button" aria-label="取消重命名" onClick={() => setEditingId(undefined)}>×</PulseButton></form> : <>
-      <PulseButton className="history-item" title={conversation.title} onClick={() => void openConversation(conversation)}><span>{conversation.title || '新对话'}</span>{conversation.pinned && <small className="history-pin" aria-label="已置顶">置顶</small>}{conversation.activeRunId && <i aria-label="运行状态待确认" />}</PulseButton>
-      <Dropdown destroyOnHidden trigger={['click']} open={menuId === conversation.id} onOpenChange={open => setMenuId(open ? conversation.id : undefined)} menu={{
-        triggerSubMenuAction: 'click',
-        items: [
-          { key: 'rename', label: '重命名', onClick: () => void renameConversation(conversation) },
-          { key: 'pin', label: conversation.pinned ? '取消置顶' : '置顶', onClick: () => void togglePinned(conversation) },
-          { key: 'move', label: '移动到项目', disabled: Boolean(conversation.activeRunId) || !projects.some(project => project.id !== conversation.projectId) && !conversation.projectId, children: [
-            ...(conversation.projectId ? [{ key: 'ungrouped', label: '未分组', onClick: () => void moveConversation(conversation) }] : []),
-            ...orderedProjects.filter(project => project.id !== conversation.projectId).map(project => ({ key: project.id, label: project.name, disabled: !project.available, onClick: () => void moveConversation(conversation, project) })),
-          ] },
-          { type: 'divider' },
-          { key: 'archive', label: '归档', disabled: Boolean(conversation.activeRunId), onClick: () => void archiveConversation(conversation) },
-          { key: 'delete', label: '删除', danger: true, disabled: Boolean(conversation.activeRunId), onClick: () => void deleteConversation(conversation) },
-        ],
-        onClick: () => setMenuId(undefined),
-      }}><PulseButton className="row-menu-button" aria-label={`对话操作：${conversation.title}`} aria-expanded={menuId === conversation.id}><Icon name="more"/></PulseButton></Dropdown>
-    </>}
-  </div>)
+  const groupedHistory = groupConversations(ungroupedConversations.filter(item => !item.pinned), sidebarSort === 'created' ? 'createdAt' : 'updatedAt')
+  const conversationRows = (items: WebConversation[]) => items.map(conversation => {
+    const project = projects.find(item => item.id === conversation.projectId)
+    const menu: MenuProps = {
+      triggerSubMenuAction: 'click',
+      items: [
+        { key: 'rename', icon: <Icon name="edit" size={15}/>, label: '重命名', onClick: () => beginRenameConversation(conversation) },
+        { key: 'pin', icon: <Icon name="pin" size={15}/>, label: conversation.pinned ? '取消置顶' : '置顶', onClick: () => void togglePinned(conversation) },
+        { key: 'move', icon: <Icon name="folder" size={15}/>, label: '移动到项目', disabled: Boolean(conversation.activeRunId) || !projects.some(item => item.id !== conversation.projectId) && !conversation.projectId, children: [
+          ...(conversation.projectId ? [{ key: 'ungrouped', label: '未分组', onClick: () => void moveConversation(conversation) }] : []),
+          ...orderedProjects.filter(item => item.id !== conversation.projectId).map(item => ({ key: item.id, label: item.name, disabled: !item.available, onClick: () => void moveConversation(conversation, item) })),
+        ] },
+        { type: 'divider' },
+        { key: 'archive', icon: <Icon name="archive" size={15}/>, label: '归档', disabled: Boolean(conversation.activeRunId), onClick: () => void archiveConversation(conversation) },
+        { key: 'delete', icon: <Icon name="close" size={15}/>, label: '删除', danger: true, disabled: Boolean(conversation.activeRunId), onClick: () => void deleteConversation(conversation) },
+      ], onClick: () => setMenuId(undefined),
+    }
+    return <Dropdown key={conversation.id} classNames={{ root: 'sidebar-menu' }} destroyOnHidden trigger={['click', 'contextMenu']} open={menuId === conversation.id} onOpenChange={open => setMenuId(open ? conversation.id : undefined)} menu={menu}>
+      <div className={`history-row ${conversation.id === selectedId ? 'selected' : ''}`}>
+        <>
+          <Popover placement="right" mouseEnterDelay={0.7} trigger={['hover', 'focus']} classNames={{ root: 'sidebar-conversation-popover' }} content={<div className="sidebar-conversation-info"><header><strong>{conversation.title || '新对话'}</strong><time>{new Date(conversation.updatedAt).toLocaleString()}</time></header><p><Icon name="folder" size={15}/>{project?.name ?? '未分组'}</p><p><Icon name="terminal" size={15}/><span>{conversation.cwd}</span></p><small>{conversation.activeRunId ? '任务状态将在打开会话后同步' : '在当前连接的电脑上运行'}</small></div>}>
+            <PulseButton className="history-item" onDoubleClick={event => { event.preventDefault(); event.stopPropagation(); beginRenameConversation(conversation) }} onClick={event => { event.stopPropagation(); if (event.detail < 2) void openConversation(conversation) }}><HoverTitle>{conversation.title || '新对话'}</HoverTitle>{conversation.pinned && <small className="history-pin" aria-label="已置顶"><Icon name="pin" size={12}/></small>}{conversation.activeRunId && <i aria-label="运行状态待确认" />}</PulseButton>
+          </Popover>
+          <div className="history-row-actions">
+            <PulseButton className="history-quick-action" aria-label={`${conversation.pinned ? '取消置顶' : '置顶'}对话：${conversation.title}`} onClick={event => { event.stopPropagation(); void togglePinned(conversation) }}><Icon name="pin" size={14}/></PulseButton>
+            <PulseButton className="history-quick-action" aria-label={`归档对话：${conversation.title}`} disabled={Boolean(conversation.activeRunId)} onClick={event => { event.stopPropagation(); void archiveConversation(conversation) }}><Icon name="archive" size={14}/></PulseButton>
+            <PulseButton className="row-menu-button" aria-label={`对话操作：${conversation.title}`} aria-expanded={menuId === conversation.id}><Icon name="more" size={16}/></PulseButton>
+          </div>
+        </>
+      </div>
+    </Dropdown>
+  })
   const switchInHistory = surfaceMode === 'work' && (drawerOpen || (!mobileLayout && !sidebarCollapsed))
   const modeSwitch = <div className="surface-switch" role="tablist" aria-label="Pulse 工作模式"><PulseButton role="tab" aria-selected={surfaceMode === 'chat'} className={surfaceMode === 'chat' ? 'active' : ''} onClick={() => switchMode('chat')}>聊天</PulseButton><PulseButton role="tab" aria-selected={surfaceMode === 'work'} className={surfaceMode === 'work' ? 'active' : ''} onClick={() => switchMode('work')}>工作</PulseButton></div>
   const history = <aside className="history" aria-label="历史对话">
@@ -1181,30 +1212,42 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     <div className="history-primary">{!mobileLayout && transfer.importButton}<PulseButton onClick={() => selectProject(undefined)}><Icon name="home"/><span>全部对话</span></PulseButton></div>
     <label className="history-search"><Icon name="search"/><PulseInput ref={searchRef} value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索对话" aria-label="搜索对话" /><kbd>⌘ K</kbd></label>
     <div className="history-list">
-      <section className="project-nav-group"><header><PulseButton className="project-nav-heading" aria-expanded={!collapsedProjectIds.includes('projects') || Boolean(query.trim())} onClick={() => setProjectCollapsed('projects', !collapsedProjectIds.includes('projects'))}><Icon className={collapsedProjectIds.includes('projects') && !query.trim() ? 'is-collapsed' : ''} name="chevron"/> 项目</PulseButton><PulseButton className="project-add" disabled={!sessionCapabilities.canRegisterProject || !sessionCapabilities.canBrowseHostPaths} title="添加电脑项目" aria-label="添加电脑项目" onClick={() => setProjectPickerOpen(true)}><Icon name="plus"/></PulseButton></header>{(!collapsedProjectIds.includes('projects') || query.trim()) && <>
-        {orderedProjects.map((project, index) => {
+      <section className="project-nav-group"><header><PulseButton className="project-nav-heading" aria-expanded={!collapsedProjectIds.includes('projects') || Boolean(query.trim())} onClick={() => setProjectCollapsed('projects', !collapsedProjectIds.includes('projects'))}>项目 <Icon className={collapsedProjectIds.includes('projects') && !query.trim() ? 'is-collapsed' : ''} name="chevron"/></PulseButton><Dropdown classNames={{ root: 'sidebar-menu' }} trigger={['click']} menu={{ triggerSubMenuAction: 'click', items: [
+          { key: 'grouping', label: '整理侧边栏', icon: <Icon name="menu" size={15}/>, children: [
+            { key: 'projects', label: `${sidebarGrouping === 'projects' ? '✓ ' : ''}分项目显示`, onClick: () => setSidebarGrouping('projects') },
+            { key: 'merged', label: `${sidebarGrouping === 'merged' ? '✓ ' : ''}合并显示`, onClick: () => setSidebarGrouping('merged') },
+          ] },
+          { key: 'sort', label: '聊天排序方式', icon: <Icon name="down" size={15}/>, children: [
+            { key: 'updated', label: `${sidebarSort === 'updated' ? '✓ ' : ''}最近更新`, onClick: () => setSidebarSort('updated') },
+            { key: 'created', label: `${sidebarSort === 'created' ? '✓ ' : ''}创建时间`, onClick: () => setSidebarSort('created') },
+          ] },
+        ] }}><PulseButton className="sidebar-organize" aria-label="整理侧边栏"><Icon name="more"/></PulseButton></Dropdown><PulseButton className="project-add" disabled={!sessionCapabilities.canRegisterProject || !sessionCapabilities.canBrowseHostPaths} title="添加电脑项目" aria-label="添加电脑项目" onClick={() => setProjectPickerOpen(true)}><Icon name="plus"/></PulseButton></header>{(!collapsedProjectIds.includes('projects') || query.trim()) && <>
+        {sidebarGrouping === 'projects' && orderedProjects.map(project => {
           const items = visibleConversations.filter(item => item.projectId === project.id)
           if (query.trim() && !items.length && !project.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())) return null
           const expanded = !collapsedProjectIds.includes(project.id) || Boolean(query.trim())
-          return <section className="project-history" key={project.id} aria-label={`${project.name}项目对话`}>
-            <div className={`project-nav-row ${selectedProjectId === project.id ? 'selected' : ''}`}>
-              <PulseButton title={project.cwd} aria-label={`${expanded ? '折叠' : '展开'}项目：${project.name}`} aria-expanded={expanded} onClick={() => setProjectCollapsed(project.id, expanded)}><Icon className={`project-chevron ${expanded ? '' : 'is-collapsed'}`} name="chevron"/><span className="project-glyph"><Icon name="folder"/></span><span className="project-name">{project.name}</span>{!project.available && <small>不可用</small>}<small className="project-count">{items.length}</small></PulseButton>
-              <PulseButton className="project-new-button" aria-label={`在${project.name}中新建对话`} disabled={!project.available} onClick={() => { setProjectCollapsed(project.id, false); selectProject(project.id) }}><Icon name="plus"/></PulseButton>
-              <Dropdown destroyOnHidden trigger={['click']} open={menuId === project.id} onOpenChange={open => setMenuId(open ? project.id : undefined)} menu={{ items: [
-                { key: 'rename', label: '重命名', onClick: () => void renameProject(project) },
-                { key: 'pin', label: project.pinned ? '取消置顶' : '置顶项目', onClick: () => void toggleProjectPinned(project) },
-                { key: 'up', label: '上移', disabled: index === 0, onClick: () => void reorderProject(project, -1) },
-                { key: 'down', label: '下移', disabled: index === orderedProjects.length - 1, onClick: () => void reorderProject(project, 1) },
+          const projectMenu: MenuProps = { items: [
+                { key: 'edit', icon: <Icon name="edit" size={15}/>, label: '编辑项目', onClick: () => { setMenuId(undefined); setEditingProject(project) } },
+                { key: 'pin', icon: <Icon name="pin" size={15}/>, label: project.pinned ? '取消置顶' : '置顶项目', onClick: () => void toggleProjectPinned(project) },
                 { type: 'divider' },
-                { key: 'remove', label: '移除并归档', danger: true, onClick: () => void removeProject(project) },
-              ], onClick: () => setMenuId(undefined) }}><PulseButton className="project-menu-button" aria-label={`项目操作：${project.name}`} aria-expanded={menuId === project.id}><Icon name="more"/></PulseButton></Dropdown>
-            </div>
+                { key: 'remove', icon: <Icon name="close" size={15}/>, label: '移除并归档', danger: true, onClick: () => void removeProject(project) },
+              ], onClick: () => setMenuId(undefined) }
+          return <section className="project-history" key={project.id} aria-label={`${project.name}项目对话`}>
+            <ProjectHoverCard project={project} count={conversations.filter(item => item.projectId === project.id).length} disabled={Boolean(projectDrag.dragging) || menuId === project.id} onPin={() => toggleProjectPinned(project)} onEdit={() => { setMenuId(undefined); setEditingProject(project) }}>
+            <Dropdown classNames={{ root: 'sidebar-menu' }} destroyOnHidden trigger={['click', 'contextMenu']} open={menuId === project.id} onOpenChange={open => setMenuId(open ? project.id : undefined)} menu={projectMenu}>
+              <div {...projectDrag.row(project.id)} data-project-id={project.id} data-project-dragging={projectDrag.dragging === project.id || undefined} data-drop-position={projectDrag.over?.id === project.id ? projectDrag.over.after ? 'after' : 'before' : undefined} className={`project-nav-row ${selectedProjectId === project.id && !selectedId ? 'selected' : ''}`}>
+              <PulseButton title={project.cwd} aria-label={`${expanded ? '折叠' : '展开'}项目：${project.name}`} aria-expanded={expanded} onClick={event => { event.stopPropagation(); setProjectCollapsed(project.id, expanded) }}><span className="project-glyph project-drag-grip" {...projectDrag.grip(project.id)}><Icon name={expanded ? 'folder-open' : 'folder'}/></span><span className="project-name">{project.name}</span>{!project.available && <small>不可用</small>}<small className="project-count">{items.length}</small></PulseButton>
+              <div className="project-row-actions"><PulseButton className="project-new-button" aria-label={`在${project.name}中新建对话`} disabled={!project.available} onClick={event => { event.stopPropagation(); setProjectCollapsed(project.id, false); selectProject(project.id) }}><Icon name="plus"/></PulseButton>
+                <PulseButton className="project-menu-button" aria-label={`项目操作：${project.name}`} aria-expanded={menuId === project.id}><Icon name="more"/></PulseButton></div>
+              </div>
+            </Dropdown>
+            </ProjectHoverCard>
             {expanded && <div className="project-conversations">{conversationRows(items)}{!items.length && <p className="project-empty">{query.trim() ? '没有匹配的对话' : '暂无对话'}</p>}</div>}
           </section>
         })}
         {projects.length === 0 && <p className="history-empty">还没有登记项目</p>}
       </>}</section>
-      {ungroupedConversations.length > 0 && <section className="ungrouped-history" aria-label="未分组对话"><h2>未分组</h2>
+      {ungroupedConversations.length > 0 && <section className="ungrouped-history" aria-label={sidebarGrouping === 'merged' ? '全部对话' : '未分组对话'}><h2>{sidebarGrouping === 'merged' ? '聊天' : '未分组'}</h2>
         {pinnedConversations.length > 0 && <section className="history-group"><h2>已置顶</h2>{conversationRows(pinnedConversations)}</section>}
         {groupedHistory.map(group => <section className="history-group" key={group.label}><h2>{group.label}</h2>{conversationRows(group.items)}</section>)}
       </section>}
@@ -1221,6 +1264,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const openBubbleWork = useCallback((id: string) => messageHandlers.current.openWorkNotice(id), [])
   const openBubbleFile = useCallback((input: string, runId?: string) => {
     const path = input.replace(/:\d+(?::\d+)?$/, '')
+    if (path.endsWith('/')) { messageHandlers.current.patchQuery({ workspace: 'files', path: path.replace(/\/$/, ''), file: undefined, diff: undefined, artifact: undefined, artifactRun: undefined, automation: undefined }); return }
     const artifact = artifactIndex.artifacts.find(item => (!runId || item.runId === runId) && (item.path === path || item.absolutePath === path))
     const relative = path.startsWith((selected?.cwd ?? '') + '/') ? path.slice(selected!.cwd.length + 1) : path.replace(/^\.\//, '')
     messageHandlers.current.patchQuery({ workspace: 'preview', file: artifact ? undefined : relative, artifact: artifact?.path, artifactRun: artifact?.runId, automation: undefined, diff: undefined, details: undefined })
@@ -1270,7 +1314,16 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         else if (persistedTraceFallback) out.push(<PersistedRunTrace key={`trace:${runId}`} runId={runId} transport={transport} onDiffClick={surfaceMode === 'work' ? openBubbleDiff : undefined} />)
         const card = recoveryCard(runId); if (card) out.push(card)
       }
-      out.push(<MessageBubble key={`${selectedId}:${message.id}`} mode={surfaceMode} message={message} retry={retryBubble} onOpenWork={openBubbleWork} onFileClick={path => openBubbleFile(path, message.runId)} onDiffClick={surfaceMode === 'work' && message.role === 'assistant' ? openBubbleDiff : undefined} transport={transport} conversationId={selectedId} />)
+      out.push(<MessageBubble key={`${selectedId}:${message.id}`} mode={surfaceMode} message={message} retry={retryBubble} onOpenWork={openBubbleWork} imageApi={source => {
+        if (/^https?:|^\/\//i.test(source)) return undefined
+        if (source.startsWith('/api/')) return source
+        let path = source; try { path = decodeURIComponent(source) } catch { /* Preserve malformed escapes for a safe failure. */ }
+        const artifact = artifactIndex.artifacts.find(item => (!message.runId || item.runId === message.runId) && (item.path === path || item.absolutePath === path))
+        if (artifact && selectedId) return fileApi({ kind: 'file', path: artifact.path, conversationId: selectedId, runId: artifact.runId }, 'raw')
+        if (!selected?.projectId) return undefined
+        const relative = path.startsWith(selected.cwd + '/') ? path.slice(selected.cwd.length + 1) : path.replace(/^\.\//, '')
+        return fileApi({ kind: 'file', path: relative, projectId: selected.projectId }, 'raw')
+      }} onFileClick={path => openBubbleFile(path, message.runId)} onDiffClick={surfaceMode === 'work' && message.role === 'assistant' ? openBubbleDiff : undefined} transport={transport} conversationId={selectedId} />)
       if (surfaceMode === 'work' && runId && lastMessage.get(runId) === index) { const card = deliveries(runId); if (card) out.push(card) }
       return out
     })
@@ -1289,14 +1342,19 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     }
     return items
   }
-  return <main className={`shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''} ${workbenchOpen ? 'workbench-open' : ''}`}>
-    {surfaceMode === 'work' && !drawerOpen && <div className="desktop-history">{history}</div>}
+  return <main style={surfaceMode === 'work' ? historyLayout.style : { ...historyLayout.style, '--history-width': '0px' } as import('react').CSSProperties} data-history-dragging={historyLayout.dragging || undefined} className={`shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''} ${workbenchOpen ? 'workbench-open' : ''}`}>
+    {surfaceMode === 'work' && !drawerOpen && <div className="desktop-history">{history}<div className="history-resizer" {...historyLayout.separator}/></div>}
+    <Modal open={Boolean(editingId)} title="重命名对话" className="conversation-rename-modal" okText="保存" cancelText="取消" confirmLoading={renameSaving} okButtonProps={{ disabled: !editingTitle.trim() }} onOk={() => void renameConversation()} onCancel={() => { if (!renameSaving) setEditingId(undefined) }} destroyOnHidden>
+      <PulseInput autoFocus aria-label="对话标题" maxLength={80} value={editingTitle} disabled={renameSaving} onChange={event => setEditingTitle(event.target.value)} onPressEnter={() => void renameConversation()}/>
+      {renameError && <p role="alert">{renameError}</p>}
+    </Modal>
+    {editingProject && <ProjectEditor key={editingProject.id} project={editingProject} transport={transport} canEditFolders={sessionCapabilities.canRegisterProject && sessionCapabilities.canBrowseHostPaths} onClose={() => setEditingProject(undefined)} onSaved={updated => setProjects(items => items.map(item => item.id === updated.id ? updated : item))} onRemove={async () => { if (await removeProject(editingProject)) setEditingProject(undefined) }}/>}
     <HostPathPicker open={projectPickerOpen} mode="directory" allowCreateDirectory transport={transport} onCancel={() => setProjectPickerOpen(false)} onConfirm={selection => void createProject(selection.path)} />
     {surfaceMode === 'work' && <Drawer className="pulse-history-drawer" placement="left" size="min(330px,86vw)" open={drawerOpen} onClose={() => { setDrawerOpen(false); drawerTrigger.current?.focus() }} closable={false} destroyOnHidden styles={{ body: { padding: 0 } }}>{drawerOpen && history}</Drawer>}
-    <section className="chat">
+    <ChatSurface>
       <header className={`navbar surface-${surfaceMode} ${detailsOpen ? 'details-open' : ''}`}>
         {surfaceMode === 'work' && <PulseButton ref={drawerTrigger} className="icon-button mobile-menu" onClick={() => setDrawerOpen(true)} aria-label="历史对话"><Icon name="menu"/></PulseButton>}
-        {surfaceMode === 'work' && <PulseButton className="icon-button desktop-menu" onClick={() => setSidebarCollapsed(value => !value)} aria-label={sidebarCollapsed ? '展开历史对话' : '收起历史对话'}><Icon name="menu"/></PulseButton>}
+        {surfaceMode === 'work' && <PulseButton className="icon-button desktop-menu" onClick={() => historyLayout.toggle()} aria-label={sidebarCollapsed ? '展开历史对话' : '收起历史对话'}><Icon name="menu"/></PulseButton>}
         {!switchInHistory && modeSwitch}
         <div className="navbar-title"><span className={`status-dot ${paired ? '' : 'offline'}`} /><span className="title-text" title={surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}>{surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}</span></div>
         <div className="navbar-actions">{surfaceMode === 'work' && !mobileLayout && transfer.exportButton}{surfaceMode === 'chat' && <PulseButton className="details-button" aria-label="设置" title="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings"/><span>设置</span></PulseButton>}{running && <span className="running-pill"><i />{surfaceMode === 'chat' ? '正在回复' : '运行中'}</span>}{surfaceMode === 'work' && <><PulseButton className={`workbench-trigger ${workbenchOpen ? 'active' : ''}`} onClick={() => { patchQuery({ workspace: 'preview', previewHidden: undefined, details: undefined }) }} aria-label="工作区" title="打开工作窗口"><Icon name="folder"/><span>工作区</span></PulseButton></>}<Popover open={detailsOpen} onOpenChange={open => { patchQuery({ details: open }) }} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}><PulseButton className={`details-button ${detailsOpen ? 'active' : ''}`} aria-label="对话详情" aria-expanded={detailsOpen} title="对话详情"><Icon name="info"/><span>详情</span></PulseButton></Popover></div>
@@ -1311,17 +1369,16 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       <WindowedMessages items={renderMessages()} container={messagesEl} follow={followBottom} />
       </section>
       {!atBottom && <PulseButton className="jump-bottom" onClick={() => { followBottom.current = true; setAtBottom(true); messagesEl.current?.scrollTo({ top: messagesEl.current.scrollHeight, behavior: 'smooth' }) }}>回到底部 ↓</PulseButton>}
-      <footer className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${emptyConversation && !activeInteraction ? 'is-empty' : ''}`}>
-        <MessageQueuePanel queue={currentQueue} controller={messageQueue.controller} onError={setToast} />
-        {activeInteraction && <InteractionPanel key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={approvalPolicy === 'delegate'} running={activeInteraction.conversationId ? true : running} stopping={stopping} stop={() => void (activeInteraction.conversationId ? stopRunFor(activeInteraction.runId, activeInteraction.conversationId) : stopRun())} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} setApprovalPolicy={setApprovalPolicy} />}
+      <ChatActionArea state={deriveChatState({ running, stopping, submitting, interaction: activeInteraction, stopped: status.some(item => item.kind === 'complete' && item.outcome === 'cancelled') })} stopError={stopError} onRetryStop={() => void stopRun()} className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${emptyConversation && !activeInteraction ? 'is-empty' : ''}`}>
+        {activeInteraction && <InteractionPanel key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={approvalPolicy === 'delegate'} onOpenConversation={activeInteraction.conversationId ? () => go(workUrl(activeInteraction.conversationId!)) : undefined} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} />}
+        <MessageQueuePanel key={`queue:${selectedId}`} queue={currentQueue} controller={messageQueue.controller} onError={setToast} />
         <RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || !serviceConnected || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} followupBehavior={messageQueue.behavior} onSend={async (payload, behavior) => await send(payload, behavior) === true} onStop={() => void stopRun()} toolbarExtra={composerApproval} />
         <div className={`composer-meta ${route.newWork ? 'new-chat-tools' : ''}`}>
-          {activeInteraction && composerApproval}
           {route.newWork ? <div className="new-conversation-project"><Icon name="folder"/><Select variant="borderless" aria-label="新对话所属项目" value={selectedProjectId ?? '__ungrouped__'} onChange={value => { const projectId = value === '__ungrouped__' ? undefined : value; patchQuery({ project: projectId }); setSelectedProjectId(projectId); if (projectId) window.localStorage.setItem('pulse-web-project', projectId); else window.localStorage.removeItem('pulse-web-project') }} options={[{ value: '__ungrouped__', label: '不归属项目' }, ...projects.map(project => ({ value: project.id, label: project.name }))]} popupMatchSelectWidth={false} /></div> : !activeInteraction && <div className="composer-hint">Pulse 可能会出错，请核对重要信息。</div>}
         </div>
-      </footer>
-    </section>
-    {workbenchOpen && <Suspense fallback={<div className="workbench-loading" role="status">正在打开工作窗口…</div>}><PreviewDock key={selectedId ?? selectedProjectId ?? 'unassigned'} scope={selectedId ?? selectedProjectId ?? 'unassigned'} conversationId={selectedId} projectId={selected?.projectId ?? selectedProjectId} project={projects.find(project => project.id === (selected?.projectId ?? selectedProjectId))} transport={transport} localAdmin={sessionCapabilities.localAdmin} canUseTerminal={sessionCapabilities.canUseTerminal} position={route.query} onNavigate={patchQuery} onClose={() => patchQuery({ workspace: undefined, previewHidden: '1' })} /></Suspense>}
+      </ChatActionArea>
+    </ChatSurface>
+    {workbenchOpen && <Suspense fallback={<div className="workbench-loading" role="status">正在打开工作窗口…</div>}><PreviewDock key={selectedId ?? selectedProjectId ?? 'unassigned'} scope={selectedId ?? selectedProjectId ?? 'unassigned'} conversationId={selectedId} projectId={selected?.projectId ?? selectedProjectId} project={projects.find(project => project.id === (selected?.projectId ?? selectedProjectId))} transport={transport} localAdmin={sessionCapabilities.localAdmin} canUseTerminal={sessionCapabilities.canUseTerminal} position={route.query} onNavigate={patchQuery} onClose={() => patchQuery({ workspace: undefined, artifact: undefined, artifactRun: undefined, file: undefined, automation: undefined, diff: undefined, staged: undefined, previewHidden: '1' })} /></Suspense>}
     {surfaceMode === 'work' && transfer.dialog}
     {toast && <PulseToast text={toast} />}
   </main>
@@ -1347,7 +1404,7 @@ function completeStatus(outcome: 'succeeded' | 'failed' | 'cancelled', errorCode
 function replaceStatus(items: RunStatus[], value: RunStatus): RunStatus[] {
   if (value.kind === 'tool') return [...items.filter(item => item.kind !== 'tool' || item.activityId !== value.activityId), value]
   if (value.kind === 'interaction') return [...items.filter(item => item.kind !== 'interaction' || item.groupId !== value.groupId), value]
-  if (value.kind === 'complete') return [...items.filter(item => item.kind !== 'complete'), value]
+  if (value.kind === 'complete') return [...items.filter(item => item.kind !== 'complete' && item.kind !== 'interaction'), value]
   return [...items.filter(item => item.kind !== 'status'), value]
 }
 
@@ -1369,102 +1426,15 @@ function readableTool(name: string): string {
   return labels[name] ?? '使用工具'
 }
 
-function groupConversations(items: WebConversation[]): Array<{ label: string; items: WebConversation[] }> {
+function groupConversations(items: WebConversation[], dateField: 'createdAt' | 'updatedAt' = 'updatedAt'): Array<{ label: string; items: WebConversation[] }> {
   const today = new Date(); today.setHours(0, 0, 0, 0)
   const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1)
   const week = new Date(today); week.setDate(today.getDate() - 7)
   const groups = new Map<string, WebConversation[]>()
   for (const item of items) {
-    const date = new Date(item.updatedAt)
+    const date = new Date(item[dateField])
     const label = date >= today ? '今天' : date >= yesterday ? '昨天' : date >= week ? '最近 7 天' : '更早'
     groups.set(label, [...(groups.get(label) ?? []), item])
   }
   return [...groups].map(([label, conversations]) => ({ label, items: conversations }))
-}
-
-
-
-type InteractionAnswer = { value: string } | { values: string[] } | { text: string }
-
-export function InteractionPanel({ interaction, context, reviewNote, delegated, running, stopping, stop, submit, setApprovalPolicy }: { interaction: Extract<RunStatus, { kind: 'interaction' }>; context?: string | undefined; reviewNote: string; delegated: boolean; running: boolean; stopping: boolean; stop: () => void; submit: (answers: Array<{ effectId: string; value: Record<string, unknown> }>) => Promise<boolean>; setApprovalPolicy: (policy: 'manual' | 'delegate') => Promise<boolean> }) {
-  const key = `pulse-web-interaction:${interaction.runId}:${interaction.groupId}`
-  const [answers, setAnswers] = useState<Record<string, InteractionAnswer>>(() => {
-    let restored: Record<string, InteractionAnswer> = {}
-    try { restored = JSON.parse(localStorage.getItem(key) ?? '{}') as Record<string, InteractionAnswer> } catch { /* Ignore corrupt local drafts and start empty. */ }
-    for (const question of interaction.items) if (!restored[question.effectId] && question.input.type === 'input' && typeof question.input.defaultValue === 'string') restored[question.effectId] = { text: question.input.defaultValue }
-    for (const question of interaction.items) if (!restored[question.effectId] && question.input.type === 'multi' && (typeof question.input.min !== 'number' || question.input.min === 0)) restored[question.effectId] = { values: [] }
-    return restored
-  })
-  const [index, setIndex] = useState(0)
-  const [review, setReview] = useState(false)
-  const [sending, setSending] = useState(false)
-  const [policyPending, setPolicyPending] = useState(false)
-  const [error, setError] = useState('')
-  const item = interaction.items[index]
-  const input = item?.input ?? {}
-  const options = (Array.isArray(input.options) ? input.options as Array<string | { value: string; label?: string; description?: string }> : []).filter(option => typeof option === 'string' ? option.trim() : option.value?.trim() && (option.label ?? option.value).trim())
-  const selected = item ? answers[item.effectId] : undefined
-  const persist = (next: Record<string, InteractionAnswer>) => { setAnswers(next); localStorage.setItem(key, JSON.stringify(next)); setError('') }
-  const answerValid = (question: { effectId: string; input: Record<string, unknown> }) => {
-    const answer = answers[question.effectId]
-    if (answer && 'text' in answer) return Boolean(answer.text.trim()) && answer.text.length <= 4000
-    if (question.input.type === 'choice') return Boolean(answer && 'value' in answer && answer.value.length > 0)
-    if (question.input.type === 'multi') {
-      const values = answer && 'values' in answer ? answer.values : []
-      const min = typeof question.input.min === 'number' ? question.input.min : 0
-      const max = typeof question.input.max === 'number' ? question.input.max : Number.POSITIVE_INFINITY
-      return values.length >= min && values.length <= max
-    }
-    return false
-  }
-  const updateCurrent = (value: InteractionAnswer) => { if (item) persist({ ...answers, [item.effectId]: value }) }
-  const submitBatch = async (values: Array<{ effectId: string; value: Record<string, unknown> }>) => {
-    if (sending) return
-    setSending(true); setError('')
-    try {
-      if (await submit(values)) localStorage.removeItem(key)
-      else setError('提交失败，答案已保留；请检查连接后重试。')
-    } catch { setError('提交失败，内容已保留；请检查连接后重试。') } finally { setSending(false) }
-  }
-  if (interaction.interactionKind === 'approval') {
-    const approvalItem = interaction.items[0]
-    const approvalInput = approvalItem?.input ?? {}
-    const tools = Array.isArray(approvalInput.tools) ? approvalInput.tools as Array<{ toolName?: string; details?: Record<string, unknown> }> : []
-    const approve = () => void submitBatch([{ effectId: approvalItem!.effectId, value: { approved: true } }])
-    const deny = () => void submitBatch([{ effectId: approvalItem!.effectId, value: { approved: false, reason: '用户拒绝' } }])
-    return <section className="interaction-panel approval-panel" aria-label="待审批操作">
-      <div className="interaction-heading"><strong>需要你的确认</strong>{delegated && <span className="delegate-state">全局自动审核</span>}</div>{context && <small className="interaction-context">{context}</small>}
-      <p>{typeof approvalInput.prompt === 'string' ? approvalInput.prompt : 'Pulse 需要你确认以下操作。'}{typeof approvalInput.operationCount === 'number' ? ` 共 ${approvalInput.operationCount} 项操作。` : ''}</p>
-      <div className="approval-operations">{tools.map((tool, i) => <div className="approval-operation" key={`${tool.toolName}-${i}`}><strong>{readableTool(tool.toolName ?? '')}</strong>{typeof tool.details?.path === 'string' && <code>{tool.details.path}</code>}{typeof tool.details?.command === 'string' && <code>{tool.details.command}</code>}</div>)}</div>
-      {tools.some(tool => Object.keys(tool.details ?? {}).some(key => key !== 'path' && key !== 'command')) && <PulseDisclosure className="technical-details" label={"更多操作细节"}>{tools.map((tool, i) => <pre key={i}>{JSON.stringify(tool.details, null, 2)}</pre>)}</PulseDisclosure>}
-      {reviewNote && <p className="review-note" role="status">{reviewNote}</p>}
-      {error && <p className="interaction-error" role="alert">{error}</p>}
-      <div className="interaction-actions"><PulseButton type="button" className="primary" disabled={sending || policyPending} onClick={approve}>允许本次</PulseButton><PulseButton type="button" className="secondary" disabled={sending || policyPending} onClick={deny}>拒绝</PulseButton><ApprovalPolicySelect value={delegated ? 'delegate' : 'manual'} disabled={sending || policyPending} onChange={async policy => { setPolicyPending(true); try { if (!await setApprovalPolicy(policy)) setError('审核模式切换失败，请重试。') } finally { setPolicyPending(false) } }} />{running && <PulseButton type="button" className="stop-button" disabled={stopping || policyPending} onClick={stop}>{stopping ? '正在停止…' : '停止任务'}</PulseButton>}</div>
-    </section>
-  }
-  const count = interaction.items.length
-  const sendAsk = () => void submitBatch(interaction.items.map(question => ({ effectId: question.effectId, value: (answers[question.effectId] ?? (question.input.type === 'multi' ? { values: [] } : {})) as Record<string, unknown> })))
-  return <section className="interaction-panel ask-panel" aria-label="待回答问题">
-    <div className="interaction-heading"><strong>需要你的回答</strong><span>第 {review ? count : index + 1} / {count} 题{review ? ' · 答案确认' : ''}</span></div>{context && <small className="interaction-context">{context}</small>}
-    <div className="question-scroll">
-      {review ? <div className="answer-overview">{interaction.items.map((question, i) => <article key={question.effectId}><div><strong>{i + 1}. {String(question.input.prompt ?? '请回答')}</strong><PulseButton type="button" onClick={() => { setIndex(i); setReview(false) }}>修改</PulseButton></div><p>{formatInteractionAnswer(answers[question.effectId], question.input)}</p></article>)}</div> : <>
-        <h3>{String(input.prompt ?? '请回答')}</h3>
-        {typeof input.context === 'string' && input.context && <p className="question-background">{input.context}</p>}
-        {input.type === 'choice' && <div className="question-options">{options.map(option => { const choice = typeof option === 'string' ? { value: option, label: option } : option; const active = Boolean(selected && 'value' in selected && selected.value === choice.value); return <PulseButton type="button" className={active ? 'selected' : ''} disabled={sending} key={choice.value} onClick={() => updateCurrent({ value: choice.value })}><strong>{choice.label ?? choice.value}</strong>{choice.description && <span className="question-option-description">{choice.description}</span>}</PulseButton> })}</div>}
-        {input.type === 'multi' && <><p className="question-hint">可多选{typeof input.min === 'number' && input.min > 0 ? `，至少 ${input.min} 项` : ''}{typeof input.max === 'number' ? `，最多 ${input.max} 项` : ''}</p><div className="question-options multi">{options.map(option => { const choice = typeof option === 'string' ? { value: option, label: option } : option; const current = selected && 'values' in selected ? selected.values : []; const max = typeof input.max === 'number' ? input.max : Number.POSITIVE_INFINITY; const atLimit = !current.includes(choice.value) && current.length >= max; return <div key={choice.value}><PulseCheckbox  disabled={sending || atLimit} checked={current.includes(choice.value)} onChange={() => updateCurrent({ values: current.includes(choice.value) ? current.filter(value => value !== choice.value) : [...current, choice.value] })}><strong>{choice.label ?? choice.value}</strong>{choice.description && <span className="question-option-description">{choice.description}</span>}</PulseCheckbox></div> })}</div></>}
-        {(input.type === 'choice' || input.type === 'multi') && <label className="question-custom"><span>自行回答</span><PulseTextArea aria-label="自行回答" maxLength={4000} rows={3} value={selected && 'text' in selected ? selected.text : ''} disabled={sending} placeholder="也可以直接输入你的答案…" onChange={event => updateCurrent({ text: event.target.value })} /></label>}
-        {input.type === 'input' && <PulseTextArea aria-label="你的答案" maxLength={4000} rows={4} className="question-input" value={selected && 'text' in selected ? selected.text : typeof input.defaultValue === 'string' ? input.defaultValue : ''} disabled={sending} placeholder={typeof input.placeholder === 'string' ? input.placeholder : '请输入'} onChange={event => updateCurrent({ text: event.target.value })} />}
-      </>}
-    </div>
-    {error && <p className="interaction-error" role="alert">{error}</p>}
-    <div className="interaction-actions ask-actions">{review ? <><PulseButton type="button" className="secondary" disabled={sending} onClick={() => { setReview(false); setIndex(count - 1) }}>返回修改</PulseButton><PulseButton type="button" className="primary" disabled={sending || interaction.items.some(question => !answerValid(question))} onClick={sendAsk}>{sending ? '正在提交…' : '统一提交'}</PulseButton></> : <><PulseButton type="button" className="secondary" disabled={sending || index === 0} onClick={() => setIndex(value => Math.max(0, value - 1))}>上一题</PulseButton>{index < count - 1 ? <PulseButton type="button" className="primary" disabled={sending || !item || !answerValid(item)} onClick={() => setIndex(value => value + 1)}>下一题</PulseButton> : <PulseButton type="button" className="primary" disabled={sending || interaction.items.some(question => !answerValid(question))} onClick={() => setReview(true)}>检查答案</PulseButton>}{running && <PulseButton type="button" className="stop-button" disabled={stopping} onClick={stop}>{stopping ? '正在停止…' : '停止任务'}</PulseButton>}</>}</div>
-  </section>
-}
-
-function formatInteractionAnswer(answer: InteractionAnswer | undefined, input: Record<string, unknown>): string {
-  if (!answer) return '尚未填写'
-  if ('text' in answer) return answer.text || '（空）'
-  const options = (Array.isArray(input.options) ? input.options as Array<string | { value: string; label?: string; description?: string }> : []).filter(option => typeof option === 'string' ? option.trim() : option.value?.trim() && (option.label ?? option.value).trim())
-  const label = (value: string) => { const option = options.find(item => (typeof item === 'string' ? item : item.value) === value); return typeof option === 'string' ? option : option?.label ?? value }
-  return 'value' in answer ? label(answer.value) : answer.values.length ? answer.values.map(label).join('、') : '未选择'
 }

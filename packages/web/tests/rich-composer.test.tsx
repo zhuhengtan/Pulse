@@ -11,7 +11,7 @@ beforeAll(() => {
   Range.prototype.getBoundingClientRect = () => ({ x: 0, y: 0, top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, toJSON() {} })
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
-const transport = { request: vi.fn(async (path: string) => Response.json(path.includes('skills') ? { skills: [{ id: 'grill-and-plan', name: 'grill-and-plan' }] } : { paths: ['中文目录/a.ts'] })), subscribe: () => () => {} }
+const transport = { request: vi.fn(async (path: string) => Response.json(path.includes('skills') ? { skills: [{ id: 'grill-and-plan', name: 'grill-and-plan' }] } : { entries: [{ name: '中文目录', path: '中文目录', type: 'directory' }] })), subscribe: () => () => {} }
 const editorOf = (view: ReturnType<typeof render>) => (view.container.querySelector('.tiptap') as HTMLElement & { editor: Editor }).editor
 function Harness({ send, running = false, mode = 'work', disabled = false }: { send: (payload: ComposerPayload) => Promise<boolean>; running?: boolean; mode?: 'work' | 'chat'; disabled?: boolean }) {
   const [key, setKey] = useState('A')
@@ -76,7 +76,7 @@ it.each(['Skill 技能', '引用项目文件'])('opens %s from the add menu and 
   fireEvent.click(view.getByRole('button', { name: '更多功能' }))
   fireEvent.click(await view.findByRole('menuitem', { name: label === 'Skill 技能' ? /Skill 技能/ : /引用项目文件/ }))
   const menu = await view.findByRole('listbox')
-  expect(menu.textContent).toContain(label === 'Skill 技能' ? 'grill-and-plan' : '中文目录/a.ts')
+  expect(menu.textContent).toContain(label === 'Skill 技能' ? 'grill-and-plan' : '中文目录')
   if (label === 'Skill 技能') fireEvent.keyDown(view.container.querySelector('.tiptap')!, { key: 'Enter' })
   else fireEvent.mouseDown(view.getByRole('option'))
   await waitFor(() => expect(view.queryByRole('listbox')).toBeNull())
@@ -97,7 +97,7 @@ it.each(['chat', 'work'] as const)('allows busy follow-ups in %s with queue as d
   if (mode === 'work') expect(view.queryByRole('button', { name: '发送' })).toBeNull()
   fireEvent.keyDown(view.container.querySelector('.tiptap')!, { key: 'Enter' })
   await waitFor(() => expect(send).toHaveBeenCalledTimes(1))
-  expect(send.mock.calls[0]).toEqual([{ text: '第二条消息' }, 'queue'])
+  expect(send.mock.calls[0]).toEqual([expect.objectContaining({ text: '第二条消息', richContent: expect.objectContaining({ version: 1 }) }), 'queue'])
 })
 
 it.each(['paste', 'drop'])('handles actual editor %s events as attachments instead of editor text', async action => {
@@ -149,4 +149,37 @@ it('rejects an oversized complete payload without clearing its attachment', asyn
   expect(await view.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('单次发送上限'))
   expect(send).not.toHaveBeenCalled()
   expect(view.getByText('large.txt')).toBeTruthy()
+})
+it('navigates file directories with arrows and inserts complete folder references with Enter', async () => {
+  vi.spyOn(transport, 'request').mockImplementation(async path => Response.json({ entries: path.includes(encodeURIComponent('中文 目录/'))
+    ? [{ name: '设计 文档.md', path: '中文 目录/设计 文档.md', type: 'file' }]
+    : [{ name: '中文 目录', path: '中文 目录', type: 'directory' }, { name: 'README.md', path: 'README.md', type: 'file' }] }))
+  const send = vi.fn(async () => false), view = render(<Harness send={send}/>), editor = editorOf(view)
+  act(() => editor.commands.insertContent('@'))
+  await view.findByRole('option', { name: /中文 目录/ })
+  const dom = view.container.querySelector('.tiptap')!
+  fireEvent.keyDown(dom, { key: 'ArrowRight' })
+  await view.findByRole('option', { name: '设计 文档.md' })
+  expect(editor.getText()).toBe('@中文 目录/')
+  fireEvent.keyDown(dom, { key: 'ArrowLeft' })
+  await view.findByRole('option', { name: /中文 目录/ })
+  fireEvent.keyDown(dom, { key: 'Enter' })
+  expect(editor.getJSON().content?.[0]?.content?.[0]).toMatchObject({ type: 'fileChip', attrs: { id: '中文 目录/', label: '中文 目录/' } })
+  expect(send).not.toHaveBeenCalled()
+  fireEvent.click(view.getByRole('button', { name: '发送' }))
+  await waitFor(() => expect(send.mock.calls[0]?.[0]).toMatchObject({ mentionedFiles: ['中文 目录/'] }))
+})
+it('does not send raw mentions while a directory request is pending, and Escape dismisses it', async () => {
+  let resolve!: (response: Response) => void
+  vi.spyOn(transport, 'request').mockImplementation(() => new Promise<Response>(done => { resolve = done }))
+  const send = vi.fn(async () => false), view = render(<Harness send={send}/>), editor = editorOf(view)
+  act(() => editor.commands.insertContent('@'))
+  await view.findByText('正在读取目录…')
+  const dom = view.container.querySelector('.tiptap')!
+  fireEvent.keyDown(dom, { key: 'Enter' })
+  expect(send).not.toHaveBeenCalled()
+  fireEvent.keyDown(dom, { key: 'Escape' })
+  await act(async () => resolve(Response.json({ entries: [{ name: 'late', path: 'late', type: 'directory' }] })))
+  expect(view.queryByRole('listbox')).toBeNull()
+  expect(editor.getText()).toBe('@')
 })

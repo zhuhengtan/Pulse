@@ -110,7 +110,7 @@ it.each([true, false])('submits manual approval=%s without randomUUID on an inse
   } finally { if (descriptor) Object.defineProperty(globalThis.crypto, 'randomUUID', descriptor); else delete (globalThis.crypto as any).randomUUID; router.dispose() }
 })
 it('shows a recoverable error if approval submission unexpectedly rejects', async () => {
-  render(<PulseDesignSystem><InteractionPanel interaction={interaction} reviewNote="" delegated running stopping={false} stop={() => {}} submit={async () => { throw new Error('offline') }} setApprovalPolicy={async () => true} /></PulseDesignSystem>)
+  render(<PulseDesignSystem><InteractionPanel interaction={interaction} reviewNote="" delegated submit={async () => { throw new Error('offline') }} /></PulseDesignSystem>)
   fireEvent.click(screen.getByRole('button', { name: '允许本次' }))
   expect(await screen.findByRole('alert')).toBeTruthy()
   await waitFor(() => expect((screen.getByRole('button', { name: '允许本次' }) as HTMLButtonElement).disabled).toBe(false))
@@ -140,17 +140,16 @@ it('keeps approval retries idempotent when request storage is unavailable', asyn
 it('shows question, background and option descriptions separately and submits a textarea answer', async () => {
   const submit = vi.fn(async () => true)
   const ask = { kind: 'interaction' as const, runId: 'ask-custom', groupId: 'custom', interactionKind: 'ask' as const, items: [{ effectId: 'question', input: { type: 'choice', prompt: '选择迁移方式？', context: '需要保留现有会话。', options: [{ label: '渐进调整（推荐）', value: 'incremental', description: '逐步验证，便于回退。' }, { label: '', value: '' }] } }] }
-  const view = render(<PulseDesignSystem><InteractionPanel interaction={ask} reviewNote="" delegated={false} running={false} stopping={false} stop={() => {}} submit={submit} setApprovalPolicy={async () => true} /></PulseDesignSystem>)
+  const view = render(<PulseDesignSystem><InteractionPanel interaction={ask} reviewNote="" delegated={false} submit={submit} /></PulseDesignSystem>)
   expect(view.getByRole('heading', { name: '选择迁移方式？' }).textContent).toBe('选择迁移方式？')
   expect(view.getByText('需要保留现有会话。').className).toBe('question-background')
   expect(view.getByRole('button', { name: /渐进调整（推荐）/ }).textContent).toContain('逐步验证，便于回退。')
   expect(view.container.querySelectorAll('.question-options button')).toHaveLength(1)
+  fireEvent.click(view.getByText('自行回答'))
   const input = view.getByRole('textbox', { name: '自行回答' })
   expect(input.tagName).toBe('TEXTAREA')
   fireEvent.change(input, { target: { value: '按模块迁移。\n保留旧入口。' } })
-  fireEvent.click(view.getByRole('button', { name: '检查答案' }))
-  expect(view.getByText('按模块迁移。 保留旧入口。')).toBeTruthy()
-  fireEvent.click(view.getByRole('button', { name: '统一提交' }))
+  fireEvent.click(view.getByRole('button', { name: '提交回答' }))
   await waitFor(() => expect(submit).toHaveBeenCalledWith([{ effectId: 'question', value: { text: '按模块迁移。\n保留旧入口。' } }]))
 })
 

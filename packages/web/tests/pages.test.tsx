@@ -116,7 +116,7 @@ describe('question and approval pages', () => {
       { effectId: 'multi', input: { type: 'multi', prompt: '选择页面', min: 1, max: 1, options: ['聊天', '设置'] } },
       { effectId: 'text', input: { type: 'input', prompt: '补充要求' } },
     ] }
-    render(<PulseDesignSystem><InteractionPanel interaction={interaction} reviewNote="" delegated={false} running stopping={false} stop={() => {}} submit={submit} setApprovalPolicy={async () => true}/></PulseDesignSystem>)
+    render(<PulseDesignSystem><InteractionPanel interaction={interaction} reviewNote="" delegated={false} submit={submit}/></PulseDesignSystem>)
     expect((screen.getByRole('button', { name: '下一题' }) as HTMLButtonElement).disabled).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: '标准', exact: true }))
     fireEvent.click(screen.getByRole('button', { name: '下一题' }))
@@ -124,10 +124,8 @@ describe('question and approval pages', () => {
     expect((screen.getByRole('checkbox', { name: '设置' }) as HTMLInputElement).disabled).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: '下一题' }))
     fireEvent.change(screen.getByRole('textbox'), { target: { value: '检查所有页面' } })
-    fireEvent.click(screen.getByRole('button', { name: '检查答案' }))
-    expect(screen.getByText('检查所有页面')).toBeTruthy()
     expect(submit).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button', { name: '统一提交' }))
+    fireEvent.click(screen.getByRole('button', { name: '提交回答' }))
     await waitFor(() => expect(submit).toHaveBeenCalledWith([{ effectId: 'choice', value: { value: '标准' } }, { effectId: 'multi', value: { values: ['聊天'] } }, { effectId: 'text', value: { text: '检查所有页面' } }]))
     expect(localStorage.getItem('pulse-web-interaction:page-test:ask')).toBeNull()
   })

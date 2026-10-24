@@ -85,6 +85,37 @@ export async function readLatestMessages(transport: PulseWebTransport, id: strin
   return transport.messages ? (await transport.messages(id)).items : apiJson<MessageList>(transport, `/api/web/conversations/${encodeURIComponent(id)}/messages`)
 }
 
+/** Reconcile an uncertain send with durable evidence; never repeat the write. */
+export async function submitWorkMessage(
+  transport: PulseWebTransport,
+  conversationId: string,
+  payload: Pick<WebMessage, 'text' | 'requestId' | 'attachments' | 'skills' | 'mentionedFiles' | 'richContent'> & { delivery: 'immediate' | 'whenIdle' },
+): Promise<{ runId: string }> {
+  try {
+    return await apiJson(transport, `/api/conversations/${encodeURIComponent(conversationId)}/messages`, jsonRequest('POST', payload))
+  } catch (error) {
+    // Explicit authorization or payload rejection must not be hidden by readback.
+    if (!payload.requestId || (error instanceof ApiError && error.status < 500 && !(error.status === 409 && error.detail === 'CONVERSATION_BUSY'))) throw error
+    // Startup may outlive the desktop HTTP timeout. Keep checking the same ID,
+    // without resending; a competing request or explicit rejection stays failed.
+    for (const delay of error instanceof ApiError && error.status === 409 ? [0] : [0, 2000, 4000, 8000, 16000, 16000]) {
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay))
+      try {
+        const items = await readLatestMessages(transport, conversationId)
+        const message = items.find(item => item.id === `msg-${payload.requestId}` && item.role === 'user')
+        const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+        if (message?.runId && !message.bodyTruncated && message.text === payload.text
+          && equal(message.richContent ?? null, payload.richContent ?? null)
+          && equal((message.attachments ?? []).map(item => item.id), (payload.attachments ?? []).map(item => item.id))
+          && equal(message.skills ?? [], payload.skills ?? [])
+          && equal(message.mentionedFiles ?? [], payload.mentionedFiles ?? [])) return { runId: message.runId }
+        if (items.length) break
+      } catch { break /* Keep the original error when readback itself is unavailable. */ }
+    }
+    throw error
+  }
+}
+
 export function createPulseSocket(path: string): WebSocket {
   const bridge = window.pulseDesktop
   if (!bridge?.openSocket || !bridge.sockets) return new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${path}`)

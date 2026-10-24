@@ -42,6 +42,8 @@ describe('execution trace replay', () => {
     const view = render(<RunTraceView trace={{ ...trace, label: '阶段进度: 0/0, 0 项受阻' }} running />)
     expect(screen.getByRole('button', { name: /主进程/ }).textContent).toContain('正在推理')
     expect(screen.getByRole('button', { name: /主进程/ }).textContent).not.toMatch(/0\/0|0 次工具调用/)
+    expect(screen.getByRole('button', { name: /主进程/ }).getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(screen.getByRole('button', { name: /主进程/ }))
     expect(view.container.querySelectorAll('.trace-model')).toHaveLength(1)
     expect(screen.getByText('执行详情')).toBeTruthy()
 
@@ -56,6 +58,8 @@ describe('execution trace replay', () => {
   it.each(['succeeded', 'failed', 'cancelled'] as const)('collapses a %s run while retaining the header and allowing manual replay', outcome => {
     const trace = [model(1, 'A', 1), reasoning(2, '保持展开')].reduce(reduceTrace, emptyTrace)
     const view = render(<RunTraceView trace={trace} running />)
+    expect(screen.queryByText('保持展开')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /主进程/ }))
     expect(screen.getByText('保持展开')).toBeTruthy()
     // An explicit expansion during execution must also collapse on completion.
     const head = screen.getByRole('button', { name: /主进程/ })
@@ -105,7 +109,7 @@ describe('execution trace replay', () => {
     view.unmount()
     const legacyTransport: PulseWebTransport = { ...transport, request: async () => response({ events: events.map(({ timestamp: _timestamp, runStartedAt: _start, ...event }) => event) }) }
     render(<PersistedRunTrace runId="run-busy" transport={legacyTransport} />)
-    await screen.findByText(/已完成 · 1 个 Lane/)
+    await screen.findByText('已完成', { exact: true })
     expect(screen.queryByText(/耗时/)).toBeNull()
   })
 })
@@ -138,6 +142,7 @@ describe('active work trace recovery', () => {
     const fixture = workFixture(async () => response({ events: [model(1, 'A', 1), reasoning(2, '历史思考'), reasoning(3, '加载期间思考')], seq: 3 }))
     await openWork(fixture.transport)
     await waitFor(() => expect(fixture.subscriptions).toEqual(['/api/runs/run-busy/events?after=2']))
+    fireEvent.click(await screen.findByRole('button', { name: /主进程/ }))
     await screen.findByText('历史思考加载期间思考')
     act(() => { fixture.emit(reasoning(3, '加载期间思考')); fixture.emit(reasoning(4, '后续思考')) })
     await screen.findByText('历史思考加载期间思考后续思考')
@@ -146,6 +151,7 @@ describe('active work trace recovery', () => {
     fireEvent.click(screen.getByRole('button', { name: '完善项目记忆' }))
     await screen.findByText('对话内容会保留，所属项目可以随时调整。')
     fireEvent.click(screen.getByRole('button', { name: /^正在执行的任务/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /主进程/ }))
     await screen.findByText('历史思考加载期间思考')
     expect(fixture.subscriptions).toHaveLength(2)
   })
@@ -155,6 +161,7 @@ describe('active work trace recovery', () => {
     await openWork(fixture.transport)
     await waitFor(() => expect(fixture.subscriptions).toEqual(['/api/runs/run-busy/events?after=0']))
     act(() => { fixture.emit(model(1, 'A', 1)); fixture.emit(reasoning(2, '恢复完整思考')) })
+    fireEvent.click(await screen.findByRole('button', { name: /主进程/ }))
     await screen.findByText('恢复完整思考')
   })
 

@@ -1,0 +1,72 @@
+.project-editor .ant-modal-container {
+  padding:26px;
+  border:1px solid var(--line);
+  border-radius:20px;
+  background:var(--surface-raised);
+  box-shadow:var(--shadow);
+  color:var(--ink);
+}
+.project-editor .ant-modal-header { margin-bottom:22px; background:transparent; }
+.project-editor .ant-modal-title { color:var(--ink); font-size:22px; font-weight:600; line-height:1.4; }
+.project-editor .ant-modal-close { top:22px; inset-inline-end:22px; color:var(--muted); border-radius:8px; }
+.project-editor .ant-modal-body { padding:0; }
+.project-editor .project-name-field.ant-input-affix-wrapper {
+  min-height:46px;
+  padding:10px 14px;
+  gap:12px;
+  border:1px solid var(--line);
+  border-radius:10px;
+  background:var(--surface-subtle);
+  box-shadow:none;
+  transition:border-color .18s,box-shadow .18s;
+}
+.project-editor .project-name-field.ant-input-affix-wrapper:hover { border-color:var(--muted); }
+.project-editor .project-name-field.ant-input-affix-wrapper:focus-within {
+  border-color:var(--muted);
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--muted) 12%,transparent);
+}
+/* The affix wrapper owns the focus indicator; its nested input must stay unframed. */
+.project-editor .project-name-field input.ant-input,
+.project-editor .project-name-field input.ant-input:focus-visible {
+  padding:0;
+  border:0;
+  border-radius:0;
+  outline:none;
+  box-shadow:none;
+  background:transparent;
+  color:var(--ink);
+  font-size:15px;
+  line-height:24px;
+}
+.project-editor .project-name-field .ant-input-prefix { color:var(--muted); font-size:18px; }
+.project-editor h3 { font-size:13px; font-weight:550; color:var(--muted); margin:24px 0 10px; }
+.project-source-folders { border:1px solid var(--line); border-radius:12px; background:var(--surface-subtle); max-height:42dvh; overflow:auto; }
+.project-source-folder { display:flex; align-items:center; gap:6px; padding:10px 8px; border-bottom:1px solid var(--line); }
+.project-source-path.pulse-button { display:flex; flex:1; min-width:0; gap:12px; align-items:center; justify-content:flex-start; text-align:left; height:auto; padding:5px 8px; border-radius:8px; }
+.project-source-path>.anticon { color:var(--muted); font-size:18px; }
+.project-source-path>span:not(.anticon) { min-width:0; }
+.project-source-path strong,.project-source-path small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.project-source-path strong { font-size:14px; font-weight:500; }
+.project-source-path small { font-size:11px; color:var(--muted); margin-top:4px; }
+.project-source-primary.pulse-button { flex:none; min-height:28px; font-size:11px; color:var(--muted); border-radius:6px; padding:2px 8px; }
+.project-source-primary.is-primary { background:var(--soft); color:var(--ink); }
+.project-source-remove.pulse-button { flex:none; width:28px; height:28px; padding:0; border-radius:6px; color:var(--muted); }
+.project-source-add.pulse-button { display:flex; align-items:center; justify-content:flex-start; gap:12px; width:100%; padding:14px 16px; height:auto; border-radius:0; font-size:13px; color:var(--muted); }
+.project-primary-hint { margin:12px 0 0; font-size:11px; color:var(--muted); line-height:1.7; }
+.project-editor-error { color:var(--danger-text,#d84c4c); font-size:12px; }
+.project-editor .ant-modal-footer { margin-top:24px; }
+.project-editor-footer { display:flex; align-items:center; gap:10px; padding-top:12px; }
+.project-editor-footer>span { flex:1; }
+.project-editor-footer .pulse-button { min-height:38px; border-radius:10px; padding:6px 14px; }
+.project-editor-remove.pulse-button { background:#e5484d16; color:#df5459; }
+.project-editor-save.pulse-button { background:var(--ink); color:var(--panel); }
+@media(max-width:767px) {
+  .project-editor.ant-modal { max-width:calc(100vw - 24px); margin:0 auto; top:7dvh; padding-bottom:20px; }
+  .project-editor .ant-modal-container { padding:22px 18px; border-radius:16px; }
+  .project-editor .ant-modal-close { top:19px; inset-inline-end:15px; }
+  .project-editor .ant-modal-title { font-size:20px; }
+  .project-source-folder { padding:8px 2px; gap:2px; }
+  .project-editor-footer { gap:4px; }
+  .project-editor-footer .pulse-button { padding-inline:10px; }
+  .project-source-primary.pulse-button { font-size:10px; padding-inline:5px; }
+}

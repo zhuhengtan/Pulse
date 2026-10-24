@@ -1,5 +1,13 @@
+import { unified } from 'unified'
+import remarkParse from 'remark-parse'
+import type { PulseWebTransport } from './transport.js'
 import { PulseButton } from './PulseControls.js'
-import { memo, type ReactNode } from 'react'
+import { memo, useEffect, useState, Children, isValidElement, type ReactNode, type ReactElement } from 'react'
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
+import 'katex/dist/katex.min.css'
 import hljs from 'highlight.js/lib/core'
 import bash from 'highlight.js/lib/languages/bash'
 import css from 'highlight.js/lib/languages/css'
@@ -14,115 +22,89 @@ import { copyText } from './clipboard.js'
 
 for (const [name, language] of Object.entries({ bash, sh: bash, css, html, xml: html, javascript, js: javascript, json, markdown, md: markdown, python, py: python, typescript, ts: typescript, tsx: typescript })) hljs.registerLanguage(name, language)
 
-function safeHref(value: string): string | undefined {
-  try {
-    const url = new URL(value, window.location.origin)
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : undefined
-  } catch { return undefined }
-}
-
-function inline(source: string, onFileClick?: (path: string) => void, onDiffClick?: (path: string) => void): ReactNode[] {
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\)|(?:^|\s)\/(?:skill:)?([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?=\s|$|[.,!?;:])|(?:^|\s)@([a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*)(?=\s|$|[.,!?;:]))/g
-  const result: ReactNode[] = []
-  let offset = 0
-  for (const match of source.matchAll(pattern)) {
-    const index = match.index ?? 0
-    if (index > offset) result.push(source.slice(offset, index))
-    const token = match[0]
-    if (token.startsWith('`')) {
-      result.push(<code key={index}>{token.slice(1, -1)}</code>)
-    } else if (token.startsWith('**')) {
-      result.push(<strong key={index}>{token.slice(2, -2)}</strong>)
-    } else if (token.startsWith('*')) {
-      result.push(<em key={index}>{token.slice(1, -1)}</em>)
-    } else if (token.startsWith('[')) {
-      const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
-      const href = link?.[2] ? safeHref(link[2].trim()) : undefined
-      const fileLink = link && !/^[a-z][a-z0-9+.-]*:|^#/i.test(link[2]!) && !link[2]!.startsWith('//')
-      result.push(fileLink && onFileClick ? <span className="markdown-file-actions" key={index}><button className="markdown-file-link" type="button" onClick={() => onFileClick(link![2]!)}>{link![1]}</button>{onDiffClick && <PulseButton type="button" className="markdown-diff-link" aria-label={`查看 ${link![2]} 的差异`} onClick={() => onDiffClick(link![2]!)}>查看差异</PulseButton>}</span> : href && link ? <a key={index} href={href} target="_blank" rel="noopener noreferrer">{link[1]}</a> : token)
-    } else {
-      const leadingSpace = token.match(/^\s+/)?.[0] ?? ''
-      const rest = token.slice(leadingSpace.length)
-      if (leadingSpace) result.push(leadingSpace)
-      if (rest.startsWith('/')) {
-        const skillName = rest.slice(1).replace(/^skill:/, '')
-        result.push(
-          <span key={index} className="mention-chip skill-chip" title={`Skill: ${skillName}`}>
-            /{skillName}
-          </span>
-        )
-      } else if (rest.startsWith('@')) {
-        const filePath = rest.slice(1)
-        result.push(
-          <span key={index} className="markdown-file-actions"><span
-            className="mention-chip file-chip"
-            title={`文件: ${filePath}`}
-            onClick={onFileClick ? () => onFileClick(filePath) : undefined}
-          >
-            @{filePath}
-          </span>{onDiffClick && <PulseButton type="button" className="markdown-diff-link" aria-label={`查看 ${filePath} 的差异`} onClick={() => onDiffClick(filePath)}>查看差异</PulseButton>}</span>
-        )
-      } else {
-        result.push(token)
-      }
+/** Use CommonMark positions so nested/indented/fenced/inline code is never rewritten. */
+const mathBoundaryParser = unified().use(remarkParse)
+export function normalizeMathDelimiters(source: string): string {
+  if (!source.includes('\\(') && !source.includes('\\[')) return source
+  const protectedRanges: Array<[number, number]> = []
+  type BoundaryNode = { type: string; position?: { start: { offset?: number | undefined }; end: { offset?: number | undefined } } | undefined; children?: BoundaryNode[] | undefined }
+  const walk = (node: BoundaryNode) => {
+    if (['code', 'inlineCode', 'html'].includes(node.type) && node.position) {
+      protectedRanges.push([node.position.start.offset!, node.position.end.offset!]); return
     }
-    offset = index + token.length
+    node.children?.forEach(walk)
   }
-  if (offset < source.length) result.push(source.slice(offset))
-  return result
+  walk(mathBoundaryParser.parse(source))
+  const convert = (value: string) => value.replace(/(?<!\\)\\\(([\s\S]*?)\\\)|(?<!\\)\\\[([\s\S]*?)\\\]/g, (_match, inline: string | undefined, block: string | undefined) => inline !== undefined ? `$${inline}$` : `\n$$\n${block}\n$$\n`)
+  let offset = 0, result = ''
+  for (const [start, end] of protectedRanges) { result += convert(source.slice(offset, start)) + source.slice(start, end); offset = end }
+  return result + convert(source.slice(offset))
 }
+function decodeFilePath(path: string): string { try { return decodeURIComponent(path) } catch { return path } }
 
-function tableCells(row: string): string[] {
-  return row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim())
-}
-
-function isTableSeparator(row: string): boolean {
-  const cells = tableCells(row)
-  return row.includes('|') && cells.length > 0 && cells.every(cell => /^:?-{3,}:?$/.test(cell))
-}
-
-export const Markdown = memo(function Markdown({ text, onFileClick, onDiffClick }: { text: string; onFileClick?: ((path: string) => void) | undefined; onDiffClick?: ((path: string) => void) | undefined }) {
-  const rows = text.split('\n')
-  const blocks: ReactNode[] = []
-  for (let index = 0; index < rows.length;) {
-    const row = rows[index] ?? ''
-    if (row.startsWith('```')) {
-      const language = row.slice(3).trim().split(/[\s,]+/)[0]?.toLowerCase() ?? ''
-      const code: string[] = []
-      index++
-      while (index < rows.length && !rows[index]?.startsWith('```')) code.push(rows[index++] ?? '')
-      if (index < rows.length) index++
-      const source = code.join('\n')
-      const highlighted = language && hljs.getLanguage(language) ? hljs.highlight(source, { language }).value : undefined
-      blocks.push(<div className="code-block" key={`code-${index}`}><div className="code-head"><span>{language || '代码'}</span><PulseButton type="button" aria-label="复制代码" onClick={event => { const button = event.currentTarget; void copyText(source).then(() => { button.textContent = '已复制'; window.setTimeout(() => { button.textContent = '复制' }, 1200) }).catch(() => undefined) }}>复制</PulseButton></div><pre><code className={highlighted ? `hljs language-${language}` : undefined} dangerouslySetInnerHTML={highlighted ? { __html: highlighted } : undefined}>{highlighted ? undefined : source}</code></pre></div>)
-    } else if (!row.trim()) index++
-    else if (/^#{1,4}\s/.test(row)) {
-      const depth = (row.match(/^#+/)?.[0].length ?? 1) as 1 | 2 | 3 | 4
-      const content = inline(row.replace(/^#{1,4}\s+/, ''), onFileClick, onDiffClick)
-      blocks.push(depth === 1 ? <h1 key={index}>{content}</h1> : depth === 2 ? <h2 key={index}>{content}</h2> : depth === 3 ? <h3 key={index}>{content}</h3> : <h4 key={index}>{content}</h4>)
-      index++
-    } else if (/^\s*[-*]\s+/.test(row)) {
-      const items: ReactNode[] = []
-      while (index < rows.length && /^\s*[-*]\s+/.test(rows[index] ?? '')) items.push(<li key={index}>{inline((rows[index++] ?? '').replace(/^\s*[-*]\s+/, ''), onFileClick, onDiffClick)}</li>)
-      blocks.push(<ul key={`ul-${index}`}>{items}</ul>)
-    } else if (/^\s*\d+[.)]\s+/.test(row)) {
-      const items: ReactNode[] = []
-      while (index < rows.length && /^\s*\d+[.)]\s+/.test(rows[index] ?? '')) items.push(<li key={index}>{inline((rows[index++] ?? '').replace(/^\s*\d+[.)]\s+/, ''), onFileClick, onDiffClick)}</li>)
-      blocks.push(<ol key={`ol-${index}`}>{items}</ol>)
-    } else if (index + 1 < rows.length && isTableSeparator(rows[index + 1] ?? '')) {
-      const headings = tableCells(row)
-      index += 2
-      const body: string[][] = []
-      while (index < rows.length && (rows[index] ?? '').includes('|')) body.push(tableCells(rows[index++] ?? ''))
-      blocks.push(<div className="table-scroll" key={`table-${index}`}><table><thead><tr>{headings.map((cell, column) => <th key={column}>{inline(cell, onFileClick, onDiffClick)}</th>)}</tr></thead><tbody>{body.map((cells, rowIndex) => <tr key={rowIndex}>{headings.map((_, column) => <td key={column}>{inline(cells[column] ?? '', onFileClick, onDiffClick)}</td>)}</tr>)}</tbody></table></div>)
-    } else if (row.startsWith('> ')) {
-      blocks.push(<blockquote key={index}>{inline(row.slice(2), onFileClick, onDiffClick)}</blockquote>); index++
-    } else {
-      const paragraph = [row]
-      index++
-      while (index < rows.length && rows[index]?.trim() && !/^```|^#{1,4}\s|^\s*[-*]\s+|^\s*\d+[.)]\s+|^> /.test(rows[index] ?? '')) paragraph.push(rows[index++] ?? '')
-      blocks.push(<p key={index}>{paragraph.map((line, part) => <span key={part}>{part > 0 && <br />}{inline(line, onFileClick, onDiffClick)}</span>)}</p>)
-    }
+type Tree = { type: string; value?: string; url?: string; children?: Tree[] }
+function remarkReferences() {
+  return (tree: Tree) => {
+    const walk = (parent: Tree) => {
+      if (!parent.children || ['link', 'image', 'code', 'inlineCode', 'math', 'inlineMath', 'html'].includes(parent.type)) return
+      parent.children = parent.children.flatMap(child => {
+        if (child.type !== 'text' || !child.value) { walk(child); return [child] }
+        const parts: Tree[] = []; let offset = 0
+        for (const match of child.value.matchAll(/(^|\s)(\/(?:skill:)?[A-Za-z0-9][A-Za-z0-9._-]{0,63}|@[^\s，。；！？]+)(?=\s|$|[.,!?;:])/g)) {
+          const start = match.index! + match[1]!.length, token = match[2]!
+          parts.push({ type: 'text', value: child.value.slice(offset, start) })
+          parts.push({ type: 'link', url: `${token[0] === '/' ? 'pulse-skill' : 'pulse-file'}:${encodeURIComponent(token.slice(1).replace(/^skill:/, ''))}`, children: [{ type: 'text', value: token }] })
+          offset = start + token.length
+        }
+        parts.push({ type: 'text', value: child.value.slice(offset) }); return parts
+      })
+    }; walk(tree)
   }
-  return <div className="markdown">{blocks}</div>
+}
+export function ReferenceChip({ kind, label, path, onClick }: { kind: 'skill' | 'file'; label: string; path: string; onClick?: (() => void) | undefined }) {
+  return <span className={`mention-chip ${kind}-chip`} data-kind={kind} title={kind === 'skill' ? `Skill: ${path}` : path} role={onClick ? 'button' : undefined} tabIndex={onClick ? 0 : undefined} onClick={onClick} onKeyDown={event => { if (onClick && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onClick() } }}><span className="reference-icon" aria-hidden="true">{kind === 'skill' ? '✦' : path.endsWith('/') ? '▱' : '▤'}</span>{label}</span>
+}
+function MarkdownImage({ src, alt, imageApi, transport }: { src?: string | undefined; alt?: string | undefined; imageApi?: ((source: string) => string | undefined) | undefined; transport?: PulseWebTransport | undefined }) {
+  const [failed, setFailed] = useState(false), [open, setOpen] = useState(false)
+  const api = src ? imageApi?.(src) : undefined
+  const [localUrl, setLocalUrl] = useState('')
+  useEffect(() => {
+    if (!api || !transport) return
+    let live = true, objectUrl = ''; const controller = new AbortController()
+    setLocalUrl(''); setFailed(false)
+    void transport.request(api, { signal: controller.signal }).then(async response => {
+      const type = response.headers.get('content-type')?.split(';')[0] ?? ''
+      if (!response.ok || !type.startsWith('image/') || Number(response.headers.get('content-length') ?? 0) > 32 * 1024 * 1024) throw new Error('IMAGE_UNAVAILABLE')
+      const blob = await response.blob(); if (blob.size > 32 * 1024 * 1024) throw new Error('IMAGE_TOO_LARGE')
+      if (live) { objectUrl = URL.createObjectURL(blob); setLocalUrl(objectUrl) }
+    }).catch(() => { if (live) setFailed(true) })
+    return () => { live = false; controller.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl) }
+  }, [api, transport])
+  const imageUrl = api ? localUrl : src
+  if (!src || failed) return <span className="markdown-image-fallback" role="img" aria-label={alt || '图片无法加载'}>▧ {alt || '图片无法加载'}</span>
+  if (!imageUrl) return <span className="markdown-image-fallback" role="status">正在加载图片…</span>
+  return <><img className="markdown-image" src={imageUrl} alt={alt ?? ''} loading="lazy" onError={() => setFailed(true)} onClick={() => setOpen(true)} role="button" tabIndex={0} onKeyDown={event => { if (event.key === 'Enter') setOpen(true) }}/>{open && <span className="attachment-modal-overlay" role="dialog" aria-label="图片预览" onClick={() => setOpen(false)} onKeyDown={event => { if (event.key === 'Escape') setOpen(false) }}><button autoFocus className="image-preview-close" aria-label="关闭图片预览" onClick={() => setOpen(false)}>×</button><img className="attachment-modal-image" src={imageUrl} alt={alt ?? ''}/></span>}</>
+}
+export function CodeBlock({ source, language = '' }: { source: string; language?: string }) {
+  const [copied, setCopied] = useState(false)
+  const highlighted = language && hljs.getLanguage(language) ? hljs.highlight(source, { language }).value : undefined
+  return <div className="code-block"><div className="code-head"><span>{language || '代码'}</span><PulseButton type="button" aria-label="复制代码" onClick={() => { void copyText(source).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1200) }).catch(() => undefined) }}>{copied ? '已复制' : '复制'}</PulseButton></div><pre><code className={highlighted ? `hljs language-${language}` : undefined} dangerouslySetInnerHTML={highlighted ? { __html: highlighted } : undefined}>{highlighted ? undefined : source}</code></pre></div>
+}
+export const Markdown = memo(function Markdown({ text, onFileClick, onDiffClick, imageApi, transport }: { text: string; imageApi?: ((source: string) => string | undefined) | undefined; transport?: PulseWebTransport | undefined; onFileClick?: ((path: string) => void) | undefined; onDiffClick?: ((path: string) => void) | undefined }) {
+  return <div className="markdown"><ReactMarkdown skipHtml remarkPlugins={[remarkGfm, remarkMath, remarkReferences]} rehypePlugins={[[rehypeKatex, { throwOnError: false, trust: false, strict: 'ignore' }]]} urlTransform={url => /^(pulse-skill|pulse-file):/.test(url) ? url : defaultUrlTransform(url)} components={{
+    a: ({ href = '', children }) => {
+      if (href.startsWith('pulse-skill:')) { const name = decodeURIComponent(href.slice(12)); return <ReferenceChip kind="skill" label={`/${name}`} path={name}/> }
+      const path = href.startsWith('pulse-file:') ? decodeURIComponent(href.slice(11)) : decodeFilePath(href)
+      if (path && !/^[a-z][a-z0-9+.-]*:|^#|^\/\//i.test(path) && onFileClick) return <span className="markdown-file-actions"><button className="markdown-file-link" onClick={() => onFileClick(path)}>{href.startsWith('pulse-file:') ? <ReferenceChip kind="file" label={`@${path}`} path={path}/> : children}</button>{onDiffClick && <PulseButton className="markdown-diff-link" aria-label={`查看 ${path} 的差异`} onClick={() => onDiffClick(path)}>查看差异</PulseButton>}</span>
+      if (href.startsWith('pulse-file:')) return <ReferenceChip kind="file" label={`@${path}`} path={path}/>
+      return href ? <a href={href} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>
+    },
+    img: ({ src, alt }) => <MarkdownImage key={src} src={src} alt={alt} imageApi={imageApi} transport={transport}/>,
+    table: ({ children }) => <div className="table-scroll"><table>{children}</table></div>,
+    pre: ({ children }) => {
+      const child = Children.toArray(children).find(isValidElement) as ReactElement<{ className?: string; children?: ReactNode }> | undefined
+      if (!child) return <pre>{children}</pre>
+      return <CodeBlock language={child.props.className?.replace(/^language-/, '') ?? ''} source={String(child.props.children ?? '').replace(/\n$/, '')}/>
+    },
+  }}>{normalizeMathDelimiters(text)}</ReactMarkdown></div>
 })

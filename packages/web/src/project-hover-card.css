@@ -1,0 +1,15 @@
+.project-info-popover .ant-popover-container { padding:0; border:1px solid var(--line); border-radius:16px; background:var(--surface-raised); box-shadow:var(--shadow); }
+.project-info-card { width:min(355px,calc(100vw - 48px)); color:var(--ink); font-size:13px; }
+.project-info-card header { display:flex; align-items:center; gap:10px; padding:14px 14px 5px; }
+.project-info-card header strong { flex:1; min-width:0; font-size:16px; font-weight:550; line-height:1.45; overflow-wrap:anywhere; }
+.project-info-pin.pulse-button { flex:none; align-self:flex-start; width:30px; min-width:30px; height:30px; padding:0; border-radius:8px; color:var(--muted); }
+.project-info-pin[aria-pressed="true"] { color:var(--ink); background:var(--soft); }
+.project-info-count { display:flex; align-items:center; gap:10px; padding:2px 15px 12px; margin:0; }
+.project-info-folders { display:grid; gap:15px; border-top:1px solid var(--line); margin:0 14px; padding:15px 0; max-height:min(380px,50dvh); overflow:auto; }
+.project-info-folder { display:flex; align-items:flex-start; gap:10px; line-height:1.6; }
+.project-info-folder>.pulse-icon { flex:none; margin-top:3px; color:var(--muted); }
+.project-info-folder>span:not(.anticon) { flex:1; min-width:0; overflow-wrap:anywhere; white-space:pre-wrap; }
+.project-info-folder small { flex:none; margin-top:3px; color:var(--muted); border:1px solid var(--line); border-radius:5px; padding:0 5px; font-size:10px; }
+.project-info-card footer { margin:0 14px; padding:6px 0; border-top:1px solid var(--line); }
+.project-info-card footer .pulse-button { display:flex; align-items:center; gap:9px; width:100%; padding:8px 0; justify-content:flex-start; font-size:13px; }
+.project-info-unavailable { color:var(--danger-text); margin:0 14px 12px; font-size:11px; }

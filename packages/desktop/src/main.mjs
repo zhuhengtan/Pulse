@@ -1,3 +1,4 @@
+import { NativeBrowser } from './native-browser.mjs';
 import { DesktopInstallation } from './installation.mjs';
 import { deviceSessionPartition, restoreDeviceCookie, saveDeviceCookie } from './device-session.mjs';
 import { app, BrowserWindow, ipcMain, protocol, net, Menu, dialog, shell, session as electronSession } from 'electron';
@@ -23,9 +24,26 @@ else {
     const pendingReads = new Map(), pendingChat = new Map(), subscriptions = new Map(), nativeSockets = new Map();
     const send = (channel, value) => { if (window && !window.isDestroyed())
         window.webContents.send(channel, value); };
+    const browser = new NativeBrowser({ window: () => window, notify: value => send('pulse:native-browser', value), protectedUrls: () => [pageUrl, ...(base ? [base] : []), 'http://127.0.0.1:7332'] });
+    let browserHost, browserRetry;
+    const browserRequests = new Map();
+    function connectBrowserHost() {
+        if (!base || app.isQuitting || browserHost?.readyState === WebSocket.OPEN || browserHost?.readyState === WebSocket.CONNECTING) return;
+        const socket = browserHost = new WebSocket(base.replace('http:', 'ws:') + '/api/automation/native-host', { headers: { Origin: base, Cookie: cookie, 'X-Pulse-Client': 'electron' }, maxPayload: 1024 * 1024 });
+        socket.on('message', async raw => {
+            let frame; try { frame = JSON.parse(raw.toString()); } catch { return; }
+            if (frame.method === 'cancel') { const pending = browserRequests.get(frame.params?.requestId); if (pending) { pending.aborted = true; browser.groups.get(pending.groupId)?.active?.webContents.stop(); } return; }
+            const operation = { aborted: false, groupId: frame.params?.id }; browserRequests.set(frame.id, operation);
+            try { const result = await browser.dispatch(frame.method, frame.params, operation); if (socket.readyState === WebSocket.OPEN && !operation.aborted) socket.send(JSON.stringify({ id: frame.id, result })); }
+            catch (error) { if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id: frame.id, error: error.message })); }
+            finally { browserRequests.delete(frame.id); }
+        });
+        socket.on('error', () => {});
+        socket.on('close', () => { if (browserHost === socket) browserHost = undefined; browser.disconnect(); clearTimeout(browserRetry); if (!app.isQuitting) browserRetry = setTimeout(connectBrowserHost, 1500); });
+    }
     const allowedPath = path => { if (typeof path !== 'string' || !path.startsWith('/api/') || path.startsWith('//') || path.includes('\\') || path.length > 4096)
         throw new Error('API_PATH_INVALID'); return path; };
-    const localQuery = path => /^\/api\/(approval-policy$|assistant(?:\?|$)|conversations(?:\?|$|\/[^/]+$)|projects$|data\/conversations\/[^/]+\/(?:messages|body|search)(?:\?|$)|runs\/[^/]+\/state$)/.test(path);
+    const localQuery = path => /^\/api\/(approval-policy$|assistant(?:\?|$)|conversations(?:\?|$|\/[^/]+$)|projects$|data\/conversations\/[^/]+\/(?:messages|body|search)(?:\?|$))/.test(path);
     function query(path) { return new Promise((resolveQuery, reject) => { if (pendingReads.size >= 64) {
         reject(new Error('LOCAL_QUERY_QUEUE_FULL'));
         return;
@@ -139,6 +157,7 @@ else {
         const sessionInfo = await info.json();
         backendInfo = { connected: true, version: sessionInfo.serverVersion, pid: sessionInfo.serverPid, outdated: Boolean(installation.source && (sessionInfo.serverVersion !== installation.state.version || sessionInfo.runtimeId !== installation.state.runtimeId)) };
         void connectChat().catch(() => { });
+        connectBrowserHost();
     }
     function setupSnapshot() { return { ...installation.snapshot(), dataDirectory: directory, service: { ...backendInfo, connected: Boolean(base), error: serviceError } }; }
     async function prepareDesktop(full = false) {
@@ -271,6 +290,13 @@ else {
             }
             return { status: response.status, bytes: new Uint8Array(await response.arrayBuffer()), headers };
         });
+        ipcMain.handle('pulse:browser-layout', (event, id, bounds) => {
+            trusted(event);
+            if (typeof id !== 'string' || bounds && !['x', 'y', 'width', 'height'].every(key => Number.isFinite(bounds[key]) && Math.abs(bounds[key]) < 100000)) throw new Error('BROWSER_LAYOUT_INVALID');
+            browser.layout(id, bounds);
+        });
+        ipcMain.handle('pulse:browser-dispose', (event, id) => { trusted(event); if (typeof id !== 'string') throw new Error('BROWSER_ID_INVALID'); browser.close(id); });
+        ipcMain.handle('pulse:browser-state', (event, id) => { trusted(event); const group = browser.groups.get(id); return group ? { id, tabs: browser.tabs(group), error: group.error || '' } : undefined; });
         ipcMain.handle('pulse:socket-open', (event, id, path) => {
             trusted(event);
             if (typeof id !== 'string' || id.length > 80 || nativeSockets.size >= 8 || !(/^\/api\/terminals\/[0-9a-f-]{36}\/socket$/.test(path) || path === '/api/automation/socket'))
@@ -350,9 +376,12 @@ else {
             window = new BrowserWindow({ width: pageUrl.startsWith('http:') ? 1440 : 1200, height: pageUrl.startsWith('http:') ? 950 : 850, minWidth: 390, minHeight: 600, title: pageUrl.startsWith('http:') ? 'Pulse · 开发预览' : 'Pulse', webPreferences: { preload: fileURLToPath(new URL('./preload.cjs', import.meta.url)), contextIsolation: true, nodeIntegration: false, sandbox: true } });
             window.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//.test(url))
                 void shell.openExternal(url); return { action: 'deny' }; });
+            window.webContents.on('did-start-loading', () => browser.hideAll());
+            window.webContents.on('render-process-gone', () => browser.hideAll());
+            window.on('resize', () => { for (const group of browser.groups.values()) browser.applyLayout(group); });
             window.webContents.on('will-navigate', (event, url) => { if (!isDesktopPageUrl(url, pageUrl))
                 event.preventDefault(); });
-            window.on('closed', () => { window = undefined; for (const socket of nativeSockets.values())
+            window.on('closed', () => { browser.closeAll(); window = undefined; for (const socket of nativeSockets.values())
                 socket.close(); nativeSockets.clear(); for (const sub of subscriptions.values())
                 sub.controller.abort(); subscriptions.clear(); });
             void window.loadURL(pageUrl);
@@ -374,7 +403,7 @@ else {
         else
             createWindow(); });
         app.on('window-all-closed', () => app.quit());
-        app.on('before-quit', () => { app.isQuitting = true; clearTimeout(retry); chat?.close(); for (const sub of subscriptions.values())
+        app.on('before-quit', () => { app.isQuitting = true; clearTimeout(browserRetry); browserHost?.close(); browser.closeAll(); clearTimeout(retry); chat?.close(); for (const sub of subscriptions.values())
             sub.controller.abort(); void reader.terminate(); });
     }).catch(error => { console.error('Pulse desktop startup failed:', error.message); app.quit(); });
 }

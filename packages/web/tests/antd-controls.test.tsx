@@ -73,19 +73,11 @@ describe('Ant Design controls and workbench behavior', () => {
     await screen.findByText('+verified diff')
   })
 
-  it('uses Ant Design automation dropdowns and retains read-only action restrictions', async () => {
+  it('keeps browser automation out of the Web workbench', async () => {
     const view = render(<PulseDesignSystem><Workbench readOnly /></PulseDesignSystem>)
-    fireEvent.click(screen.getByRole('tab', { name: '自动化', exact: true }))
-    await screen.findAllByText(/Existing document/)
-    expect(view.container.querySelector('select')).toBeNull()
-    expect(view.container.querySelectorAll('.automation-controls .ant-select')).toHaveLength(2)
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: '浏览器连接模式' }))
-    fireEvent.click(await screen.findByText('现有 Chrome/Edge'))
-    await waitFor(() => expect(screen.getByRole('combobox', { name: '浏览器连接模式' }).closest('.ant-select')?.textContent).toContain('现有 Chrome/Edge'))
-    expect((screen.getByRole('button', { name: '打开浏览器' }) as HTMLButtonElement).disabled).toBe(true)
-    expect((screen.getByRole('button', { name: '连接桌面' }) as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.queryByText('配对设备控制权限')).toBeNull()
-    expect(screen.queryByRole('checkbox', { name: 'Test phone' })).toBeNull()
+    expect(screen.queryByRole('tab', { name: '自动化', exact: true })).toBeNull()
+    expect(screen.queryByRole('button', { name: '打开浏览器' })).toBeNull()
+    expect(view.container.querySelector('.automation-frame')).toBeNull()
   })
 
   it('separates staged, unstaged and untracked Git entries without changing Git state', async () => {

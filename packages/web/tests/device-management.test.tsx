@@ -88,7 +88,7 @@ describe('authorized device settings', () => {
     fireEvent.click(screen.getByRole('button', { name: '扫码连接', exact: true }))
     await screen.findByRole('img', { name: 'H5 连接二维码' })
     expect(screen.getByRole('textbox', { name: 'H5 连接地址' }).getAttribute('value')).toBe('http://example.local/?code=fixture')
-    fireEvent.click(screen.getByRole('button', { name: '刷新二维码', exact: true }))
+    fireEvent.click(await screen.findByRole('button', { name: '刷新二维码', exact: true }))
     await waitFor(() => expect(reads.filter(path => path === '/api/pair/qr')).toHaveLength(2))
     expect(writes).toEqual([])
   })

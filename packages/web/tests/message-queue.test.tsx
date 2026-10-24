@@ -26,7 +26,7 @@ describe('durable frontend message queue', () => {
   })
   it('preserves the complete payload and dispatches FIFO only after release and success', async () => {
     const f = fixture()
-    const payload = { text: 'first', attachments: [{ id: 'attachment', name: 'note.txt', type: 'file' as const, size: 4, mediaType: 'text/plain', data: 'data:text/plain;base64,dGVzdA==' }], skills: ['skill'], mentionedFiles: ['file.ts'] }
+    const payload = { richContent: { version: 1 as const, document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'first', marks: [{ type: 'bold' }] }] }] } }, text: 'first', attachments: [{ id: 'attachment', name: 'note.txt', type: 'file' as const, size: 4, mediaType: 'text/plain', data: 'data:text/plain;base64,dGVzdA==' }], skills: ['skill'], mentionedFiles: ['file.ts'] }
     await f.controller.enqueue('conversation', 'work', payload, 'previous')
     await f.controller.enqueue('conversation', 'work', { text: 'second' }, 'previous')
     payload.text = 'new draft'
@@ -37,6 +37,17 @@ describe('durable frontend message queue', () => {
     await f.controller.tick(); expect(f.sent).toHaveLength(1)
     f.state({ state: 'succeeded', waiting: false }); await f.controller.tick()
     expect(f.sent.map(item => item.payload.text)).toEqual(['first', 'second'])
+  })
+  it('atomically replaces rich content, serialized text and references during queue edits', async () => {
+    const f = fixture()
+    await f.controller.enqueue('conversation', 'work', { text: 'old', skills: ['old-skill'], mentionedFiles: ['old.ts'] })
+    const id = f.queue().entries[0]!.requestId
+    const payload = { text: '**new** @中文/文件.md', richContent: { version: 1 as const, document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'new', marks: [{ type: 'bold' }] }, { type: 'fileChip', attrs: { id: '中文/文件.md', label: '文件.md' } }] }] } }, mentionedFiles: ['中文/文件.md'] }
+    await f.controller.edit('conversation', id, payload)
+    expect(f.queue().entries[0]!.payload).toEqual(payload)
+    f.controller.close()
+    const restored = new MessageQueueController('service-one', f.store, f.adapter, () => {})
+    await restored.tick(); expect(f.sent[0]!.payload).toEqual(payload); restored.close()
   })
   it('never drains when ask is waiting or its answer has merely been accepted', async () => {
     const f = fixture(); await f.controller.enqueue('conversation', 'chat', { text: 'not an ask answer' }, 'active')
@@ -69,6 +80,18 @@ describe('durable frontend message queue', () => {
     const first = f.controller.tick(); while (!release) await Promise.resolve()
     const other = new MessageQueueController('service-one', f.store, f.adapter, () => {}); await other.tick(); expect(f.sent).toHaveLength(1)
     release(); await first; expect(f.queue().entries).toHaveLength(0)
+  })
+  it('rejects stale edits after another tab has started delivery', async () => {
+    const f = fixture(); let release!: () => void
+    f.adapter.send = async () => { await new Promise<void>(resolve => { release = resolve }); return { runId: 'one' } }
+    await f.controller.enqueue('conversation', 'work', { text: 'original', skills: ['keep'] })
+    const requestId = f.queue().entries[0]!.requestId
+    const sending = f.controller.tick(); while (!release) await Promise.resolve()
+    const other = new MessageQueueController('service-one', f.store, f.adapter, () => {})
+    await expect(other.edit('conversation', requestId, 'late edit')).rejects.toThrow()
+    expect(f.queue().entries[0]?.payload).toEqual({ text: 'original', skills: ['keep'] })
+    release(); await sending
+    await expect(other.edit('conversation', requestId, 'missing')).rejects.toThrow()
   })
   it('immediate sends only the selected entry and retains pause, attachments and remaining order', async () => {
     const f = fixture(); await f.controller.enqueue('conversation', 'work', { text: 'one', skills: ['keep'] })

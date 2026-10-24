@@ -2,6 +2,11 @@ const { contextBridge, ipcRenderer } = require('electron');
 const subscribe = (channel, listener) => { const receive = (_event, value) => listener(value); ipcRenderer.on(channel, receive); return () => ipcRenderer.removeListener(channel, receive); };
 contextBridge.exposeInMainWorld('pulseDesktop', {
     installation: true,
+    nativeBrowser: true,
+    browserLayout: (id, bounds) => ipcRenderer.invoke('pulse:browser-layout', id, bounds),
+    browserDispose: id => ipcRenderer.invoke('pulse:browser-dispose', id),
+    browserState: id => ipcRenderer.invoke('pulse:browser-state', id),
+    browserEvents: listener => subscribe('pulse:native-browser', listener),
     request: (path, init) => ipcRenderer.invoke('pulse:request', path, init),
     connections: listener => subscribe('pulse:connection', listener),
     changes: listener => subscribe('pulse:changed', listener),

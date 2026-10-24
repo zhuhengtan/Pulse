@@ -1,9 +1,21 @@
 import { defineConfig } from 'vite'
+import { fileURLToPath } from 'node:url'
 
 const pulseH5Target = process.env.PULSE_H5_TARGET ?? 'http://127.0.0.1:7333'
 
 export default defineConfig({
   base: '/',
+  plugins: [{
+    name: 'pulse-development-info',
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        if (request.url !== '/__pulse_dev') { next(); return }
+        response.setHeader('Content-Type', 'application/json')
+        response.setHeader('Cache-Control', 'no-store')
+        response.end(JSON.stringify({ workspace: fileURLToPath(new URL('../../', import.meta.url)), backend: new URL(pulseH5Target).origin }))
+      })
+    },
+  }],
   server: {
     proxy: {
       '/file-preview': { target: pulseH5Target, changeOrigin: true },

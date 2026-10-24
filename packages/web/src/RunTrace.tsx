@@ -153,12 +153,6 @@ export function changedToolPaths(step: TraceStep): string[] {
   const path = str(step.preview?.path) ?? str(step.args?.destination) ?? str(step.args?.path)
   return path ? [path] : []
 }
-function TraceDiffLinks({ steps }: { steps: TraceStep[] }) {
-  const open = useContext(OpenDiffContext)
-  if (!open) return null
-  const paths = [...new Set(steps.flatMap(changedToolPaths))]
-  return paths.length ? <div className="trace-diff-links">{paths.map(path => <PulseButton key={path} type="button" onClick={() => open(path)} aria-label={`查看 ${path} 的差异`}><Icon name="edit" size={12}/>查看差异 · {path}</PulseButton>)}</div> : null
-}
 
 function DiffText({ text }: { text: string }) {
   return <pre className="trace-code">{text.split('\n').slice(0, 200).map((line, i) => <span key={i} className={line.startsWith('+') && !line.startsWith('+++') ? 'diff-add' : line.startsWith('-') && !line.startsWith('---') ? 'diff-del' : undefined}>{line}{'\n'}</span>)}</pre>
@@ -180,6 +174,8 @@ function ToolDetail({ step }: { step: TraceStep }) {
 
 function StepRow({ step, live, showModel = true }: { step: TraceStep; live: boolean; showModel?: boolean }) {
   const [userOpen, setUserOpen] = useState<boolean | undefined>(undefined)
+  const openDiff = useContext(OpenDiffContext)
+  const diffPath = openDiff ? changedToolPaths(step)[0] : undefined
   const seenLive = useRef(false)
   if (live) seenLive.current = true
   if (step.kind === 'tool') {
@@ -187,10 +183,10 @@ function StepRow({ step, live, showModel = true }: { step: TraceStep; live: bool
     const hasDetail = Boolean(step.error || step.args || step.preview)
     const open = userOpen ?? step.status === 'failed'
     return <div className={`trace-step trace-tool trace-${step.status ?? 'running'}`}>
-      <PulseButton type="button" className="trace-row" onClick={() => setUserOpen(!open)} aria-expanded={open} disabled={!hasDetail}>
+      <PulseButton type="button" className="trace-row" onClick={() => diffPath ? openDiff?.(diffPath) : setUserOpen(!open)} title={diffPath ? `查看 ${diffPath} 的差异` : undefined} aria-expanded={diffPath ? undefined : open} disabled={!diffPath && !hasDetail}>
         <span className="trace-state">{step.status === 'running' ? <i className="trace-spin" /> : step.status === 'succeeded' ? '✓' : step.status === 'failed' ? '✕' : '–'}</span>
         <span className="trace-icon"><Icon name={icon} size={14}/></span><span className="trace-text">{text}</span>
-        {hasDetail && <span className="trace-caret">{open ? '▾' : '▸'}</span>}
+        {(diffPath || hasDetail) && <span className="trace-caret">{!diffPath && open ? '▾' : '▸'}</span>}
       </PulseButton>
       {open && hasDetail && <ToolDetail step={step} />}
     </div>
@@ -257,7 +253,7 @@ function summary(state: TraceState, running: boolean): string {
   const label = emptyProgress ? undefined : state.label
   const head = running ? (label ?? (phase ? `正在${phase}` : '执行中')) : state.outcome === 'succeeded' ? '已完成' : state.outcome === 'cancelled' ? '已停止' : state.outcome === 'failed' ? '未完成' : '已结束'
   const seconds = state.startedAt !== undefined && state.endedAt !== undefined ? Math.max(1, Math.round((state.endedAt - state.startedAt) / 1000)) : undefined
-  return `${head} · ${lanes} 个 Lane${tools ? ` · ${tools} 次工具调用` : ''}${seconds ? ` · 耗时 ${seconds}s` : ''}`
+  return `${head}${lanes > 1 ? ` · ${lanes} 个执行分支` : ''}${tools ? ` · ${tools} 次工具调用` : ''}${seconds ? ` · 耗时 ${seconds}s` : ''}`
 }
 
 function progressState(step: TraceStep): string {
@@ -274,6 +270,8 @@ function ProgressFailure({ step }: { step: TraceStep }) {
 /** Consecutive tool calls stay inspectable without turning updates into a log wall. */
 function ProgressTools({ steps }: { steps: TraceStep[] }) {
   const [open, setOpen] = useState(false)
+  const openDiff = useContext(OpenDiffContext)
+  const diffPath = openDiff && steps.length === 1 ? changedToolPaths(steps[0]!)[0] : undefined
   const active = [...steps].reverse().find(step => !step.status || step.status === 'running')
   const failures = steps.filter(step => step.status === 'failed')
   const counts = new Map<string, number>()
@@ -281,7 +279,7 @@ function ProgressTools({ steps }: { steps: TraceStep[] }) {
   for (const step of steps) { const verb = verbs[step.tool ?? ''] ?? '工具操作'; counts.set(verb, (counts.get(verb) ?? 0) + 1) }
   const label = active ? summarizeTool(active).text : steps.length === 1 ? summarizeTool(steps[0]!).text : [...counts].map(([verb, count]) => `${verb} ${count}`).join(' · ')
   return <div className="progress-tools">
-    <button type="button" className="progress-batch-head" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+    <button type="button" className="progress-batch-head" title={diffPath ? `查看 ${diffPath} 的差异` : undefined} aria-expanded={diffPath ? undefined : open} onClick={() => diffPath ? openDiff?.(diffPath) : setOpen(value => !value)}>
       <span className={`progress-batch-state ${failures.length ? 'has-failure' : ''}`} aria-label={active ? '进行中' : failures.length ? '有操作失败' : '操作记录'}>{active ? <i className="trace-spin" /> : <Icon name={summarizeTool(steps[steps.length - 1]!).icon} size={14}/>}</span>
       <span className="progress-batch-label">{label}</span>
       {failures.length > 0 && <small>{failures.length} 项失败</small>}
@@ -294,7 +292,6 @@ function ProgressTools({ steps }: { steps: TraceStep[] }) {
         {step.error && <p>{String(step.error.message ?? step.error.code ?? '操作失败')}</p>}
       </div>)}
     </div>}
-    <TraceDiffLinks steps={steps} />
     {!open && failures.map(step => <ProgressFailure key={step.id} step={step} />)}
   </div>
 }
@@ -306,7 +303,7 @@ function RunProgress({ trace }: { trace: TraceState }) {
     const id = `${laneId}:${step.id}`
     if (step.kind === 'tool') {
       const last = groups[groups.length - 1]
-      if (last?.kind === 'tools' && last.lane === laneId) last.steps.push(step)
+      if (last?.kind === 'tools' && last.lane === laneId && !changedToolPaths(step).length && !last.steps.some(item => changedToolPaths(item).length)) last.steps.push(step)
       else groups.push({ kind: 'tools', id, lane: laneId, steps: [step] })
     } else if (step.note?.trim()) groups.push({ kind: 'note', id, note: step.note })
   }
@@ -324,7 +321,7 @@ export function RunTraceView({ trace, running: streamRunning, onDiffClick }: { t
   // Reset overrides at lifecycle transitions. Late replay events must not undo
   // the user's choice to reopen a completed run.
   if (wasRunning !== running) { setWasRunning(running); setUserOpen(undefined) }
-  const open = wasRunning !== running ? running : userOpen ?? running
+  const open = wasRunning !== running ? false : userOpen ?? false
   const roots = trace.order.filter(id => { const lane = trace.lanes[id]!; return !lane.parentId || !trace.lanes[lane.parentId] })
   const render = (id: string): ReactElement[] => {
     const lane = trace.lanes[id]!

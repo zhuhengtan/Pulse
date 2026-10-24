@@ -34,7 +34,7 @@ function Review() {
     {page==='交付文件' && <div className="messages" style={{height:'100%',margin:'auto'}}><ConversationArtifacts conversationId="fixture-conversation" revision="1" transport={fixture.transport}/></div>}
     {page==='归档' && <ArchivePage transport={fixture.transport} onBack={()=>setPage('设置')} onChanged={()=>setResult('归档状态已更新')} onOpen={()=>setResult('已打开示例归档')}/>}
     {page==='执行过程' && <div className="messages" style={{height:'100%',margin:'auto'}}><PulseButton onClick={()=>setDone(!done)}>切换执行完成</PulseButton><RunTraceView trace={done?{...trace,outcome:'succeeded'}:trace} running={!done}/></div>}
-    {(page==='问答'||page==='审批') && <div className="composer-wrap" style={{margin:'40px auto',width:'min(900px,100%)'}}><InteractionPanel key={page} interaction={interaction} context="示例项目 · 页面检查" reviewNote="" delegated={false} running stopping={false} stop={()=>setResult('已停止示例任务')} submit={async()=>{setResult('已提交示例答案');return true}} setApprovalPolicy={async()=>{setResult('示例代审设置已更新');return true}}/></div>}
+    {(page==='问答'||page==='审批') && <div className="composer-wrap" style={{margin:'40px auto',width:'min(900px,100%)'}}><InteractionPanel key={page} interaction={interaction} context="示例项目 · 页面检查" reviewNote="" delegated={false} submit={async()=>{setResult('已提交示例答案');return true}}/></div>}
     {page==='配对' && <SettingsPage transport={fixture.transport} canEditConfig category="devices" onCategoryChange={()=>{}} onClose={()=>setPage('设置')}/>}
     {page==='连接错误' && <PulseApp transport={fixture.transport}/>}
   </div></PulseDesignSystem>

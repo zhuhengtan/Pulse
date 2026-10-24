@@ -12,6 +12,8 @@ export function sidebarFixture() {
     { id: 'jarvis-chat', title: '完善项目记忆', cwd: projects[1]!.cwd, projectId: 'jarvis', createdAt: now, updatedAt: now },
     { id: 'busy', title: '正在执行的任务', cwd: projects[1]!.cwd, projectId: 'jarvis', activeRunId: 'run-busy', createdAt: now, updatedAt: now },
   ]
+  const projectEdits: Array<{ id: string; body: Record<string, unknown> }> = []
+  const projectOrders: string[][] = []
   const patches: Array<{ id: string; body: Record<string, unknown> }> = []
   let rejectMove = false
   let approvalPolicy: 'manual' | 'delegate' = 'manual'
@@ -24,6 +26,16 @@ export function sidebarFixture() {
       }
       if (path === '/api/session/local' || path === '/api/session') return response({ localAdmin: true, canUseTerminal: false })
       if (path === '/api/assistant') return response({ conversation: { id: 'assistant', title: 'Pulse 助理', cwd: '/example', createdAt: now, updatedAt: now }, messages: [], receipts: [], workInteractions: [] })
+      if (path === '/api/projects/order') {
+        const ids = JSON.parse(String(init?.body)).ids as string[]; projectOrders.push(ids)
+        projects.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id)); return response({ ok: true })
+      }
+      if (/^\/api\/projects\/[^/]+$/.test(path) && init?.method === 'PATCH') {
+        const id = path.split('/').at(-1)!, body = JSON.parse(String(init.body)); projectEdits.push({ id, body })
+        const index = projects.findIndex(project => project.id === id)
+        projects[index] = { ...projects[index]!, ...body }
+        return response(projects[index])
+      }
       if (path === '/api/projects') return response(projects)
       if (path === '/api/conversations') return response(conversations)
       if (path.endsWith('/messages')) return response([{ id: 'message', role: 'assistant', text: '对话内容会保留，所属项目可以随时调整。', createdAt: now }])
@@ -38,7 +50,7 @@ export function sidebarFixture() {
           const { projectId: previous, ...rest } = item
           const projectId = Object.hasOwn(body, 'projectId') ? body.projectId as string | null : previous
           const project = projects.find(value => value.id === projectId)
-          return { ...rest, ...(projectId ? { projectId } : {}), cwd: project?.cwd ?? item.cwd }
+          return { ...rest, ...(typeof body.title === 'string' ? { title: body.title } : {}), ...(typeof body.pinned === 'boolean' ? { pinned: body.pinned } : {}), ...(projectId ? { projectId } : {}), cwd: project?.cwd ?? item.cwd }
         })
         return response(conversations.find(item => item.id === id))
       }
@@ -46,5 +58,5 @@ export function sidebarFixture() {
     },
     subscribe: () => () => {},
   }
-  return { transport, patches, rejectMove: () => { rejectMove = true } }
+  return { transport, patches, projectEdits, projectOrders, rejectMove: () => { rejectMove = true } }
 }

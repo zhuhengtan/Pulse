@@ -1,6 +1,9 @@
 import type { CSSProperties, ComponentType } from 'react'
 import {
+  PushpinOutlined,
   ArrowLeftOutlined,
+  ArrowUpOutlined,
+  DownOutlined,
   ReloadOutlined,
   AuditOutlined,
   BulbOutlined,
@@ -13,11 +16,14 @@ import {
   GlobalOutlined,
   ToolOutlined,
   FolderOutlined,
+  FolderOpenOutlined,
+  FolderAddOutlined,
   HomeOutlined,
   InboxOutlined,
   InfoCircleOutlined,
   MenuOutlined,
   MoreOutlined,
+  MessageOutlined,
   PaperClipOutlined,
   PlusOutlined,
   RightOutlined,
@@ -29,11 +35,17 @@ import {
 } from '@ant-design/icons'
 
 const icons = {
+  pin: PushpinOutlined,
+  message: MessageOutlined,
+  up: ArrowUpOutlined,
+  down: DownOutlined,
   menu: MenuOutlined,
   close: CloseOutlined,
   plus: PlusOutlined,
   info: InfoCircleOutlined,
   folder: FolderOutlined,
+  'folder-open': FolderOpenOutlined,
+  'folder-add': FolderAddOutlined,
   search: SearchOutlined,
   archive: InboxOutlined,
   settings: SettingOutlined,

@@ -29,6 +29,22 @@ const address = (router: ReturnType<typeof createMemoryRouter>) => router.state.
 const navigate = async (router: ReturnType<typeof createMemoryRouter>, target: string | number) => { await act(async () => { if (typeof target === 'number') await router.navigate(target); else await router.navigate(target) }) }
 
 describe('explicit URL navigation', () => {
+  it('surfaces the internal AI browser in the right panel even when an external session is listed first', async () => {
+    const original = window.pulseDesktop
+    window.pulseDesktop = { nativeBrowser: true } as NonNullable<typeof window.pulseDesktop>
+    try {
+      const fixture = routingFixture(), request = fixture.transport.request
+      const base = { kind: 'browser', state: 'ai', conversationId: 'pulse-chat', owner: 'run:agent' }
+      fixture.transport.request = async (path, init) => path === '/api/automation/sessions'
+        ? Response.json({ sessions: [{ ...base, id: 'external', mode: 'dedicated' }, { ...base, id: 'internal', mode: 'native' }], nativeBrowser: true, approvalMode: 'ask' })
+        : request(path, init)
+      const view = show('/work/pulse-chat', fixture)
+      await waitFor(() => expect(new URLSearchParams(view.router.state.location.search).get('automation')).toBe('internal'))
+      expect(new URLSearchParams(view.router.state.location.search).get('workspace')).toBe('preview')
+      view.unmount()
+    } finally { window.pulseDesktop = original }
+  })
+
   it('normalizes the root and prefers an explicit conversation over saved preferences', async () => {
     const root = show('/')
     await screen.findByText('我们要做什么？'); expect(address(root.router)).toBe('/chat')
@@ -72,7 +88,7 @@ describe('explicit URL navigation', () => {
     ]
     fixture.transport.request = async (path, init) => path === '/api/conversations' ? new Response(JSON.stringify(conversations)) : request(path, init)
     const view = show('/work/old', fixture)
-    const titles = (selector: string) => [...view.container.querySelectorAll(`${selector} .history-item`)].map(button => button.getAttribute('title'))
+    const titles = (selector: string) => [...view.container.querySelectorAll(`${selector} .history-item`)].map(button => button.querySelector('span')?.textContent)
     const checkOrder = () => {
       expect(titles('.project-conversations')).toEqual(['置顶项目对话', '较新项目对话', '较旧项目对话'])
       expect(titles('.ungrouped-history')).toEqual(['较新未分组对话', '较旧未分组对话'])
@@ -169,7 +185,7 @@ describe('explicit URL navigation', () => {
     const view = show('/work/pulse-chat?workspace=git&staged=1&diff=staged.ts')
     await screen.findByText('+verified diff')
     expect(view.calls.some(call => call.path.includes('/git/diff?path=staged.ts&staged=1'))).toBe(true)
-    for (const tab of workspaceTabs.filter(value => value !== 'preview')) {
+    for (const tab of workspaceTabs.filter(value => value !== 'preview' && value !== 'automation')) {
       await navigate(view.router, `/work/pulse-chat?workspace=${tab}`)
       await waitFor(() => expect(screen.getByRole('tab', { name: { files: '文件', git: '变更', terminal: '终端', automation: '自动化' }[tab], exact: true }).getAttribute('aria-selected')).toBe('true'))
     }

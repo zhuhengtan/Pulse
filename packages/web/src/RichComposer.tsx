@@ -1,10 +1,14 @@
+import { mentionLocation, parentMentionDirectory } from './fileMentions.js'
+import { AttachmentCards } from './AttachmentCards.js'
+import { parseRichContent, type RichContent } from '@hunterzhu/pulse-server/rich-content'
+import { ComposerBubbleMenu, ComposerLink, ComposerRules, composerNewline } from './ComposerFormatting.js'
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { useEditor, EditorContent } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import Placeholder from '@tiptap/extension-placeholder'
 import { Markdown } from 'tiptap-markdown'
-import { Node, Extension, mergeAttributes, type JSONContent } from '@tiptap/core'
-import { Suggestion, type SuggestionProps, type SuggestionKeyDownProps } from '@tiptap/suggestion'
+import { Node, Extension, mergeAttributes, type JSONContent, type Editor } from '@tiptap/core'
+import { Suggestion, exitSuggestion, type SuggestionProps, type SuggestionKeyDownProps } from '@tiptap/suggestion'
 import { PluginKey } from '@tiptap/pm/state'
 import { Dropdown } from 'antd'
 import type { FollowupBehavior } from './MessageQueue.js'
@@ -18,7 +22,7 @@ export interface AttachmentDraft {
   type: 'image' | 'file'
   size: number
   mediaType: string
-  previewUrl?: string
+  previewUrl?: string | undefined
   data: string
 }
 
@@ -30,15 +34,19 @@ export interface ComposerDraft {
   revision: number
 }
 export const emptyComposerDraft = (): ComposerDraft => ({ markdown: '', attachments: [], processing: 0, revision: 0 })
-export type ComposerPayload = { text: string; attachments?: WebAttachment[] | undefined; skills?: string[] | undefined; mentionedFiles?: string[] | undefined }
+export type ComposerPayload = { text: string; richContent?: RichContent | undefined; attachments?: WebAttachment[] | undefined; skills?: string[] | undefined; mentionedFiles?: string[] | undefined }
+
+const fileSuggestionKey = new PluginKey('fileSuggestion')
 
 export interface SuggestionItem {
   id: string
   name: string
   description?: string
+  directory?: boolean
 }
 
 export interface RichComposerProps {
+  submitLabel?: string | undefined
   id?: string | undefined
   draft: ComposerDraft
   placeholder?: string | undefined
@@ -86,8 +94,8 @@ const SkillChip = Node.create({
     const label = node.attrs.label || node.attrs.id || ''
     return [
       'span',
-      mergeAttributes({ 'data-type': 'skill-chip', class: 'mention-chip skill-chip' }, HTMLAttributes),
-      `/${label}`,
+      mergeAttributes({ 'data-type': 'skill-chip', class: 'mention-chip skill-chip', title: node.attrs.id }, HTMLAttributes),
+      ['span', { class: 'reference-icon', 'aria-hidden': 'true' }, '✦'], `/${label}`,
     ]
   },
 
@@ -136,8 +144,8 @@ const FileChip = Node.create({
     const label = node.attrs.label || node.attrs.id || ''
     return [
       'span',
-      mergeAttributes({ 'data-type': 'file-chip', class: 'mention-chip file-chip' }, HTMLAttributes),
-      `@${label}`,
+      mergeAttributes({ 'data-type': 'file-chip', class: 'mention-chip file-chip', title: node.attrs.id }, HTMLAttributes),
+      ['span', { class: 'reference-icon', 'aria-hidden': 'true' }, String(node.attrs.id ?? '').endsWith('/') ? '▱' : '▤'], `@${label}`,
     ]
   },
 
@@ -156,11 +164,6 @@ const FileChip = Node.create({
   },
 })
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
 
 function readFileAsBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -228,6 +231,7 @@ function compressImage(file: File): Promise<AttachmentDraft> {
 
 export function RichComposer({
   id: composerId = 'composer',
+  submitLabel,
   draft,
   placeholder,
   disabled = false,
@@ -253,6 +257,8 @@ export function RichComposer({
   const setAttachments = (update: (current: AttachmentDraft[]) => AttachmentDraft[]) => onChange(current => ({ ...current, attachments: update(current.attachments), revision: current.revision + 1 }))
   const [isDragOver, setIsDragOver] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
+  const [sendMenuOpen, setSendMenuOpen] = useState(false)
+  const followupRef = useRef({ running, followupBehavior }); followupRef.current = { running, followupBehavior }
   const fileInputRef = useRef<HTMLInputElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [hasContent, setHasContent] = useState(Boolean(value.trim()))
@@ -263,10 +269,16 @@ export function RichComposer({
     items: SuggestionItem[]
     command: (item: SuggestionItem) => void
     selectedIndex: number
+    directory?: string
+    loading?: boolean
+    navigate?: (path: string) => void
   } | null>(null)
 
   const suggestionRef = useRef(suggestionState)
   suggestionRef.current = suggestionState
+
+  const suggestionMenuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => { suggestionMenuRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest' }) }, [suggestionState?.selectedIndex, suggestionState?.items])
 
   const cachedSkills = useRef<SuggestionItem[] | null>(null)
   const currentProjectIdRef = useRef(projectId)
@@ -287,15 +299,18 @@ export function RichComposer({
   // Fetch project files helper
   const fetchProjectFiles = useCallback(async (pId: string, query: string): Promise<SuggestionItem[]> => {
     try {
-      const res = await apiJson<{ paths: string[] }>(transport, `/api/projects/${encodeURIComponent(pId)}/file-index?q=${encodeURIComponent(query)}`)
-      return (res.paths || []).map(p => ({ id: p, name: p }))
+      const { directory, filter } = mentionLocation(query)
+      const res = await apiJson<{ entries: Array<{ name: string; path: string; type: string }> }>(transport, `/api/projects/${encodeURIComponent(pId)}/files?path=${encodeURIComponent(directory || '.')}`)
+      return (res.entries || []).filter(entry => ['directory', 'file'].includes(entry.type) && entry.name.toLocaleLowerCase().includes(filter.toLocaleLowerCase()))
+        .sort((a, b) => Number(b.type === 'directory') - Number(a.type === 'directory') || a.name.localeCompare(b.name))
+        .map(entry => ({ id: entry.path + (entry.type === 'directory' ? '/' : ''), name: entry.name, directory: entry.type === 'directory' }))
     } catch {
       return []
     }
   }, [transport])
 
   const handleSend = async (behavior?: FollowupBehavior) => {
-    if (disabled || submitting || sendingRef.current || draft.processing) return
+    if (disabled || submitting || stopping || sendingRef.current || draft.processing) return
     const currentMarkdown = (editor?.storage as any)?.markdown?.getMarkdown?.() ?? ''
     const trimmed = currentMarkdown.trim()
     if (!trimmed && attachments.length === 0) return
@@ -324,12 +339,6 @@ export function RichComposer({
         }
       })
     }
-    const fileRegex = /(?:^|\s)@([a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*)/g
-    let fm: RegExpExecArray | null
-    while ((fm = fileRegex.exec(trimmed)) !== null) {
-      if (fm[1]) filesFound.push(fm[1])
-    }
-
     const uniqueSkills = [...new Set(skillsFound)]
     const uniqueFiles = [...new Set(filesFound)]
 
@@ -342,9 +351,13 @@ export function RichComposer({
       data: att.data,
     }))
 
+    let richContent: RichContent
+    try { richContent = parseRichContent({ version: 1, document: editor!.getJSON() })! }
+    catch { setSendError('内容格式或长度不受支持，请调整后重试。草稿已保留。'); return }
     const snapshotRevision = draft.revision
     const payload: ComposerPayload = {
       text: trimmed,
+      richContent,
       ...(webAttachments.length ? { attachments: webAttachments } : {}),
       ...(uniqueSkills.length ? { skills: uniqueSkills } : {}),
       ...(uniqueFiles.length ? { mentionedFiles: uniqueFiles } : {}),
@@ -421,16 +434,20 @@ export function RichComposer({
   }, [disabled, submitting, onChange])
 
   // Configure Tiptap editor
-  const editor = useEditor({
+  const editor: Editor | null = useEditor({
     extensions: [
       StarterKit.configure({
-        heading: false,
+        heading: { levels: [1, 2, 3] },
+        link: false,
+        trailingNode: false,
       }),
       Placeholder.configure({
         showOnlyWhenEditable: false,
         placeholder: () => placeholderRef.current || '给 Pulse 发送消息…',
       }),
-      Markdown,
+      Markdown.configure({ html: false, breaks: true, transformPastedText: true, transformCopiedText: true }),
+      ComposerLink,
+      ComposerRules,
       SkillChip,
       FileChip,
       Extension.create({
@@ -535,7 +552,8 @@ export function RichComposer({
             Suggestion({
               editor: this.editor,
               char: '@',
-              pluginKey: new PluginKey('fileSuggestion'),
+              allowSpaces: true,
+              pluginKey: fileSuggestionKey,
               allow: ({ state, range }) => {
                 const $from = state.doc.resolve(range.from)
                 const textBefore = $from.parent.textBetween(0, $from.parentOffset, undefined, '\uFFFC')
@@ -553,7 +571,7 @@ export function RichComposer({
                   .insertContentAt(range, [
                     {
                       type: 'fileChip',
-                      attrs: { id: props.id, label: props.name },
+                      attrs: { id: props.id, label: props.name + (props.directory ? '/' : '') },
                     },
                     {
                       type: 'text',
@@ -566,7 +584,10 @@ export function RichComposer({
                 onStart: (props: SuggestionProps) => {
                   setSuggestionState({
                     type: 'file',
-                    items: props.items,
+                    directory: mentionLocation(props.query).directory,
+                    navigate: path => { props.editor.chain().focus().insertContentAt(props.range, `@${path}`).run() },
+                    items: props.loading ? [] : props.items,
+                    loading: props.loading,
                     command: props.command,
                     selectedIndex: 0,
                   })
@@ -576,13 +597,24 @@ export function RichComposer({
                     if (!current) return null
                     return {
                       ...current,
-                      items: props.items,
+                      directory: mentionLocation(props.query).directory,
+                      navigate: path => { props.editor.chain().focus().insertContentAt(props.range, `@${path}`).run() },
+                      items: props.loading ? [] : props.items,
+                    loading: props.loading,
                       command: props.command,
                       selectedIndex: 0,
                     }
                   })
                 },
                 onKeyDown: (props: SuggestionKeyDownProps) => {
+                  if (props.event.isComposing) return false
+                  const state = suggestionRef.current
+                  if (props.event.key === 'ArrowRight' || props.event.key === 'ArrowLeft') {
+                    const item = state?.items[state.selectedIndex]
+                    if (props.event.key === 'ArrowRight' && item?.directory) state?.navigate?.(item.id)
+                    if (props.event.key === 'ArrowLeft' && state?.directory) state.navigate?.(parentMentionDirectory(state.directory))
+                    return true
+                  }
                   if (props.event.key === 'ArrowUp') {
                     setSuggestionState(current => {
                       if (!current || !current.items.length) return current
@@ -606,9 +638,10 @@ export function RichComposer({
                       current.command(item)
                       return true
                     }
-                    return false
+                    return true
                   }
                   if (props.event.key === 'Escape') {
+                    exitSuggestion(props.view, fileSuggestionKey)
                     setSuggestionState(null)
                     return true
                   }
@@ -627,16 +660,19 @@ export function RichComposer({
     editable: !disabled,
     editorProps: {
       handleKeyDown: (_view, event) => {
-        if (suggestionRef.current) return false
+        if (suggestionRef.current || fileSuggestionKey.getState(_view.state)?.active) return false
         if (event.key === 'Enter') {
           const isMobile = window.matchMedia('(max-width: 767px)').matches
           if (event.isComposing) return false
-          if (!isMobile && !event.shiftKey) {
+          if ((!isMobile && !event.shiftKey && !editor?.isActive('codeBlock')) || event.metaKey || event.ctrlKey) {
             event.preventDefault()
-            void sendRef.current()
+            const current = followupRef.current
+            void sendRef.current(current.running && (event.metaKey || event.ctrlKey) ? current.followupBehavior === 'queue' ? 'immediate' : 'queue' : undefined)
             return true
           }
-          return false
+          if (editor?.isActive('codeBlock') && !event.shiftKey) return false
+          event.preventDefault()
+          return editor ? composerNewline(editor) : false
         }
         return false
       },
@@ -644,6 +680,12 @@ export function RichComposer({
         if (event.clipboardData?.files?.length) {
           event.preventDefault()
           void handleFilesAdded(Array.from(event.clipboardData.files))
+          return true
+        }
+        const pasted = event.clipboardData?.getData('text/plain')?.trim()
+        if (pasted && /^https?:\/\/[^\s]+$/.test(pasted) && editor) {
+          event.preventDefault()
+          editor.chain().insertContent({ type: 'text', text: pasted, marks: [{ type: 'link', attrs: { href: pasted } }] }).unsetMark('link').run()
           return true
         }
         return false
@@ -660,11 +702,11 @@ export function RichComposer({
   useEffect(() => {
     if (!editor) return
     const currentMarkdown = (editor.storage as any)?.markdown?.getMarkdown?.() ?? ''
-    if (value !== currentMarkdown) {
+    if (value !== currentMarkdown || draft.document && JSON.stringify(draft.document) !== JSON.stringify(editor.getJSON())) {
       editor.commands.setContent(draft.document ?? value, { emitUpdate: false })
       setHasContent(Boolean(value.trim()))
     }
-  }, [value, editor])
+  }, [value, draft.document, editor])
 
   // Synchronize disabled state
   useEffect(() => {
@@ -675,7 +717,7 @@ export function RichComposer({
 
   const sendRef = useRef(handleSend)
   sendRef.current = handleSend
-  const canSubmit = (hasContent || attachments.length > 0) && !draft.processing && !submitting && !disabled
+  const canSubmit = (hasContent || attachments.length > 0) && !draft.processing && !submitting && !disabled && !stopping
 
   return (
     <div
@@ -700,13 +742,17 @@ export function RichComposer({
       {draft.processing > 0 && <div role="status">正在处理附件…</div>}
       {/* Suggestions Menu */}
       {suggestionState && (
-        <div className="composer-suggestion-popup" role="listbox">
+        <div className="composer-suggestion-popup" ref={suggestionMenuRef}>
           <div className="suggestion-header">
-            {suggestionState.type === 'skill' ? '推荐 Skill' : '项目文件'}
+            {suggestionState.type === 'skill' ? '推荐 Skill' : <>
+              <button type="button" onMouseDown={event => { event.preventDefault(); suggestionState.navigate?.('') }}>项目</button>
+              {(suggestionState.directory ?? '').split('/').filter(Boolean).map((name, index, parts) => <span key={index}><span aria-hidden="true"> / </span><button type="button" onMouseDown={event => { event.preventDefault(); suggestionState.navigate?.(parts.slice(0, index + 1).join('/') + '/') }}>{name}</button></span>)}
+            </>}
           </div>
+          <div className="suggestion-options" role="listbox" aria-label={suggestionState.type === 'file' ? '项目文件与文件夹' : 'Skill'}>
           {suggestionState.items.length === 0 ? (
             <div className="suggestion-empty">
-              {suggestionState.type === 'file' && !projectId
+              {suggestionState.loading ? '正在读取目录…' : suggestionState.type === 'file' && !projectId
                 ? '当前会话未关联项目，无法索引文件'
                 : '未找到匹配项'}
             </div>
@@ -723,41 +769,19 @@ export function RichComposer({
                 }}
               >
                 <span className="suggestion-item-icon">
-                  {suggestionState.type === 'skill' ? '⚡' : '📄'}
+                  <Icon name={suggestionState.type === 'skill' ? 'tool' : item.directory ? 'folder' : 'file'}/>
                 </span>
-                <span className="suggestion-item-name">{item.name}</span>
+                <span className="suggestion-item-name" title={item.id}>{item.name}</span>
+                {item.directory && <button type="button" className="suggestion-enter" aria-label={`进入 ${item.name}`} onMouseDown={event => { event.preventDefault(); event.stopPropagation(); suggestionState.navigate?.(item.id) }}><Icon name="chevron" size={12}/></button>}
               </div>
             ))
-          )}
+          )}</div>
+          {suggestionState.type === 'file' && <div className="suggestion-hint">↑↓ 选择 · ↵ 引用 · → 进入 · ← 返回</div>}
         </div>
       )}
 
       {/* Attachments bar */}
-      {attachments.length > 0 && (
-        <div className="composer-attachments">
-          {attachments.map((att, idx) => (
-            <div key={att.id} className="composer-attachment-item">
-              {att.type === 'image' && att.previewUrl ? (
-                <img src={att.previewUrl} alt={att.name} className="attachment-thumbnail" />
-              ) : (
-                <span className="attachment-icon">📁</span>
-              )}
-              <div className="attachment-meta">
-                <span className="attachment-name" title={att.name}>{att.name}</span>
-                <span className="attachment-size">{formatFileSize(att.size)}</span>
-              </div>
-              <button
-                type="button"
-                className="attachment-remove"
-                aria-label={`移除 ${att.name}`}
-                onClick={() => setAttachments(curr => curr.filter((_, i) => i !== idx))}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
+      {attachments.length > 0 && <div className="composer-attachments"><AttachmentCards items={attachments} onRemove={id => setAttachments(items => items.filter(item => item.id !== id))}/></div>}
 
       {/* Editor Content */}
       <div className="composer-editor-wrap">
@@ -787,6 +811,7 @@ export function RichComposer({
           }}
         />
         <EditorContent editor={editor} id={composerId} />
+        {editor && <ComposerBubbleMenu editor={editor}/>}
       </div>
 
       {/* Bottom compact toolbar */}
@@ -846,17 +871,16 @@ export function RichComposer({
               <span className={stopping ? 'spinner' : 'composer-stop-icon'} aria-hidden="true" />
             </PulseButton>
           )}
-          {running && <button type="button" className="composer-alternate-send" disabled={!canSubmit} onClick={() => void handleSend(followupBehavior === 'queue' ? 'immediate' : 'queue')}>{followupBehavior === 'queue' ? '立即发送' : '加入队列'}</button>}
-          <button
-              type="button"
-              className="composer-send-btn"
-              disabled={!canSubmit}
-              aria-label={running ? followupBehavior === 'queue' ? '加入队列' : '立即发送' : '发送'}
-              title={running ? followupBehavior === 'queue' ? '加入队列' : '立即交给主线程' : '发送'}
-              onClick={() => void handleSend()}
-            >
-              {submitting ? <span className="spinner" /> : <Icon name="send" size={17} />}
-            </button>
+          {running && (hasContent || attachments.length > 0) && <Dropdown trigger={['click']} placement="topRight" open={sendMenuOpen} onOpenChange={setSendMenuOpen} menu={{
+            items: [{ key: 'queue', label: '排队发送', extra: followupBehavior === 'queue' ? 'Enter' : '⌘/Ctrl Enter' }, { key: 'immediate', label: '立即发送', extra: followupBehavior === 'immediate' ? 'Enter' : '⌘/Ctrl Enter' }],
+            onClick: ({ key }) => { setSendMenuOpen(false); void handleSend(key as FollowupBehavior) },
+          }}><button type="button" className="composer-send-menu" aria-label="发送方式" aria-haspopup="menu" aria-expanded={sendMenuOpen} disabled={!canSubmit}><Icon name="down" size={12}/></button></Dropdown>}
+          {(!running || hasContent || attachments.length > 0) && <button
+            type="button" className="composer-send-btn" disabled={!canSubmit}
+            aria-label={submitLabel ?? (running ? followupBehavior === 'queue' ? '加入队列' : '立即发送' : '发送')}
+            title={running ? followupBehavior === 'queue' ? '排队发送 · Enter' : '立即发送 · Enter' : '发送 · Enter'}
+            onClick={() => void handleSend()}
+          >{submitting ? <span className="spinner"/> : <Icon name="up" size={18}/>}</button>}
         </div>
       </div>
     </div>
