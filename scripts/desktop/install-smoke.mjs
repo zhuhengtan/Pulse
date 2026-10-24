@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 const require = createRequire(new URL('../../packages/server/package.json', import.meta.url));
 const { _electron } = createRequire(require.resolve('@playwright/mcp'))('playwright');
 const execute = promisify(execFile);
+const expectedVersion = JSON.parse(await readFile(new URL('../../packages/cli/package.json', import.meta.url), 'utf8')).version;
 const root = await realpath(await mkdtemp(join(tmpdir(), 'pulse-clean-install-')));
 const install = join(root, '.pulse'), profile = join(root, 'profile'), data = join(install, 'data'), shellHome = join(root, 'shell');
 const executablePath = process.env.PULSE_DESKTOP_EXECUTABLE ?? createRequire(new URL('../../packages/desktop/package.json', import.meta.url))('electron');
@@ -46,7 +47,7 @@ try {
     const descriptor = JSON.parse(await readFile(join(data, 'service.json'), 'utf8')); pid = descriptor.pid;
     assert.equal(first.service.pid, pid);
     const runCli = async path => process.platform === 'win32' ? execute(process.env.ComSpec, ['/d', '/s', '/c', `""${path}" --version"`], { env }) : execute(path, ['--version'], { env });
-    assert.match((await runCli(first.cli.path)).stdout, /0\.7\.0/);
+    assert.ok((await runCli(first.cli.path)).stdout.includes(`Pulse v${expectedVersion}`));
     if (process.platform !== 'win32') {
         const shellResult = await execute('/bin/sh', ['-c', '. "$1"; command -v pulse; pulse --version', 'fixture', join(shellHome, '.profile')], { env });
         assert.ok(shellResult.stdout.includes(first.cli.path));
@@ -84,7 +85,7 @@ try {
     assert.equal(await readFile(first.configPath, 'utf8'), config);
     assert.equal(await readFile(sentinel, 'utf8'), 'preserve user data');
     assert.equal((await request(page, `/api/conversations/${conversation.id}`)).title, 'Preserve installed history');
-    assert.match((await runCli(repaired.cli.path)).stdout, /0\.7\.0/);
+    assert.ok((await runCli(repaired.cli.path)).stdout.includes(`Pulse v${expectedVersion}`));
     await page.evaluate(() => { history.pushState(null, '', '/settings/desktop'); dispatchEvent(new PopStateEvent('popstate')); });
     await page.getByRole('button', { name: '应用后台更新', exact: true }).waitFor();
     await page.screenshot({ path: join(tmpdir(), 'pulse-desktop-environment-repair.png') });

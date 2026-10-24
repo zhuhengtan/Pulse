@@ -1,8 +1,12 @@
 {
   "name": "@hunterzhu/pulse-data",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "type": "module",
   "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhuhengtan/Pulse"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

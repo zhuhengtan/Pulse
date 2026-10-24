@@ -2,6 +2,24 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.8.0] - 2026-10-24
+
+### Added
+
+- Added the Pulse desktop client with local conversation storage, model settings, device management, and a native browser, reusing existing projects and conversation data.
+- Added a unified tabs panel for documents, images, code diffs, and browser pages; plan confirmation links open previews directly, and the panel stays closed on first launch.
+- Added queued follow-up messages and model-directed steering, preserving input order while keeping question replies separate from the message queue.
+- Added the Pulse product website and repository download entry points, with macOS, Windows, and Linux clients, version-specific downloads, and SHA-256 checksums in public releases.
+- Added development diagnostics, code snapshots, and autonomous-task regression tools to supervise repairs and check actual deliverables and acceptance evidence.
+
+### Fixed
+
+- Question cards show text inputs directly and can be closed without answering; dismissal does not submit drafts, infer choices, or grant execution permission.
+- Improved plan criterion identifier normalization, analysis-stage evidence handling, interrupted parallel Lane restoration, and continuation after read or verification failures.
+- Data services use a bounded startup-readiness handshake and retain exit and startup diagnostics, avoiding premature failures during cold starts.
+- Fixed merging ignored data directories from workspaces, tightened Git reads and paired-device permissions, and prevented implicit pnpm dependency reinstalls.
+- Fixed truncated equals signs in inline CLI arguments and refined rich-text composition, project navigation, approval menus, and execution progress display.
+
 ## [0.7.0] - 2026-10-19
 
 ### Added

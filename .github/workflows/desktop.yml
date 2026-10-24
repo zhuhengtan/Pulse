@@ -1,6 +1,11 @@
 name: Desktop packages
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
@@ -23,6 +28,8 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: pnpm/action-setup@v4
         with:
           version: 12.4.2
@@ -46,20 +53,26 @@ jobs:
       - run: pnpm desktop:app:prepare
       - name: Verify storage and chat protocol
         run: pnpm exec vitest run tests/conversation-data.test.ts tests/data-migration.test.ts tests/chat-websocket.test.ts
-      - name: Native desktop smoke
+      - name: Native desktop chat smoke
         if: runner.os != 'Linux'
-        run: |
-          pnpm desktop:app:smoke
-          pnpm desktop:app:startup-smoke
-          pnpm desktop:app:install-smoke
-      - name: Native Linux desktop smoke
+        run: pnpm desktop:app:smoke
+      - name: Native desktop startup smoke
+        if: runner.os != 'Linux'
+        run: pnpm desktop:app:startup-smoke
+      - name: Native desktop installation smoke
+        if: runner.os != 'Linux'
+        run: pnpm desktop:app:install-smoke
+      - name: Native Linux desktop chat smoke
         if: runner.os == 'Linux'
-        run: |
-          xvfb-run --auto-servernum pnpm desktop:app:smoke
-          xvfb-run --auto-servernum pnpm desktop:app:startup-smoke
-          xvfb-run --auto-servernum pnpm desktop:app:install-smoke
+        run: xvfb-run --auto-servernum pnpm desktop:app:smoke
+      - name: Native Linux desktop startup smoke
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum pnpm desktop:app:startup-smoke
+      - name: Native Linux desktop installation smoke
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum pnpm desktop:app:install-smoke
       - name: Build native packages
-        run: pnpm --filter @hunterzhu/pulse-desktop run dist --${{ matrix.arch }}
+        run: pnpm --filter @hunterzhu/pulse-desktop run dist --${{ matrix.arch }} --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: pulse-desktop-${{ matrix.os }}-${{ matrix.arch }}

@@ -1,25 +1,79 @@
 {
   "name": "@hunterzhu/pulse-desktop",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "main": "src/main.mjs",
   "description": "Pulse local desktop client",
   "author": "Hunter Zhu",
   "license": "PolyForm-Noncommercial-1.0.0",
-  "scripts": {"dev": "electron .", "pack": "electron-builder --dir", "dist": "electron-builder"},
-  "dependencies": {"@hunterzhu/pulse-data": "workspace:*", "ws": "^8.21.3"},
-  "devDependencies": {"electron": "44.9.2", "electron-builder": "26.15.3"},
+  "scripts": {
+    "dev": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "@hunterzhu/pulse-data": "workspace:*",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "electron": "44.9.2",
+    "electron-builder": "26.15.3"
+  },
   "build": {
-    "appId": "com.hunterzhu.pulse.desktop", "productName": "Pulse",
-    "directories": {"output": "../../artifacts/desktop"},
-    "files": ["src/**", "package.json"],
-    "asarUnpack": ["node_modules/@hunterzhu/pulse-data/**"],
-    "extraResources": [{"from":"../../packages/web/dist","to":"web"},{"from":"../../artifacts/desktop-runtime/pulse","to":"runtime"}],
+    "appId": "com.hunterzhu.pulse.desktop",
+    "productName": "Pulse",
+    "directories": {
+      "output": "../../artifacts/desktop"
+    },
+    "files": [
+      "src/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/@hunterzhu/pulse-data/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../../packages/web/dist",
+        "to": "web"
+      },
+      {
+        "from": "../../artifacts/desktop-runtime/pulse",
+        "to": "runtime"
+      }
+    ],
     "npmRebuild": false,
-    "mac": {"target": ["dmg", "zip"], "category": "public.app-category.productivity"},
-    "win": {"target": ["nsis", "zip"]},
-    "linux": {"target": ["AppImage", "deb"], "category": "Utility"},
-    "nsis": {"oneClick": false,"allowToChangeInstallationDirectory": true,"deleteAppDataOnUninstall": false}
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity",
+      "icon": "build/icons/icon.icns",
+      "artifactName": "pulse-macos-${arch}.${ext}"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ],
+      "icon": "build/icons/icon.ico",
+      "artifactName": "pulse-windows-${arch}.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility",
+      "icon": "src/assets/icon.png",
+      "artifactName": "pulse-linux-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    }
   }
 }

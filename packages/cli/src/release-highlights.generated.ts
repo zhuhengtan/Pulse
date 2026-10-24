@@ -1,5 +1,47 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.8.0": [
+    {
+      "zh": "新增 Pulse 桌面客户端，支持本地会话存储、模型设置、设备管理与原生浏览器，并复用现有项目和会话数据。",
+      "en": "Added the Pulse desktop client with local conversation storage, model settings, device management, and a native browser, reusing existing projects and conversation data."
+    },
+    {
+      "zh": "新增统一标签页面板，预览文档、图片、代码差异与浏览器页面；计划确认中的文件可直接点击预览，首次启动默认保持面板关闭。",
+      "en": "Added a unified tabs panel for documents, images, code diffs, and browser pages; plan confirmation links open previews directly, and the panel stays closed on first launch."
+    },
+    {
+      "zh": "新增可排队的后续消息和模型驱动的中途指正，保留用户输入顺序并将提问答复与消息队列分开处理。",
+      "en": "Added queued follow-up messages and model-directed steering, preserving input order while keeping question replies separate from the message queue."
+    },
+    {
+      "zh": "新增 Pulse 产品主页与仓库下载入口，正式 Release 提供 macOS、Windows、Linux 客户端、版本对应的下载链接及 SHA-256 校验文件。",
+      "en": "Added the Pulse product website and repository download entry points, with macOS, Windows, and Linux clients, version-specific downloads, and SHA-256 checksums in public releases."
+    },
+    {
+      "zh": "新增开发诊断、代码快照及自主任务回归工具，支持监督修复过程并检查实际产物与验收证据。",
+      "en": "Added development diagnostics, code snapshots, and autonomous-task regression tools to supervise repairs and check actual deliverables and acceptance evidence."
+    },
+    {
+      "zh": "提问卡片直接显示输入框，并允许关闭而不作答；关闭不会提交草稿、猜测选项或授予执行权限。",
+      "en": "Question cards show text inputs directly and can be closed without answering; dismissal does not submit drafts, infer choices, or grant execution permission."
+    },
+    {
+      "zh": "改善任务计划的准则标识容错、纯分析阶段证据判定、并发 Lane 的中断恢复，以及读取和验证失败后的续执行。",
+      "en": "Improved plan criterion identifier normalization, analysis-stage evidence handling, interrupted parallel Lane restoration, and continuation after read or verification failures."
+    },
+    {
+      "zh": "数据服务改用有界启动就绪握手，保留服务退出与启动失败的诊断，避免冷启动被过早判定失败。",
+      "en": "Data services use a bounded startup-readiness handshake and retain exit and startup diagnostics, avoiding premature failures during cold starts."
+    },
+    {
+      "zh": "修复工作区合入对已忽略数据目录的处理，收紧 Git 读取和配对设备权限，并阻止 pnpm 隐式重装依赖。",
+      "en": "Fixed merging ignored data directories from workspaces, tightened Git reads and paired-device permissions, and prevented implicit pnpm dependency reinstalls."
+    },
+    {
+      "zh": "修复 CLI 内联参数中等号被截断的问题，改善富文本输入、项目侧栏、审批菜单与执行过程展示。",
+      "en": "Fixed truncated equals signs in inline CLI arguments and refined rich-text composition, project navigation, approval menus, and execution progress display."
+    }
+  ],
   "0.7.0": [
     {
       "zh": "新增富文本输入框，支持技能与文件标签、粘贴及拖放附件，并按会话保存编辑草稿。",

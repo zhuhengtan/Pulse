@@ -16,7 +16,43 @@ permissions:
   id-token: write
 
 jobs:
+  verify-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - name: Require successful CI for this exact commit
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execFileSync } = require('node:child_process');
+            const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              ...context.repo, workflow_id: 'ci.yml', head_sha: sha, event: 'push', per_page: 100
+            });
+            const latest = runs.filter(run => run.head_sha === sha && run.head_branch === 'main')
+              .sort((a, b) => b.id - a.id)[0];
+            if (!latest || latest.status !== 'completed' || latest.conclusion !== 'success') {
+              throw new Error(`Release blocked: latest main CI for ${sha} is not successful.`);
+            }
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              ...context.repo, run_id: latest.id, filter: 'latest', per_page: 100
+            });
+            for (const os of ['ubuntu-latest', 'macos-latest', 'windows-latest']) {
+              const job = jobs.find(job => job.name === `check (${os})`);
+              if (!job || job.status !== 'completed' || job.conclusion !== 'success') {
+                throw new Error(`Release blocked: ${os} has not passed for ${sha}.`);
+              }
+            }
+            core.info(`Release approved by CI run ${latest.id} for ${sha}`);
+  client:
+    needs: verify-ci
+    uses: ./.github/workflows/desktop.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
   desktop:
+    needs: verify-ci
     strategy:
       fail-fast: false
       matrix:
@@ -51,7 +87,7 @@ jobs:
           path: packages/adapters/dist/native/
           if-no-files-found: error
   release:
-    needs: desktop
+    needs: [verify-ci, desktop, client]
     runs-on: ubuntu-latest
     env:
       PULSE_EXPECTED_PNPM_VERSION: 12.4.2
@@ -128,8 +164,17 @@ jobs:
       - run: pnpm cli:build
       - run: pnpm cli:pack
       - run: pnpm cli:verify-package
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pulse-desktop-*
+          path: artifacts/desktop
+          merge-multiple: true
+      - name: Verify all desktop assets and generate checksums
+        run: node scripts/release/verify-desktop-assets.mjs
       - run: pnpm release:npm-publish
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$RELEASE_TAG" artifacts/cli/pulse-*.tar.gz artifacts/cli/*.sha256 --generate-notes --verify-tag
+        run: |
+          gh release create "$RELEASE_TAG" artifacts/cli/pulse-*.tar.gz artifacts/cli/*.sha256 artifacts/desktop/*.dmg artifacts/desktop/*.zip artifacts/desktop/*.exe artifacts/desktop/*.AppImage artifacts/desktop/*.deb artifacts/desktop/pulse-desktop-SHA256SUMS.txt --generate-notes --verify-tag --draft
+          gh release edit "$RELEASE_TAG" --draft=false --latest
