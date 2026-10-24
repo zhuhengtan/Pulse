@@ -62,7 +62,8 @@ try {
     await page.getByText('Work history 9999', { exact: true }).waitFor({ timeout: 10000 });
     if (diagnostics) {
         timeline = await page.context().newCDPSession(page);
-        await timeline.send('Tracing.start', { transferMode: 'ReturnAsStream', categories: 'devtools.timeline,v8,blink.user_timing,disabled-by-default-v8.cpu_profiler' });
+        const categories = ['devtools.timeline', 'blink.user_timing', ...(process.env.PULSE_DESKTOP_CPU_PROFILE === '1' ? ['v8', 'disabled-by-default-v8.cpu_profiler'] : [])];
+        await timeline.send('Tracing.start', { transferMode: 'ReturnAsStream', categories: categories.join(',') });
     }
     await page.evaluate(() => { window.__pulseLongTasks = []; if (PerformanceObserver.supportedEntryTypes.includes('longtask'))
         new PerformanceObserver(list => window.__pulseLongTasks.push(...list.getEntries().map(item => item.duration))).observe({ type: 'longtask', buffered: false }); });
