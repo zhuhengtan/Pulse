@@ -30,8 +30,12 @@ export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>
       "en": "Improved plan criterion identifier normalization, analysis-stage evidence handling, interrupted parallel Lane restoration, and continuation after read or verification failures."
     },
     {
-      "zh": "数据服务改用有界启动就绪握手，保留退出与启动失败的诊断；最后一个客户端显式关闭时释放数据库文件，避免冷启动误判与 Windows 文件占用。",
-      "en": "Data services use a bounded startup-readiness handshake, retain exit and startup diagnostics, and release database files when the last client explicitly closes, avoiding premature cold-start failures and locked files on Windows."
+      "zh": "数据服务改用有界启动就绪握手，保留退出与启动失败的诊断；重连前确认 writer 可用，最后一个客户端显式关闭时释放数据库文件，避免关闭竞态、冷启动误判与 Windows 文件占用。",
+      "en": "Data services use a bounded startup-readiness handshake, retain exit and startup diagnostics, confirm writer readiness before reconnecting, and release database files when the last client explicitly closes, avoiding shutdown races, premature cold-start failures, and locked files on Windows."
+    },
+    {
+      "zh": "修复 macOS 沙箱中 npm 默认脚本 shell 受 PATH 隔离影响的启动问题，并保留工作区和环境中的显式 shell 设置。",
+      "en": "Fixed npm lifecycle startup through isolated PATH entries in the macOS sandbox while retaining explicit workspace and environment script-shell settings."
     },
     {
       "zh": "修复工作区合入对已忽略数据目录的处理，收紧 Git 读取和配对设备权限，并阻止 pnpm 隐式重装依赖。",

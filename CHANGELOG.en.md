@@ -16,7 +16,8 @@ This file records Pulse release notes in English and is the source for `pulse --
 
 - Question cards show text inputs directly and can be closed without answering; dismissal does not submit drafts, infer choices, or grant execution permission.
 - Improved plan criterion identifier normalization, analysis-stage evidence handling, interrupted parallel Lane restoration, and continuation after read or verification failures.
-- Data services use a bounded startup-readiness handshake, retain exit and startup diagnostics, and release database files when the last client explicitly closes, avoiding premature cold-start failures and locked files on Windows.
+- Data services use a bounded startup-readiness handshake, retain exit and startup diagnostics, confirm writer readiness before reconnecting, and release database files when the last client explicitly closes, avoiding shutdown races, premature cold-start failures, and locked files on Windows.
+- Fixed npm lifecycle startup through isolated PATH entries in the macOS sandbox while retaining explicit workspace and environment script-shell settings.
 - Fixed merging ignored data directories from workspaces, tightened Git reads and paired-device permissions, and prevented implicit pnpm dependency reinstalls.
 - Fixed truncated equals signs in inline CLI arguments and refined rich-text composition, project navigation, approval menus, and execution progress display.
 

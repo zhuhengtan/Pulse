@@ -74,7 +74,7 @@ pnpm release:npm-publish
 5. 校验完整的 8 个桌面安装包/压缩包并生成 `pulse-desktop-SHA256SUMS.txt`，按 data、runtime、tool-sdk、adapters、server、cli 的依赖顺序发布 npm 包；
 6. 创建草稿 GitHub Release，上传 CLI 压缩包、四个平台的客户端及校验文件，全部上传成功后再公开 Release。
 
-各 npm 包需要配置匹配本仓库和 `release.yml` 的 Trusted Publisher。Workflow 通过 `id-token: write` 使用 npm Trusted Publishing，通过 `GITHUB_TOKEN` 创建 Release，无需新增 `NPM_TOKEN` secret。
+各 npm 包需要配置匹配本仓库和 `release.yml` 的 Trusted Publisher。Workflow 通过 `id-token: write` 优先使用 npm Trusted Publishing，通过 `GITHUB_TOKEN` 创建 Release。发布步骤也接入仓库已有的 `NPM_TOKEN` secret，供尚未配置 Trusted Publisher 的新包首次发布时回退使用；不需要本机登录 npm。新包首次发布后，应在 npm 包设置中配置本仓库 `release.yml` 的 Trusted Publisher。
 
 发布后确认 Release workflow 成功、GitHub Release 附件齐全，并逐一检查六个 npm 包的版本。Registry 传播有延迟时重试查询，不要把本地检查或 CI 通过当作已经发布成功。
 

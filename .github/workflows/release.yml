@@ -171,7 +171,12 @@ jobs:
           merge-multiple: true
       - name: Verify all desktop assets and generate checksums
         run: node scripts/release/verify-desktop-assets.mjs
-      - run: pnpm release:npm-publish
+      - name: Publish npm packages
+        run: pnpm release:npm-publish
+        env:
+          # npm prefers OIDC; the existing secret bootstraps packages that do
+          # not yet have a package-level trusted publisher (such as pulse-data).
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
