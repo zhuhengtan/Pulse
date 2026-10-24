@@ -9,7 +9,7 @@ import { currentRequestText, suppliedRequestResults } from './helpers/provider-r
 
 afterEach(() => vi.unstubAllGlobals())
 
-it.each(['same', 'changed', 'closed', 'cold'] as const)('reuses only the still-authorized unchanged plan review: %s', async mode => {
+for (const mode of ['same', 'changed', 'closed', 'cold'] as const) it(`reuses only the still-authorized unchanged plan review: ${mode}`, async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-approved-review-'))
   const objective = '先把方案写到 docs/plans/feature.md，确认后实现 feature.txt 并读取验证。'
   const ids = acceptanceCriteriaFromObjective(objective).map(c => c.id)
@@ -100,4 +100,7 @@ it.each(['same', 'changed', 'closed', 'cold'] as const)('reuses only the still-a
     expect(Boolean(reused)).toBe(accepted)
     if (accepted) expect(JSON.parse(reused.trim())).toMatchObject({ schemaVersion: 1, scope: 'unchanged-approved-plan', newModelCall: false })
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
-}, 30_000)
+// The closed grant exhausts bounded refusal/recovery attempts (up to 40 model
+// calls); it consistently takes ~16s locally and reached 30s on hosted Linux.
+// Keep the fail-closed assertions and give only that adverse case extra budget.
+}, mode === 'closed' ? 60_000 : 30_000)
