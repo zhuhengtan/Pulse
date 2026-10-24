@@ -94,6 +94,9 @@ try {
     await page.screenshot({ path: join(tmpdir(), 'pulse-desktop-work.png') });
     const execution = await host.createConversation({ title: 'Desktop execution', projectId: null });
     await page.evaluate(id => { history.pushState(null, '', `/work/${id}`); dispatchEvent(new PopStateEvent('popstate')); }, execution.id);
+    // Navigation is asynchronous: an editor from the previous conversation can
+    // still be present until the target history and its draft finish loading.
+    await page.getByRole('heading', { name: '我们要做什么？', exact: true }).waitFor({ timeout: 10000 });
     await page.locator('[contenteditable=true]').fill('Show a short status');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await page.getByText('Desktop socket reply', { exact: true }).waitFor({ timeout: 10000 });
