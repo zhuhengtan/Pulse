@@ -72,7 +72,7 @@ try {
   node('scripts/cli/start.mjs', '--version')
   node('scripts/cli/dev.mjs', '--version')
   node('scripts/cli/debug.mjs', '--version')
-  console.log(`\nLocal CI passed on ${process.platform}. No release was published.`)
 } finally {
   await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 }
+console.log(`\nLocal CI passed on ${process.platform}. No release was published.`)
