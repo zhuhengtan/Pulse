@@ -56,7 +56,9 @@ try {
     const device = await request(page, '/api/session');
     const project = await request(page, '/api/projects', { name: 'Clean install fixture', cwd: root });
     const conversation = await request(page, '/api/conversations', { title: 'Preserve installed history', projectId: project.id });
+    await page.waitForFunction(async () => (await window.pulseDesktop.request('/api/automation/sessions')).body.nativeBrowser === true);
     const browser = await request(page, '/api/automation/sessions', { kind: 'browser', manual: true, projectId: project.id });
+    assert.equal(browser.mode, 'native');
     const control = await request(page, `/api/automation/sessions/${browser.id}/control`, { action: 'takeover' });
     await request(page, `/api/automation/sessions/${browser.id}/command`, { lease: control.lease, method: 'navigate', params: { url: `http://127.0.0.1:${website.address().port}` } });
     await request(page, `/api/automation/sessions/${browser.id}/observe`, {});
