@@ -173,6 +173,7 @@ describe('Pulse Parallel Lane & Long Task Interruption Deep Tests', () => {
 
     let run1WrittenA = false
     let run1Cancelled = false
+    let betaInFlight = false
     let run2WrittenB = false
     let run2WroteA = false
     let run2ReadA = false
@@ -257,9 +258,15 @@ describe('Pulse Parallel Lane & Long Task Interruption Deep Tests', () => {
 
       if (isStageBeta) {
         if (!run1Cancelled) {
-          // In Run 1, delay beta so alpha finishes and we cancel mid-flight
-          await new Promise(resolve => setTimeout(resolve, 80))
-          return reply('beta 准备中...')
+          // Keep beta in flight until cancellation, independently of disk and
+          // runner speed. A timed reply can finish before alpha is checkpointed.
+          betaInFlight = true
+          const signal = init?.signal
+          return await new Promise<Response>((_resolve, reject) => {
+            const abort = () => reject(new DOMException('Run cancelled', 'AbortError'))
+            if (signal?.aborted) abort()
+            else signal?.addEventListener('abort', abort, { once: true })
+          })
         }
         if (!run2WrittenB) {
           run2WrittenB = true
@@ -281,11 +288,11 @@ describe('Pulse Parallel Lane & Long Task Interruption Deep Tests', () => {
         try {
           await readFile(join(cwd, 'alpha.ts'), 'utf8')
           const snapshot = JSON.parse(await readFile(join(dataDir, 'conversations', conversation.id, 'runs', run1.id, 'runtime.json'), 'utf8')).state.state
-          return snapshot.lanes.some(([, lane]: any) => lane.context.state?.taskControllerChain?.tasks?.some((task: any) => task.id === 'stage-alpha' && task.status === 'passed' && Boolean(task.delivery)))
+          return betaInFlight && snapshot.lanes.some(([, lane]: any) => lane.context.state?.taskControllerChain?.tasks?.some((task: any) => task.id === 'stage-alpha' && task.status === 'passed' && Boolean(task.delivery)))
         } catch {
           return false
         }
-      }, { timeout: 4000, interval: 30 }).toBe(true)
+      }, { timeout: 10_000, interval: 30 }).toBe(true)
 
       // Cancel Run 1 while beta is in progress
       await run1.cancel('USER_REQUESTED')

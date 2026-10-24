@@ -7,6 +7,7 @@ import { captureCheck, finishCheck, freezeCheckDefinitions } from '../packages/s
 import { PulseRuntime } from '@hunterzhu/pulse-runtime'
 import { staleFileEvidence } from '../packages/server/src/task-controller/evidence-current.js'
 import { createLocalHost } from '../packages/server/src/index.js'
+import { runShell } from '../packages/adapters/src/tools/shell.js'
 import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 
@@ -111,8 +112,18 @@ it('runs a corrected new test script through the actual sandboxed Host before ac
     const failures = snapshot.effects.filter(([, e]: any) => e.state === 'failed').map(([id, e]: any) => ({ id, input: e.input, outcome: e.outcome }))
     const checks = snapshot.results.map(([, result]: any) => result).filter((result: any) => typeof result.summary?.code === 'number').map((result: any) => ({ id: result.id, ...result.summary }))
     const input = JSON.parse(await readFile(join(runRoot, 'input.json'), 'utf8'))
+    // Keep CI failures actionable without dumping inherited environment or
+    // credentials. Compare PATH-based npm/Node launches with the trusted Node.
+    const diagnostics = task?.status === 'accepted' ? undefined : await runShell('node', ['-e', `
+      const {spawnSync}=require('node:child_process');
+      const run=(command,args)=>{const r=spawnSync(command,args,{encoding:'utf8'});return {command,args,status:r.status,signal:r.signal,error:r.error?.code,stdout:r.stdout,stderr:r.stderr}};
+      console.log(JSON.stringify({node:process.version,execPath:process.execPath,probes:[
+        run('node',['--version']),run('npm',['--version']),run('npm',['config','get','script-shell']),
+        run(process.execPath,['--test','test/fixture.test.js']),run('npm',['test'])
+      ]}));
+    `], { cwd, timeoutMs: 20_000 })
     if (task?.status !== 'accepted') await cp(cwd, join(process.cwd(), '.pulse-dev/autonomy-failed-rerun-20261023', 'v52-unit-host-failure-' + Date.now()), { recursive: true })
-    expect(task, JSON.stringify({ task, version: input.controllerVersion, failures, checks })).toMatchObject({ status: 'accepted' })
+    expect(task, JSON.stringify({ task, version: input.controllerVersion, failures, checks, diagnostics })).toMatchObject({ status: 'accepted' })
     expect(successfulWarning).toBe(true)
   } finally { await host.close(); vi.unstubAllGlobals(); await rm(cwd, { recursive: true, force: true }) }
 }, 30_000)
