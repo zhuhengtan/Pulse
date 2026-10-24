@@ -483,6 +483,13 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     // An explicit install command remains subject to the normal approval/sandbox policy.
     const executionEnv: Record<string, string | undefined> = { pnpm_config_verify_deps_before_run: 'false', [pathKey]: [...(pnpmHome ? [pnpmHome] : []), nodeBin, join(cwd, 'node_modules', '.bin'), baseEnv[pathKey] ?? ''].join(delimiter),
       ...(process.platform === 'win32' ? {} : { HOME: scratch, TMPDIR: scratch, TMP: scratch, TEMP: scratch, XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }) }
+    if (process.platform === 'darwin' && !Object.keys(baseEnv).some(key => /^npm_config_script_shell$/i.test(key))) {
+      // npm normally spawns "sh" through PATH, which may contain shims hidden
+      // by the macOS read boundary. Use the system POSIX default while retaining
+      // an explicit environment or workspace script-shell configuration.
+      const npmrc = await readFile(join(cwd, '.npmrc'), 'utf8').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? '' : undefined)
+      if (npmrc !== undefined && !/^\s*["']?script-shell["']?\s*=/im.test(npmrc)) executionEnv.npm_config_script_shell = '/bin/sh'
+    }
     let executable = command
     let executableArgs = args
     if (command === 'node') executable = nodeExecutable
