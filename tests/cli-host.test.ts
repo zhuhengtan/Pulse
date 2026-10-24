@@ -166,7 +166,7 @@ describe('local CLI application host', () => {
       await run.outcome()
       const runDir = join(directory, 'data', 'conversations', conversation.id, 'runs', run.id)
       const input = JSON.parse(await readFile(join(runDir, 'input.json'), 'utf8')) as { controllerVersion: string; maxTurns: number; maxModelCalls: number }
-      expect(input).toMatchObject({ controllerVersion: '34', maxTurns: 1, maxModelCalls: 4 })
+      expect(input).toMatchObject({ controllerVersion: '54', maxTurns: 1, maxModelCalls: 4 })
       const modelCalls = (await run.usage()).modelCalls
       expect(modelCalls).toBeGreaterThan(1)
       expect(modelCalls).toBeLessThanOrEqual(4)

@@ -1197,7 +1197,8 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
         const edited = hasStageEdit(ctx, task) || boundedTransitions && existingContractEvidence(ctx, task, hostChecks)
         const requiresEdit = requiresFileChange(task.goal, task.check, task.kind) && options.toolNames.some((name) => fileEditTools.has(name))
         const contractForFiles = taskRecordFromGlobal(ctx.global as JsonValue)
-        const missingTestFiles = ['51', '52', '53', '54'].includes(programVersion) ? missingNamedTestExtensions(
+        const hasSubsequentEditStage = state.tasks.some(other => other.id !== task.id && (other.status === 'pending' || other.status === 'running') && (other.kind === 'edit' || requiresFileChange(other.goal, other.check, other.kind)))
+        const missingTestFiles = ['51', '52', '53', '54'].includes(programVersion) && (!hasSubsequentEditStage || task.kind === 'edit' || requiresEdit) ? missingNamedTestExtensions(
           (contractForFiles?.acceptanceCriteria ?? []).filter(c => task.criterionIds.includes(c.id)).map(c => c.description).join('\n'),
           [...task.evidenceRefs, ...stageEvidence(state)].flatMap(ref => committedOutputPaths(ctx, ref)),
         ) : []

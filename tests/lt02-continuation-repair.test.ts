@@ -158,7 +158,8 @@ it('continues after approving a canonical operation even when a sibling carries 
     const request = JSON.parse(String(init.body)), text = currentRequestText(request.messages)
     const refs = suppliedRequestResults(request.messages).map((r: any) => r.id)
     let content: any
-    if (text.includes('Create an executable plan')) content = JSON.stringify({ tasks: [{ id: 'check', kind: 'verify', goal: 'Check fixture.mjs and read a.txt', check: 'Actual local receipt', criterionIds: ['criterion-1'], dependsOn: [] }] })
+    if (String(_url).includes('127.0.0.1') || text.includes('You are the Pulse safety reviewer')) throw new TypeError('fetch failed: ECONNREFUSED')
+    if (text.includes('Create an executable plan')) content = JSON.stringify({ tasks: [{ id: 'check', kind: 'verify', goal: 'Check fixture.mjs and read a.txt', check: 'Run node fixture.mjs and read a.txt', criterionIds: ['criterion-1'], dependsOn: [] }] })
     else if (text.includes('Verify ONLY the active')) content = JSON.stringify({ status: 'passed', evidenceRefs: refs, note: 'Actual check' })
     else if (text.includes('Independently verify every ORIGINAL')) content = JSON.stringify({ criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: refs, rationale: 'Checked' }] })
     else if (++work === 1) return new Response(JSON.stringify({ choices: [{ message: { content: '', tool_calls: [{ id: 'node', function: { name: 'shell_exec', arguments: JSON.stringify({ command: 'node', args: ['fixture.mjs'] }) } }, { id: 'read', function: { name: 'fs_read', arguments: JSON.stringify({ path: 'a.txt' }) } }] }, finish_reason: 'tool_calls' }] }), { headers: { 'content-type': 'application/json' } })
@@ -166,7 +167,7 @@ it('continues after approving a canonical operation even when a sibling carries 
     else content = 'Completed checks'
     return new Response(JSON.stringify({ choices: [{ message: { content }, finish_reason: 'stop' }] }), { headers: { 'content-type': 'application/json' } })
   }))
-  const host = createLocalHost({ cwd: dir, dataDir: join(dir, 'data'), taskController: true, approvalMode: 'auto', jarvis: { enabled: false }, provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, maxModelCalls: 16 })
+  const host = createLocalHost({ cwd: dir, dataDir: join(dir, 'data'), taskController: true, approvalMode: 'auto', approvalReview: { provider: 'ollama', model: 'local-review', baseURL: 'http://127.0.0.1:11434', timeoutMs: 5000, manualOnRejection: true }, jarvis: { enabled: false }, provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, maxModelCalls: 16 })
   try {
     const c = await host.createConversation(), run = await host.sendMessage(c.id, { text: 'Check fixture.mjs and read a.txt' }); let approvals = 0
     for await (const event of run.events) {

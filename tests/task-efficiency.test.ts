@@ -30,7 +30,7 @@ describe('efficient task continuation', () => {
         if (effect.key?.startsWith('verify-stage')) return { value: { status: 'passed', evidenceRefs: refs, note: 'Read source' } }
         return { value: ++work === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.read', input: { path: 'source.txt' } }] } : { text: 'done', finishReason: 'stop' } }
       } })
-      const p = buildTaskControllerProgram({ system: 'test', toolNames: ['fs.read'], approvalMode: 'auto', maxTurns: 16 })
+      const p = buildTaskControllerProgram({ system: 'test', toolNames: ['fs.read'], readOnlyToolNames: ['fs.read'], approvalMode: 'auto', maxTurns: 16 })
       const { agentId } = first.createAgent({ goal: initial.taskRecord.objective, program: p, initialGlobal: initial })
       expect(await first.start(agentId).outcome()).toMatchObject({ status: 'succeeded' })
       const checkpoint = (await createCheckpoint(first, root, 'old-run', global(first)))!
@@ -202,7 +202,7 @@ it('reuses passed dependency evidence in later work and verification without rep
     }
     return { value: ++work === 1 ? { finishReason: 'tool_calls', toolCalls: [{ name: 'fs.read', input: {} }] } : { text: 'done', finishReason: 'stop' } }
   } })
-  const program = buildTaskControllerProgram({ system: 'test', toolNames: ['fs.read'], approvalMode: 'auto', maxTurns: 16 })
+  const program = buildTaskControllerProgram({ system: 'test', toolNames: ['fs.read'], readOnlyToolNames: ['fs.read'], approvalMode: 'auto', maxTurns: 16 })
   const { agentId } = runtime.createAgent({ goal: initial.taskRecord.objective, program, initialGlobal: initial })
   expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'succeeded' })
   expect(global(runtime).taskOutcome.status).toBe('accepted')

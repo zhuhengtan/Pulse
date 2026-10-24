@@ -186,7 +186,7 @@ it.each([false, true])('failed progress review uses only an actual missing page 
   agentId = runtime.createAgent({ goal: 'Analyze sources', program, initialGlobal: { taskRecord: { schemaVersion: 1, runId: 'fixture', objective: 'Analyze sources', acceptanceCriteria: criteria, status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] } } }).agentId
   expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
   expect(global().taskOutcome.status).toBe('accepted')
-  expect(plans).toBe(1); expect(reviews).toBe(2)
+  expect(plans).toBe(1); expect(reviews).toBe(3)
   const readEffects = [...runtime.state.effects.values()].filter(e => e.kind === 'tool')
   expect(readEffects).toHaveLength(5)
   expect((readEffects.at(-1)!.input as any).arguments.offset).toBe(3000)

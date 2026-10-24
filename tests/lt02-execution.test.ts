@@ -57,7 +57,7 @@ it('accounts local approvals and spends reserved calls on verification, with ind
     if (String(url).includes('127.0.0.1')) { reviews++; return chat('APPROVE') }
     expect(text).not.toContain('You are the Pulse safety reviewer'); primary++
     const refs = suppliedRequestResults(body.messages).map(r => r.id)
-    if (text.includes('Create an executable plan')) return chat({ tasks: [{ id: 's1', kind: 'verify', goal: '检查现有脚本', check: '脚本检查通过', criterionIds: ids, dependsOn: [] }, { id: 's2', kind: 'analyze', goal: '总结检查', check: '说明完整', criterionIds: ids, dependsOn: ['s1'] }] })
+    if (text.includes('Create an executable plan')) return chat({ tasks: [{ id: 's1', kind: 'verify', goal: '检查现有脚本', check: '运行脚本检查通过', criterionIds: ids, dependsOn: [] }, { id: 's2', kind: 'analyze', goal: '总结检查', check: '说明完整', criterionIds: ids, dependsOn: ['s1'] }] })
     if (text.includes('Verify ONLY the active')) return chat({ status: 'needs_work', correctionKind: 'verify', evidenceRefs: refs, note: 'Probe exited 1; failure remains failed' })
     if (text.includes('Independently verify every ORIGINAL')) return chat({ criteria: ids.map(criterionId => ({ criterionId, status: 'passed', evidenceRefs: refs, rationale: 'optimistic model' })) })
     return ++work === 1 ? tool('shell_exec', { command: 'node', args: ['probe.mjs'] }) : tool('fs_read', { path: 'info.txt', offset: (work - 2) * 3000 })

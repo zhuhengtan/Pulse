@@ -33,7 +33,7 @@ it.each(['files', 'pages', 'corrected-path', 'repeated-window'] as const)('suppo
     const outcome = await run.outcome()
     expect(events.some(event => event.type === 'waiting')).toBe(false)
     const saved = JSON.parse(await readFile(join(dataDir, 'conversations', conversation.id, 'runs', run.id, 'input.json'), 'utf8'))
-    expect(saved.assistantChatVersion).toBe('4')
+    expect(saved.assistantChatVersion).toBe('5')
     if (scenario === 'repeated-window') {
       expect(outcome.status).toBe('failed')
       expect(requests.length).toBeLessThanOrEqual(12)
