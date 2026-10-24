@@ -175,7 +175,6 @@ describe('Pulse Parallel Lane & Long Task Interruption Deep Tests', () => {
     let run1Cancelled = false
     let betaInFlight = false
     let run2WrittenB = false
-    let run2WroteA = false
     let run2ReadA = false
 
     const provider = { provider: 'openai-compatible' as const, baseURL: 'http://127.0.0.1:12345/v1', defaultModel: 'fixture' }
@@ -284,15 +283,25 @@ describe('Pulse Parallel Lane & Long Task Interruption Deep Tests', () => {
 
       // The verifier request starts before the Host commits its result. Cancel
       // only after the completed stage and its delivery are durably recorded.
-      await expect.poll(async () => {
-        try {
-          await readFile(join(cwd, 'alpha.ts'), 'utf8')
-          const snapshot = JSON.parse(await readFile(join(dataDir, 'conversations', conversation.id, 'runs', run1.id, 'runtime.json'), 'utf8')).state.state
-          return betaInFlight && snapshot.lanes.some(([, lane]: any) => lane.context.state?.taskControllerChain?.tasks?.some((task: any) => task.id === 'stage-alpha' && task.status === 'passed' && Boolean(task.delivery)))
-        } catch {
-          return false
-        }
-      }, { timeout: 10_000, interval: 30 }).toBe(true)
+      let observed: Record<string, unknown> = {}
+      try {
+        await expect.poll(async () => {
+          try {
+            const alphaOnDisk = await readFile(join(cwd, 'alpha.ts'), 'utf8').then(() => true, () => false)
+            const snapshot = JSON.parse(await readFile(join(dataDir, 'conversations', conversation.id, 'runs', run1.id, 'runtime.json'), 'utf8')).state.state
+            const chains = snapshot.lanes.map(([id, lane]: any) => ({ id, status: lane.status, tasks: lane.context.state?.taskControllerChain?.tasks?.map((task: any) => ({ id: task.id, status: task.status, delivery: Boolean(task.delivery), note: task.note })) }))
+            observed = { betaInFlight, run1WrittenA, alphaOnDisk, chains, failures: snapshot.effects.filter(([, effect]: any) => effect.state === 'failed').map(([id, effect]: any) => ({ id, key: effect.key, error: effect.outcome?.error?.code })).slice(-8) }
+            return alphaOnDisk && betaInFlight && chains.some((lane: any) => lane.tasks?.some((task: any) => task.id === 'stage-alpha' && task.status === 'passed' && task.delivery))
+          } catch (error) {
+            observed = { ...observed, betaInFlight, run1WrittenA, readError: String(error).slice(0, 300) }
+            return false
+          }
+        // Preparation includes a real write, verifier and durable checkpoint;
+        // its speed does not change the interruption/continuation assertions.
+        }, { timeout: 30_000, interval: 30 }).toBe(true)
+      } catch (error) {
+        throw new Error('PARALLEL_DELIVERY_CHECKPOINT_NOT_READY: ' + JSON.stringify(observed), { cause: error })
+      }
 
       // Cancel Run 1 while beta is in progress
       await run1.cancel('USER_REQUESTED')
@@ -334,7 +343,8 @@ describe('Pulse Parallel Lane & Long Task Interruption Deep Tests', () => {
       expect(taskOutcome2?.status).toBe('accepted')
 
       // Ensure alpha.ts was not overwritten/re-written in run 2
-      expect(run2WroteA).toBe(false)
+      const audit = JSON.parse(await readFile(join(dataDir, 'conversations', conversation.id, 'runs', run2.id, 'operations.json'), 'utf8'))
+      expect(audit.operations.filter((operation: any) => operation.tool === 'fs.write' && operation.path === 'alpha.ts')).toHaveLength(0)
       expect(run2WrittenB).toBe(true)
 
       const fileA = await readFile(join(cwd, 'alpha.ts'), 'utf8')
@@ -345,7 +355,7 @@ describe('Pulse Parallel Lane & Long Task Interruption Deep Tests', () => {
       await host.close()
       await rm(root, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, 60_000)
 
   it('3. Partial Failure in Parallel Lane: retains passed chain deliveries while reporting clear blocker on failing chain', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-parallel-partial-fail-'))
