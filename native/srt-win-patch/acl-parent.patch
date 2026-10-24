@@ -587,7 +587,7 @@ index d3778f4e6..78c39d150 100644
  //! between leaves a row whose ACE hasn't been written; the next
  //! call re-derives and reapplies.
 
-@@ -1406,6 +1406,148 @@ mod tests {
+@@ -1406,6 +1406,162 @@ mod tests {
          });
      }
 
@@ -600,13 +600,16 @@ index d3778f4e6..78c39d150 100644
 +        const SID: &'static str = "S-1-5-32-546";
 +
 +        fn new() -> Self {
++            Self::at_timestamp(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos())
++        }
++
++        fn at_timestamp(timestamp: u128) -> Self {
++            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 +            let path = std::env::temp_dir().join(format!(
-+                "srt-db-acl-{}-{}",
++                "srt-db-acl-{}-{}-{}",
 +                std::process::id(),
-+                SystemTime::now()
-+                    .duration_since(UNIX_EPOCH)
-+                    .unwrap()
-+                    .as_nanos()
++                timestamp,
++                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 +            ));
 +            std::fs::create_dir(&path).unwrap();
 +            Self(std::fs::canonicalize(path).unwrap())
@@ -695,6 +698,17 @@ index d3778f4e6..78c39d150 100644
 +                .unwrap();
 +            assert_eq!(rows, 0);
 +        });
++    }
++
++    #[test]
++    fn parallel_acl_fixtures_remain_unique_with_a_frozen_clock() {
++        let workers: Vec<_> = (0..16)
++            .map(|_| std::thread::spawn(|| AclFixture::at_timestamp(0)))
++            .collect();
++        let fixtures: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
++        let paths: std::collections::HashSet<_> = fixtures.iter().map(|fixture| &fixture.0).collect();
++        assert_eq!(paths.len(), fixtures.len());
++        assert!(fixtures.iter().all(|fixture| fixture.0.is_dir()));
 +    }
 +
 +    #[test]
