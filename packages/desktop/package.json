@@ -64,6 +64,7 @@
     },
     "linux": {
       "maintainer": "Hunter Zhu",
+      "executableName": "pulse",
       "target": [
         "AppImage",
         "deb"
@@ -71,6 +72,9 @@
       "category": "Utility",
       "icon": "src/assets/icon.png",
       "artifactName": "pulse-linux-${arch}.${ext}"
+    },
+    "deb": {
+      "packageName": "pulse"
     },
     "nsis": {
       "oneClick": false,

@@ -9,4 +9,4 @@
 
 部署时 `scripts/site/downloads.mjs` 读取最新正式 GitHub Release，生成 `downloads.json`。必须所有系统的安装包及 SHA-256 文件齐全才开放下载；旧的 CLI-only Release、草稿、预发布或缺失附件会显示发布进度。源码中的空 manifest 是安全默认值，不填写计划中的版本号或虚构下载链接。
 
-桌面包名使用 `pulse-macos-{arm64,x64}.dmg`、`pulse-windows-x64.exe`、`pulse-linux-x64.AppImage` 和 `pulse-linux-x64.deb`。正式 Release 完成后自动刷新官网，不在主页中硬编码安装包版本。
+桌面包名使用 `pulse-macos-{arm64,x64}.dmg`、`pulse-windows-x64.exe`、`pulse-linux-x86_64.AppImage` 和 `pulse-linux-amd64.deb`。Linux 文件名沿用构建器对 x64 的平台命名。正式 Release 完成后自动刷新官网，不在主页中硬编码安装包版本。
