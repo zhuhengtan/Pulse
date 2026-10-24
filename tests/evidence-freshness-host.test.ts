@@ -116,8 +116,11 @@ it.each([
     const conversation = await host.createConversation(), run = await host.sendMessage(conversation.id, { text: objective })
     const outcome = await run.outcome()
     expect(outcome, JSON.stringify(outcome)).toMatchObject({ status: 'succeeded' })
-    expect(await run.taskOutcome(), outcome.text).toMatchObject({ status: 'accepted' })
+    const task = await run.taskOutcome()
+    const diagnostics = task?.status === 'accepted' ? undefined : JSON.parse(await readFile(join(cwd, 'data/conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8')).state.state.results.filter(([, r]: any) => r.value?.checkReceipt || typeof r.summary?.code === 'number').map(([, r]: any) => ({ id: r.id, code: r.value?.code, timedOut: r.value?.timedOut, aborted: r.value?.aborted, stdout: r.value?.stdout?.slice(-2000), stderr: r.value?.stderr?.slice(-2000), check: r.value?.checkReceipt }))
+    expect(task, JSON.stringify({ text: outcome.text, stage, turns, diagnostics })).toMatchObject({ status: 'accepted' })
     expect(stage).toBe(3)
     expect((await readFile(join(cwd, 'feature.test.mjs'), 'utf8')).startsWith(original)).toBe(true)
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
-}, process.platform === 'win32' ? 360_000 : 10_000)
+// Three real cold Windows launches plus receipt checks and sandbox cleanup.
+}, process.platform === 'win32' ? 720_000 : 10_000)

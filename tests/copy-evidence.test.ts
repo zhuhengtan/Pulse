@@ -27,6 +27,13 @@ it('records an actual binary copy and detects later source or destination change
  await writeFile(join(root,'input/a.bin'),'external source change')
  expect(await staleFileEvidence(root,['result-1'],runtime)).toEqual(['result-1'])
 }))
+it.runIf(process.platform!=='win32')('preserves literal backslashes in POSIX filenames in portable copy receipts',()=>fixture(async root=>{
+ const source='input/a\\b.bin',destination='output/a\\b.bin'
+ await writeFile(join(root,source),Buffer.from([0,128,255,10]))
+ const before=await captureCopy(root,root,'cp',[source,'output/'])
+ await copyFile(join(root,source),join(root,destination))
+ expect(copyChanges({code:0,fileChanges:await finishCopy(root,before,{code:0})})).toEqual([expect.objectContaining({source,path:destination,beforeHash:null})])
+}))
 it.each([{code:1},{code:null},{code:0,timedOut:true},{code:0,aborted:true},{code:0,truncated:true}])('never creates proof from an unsuccessful or uncertain command (%j)',result=>fixture(async root=>{
  const before=await captureCopy(root,root,'cp',['input/a.bin','output/a.bin'])
  await copyFile(join(root,'input/a.bin'),join(root,'output/a.bin'))

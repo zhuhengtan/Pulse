@@ -188,7 +188,8 @@ it('continues after approving a canonical operation even when a sibling carries 
     const audit = JSON.parse(await readFile(join(dir, 'data/conversations', c.id, 'runs', run.id, 'operations.json'), 'utf8'))
     expect(audit.operations.filter((e: any) => e.tool === 'shell.exec' && e.status === 'succeeded'), JSON.stringify({ audit, outcome: await run.outcome() })).toHaveLength(2)
   } finally { await host.close(); vi.unstubAllGlobals(); await rm(dir, { recursive: true, force: true }) }
-}, process.platform === 'win32' ? 240_000 : 15_000)
+// Two cold Windows launches plus two actual human-approval continuations.
+}, process.platform === 'win32' ? 480_000 : 15_000)
 
 it.each([false, true])('deduplicates inherited approval cards and rejects conflicting identities (%s)', conflict => {
   const controller = initialController(16)

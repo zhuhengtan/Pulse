@@ -40,4 +40,5 @@ it('accepts a real verified shell copy without manufacturing an fs.write receipt
   expect(await readFile(join(cwd,'input/a.txt'),'utf8')).toBe('original bytes\n')
   expect(ops.filter((o:any)=>o.tool==='fs.write'||o.tool==='fs.move')).toHaveLength(0)
  }finally{await host.close();await rm(cwd,{recursive:true,force:true})}
-},30_000)
+// Windows cold sandbox setup precedes the short copy command.
+},process.platform==='win32'?240_000:30_000)

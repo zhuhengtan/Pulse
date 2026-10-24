@@ -47,17 +47,19 @@ it.each([
 it('revalidates the corrected entrypoint and detects later external changes without waiving failed tests', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pulse-real-candidate-script-')), store = join(root, '.host')
   const setScript = (test: string) => writeFile(join(root, 'package.json'), JSON.stringify({ private: true, scripts: { test } }))
+  // Fixed fixture arguments only: Windows npm is a CMD shim, not a native image.
+  const npmTest = () => execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['test'], { cwd: root, encoding: 'utf8', stdio: 'pipe', shell: process.platform === 'win32' })
   try {
     await freezeCheckDefinitions(root, store, false, true, 3)
     await mkdir(join(root, 'test'))
     await writeFile(join(root, 'test/a.test.js'), "require('node:test')('real assertion', () => require('node:assert/strict').equal(1, 1))\n")
     await setScript('node --test test/')
     const before = await captureCheck(root, root, 'npm', ['test'], false, 3)
-    expect(() => execFileSync('npm', ['test'], { cwd: root, stdio: 'pipe' })).toThrow()
+    expect(npmTest).toThrowError(expect.objectContaining({ status: 1 }))
     await finishCheck(root, before, store, true)
     await setScript('node --test test/*.test.js')
     const fresh = await captureCheck(root, root, 'npm', ['test'], false, 3)
-    expect(execFileSync('npm', ['test'], { cwd: root, encoding: 'utf8' })).toContain('real assertion')
+    expect(npmTest()).toContain('real assertion')
     const receipt = await finishCheck(root, fresh, store, true)
     expect(receipt.definitionChanged).toBe(false)
     const runtime = new PulseRuntime()
@@ -66,7 +68,7 @@ it('revalidates the corrected entrypoint and detects later external changes with
     await writeFile(join(root, 'test/a.test.js'), "require('node:test')('real assertion', () => require('node:assert/strict').equal(1, 2))\n")
     expect(await staleFileEvidence(root, ['result-1'], runtime)).toEqual(['result-1'])
     const failing = await captureCheck(root, root, 'npm', ['test'], false, 3)
-    expect(() => execFileSync('npm', ['test'], { cwd: root, stdio: 'pipe' })).toThrow()
+    expect(npmTest).toThrowError(expect.objectContaining({ status: 1 }))
     const failureReceipt = await finishCheck(root, failing, store, true)
     expect(failureReceipt.candidateScriptCoverage?.[0]?.files).toEqual(['test/a.test.js'])
     // A valid manifest is only freshness proof; actual nonzero exit remains a failure.

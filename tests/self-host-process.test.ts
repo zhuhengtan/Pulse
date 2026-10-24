@@ -8,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import { installSignalHandlers } from '../scripts/self-host.mjs'
@@ -63,7 +63,7 @@ describe('installSignalHandlers 清理只回收自身注册的资源', () => {
     const probe = write(
       path.join(root, 'probe.mjs'),
       [
-        `import { installSignalHandlers, interruptState } from ${JSON.stringify(SELF_HOST)}`,
+        `import { installSignalHandlers, interruptState } from ${JSON.stringify(pathToFileURL(SELF_HOST).href)}`,
         'const caller = () => {}',
         "process.on('SIGINT', caller)",
         "const before = process.listenerCount('SIGINT')",
@@ -84,6 +84,7 @@ describe('installSignalHandlers 清理只回收自身注册的资源', () => {
     )
 
     const res = spawnSync(NODE, [probe], { encoding: 'utf8', timeout: 20000 })
+    expect(res.status, res.stderr).toBe(0)
     const lines = String(res.stdout || '').trim().split('\n')
     const info = JSON.parse(lines[0])
 
@@ -150,7 +151,7 @@ const signalFixture = (tag) => {
   return { root, cwd, dataDir, outDir, taskFile, checksFile, marker, engineEntry }
 }
 
-const runUntilCheckWindowThenSignal = async (fixture, signal) => {
+const runUntilCheckWindowThenSignal = async (fixture, signal, nativeKill = false, bridge = process.platform === 'win32' && !nativeKill) => {
   const argv = [
     '--task-file', fixture.taskFile,
     '--checks-file', fixture.checksFile,
@@ -160,7 +161,18 @@ const runUntilCheckWindowThenSignal = async (fixture, signal) => {
     '--cli-entry', fixture.engineEntry,
     '--max-attempts', '1',
   ]
-  const child = spawn(NODE, [SELF_HOST, ...argv], { stdio: ['ignore', 'pipe', 'pipe'] })
+  // Windows child.kill is TerminateProcess and never invokes JS signal handlers.
+  // A test-only preload delivers the event to the real installed handler over IPC;
+  // the native force-termination contract is checked separately below.
+  const preload = bridge ? write(path.join(fixture.root, 'signal-bridge.mjs'), [
+    "process.once('message', signal => {",
+    "  if (signal === 'SIGINT' || signal === 'SIGTERM') process.emit(signal)",
+    '  process.disconnect()',
+    '})',
+  ].join('\n')) : undefined
+  const child = spawn(NODE, [...(bridge ? ['--import', pathToFileURL(preload).href] : []), SELF_HOST, ...argv], {
+    stdio: bridge ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'],
+  })
   let stdout = ''
   let stderr = ''
   child.stdout.on('data', (chunk) => { stdout += String(chunk) })
@@ -175,7 +187,8 @@ const runUntilCheckWindowThenSignal = async (fixture, signal) => {
     const info = await closed
     throw new Error(`固定检查窗口未出现（code=${info.code}, signal=${info.sig}）：${stdout}${stderr}`)
   }
-  child.kill(signal)
+  if (bridge) child.send(signal)
+  else child.kill(signal)
   const info = await closed
   const reportFile = path.join(fixture.outDir, 'report.json')
   return {
@@ -197,10 +210,12 @@ describe('真实启动脚本：固定检查期间收到中断不得报告成功'
     expect(run.report.ok).toBe(false)
     expect(run.report.status).not.toBe('success')
     expect(run.report.exitCode).toBe(run.code)
-    // 本轮真实检查本身是通过的，所以非成功只能来自中断，而不是检查失败。
+    expect(run.report.interruptedBy).toBe('SIGINT')
+    // POSIX checks ignore SIGTERM and pass, proving the interruption veto itself.
+    // Windows forcibly stops the owned check; it must still retain a failed report.
     const attempts = Array.isArray(run.report.attempts) ? run.report.attempts : []
     expect(attempts.length).toBe(1)
-    expect(attempts[0].checks.every((item) => item.passed === true)).toBe(true)
+    expect(attempts[0].checks.every((item) => item.passed === true)).toBe(process.platform !== 'win32')
   }, 40000)
 
   it('SIGTERM：退出码非 0，report.ok=false 且 status 不是 success', async () => {
@@ -212,8 +227,24 @@ describe('真实启动脚本：固定检查期间收到中断不得报告成功'
     expect(run.report.ok).toBe(false)
     expect(run.report.status).not.toBe('success')
     expect(run.report.exitCode).toBe(run.code)
+    expect(run.report.interruptedBy).toBe('SIGTERM')
     const attempts = Array.isArray(run.report.attempts) ? run.report.attempts : []
     expect(attempts.length).toBe(1)
-    expect(attempts[0].checks.every((item) => item.passed === true)).toBe(true)
+    expect(attempts[0].checks.every((item) => item.passed === true)).toBe(process.platform !== 'win32')
+  }, 40000)
+
+  it.runIf(process.platform === 'win32').each(['SIGINT', 'SIGTERM'])('Windows native %s force termination never leaves a success report', async signal => {
+    const run = await runUntilCheckWindowThenSignal(signalFixture('native-' + signal), signal, true)
+    expect(run.code).not.toBe(0)
+    expect(run.report?.ok).not.toBe(true)
+    expect(run.report?.status).not.toBe('success')
+    // TerminateProcess cannot run JS cleanup; an absent report is expected here.
+  }, 40000)
+
+  it.each(['SIGINT', 'SIGTERM'])('IPC %s delivery reaches the registered interruption handler', async signal => {
+    const run = await runUntilCheckWindowThenSignal(signalFixture('ipc-' + signal), signal, false, true)
+    expect(run.code).not.toBe(0)
+    expect(run.report).toMatchObject({ ok: false, interruptedBy: signal, exitCode: run.code })
+    expect(run.report.status).not.toBe('success')
   }, 40000)
 })

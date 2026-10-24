@@ -38,7 +38,7 @@ export async function captureCopy(root:string,cwd:string,command:string,args:str
    await within(base,target)
    const targetStat=await lstat(target).catch(error=>{if(error.code==='ENOENT')return undefined;throw error})
    if(targetStat&&(!targetStat.isFile()||targetStat.isSymbolicLink()||targetStat.size>8*1024*1024)||source===target)return undefined
-   entries.push({source:relative(base,source),path:relative(base,target),sourceHash:await files.hash(source),beforeHash:targetStat?await files.hash(target):null})
+   entries.push({source:relative(base,source).split(sep).join('/'),path:relative(base,target).split(sep).join('/'),sourceHash:await files.hash(source),beforeHash:targetStat?await files.hash(target):null})
   }
   if(new Set(entries.map(entry=>entry.path)).size!==entries.length)return undefined
   return{schemaVersion:1,operation:'copy',entries}

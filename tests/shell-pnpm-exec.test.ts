@@ -19,4 +19,5 @@ it('runs a real pnpm exec with prepared dependencies without an implicit install
     expect(result.stderr).not.toMatch(/installing dependencies|registry\.npmjs|REMOVE_MODULES/)
     expect(await readFile(marker, 'utf8')).toBe('preserve prepared dependencies')
   } finally { await rm(root, { recursive: true, force: true }) }
-}, 45_000)
+// Retain the command's 30-second deadline; Windows setup/cleanup is additional.
+}, process.platform === 'win32' ? 240_000 : 45_000)
