@@ -4,9 +4,29 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { createHash } from 'node:crypto'
 import { DesktopInstallation, launcherText, registerLauncher, registerPath } from '../packages/desktop/src/installation.mjs'
 import { runtimeFile, verifyRuntime, writeRuntimeManifest } from '../packages/desktop/src/runtime-manifest.mjs'
 const exec = promisify(execFile)
+
+it('fully checks later noncritical files and detects same-size corruption before cleanup', async () => {
+ const root = await mkdtemp(join(tmpdir(), 'pulse-runtime-integrity-'))
+ try {
+  const files: Record<string, { bytes: number; sha256: string }> = {}
+  for (let i = 0; i < 24; i++) {
+   const text = `component-${String(i).padStart(2, '0')}`
+   await writeFile(join(root, `${i}.js`), text)
+   files[`${i}.js`] = { bytes: Buffer.byteLength(text), sha256: createHash('sha256').update(text).digest('hex') }
+  }
+  const manifest = { files, critical: ['0.js'] }
+  await expect(verifyRuntime(root, manifest, true)).resolves.toBeUndefined()
+  await writeFile(join(root, '23.js'), 'component-XX')
+  await expect(verifyRuntime(root, manifest)).resolves.toBeUndefined()
+  await expect(verifyRuntime(root, manifest, true)).rejects.toThrow('RUNTIME_FILE_CHANGED:23.js')
+  // Verification must have released its reads before a failed installation is removed.
+  await rm(root, { recursive: true })
+ } finally { await rm(root, { recursive: true, force: true }) }
+})
 async function fixture() {
  const root = await mkdtemp(join(tmpdir(), "pulse-install space's-")), source = join(root, 'bundle'), install = join(root, 'home/.pulse'), shellHome = join(root, 'home')
  const files = {

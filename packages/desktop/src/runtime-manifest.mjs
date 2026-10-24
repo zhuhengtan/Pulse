@@ -46,11 +46,25 @@ export async function readRuntimeManifest(root, platform = process.platform, arc
     return value;
 }
 export async function verifyRuntime(root, manifest, full = false) {
-    for (const name of full ? Object.keys(manifest.files) : manifest.critical) {
+    const names = full ? Object.keys(manifest.files) : manifest.critical;
+    const realRoot = await realpath(root);
+    async function verify(name) {
         const file = runtimeFile(root, name), info = await lstat(file);
-        const rel = relative(await realpath(root), await realpath(file));
+        const rel = relative(realRoot, await realpath(file));
         if (rel === '..' || rel.startsWith('..' + sep)) throw new Error('RUNTIME_FILE_CHANGED:' + name);
-        if (manifest.files[name]?.link !== undefined) { if (!info.isSymbolicLink() || await readlink(file) !== manifest.files[name].link) throw new Error('RUNTIME_FILE_CHANGED:' + name); continue; }
+        if (manifest.files[name]?.link !== undefined) { if (!info.isSymbolicLink() || await readlink(file) !== manifest.files[name].link) throw new Error('RUNTIME_FILE_CHANGED:' + name); return; }
         if (!info.isFile() || info.isSymbolicLink() || info.size !== manifest.files[name]?.bytes || await fileDigest(file) !== manifest.files[name]?.sha256) throw new Error('RUNTIME_FILE_CHANGED:' + name);
     }
+    // Bundles contain tens of thousands of small files. Bound concurrent I/O
+    // rather than paying every filesystem round trip serially. Drain all reads
+    // before returning an error so repair/cleanup can safely rename or remove.
+    let index = 0, failure;
+    await Promise.all(Array.from({ length: Math.min(8, names.length) }, async () => {
+        while (!failure && index < names.length) {
+            const name = names[index++];
+            try { await verify(name); }
+            catch (error) { failure ??= error; }
+        }
+    }));
+    if (failure) throw failure;
 }

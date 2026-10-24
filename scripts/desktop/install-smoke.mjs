@@ -46,8 +46,15 @@ async function closeWindow(label) {
 async function status(page) { return bounded(page.evaluate(async () => (await window.pulseDesktop.request('/api/desktop/setup')).body), 'setup-snapshot', 5000); }
 async function ready(page) {
     const deadline = Date.now() + 180000;
-    let value;
-    do { value = await status(page); if (['ready', 'error'].includes(value.phase)) break; await new Promise(resolve => setTimeout(resolve, 300)); } while (Date.now() < deadline);
+    let value, lastProgress;
+    do {
+        value = await status(page);
+        const runtime = value.steps?.find(item => item.id === 'runtime');
+        const progress = JSON.stringify({ phase: value.phase, runtime: runtime?.state, detail: runtime?.detail });
+        if (progress !== lastProgress) { console.log(`[desktop:install] ${phase} ${progress}`); lastProgress = progress; }
+        if (['ready', 'error'].includes(value.phase)) break;
+        await new Promise(resolve => setTimeout(resolve, 300));
+    } while (Date.now() < deadline);
     assert.equal(value.phase, 'ready', JSON.stringify(value)); return value;
 }
 async function request(page, path, body) {

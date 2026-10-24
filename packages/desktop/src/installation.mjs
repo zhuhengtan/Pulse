@@ -108,14 +108,21 @@ export class DesktopInstallation {
                 const release = `${manifest.version}-${manifest.buildId.slice(0, 16)}`;
                 const managed = join(this.root, 'desktop', 'runtimes');
                 let target = saved.buildId === manifest.buildId && typeof saved.runtimeDirectory === 'string' && dirname(saved.runtimeDirectory) === managed ? saved.runtimeDirectory : join(managed, release);
+                this.step('runtime', '准备 Pulse 运行环境', 'running', '正在检查已安装的运行环境');
                 const healthy = await verifyRuntime(target, manifest, full).then(() => true, () => false);
                 if (!healthy) {
+                    this.step('runtime', '准备 Pulse 运行环境', 'running', '正在校验内置文件');
                     await verifyRuntime(this.source, manifest, true);
                     // Never replace files beneath a running backend. A repair gets a fresh immutable directory.
                     if (await exists(target)) target = join(managed, `${release}-repair-${randomUUID()}`);
                     await mkdir(managed, { recursive: true });
                     const staging = join(managed, `.install-${randomUUID()}`);
-                    try { await cp(this.source, staging, { recursive: true, dereference: false, verbatimSymlinks: true }); await verifyRuntime(staging, manifest, true); await rename(staging, target); }
+                    try {
+                        this.step('runtime', '准备 Pulse 运行环境', 'running', '正在复制到本地');
+                        await cp(this.source, staging, { recursive: true, dereference: false, verbatimSymlinks: true });
+                        this.step('runtime', '准备 Pulse 运行环境', 'running', '正在校验安装文件');
+                        await verifyRuntime(staging, manifest, true); await rename(staging, target);
+                    }
                     finally { await rm(staging, { recursive: true, force: true }); }
                 }
                 this.node = join(target, this.platform === 'win32' ? 'node.exe' : 'node');
