@@ -467,8 +467,8 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
       const selected = resolveModelReference(catalog, config.approvalReview!.model!)
       const entry = selections.find(item => item.id === selected)
       const source = entry && effectiveProviders[entry.providerId]
-      if (!entry || !source || source.provider !== 'ollama') throw new Error('APPROVAL_REVIEW_REQUIRES_OLLAMA')
-      return { provider: 'ollama' as const, model: entry.model.modelCode, baseURL: source.baseURL ?? 'http://127.0.0.1:11434', timeoutMs: Math.max(30_000, Math.min(60_000, config.approvalReview!.timeoutMs ?? 30_000)) }
+      if (!entry || !source || (source.provider !== 'ollama' && source.provider !== 'deepseek')) throw new Error('APPROVAL_REVIEW_PROVIDER_UNSUPPORTED')
+      return { provider: source.provider, model: entry.model.modelCode, baseURL: source.baseURL ?? (source.provider === 'ollama' ? 'http://127.0.0.1:11434' : 'https://api.deepseek.com'), ...(source.provider === 'deepseek' ? { apiKeyEnv: source.apiKeyEnv ?? 'DEEPSEEK_API_KEY' } : {}), timeoutMs: Math.max(30_000, Math.min(60_000, config.approvalReview!.timeoutMs ?? 30_000)) }
     })() } : {}),
   }
 }

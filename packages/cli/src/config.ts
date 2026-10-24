@@ -98,7 +98,7 @@ export interface PulseCliConfig {
     timeoutMs?: number
   }
   approvalReview?: {
-    provider?: 'ollama'
+    provider?: 'ollama' | 'deepseek'
     model?: string
     baseURL?: string
     timeoutMs?: number
