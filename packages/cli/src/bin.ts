@@ -127,9 +127,10 @@ export function parse(argv: string[]): Parsed {
       break
     }
     if (arg.startsWith('--')) {
-      const parts = arg.slice(2).split('=', 2)
-      const key = parts[0] ?? ''
-      const inline = parts[1]
+      const body = arg.slice(2)
+      const equalsIndex = body.indexOf('=')
+      const key = equalsIndex === -1 ? body : body.slice(0, equalsIndex)
+      const inline = equalsIndex === -1 ? undefined : body.slice(equalsIndex + 1)
       if (!key) continue
       if (inline !== undefined) {
         options[key] = inline
