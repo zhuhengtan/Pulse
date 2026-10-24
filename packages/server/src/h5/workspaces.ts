@@ -45,6 +45,19 @@ async function git(cwd: string, args: string[], maxBuffer = 64 * 1024 * 1024, en
   return result.stdout
 }
 
+/** True when Git's ignore rules already prevent `git add` from staging this
+ * path (an ignored parent directory counts). Only exit code 1 means "not
+ * ignored"; every other failure is a real Git error and must surface. */
+async function isGitIgnored(cwd: string, path: string): Promise<boolean> {
+  try {
+    await exec('git', ['check-ignore', '--quiet', '--', path], { cwd, encoding: 'utf8', windowsHide: true })
+    return true
+  } catch (error) {
+    if ((error as { code?: unknown }).code === 1) return false
+    throw error
+  }
+}
+
 async function copyWorkingFiles(sourceRoot: string, destinationRoot: string, excludedRoot?: string): Promise<void> {
   const excluded = excludedRoot && inside(sourceRoot, excludedRoot) ? relative(sourceRoot, excludedRoot).split(sep).join('/') : undefined
   const output = await git(sourceRoot, ['ls-files', '--cached', '--others', '--exclude-standard', '-z'])
@@ -127,7 +140,13 @@ async function snapshotCurrentProject(projectRoot: string, scratch: string, pare
   try {
     await git(projectRoot, ['read-tree', parentCommit], 64 * 1024 * 1024, env)
     const excluded = excludedRoot && inside(projectRoot, excludedRoot) ? relative(projectRoot, excludedRoot).split(sep).join('/') : undefined
-    await git(projectRoot, ['add', '-A', '--', '.', ...(excluded ? [`:(exclude)${excluded}`] : [])], 128 * 1024 * 1024, env)
+    // Naming a path that lives inside an ignored directory (e.g. `.pulse-dev/`)
+    // as a pathspec makes `git add` treat it as an explicit request for ignored
+    // content and fail with "The following paths are ignored". Ignored paths are
+    // never staged without --force anyway, so such a runtime directory needs no
+    // exclude pathspec; only a path git would actually add must be excluded.
+    const excludePath = !!excluded && !(await isGitIgnored(projectRoot, excluded))
+    await git(projectRoot, ['add', '-A', '--', '.', ...(excludePath ? [`:(exclude)${excluded}`] : [])], 128 * 1024 * 1024, env)
     const tree = (await git(projectRoot, ['write-tree'], 64 * 1024 * 1024, env)).trim()
     return (await git(projectRoot, ['-c', 'user.name=Pulse Workspace', '-c', 'user.email=pulse-workspace@localhost', 'commit-tree', tree, '-p', parentCommit, '-m', 'Pulse latest project snapshot'])).trim()
   } finally {
