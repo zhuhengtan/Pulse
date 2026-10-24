@@ -197,7 +197,7 @@ export class AssistantConversationStore {
     await this.data.call('saveState', 'assistant-inbox', this.requireState())
   }
 
-  close(): void { this.data.close() }
+  close(): Promise<void> { return this.data.close() }
 
   private async serial<T>(operation: () => Promise<T>): Promise<T> {
     const previous = this.tail

@@ -360,7 +360,7 @@ export class H5Server {
     await this.assistantPump?.catch(() => undefined)
     await Promise.allSettled([...this.runConsumers])
     await Promise.allSettled([...this.runSnapshots].map(([runId, snapshot]) => this.host.conversationData.call('saveState', `run:${runId}`, snapshot)))
-    this.assistantInbox.close()
+    await this.assistantInbox.close()
     await this.workspaces.close()
     if (this.jarvisSyncTimer) clearInterval(this.jarvisSyncTimer)
     this.jarvisSyncTimer = undefined

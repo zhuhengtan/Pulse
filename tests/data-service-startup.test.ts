@@ -16,7 +16,7 @@ async function fixture() {
 function client(path: string) { const value = new ConversationData(path); clients.push(value); return value }
 afterEach(async () => {
   vi.unstubAllEnvs()
-  for (const value of clients.splice(0)) value.close()
+  for (const value of clients.splice(0)) await value.close()
   for (const root of roots.splice(0)) {
     // Only our fixture writer is allowed to finish its normal idle shutdown.
     for (let i = 0; i < 100; i++) {

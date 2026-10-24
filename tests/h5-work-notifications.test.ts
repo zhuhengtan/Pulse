@@ -38,9 +38,11 @@ it.each([false, true])('finishes project work independently of chat notification
     // Legacy links/notices alone do not establish that a task originated in chat.
     if (!assistantOrigin) {
       const store = new AssistantConversationStore(dataDir)
-      await store.init(async () => { throw new Error('Expected existing assistant') })
-      await store.linkWork(work.id, project.id, 'Old manual task')
-      await store.addWorkNotice({ id: 'legacy-manual-notice', role: 'assistant', text: 'Old manual result', createdAt: new Date().toISOString(), work: { conversationId: work.id, projectId: project.id, title: 'Old manual task', state: 'succeeded' } })
+      try {
+        await store.init(async () => { throw new Error('Expected existing assistant') })
+        await store.linkWork(work.id, project.id, 'Old manual task')
+        await store.addWorkNotice({ id: 'legacy-manual-notice', role: 'assistant', text: 'Old manual result', createdAt: new Date().toISOString(), work: { conversationId: work.id, projectId: project.id, title: 'Old manual task', state: 'succeeded' } })
+      } finally { await store.close() }
     }
     host = createLocalHost(options); server = new H5Server(host, { dataDir, host: '127.0.0.1', port: 0 })
     base = `http://127.0.0.1:${(await server.start()).port}`; headers = await authorize()

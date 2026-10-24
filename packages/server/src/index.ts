@@ -4006,7 +4006,7 @@ export class LocalHost {
     await Promise.allSettled([...this.runBackends].map(backend => backend.close?.()))
     this.runBackends.clear()
     this.persistenceCache.clear()
-    this.conversationData.close()
+    await this.conversationData.close()
     this.approvedToolCalls.clear()
     for (const conversationId of [...this.conversationLocks.keys()]) await this.releaseConversationLock(conversationId)
   }

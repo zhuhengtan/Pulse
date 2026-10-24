@@ -41,9 +41,8 @@ describe('shared conversation data', () => {
             expect(await b.call('messages', 'a')).toEqual([]);
         }
         finally {
-            a.close();
-            b.close();
-            await new Promise(resolve => setTimeout(resolve, 1700));
+            await a.close();
+            await b.close();
             await rm(directory, { recursive: true, force: true });
         }
     });

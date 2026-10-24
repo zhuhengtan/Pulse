@@ -21,7 +21,7 @@ describe('rich presentation persistence', () => {
       await restored.init(async () => 'must-not-create')
       expect(restored.transcript()[0]?.richContent).toEqual(rich)
       expect((await restored.retry(input.requestId, input.text, undefined, undefined, input.mentionedFiles, rich)).message.richContent).toEqual(rich)
-    } finally { store.close(); restored.close(); await rm(dir, { recursive: true, force: true }) }
+    } finally { await store.close(); await restored.close(); await rm(dir, { recursive: true, force: true }) }
   })
   it('persists a regular work message through host restart and keeps model text independent', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'pulse-rich-host-'))

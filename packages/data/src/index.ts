@@ -1,7 +1,7 @@
 import { createConnection, type Socket } from 'node:net';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, rm, stat, readdir, access, lstat, chmod } from 'node:fs/promises';
+import { mkdir, rm, stat, readdir, access, lstat, chmod, readFile } from 'node:fs/promises';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 export interface MessagePage<T = Record<string, unknown>> {
@@ -21,6 +21,7 @@ export class ConversationData {
     private closed = false;
     private socket: Socket | undefined;
     private connecting: Promise<void> | undefined;
+    private closing: Promise<void> | undefined;
     private serial = 0;
     private pending = new Map<number, {
         resolve: (value: unknown) => void;
@@ -93,7 +94,6 @@ export class ConversationData {
                 // work. Wait for explicit database readiness within one wall-clock budget.
                 const deadline = startedAt + 15_000;
                 while (Date.now() < deadline) {
-                    if (this.closed) throw new Error('DATA_CLIENT_CLOSED');
                     if (serviceCode || exitCode !== undefined && exitCode !== 0 || exitSignal) throw unavailable('DATA_SERVICE_START_FAILED');
                     // Another client may already own the writer. Its child exits cleanly;
                     // connect to that writer without deleting its lock or killing it.
@@ -114,10 +114,8 @@ export class ConversationData {
             }
             socket = found;
         }
-        if (this.closed) {
-            socket.destroy();
-            throw new Error('DATA_CLIENT_CLOSED');
-        }
+        // A close racing startup joins this connection and releases it through
+        // the same graceful protocol; do not leave an unclaimed writer behind.
         this.socket = socket;
         socket.unref();
         socket.setEncoding('utf8');
@@ -165,9 +163,48 @@ export class ConversationData {
         socket.on('error', fail);
         socket.on('close', fail);
     }
-    async call<T = unknown>(method: string, ...args: unknown[]): Promise<T> { await this.connect(); return new Promise<T>((resolveCall, reject) => { if (this.pending.size >= 256) {
+    async call<T = unknown>(method: string, ...args: unknown[]): Promise<T> {
+        await this.connect();
+        if (this.closed) throw new Error('DATA_CLIENT_CLOSED');
+        return this.request<T>(method, args);
+    }
+    private request<T>(method: string, args: unknown[]): Promise<T> { return new Promise<T>((resolveCall, reject) => { if (this.pending.size >= 256) {
         reject(new Error('DATA_QUEUE_FULL'));
         return;
     } const id = ++this.serial; const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('DATA_REQUEST_TIMEOUT')); }, 10000); this.pending.set(id, { resolve: v => resolveCall(v as T), reject, timer }); this.socket!.ref(); this.socket!.write(JSON.stringify({ id, method, args }) + '\n'); }); }
-    close(): void { this.closed = true; this.socket?.destroy(); this.socket = undefined; }
+    close(): Promise<void> {
+        if (this.closing) return this.closing;
+        this.closed = true;
+        this.closing = this.disconnect();
+        return this.closing;
+    }
+    private async disconnect(): Promise<void> {
+        await this.connecting?.catch(() => undefined);
+        const socket = this.socket;
+        if (!socket || socket.destroyed) return;
+        // Graceful release drains prior requests. Only the final client closes the
+        // writer; losing a connection still retains the normal reconnect grace.
+        const released = await this.request<{ lastClient: boolean; pid: number }>('disconnect', []).catch(() => undefined);
+        await new Promise<void>(resolve => {
+            if (socket.destroyed) { resolve(); return; }
+            socket.once('close', () => resolve());
+            socket.destroy();
+        });
+        if (this.socket === socket) this.socket = undefined;
+        if (!released?.lastClient) return;
+        const deadline = Date.now() + 2000;
+        while (true) {
+            const owner = await readFile(join(this.directory, '.writer.lock'), 'utf8').then(value => {
+                // A replacement writer may have created its lock but not yet
+                // written its PID. The released writer never rewrites this file.
+                try { return JSON.parse(value) as { pid?: number }; } catch { return undefined; }
+            }, error => {
+                if (error.code === 'ENOENT') return undefined;
+                throw error;
+            });
+            if (owner?.pid !== released.pid) return;
+            if (Date.now() >= deadline) throw new Error('DATA_SERVICE_CLOSE_TIMEOUT');
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+    }
 }

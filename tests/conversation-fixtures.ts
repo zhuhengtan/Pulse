@@ -14,7 +14,7 @@ export async function readConversationFixture(path: string, encoding?: string): 
         return encoding ? text : Buffer.from(text);
     }
     finally {
-        data.close();
+        await data.close();
     }
 }
 export async function writeConversationFixture(path: string, text: string | Buffer, options?: unknown): Promise<void> {
@@ -40,6 +40,6 @@ export async function writeConversationFixture(path: string, text: string | Buff
         }
     }
     finally {
-        data.close();
+        await data.close();
     }
 }

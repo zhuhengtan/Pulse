@@ -32,8 +32,7 @@ it('migrates offline data once, preserves sources, validates repeat runs and ref
         expect((await readdir(directory)).filter(name => name.startsWith('migration-backup-')).length).toBe(2);
     }
     finally {
-        data?.close();
-        await new Promise(r => setTimeout(r, 1700));
+        await data?.close();
         await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
 });

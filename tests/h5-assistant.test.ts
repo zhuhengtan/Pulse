@@ -22,7 +22,7 @@ describe('assistant inbox', () => {
     expect(duplicate.message.runId).toBe(first.message.runId)
     expect((await store.next())?.messageId).toBe(first.message.messageId)
     expect((await store.next())?.messageId).toBe(second.message.messageId)
-    store.close()
+    await store.close()
   })
 
   it('does not replay an interrupted reply after restart', async () => {
@@ -39,7 +39,7 @@ describe('assistant inbox', () => {
     expect(restored.hasQueued()).toBe(true)
     const data = new ConversationData(dir)
     expect((await data.call<{ conversationId: string }>('readState', 'assistant-inbox')).conversationId).toBe('assistant-conversation')
-    data.close(); store.close(); restored.close()
+    await data.close(); await store.close(); await restored.close()
   })
 })
 

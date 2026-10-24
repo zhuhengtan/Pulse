@@ -58,6 +58,7 @@ if (process.platform !== 'win32' && existsSync(endpoint))
 const clients = new Set();
 let database;
 let idle;
+let stopping = false;
 const stop = () => { try {
     database?.close();
 }
@@ -70,7 +71,7 @@ const server = createServer(socket => {
     socket.setEncoding('utf8');
     let buffer = '';
     socket.on('error', () => { });
-    socket.on('close', () => { clients.delete(socket); if (!clients.size)
+    socket.on('close', () => { clients.delete(socket); if (!stopping && !clients.size)
         idle = setTimeout(() => server.close(stop), 1500); });
     socket.on('data', chunk => {
         buffer += chunk;
@@ -85,6 +86,19 @@ const server = createServer(socket => {
             let request;
             try {
                 request = JSON.parse(line);
+                if (request.method === 'disconnect' && Array.isArray(request.args) && request.args.length === 0) {
+                    clients.delete(socket);
+                    const lastClient = clients.size === 0;
+                    if (lastClient) {
+                        stopping = true;
+                        clearTimeout(idle);
+                        server.close(stop);
+                        database.close();
+                        database = undefined;
+                    }
+                    socket.end(JSON.stringify({ id: request.id, value: { lastClient, pid: process.pid } }) + '\n');
+                    return;
+                }
                 if (!readMethods.has(request.method) && !writeMethods.has(request.method))
                     throw new Error('DATA_METHOD_INVALID');
                 if (!Array.isArray(request.args))
