@@ -5,6 +5,7 @@
   "type": "module",
   "main": "src/main.mjs",
   "description": "Pulse local desktop client",
+  "homepage": "https://zhuhengtan.github.io/Pulse/",
   "author": "Hunter Zhu",
   "license": "PolyForm-Noncommercial-1.0.0",
   "scripts": {
@@ -62,6 +63,7 @@
       "artifactName": "pulse-windows-${arch}.${ext}"
     },
     "linux": {
+      "maintainer": "Hunter Zhu",
       "target": [
         "AppImage",
         "deb"
