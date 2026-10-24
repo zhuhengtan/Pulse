@@ -64,21 +64,54 @@ export class ConversationData {
             socket = await attempt();
         }
         catch (error) {
-            const child = spawn(process.execPath, [fileURLToPath(new URL('./service.mjs', import.meta.url)), resolve(this.directory), endpoint], { detached: true, stdio: 'ignore', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
+            const child = spawn(process.execPath, [fileURLToPath(new URL('./service.mjs', import.meta.url)), resolve(this.directory), endpoint], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
             child.unref();
-            child.on('error', () => { });
+            const startedAt = Date.now();
+            let phase = 'starting';
+            let serviceCode: string | undefined;
+            let exitCode: number | null | undefined;
+            let exitSignal: NodeJS.Signals | null | undefined;
+            let lastConnectCode: string | undefined;
+            child.channel?.unref();
+            const onMessage = (message: unknown) => {
+                if (!message || typeof message !== 'object' || !('type' in message) || message.type !== 'pulse-data-startup') return;
+                const value = message as { phase?: unknown; code?: unknown };
+                if (typeof value.phase === 'string' && /^[a-z-]{1,40}$/.test(value.phase)) phase = value.phase;
+                if (typeof value.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(value.code)) serviceCode = value.code;
+            };
+            const onExit = (code: number | null, signal: NodeJS.Signals | null) => { exitCode = code; exitSignal = signal; };
+            const onError = (cause: NodeJS.ErrnoException) => { phase = 'spawn'; serviceCode = cause.code ?? 'SPAWN_FAILED'; };
+            child.on('message', onMessage);
+            child.on('exit', onExit);
+            child.on('error', onError);
+            const unavailable = (code: string) => Object.assign(new Error(`${code}: phase=${phase}${serviceCode ? ` code=${serviceCode}` : ''}${exitCode !== undefined ? ` exit=${exitCode}` : ''}${exitSignal ? ` signal=${exitSignal}` : ''}${lastConnectCode ? ` connect=${lastConnectCode}` : ''}`), {
+                code, details: { phase, serviceCode, exitCode, exitSignal, childPid: child.pid, connectionCode: lastConnectCode, elapsedMs: Date.now() - startedAt },
+            });
             let found: Socket | undefined;
-            for (let i = 0; i < 100; i++) {
-                try {
-                    found = await attempt();
-                    break;
+            try {
+                // Cold native process startup can exceed three seconds under concurrent
+                // work. Wait for explicit database readiness within one wall-clock budget.
+                const deadline = startedAt + 15_000;
+                while (Date.now() < deadline) {
+                    if (this.closed) throw new Error('DATA_CLIENT_CLOSED');
+                    if (serviceCode || exitCode !== undefined && exitCode !== 0 || exitSignal) throw unavailable('DATA_SERVICE_START_FAILED');
+                    // Another client may already own the writer. Its child exits cleanly;
+                    // connect to that writer without deleting its lock or killing it.
+                    if (phase === 'ready' || phase === 'lock-owner-alive' || exitCode === 0) {
+                        try { found = await attempt(); break; }
+                        catch (cause) { lastConnectCode = (cause as NodeJS.ErrnoException).code; }
+                    }
+                    await new Promise(r => setTimeout(r, Math.min(30, Math.max(1, deadline - Date.now()))));
                 }
-                catch {
-                    await new Promise(r => setTimeout(r, 30));
-                }
+                if (!found) throw unavailable('DATA_SERVICE_UNAVAILABLE');
+            } finally {
+                child.removeListener('message', onMessage);
+                child.removeListener('exit', onExit);
+                // A spawn error can arrive after a closing client has stopped waiting.
+                child.removeListener('error', onError);
+                child.on('error', () => {});
+                if (child.connected) child.disconnect();
             }
-            if (!found)
-                throw new Error('DATA_SERVICE_UNAVAILABLE');
             socket = found;
         }
         if (this.closed) {

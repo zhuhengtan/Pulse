@@ -2,11 +2,19 @@ import { createServer } from 'node:net';
 import { chmodSync, existsSync, unlinkSync, openSync, writeFileSync, closeSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ConversationDatabase, readMethods, writeMethods } from './sqlite.mjs';
+// Startup status contains fixed phases and error codes only, never persisted data.
+const startup = (phase, error) => new Promise(resolve => {
+    const candidate = error?.code ?? error?.message;
+    const code = typeof candidate === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(candidate) ? candidate : error ? 'STARTUP_FAILED' : undefined;
+    if (!process.connected) { resolve(); return; }
+    process.send({ type: 'pulse-data-startup', phase, ...(code ? { code } : {}) }, () => resolve());
+});
+const exitStartup = async (phase, error, code = 1) => { await startup(phase, error); process.exit(code); };
 const [directory, endpoint] = process.argv.slice(2);
 if (!directory || !endpoint)
-    process.exit(2);
+    await exitStartup('arguments', new Error('DATA_SERVICE_ARGUMENTS_INVALID'), 2);
 if (existsSync(join(directory, 'migration.lock')))
-    process.exit(1);
+    await exitStartup('migration', new Error('DATA_MIGRATION_IN_PROGRESS'));
 const lockPath = join(directory, '.writer.lock');
 let lock;
 for (;;) {
@@ -17,21 +25,25 @@ for (;;) {
     }
     catch (error) {
         if (error.code !== 'EEXIST')
-            throw error;
+            await exitStartup('lock-create', error);
         let owner;
-        try {
-            owner = JSON.parse(readFileSync(lockPath, 'utf8'));
+        // A competing writer can observe the exclusive lock between creation and
+        // its PID write. Give that in-flight initialization a bounded settlement.
+        for (let attempt = 0; attempt < 10; attempt++) {
+            try { owner = JSON.parse(readFileSync(lockPath, 'utf8')); break; }
+            catch { await new Promise(resolve => setTimeout(resolve, 10)); }
         }
-        catch {
-            process.exit(1);
-        }
+        if (!existsSync(lockPath)) continue;
+        if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0)
+            await exitStartup('lock-invalid', new Error('DATA_WRITER_LOCK_INVALID'));
+
         try {
             process.kill(owner.pid, 0);
-            process.exit(0);
+            await exitStartup('lock-owner-alive', undefined, 0);
         }
         catch (probe) {
             if (probe.code !== 'ESRCH')
-                process.exit(1);
+                await exitStartup('lock-probe', probe);
         }
         unlinkSync(lockPath);
     }
@@ -94,16 +106,16 @@ const server = createServer(socket => {
         }
     });
 });
-server.on('error', error => { if (error.code === 'EADDRINUSE')
-    process.exit(0); process.exit(1); });
-server.listen(endpoint, () => { try {
+server.on('error', async error => { await exitStartup('listen', error.code === 'EADDRINUSE' ? undefined : error, error.code === 'EADDRINUSE' ? 0 : 1); });
+server.listen(endpoint, async () => { try {
     if (process.platform !== 'win32')
         chmodSync(endpoint, 0o600);
     database = new ConversationDatabase(directory);
+    await startup('ready');
     idle = setTimeout(() => { if (!clients.size)
         server.close(stop); }, 3000);
 }
-catch {
-    process.exit(1);
+catch (error) {
+    await exitStartup('database', error);
 } });
 process.once('SIGTERM', () => server.close(stop));
