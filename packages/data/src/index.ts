@@ -234,14 +234,23 @@ export class ConversationData {
         if (!released?.lastClient) return;
         const deadline = Date.now() + 2000;
         while (true) {
-            const owner = await readFile(join(this.directory, '.writer.lock'), 'utf8').then(value => {
-                // A replacement writer may have created its lock but not yet
-                // written its PID. The released writer never rewrites this file.
-                try { return JSON.parse(value) as { pid?: number }; } catch { return undefined; }
-            }, error => {
-                if (error.code === 'ENOENT') return undefined;
+            let value: string;
+            try { value = await readFile(join(this.directory, '.writer.lock'), 'utf8'); }
+            catch (error) {
+                const code = (error as NodeJS.ErrnoException).code;
+                if (code === 'ENOENT') return;
+                // Windows can deny opening a lock that is pending deletion.
+                // Retain the same close deadline and propagate persistent errors.
+                if (process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '') && Date.now() < deadline) {
+                    await new Promise(resolve => setTimeout(resolve, 10));
+                    continue;
+                }
                 throw error;
-            });
+            }
+            // A replacement writer may have created its lock but not yet
+            // written its PID. The released writer never rewrites this file.
+            let owner: { pid?: number } | undefined;
+            try { owner = JSON.parse(value); } catch { /* A new owner is still initializing. */ }
             if (owner?.pid !== released.pid) return;
             if (Date.now() >= deadline) throw new Error('DATA_SERVICE_CLOSE_TIMEOUT');
             await new Promise(resolve => setTimeout(resolve, 10));
