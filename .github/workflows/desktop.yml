@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 40
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      PULSE_DESKTOP_SMOKE_ARTIFACTS: artifacts/desktop-smoke
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,6 +74,13 @@ jobs:
         run: xvfb-run --auto-servernum pnpm desktop:app:install-smoke
       - name: Build native packages
         run: pnpm --filter @hunterzhu/pulse-desktop run dist --${{ matrix.arch }} --publish never
+      - name: Preserve desktop failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-diagnostics-${{ matrix.os }}-${{ matrix.arch }}
+          path: artifacts/desktop-smoke/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: pulse-desktop-${{ matrix.os }}-${{ matrix.arch }}

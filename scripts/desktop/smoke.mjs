@@ -11,6 +11,31 @@ const root = await mkdtemp(join(tmpdir(), 'pulse-desktop-smoke-')), directory = 
 const host = createLocalHost({ cwd: root, dataDir: directory, provider: { provider: 'mock', defaultModel: 'mock' }, providerProfiles: { mock: { provider: 'mock', defaultModel: 'mock' } }, providerModels: { mock: { provider: 'mock', model: 'mock' } }, activeModel: 'mock', assistantModel: 'mock', mockResponse: 'Desktop socket reply', jarvis: { enabled: false } });
 const server = new H5Server(host, { dataDir: directory, port: 0, host: '127.0.0.1' });
 let desktop;
+let page, timeline;
+const diagnostics = process.env.PULSE_DESKTOP_SMOKE_ARTIFACTS;
+async function stopTimeline() {
+    if (!timeline || !diagnostics) return;
+    const session = timeline; timeline = undefined;
+    let finish, timer;
+    const completed = new Promise((resolve, reject) => {
+        finish = resolve;
+        timer = setTimeout(() => reject(new Error('DESKTOP_TRACE_STOP_TIMEOUT')), 10000);
+        session.once('Tracing.tracingComplete', finish);
+    });
+    let stream;
+    try { [, { stream }] = await Promise.all([session.send('Tracing.end'), completed]); }
+    finally { clearTimeout(timer); session.removeListener('Tracing.tracingComplete', finish); }
+    const chunks = [];
+    try {
+        for (;;) {
+            const part = await session.send('IO.read', { handle: stream });
+            chunks.push(Buffer.from(part.data, part.base64Encoded ? 'base64' : 'utf8'));
+            if (part.eof) break;
+        }
+    } finally { await session.send('IO.close', { handle: stream }); await session.detach(); }
+    await mkdir(diagnostics, { recursive: true });
+    await writeFile(join(diagnostics, 'renderer-trace.json'), Buffer.concat(chunks));
+}
 try {
     await host.init();
     await server.start();
@@ -22,7 +47,7 @@ try {
     const env = { ...process.env, PULSE_DESKTOP_USER_DATA: join(root, 'user-data'), PULSE_DESKTOP_DATA_DIR: directory, PULSE_HOME: join(root, 'home') };
     delete env.ELECTRON_RUN_AS_NODE;
     desktop = await _electron.launch({ executablePath: process.env.PULSE_DESKTOP_EXECUTABLE ?? electronPath, args: process.env.PULSE_DESKTOP_EXECUTABLE ? [] : [fileURLToPath(new URL('../../packages/desktop', import.meta.url))], env, timeout: 20000 });
-    let page = await desktop.firstWindow();
+    page = await desktop.firstWindow();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.getByText('Local history 119', { exact: true }).waitFor({ timeout: 20000 });
@@ -35,6 +60,10 @@ try {
     await page.screenshot({ path: join(tmpdir(), 'pulse-desktop-chat.png') });
     await page.evaluate(id => { history.pushState(null, '', `/work/${id}`); dispatchEvent(new PopStateEvent('popstate')); }, work.id);
     await page.getByText('Work history 9999', { exact: true }).waitFor({ timeout: 10000 });
+    if (diagnostics) {
+        timeline = await page.context().newCDPSession(page);
+        await timeline.send('Tracing.start', { transferMode: 'ReturnAsStream', categories: 'devtools.timeline,v8,blink.user_timing,disabled-by-default-v8.cpu_profiler' });
+    }
     await page.evaluate(() => { window.__pulseLongTasks = []; if (PerformanceObserver.supportedEntryTypes.includes('longtask'))
         new PerformanceObserver(list => window.__pulseLongTasks.push(...list.getEntries().map(item => item.duration))).observe({ type: 'longtask', buffered: false }); });
     const switches = [];
@@ -54,6 +83,11 @@ try {
     if (virtualNodes > 120)
         throw new Error('LONG_HISTORY_NOT_WINDOWED');
     const maxLongTaskMs = await page.evaluate(() => Math.max(0, ...window.__pulseLongTasks));
+    if (diagnostics) {
+        await mkdir(diagnostics, { recursive: true });
+        await writeFile(join(diagnostics, 'performance.json'), JSON.stringify({ switchP95Ms, maxLongTaskMs, virtualNodes, switches, longTasks: await page.evaluate(() => window.__pulseLongTasks) }, null, 2));
+        await stopTimeline();
+    }
     if (maxLongTaskMs > 200)
         throw new Error(`FRONTEND_LONG_TASK:${maxLongTaskMs}`);
     await page.screenshot({ path: join(tmpdir(), 'pulse-desktop-work.png') });
@@ -87,6 +121,14 @@ try {
     if (errors.length)
         throw new Error(errors.join('\n'));
     console.log(JSON.stringify({ ok: true, localHistoryBypassesServer: true, chatWebSocket: true, workPostSse: true, workMessages: 10000, rapidSwitches: 30, switchP95Ms, maxLongTaskMs, virtualNodes, serviceSurvivesWindow: true, offlineHistoryAfterReload: true, screenshots: [join(tmpdir(), 'pulse-desktop-chat.png'), join(tmpdir(), 'pulse-desktop-work.png')] }));
+}
+catch (error) {
+    if (diagnostics) {
+        await mkdir(diagnostics, { recursive: true }).catch(() => {});
+        await page?.screenshot({ path: join(diagnostics, 'failure.png') }).catch(() => {});
+        await stopTimeline().catch(() => {});
+    }
+    throw error;
 }
 finally {
     await desktop?.close();
