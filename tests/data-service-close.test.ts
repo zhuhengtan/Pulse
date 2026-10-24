@@ -1,8 +1,34 @@
 import { mkdtemp, readFile, rename, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createServer } from 'node:net'
 import { expect, it } from 'vitest'
-import { ConversationData } from '../packages/data/src/index.js'
+import { ConversationData, dataEndpoint } from '../packages/data/src/index.js'
+
+it('rejects a connected but retiring writer before sending any mutation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pulse-data-retiring-'))
+  const first = new ConversationData(directory), next = new ConversationData(directory)
+  let received = ''
+  const retiring = createServer(socket => socket.once('data', chunk => {
+    received += chunk.toString()
+    retiring.close()
+    socket.destroy()
+  }))
+  try {
+    await first.call('saveState', 'fixture', 'preserved')
+    await first.close()
+    await new Promise<void>((resolve, reject) => { retiring.once('error', reject); retiring.listen(dataEndpoint(directory), resolve) })
+    await next.call('saveState', 'second', 'written-once')
+    expect(JSON.parse(received.trim())).toMatchObject({ id: 0, method: 'revision', args: [] })
+    expect(await next.call('readState', 'fixture')).toBe('preserved')
+    expect(await next.call('readState', 'second')).toBe('written-once')
+    expect(await next.call('revision')).toBe(2)
+  } finally {
+    retiring.close()
+    await first.close(); await next.close()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
 
 it('releases SQLite and the writer lock on final graceful close without stopping another client', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'pulse-data-close-'))

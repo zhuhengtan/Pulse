@@ -16,6 +16,37 @@ export interface DataChange {
     item: string | null;
 }
 export function dataEndpoint(directory: string): string { const digest = createHash('sha256').update(resolve(directory)).digest('hex').slice(0, 24); return process.platform === 'win32' ? `\\\\.\\pipe\\pulse-data-${digest}` : join('/tmp', `pulse-ipc-${process.getuid?.() ?? 'user'}`, `${digest}.sock`); }
+// A kernel connection alone can target a writer that has already begun its
+// final shutdown. Only expose a socket after the writer has registered it.
+function connectReadySocket(endpoint: string): Promise<Socket> {
+    return new Promise((resolveSocket, reject) => {
+        const socket = createConnection(endpoint);
+        socket.setEncoding('utf8');
+        let buffer = '';
+        const fail = (cause?: Error) => { cleanup(); socket.destroy(); reject(cause ?? Object.assign(new Error('DATA_SERVICE_DISCONNECTED'), { code: 'DATA_SERVICE_DISCONNECTED' })); };
+        const timer = setTimeout(() => fail(Object.assign(new Error('DATA_SERVICE_HANDSHAKE_TIMEOUT'), { code: 'DATA_SERVICE_HANDSHAKE_TIMEOUT' })), 2000);
+        const closed = () => fail();
+        const cleanup = () => { clearTimeout(timer); socket.removeListener('error', fail); socket.removeListener('close', closed); socket.removeListener('data', receive); };
+        const receive = (chunk: string) => {
+            buffer += chunk;
+            if (Buffer.byteLength(buffer) > 64 * 1024) { fail(new Error('DATA_RESPONSE_TOO_LARGE')); return; }
+            let newline;
+            while ((newline = buffer.indexOf('\n')) >= 0) {
+                const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
+                try {
+                    const response = JSON.parse(line);
+                    if (response.id !== 0) continue;
+                    if (!Number.isSafeInteger(response.value) || response.value < 0) { fail(new Error('DATA_SERVICE_NOT_READY')); return; }
+                    socket.pause(); cleanup();
+                    if (buffer) socket.unshift(buffer);
+                    resolveSocket(socket); return;
+                } catch { fail(new Error('DATA_RESPONSE_INVALID')); return; }
+            }
+        };
+        socket.on('error', fail); socket.on('close', closed); socket.on('data', receive);
+        socket.once('connect', () => socket.write(JSON.stringify({ id: 0, method: 'revision', args: [] }) + '\n'));
+    });
+}
 /** One writer service per data directory; clients never perform synchronous SQL in the gateway. */
 export class ConversationData {
     private closed = false;
@@ -59,60 +90,68 @@ export class ConversationData {
                 throw new Error('DATA_ENDPOINT_OWNER_INVALID');
             await chmod(dirname(endpoint), 0o700);
         }
-        const attempt = () => new Promise<Socket>((yes, no) => { const s = createConnection(endpoint); s.once('error', no); s.once('connect', () => { s.removeListener('error', no); yes(s); }); });
-        let socket: Socket;
-        try {
-            socket = await attempt();
-        }
-        catch (error) {
-            const child = spawn(process.execPath, [fileURLToPath(new URL('./service.mjs', import.meta.url)), resolve(this.directory), endpoint], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
-            child.unref();
-            const startedAt = Date.now();
-            let phase = 'starting';
-            let serviceCode: string | undefined;
-            let exitCode: number | null | undefined;
-            let exitSignal: NodeJS.Signals | null | undefined;
-            let lastConnectCode: string | undefined;
-            child.channel?.unref();
-            const onMessage = (message: unknown) => {
-                if (!message || typeof message !== 'object' || !('type' in message) || message.type !== 'pulse-data-startup') return;
-                const value = message as { phase?: unknown; code?: unknown };
-                if (typeof value.phase === 'string' && /^[a-z-]{1,40}$/.test(value.phase)) phase = value.phase;
-                if (typeof value.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(value.code)) serviceCode = value.code;
-            };
-            const onExit = (code: number | null, signal: NodeJS.Signals | null) => { exitCode = code; exitSignal = signal; };
-            const onError = (cause: NodeJS.ErrnoException) => { phase = 'spawn'; serviceCode = cause.code ?? 'SPAWN_FAILED'; };
-            child.on('message', onMessage);
-            child.on('exit', onExit);
-            child.on('error', onError);
-            const unavailable = (code: string) => Object.assign(new Error(`${code}: phase=${phase}${serviceCode ? ` code=${serviceCode}` : ''}${exitCode !== undefined ? ` exit=${exitCode}` : ''}${exitSignal ? ` signal=${exitSignal}` : ''}${lastConnectCode ? ` connect=${lastConnectCode}` : ''}`), {
-                code, details: { phase, serviceCode, exitCode, exitSignal, childPid: child.pid, connectionCode: lastConnectCode, elapsedMs: Date.now() - startedAt },
-            });
-            let found: Socket | undefined;
+        const attempt = () => connectReadySocket(endpoint);
+        const openStartedAt = Date.now();
+        let socket: Socket | undefined;
+        while (!socket) {
             try {
-                // Cold native process startup can exceed three seconds under concurrent
-                // work. Wait for explicit database readiness within one wall-clock budget.
-                const deadline = startedAt + 15_000;
-                while (Date.now() < deadline) {
-                    if (serviceCode || exitCode !== undefined && exitCode !== 0 || exitSignal) throw unavailable('DATA_SERVICE_START_FAILED');
-                    // Another client may already own the writer. Its child exits cleanly;
-                    // connect to that writer without deleting its lock or killing it.
-                    if (phase === 'ready' || phase === 'lock-owner-alive' || exitCode === 0) {
-                        try { found = await attempt(); break; }
-                        catch (cause) { lastConnectCode = (cause as NodeJS.ErrnoException).code; }
-                    }
-                    await new Promise(r => setTimeout(r, Math.min(30, Math.max(1, deadline - Date.now()))));
-                }
-                if (!found) throw unavailable('DATA_SERVICE_UNAVAILABLE');
-            } finally {
-                child.removeListener('message', onMessage);
-                child.removeListener('exit', onExit);
-                // A spawn error can arrive after a closing client has stopped waiting.
-                child.removeListener('error', onError);
-                child.on('error', () => {});
-                if (child.connected) child.disconnect();
+                socket = await attempt();
             }
-            socket = found;
+            catch (error) {
+                const child = spawn(process.execPath, [fileURLToPath(new URL('./service.mjs', import.meta.url)), resolve(this.directory), endpoint], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
+                child.unref();
+                const startedAt = openStartedAt;
+                let phase = 'starting';
+                let serviceCode: string | undefined;
+                let exitCode: number | null | undefined;
+                let exitSignal: NodeJS.Signals | null | undefined;
+                let lastConnectCode: string | undefined;
+                child.channel?.unref();
+                const onMessage = (message: unknown) => {
+                    if (!message || typeof message !== 'object' || !('type' in message) || message.type !== 'pulse-data-startup') return;
+                    const value = message as { phase?: unknown; code?: unknown };
+                    if (typeof value.phase === 'string' && /^[a-z-]{1,40}$/.test(value.phase)) phase = value.phase;
+                    if (typeof value.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(value.code)) serviceCode = value.code;
+                };
+                const onExit = (code: number | null, signal: NodeJS.Signals | null) => { exitCode = code; exitSignal = signal; };
+                const onError = (cause: NodeJS.ErrnoException) => { phase = 'spawn'; serviceCode = cause.code ?? 'SPAWN_FAILED'; };
+                child.on('message', onMessage);
+                child.on('exit', onExit);
+                child.on('error', onError);
+                const unavailable = (code: string) => Object.assign(new Error(`${code}: phase=${phase}${serviceCode ? ` code=${serviceCode}` : ''}${exitCode !== undefined ? ` exit=${exitCode}` : ''}${exitSignal ? ` signal=${exitSignal}` : ''}${lastConnectCode ? ` connect=${lastConnectCode}` : ''}`), {
+                    code, details: { phase, serviceCode, exitCode, exitSignal, childPid: child.pid, connectionCode: lastConnectCode, elapsedMs: Date.now() - startedAt },
+                });
+                let found: Socket | undefined;
+                try {
+                    // Cold native process startup can exceed three seconds under concurrent
+                    // work. Wait for explicit database readiness within one wall-clock budget.
+                    const deadline = startedAt + 15_000;
+                    while (Date.now() < deadline) {
+                        if (serviceCode || exitCode !== undefined && exitCode !== 0 || exitSignal) throw unavailable('DATA_SERVICE_START_FAILED');
+                        // Another client may already own the writer. Its child exits cleanly;
+                        // connect to that writer without deleting its lock or killing it.
+                        if (phase === 'ready' || phase === 'lock-owner-alive' || exitCode === 0) {
+                            try { found = await attempt(); break; }
+                            catch (cause) {
+                                lastConnectCode = (cause as NodeJS.ErrnoException).code;
+                                // The old writer may have acknowledged its final close
+                                // after a competing startup observed its live PID.
+                                if (exitCode === 0 && !await access(join(this.directory, '.writer.lock')).then(() => true, () => false)) break;
+                            }
+                        }
+                        await new Promise(r => setTimeout(r, Math.min(30, Math.max(1, deadline - Date.now()))));
+                    }
+                    if (!found && Date.now() >= deadline) throw unavailable('DATA_SERVICE_UNAVAILABLE');
+                } finally {
+                    child.removeListener('message', onMessage);
+                    child.removeListener('exit', onExit);
+                    // A spawn error can arrive after a closing client has stopped waiting.
+                    child.removeListener('error', onError);
+                    child.on('error', () => {});
+                    if (child.connected) child.disconnect();
+                }
+                socket = found;
+            }
         }
         // A close racing startup joins this connection and releases it through
         // the same graceful protocol; do not leave an unclaimed writer behind.
@@ -155,13 +194,14 @@ export class ConversationData {
                 socket.destroy(new Error('DATA_RESPONSE_INVALID'));
             }
         } });
-        const fail = () => { if (this.socket === socket)
+        const fail = () => { if (this.socket !== socket) return;
             this.socket = undefined; for (const p of this.pending.values()) {
             clearTimeout(p.timer);
             p.reject(new Error('DATA_SERVICE_DISCONNECTED'));
         } this.pending.clear(); };
         socket.on('error', fail);
         socket.on('close', fail);
+        socket.resume();
     }
     async call<T = unknown>(method: string, ...args: unknown[]): Promise<T> {
         await this.connect();

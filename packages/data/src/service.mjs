@@ -66,6 +66,7 @@ finally {
     process.exit(0);
 } };
 const server = createServer(socket => {
+    if (stopping) { socket.destroy(); return; }
     clearTimeout(idle);
     clients.add(socket);
     socket.setEncoding('utf8');
