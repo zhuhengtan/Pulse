@@ -3051,6 +3051,19 @@ export class LocalHost {
           })()
         : undefined
       const terminalController = outcome.status !== 'succeeded' && finalGlobal ? controllerFromGlobal(finalGlobal) : undefined
+      if (terminalController) {
+        for (const lane of runtime.state.lanes.values()) {
+          const chain = (lane.context.state as any)?.taskControllerChain
+          if (chain && Array.isArray(chain.tasks)) {
+            for (const childTask of chain.tasks) {
+              const rootTask = terminalController.tasks.find((t) => t.id === childTask.id)
+              if (rootTask && rootTask.status === 'running' && childTask.status === 'passed') {
+                Object.assign(rootTask, childTask)
+              }
+            }
+          }
+        }
+      }
       const projectedController = terminalController ? interruptedController(terminalController, `${outcome.error?.code ?? outcome.status}: ${outcome.error?.message ?? outcome.reason ?? 'Run interrupted'}`) : undefined
       if (projectedController && terminalResults) projectedController.acceptanceResults = terminalResults
       const controllerSummary = stages.length > 0 && directResult?.trim() ? directResult.trim() : projectedController ? interruptedSummary(goal, projectedController, `${outcome.error?.code ?? outcome.status}: ${outcome.error?.message ?? outcome.reason ?? 'Run interrupted'}`, stage => [...new Set([...stage.evidenceRefs, ...(stage.contextRefs ?? [])].flatMap(ref => { const value = runtime.state.results.get(ref)?.value; return value && typeof value === 'object' && !Array.isArray(value) && (value.changed === true || value.committed === true) && typeof value.path === 'string' ? [value.path] : [] }))]) : undefined
@@ -3107,7 +3120,7 @@ export class LocalHost {
         }).catch(() => undefined)
       }
       await writeFile(join(this.runDir(conversationId, runId), 'operations.json'), JSON.stringify(operationAudit(runtime), null, 2))
-      if (taskGlobal) { const prior = await readFile(join(this.runDir(conversationId, runId), 'reuse-checkpoint.json'), 'utf8').then((text) => JSON.parse(text) as Checkpoint).catch(() => undefined); const version = taskAgent ? runtime.state.lanes.get(taskAgent.rootLaneId)?.resume.programVersion : undefined; const checkpointRoot = (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || version === '54') ? current.executionCwd ?? current.cwd : current.cwd; const checkpoint = await createCheckpoint(runtime, checkpointRoot, runId, taskGlobal, prior, ['40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54'].includes(String(version)) ? { continuationCommands: true } : undefined); if (checkpoint) await writeFile(join(this.runDir(conversationId, runId), 'checkpoint.json'), JSON.stringify(checkpoint)) }
+      if (taskGlobal) { const prior = await readFile(join(this.runDir(conversationId, runId), 'reuse-checkpoint.json'), 'utf8').then((text) => JSON.parse(text) as Checkpoint).catch(() => undefined); const version = taskAgent ? runtime.state.lanes.get(taskAgent.rootLaneId)?.resume.programVersion : undefined; const checkpointRoot = (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || version === '54') ? current.executionCwd ?? current.cwd : current.cwd; const checkpoint = await createCheckpoint(runtime, checkpointRoot, runId, projectedController ? { ...(taskGlobal as object), taskController: projectedController } as unknown as JsonValue : taskGlobal, prior, ['40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54'].includes(String(version)) ? { continuationCommands: true } : undefined); if (checkpoint) await writeFile(join(this.runDir(conversationId, runId), 'checkpoint.json'), JSON.stringify(checkpoint)) }
       return { ...outcome, ...(text === undefined ? {} : { text }) }
     })().finally(async () => {
       this.active.delete(runId)

@@ -1,4 +1,8 @@
 .project-info-popover .ant-popover-container { padding:0; border:1px solid var(--line); border-radius:16px; background:var(--surface-raised); box-shadow:var(--shadow); }
+/* Bridge the container border instead of ending the arrow against it. */
+.project-info-popover .ant-popover-arrow::before { background:var(--surface-raised); }
+.project-info-popover[class*="ant-popover-placement-right"] > .ant-popover-arrow { translate:2px 0; }
+.project-info-popover[class*="ant-popover-placement-left"] > .ant-popover-arrow { translate:-2px 0; }
 .project-info-card { width:min(355px,calc(100vw - 48px)); color:var(--ink); font-size:13px; }
 .project-info-card header { display:flex; align-items:center; gap:10px; padding:14px 14px 5px; }
 .project-info-card header strong { flex:1; min-width:0; font-size:16px; font-weight:550; line-height:1.45; overflow-wrap:anywhere; }
