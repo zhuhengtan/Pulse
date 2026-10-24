@@ -573,7 +573,9 @@ describe('M1-3 context, models and adapters', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   // Each Windows command provisions its own isolated ACL policy before the
   // child timeout starts. Five cold launches include policy restoration as well as child execution.
-  }, process.platform === 'win32' ? 600_000 : 60_000)
+  // Hosted Windows runners measured 105–146 seconds per complete launch; keep
+  // the five-command test bounded without cutting off its final initialization.
+  }, process.platform === 'win32' ? 900_000 : 60_000)
 
   it('classifies filesystem and shell validation failures as non-retryable', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-tool-errors-'))
