@@ -9,6 +9,8 @@
     "node": ">=22.13"
   },
   "scripts": {
+    "site:check": "node scripts/site/check.mjs",
+    "site:downloads": "node scripts/site/downloads.mjs",
     "dev": "node scripts/desktop/start-local.mjs",
     "ci:local": "node scripts/ci/local.mjs",
     "native:prepare": "pnpm --filter @hunterzhu/pulse-server rebuild node-pty",

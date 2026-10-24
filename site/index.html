@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Pulse 是你的桌面 AI 工作伙伴。连接自己的模型，在项目中完成多步骤任务，查看执行过程、审阅计划并接管关键操作。">
+  <meta name="theme-color" content="#f6f8fc">
+  <meta property="og:title" content="Pulse — 让想法，持续向前。">
+  <meta property="og:description" content="从一句想法，到有迹可循的进展。认识 Pulse 桌面客户端。">
+  <meta property="og:type" content="website">
+  <title>Pulse — 你的桌面 AI 工作伙伴</title>
+  <link rel="icon" type="image/png" href="assets/icon-32.png">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到正文</a>
+  <header class="site-header wrap">
+    <a class="brand" href="./" aria-label="Pulse 首页"><img src="assets/pulse-logo.png" width="132" height="44" alt="Pulse"></a>
+    <nav aria-label="主导航"><a href="#features">功能</a><a href="#workflow">工作方式</a><a href="#download">下载</a><a class="github-link" href="https://github.com/zhuhengtan/Pulse">GitHub <span aria-hidden="true">↗</span></a></nav>
+  </header>
+  <main id="main">
+    <section class="hero wrap">
+      <div class="hero-copy"><p class="eyebrow"><span></span> YOUR DESKTOP AI WORKSPACE</p>
+        <h1>让想法，<br><span>持续向前。</span></h1>
+        <p class="hero-description">把任务交给 Pulse。连接你自己的模型，<br class="desktop-break">在熟悉的项目里工作，让每一步进展都看得见。</p>
+        <div class="hero-actions"><a class="button primary" href="#download">下载 Pulse <span aria-hidden="true">↓</span></a><a class="text-link" href="#workspace">看看工作界面 <span aria-hidden="true">↗</span></a></div>
+        <p class="platform-note">macOS · Windows · Linux <span>｜</span> 使用你自己的模型配置</p>
+      </div>
+      <div class="hero-art" aria-label="Pulse 从任务、计划到交付的流程示意">
+        <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><span class="orbit-dot dot-one"></span><span class="orbit-dot dot-two"></span>
+        <div class="app-icon"><img src="assets/app-icon.png" width="176" height="176" alt="Pulse 应用图标"></div>
+        <div class="float-card task-card"><span class="card-symbol">↗</span><div><small>从你的想法开始</small><strong>整理需求，补齐实现</strong></div></div>
+        <div class="float-card progress-card"><div class="card-line"><span class="live-dot"></span><strong>每一步，都有进展</strong><span class="card-tag">Pulse</span></div><div class="progress-line"><i></i><i></i><i></i><i></i><i></i><i></i></div><small>计划 · 执行 · 验证 · 交付</small></div>
+        <span class="art-caption">一个工作伙伴，贯穿整个过程。</span>
+      </div>
+    </section>
+    <div class="principles wrap"><span><i>01</i> 你的模型，你来选择</span><span><i>02</i> 项目与上下文，留在手边</span><span><i>03</i> 关键操作，由你掌握</span></div>
+    <section id="workspace" class="workspace-section wrap">
+      <div class="section-heading"><div><p class="eyebrow">A PLACE TO GET THINGS DONE</p><h2>对话之外，是工作的全貌。</h2></div><p>在同一个窗口里查看任务进展、审阅计划与预览文件。<br>需要介入时，随时补充要求或接管操作。</p></div>
+      <figure class="product-window"><div class="window-chrome"><span class="window-dots"><i></i><i></i><i></i></span><span>Pulse · 桌面工作空间</span><span class="chrome-local">LOCAL WORKSPACE</span></div><img src="assets/workspace.jpg" width="1280" height="720" alt="Pulse 工作界面：左侧项目与会话，中间计划确认与常显输入框，右侧 Markdown 计划预览" loading="lazy"><figcaption>实际界面，使用演示数据。模型与工具的执行结果取决于配置和具体任务。</figcaption></figure>
+    </section>
+    <section id="features" class="features-section wrap">
+      <div class="section-heading"><div><p class="eyebrow">LESS SWITCHING. MORE DOING.</p><h2>从一句话，走到下一步。</h2></div><p>聊天、项目工作、文件与工具，<br>在一个有连续性的工作空间里连接起来。</p></div>
+      <div class="feature-grid">
+        <article><span class="feature-icon" aria-hidden="true">⌘</span><h3>在项目里，认真做事</h3><p>围绕项目组织会话，阅读文件、修改代码、运行检查。多步骤任务有计划、有进展，也有交付。</p><span class="feature-label">PROJECTS & TASKS</span></article>
+        <article><span class="feature-icon" aria-hidden="true">◫</span><h3>看见过程，随时介入</h3><p>查看执行活动与工具调用。补充要求、排队发送消息，或停止当前任务，让合作保持在你的节奏里。</p><span class="feature-label">VISIBLE PROGRESS</span></article>
+        <article><span class="feature-icon" aria-hidden="true">↗</span><h3>计划与产物，就在旁边</h3><p>用标签页预览文档、图片和代码差异。桌面内置浏览器支持页面操作与人工接管，减少来回切换。</p><span class="feature-label">TABS & BROWSER</span></article>
+        <article><span class="feature-icon" aria-hidden="true">⌁</span><h3>选择适合你的模型</h3><p>配置自己的模型供应商与默认模型。模型可以替换，项目会话和执行记录保持连续。</p><span class="feature-label">BRING YOUR MODEL</span></article>
+      </div>
+    </section>
+    <section id="workflow" class="workflow-section"><div class="wrap workflow-layout"><div><p class="eyebrow">YOUR IDEAS. YOUR CONTROL.</p><h2>让 AI 向前走，<br>也让决定留给你。</h2><p>一个值得持续合作的工作伙伴，<br>需要清晰的过程，也需要明确的边界。</p></div><ol class="workflow-list"><li><span>01</span><div><h3>说清你想完成的事</h3><p>选择项目，描述目标。添加文件、引用或技能，补充必要的上下文。</p></div></li><li><span>02</span><div><h3>一起确认方向</h3><p>复杂任务先审阅计划，回答关键问题。只有明确同意，才授予需要确认的执行权限。</p></div></li><li><span>03</span><div><h3>跟进执行，查看结果</h3><p>查看活动、文件与验证结果。任务可以中断和继续，具体恢复条件会在界面中说明。</p></div></li></ol></div></section>
+    <section id="download" class="download-section wrap">
+      <div class="download-heading"><img src="assets/app-icon.png" width="76" height="76" alt=""><p class="eyebrow">MAKE ROOM FOR YOUR NEXT IDEA</p><h2>下一件事，和 Pulse 一起。</h2><p>选择你的桌面系统，开始搭建自己的 AI 工作空间。</p><p id="release-status" class="release-status" role="status">正在读取客户端发布信息…</p></div>
+      <div class="download-grid">
+        <article id="macos"><div class="os-heading"><span aria-hidden="true">⌘</span><h3>macOS</h3></div><p>为 Apple Silicon 和 Intel Mac 提供独立安装包。</p><a class="button download-button unavailable" data-download="macos-arm64" href="https://github.com/zhuhengtan/Pulse/releases">查看发布进度 <span>Apple Silicon</span></a><a class="secondary-download" data-download="macos-x64" href="https://github.com/zhuhengtan/Pulse/releases">Intel Mac · 查看发布进度</a><small data-size="macos-arm64"></small></article>
+        <article id="windows"><div class="os-heading"><span aria-hidden="true">⊞</span><h3>Windows</h3></div><p>安装向导支持选择安装位置，卸载保留用户数据。</p><a class="button download-button unavailable" data-download="windows-x64" href="https://github.com/zhuhengtan/Pulse/releases">查看发布进度 <span>x64</span></a><small data-size="windows-x64"></small></article>
+        <article id="linux"><div class="os-heading"><span aria-hidden="true">&gt;_</span><h3>Linux</h3></div><p>使用 AppImage，或选择适合 Debian / Ubuntu 的 DEB 包。</p><a class="button download-button unavailable" data-download="linux-x64" href="https://github.com/zhuhengtan/Pulse/releases">查看发布进度 <span>AppImage · x64</span></a><a class="secondary-download" data-download="linux-deb-x64" href="https://github.com/zhuhengtan/Pulse/releases">DEB · 查看发布进度</a><small data-size="linux-x64"></small></article>
+      </div>
+      <div class="download-meta"><a id="checksums-link" href="https://github.com/zhuhengtan/Pulse/releases">校验文件与历史版本 ↗</a><a href="https://github.com/zhuhengtan/Pulse/blob/main/CHANGELOG.md">更新日志 ↗</a><a href="https://github.com/zhuhengtan/Pulse/blob/main/docs/desktop/README.md">安装与使用说明 ↗</a></div>
+      <noscript><p class="download-fallback">请前往 <a href="https://github.com/zhuhengtan/Pulse/releases">GitHub Releases</a> 查看当前可下载的客户端与校验文件。</p></noscript>
+    </section>
+    <section class="start-section wrap"><h2>三步，开始第一项工作。</h2><div class="start-steps"><div><b>1</b><h3>安装并打开 Pulse</h3><p>下载与你的系统和架构匹配的客户端，按安装说明完成设置。</p></div><div><b>2</b><h3>连接你自己的模型</h3><p>在设置中填写模型供应商信息。模型服务可能单独收费。</p></div><div><b>3</b><h3>选一个项目，开始对话</h3><p>添加现有项目文件夹，或者先聊一聊要解决的问题。</p></div></div></section>
+    <section class="faq-section wrap"><div><p class="eyebrow">A FEW THINGS TO KNOW</p><h2>开始之前。</h2></div><div class="faq-list"><details><summary>需要自己配置模型吗？</summary><p>需要。Pulse 是工作客户端与运行时，请在设置中连接支持的模型供应商。模型的可用性、能力和费用由相应服务提供方决定。</p></details><details><summary>“本地工作空间”意味着完全离线吗？</summary><p>项目、会话和运行状态保存在本机。连接云端模型或使用联网工具时，相关内容仍会按照你的配置发送给对应服务；本地存储不等于完全离线。</p></details><details><summary>可以用于商业用途吗？</summary><p>源码和发布包采用 PolyForm Noncommercial 1.0.0，允许符合条款的非商业使用、修改与分发。商业用途需要另行许可，具体以仓库 LICENSE 为准。</p></details><details><summary>遇到问题，或想了解技术实现？</summary><p>可以在 GitHub 提交 Issue。仓库文档介绍了桌面客户端、工作会话、浏览器与可恢复运行时的工作方式。</p></details></div></section>
+  </main>
+  <footer class="site-footer wrap"><div><a class="brand" href="./"><img src="assets/pulse-logo.png" width="105" height="35" alt="Pulse"></a><p>让想法，持续向前。</p></div><nav aria-label="页脚导航"><a href="https://github.com/zhuhengtan/Pulse">GitHub</a><a href="https://github.com/zhuhengtan/Pulse/issues">反馈问题</a><a href="https://github.com/zhuhengtan/Pulse/blob/main/README.en.md">English docs</a><a href="https://github.com/zhuhengtan/Pulse/blob/main/LICENSE">使用许可</a></nav><small>© 2026 Hunter Zhu · PolyForm Noncommercial</small></footer>
+</body>
+</html>

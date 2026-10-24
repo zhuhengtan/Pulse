@@ -1,4 +1,16 @@
-# Pulse Runtime
+<p align="center"><img src="site/assets/pulse-logo.png" width="240" alt="Pulse"></p>
+
+# Pulse
+
+**你的桌面 AI 工作伙伴，让想法持续向前。** 连接自己的模型，在项目中完成多步骤任务，查看进展、审阅计划和预览产物。
+
+**[下载客户端](https://zhuhengtan.github.io/Pulse/#download)** · **[产品主页](https://zhuhengtan.github.io/Pulse/)** · [安装与使用](docs/desktop/README.md) · [全部版本与校验文件](https://github.com/zhuhengtan/Pulse/releases)
+
+支持 macOS（Apple Silicon / Intel）、Windows x64 与 Linux x64。下载入口仅开放正式 Release 中已完整上传的客户端。
+
+<p><a href="https://zhuhengtan.github.io/Pulse/"><img src="site/assets/workspace.jpg" width="100%" alt="Pulse 工作界面，使用演示数据：任务计划确认与右侧文档预览"></a></p>
+
+桌面客户端基于下述可恢复 Agent Runtime 构建。开发者也可以单独使用 CLI 或运行时 SDK。
 
 [English](README.en.md)
 

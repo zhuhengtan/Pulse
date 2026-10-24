@@ -36,6 +36,7 @@ try {
   pnpm('web:build')
   pnpm('check')
   pnpm('eval:validate')
+  pnpm('site:check')
   pnpm('release:check')
   pnpm('cli:build')
   node('packages/cli/scripts/postinstall.mjs')

@@ -1,4 +1,16 @@
-# Pulse Runtime
+<p align="center"><img src="site/assets/pulse-logo.png" width="240" alt="Pulse"></p>
+
+# Pulse
+
+**Your desktop AI workspace. Keep ideas moving.** Connect your own models, work on multi-step project tasks, follow progress, review plans, and preview deliverables.
+
+**[Download the desktop app](https://zhuhengtan.github.io/Pulse/#download)** · **[Product website](https://zhuhengtan.github.io/Pulse/)** · [Installation guide](docs/desktop/README.md) · [Releases and checksums](https://github.com/zhuhengtan/Pulse/releases)
+
+Available for macOS (Apple Silicon / Intel), Windows x64, and Linux x64. Downloads appear only when a complete set of desktop assets is available in a public release.
+
+<p><a href="https://zhuhengtan.github.io/Pulse/"><img src="site/assets/workspace.jpg" width="100%" alt="Pulse workspace with demo data: plan confirmation and document preview"></a></p>
+
+The desktop app is built on the recoverable Agent Runtime described below. Developers can also use the CLI and runtime SDK independently.
 
 [简体中文](README.md)
 
