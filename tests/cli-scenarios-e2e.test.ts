@@ -172,9 +172,16 @@ describe('AI CLI scenarios end-to-end tests', () => {
     const dataDir = join(directory, 'data')
     const blockedFile = join(directory, 'blocked.txt')
     const allowedFile = join(directory, 'allowed.txt')
+    const runMode = async (mode: string, args: string[]) => {
+      const started = Date.now()
+      console.info(`[cli:safety] ${mode}:start`)
+      const result = await runCli(args)
+      console.info(`[cli:safety] ${mode}:exit=${result.code} elapsed=${Date.now() - started}ms`)
+      return result
+    }
 
     // 1. In approval-mode ask (default without auto-approve), write tool cancels in non-interactive mode
-    const askRes = await runCli([
+    const askRes = await runMode('ask', [
       'run',
       'Write blocked file',
       '--data-dir',
@@ -191,7 +198,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
     await expect(readFile(blockedFile, 'utf8')).rejects.toThrow()
 
     // 2. With --auto-approve, write tool executes and file is written
-    const autoRes = await runCli([
+    const autoRes = await runMode('auto', [
       'run',
       'Write allowed file',
       '--data-dir',
@@ -207,7 +214,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
 
     // 3. With --read-only, write tools are blocked
     const readonlyFile = join(directory, 'readonly.txt')
-    const readonlyRes = await runCli([
+    const readonlyRes = await runMode('read-only', [
       'run',
       'Write in readonly',
       '--data-dir',
@@ -220,7 +227,8 @@ describe('AI CLI scenarios end-to-end tests', () => {
     ])
     expect(readonlyRes.code).toBe(0)
     await expect(readFile(readonlyFile, 'utf8')).rejects.toThrow()
-  })
+  // Three separate cold CLI processes; this verifies policy, not a 10-second SLA.
+  }, process.platform === 'win32' ? 180_000 : 30_000)
 
   it('Scenario 4: Sessions listing and resume workflow', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-e2e-sessions-'))
