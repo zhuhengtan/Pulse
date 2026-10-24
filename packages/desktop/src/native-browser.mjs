@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { networkInterfaces } from 'node:os';
 import { basename, join } from 'node:path';
 import { formatAXNode } from './ax-text.mjs';
+import { captureNativePage } from './native-capture.mjs';
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail = code => { throw new Error(code); };
@@ -165,7 +166,7 @@ export class NativeBrowser {
     async observe(group) {
         const observation = await this.snapshot(group);
         // Vision is available to the agent; the UI displays the native view and never fetches frames.
-        const image = await group.active.webContents.capturePage();
+        const image = await captureNativePage(group.active.webContents);
         return { ...observation, image: { mediaType: 'image/jpeg', data: image.toJPEG(75).toString('base64') } };
     }
     async act(group, action, geometry, operation) {
