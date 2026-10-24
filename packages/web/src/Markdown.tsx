@@ -1,4 +1,4 @@
-import { unified } from 'unified'
+import { unified, type Processor } from 'unified'
 import remarkParse from 'remark-parse'
 import type { PulseWebTransport } from './transport.js'
 import { PulseButton } from './PulseControls.js'
@@ -61,6 +61,30 @@ function remarkReferences() {
     }; walk(tree)
   }
 }
+// GFM/math extension construction is expensive on every message mount. Reuse
+// only the syntax parser and bounded syntax trees, never callbacks or UI state.
+const messageParser = unified().use(remarkParse).use(remarkGfm).use(remarkMath).freeze()
+const syntaxTrees = new Map<string, ReturnType<typeof messageParser.parse>>()
+let cachedCharacters = 0
+function remarkMessageParser(this: Processor) {
+  this.parser = source => {
+    let tree = syntaxTrees.get(source)
+    if (tree) {
+      syntaxTrees.delete(source); syntaxTrees.set(source, tree)
+    } else {
+      tree = messageParser.parse(source)
+      if (source.length <= 32768) {
+        while (syntaxTrees.size >= 128 || cachedCharacters + source.length > 262144) {
+          const oldest = syntaxTrees.keys().next().value!
+          syntaxTrees.delete(oldest); cachedCharacters -= oldest.length
+        }
+        syntaxTrees.set(source, tree); cachedCharacters += source.length
+      }
+    }
+    // Reference linking and rehype mutate their input. Each render owns a tree.
+    return structuredClone(tree)
+  }
+}
 export function ReferenceChip({ kind, label, path, onClick }: { kind: 'skill' | 'file'; label: string; path: string; onClick?: (() => void) | undefined }) {
   return <span className={`mention-chip ${kind}-chip`} data-kind={kind} title={kind === 'skill' ? `Skill: ${path}` : path} role={onClick ? 'button' : undefined} tabIndex={onClick ? 0 : undefined} onClick={onClick} onKeyDown={event => { if (onClick && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onClick() } }}><span className="reference-icon" aria-hidden="true">{kind === 'skill' ? '✦' : path.endsWith('/') ? '▱' : '▤'}</span>{label}</span>
 }
@@ -91,7 +115,7 @@ export function CodeBlock({ source, language = '' }: { source: string; language?
   return <div className="code-block"><div className="code-head"><span>{language || '代码'}</span><PulseButton type="button" aria-label="复制代码" onClick={() => { void copyText(source).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1200) }).catch(() => undefined) }}>{copied ? '已复制' : '复制'}</PulseButton></div><pre><code className={highlighted ? `hljs language-${language}` : undefined} dangerouslySetInnerHTML={highlighted ? { __html: highlighted } : undefined}>{highlighted ? undefined : source}</code></pre></div>
 }
 export const Markdown = memo(function Markdown({ text, onFileClick, onDiffClick, imageApi, transport }: { text: string; imageApi?: ((source: string) => string | undefined) | undefined; transport?: PulseWebTransport | undefined; onFileClick?: ((path: string) => void) | undefined; onDiffClick?: ((path: string) => void) | undefined }) {
-  return <div className="markdown"><ReactMarkdown skipHtml remarkPlugins={[remarkGfm, remarkMath, remarkReferences]} rehypePlugins={[[rehypeKatex, { throwOnError: false, trust: false, strict: 'ignore' }]]} urlTransform={url => /^(pulse-skill|pulse-file):/.test(url) ? url : defaultUrlTransform(url)} components={{
+  return <div className="markdown"><ReactMarkdown skipHtml remarkPlugins={[remarkMessageParser, remarkReferences]} rehypePlugins={[[rehypeKatex, { throwOnError: false, trust: false, strict: 'ignore' }]]} urlTransform={url => /^(pulse-skill|pulse-file):/.test(url) ? url : defaultUrlTransform(url)} components={{
     a: ({ href = '', children }) => {
       if (href.startsWith('pulse-skill:')) { const name = decodeURIComponent(href.slice(12)); return <ReferenceChip kind="skill" label={`/${name}`} path={name}/> }
       const path = href.startsWith('pulse-file:') ? decodeURIComponent(href.slice(11)) : decodeFilePath(href)
