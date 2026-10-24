@@ -6,6 +6,7 @@ export function WindowedMessages({ items, container, follow }: {
     container: RefObject<HTMLElement | null>;
     follow: RefObject<boolean>;
 }) {
+    const virtualized = items.length > WINDOWING_THRESHOLD;
     const heights = useRef(new Map<string, number>()), nodes = useRef(new Map<Element, string>());
     const observer = useRef<ResizeObserver | null>(null);
     const pendingAnchor = useRef<{ pinned: boolean; top: number } | undefined>(undefined);
@@ -13,6 +14,7 @@ export function WindowedMessages({ items, container, follow }: {
     // The parent's element ref is attached after child layout effects run.
     // Install listeners after that ref exists, including on the first mount.
     useEffect(() => {
+        if (!virtualized) return;
         const el = container.current;
         if (!el)
             return;
@@ -47,13 +49,13 @@ export function WindowedMessages({ items, container, follow }: {
                 observer.current.observe(node);
         }
         return () => { cancelAnimationFrame(frame); el.removeEventListener('scroll', sync); observer.current?.disconnect(); observer.current = null; nodes.current.clear(); };
-    }, [container, follow]);
+    }, [container, follow, virtualized]);
     const offsets = [0];
     for (const item of items)
         offsets.push(offsets.at(-1)! + (heights.current.get(String(item.key)) ?? 120));
     const total = offsets.at(-1) ?? 0, top = (pendingAnchor.current?.pinned ?? follow.current) ? Math.max(0, total - viewport.height) : viewport.top;
     let start = 0, end = items.length;
-    if (items.length > WINDOWING_THRESHOLD) {
+    if (virtualized) {
         while (start < items.length && (offsets[start + 1] ?? 0) < top - 1200)
             start++;
         end = start;
@@ -63,12 +65,15 @@ export function WindowedMessages({ items, container, follow }: {
     useLayoutEffect(() => {
         const anchor = pendingAnchor.current; pendingAnchor.current = undefined;
         const el = container.current;
+        // PulseApp already restores ordinary paginated histories. Reading the
+        // same scrollHeight here forces a second layout on every route switch.
+        if (!virtualized) return;
         if (!el) return;
         if (anchor?.pinned) follow.current = true;
         if (follow.current) el.scrollTop = el.scrollHeight;
         else if (anchor) el.scrollTop = anchor.top;
-    }, [revision, items.length]);
-    if (items.length <= WINDOWING_THRESHOLD)
+    }, [revision, items.length, virtualized]);
+    if (!virtualized)
         return <>{items}</>;
     return <><div aria-hidden="true" style={{ height: offsets[start] ?? 0 }}/>{items.slice(start, end).map(item => <div key={item.key} style={{ display: 'flow-root' }} ref={node => { const key = String(item.key); for (const [previous, id] of nodes.current)
         if (id === key && previous !== node) {

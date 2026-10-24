@@ -1,7 +1,7 @@
 import { AttachmentCards } from './AttachmentCards.js'
 import { RichMessage } from './RichMessage.js'
 import { PulseButton, usePulseDialogs } from './PulseControls.js'
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Popover } from 'antd-mobile'
 import { Icon } from './Icon.js'
 import { Markdown } from './Markdown.js'
@@ -14,19 +14,21 @@ const messageTimeTitle = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', mon
 
 export const MessageBubble = memo(function MessageBubble({ message, mode, retry, imageApi, onOpenWork, onFileClick, onDiffClick, transport = browserTransport, conversationId }: {
   message: WebMessage
-  imageApi?: ((source: string) => string | undefined) | undefined
+  imageApi?: ((source: string, runId?: string) => string | undefined) | undefined
   mode: 'chat' | 'work'
   retry: (message: WebMessage, mode: 'chat' | 'work') => void
   transport?: PulseWebTransport
   conversationId?: string | undefined
   onOpenWork: (conversationId: string) => void
-  onFileClick?: ((path: string) => void) | undefined
+  onFileClick?: ((path: string, runId?: string) => void) | undefined
   onDiffClick?: ((path: string) => void) | undefined
 }) {
   const [fullText, setFullText] = useState<string>()
   const [bodyLoading, setBodyLoading] = useState(false)
   const [bodyError, setBodyError] = useState('')
   const text = fullText ?? message.text
+  const scopedImageApi = useCallback((source: string) => imageApi?.(source, message.runId), [imageApi, message.runId])
+  const scopedFileClick = useCallback((path: string) => onFileClick?.(path, message.runId), [onFileClick, message.runId])
   const loadBody = async () => {
     if (bodyLoading) return
     setBodyLoading(true); setBodyError('')
@@ -81,7 +83,7 @@ export const MessageBubble = memo(function MessageBubble({ message, mode, retry,
       {canRetry && <button type="button" className="message-retry" aria-label="发送失败，重新发送" title="发送失败，点击确认重新发送" onClick={() => void confirmRetry()}>!</button>}
       {hasContent && <div className={`bubble ${actions.menuOpen ? 'has-message-menu' : ''}`} {...actions.gesture}>
         {message.role === 'user' && <AttachmentCards items={message.attachments ?? []} onPreview={setPreviewImage}/>}
-        {message.text.trim() && (message.role === 'user' ? <RichMessage content={message.richContent} fallback={text} onFileClick={onFileClick} onDiffClick={onDiffClick}/> : <Markdown text={text} imageApi={imageApi} transport={transport} onFileClick={onFileClick} onDiffClick={onDiffClick} />)}
+        {message.text.trim() && (message.role === 'user' ? <RichMessage content={message.richContent} fallback={text} onFileClick={onFileClick ? scopedFileClick : undefined} onDiffClick={onDiffClick}/> : <Markdown text={text} imageApi={imageApi ? scopedImageApi : undefined} transport={transport} onFileClick={onFileClick ? scopedFileClick : undefined} onDiffClick={onDiffClick} />)}
         {message.bodyTruncated && fullText === undefined && <div><PulseButton onClick={() => void loadBody()} disabled={bodyLoading}>{bodyLoading ? '加载中…' : '展开完整消息'}</PulseButton>{bodyError && <span role="alert">{bodyError}</span>}</div>}
         {message.role !== 'user' && <AttachmentCards items={message.attachments ?? []} onPreview={setPreviewImage}/>}
 

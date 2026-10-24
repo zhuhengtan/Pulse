@@ -50,6 +50,20 @@ describe('message presentation and copying', () => {
     show({ ...message, createdAt: '' })
     expect(screen.queryByLabelText('发送时间')).toBeNull()
   })
+  it('keeps file and image callbacks scoped to the current run and view', () => {
+    const previousFile = vi.fn(), currentFile = vi.fn()
+    const previousImage = vi.fn(() => undefined), currentImage = vi.fn(() => undefined)
+    const text = '[文档](plan.md) ![图片](assets/test.png)'
+    const view = render(<MessageBubble message={{ ...message, text, runId: 'run-a' }} mode="work" retry={vi.fn()} onOpenWork={vi.fn()} onFileClick={previousFile} imageApi={previousImage}/>)
+    fireEvent.click(screen.getByRole('button', { name: '文档', exact: true }))
+    expect(previousFile).toHaveBeenCalledWith('plan.md', 'run-a')
+    expect(previousImage).toHaveBeenCalledWith('assets/test.png', 'run-a')
+    view.rerender(<MessageBubble message={{ ...message, text, runId: 'run-b' }} mode="work" retry={vi.fn()} onOpenWork={vi.fn()} onFileClick={currentFile} imageApi={currentImage}/>)
+    fireEvent.click(screen.getByRole('button', { name: '文档', exact: true }))
+    expect(currentFile).toHaveBeenCalledWith('plan.md', 'run-b')
+    expect(currentImage).toHaveBeenCalledWith('assets/test.png', 'run-b')
+    expect(previousFile).toHaveBeenCalledTimes(1)
+  })
   it('keeps chat/work presentation explicit and user messages copyable', async () => {
     const view = show({ ...message, role: 'user' }, 'work')
     expect(view.container.querySelector('.message--work.user')).not.toBeNull()

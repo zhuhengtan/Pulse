@@ -5,6 +5,7 @@ import { PulseApp } from '../src/PulseApp.js'
 import { PulseDesignSystem } from '../src/PulseDesignSystem.js'
 import { routingFixture } from './fixtures/routing.js'
 import type { WebRunEvent } from '../src/transport.js'
+import type { Editor } from '@tiptap/core'
 
 beforeAll(() => {
   Object.defineProperty(window, 'matchMedia', { value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }), configurable: true })
@@ -95,4 +96,29 @@ it('keeps the reading position on streamed updates and lets the user explicitly 
   act(() => { receive({ type: 'text', runId: 'run-busy', seq: 2, data: '持续输出的工作消息' }) })
   await screen.findByText('持续输出的工作消息')
   expect(calls.every(call => call.behavior === 'instant')).toBe(true)
+})
+
+it('restores the cached target draft and keeps its editor and messages mounted while metadata loads', async () => {
+  const fixture = routingFixture(), request = fixture.transport.request
+  let hold = false, release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  fixture.transport.request = async (path, init) => {
+    if (hold && path === '/api/conversations') await gate
+    return request(path, init)
+  }
+  const { router } = show('/work/pulse-chat', fixture)
+  await screen.findByText('消息：pulse-chat')
+  const input = document.querySelector('.tiptap') as HTMLElement & { editor: Editor }
+  act(() => { input.editor.commands.insertContent('cached target draft') })
+  await navigate(router, '/chat'); await screen.findByText('最新助手消息')
+  hold = true
+  await navigate(router, '/work/pulse-chat')
+  const message = (await screen.findByText('消息：pulse-chat')).closest('article')
+  const editor = document.querySelector('.tiptap')
+  expect(editor?.textContent).toContain('cached target draft')
+  await act(async () => { release() })
+  await waitFor(() => expect(screen.queryByText('正在加载对话…')).toBeNull())
+  expect(document.querySelector('.tiptap')).toBe(editor)
+  expect(screen.getByText('消息：pulse-chat').closest('article')).toBe(message)
+  expect(editor?.textContent).toContain('cached target draft')
 })

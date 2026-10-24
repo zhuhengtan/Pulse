@@ -16,7 +16,7 @@ import { createRequestId } from './requestId.js'
 import { previewKey, readPreviewState, fileApi } from './previewState.js'
 import { HostPathPicker } from './HostPathPicker.js'
 import { PulseButton, PulseCheckbox, PulseDisclosure, PulseInput, PulseTextArea, PulseToast, usePulseDialogs } from './PulseControls.js'
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { lazy, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent, ReactElement } from 'react'
 import { ApiError, apiJson, submitWorkMessage, readLatestMessages, browserTransport, getWebConversation, jsonRequest } from './transport.js'
 import { ConversationArtifacts, useConversationArtifacts } from './ConversationArtifacts.js'
@@ -523,9 +523,15 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     historyAbort.current?.abort()
     const target = route.page === 'chat' ? assistantIdRef.current : route.conversationId
     const cached = target ? historyCache.current.get(target) : undefined
-    selectedIdRef.current = undefined; setSelectedId(undefined)
-    setOlderCursor(cached?.before)
-    setDrawerOpen(false); setMessages(cached?.messages ?? []); setStatus([]); setReviewNote(''); setRunning(false); setStopping(false); setStopError(''); stopLock.current = false; setRecoveryRun(undefined)
+    // Select the known route target in the same update as its cached history.
+    // An intermediate undefined selection remounts every bubble and editor a
+    // second time when metadata arrives, and briefly binds the wrong draft.
+    selectedIdRef.current = target
+    setLoading(true)
+    startTransition(() => {
+      setSelectedId(target); setOlderCursor(cached?.before)
+      setDrawerOpen(false); setMessages(cached?.messages ?? []); setStatus([]); setReviewNote(''); setRunning(false); setStopping(false); setStopError(''); stopLock.current = false; setRecoveryRun(undefined)
+    })
     if (route.page === 'chat') void loaders.current.loadAssistant()
     else if (route.page === 'work') void loaders.current.loadHistory(route.conversationId)
     else setLoading(false)
@@ -1278,6 +1284,17 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     messageHandlers.current.patchQuery({ workspace: 'preview', file: artifact ? undefined : relative, artifact: artifact?.path, artifactRun: artifact?.runId, automation: undefined, diff: undefined, details: undefined, previewHidden: undefined })
   }, [selected?.cwd, artifactIndex.artifacts])
 
+  const resolveBubbleImage = useCallback((source: string, runId?: string) => {
+    if (/^https?:|^\/\//i.test(source)) return undefined
+    if (source.startsWith('/api/')) return source
+    let path = source; try { path = decodeURIComponent(source) } catch { /* Preserve malformed escapes for a safe failure. */ }
+    const artifact = artifactIndex.artifacts.find(item => (!runId || item.runId === runId) && (item.path === path || item.absolutePath === path))
+    if (artifact && selectedId) return fileApi({ kind: 'file', path: artifact.path, conversationId: selectedId, runId: artifact.runId }, 'raw')
+    if (!selected?.projectId) return undefined
+    const relative = path.startsWith(selected.cwd + '/') ? path.slice(selected.cwd.length + 1) : path.replace(/^\.\//, '')
+    return fileApi({ kind: 'file', path: relative, projectId: selected.projectId }, 'raw')
+  }, [artifactIndex.artifacts, selectedId, selected?.projectId, selected?.cwd])
+
   const openBubbleDiff = useCallback((input: string) => {
     const path = input.replace(/:\d+(?::\d+)?$/, '').replaceAll('\\', '/')
     const artifact = artifactIndex.artifacts.find(item => item.absolutePath.replaceAll('\\', '/') === path)
@@ -1322,16 +1339,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         else if (persistedTraceFallback) out.push(<PersistedRunTrace key={`trace:${runId}`} runId={runId} transport={transport} onDiffClick={surfaceMode === 'work' ? openBubbleDiff : undefined} />)
         const card = recoveryCard(runId); if (card) out.push(card)
       }
-      out.push(<MessageBubble key={`${selectedId}:${message.id}`} mode={surfaceMode} message={message} retry={retryBubble} onOpenWork={openBubbleWork} imageApi={source => {
-        if (/^https?:|^\/\//i.test(source)) return undefined
-        if (source.startsWith('/api/')) return source
-        let path = source; try { path = decodeURIComponent(source) } catch { /* Preserve malformed escapes for a safe failure. */ }
-        const artifact = artifactIndex.artifacts.find(item => (!message.runId || item.runId === message.runId) && (item.path === path || item.absolutePath === path))
-        if (artifact && selectedId) return fileApi({ kind: 'file', path: artifact.path, conversationId: selectedId, runId: artifact.runId }, 'raw')
-        if (!selected?.projectId) return undefined
-        const relative = path.startsWith(selected.cwd + '/') ? path.slice(selected.cwd.length + 1) : path.replace(/^\.\//, '')
-        return fileApi({ kind: 'file', path: relative, projectId: selected.projectId }, 'raw')
-      }} onFileClick={path => openBubbleFile(path, message.runId)} onDiffClick={surfaceMode === 'work' && message.role === 'assistant' ? openBubbleDiff : undefined} transport={transport} conversationId={selectedId} />)
+      out.push(<MessageBubble key={`${selectedId}:${message.id}`} mode={surfaceMode} message={message} retry={retryBubble} onOpenWork={openBubbleWork} imageApi={resolveBubbleImage} onFileClick={openBubbleFile} onDiffClick={surfaceMode === 'work' && message.role === 'assistant' ? openBubbleDiff : undefined} transport={transport} conversationId={selectedId} />)
       if (surfaceMode === 'work' && runId && lastMessage.get(runId) === index) { const card = deliveries(runId); if (card) out.push(card) }
       return out
     })

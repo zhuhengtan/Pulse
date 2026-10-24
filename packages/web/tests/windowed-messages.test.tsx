@@ -29,3 +29,16 @@ it('keeps short conversations in ordinary accessible DOM order', () => {
   const view = render(<History count={3}/>)
   expect([...view.container.querySelectorAll('article')].map(node => node.textContent)).toEqual(['Message 0', 'Message 1', 'Message 2'])
 })
+
+it('starts windowing and scroll observation when earlier history grows beyond one page', async () => {
+  const view = render(<History count={50}/>)
+  expect(screen.getByText('Message 0')).toBeTruthy()
+  view.rerender(<History count={500}/>)
+  expect(screen.getByText('Message 499')).toBeTruthy()
+  expect(screen.queryByText('Message 0')).toBeNull()
+  const history = screen.getByLabelText('History')
+  history.scrollTop = 0; fireEvent.scroll(history)
+  await waitFor(() => expect(screen.getByText('Message 0')).toBeTruthy())
+  view.rerender(<History count={3}/>)
+  expect([...view.container.querySelectorAll('article')].map(node => node.textContent)).toEqual(['Message 0', 'Message 1', 'Message 2'])
+})
