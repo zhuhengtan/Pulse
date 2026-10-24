@@ -1205,6 +1205,9 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
           ? { ...result, status: 'needs_work' as const, correctionKind: 'edit' as const, note: `NAMED_TEST_DELIVERY_MISSING: no successful extension receipt for ${missingTestFiles.join(', ')}. A candidate suite cannot replace the named deliverable. Preserve original bytes and append authorized test registrations; then rerun the required checks.` }
           : result.status === 'passed' && requiresEdit && !edited ? { ...result, status: 'needs_work' as const, note: 'No file was changed. Apply the stage with fs.apply_patch or fs.apply_patches, then verify that edit.' } : result
         const selected = [...new Set([...reviewed.evidenceRefs, ...(reviewed.expectedFailureRefs ?? [])])]
+        if (selected.length === 0 && !stageRequiresToolEvidence(task.goal, task.check) && task.candidateRef !== undefined) {
+          selected.push(task.candidateRef)
+        }
         // Models occasionally understand that a non-zero exit is the expected
         // result but omit the auxiliary citation field. Infer that intent only
         // for stages whose goal/check explicitly describes a negative test.
@@ -1257,7 +1260,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
           const meta = ctx.results.meta(ref), body = ctx.results.read(ref)
           return meta?.outcomeStatus !== 'succeeded' || !!(body && typeof body === 'object' && !Array.isArray(body) && ('code' in body && body.code !== 0 || body.timedOut === true || body.aborted === true))
         })
-        const candidateOnly = !stageRequiresToolEvidence(task.goal, task.check) && (completeEvidence || task.evidenceRefs.length === 0) && task.candidateRef !== undefined && result.evidenceRefs.includes(task.candidateRef)
+        const candidateOnly = !stageRequiresToolEvidence(task.goal, task.check) && (completeEvidence || task.evidenceRefs.length === 0) && task.candidateRef !== undefined && (result.evidenceRefs.includes(task.candidateRef) || selected.includes(task.candidateRef))
         const supplied = new Set([...refs, ...(task.candidateRef ? [task.candidateRef] : [])])
         const toolProof = !stageRequiresToolEvidence(task.goal, task.check) || refs.some(ref => ctx.results.meta(ref)?.effectKind === 'tool')
         const passed = toolProof && !hostFailure && !failedRequiredCheck && reviewed.status === 'passed' && selected.length > 0 && selected.every((ref) => supplied.has(ref)) && (refs.length > 0 || candidateOnly)
@@ -1576,14 +1579,15 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
         const review = state.finalReview?.filter((item) => item.criterionId === criterion.id)
         // Later stages may read back or test earlier deliverables. Their settled,
         // verified evidence remains valid for the original criterion as well.
-        const validEvidence = new Set(state.tasks.filter((task) => task.status === 'passed').flatMap((task) => task.evidenceRefs))
-        const evidenceRefs = [...new Set(tasks.flatMap((task) => task.evidenceRefs))].filter((ref) => validEvidence.has(ref))
-        const stagePassed = tasks.length > 0 && tasks.every((task) => task.status === 'passed') && evidenceRefs.length > 0
+        const validEvidence = new Set(state.tasks.filter((task) => task.status === 'passed').flatMap((task) => [...task.evidenceRefs, ...(task.candidateRef ? [task.candidateRef] : [])]))
+        const candidateEvidence = tasks.some(t => !stageRequiresToolEvidence(t.goal, t.check) && t.candidateRef)
+        const evidenceRefs = [...new Set(tasks.flatMap((task) => [...task.evidenceRefs, ...(candidateEvidence && task.candidateRef ? [task.candidateRef] : [])]))].filter((ref) => validEvidence.has(ref))
+        const stagePassed = tasks.length > 0 && tasks.every((task) => task.status === 'passed') && (evidenceRefs.length > 0 || candidateEvidence)
         const assessment = review?.length === 1 ? review[0] : undefined
         const allAllowed = new Set([...state.tasks.filter(t => t.status === 'passed').flatMap(t => [...t.evidenceRefs, ...(t.contextRefs ?? []), ...(t.candidateRef ? [t.candidateRef] : [])]), ...(auditRecovery ? state.sourceDelivery?.refs ?? [] : []), ...(state.acceptanceResults ?? []).flatMap(r => r.ref ? [r.ref] : [])])
         const missingTestFiles = ['51', '52', '53', '54'].includes(programVersion) ? missingNamedTestExtensions(criterion.description, [...allAllowed].flatMap(ref => committedOutputPaths(ctx, ref))) : []
         const independentFailure = missingTestFiles.length ? { status: 'not_met' as const, reason: `NAMED_TEST_DELIVERY_MISSING: no successful extension receipt for ${missingTestFiles.join(', ')}. Supplemental files cannot replace the exact requested deliverable.` } : independentAcceptance ? acceptanceFailure(record, state.acceptanceResults ?? [], criterion.id) : undefined
-        const passed = !independentFailure && stagePassed && !state.finalReviewErrors?.length && assessment?.status === 'passed' && assessment.evidenceRefs.length > 0 && assessment.evidenceRefs.every(ref => allAllowed.has(ref))
+        const passed = !independentFailure && stagePassed && !state.finalReviewErrors?.length && assessment?.status === 'passed' && (assessment.evidenceRefs.length > 0 || candidateEvidence) && assessment.evidenceRefs.every(ref => allAllowed.has(ref))
         const explicitFailure = assessment?.status !== 'passed' ? assessment : undefined
         const stageNote = tasks.map((task) => {
           if (!isCascadeBlocked(task, state.tasks)) return `${task.id}: ${task.note ?? task.status}`

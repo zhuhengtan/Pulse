@@ -124,7 +124,51 @@ export function controllerFromGlobal(global: Readonly<JsonValue>): TaskControlle
   if (!parsed.success) throw new Error('TASK_CONTROLLER_STATE_INVALID')
   return JSON.parse(JSON.stringify(parsed.data)) as TaskControllerState
 }
+export function normalizePlanCriterionIds(tasks: PlannedTask[], validCriterionIds: string[]): PlannedTask[] {
+  if (!validCriterionIds.length || !tasks.length) return tasks
+  const validSet = new Set(validCriterionIds)
+  const lowerMap = new Map(validCriterionIds.map(id => [id.toLowerCase(), id]))
+
+  const numMap = new Map<string, string>()
+  for (const id of validCriterionIds) {
+    const match = id.match(/(\d+)$/)
+    if (match && match[1]) {
+      if (numMap.has(match[1])) {
+        numMap.set(match[1], '')
+      } else {
+        numMap.set(match[1], id)
+      }
+    }
+  }
+
+  const mapId = (raw: string): string => {
+    if (validSet.has(raw)) return raw
+    const trimmed = raw.trim()
+    if (validSet.has(trimmed)) return trimmed
+    const lower = lowerMap.get(trimmed.toLowerCase())
+    if (lower) return lower
+
+    if (validCriterionIds.length === 1 && (['all', '*', 'c1', 'crit-1', 'crit_1', 'criterion-1', 'criterion_1', '1', 'default'].includes(trimmed.toLowerCase()) || !trimmed.includes('-'))) {
+      return validCriterionIds[0]!
+    }
+
+    const match = trimmed.match(/(\d+)$/)
+    if (match && match[1]) {
+      const candidate = numMap.get(match[1])
+      if (candidate) return candidate
+    }
+
+    return raw
+  }
+
+  for (const task of tasks) {
+    task.criterionIds = [...new Set(task.criterionIds.map(mapId))]
+  }
+  return tasks
+}
+
 export function validatePlan(tasks: PlannedTask[], criterionIds: string[], originalContract?: string): void {
+  normalizePlanCriterionIds(tasks, criterionIds)
   const byId = new Map(tasks.map((task) => [task.id, task]))
   if (byId.size !== tasks.length) throw new Error('TASK_PLAN_DUPLICATE_ID')
   const covered = new Set(tasks.flatMap((task) => task.criterionIds))
