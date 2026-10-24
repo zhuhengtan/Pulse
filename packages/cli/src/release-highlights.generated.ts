@@ -42,6 +42,14 @@ export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>
       "en": "Reuse message date formatters and Markdown parsers, bound cached syntax trees, and defer unopened message menus to reduce rendering work when switching long histories; fix initial scroll listeners and position restoration after virtual-row height changes."
     },
     {
+      "zh": "加快桌面客户端首次安装和修复时的运行环境校验，保留完整文件与链接检查，并显示准备进度；修复时保持现有后台服务和用户数据。",
+      "en": "Speed up runtime verification during first desktop installation and repair while retaining full file and link checks and showing preparation progress; preserve the running background service and user data during repair."
+    },
+    {
+      "zh": "统一文件复制凭据的跨平台路径，保留二进制哈希、源与目标新鲜度检查及工作区边界。",
+      "en": "Normalize cross-platform paths in file-copy receipts while preserving binary hashes, source/destination freshness checks, and workspace boundaries."
+    },
+    {
       "zh": "修复工作区合入对已忽略数据目录的处理，收紧 Git 读取和配对设备权限，并阻止 pnpm 隐式重装依赖。",
       "en": "Fixed merging ignored data directories from workspaces, tightened Git reads and paired-device permissions, and prevented implicit pnpm dependency reinstalls."
     },
