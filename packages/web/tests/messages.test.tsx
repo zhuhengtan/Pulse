@@ -36,6 +36,20 @@ function hold(element: Element, ms = 450) {
 }
 
 describe('message presentation and copying', () => {
+  it('preserves local timestamp labels and titles when the message date changes', () => {
+    const view = show()
+    for (const createdAt of [message.createdAt, '2026-01-01T03:04:05Z']) {
+      view.rerender(<MessageBubble message={{ ...message, createdAt }} mode="chat" retry={vi.fn()} onOpenWork={vi.fn()}/>)
+      const date = new Date(createdAt), time = screen.getByLabelText('发送时间')
+      expect(time.textContent).toBe(new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date).replaceAll('/', '-'))
+      expect(time.getAttribute('title')).toBe(`${date.toLocaleString('zh-CN', { hour12: false })}（本地时间）`)
+      expect(time.getAttribute('datetime')).toBe(date.toISOString())
+    }
+  })
+  it('keeps invalid message timestamps hidden', () => {
+    show({ ...message, createdAt: '' })
+    expect(screen.queryByLabelText('发送时间')).toBeNull()
+  })
   it('keeps chat/work presentation explicit and user messages copyable', async () => {
     const view = show({ ...message, role: 'user' }, 'work')
     expect(view.container.querySelector('.message--work.user')).not.toBeNull()

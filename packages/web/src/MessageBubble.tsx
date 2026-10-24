@@ -1,14 +1,16 @@
 import { AttachmentCards } from './AttachmentCards.js'
 import { RichMessage } from './RichMessage.js'
 import { PulseButton, usePulseDialogs } from './PulseControls.js'
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { Popover } from 'antd-mobile'
 import { Icon } from './Icon.js'
 import { Markdown } from './Markdown.js'
 import { copyText } from './clipboard.js'
 import { useMessageActions } from './useMessageActions.js'
 import { apiJson, browserTransport, type WebMessage, type PulseWebTransport } from './transport.js'
-
+// Reuse ICU formatters across the visible message window and route switches.
+const messageTime = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+const messageTimeTitle = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false })
 
 export const MessageBubble = memo(function MessageBubble({ message, mode, retry, imageApi, onOpenWork, onFileClick, onDiffClick, transport = browserTransport, conversationId }: {
   message: WebMessage
@@ -65,10 +67,10 @@ export const MessageBubble = memo(function MessageBubble({ message, mode, retry,
       }
     }
   }
-  const sentAt = new Date(message.createdAt)
+  const sentAt = useMemo(() => new Date(message.createdAt), [message.createdAt])
   const validTime = Number.isFinite(sentAt.getTime())
-  const timeLabel = validTime ? new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(sentAt).replaceAll('/', '-') : ''
-  const timeTitle = validTime ? `${sentAt.toLocaleString('zh-CN', { hour12: false })}（本地时间）` : ''
+  const timeLabel = useMemo(() => validTime ? messageTime.format(sentAt).replaceAll('/', '-') : '', [sentAt, validTime])
+  const timeTitle = useMemo(() => validTime ? `${messageTimeTitle.format(sentAt)}（本地时间）` : '', [sentAt, validTime])
   const copyLabel = message.role === 'user' ? '复制消息' : '复制回复'
 
   const hasContent = Boolean(message.text.trim()) || Boolean(message.attachments?.length)
@@ -83,9 +85,9 @@ export const MessageBubble = memo(function MessageBubble({ message, mode, retry,
         {message.bodyTruncated && fullText === undefined && <div><PulseButton onClick={() => void loadBody()} disabled={bodyLoading}>{bodyLoading ? '加载中…' : '展开完整消息'}</PulseButton>{bodyError && <span role="alert">{bodyError}</span>}</div>}
         {message.role !== 'user' && <AttachmentCards items={message.attachments ?? []} onPreview={setPreviewImage}/>}
 
-        <Popover trigger="click" visible={actions.menuOpen} onVisibleChange={actions.setMenuOpen} destroyOnHide placement={message.role === 'user' ? 'top-end' : 'top-start'} className="message-mobile-popover" content={<div>{validTime && <time className="message-menu-time" dateTime={sentAt.toISOString()} title={timeTitle}>{timeLabel}</time>}<div role="menu" aria-label="消息操作"><PulseButton type="button" role="menuitem" disabled={copying} onClick={() => void copy()}><Icon name="copy"/><span>复制</span></PulseButton></div></div>}>
+        {actions.menuOpen && <Popover trigger="click" visible onVisibleChange={actions.setMenuOpen} destroyOnHide placement={message.role === 'user' ? 'top-end' : 'top-start'} className="message-mobile-popover" content={<div>{validTime && <time className="message-menu-time" dateTime={sentAt.toISOString()} title={timeTitle}>{timeLabel}</time>}<div role="menu" aria-label="消息操作"><PulseButton type="button" role="menuitem" disabled={copying} onClick={() => void copy()}><Icon name="copy"/><span>复制</span></PulseButton></div></div>}>
           <span className="message-menu-anchor" aria-hidden="true" style={{ left: actions.anchor.x, top: actions.anchor.y }}/>
-        </Popover>
+        </Popover>}
       </div>}
     </div>}
     {previewImage && (
