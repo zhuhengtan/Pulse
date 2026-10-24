@@ -19,7 +19,143 @@ export interface CheckReceipt {
   definitionChanged: boolean
   candidateScriptCoverage?: CandidateScriptCoverage[]
 }
-export const isCheck = (command: string, args: string[]) => /(?:^|[/\\])xmllint$/.test(command) || /(?:--(?:test|check)|(?:test|check|verify|lint|typecheck|pytest|vitest|jest)(?:[.\s/\\-]|$))/i.test([command, ...args].join(' '))
+const baseName = (token: string) => token.replace(/^.*[/\\]/, '').toLowerCase().replace(/\.(?:exe|cmd|bat|ps1)$/, '')
+const RUNNING_SCRIPT = /^(?:test|tests|check|checks|verify|validate|lint|typecheck)(?:[.\-_:][^/\\]*)?$/i
+const TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]sx?$/
+const RUNNERS = new Set(['vitest', 'jest', 'pytest', 'eslint', 'xmllint'])
+const WRAPPERS = new Set(['env', 'time', 'sudo', 'command', 'exec', 'cross-env', 'npx', 'pnpx', 'bunx', 'nice', 'nohup'])
+const PACKAGE_MANAGERS = new Set(['pnpm', 'npm', 'yarn', 'bun'])
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh'])
+const VALUE_FLAGS = new Set(['-c', '-p', '-u', '-F', '--prefix', '--cwd', '--dir', '--workspace', '--config', '--filter', '--reporter'])
+const NODE_VALUE_FLAGS = new Set(['-e', '--eval', '-p', '--print', '-r', '--require', '--loader', '--experimental-loader', '--import', '--input-type', '--env-file', '--conditions', '--experimental-config-file'])
+// `python -m pytest` names a module to run, so `-m` takes a value and the module
+// name is not the script position.
+const INTERPRETER_VALUE_FLAGS = new Set([...NODE_VALUE_FLAGS, '-m'])
+// Inline code flags: the words after them are that code's argv, never a script.
+const EVAL_FLAGS = new Set(['-e', '--eval', '-p', '--print'])
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+const stripFlags = (argv: string[]): string[] => {
+  while (argv.length > 0 && argv[0]!.startsWith('-') && argv[0] !== '--') {
+    const flag = argv[0]!
+    argv = argv.slice(1)
+    if (VALUE_FLAGS.has(flag)) argv = argv.slice(1)
+  }
+  return argv
+}
+/** Index of the first positional argument, skipping flags and their values. */
+const positionalIndex = (argv: string[], valueFlags: Set<string>): number => {
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index]!
+    if (arg === '--') return index + 1
+    if (!arg.startsWith('-')) return index
+    if (!arg.includes('=') && valueFlags.has(arg)) index++
+  }
+  return -1
+}
+const firstPositional = (argv: string[], valueFlags: Set<string>): string | undefined => {
+  const index = positionalIndex(argv, valueFlags)
+  return index < 0 ? undefined : argv[index]
+}
+const runsNamedScript = (token: string | undefined): boolean => token !== undefined && RUNNING_SCRIPT.test(baseName(token))
+/**
+ * Split an inline shell command line into simple commands, honouring single and
+ * double quotes. Returns undefined for shapes this parser deliberately does not
+ * interpret (unquoted expansions, subshells, redirections, background jobs,
+ * unbalanced quotes) so an unsupported shape is never guessed into a check.
+ */
+const parseInlineCommand = (text: string): string[][] | undefined => {
+  const segments: string[][] = []
+  let tokens: string[] = []
+  let token = ''
+  let inToken = false
+  let quote: '"' | "'" | undefined
+  const endToken = (): void => {
+    if (inToken) { tokens.push(token); token = ''; inToken = false }
+  }
+  const endSegment = (): void => {
+    endToken()
+    if (tokens.length > 0) segments.push(tokens)
+    tokens = []
+  }
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]!
+    if (quote !== undefined) {
+      if (char === quote) { quote = undefined; continue }
+      // Expansions and escapes inside double quotes change the words in ways we
+      // do not model, so abstain instead of reading them as a command.
+      if (quote === '"' && (char === '$' || char === '`' || char === '\\')) return undefined
+      token += char
+      continue
+    }
+    if (char === "'" || char === '"') { quote = char; inToken = true; continue }
+    if (char === ' ' || char === '\t') { endToken(); continue }
+    if (char === '\n' || char === ';') { endSegment(); continue }
+    if (char === '|') { endSegment(); if (text[index + 1] === '|') index++; continue }
+    if (char === '&') {
+      if (text[index + 1] !== '&') return undefined
+      endSegment()
+      index++
+      continue
+    }
+    // Unquoted characters that can restructure the command line.
+    if (char === '$' || char === '`' || char === '(' || char === ')' || char === '<' || char === '>' || char === '\\') return undefined
+    token += char
+    inToken = true
+  }
+  if (quote !== undefined) return undefined
+  endSegment()
+  return segments
+}
+export function isCheck(command: string, args: string[]): boolean {
+  // Judge by the executable actually invoked and by where the runner or script
+  // sits in argv. Reading a file named *.test.ts with shasum/git/cat/grep/rg is
+  // data inspection, not a check; only a real runner or verification script is.
+  let argv = [command, ...args]
+  for (;;) {
+    while (argv.length > 0 && ENV_ASSIGNMENT.test(argv[0]!)) argv = argv.slice(1)
+    if (argv.length === 0) return false
+    const program = baseName(argv[0]!)
+    if (WRAPPERS.has(program)) { argv = stripFlags(argv.slice(1)); continue }
+    if (PACKAGE_MANAGERS.has(program)) {
+      argv = stripFlags(argv.slice(1))
+      const verb = (argv[0] ?? '').toLowerCase()
+      if (verb === 'exec' || verb === 'dlx' || verb === 'x' || verb === 'create') { argv = stripFlags(argv.slice(1)); continue }
+      if (verb === 'run' || verb === 'run-script') return runsNamedScript(argv[1])
+      return ['test', 't', 'check', 'lint', 'typecheck'].includes(verb) || (argv.length > 0 && RUNNERS.has(baseName(argv[0]!)))
+    }
+    if (SHELLS.has(program)) {
+      const rest = argv.slice(1)
+      // `sh -c "cmd"` and `bash -lc "cmd"` carry a command line, not data.
+      const inlineIndex = rest.findIndex((arg) => /^-[a-z]*c$/i.test(arg))
+      if (inlineIndex >= 0) {
+        // Locate each simple command by its own executable, honouring quotes:
+        // `sh -c 'echo "prefix; vitest run"'` only prints text and runs no
+        // runner. Text inside quotes never splits a command.
+        const inlineCommand = rest[inlineIndex + 1] ?? ''
+        const segments = parseInlineCommand(inlineCommand)
+        return segments !== undefined && segments.some((tokens) => isCheck(tokens[0]!, tokens.slice(1)))
+      }
+      return runsNamedScript(firstPositional(rest, new Set()))
+    }
+    if (program === 'node' || program === 'nodejs' || program === 'deno' || program.startsWith('python') || program === 'py') {
+      const rest = argv.slice(1)
+      // Only interpreter options before the script position count. Anything
+      // after the script name is that script's own data, even when it reads
+      // `--test`, `--check` or a *.test.ts style path.
+      const scriptIndex = positionalIndex(rest, INTERPRETER_VALUE_FLAGS)
+      const options = scriptIndex < 0 ? rest : rest.slice(0, scriptIndex)
+      if (options.some((arg) => arg === '--test' || arg === '--check')) return true
+      const modules = options.indexOf('-m')
+      if (modules >= 0 && RUNNERS.has(baseName(options[modules + 1] ?? ''))) return true
+      // `node -e "code" tests/verify.mjs` runs inline code: the remaining words
+      // are that code's argv, so no script position exists to classify.
+      if (options.some((arg) => EVAL_FLAGS.has(arg))) return false
+      const script = scriptIndex < 0 ? undefined : rest[scriptIndex]
+      return runsNamedScript(script) || (script !== undefined && TEST_FILE.test(baseName(script)))
+    }
+    return RUNNERS.has(program) || runsNamedScript(program)
+  }
+}
 const portableKeys = (record: Record<string, string>) => Object.fromEntries(Object.entries(record).map(([key, value]) => [key.replaceAll('\\', '/'), value]))
 const hash = (text: string) => createHash('sha256').update(text).digest('hex')
 export function testAdditionsRequested(intent: string): boolean {

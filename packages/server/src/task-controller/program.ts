@@ -16,9 +16,26 @@ import { coversNamedNodeTests, namedHostChecks, stageCheckFailure, existingContr
 import { observeStageProgress, stageProgressBlock } from './progress.js'
 import { deliveryChains, stageDelivery } from './delivery.js'
 import { acceptanceFailure, assessAcceptanceResult } from './acceptance.js'
-import { testAdditionsRequested, candidateTestChangesAllowed } from '../check-receipt.js'
+import { testAdditionsRequested, candidateTestChangesAllowed, isCheck } from '../check-receipt.js'
 import { explicitPlanDecision, planRevisionFeedback, planConfirmationOptions, requiresExplicitPlanConfirmation } from '../plan-confirmation.js'
 import { isReadyPlanReview } from '../plan-consistency.js'
+
+/**
+ * Structured invocation of a shell.exec receipt, when the recorded shape carries
+ * one. meta.toolCommand is a display string (command plus args), so the
+ * executable and its argv must come from toolArguments instead. Legacy receipts
+ * that predate structured arguments return undefined here and keep the
+ * historical text match, so an already failed check is never dropped.
+ */
+export function checkInvocation(meta: { toolName?: string; toolArguments?: unknown } | undefined): { command: string; args: string[]; cwd: string } | undefined {
+  if (meta?.toolName !== 'shell.exec') return undefined
+  const recorded = meta.toolArguments
+  if (!recorded || typeof recorded !== 'object' || Array.isArray(recorded)) return undefined
+  const { command, args, cwd } = recorded as { command?: unknown; args?: unknown; cwd?: unknown }
+  if (typeof command !== 'string' || command.length === 0) return undefined
+  if (!Array.isArray(args) || !args.every((arg): arg is string => typeof arg === 'string')) return undefined
+  return { command, args, cwd: typeof cwd === 'string' && cwd.length > 0 ? cwd : '.' }
+}
 
 type Context = StepContext<JsonValue>
 const json = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue
@@ -370,7 +387,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
     const toSurface = (task: ControlledTask): SurfaceTask => ({ id: task.id, text: stageSummary(task), criterionIds: task.criterionIds, dependsOn: task.dependsOn, evidenceRefs: task.evidenceRefs })
     const graph = buildContextGraph({ criterionIds: record?.acceptanceCriteria.map((criterion) => criterion.id) ?? [], anchorText: [record?.objective, ctx.goal, ...(record?.acceptanceCriteria.map((criterion) => criterion.description) ?? [])].join('\n'), stages: stages.map(toSurface), ...(active ? { active: toSurface(active) } : {}), evidenceText, conversation: conversation.map((message) => message.content) })
     const surface = expandContextSurface(graph.anchor, graph.nodes)
-    if (continuous) return [contract, ...conversationContract, { role: 'user', content: JSON.stringify({ hostOwnedChecks: boundedTransitions ? record?.acceptanceChecks?.map(c => ({ id: c.id, assertions: c.expectedChecks, policy: 'Host executes named checks at stage verification and again at final acceptance. These assertion IDs are not workspace paths or worker tools. Do not search for them.' })) : undefined, activeStage: active ? { id: active.id, kind: active.kind, goal: active.goal, check: active.check, attempt: active.attempts, correction: active.note } : null, stagePolicy: 'Accept only this stage contribution against its goal/check and user constraints. Requirements assigned to later stages are checked there and in final acceptance; do not require successor deliverables before their stage starts.', deliveries: (active ? stages.filter(t => active.dependsOn.includes(t.id)) : stages).flatMap(t => t.delivery ? [t.delivery] : []), contextSurface: { hits: surface.hits.map(h => h.source === 'evidence' ? { ...h, text: 'Retained evidence; retrieve by reference only if needed.' } : h), remaining: surface.remaining }, knownFileWindows: fileWindows(ctx).slice(-12), omittedFileWindows: Math.max(0, fileWindows(ctx).length - 12), usedTurns: state?.actualBudget?.used ?? state?.usedTurns, modelBudget: state?.actualBudget, finalReviewErrors: state?.finalReviewErrors, updates: state?.updates, retrieval: 'Deliveries are bounded indexes, not acceptance. For omitted entries page task.delivery by stageId; retrieve one needed original ref with task.evidence, or task.recall for historical checkpoints. Never copy transcripts or reread unchanged files to reconstruct history.' }) }, ...updates]
+    if (continuous) return [contract, ...conversationContract, { role: 'user', content: JSON.stringify({ currentRequest: ctx.goal, requestPolicy: 'The current request and subsequent updates govern this run. Historical objectives and plans supply context only; never substitute their stages for the current request.' }) }, { role: 'user', content: JSON.stringify({ hostOwnedChecks: boundedTransitions ? record?.acceptanceChecks?.map(c => ({ id: c.id, assertions: c.expectedChecks, policy: 'Host executes named checks at stage verification and again at final acceptance. These assertion IDs are not workspace paths or worker tools. Do not search for them.' })) : undefined, activeStage: active ? { id: active.id, kind: active.kind, goal: active.goal, check: active.check, attempt: active.attempts, correction: active.note } : null, stagePolicy: 'Accept only this stage contribution against its goal/check and user constraints. Requirements assigned to later stages are checked there and in final acceptance; do not require successor deliverables before their stage starts.', deliveries: (active ? stages.filter(t => active.dependsOn.includes(t.id)) : stages).flatMap(t => t.delivery ? [t.delivery] : []), contextSurface: { hits: surface.hits.map(h => h.source === 'evidence' ? { ...h, text: 'Retained evidence; retrieve by reference only if needed.' } : h), remaining: surface.remaining }, knownFileWindows: fileWindows(ctx).slice(-12), omittedFileWindows: Math.max(0, fileWindows(ctx).length - 12), usedTurns: state?.actualBudget?.used ?? state?.usedTurns, modelBudget: state?.actualBudget, finalReviewErrors: state?.finalReviewErrors, updates: state?.updates, retrieval: 'Deliveries are bounded indexes, not acceptance. For omitted entries page task.delivery by stageId; retrieve one needed original ref with task.evidence, or task.recall for historical checkpoints. Never copy transcripts or reread unchanged files to reconstruct history.' }) }, ...updates]
     return [contract, ...conversationContract, { role: 'user', content: ctx.goal },
       { role: 'user', content: JSON.stringify({ knownFileWindows: fileWindows(ctx), finalReviewErrors: state?.finalReviewErrors, recoveryCriterionIds: state?.recoveryCriterionIds, usedTurns: state?.usedTurns, activeStage: active ? { id: active.id, goal: active.goal, check: active.check, status: active.status, note: active.note } : null, contextSurface: surface, contextSurfaceNote: 'User requirements and the latest assistant proposal above remain conversation context, subject to the current request. Older assistant detail grows from the active stage, or from the acceptance criteria before a stage exists, along dependencies and evidence. A farther record stays behind a closer one. If this ring does not fit, remaining ids are the next points on that same ring. Call task.surface with one id already on this surface, a previous expansion, or in remaining. Do not request an offset page of the conversation or history.' }) },
       ...updates]
@@ -1076,7 +1093,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
       inputs: (ctx) => { const state = stateOf(ctx, options.readOnlyToolNames ?? []); const task = state.tasks.find((item) => item.id === state.activeId); return { conversation: currentInputs(ctx), results: [...new Set([...(continuous ? [] : [...stageEvidence(state), ...knownReads(ctx)]), ...(task?.evidenceRefs ?? [])])], toolDiscovery: { limit: options.toolNames.length, ...(['39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54'].includes(programVersion) ? { exclude: options.toolNames.filter(name => !stageToolAllow(ctx).includes(name)) } : independentAcceptance ? { exclude: (taskRecordFromGlobal(ctx.global as JsonValue)?.acceptanceChecks ?? []).map(check => check.toolName) } : {}) } } },
       ...(['41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54'].includes(programVersion) ? { evidenceReadWindowBytes: 3000 } : {}),
       ...(reuseEvidence ? { reuseSettledEvidence: true, freshAfterShell: generalRecovery, onEvidenceReused: retainReusedEvidence, onReuseEvidence: (refs: string[], ctx: Context) => { const state = stateOf(ctx); const task = state.tasks.find(t => t.id === state.activeId)!; task.evidenceRefs = [...new Set([...task.evidenceRefs, ...refs])]; task.status = 'verifying'; save(ctx, state); return 'verify-stage' } } : {}),
-      ...(continuous ? { resetTurnsOnEntry: (ctx: Context) => { const s = controllerOf(ctx); const t = s?.tasks.find(t => t.id === s.activeId); return `${t?.id}:${t?.attempts}` } } : {}),
+      ...(continuous ? { resetTurnsOnEntry: (ctx: Context) => { const s = controllerOf(ctx); const t = s?.tasks.find(t => t.id === s.activeId); return `${s?.revision}:${t?.id}:${t?.attempts}` } } : {}),
       ...(modernRecovery && options.validateToolInput ? { validateToolInput: options.validateToolInput } : {}),
       ...(generalRecovery ? { terminalToolErrorCodes: ['VISION_MODEL_REQUIRED', 'AUTOMATION_CAPABILITY_DISABLED', 'NATIVE_BROWSER_REQUIRED', ...(auditRecovery ? ['READ_ONLY_WINDOW_CAPTURE_UNSUPPORTED'] : [])] } : {}),
       manualApprovalFallback: modernRecovery,
@@ -1211,6 +1228,20 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
         const latestChecks = new Map<string, string>()
         for (const ref of task.evidenceRefs) {
           const meta = ctx.results.meta(ref)
+          // Classify by the executable and by the position of the runner or script
+          // in argv whenever the receipt carries a structured argv, matching the
+          // receipt-level classifier. Reading a *.test.ts path with cat/ls/grep is
+          // inspection, not a required check.
+          const invocation = checkInvocation(meta)
+          if (invocation !== undefined) {
+            // Same key shape as the legacy branch so a later success of the exact
+            // same command still supersedes its earlier failure.
+            // checkInvocation narrowed its own argument, not `meta` here, so the
+            // display string is read optionally; the key stays identical to the
+            // legacy branch below so a later success still supersedes this one.
+            if (isCheck(invocation.command, invocation.args)) latestChecks.set(JSON.stringify([meta?.toolCommand, invocation.cwd]), ref)
+            continue
+          }
           if (meta?.toolName === 'shell.exec' && /(?:--(?:test|check)|(?:test|check|verify|lint|typecheck|pytest|vitest|jest)(?:[.\s/\\-]|$))/i.test(meta.toolCommand ?? '')) latestChecks.set(JSON.stringify([meta.toolCommand, meta.toolArguments && typeof meta.toolArguments === 'object' && !Array.isArray(meta.toolArguments) ? meta.toolArguments.cwd ?? '.' : '.']), ref)
         }
         const supersededChecks = new Set([...latestChecks.values()].filter(older => [...latestChecks.values()].some(newer => {

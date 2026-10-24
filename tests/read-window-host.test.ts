@@ -6,7 +6,7 @@ import { createLocalHost } from '../packages/server/src/index.js'
 import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 
-it('routes oversized-read preflight back to the model before dispatch or cache reuse', async () => {
+it('clamps oversized reads before cache reuse and retains an exact continuation notice', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pulse-read-window-host-')), objective = 'Read report.md completely and report its ending.'
   await writeFile(join(root, 'report.md'), 'a'.repeat(3000) + 'UNREAD TAIL\n')
   const ids = acceptanceCriteriaFromObjective(objective).map(c => c.id)
@@ -21,7 +21,7 @@ it('routes oversized-read preflight back to the model before dispatch or cache r
     turns++
     if (turns === 1) return tool({ path: 'report.md' })
     if (turns === 2) return tool({ path: 'report.md', maxBytes: 6000 })
-    if (turns === 3) { correctionText = JSON.stringify(body.messages); sawCorrection = /maxBytes must be <= 3000/.test(correctionText) && /nextOffset/.test(correctionText); return tool({ path: 'report.md', offset: 3000, maxBytes: 3000 }) }
+    if (turns === 3) { correctionText = JSON.stringify(body.messages); sawCorrection = /nextOffset/.test(correctionText) && /3000/.test(correctionText); return tool({ path: 'report.md', offset: 3000, maxBytes: 3000 }) }
     return reply('Complete file ending: UNREAD TAIL.')
   }))
   const host = createLocalHost({ cwd: root, dataDir: join(root, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, approvalMode: 'auto', taskController: true, jarvis: { enabled: false }, maxModelCalls: 24 })

@@ -1109,7 +1109,7 @@ export class StepBuilder<TState = JsonValue> {
           const originalId = typeof item.toolCallId === 'string' ? item.toolCallId : `call-${index + 1}`
           const rawToolName = typeof item.name === 'string' ? item.name : ''
           const toolName = canonicalToolName(rawToolName)!
-          return { originalId, toolName, toolCallId: options.scopeToolCallsToEffect ? `${name}:${sourceEffectId ?? 'turn'}:${turns}:${originalId}` : `${name}:${turns}:${originalId}`, input: toolName.startsWith('ask.') && options.prepareQuestion ? options.prepareQuestion(toolName, normalizeModelToolInput(toolName, item.input ?? {}, options.evidenceReadWindowBytes !== undefined), ctx) : normalizeModelToolInput(toolName, item.input ?? {}, options.evidenceReadWindowBytes !== undefined) }
+          return { originalId, toolName, toolCallId: options.scopeToolCallsToEffect ? `${name}:${sourceEffectId ?? 'turn'}:${turns}:${originalId}` : `${name}:${turns}:${originalId}`, input: toolName.startsWith('ask.') && options.prepareQuestion ? options.prepareQuestion(toolName, normalizeModelToolInput(toolName, item.input ?? {}), ctx) : normalizeModelToolInput(toolName, item.input ?? {}) }
         })
         if (options.validateToolInput) {
           for (const call of decodedCalls.filter(call => !call.toolName.startsWith('ask.'))) {
