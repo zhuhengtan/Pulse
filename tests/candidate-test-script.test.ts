@@ -78,12 +78,19 @@ it('runs a corrected new test script through the actual sandboxed Host before ac
   const objective = 'Create feature.js exporting value 2 and verify behavior with tests. Do not add dependencies.'
   const ids = acceptanceCriteriaFromObjective(objective).map(c => c.id)
   let work = 0
+  let successfulWarning = false
+  // npm emits this harmless deprecation on stderr even when the tests pass.
+  await writeFile(join(cwd, '.npmrc'), 'cache-min=0\n')
   const reply = (value: any) => Response.json({ choices: [{ message: typeof value === 'string' ? { content: value } : value, finish_reason: value.tool_calls ? 'tool_calls' : 'stop' }] })
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
     const request = JSON.parse(String(init.body)), text = currentRequestText(request.messages), refs = suppliedRequestResults(request.messages).map(r => r.id)
     if (request.messages.some((m: any) => m.content?.includes('You are the Pulse safety reviewer'))) return reply('APPROVE')
     if (text.includes('Create an executable plan')) return reply(JSON.stringify({ tasks: [{ id: 'feature', kind: 'edit', goal: 'Create feature.js and candidate tests, fix the new test runner if necessary', check: 'npm test passes with real assertions', criterionIds: ids, dependsOn: [] }] }))
-    if (text.includes('Verify ONLY the active')) return reply(JSON.stringify({ status: 'passed', evidenceRefs: refs.filter(ref => !suppliedRequestResults(request.messages).find(r => r.id === ref)?.value?.stderr), note: 'Corrected new runner executes the same tests.' }))
+    if (text.includes('Verify ONLY the active')) {
+      const checks = suppliedRequestResults(request.messages).filter(r => r.value?.code === 0 && !r.value.timedOut && !r.value.aborted)
+      successfulWarning ||= checks.some(r => Boolean(r.value.stderr?.trim()))
+      return reply(JSON.stringify({ status: 'passed', evidenceRefs: checks.map(r => r.id), note: 'Corrected new runner exits successfully; stderr warnings do not invalidate a zero exit code.' }))
+    }
     if (text.includes('Independently verify every ORIGINAL')) return reply(JSON.stringify({ criteria: ids.map(criterionId => ({ criterionId, status: 'passed', evidenceRefs: refs, rationale: 'Actual sandboxed successful npm test.' })) }))
     const calls = ++work === 1 ? [
       { name: 'fs_write', args: { path: 'feature.js', content: 'exports.value = 2\n' } },
@@ -102,8 +109,10 @@ it('runs a corrected new test script through the actual sandboxed Host before ac
     const runRoot = join(cwd, '.host-data/conversations', c.id, 'runs', run.id)
     const snapshot = JSON.parse(await readFile(join(runRoot, 'runtime.json'), 'utf8')).state.state
     const failures = snapshot.effects.filter(([, e]: any) => e.state === 'failed').map(([id, e]: any) => ({ id, input: e.input, outcome: e.outcome }))
+    const checks = snapshot.results.map(([, result]: any) => result).filter((result: any) => typeof result.summary?.code === 'number').map((result: any) => ({ id: result.id, ...result.summary }))
     const input = JSON.parse(await readFile(join(runRoot, 'input.json'), 'utf8'))
     if (task?.status !== 'accepted') await cp(cwd, join(process.cwd(), '.pulse-dev/autonomy-failed-rerun-20261023', 'v52-unit-host-failure-' + Date.now()), { recursive: true })
-    expect(task, JSON.stringify({ task, version: input.controllerVersion, failures })).toMatchObject({ status: 'accepted' })
+    expect(task, JSON.stringify({ task, version: input.controllerVersion, failures, checks })).toMatchObject({ status: 'accepted' })
+    expect(successfulWarning).toBe(true)
   } finally { await host.close(); vi.unstubAllGlobals(); await rm(cwd, { recursive: true, force: true }) }
 }, 30_000)
