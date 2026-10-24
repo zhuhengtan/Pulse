@@ -33,7 +33,7 @@ it('shares approval across old and new conversations, persists on restart and re
       runs.push(runId)
       await vi.waitFor(async () => {
         const snapshot = await fetch(`${base}/api/runs/${runId}/state`, { headers }).then(r => r.json())
-        expect(snapshot.reviewNote).toContain('尚未配置本机审核模型')
+        expect(snapshot.reviewNote).toContain('尚未配置审核模型')
         expect(snapshot.interactions).toContainEqual(expect.objectContaining({ kind: 'approval' }))
       }, { timeout: 5000, interval: 25 })
     }

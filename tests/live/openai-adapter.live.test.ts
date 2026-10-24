@@ -13,7 +13,7 @@ const toolSmoke = process.env.PULSE_LIVE_TOOL_SMOKE === '1'
 const structuredSmoke = process.env.PULSE_LIVE_STRUCTURED_SMOKE === '1'
 const cancellationSmoke = process.env.PULSE_LIVE_CANCELLATION_SMOKE === '1'
 
-describe.skipIf(!activeKey)('live OpenAI-compatible adapter', () => {
+describe.skipIf(process.env.PULSE_LIVE_API !== '1' || !activeKey)('live OpenAI-compatible adapter', () => {
   it('performs one minimal request and normalizes the response', async () => {
     const adapter = new OpenAICompatibleAdapter('openai-live', {
       provider: activeProvider,
@@ -106,7 +106,7 @@ describe.skipIf(!activeKey)('live OpenAI-compatible adapter', () => {
   }, 30_000)
 })
 
-describe.skipIf(!deepseekApiKey)('live DeepSeek structured-output adapter', () => {
+describe.skipIf(process.env.PULSE_LIVE_API !== '1' || !deepseekApiKey)('live DeepSeek structured-output adapter', () => {
   it('uses JSON mode and returns a locally validated structured response', async () => {
     const adapter = new OpenAICompatibleAdapter('deepseek-live-structured', {
       provider: 'deepseek',

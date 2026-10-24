@@ -39,7 +39,7 @@ it.runIf(process.env.PULSE_VISION_LIVE === '1')('routes a real screenshot artifa
   const manager=new AutomationSessionManager(root,{browser:{channel:'chrome'}},true,undefined,['127.0.0.1'])
   await new Promise<void>(resolve=>fixture.listen(0,'127.0.0.1',resolve))
   try {
-    const session=await manager.open('browser','vision-live',root)
+    const session=await manager.open('browser','vision-live',root,'dedicated')
     await manager.command(session.id,'navigate',{url:`http://127.0.0.1:${(fixture.address() as {port:number}).port}`},'vision-live')
     const frame=await manager.observe(session.id,'vision-live')
     const image=frame.pulseImage as {mediaType:'image/png';data:string}

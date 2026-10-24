@@ -4,6 +4,33 @@
 
 ## 开发与打包
 
+本地测试可在仓库根目录一键启动：
+
+```sh
+./start-dev.sh
+```
+
+也可以运行 `pnpm dev`（Windows 使用此命令）。要求已安装 Node >=22.13、pnpm 12.4.2；缺少项目依赖、Electron 或 Chromium 时脚本会自动准备，首次运行需要网络。默认启动开发后台 `7333`、前端 `5174` 及 Electron 窗口。前端代码/样式保存后自动刷新，Electron 主进程/preload 的修改须重开窗口，后端修改须重启开发后台后生效。
+
+脚本复用 `.pulse-dev/h5/data` 中已运行的后台和匹配当前仓库/后台的 Vite，不会自动停止任务或重启服务。已有后台若是旧代码，可运行 `./restart-dev.sh`：先构建，再核验数据目录、服务 PID 和前端归属，使用 SIGTERM 正常停止开发后台并在原端口启动新版。它保留聊天和配置，执行中的任务会中断；匹配的 Vite 与 Electron 窗口继续复用，主进程/preload 修改仍须关闭窗口后重开。停止超时会报错，不强杀。配置和模型沿用 `PULSE_CONFIG` / `PULSE_HOME` / `~/.pulse` 的现有规则；开发聊天、设备与窗口配置保存在 `.pulse-dev`，不注册用户 CLI 或修改终端 PATH。脚本不打包应用，也不编译可选的原生桌面控制辅助程序（需要时单独运行 `pnpm desktop:build`）。
+
+```sh
+./start-dev.sh --web-only  # 仅开后台和网页，用输出的地址访问
+./start-dev.sh --no-build  # 已编译时快速启动，不适用于刚修改过后端的情况
+./start-dev.sh --help
+./restart-dev.sh             # 构建并重启开发后台，复用或打开预览
+./restart-dev.sh --web-only  # 重启后台，仅保留或启动网页预览
+./restart-dev.sh --no-build  # 已有最新 dist 时跳过构建
+```
+
+退出窗口或按 Ctrl+C，只关闭本次新开的窗口/前端，已复用的前端不受影响，后台继续运行。后台日志位于 `.pulse-dev/logs/backend.log`；复用的后台仍使用其原来的日志入口。端口冲突会报错，不会结束占用进程；`7332` 保留给正式服务。需要另一套测试环境时可同时设置 `PULSE_DEV_DIR`、`PULSE_WEB_DEV_PORT` 和 `PULSE_DESKTOP_DEV_URL`，例如：
+
+```sh
+PULSE_DEV_DIR=.pulse-dev/sandbox PULSE_WEB_DEV_PORT=7343 PULSE_DESKTOP_DEV_URL=http://127.0.0.1:5184/work/new ./start-dev.sh
+```
+
+脚本的隔离启动回归可用 `PULSE_LOCAL_DEV_LIVE=1 pnpm exec vitest run tests/live/local-dev-start.test.ts` 运行；隔离重启回归使用 `PULSE_LOCAL_DEV_LIVE=1 pnpm exec vitest run tests/live/local-dev-restart.test.ts`。
+
 要求 Node >=22.13（桌面 CI 使用 Node 24）和 pnpm 12.4.2。Electron 与后台 Node 分开打包，后台的 Node 和原生依赖必须在目标系统及架构上构建。
 
 ```sh
@@ -92,3 +119,11 @@ pnpm desktop:app:smoke
 真实 Electron smoke 验证本地历史绕过 Server、聊天 WS、工作 POST+SSE、分页和窗口化、30次切换、窗口退出后服务继续，以及服务停止后刷新仍可读取历史。使用临时数据和模拟模型，不读取用户配置或发送外部模型请求。
 
 本机 macOS 的实测证据和执行状态见 [验收记录](./acceptance-2026-10-21.md)。Windows/Linux 与 macOS x64 必须由对应 CI/设备验证，不能用 macOS arm64 的通过结果代替。
+
+## 内置浏览器
+
+Electron 右侧工作窗口使用 `WebContentsView` 显示真正的网页；拖动面板或调整窗口时，网页视口随之改变，由网站自身的响应式布局适配。新窗口链接会转成同一工作窗口中的网页标签，关闭最后一个标签会关闭整个面板。打开网页不要求先选择项目。
+
+Browser Use 通过本机认证的原生宿主连接操作这些相同页面，继续使用任务所有权、接管和控制租约；没有全局远程调试端口。人工接管后可以直接在网页内输入、点击和滚动。浏览器页面不加载 Pulse preload、不启用 Node，使用独立于设备登录的浏览器分区。后台断线时暂停操作，恢复后需要重新接管；旧截图会话在接管时切换为原生页面。
+
+Web/H5 不提供 Browser Use 入口、截图遥控或浏览器控制 API；文件、图片、PDF 和 Diff 预览仍然可用。原生浏览器的人工界面不请求截图；视觉模型需要观察页面时，后台可以单次捕获该页面作为工具观察。

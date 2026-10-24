@@ -9,6 +9,7 @@ describe('response language selection', () => {
 
   it('keeps English for an English request', () => {
     expect(detectResponseLanguage('Please fix this CLI issue')).toBe('en')
-    expect(responseLanguageInstruction('en')).toContain('same language')
+    expect(responseLanguageInstruction('en')).toContain('prose deliverables in English')
+    expect(responseLanguageInstruction('en')).toContain('unless the user specifies another language')
   })
 })

@@ -31,7 +31,13 @@ describe('M1-3 context, models and adapters', () => {
         offset = part.nextOffset
       }
       expect(output).toBe(source)
-      await expect(fs.readRange('text.txt', 5, 2)).rejects.toMatchObject({ code: 'INVALID_UTF8_OFFSET' })
+      for (const [badOffset, validOffset] of [[2, 1], [3, 1], [5, 4], [6, 4], [7, 4]]) {
+        const error: any = await fs.readRange('text.txt', 5, badOffset).catch(error => error)
+        expect(error).toMatchObject({ code: 'INVALID_UTF8_OFFSET', retryable: false, details: { field: 'offset', requestedOffset: badOffset, suggestedRead: { path: 'text.txt', offset: validOffset, maxBytes: 5 } } })
+        const corrected = await fs.readRange('text.txt', error.details.suggestedRead.maxBytes, error.details.suggestedRead.offset)
+        expect(corrected.content).not.toContain('�')
+        expect(corrected.content.startsWith(validOffset === 1 ? '雪' : '😀')).toBe(true)
+      }
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 

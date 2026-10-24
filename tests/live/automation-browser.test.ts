@@ -18,7 +18,7 @@ it.runIf(process.env.PULSE_BROWSER_LIVE === '1')('operates a real isolated brows
   await new Promise<void>(resolve => server.listen(0,'127.0.0.1',resolve))
   const manager = new AutomationSessionManager(root, { browser: { channel: process.env.PULSE_BROWSER_CHANNEL === 'chromium' ? 'chromium' : 'chrome' } }, true)
   try {
-    const session = await manager.open('browser','live-test',root)
+    const session = await manager.open('browser','live-test',root,'dedicated')
     await manager.command(session.id,'navigate',{url:`http://127.0.0.1:${(server.address() as {port:number}).port}`},'live-test')
     if(process.platform==='darwin'&&process.env.PULSE_BROWSER_CHANNEL==='chromium'){const processes=execFileSync('ps',['-axo','command'],{encoding:'utf8'});expect(processes.split('\n').some(line=>line.includes(root)&&line.includes('Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'))).toBe(true)}
     const ref = (text: unknown, expression: RegExp) => { const value=String(text).match(expression)?.[1];if(!value)throw new Error('Fixture element not found');return value }
@@ -52,7 +52,7 @@ it.runIf(process.env.PULSE_BROWSER_LIVE === '1')('uploads only workspace files, 
   const manager=new AutomationSessionManager(root,{browser:{channel:process.env.PULSE_BROWSER_CHANNEL==='chromium'?'chromium':'chrome'}},true,undefined,['127.0.0.1'])
   const base=`http://127.0.0.1:${(server.address() as {port:number}).port}`
   try {
-    const session=await manager.open('browser','extended',workspace)
+    const session=await manager.open('browser','extended',workspace,'dedicated')
     await manager.command(session.id,'navigate',{url:base+'/login'},'extended')
     await expect(manager.command(session.id,'upload',{files:['escape.txt']},'extended')).rejects.toThrow('UPLOAD_OUTSIDE_WORKSPACE')
     const ref=(frame:Record<string,unknown>,pattern:RegExp)=>{const found=String(frame.text).match(pattern)?.[1];if(!found)throw new Error('Fixture element missing');return found}
@@ -70,7 +70,7 @@ it.runIf(process.env.PULSE_BROWSER_LIVE === '1')('uploads only workspace files, 
     await manager.command(session.id,'selectTab',{index:0},'extended')
     expect((await manager.observe(session.id,'extended')).title).toBe('Extended Browser Fixture')
     await manager.control(session.id,'close','local')
-    const restored=await manager.open('browser','restored',workspace)
+    const restored=await manager.open('browser','restored',workspace,'dedicated')
     await manager.command(restored.id,'navigate',{url:base+'/account'},'restored')
     expect(String((await manager.observe(restored.id,'restored')).text)).toContain('Session retained')
   } finally {await manager.close();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(root,{recursive:true,force:true})}

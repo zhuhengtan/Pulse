@@ -21,9 +21,9 @@ const roots: string[] = []
 const temporary = async () => { const dir = await mkdtemp(join(tmpdir(), 'pulse-harness-repair-')); roots.push(dir); return dir }
 afterEach(async () => { for (const dir of roots.splice(0)) await rm(dir, { recursive: true, force: true }) })
 
-it.each(['valid', 'empty', 'missing', 'duplicate', 'unknown', 'error'])('final acceptance fails closed: %s', async mode => {
+it.each((['27','28'] as const).flatMap(version => ['valid', 'empty', 'missing', 'duplicate', 'unknown', 'error'].map(mode => ({version,mode}))))('final acceptance fails closed: $version $mode', async ({version,mode}) => {
   let agentId = '', finalCalls = 0, workCalls = 0, plans = 0
-  const program = buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 16 })
+  const program = buildTaskControllerProgram({ version, system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 16 })
   const global = () => { const agent = runtime.state.agents.get(agentId)!; return agent.globalVersions.get(agent.latestGlobalVersion) as any }
   const runtime = new PulseRuntime({ effectExecutor: async effect => {
     if (effect.key?.startsWith('plan')) { plans++; return { value: { tasks: [{ id: 'explain', goal: 'Explain the design', check: 'Response delivered', dependsOn: [], criterionIds: ['criterion-1', 'criterion-2'] }] } } }
@@ -41,7 +41,7 @@ it.each(['valid', 'empty', 'missing', 'duplicate', 'unknown', 'error'])('final a
   expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'succeeded' })
   expect(global().taskOutcome.status).toBe(mode === 'valid' ? 'accepted' : 'incomplete')
   expect(global().taskController.tasks[0].status).toBe('passed')
-  expect(plans).toBe(1); expect(workCalls).toBe(1); expect(finalCalls).toBe(mode === 'unknown' ? 2 : 1)
+  expect(plans).toBe(1); expect(workCalls).toBe(1); expect(finalCalls).toBe(mode === 'unknown' || version === '28' && ['empty','missing','duplicate'].includes(mode) ? 2 : 1)
 })
 
 it('keeps prose, constraints, every long-list item and exact document source spans', () => {

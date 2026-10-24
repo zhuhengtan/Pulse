@@ -30,11 +30,13 @@ it.runIf(process.env.PULSE_MANUAL_BROWSER_LIVE === '1')('opens workspace webpage
   const page = await desktop.firstWindow()
   await page.getByRole('heading', { name: '工具', exact: true }).waitFor()
   const localAddress = `127.0.0.1:${(website.address() as { port: number }).port}`
+  await expect.poll(()=>host.automation.nativeBrowserAvailable).toBe(true)
   await page.getByRole('textbox', { name: '浏览器地址' }).fill(localAddress)
   await page.getByRole('button', { name: '前往', exact: true }).click()
-  console.log('Manual browser launch', JSON.stringify(await page.evaluate(async () => ({ url: location.href, alerts: [...document.querySelectorAll('[role=alert]')].map(e => e.textContent), options: await (window as any).pulseDesktop.request('/api/automation/sessions') }))))
+
   await expect.poll(() => host.automation.list().find(item => item.state === 'human')?.title, { timeout: 30000 }).toBe('Manual browser ready')
-  await expect.poll(() => page.locator('.automation-frame').evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth), { timeout: 10000 }).toBeGreaterThan(300)
+  expect(await page.locator('.automation-frame').count()).toBe(0)
+  await expect.poll(()=>desktop.evaluate(({BrowserWindow}:any)=>BrowserWindow.getAllWindows()[0].contentView.children.filter((view:any)=>view.getVisible()).length)).toBe(1)
   expect(host.getAutomationOptions().enabled).toEqual([])
   expect(await page.locator('.workspace-error,[role="alert"]').count()).toBe(0)
   await page.getByRole('button', { name: '刷新网页', exact: true }).click()
@@ -45,7 +47,8 @@ it.runIf(process.env.PULSE_MANUAL_BROWSER_LIVE === '1')('opens workspace webpage
    await page.getByRole('button', { name: '前往', exact: true }).click()
    await expect.poll(() => host.automation.list().find(item => item.state === 'human')?.title, { timeout: 30000 }).toContain('百度')
    await expect.poll(() => page.getByRole('button', { name: '前往', exact: true }).isEnabled(), { timeout: 15000 }).toBe(true)
-   await expect.poll(() => page.locator('.automation-frame').evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth), { timeout: 10000 }).toBeGreaterThan(300)
+   expect(await page.locator('.automation-frame').count()).toBe(0)
+  await expect.poll(()=>desktop.evaluate(({BrowserWindow}:any)=>BrowserWindow.getAllWindows()[0].contentView.children.filter((view:any)=>view.getVisible()).length)).toBe(1)
    expect(await page.locator('.workspace-error,[role="alert"]').count()).toBe(0)
    await page.screenshot({ path: join(tmpdir(), 'pulse-manual-browser-baidu.png') })
   }

@@ -154,3 +154,24 @@ it('does not copy cached children through a replaced directory symlink', async (
     expect(await readFile(join(project, 'nested', 'file.txt'), 'utf8')).toBe('outside must remain unchanged')
   } finally { await manager.close() }
 })
+
+it('uses the exact ignored project directory rather than a missing parent-repository clone', async () => {
+  const parent = await repository(), project = join(parent, 'ignored', 'project')
+  await writeFile(join(parent, '.gitignore'), 'ignored/\n'); await mkdir(project, { recursive: true }); await writeFile(join(project, 'input.txt'), 'preserve me')
+  const manager = new H5WorkspaceManager(join(parent, '.test-data')), other = new H5WorkspaceManager(join(parent, '.other-data'))
+  const before = await git(parent, 'diff', '--binary')
+  try {
+    const prepared = await manager.prepare('conv-ignored', 'project', project)
+    expect(prepared).toEqual({ cwd: await import('node:fs/promises').then(fs => fs.realpath(project)), isolated: false })
+    expect(await readFile(join(prepared.cwd, 'input.txt'), 'utf8')).toBe('preserve me')
+    const record = await manager.get('conv-ignored'); expect(record?.kind).toBe('shared')
+    expect(await git(parent, 'diff', '--binary')).toBe(before)
+  } finally { await manager.close(); await other.close() }
+})
+
+it('materializes an explicitly selected empty subdirectory in the isolated workspace', async () => {
+  const parent = await repository(), project = join(parent, 'empty'); await mkdir(project)
+  const manager = new H5WorkspaceManager(join(parent, '.test-data'))
+  try { const prepared = await manager.prepare('conv-empty', 'project', project); expect(prepared.isolated).toBe(true); await writeFile(join(prepared.cwd, 'output.txt'), 'result'); expect(await readFile(join(prepared.cwd, 'output.txt'), 'utf8')).toBe('result') }
+  finally { await manager.close() }
+})

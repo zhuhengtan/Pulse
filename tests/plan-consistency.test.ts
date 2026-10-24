@@ -80,3 +80,13 @@ describe('whole-plan consistency assessment', () => {
     expect(isReadyPlanReview({ ...review, nodes: [{ id: 'p', requires: [], unresolved: true, evidence: '# V3' }] }, path, hash)).toBe(false)
   })
 })
+
+it('exposes bounded plan-review error codes without accepting a failed review or retaining raw messages', async () => {
+  const { unavailablePlanReview } = await import('../packages/server/src/plan-consistency.js')
+  const review = unavailablePlanReview('docs/plans/p.md', 'hash', 'PLAN_REVIEW_UNAVAILABLE', 'PROVIDER_NETWORK_ERROR')
+  expect(review).toMatchObject({ status: 'unavailable', diagnostic: { code: 'PROVIDER_NETWORK_ERROR' } })
+  expect(isReadyPlanReview(review, 'docs/plans/p.md', 'hash')).toBe(false)
+  const unsafe = unavailablePlanReview('docs/plans/p.md', 'hash', 'PLAN_REVIEW_UNAVAILABLE', 'secret=never-retain-this')
+  expect(unsafe.diagnostic).toBeUndefined()
+  expect(JSON.stringify(unsafe)).not.toContain('never-retain-this')
+})

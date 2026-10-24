@@ -166,7 +166,7 @@ describe('local CLI application host', () => {
       await run.outcome()
       const runDir = join(directory, 'data', 'conversations', conversation.id, 'runs', run.id)
       const input = JSON.parse(await readFile(join(runDir, 'input.json'), 'utf8')) as { controllerVersion: string; maxTurns: number; maxModelCalls: number }
-      expect(input).toMatchObject({ controllerVersion: '19', maxTurns: 1, maxModelCalls: 4 })
+      expect(input).toMatchObject({ controllerVersion: '34', maxTurns: 1, maxModelCalls: 4 })
       const modelCalls = (await run.usage()).modelCalls
       expect(modelCalls).toBeGreaterThan(1)
       expect(modelCalls).toBeLessThanOrEqual(4)
@@ -324,6 +324,26 @@ describe('local CLI application host', () => {
       await expect(readFile(join(directory, 'auto.txt'), 'utf8')).resolves.toBe('auto')
       await host.close()
     } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  it.each(['confirm', 'cancel'])('registers ask.confirm and retains an explicit %s reply', async answer => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-confirm-'))
+    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), taskController: false, mockToolCalls: [{ name: 'ask.confirm', input: { prompt: 'Continue the original task?', decisionId: 'confirm-original', decisionScope: 'current-task' } }], mockAfterToolResponse: 'decision received' })
+    try {
+      const conversation = await host.createConversation()
+      const run = await host.sendMessage(conversation.id, { text: 'Collect my explicit confirmation.' })
+      let waits = 0
+      for await (const event of run.events) {
+        if (event.type !== 'waiting') continue
+        waits++
+        const data = event.data as { effectId: string; input: Record<string, unknown> }
+        expect(data.input).toMatchObject({ kind: 'ask', type: 'choice', toolName: 'ask.confirm', decisionId: 'confirm-original', options: [{ label: '确认 / Confirm', value: 'confirm' }, { label: '取消 / Cancel', value: 'cancel' }] })
+        await expect(run.reply(data.effectId, { value: 'unrecognized' })).rejects.toThrow('ASK_RESPONSE_INVALID:choice')
+        await run.reply(data.effectId, { value: answer })
+      }
+      expect(waits).toBe(1)
+      await expect(run.outcome()).resolves.toMatchObject({ status: 'succeeded', text: 'decision received' })
+    } finally { await host.close(); await rm(directory, { recursive: true, force: true }) }
   })
 
   it('pauses for ask.choice and resumes with the selected value', async () => {

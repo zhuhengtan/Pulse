@@ -13,6 +13,37 @@ afterEach(async () => {
 })
 
 describe('H5 work worker IPC', () => {
+  it.each(['approval', 'choice'] as const)('retains a real worker %s wait across shutdown and resumes the same run and budget', async waitKind => {
+    const dir = await mkdtemp(join(tmpdir(), 'pulse-worker-cold-'))
+    temporaryDirectories.push(dir)
+    const configPath = join(dir, 'config.json')
+    await writeFile(configPath, JSON.stringify({ providers: { mock: { provider: 'mock', name: 'Mock' } }, models: { mock: { displayName: 'mock', provider: 'mock', modelCode: 'mock' } }, activeModel: 'mock', approvalMode: 'ask', frontModel: { enabled: true, provider: 'ollama', model: 'forbidden-child-default', baseURL: 'http://127.0.0.1:1' } }))
+    if (waitKind === 'choice') await writeFile(join(dir, 'retained.txt'), 'one write')
+    const mockToolCalls = waitKind === 'choice'
+      ? [{ name: 'ask.choice', input: { prompt: 'Continue verification after the retained write?', options: [{ label: 'Continue', value: 'confirm' }, { label: 'Hold', value: 'hold' }] } }]
+      : [{ name: 'fs.write', input: { path: 'retained.txt', content: 'one write' } }]
+    const host = createLocalHost({ cwd: dir, dataDir: dir, taskController: false, approvalMode: 'ask', mockToolCalls, mockAfterToolResponse: 'finished after recovery' })
+    const conversation = await host.createConversation()
+    const launch = { entry: fileURLToPath(new URL('../packages/cli/dist/bin.js', import.meta.url)), dataDir: dir, configPath, approvalMode: 'ask' as const, cwd: dir, runtimeOptions: host.getWorkWorkerOptions() }
+    try {
+      const first = await startH5WorkWorker(launch, { conversationId: conversation.id, text: 'Write the requested file' })
+      for await (const event of first.events) if (event.type === 'waiting') break
+      const runDir = join(dir, 'conversations', conversation.id, 'runs', first.id)
+      const before = JSON.parse(await readFile(join(runDir, 'model-budget.json'), 'utf8'))
+      expect(before.purposes?.['front-model']).toBeUndefined()
+      await first.shutdown!()
+      await expect(first.outcome()).rejects.toThrow('WORKER_EXITED')
+      expect((await host.getConversation(conversation.id)).summary.activeRunId).toBe(first.id)
+      await expect(access(join(runDir, 'task-outcome.json'))).rejects.toThrow()
+      const second = await startH5WorkWorker(launch, { conversationId: conversation.id, text: '', resume: true })
+      expect(second.id).toBe(first.id)
+      for await (const event of second.events) if (event.type === 'waiting') await second.reply((event.data as { effectId: string }).effectId, waitKind === 'choice' ? { value: 'confirm', text: 'Continue' } : { approved: true })
+      await expect(second.outcome()).resolves.toMatchObject({ status: 'succeeded' })
+      expect((await second.usage()).modelCalls).toBeGreaterThan(before.used)
+      expect(await readFile(join(dir, 'retained.txt'), 'utf8')).toBe('one write')
+    } finally { await host.close() }
+  }, 30_000)
+
   it('adapts versioned process events and interaction RPCs into a RunHandle', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'pulse-worker-'))
     temporaryDirectories.push(dataDir)
@@ -38,7 +69,7 @@ describe('H5 work worker IPC', () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'pulse-worker-input-'))
     temporaryDirectories.push(dataDir)
     const handle = await startH5WorkWorker({ entry: fileURLToPath(new URL('./fixtures/h5-work-worker.mjs', import.meta.url)), dataDir, approvalMode: 'ask' }, { conversationId: 'conv-input-fixture', text: 'work' })
-    const options = { requestId: 'fixed-followup-id', attachments: [{ id: 'note', name: 'note.txt', type: 'file' as const, size: 4, mediaType: 'text/plain', data: 'data:text/plain;base64,dGVzdA==' }], skills: ['example'], mentionedFiles: ['src/example.ts'] }
+    const options = { richContent: { version: 1 as const, document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'latest user input', marks: [{ type: 'bold' }] }] }] } }, requestId: 'fixed-followup-id', attachments: [{ id: 'note', name: 'note.txt', type: 'file' as const, size: 4, mediaType: 'text/plain', data: 'data:text/plain;base64,dGVzdA==' }], skills: ['example'], mentionedFiles: ['src/example.ts'] }
     await handle.submitHumanInput('latest user input', undefined, options)
     expect(JSON.parse(await readFile(join(dataDir, 'worker-human-input.json'), 'utf8'))).toEqual(['latest user input', null, options])
     await handle.outcome()
@@ -79,11 +110,12 @@ describe('H5 work worker IPC', () => {
         cwd: dir,
         runtimeOptions: host.getWorkWorkerOptions(),
         env: { PULSE_MOCK_RESPONSE: 'worker says hi' },
-      }, { conversationId: conversation.id, text: 'Please reply with the configured test response.' })
+      }, { conversationId: conversation.id, text: 'Please reply with the configured test response.', richContent: { version: 1, document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Please reply with the configured test response.', marks: [{ type: 'bold' }] }] }] } } })
       const events = []
       for await (const event of handle.events) events.push(event)
       await expect(handle.outcome()).resolves.toMatchObject({ status: 'succeeded' })
       expect(events.some(event => event.type === 'text' && event.data === 'worker says hi')).toBe(true)
+      expect((await host.getConversationMessages(conversation.id)).find(message => message.role === 'user')?.richContent?.document.content?.[0]?.content?.[0]?.marks).toEqual([{ type: 'bold' }])
       expect((await host.getConversationMessages(conversation.id)).some(message => message.role === 'assistant' && message.text === 'worker says hi')).toBe(true)
     } finally {
       await host.close()

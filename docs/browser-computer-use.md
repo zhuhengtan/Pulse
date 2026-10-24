@@ -10,7 +10,7 @@ Pulse 提供受管理的 `browser`、`computer` 能力。网页结构操作可�
 {
   "capabilities": {
     "enabled": ["browser", "computer"],
-    "browser": { "channel": "chrome", "mode": "dedicated" },
+    "browser": { "channel": "chrome" },
     "computer": {}
   },
   "taskRouting": { "vision": ["your-provider/your-vision-model"] },
@@ -33,8 +33,11 @@ pulse automation doctor --live --model your-provider/your-vision-model
 
 ## 浏览器
 
-- `dedicated` 使用 Pulse 自己的持久配置目录，保留该环境的登录状态。默认使用 Chromium，也可以选已安装的 Chrome 或 Edge。Chromium 二进制需通过对应 Playwright 版本安装，Chrome/Edge 使用系统安装。
-- `existing` 通过 Playwright 官方扩展连接现有 Chrome/Edge，需要安装扩展并在浏览器中确认目标。不会复制日常浏览器配置，也不会在断开时关闭用户浏览器。
+- `automation.open({ kind: "browser" })` 默认使用 `native`，直接操作 Electron 右侧栏的内部浏览器，与用户看到和接管的是同一组页面。同一对话复用内部会话，任务结束后保留标签页。
+- 只有用户明确要求使用外部浏览器，才在 `automation.open` 中指定 `mode: "dedicated"` 或 `mode: "existing"`。内部浏览器未连接时返回 `NATIVE_BROWSER_REQUIRED`，不自动启动外部 Playwright。已有外部浏览器配置也不会覆盖此默认值。
+- 外部 `dedicated` 使用 Pulse 自己的 Playwright 持久配置目录，保留该环境的登录状态。默认使用 Chromium，也可以选已安装的 Chrome 或 Edge。Chromium 二进制需通过对应 Playwright 版本安装，Chrome/Edge 使用系统安装。
+- 外部 `existing` 通过 Playwright 官方扩展连接现有 Chrome/Edge，需要安装扩展并在浏览器中确认目标。不会复制日常浏览器配置，也不会在断开时关闭用户浏览器。
+- 内部与外部会话分别复用；接管、恢复和 Electron 重连不会将已选择的外部会话改成内部会话。
 - 页面结构观察默认不发送图片；模型可请求 `browser.observe` 的 `includeImage: true` 切换到视觉路由。
 - 上传只能选择工作区内文件；下载写入 `.pulse/automation-downloads`，最近的浏览器截图写入 `.pulse/automation-observations/latest.png`。这两个目录属于运行产物，不应提交到版本控制。
 - `networkHosts` 校验导航和操作目标。浏览器仍运行在主机上；该目标检查不构成子资源、重定向、扩展或已存在浏览器的完整网络沙箱。
@@ -42,6 +45,10 @@ pulse automation doctor --live --model your-provider/your-vision-model
 工具包括 `automation.open/status/close`、`browser.tabs/selectTab/navigate/observe/act/upload/downloads`。动作使用观察返回的 `frameId`，坐标是截图内的 0–1 比例值。页面或几何信息变化后必须重新观察。首版不暴露任意网页 JavaScript 执行接口。
 
 ## 桌面与系统权限
+
+macOS 可先调用 `computer.windows`，再把返回的 `windowId` 传给 `computer.observe`，直接观察该窗口而不激活它。显式窗口观察的截图与 AX 树来自同一窗口；`captureScope`、`targetWindowId` 和 `captureBounds` 标明范围，坐标相对该截图归一化。目标已消失或无法唯一匹配时返回阻塞，不回退为整个桌面截图。Windows/Linux 的只读窗口截图目前返回 `READ_ONLY_WINDOW_CAPTURE_UNSUPPORTED`。
+
+`computer.selectWindow` 会激活窗口，仅在任务允许切换焦点时使用。选中窗口后的输入还会校验实际焦点与几何信息；截图中出现的停止按钮等状态只代表观察时刻。AX 树截断会通过 `accessibilityTruncated` 标明，缺少名称时不能把角色节点当作完整文字证据。
 
 源码开发环境先构建原生组件：
 
@@ -51,7 +58,7 @@ pulse automation doctor
 pulse automation permissions
 ```
 
-构建需要 Rust；macOS 同时需要 Xcode Command Line Tools 的 Swift 编译器。发行安装包应包含对应 `platform-arch` Helper 和校验清单，终端用户不需要 Rust。可用 `capabilities.computer.helperPath` 显式选择本机可信 Helper。
+构建需要 Rust；macOS 同时需要 Xcode Command Line Tools 的 Swift 编译器。只修改 Swift 且已有相同平台、架构的已校验 Rust 启动器时，可用 `node scripts/automation/build-desktop.mjs --swift-only` 仅重建 Swift 应用；修改启动器后必须完整构建。发行安装包应包含对应 `platform-arch` Helper 和校验清单，终端用户不需要 Rust。可用 `capabilities.computer.helperPath` 显式选择本机可信 Helper。
 
 macOS 权限窗口应显示 **Pulse Desktop Helper**，应用标识为 `com.hunterzhu.pulse.desktop`。若显示终端或 IDE 名称，应检查是否使用了旧版直接启动的 Helper，不要把宿主授权当作 Pulse 授权。正式发行可用 `PULSE_MACOS_SIGN_IDENTITY` 提供 Developer ID 签名；源码默认 ad-hoc 签名，重新编译或移动应用后可能需要重新授权。当前构建不等于已完成 Apple 公证。
 

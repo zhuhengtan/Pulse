@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto'
+// @ts-expect-error standalone evaluator module
+import { withLiveCliBudget } from '../../scripts/eval/live-cli-budget.mjs'
 import { readConversationFixture } from '../conversation-fixtures.js'
 import { describe, expect, it, afterEach } from 'vitest'
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 
 /**
@@ -12,20 +14,16 @@ import { join, resolve } from 'node:path'
  * (OpenAI, DeepSeek, Anthropic, or any OpenAI-compatible provider).
  *
  * How to run:
- *   OPENAI_API_KEY="sk-..." pnpm vitest run tests/live/cli-real-llm.live.test.ts
+ *   PULSE_LIVE_API=1 PULSE_LIVE_BATCH_DIR=<retained-ledger-dir> pnpm vitest run tests/live/cli-real-llm.live.test.ts
  *   or
- *   DEEPSEEK_API_KEY="sk-..." pnpm vitest run tests/live/cli-real-llm.live.test.ts
+ * Credentials alone never opt into paid tests. All workspaces are retained.
  */
 
 const cliBinPath = resolve('packages/cli/dist/bin.js')
 const temporaryDirectories: string[] = []
 
 afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories.splice(0).map((directory) =>
-      rm(directory, { recursive: true, force: true }).catch(() => undefined)
-    )
-  )
+  for (const directory of temporaryDirectories.splice(0)) console.log('Retained live test workspace:', directory)
 })
 
 interface LiveConfig {
@@ -81,7 +79,7 @@ interface RunResult {
   stderr: string
 }
 
-function runCli(
+function runCliUnbudgeted(
   args: string[],
   options?: {
     cwd?: string
@@ -125,8 +123,16 @@ function runCli(
   })
 }
 
+async function runCli(args: string[], options?: Parameters<typeof runCliUnbudgeted>[1]): Promise<RunResult> {
+  const index = args.indexOf('--config'), configPath = args[index + 1]
+  if (index < 0 || !configPath) throw new Error('LIVE_CONFIG_REQUIRED')
+  return withLiveCliBudget(configPath, process.env.PULSE_LIVE_BATCH_DIR, `legacy-live-${randomUUID()}`, () => runCliUnbudgeted(args, options))
+}
+
 async function setupWorkspaceWithConfig(config: LiveConfig): Promise<{ workspace: string; dataDir: string; configPath: string }> {
-  const workspace = await mkdtemp(join(tmpdir(), 'pulse-live-workspace-'))
+  const retained = resolve(process.env.PULSE_LIVE_ARTIFACT_DIR ?? '.pulse-dev/live-retained')
+  await mkdir(retained, { recursive: true })
+  const workspace = await mkdtemp(join(retained, 'pulse-live-workspace-'))
   temporaryDirectories.push(workspace)
   const dataDir = join(workspace, 'data')
   const configPath = join(workspace, 'pulse.config.json')
@@ -150,6 +156,7 @@ async function setupWorkspaceWithConfig(config: LiveConfig): Promise<{ workspace
       },
     },
     activeModel: config.model,
+    maxModelCalls: 64, // Per-run safety cap; multi-turn logical tasks still need an external cumulative ledger.
     dataDir,
     approvalMode: 'auto',
   }
@@ -158,7 +165,7 @@ async function setupWorkspaceWithConfig(config: LiveConfig): Promise<{ workspace
   return { workspace, dataDir, configPath }
 }
 
-describe.skipIf(!liveConfig)('Pulse CLI Real LLM Integration Suite (Live API)', () => {
+describe.skipIf(process.env.PULSE_LIVE_API !== '1' || !liveConfig)('Pulse CLI Real LLM Integration Suite (Live API)', () => {
   it('Scenario 1: pulse doctor diagnostics against real remote LLM provider', async () => {
     const cfg = liveConfig!
     const { workspace, dataDir, configPath } = await setupWorkspaceWithConfig(cfg)

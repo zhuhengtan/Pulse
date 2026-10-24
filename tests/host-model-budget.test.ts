@@ -9,7 +9,7 @@ import { createLocalHost } from '../packages/server/src/index.js'
 import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 
 const response = (content: string, tool?: { name: string; arguments: Record<string, unknown> }) => new Response(JSON.stringify({ choices: [{ message: tool ? { content: '', tool_calls: [{ id: 'call', function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } }] } : { content }, finish_reason: tool ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } }), { headers: { 'content-type': 'application/json' } })
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs() })
 
 describe('whole-run provider attempt budget', () => {
   it('stops auto-compaction at the run budget and durably records pre-runtime failure', async () => {
@@ -31,6 +31,7 @@ describe('whole-run provider attempt budget', () => {
       expect(manifest.runs).toHaveLength(1)
       const runDir = join(root, 'data/conversations', conversation.id, 'runs', manifest.runs[0])
       expect(JSON.parse(await readFile(join(runDir, 'outcome.json'), 'utf8'))).toMatchObject({ status: 'failed', error: { code: 'TASK_MODEL_CALL_BUDGET_EXHAUSTED' }, usage: { modelCalls: 4 } })
+      expect(JSON.parse(await readFile(join(runDir, 'task-outcome.json'), 'utf8'))).toMatchObject({ status: 'failed', blockers: [{ code: 'TASK_MODEL_CALL_BUDGET_EXHAUSTED' }] })
       await expect(host.resumeRun(conversation.id)).rejects.toThrow('NO_ACTIVE_RUN')
       expect(calls).toBe(4)
     } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
@@ -217,7 +218,8 @@ describe('whole-run provider attempt budget', () => {
     } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
   })
 
-  it('counts a successful local Ollama approval before continuing the original run', async () => {
+  it.each(['ollama', 'deepseek'] as const)('counts a successful %s approval before continuing the original run', async reviewer => {
+    vi.stubEnv('PULSE_TEST_REVIEW_KEY', 'fixture-key')
     const root = await mkdtemp(join(tmpdir(), 'pulse-local-review-used-'))
     let primary = 0, reviews = 0
     vi.stubGlobal('fetch', vi.fn(async (_url, options) => {
@@ -225,7 +227,7 @@ describe('whole-run provider attempt budget', () => {
       primary++
       return primary === 1 ? response('', { name: 'fs_write', arguments: { path: 'note.md', content: 'hello' } }) : response('done')
     }))
-    const host = createLocalHost({ cwd: root, dataDir: join(root, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, taskController: false, approvalMode: 'ask', maxModelCalls: 4, approvalReview: { provider: 'ollama', model: 'fixture', baseURL: 'http://127.0.0.1:11434', timeoutMs: 30_000 } })
+    const host = createLocalHost({ cwd: root, dataDir: join(root, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, taskController: false, approvalMode: 'ask', maxModelCalls: 4, approvalReview: { provider: reviewer, apiKeyEnv: 'PULSE_TEST_REVIEW_KEY', model: 'fixture', baseURL: 'http://127.0.0.1:11434', timeoutMs: 30_000 } })
     try {
       const conversation = await host.createConversation()
       const run = await host.sendMessage(conversation.id, { text: 'Write note.md' })
@@ -241,7 +243,8 @@ describe('whole-run provider attempt budget', () => {
     } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
   })
 
-  it('does not let a parent task-controller lane retry after a worker is denied', async () => {
+  it.each(['ollama', 'deepseek'] as const)('does not let a parent task-controller lane retry after a %s reviewer denies a worker', async reviewer => {
+    vi.stubEnv('PULSE_TEST_REVIEW_KEY', 'fixture-key')
     const root = await mkdtemp(join(tmpdir(), 'pulse-controller-denial-'))
     const goal = '检查运行时版本'
     let primary = 0, reviews = 0
@@ -252,7 +255,7 @@ describe('whole-run provider attempt budget', () => {
       if (text.includes('Create an executable plan')) return response(JSON.stringify({ tasks: [{ id: 'check', goal, criterionIds: acceptanceCriteriaFromObjective(goal).map(item => item.id), dependsOn: [], check: 'Check node version' }] }))
       return response('', { name: 'shell_exec', arguments: { command: 'node', args: ['-e', 'console.log(process.version)'] } })
     }))
-    const host = createLocalHost({ approvalReview: { provider: 'ollama', model: 'fixture', baseURL: 'http://127.0.0.1:11434', timeoutMs: 30000 }, cwd: root, dataDir: join(root, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, taskController: true, approvalMode: 'auto', maxModelCalls: 16 })
+    const host = createLocalHost({ approvalReview: { provider: reviewer, apiKeyEnv: 'PULSE_TEST_REVIEW_KEY', model: 'fixture', baseURL: 'http://127.0.0.1:11434', timeoutMs: 30000 }, cwd: root, dataDir: join(root, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, taskController: true, approvalMode: 'auto', maxModelCalls: 16 })
     try {
       const conversation = await host.createConversation()
       const run = await host.sendMessage(conversation.id, { text: goal })

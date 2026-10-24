@@ -31,6 +31,23 @@ check('reopen preserves used and original limit', async () => {
   // Windows stat exposes synthetic mode bits; POSIX chmod is not its ACL model.
   if (process.platform !== 'win32') assert.equal((await stat(p)).mode & 0o777, 0o600)
 })
+check('continuations inherit unspent calls across cold reopening without double-counting attempts', async () => {
+  const firstPath = budgetPath('lineage-first'), first = await ModelAttemptBudget.open(firstPath, 4)
+  await first.reserve('planning'); await first.reserve('approval')
+  const nextPath = budgetPath('lineage-next'), next = await ModelAttemptBudget.open(nextPath, 64)
+  await next.inheritRemaining(firstPath)
+  assert.equal(next.limit, 2); assert.equal(next.used, 0)
+  await next.reserve('work')
+  const restored = await ModelAttemptBudget.open(nextPath, 64)
+  await restored.inheritRemaining(firstPath)
+  assert.equal(restored.limit, 2); assert.equal(restored.used, 1)
+  await restored.reserve('verification')
+  const third = await ModelAttemptBudget.open(budgetPath('lineage-third'), 64)
+  await third.inheritRemaining(nextPath)
+  assert.equal(third.limit, 0)
+  await assert.rejects(third.reserve(), { code: 'TASK_MODEL_CALL_BUDGET_EXHAUSTED' })
+  assert.equal(first.used + restored.used + third.used, 4)
+})
 check('parallel reservations admit exactly limit', async () => {
   const budget = await ModelAttemptBudget.open(budgetPath('parallel'), 3)
   const settled = await Promise.allSettled(Array.from({ length: 12 }, () => budget.reserve()))

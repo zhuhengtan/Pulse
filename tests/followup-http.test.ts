@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { RichContent } from '../packages/server/src/rich-content.js'
 import { createLocalHost, H5Server, type HumanInputOptions } from '../packages/server/src/index.js'
 
 const cleanups: Array<() => Promise<void>> = []
@@ -19,7 +20,7 @@ async function fixture(surface: 'chat' | 'work') {
   await host.conversationData.call('save', { ...manifest, activeRunId: runId, runs: [runId] })
   const cancel = vi.fn(async () => {}), replyBatch = vi.fn(async () => {})
   const submit = vi.fn(async (text: string, _effectId?: string, options: HumanInputOptions = {}) => {
-    await host.appendAssistantUserMessage(conversationId, { id: `msg-${options.requestId}`, text, runId, createdAt: new Date().toISOString(), ...(options.attachments ? { attachments: options.attachments } : {}), ...(options.skills ? { skills: options.skills } : {}), ...(options.mentionedFiles ? { mentionedFiles: options.mentionedFiles } : {}) })
+    await host.appendAssistantUserMessage(conversationId, { id: `msg-${options.requestId}`, text, runId, createdAt: new Date().toISOString(), ...(options.attachments ? { attachments: options.attachments } : {}), ...(options.skills ? { skills: options.skills } : {}), ...(options.mentionedFiles ? { mentionedFiles: options.mentionedFiles } : {}), ...(options.richContent ? { richContent: options.richContent } : {}) })
   })
   ;(server as any).activeRuns.set(runId, { id: runId, conversationId, submitHumanInput: submit, cancel, replyBatch, pendingInteractions: async () => [] })
   cleanups.push(async () => { (server as any).activeRuns.delete(runId); await server.stop(); await host.close(); await new Promise(resolve => setTimeout(resolve, 200)); await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
@@ -29,12 +30,15 @@ async function fixture(surface: 'chat' | 'work') {
 describe('follow-up HTTP routing', () => {
   it.each(['chat', 'work'] as const)('routes %s immediate input to the active primary with full payload and deduplicates', async surface => {
     const f = await fixture(surface)
-    const body = { requestId: 'followup-request-001', delivery: 'immediate', text: '请先回答这个问题', mentionedFiles: ['example.ts'], attachments: [{ id: 'note-attachment', name: 'note.txt', type: 'file', mediaType: 'text/plain', size: 4, data: 'data:text/plain;base64,dGVzdA==' }] }
+    const richContent: RichContent = { version: 1, document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '请先回答这个问题', marks: [{ type: 'bold' }] }] }] } }
+    const body = { richContent, requestId: 'followup-request-001', delivery: 'immediate', text: '请先回答这个问题', mentionedFiles: ['example.ts'], attachments: [{ id: 'note-attachment', name: 'note.txt', type: 'file', mediaType: 'text/plain', size: 4, data: 'data:text/plain;base64,dGVzdA==' }] }
     const response = await f.post(f.path, body); expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ runId: f.runId })
-    expect(f.submit).toHaveBeenCalledTimes(1); expect(f.submit.mock.calls[0]?.[2]).toMatchObject({ requestId: body.requestId, mentionedFiles: ['example.ts'], attachments: [expect.objectContaining({ id: 'note-attachment' })] })
+    expect(f.submit).toHaveBeenCalledTimes(1); expect(f.submit.mock.calls[0]?.[2]).toMatchObject({ richContent, requestId: body.requestId, mentionedFiles: ['example.ts'], attachments: [expect.objectContaining({ id: 'note-attachment' })] })
     expect(f.cancel).not.toHaveBeenCalled()
     const duplicate = await f.post(f.path, body); expect(duplicate.status).toBe(200); expect(f.submit).toHaveBeenCalledTimes(1)
     expect((await f.post(f.path, { ...body, text: 'different' })).status).toBe(409)
+    expect((await f.post(f.path, { ...body, richContent: { version: 1, document: { type: 'doc', content: [{ type: 'paragraph' }] } } })).status).toBe(409)
+    expect((await f.post(f.path, { ...body, requestId: 'unsafe-rich-input', richContent: { version: 1, document: { type: 'script' } } })).status).toBe(400)
     expect((await f.host.getConversationMessages(f.conversationId)).filter(message => message.id === `msg-${body.requestId}`)).toHaveLength(1)
   })
   it.each(['chat', 'work'] as const)('does not put frontend-queued %s input into a server queue during a busy race', async surface => {

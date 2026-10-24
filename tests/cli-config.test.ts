@@ -135,7 +135,7 @@ describe('ensurePulseUserConfig', () => {
     }
   })
 
-  it('resolves feature models from the provider catalog and keeps approval review local-only', async () => {
+  it('resolves explicitly configured local and DeepSeek approval models from the provider catalog', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-feature-models-'))
     temporaryDirectories.push(directory)
     const previousHome = process.env.PULSE_HOME
@@ -160,7 +160,7 @@ describe('ensurePulseUserConfig', () => {
         activeModel: 'cloud/reviewer',
         approvalReview: { model: 'cloud/reviewer' },
       })}\n`)
-      await expect(hostOptions(parse(['--config', path]))).rejects.toThrow('APPROVAL_REVIEW_REQUIRES_OLLAMA')
+      expect((await hostOptions(parse(['--config', path]))).approvalReview).toMatchObject({ provider: 'deepseek', model: 'deepseek-chat', baseURL: 'https://api.deepseek.com', apiKeyEnv: 'DEEPSEEK_API_KEY' })
     } finally {
       if (previousHome === undefined) delete process.env.PULSE_HOME
       else process.env.PULSE_HOME = previousHome

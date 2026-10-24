@@ -70,59 +70,10 @@ it.runIf(process.env.PULSE_PREVIEW_LIVE === '1')('previews artifacts in real H5 
     await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: join(tmpdir(), 'pulse-preview-mobile.png') })
     expect(await page.locator('.workspace-window').evaluate((node: HTMLElement) => Math.round(node.getBoundingClientRect().width))).toBe(390)
     await page.setViewportSize({ width: 1440, height: 1000 })
-    // A real Agent-owned browser triggers the panel and remains available after release.
-    const session = await host.automation.open('browser', 'preview-run:agent', workspace, undefined, { conversationId: conversation.id, ...(projectId ? { projectId } : {}) })
-    const site = `http://127.0.0.1:${(website.address() as { port: number }).port}`
-    await host.automation.command(session.id, 'navigate', { url: site + '/login' }, 'preview-run:agent')
-    const first = await host.automation.observe(session.id, 'preview-run:agent')
-    expect((first.tabs as any).items).toHaveLength(1)
-    await host.automation.command(session.id, 'newTab', { url: site + '/other' }, 'preview-run:agent')
-    const tabs = await host.automation.command(session.id, 'tabs', {}, 'preview-run:agent') as any
-    expect(tabs.items).toHaveLength(2)
-    if (process.env.PULSE_PREVIEW_EXTERNAL === '1') {
-      await host.automation.command(session.id, 'newTab', { url: 'https://example.com' }, 'preview-run:agent')
-      const external = await host.automation.observe(session.id, 'preview-run:agent')
-      expect(String(external.text)).toContain('Example Domain')
-      const pages = await host.automation.command(session.id, 'tabs', {}, 'preview-run:agent') as any
-      await host.automation.command(session.id, 'closeTab', { index: pages.items.find((item: any) => item.active).index, revision: pages.revision }, 'preview-run:agent')
-    }
-    await expect(host.automation.command(session.id, 'selectTab', { index: 0, revision: 'stale' }, 'preview-run:agent')).rejects.toThrow('STALE_BROWSER_TABS')
-    await host.automation.command(session.id, 'selectTab', { index: 0, revision: tabs.revision }, 'preview-run:agent')
-    await host.automation.observe(session.id, 'preview-run:agent')
-    await page.locator('.automation-frame').waitFor()
-    await host.automation.releaseOwner('preview-run:agent')
-    await page.getByRole('button', { name: '接管', exact: true }).click()
-    await expect.poll(() => page.getByRole('button', { name: '前往', exact: true }).isEnabled()).toBe(true)
-    await page.screenshot({ path: join(tmpdir(), 'pulse-preview-browser.png') })
-    await page.getByLabel('浏览器地址', { exact: true }).fill(site + '/account')
-    await page.getByRole('button', { name: '前往', exact: true }).click()
-    await expect.poll(async () => String((await host.automation.observe(session.id)).text)).toContain('Logged in')
-    // All webpage tabs share the document tab strip. New pages use the launcher address bar.
-    expect(await page.locator('.workspace-window [role="tablist"]').count()).toBe(1)
-    await page.getByRole('button', { name: '新建标签页', exact: true }).click()
-    await page.getByRole('heading', { name: '工具', exact: true }).waitFor()
-    await page.locator('.workspace-start').getByLabel('浏览器地址', { exact: true }).fill(site + '/new-page')
-    await page.getByRole('button', { name: '前往', exact: true }).click()
-    await expect.poll(async () => String((await host.automation.observe(session.id)).url), {timeout:10000}).toBe(site + '/new-page')
-    expect(await page.locator('.workspace-error').count()).toBe(0)
-    await expect.poll(() => page.locator('.workspace-tabs [role="tab"]').count()).toBeGreaterThanOrEqual(7)
-    await page.locator('.workspace-browser-stage:not([hidden]) .automation-frame').waitFor()
-    await expect.poll(() => page.locator('.workspace-browser-stage:not([hidden]) .automation-frame').evaluate((node: HTMLImageElement) => node.complete && node.naturalWidth)).toBeGreaterThan(300)
-    await page.screenshot({ path: join(tmpdir(), 'pulse-workspace-browser.png') })
-    const browserPages = page.locator('.workspace-tabs [role="tab"][title^="http://127.0.0.1"]')
-    await browserPages.first().click()
-    await expect.poll(() => host.automation.list().find(item => item.id === session.id)?.url).toBe(site + '/account')
-    await page.getByRole('button', { name: '刷新网页', exact: true }).click()
-    await expect.poll(() => page.getByRole('button', { name: '刷新网页', exact: true }).isEnabled()).toBe(true)
-    await page.getByRole('button', { name: '关闭网页 Browser acceptance', exact: true }).last().click()
-    await expect.poll(async () => ((await host.automation.observe(session.id)).tabs as any)?.items.length, {timeout:5000}).toBe(2)
-    await page.getByRole('tab', { name: 'plan.md', exact: true }).click()
-    await page.getByRole('heading', { name: 'Preview acceptance' }).waitFor()
-    await page.reload()
-    await page.getByRole('heading', { name: 'Preview acceptance' }).waitFor()
-    await page.screenshot({ path: join(tmpdir(), 'pulse-workspace-file.png') })
-    await page.getByRole('button', { name: '关闭工作区', exact: true }).click()
-    expect(host.automation.list().find(item => item.id === session.id)?.state).toBe('human')
+    expect(await page.getByRole('button', { name: '打开浏览器', exact: true }).count()).toBe(0)
+    expect(await page.getByRole('button', { name: '用浏览器打开', exact: true }).count()).toBe(0)
+    expect(await page.locator('.automation-frame').count()).toBe(0)
+    // Native browsing is verified in workspace-browser.test.ts; Web retains artifact previews.
     // Electron uses a separate user-data directory and the same isolated test service.
     const env = { ...process.env, PULSE_DESKTOP_USER_DATA: join(root, 'electron'), PULSE_DESKTOP_DATA_DIR: dataDir, PULSE_HOME: join(root, 'home') }; delete env.ELECTRON_RUN_AS_NODE
     const electronPath = createRequire(new URL('../../packages/desktop/package.json', import.meta.url))('electron')
@@ -139,7 +90,7 @@ it.runIf(process.env.PULSE_PREVIEW_LIVE === '1')('previews artifacts in real H5 
     }
     await native.screenshot({ path: join(tmpdir(), 'pulse-preview-desktop.png') })
     expect(errors).toEqual([])
-    console.log(JSON.stringify({ standaloneWindow: true, singleTabStrip: true, addressBarNewPage: true, pageSwitchClose: true, selectedDocumentRestored: true, h5: true, desktop: true, markdown: true, image: true, pdf: true, htmlResources: true, multiTab: true, staleTabsRejected: true, loginRetained: true, externalSite: process.env.PULSE_PREVIEW_EXTERNAL === '1', screenshots: ['markdown', 'pdf', 'mobile', 'browser', 'desktop'].map(name => join(tmpdir(), `pulse-preview-${name}.png`)) }))
+    console.log(JSON.stringify({ standaloneWindow: true, singleTabStrip: true, webBrowserUseRemoved: true, h5: true, desktop: true, markdown: true, image: true, pdf: true, htmlResources: true,  screenshots: ['markdown', 'pdf', 'mobile', 'browser', 'desktop'].map(name => join(tmpdir(), `pulse-preview-${name}.png`)) }))
   } catch (error) {
     if (desktop) { const page = await desktop.firstWindow(); await page.screenshot({ path: join(tmpdir(), 'pulse-preview-desktop-failure.png') }); console.log('Desktop failure state', await page.locator('body').innerText()) }
     throw error

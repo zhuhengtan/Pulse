@@ -716,7 +716,7 @@ describe('H5Server End-to-End', () => {
       expect(runState).toBe('succeeded')
       expect(await readFile(join(dir, 'delegated.txt'), 'utf8')).toBe('const token = password; // implementation data for the test reviewer')
       expect(reviewerCalls).toBe(1)
-      expect(reviewerRequest).toMatchObject({ reasoning_effort: 'none', max_tokens: 128 })
+      expect(reviewerRequest).toMatchObject({ reasoning_effort: 'none', max_tokens: 2048 })
       expect(JSON.stringify(reviewerRequest?.messages)).toContain('Apply the authorization review above and respond with exactly APPROVE or HANDOFF.')
       expect(JSON.stringify(reviewerRequest?.messages)).not.toContain('fs.list')
       const audit = await readFile(join(dir, 'conversations', conversation.id, 'runs', runId, 'approval-reviews.jsonl'), 'utf8')

@@ -41,7 +41,8 @@ it.runIf(process.platform === 'darwin' && process.env.PULSE_DESKTOP_LIVE === '1'
     const firstFrame=await manager.observe(session.id,'desktop-acceptance')
     const display=displays.find(display=>display.id===String(firstFrame.geometry).split(':')[0])!
     expect(display).toBeDefined()
-    const point=(p:{x:number;y:number})=>({x:(p.x-display.x)/(display.width-1),y:(p.y-display.y)/(display.height-1)})
+    const area=(firstFrame.captureBounds ?? display) as {x:number;y:number;width:number;height:number}
+    const point=(p:{x:number;y:number})=>({x:(p.x-area.x)/(area.width-1),y:(p.y-area.y)/(area.height-1)})
     let sequence=0
     async function act(action:unknown) {
       await manager.command(session.id,'selectWindow',{windowId:target!.id},'desktop-acceptance')

@@ -3,6 +3,47 @@ import { z } from 'zod'
 import { PulseRuntime, defineLaneProgram } from '@hunterzhu/pulse-runtime'
 
 describe('structured LLM DSL contract', () => {
+  it('reports exact length constraints and permits two bounded corrections only when requested', async () => {
+    const effects: any[] = []
+    const program = defineLaneProgram({ id: 'structured-length-correction', version: '1' }, builder => {
+      builder.addStructuredLLMStep('review', {
+        task: 'verify', instruction: 'Judge supplied evidence; never invent evidence.',
+        schema: z.object({ note: z.string().max(500) }),
+        selfCorrect: { maxRounds: 2 }, detailedValidationErrors: true,
+        onSuccess: () => 'finish',
+      })
+      builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { done: true } }], next: 'finish' }))
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async effect => {
+      effects.push(effect)
+      return { value: { note: effects.length < 3 ? 'x'.repeat(728) : 'Evidence is sufficient.' } }
+    } })
+    const { agentId } = runtime.createAgent('review evidence', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('succeeded')
+    expect(effects.map(effect => effect.key)).toEqual(['review-llm', 'review-correct-1', 'review-correct-2'])
+    for (const effect of effects.slice(1)) {
+      expect(effect.input.inputs.validationErrors).toEqual([{ code: 'too_big', path: ['note'], maximum: 500, inclusive: true, type: 'string' }])
+      expect(effect.input.inputs.originalInstruction).toBe('Judge supplied evidence; never invent evidence.')
+      expect(JSON.stringify(effect.input.inputs.validationErrors)).not.toContain('x'.repeat(20))
+    }
+  })
+
+  it('still fails closed when both detailed corrections remain invalid', async () => {
+    let calls = 0
+    const program = defineLaneProgram({ id: 'structured-length-exhausted', version: '1' }, builder => {
+      builder.addStructuredLLMStep('review', {
+        task: 'verify', instruction: 'Judge supplied evidence.', schema: z.object({ note: z.string().max(500) }),
+        selfCorrect: { maxRounds: 2 }, detailedValidationErrors: true,
+        onSuccess: () => 'finish', onError: error => ({ fail: error }),
+      })
+      builder.addStep('finish', () => ({ actions: [{ type: 'complete', result: { done: true } }], next: 'finish' }))
+    })
+    const runtime = new PulseRuntime({ effectExecutor: async () => { calls++; return { value: { note: 'x'.repeat(728) } } } })
+    const { agentId } = runtime.createAgent('review evidence', program)
+    expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+    expect(calls).toBe(3)
+  })
+
   it('keeps the original inputs and execution policies during bounded self-correction', async () => {
     const effects: Array<Record<string, any>> = []
     const program = defineLaneProgram({ id: 'structured-contract', version: '1' }, (builder) => {

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createLocalHost } from '../packages/server/src/index.js'
-import { requiresExplicitPlanConfirmation } from '../packages/server/src/plan-confirmation.js'
+import { explicitPlanDecision, requiresExplicitPlanConfirmation } from '../packages/server/src/plan-confirmation.js'
 import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 import { currentRequestText } from './helpers/provider-request.js'
 
@@ -26,11 +26,15 @@ it.each([
 
 it.each([
   { choice: 'execute', mutate: false, atomic: false, revise: false },
+  { choice: 'execute', replyText: '同意执行', mutate: false, atomic: false, revise: false },
+  { choice: 'execute', replyText: '确认执行。', mutate: false, atomic: false, revise: false },
+  { choice: 'defer', replyText: '不同意执行', mutate: false, atomic: false, revise: false },
+  { choice: 'defer', invalidReply: '同意执行，但先修改方案', mutate: false, atomic: false, revise: false },
   { choice: 'defer', mutate: false, atomic: false, revise: false },
   { choice: 'execute', mutate: true, atomic: false, revise: false },
   { choice: 'execute', mutate: false, atomic: true, revise: false },
   { choice: 'execute', mutate: false, atomic: false, revise: true },
-])('binds natural-language confirmation to the saved plan before implementation (%j)', async ({ choice, mutate, atomic, revise }) => {
+])('binds natural-language confirmation to the saved plan before implementation (%j)', async ({ choice, replyText, invalidReply, mutate, atomic, revise }) => {
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-natural-plan-'))
   const objective = atomic ? '先更新 docs/plans/feature.md 方案，确认后再实现 greet.mjs。' : '先把方案写到 docs/plans/feature.md，确认后再实现 greet.mjs。'
   const ids = acceptanceCriteriaFromObjective(objective).map(c => c.id)
@@ -79,7 +83,14 @@ it.each([
         await expect(run.reply(event.data!.effectId as string, { value: 'execute' })).rejects.toMatchObject({ code: 'PLAN_CHANGED_RECONFIRM_REQUIRED' })
         await expect(readFile(join(cwd, 'greet.mjs'), 'utf8')).rejects.toThrow()
         await run.reply(event.data!.effectId as string, { value: 'defer' })
-      } else await run.reply(event.data!.effectId as string, { value: choice })
+      } else {
+        if (invalidReply) {
+          await expect(run.reply(event.data!.effectId as string, { text: invalidReply })).rejects.toMatchObject({ code: 'PLAN_EXECUTION_DECISION_REQUIRED' })
+          expect((await run.pendingInteractions())[0]!.items[0]!.effectId).toBe(event.data!.effectId)
+          await expect(readFile(join(cwd, 'greet.mjs'))).rejects.toThrow()
+        }
+        await run.reply(event.data!.effectId as string, replyText ? { text: replyText } : { value: choice })
+      }
     }
     const outcome = await run.outcome()
     expect(waiting, outcome.text).toBe(revise ? 2 : 1)
@@ -89,4 +100,17 @@ it.each([
     if (approved) expect(await readFile(join(cwd, 'greet.mjs'), 'utf8')).toContain('export const greet')
     else await expect(readFile(join(cwd, 'greet.mjs'), 'utf8')).rejects.toThrow()
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
+})
+
+it.each([
+  [{ text: '同意执行' }, 'approved'],
+  [{ text: '不同意执行' }, 'deferred'],
+  [{ text: '同意执行，但先修改计划' }, undefined],
+  [{ text: '尚未同意执行' }, undefined],
+  [{ value: 'execute', text: '不同意执行' }, undefined],
+  [{ text: '同意执行', approved: false }, 'deferred'],
+  [{ approved: true }, undefined],
+])('uses exact unconditional decisions without substring-based approval: %j', (answer, expected) => {
+  const question = { kind: 'ask', type: 'choice', options: [{ label: '暂不执行', value: 'defer' }, { label: '执行', value: 'execute' }] }
+  expect(explicitPlanDecision(question, answer)).toBe(expected)
 })

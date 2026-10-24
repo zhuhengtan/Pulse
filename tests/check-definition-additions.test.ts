@@ -212,3 +212,16 @@ describe('authorized test additions and independent check scope', () => {
     expect(requiredArgumentChecks({ objective: '检查 --budget 参数', acceptanceCriteria: [{ id: 'args', description: 'invalid budget must fail' }] }).map(c => c.id)).toEqual(['args'])
   })
 })
+
+it('explains rejected top-level additions while preserving the baseline and allowing callback-local setup', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pulse-test-addition-diagnostic-'))
+  const store = join(root, 'data'), path = 'test/example.test.mjs'
+  const original = "import test from 'node:test'\ntest('baseline', () => {})\n"
+  try {
+    await mkdir(join(root, 'test')); await writeFile(join(root, path), original)
+    await freezeCheckDefinitions(root, store, true)
+    await expect(assertCheckEdit(root, store, path, original + "\nimport http from 'node:http'\n")).rejects.toMatchObject({ code: 'FROZEN_TEST_CHANGE', details: { path, additionsAllowed: true, constraints: expect.stringContaining('inside the appended test callback') } })
+    expect(await readFile(join(root, path), 'utf8')).toBe(original)
+    await expect(assertCheckEdit(root, store, path, original + "\ntest('extra', async () => { const http = await import('node:http'); const helper = () => Boolean(http); if (!helper()) throw Error('missing'); })\n")).resolves.toBeUndefined()
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

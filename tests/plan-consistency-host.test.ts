@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createLocalHost } from '../packages/server/src/index.js'
@@ -8,6 +8,36 @@ import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 import { currentRequestText } from './helpers/provider-request.js'
 
 afterEach(() => vi.unstubAllGlobals())
+
+it('explains the permitted hash read without opening the implementation gate', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'pulse-plan-inspection-'))
+  await writeFile(join(cwd, 'input.txt'), 'caller-owned input\n')
+  let turns = 0
+  vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+    const body = String(init.body)
+    turns++
+    const tool = (name: string, args: object) => Response.json({ choices: [{ message: { content: '', tool_calls: [{ id: `read-${turns}`, function: { name, arguments: JSON.stringify(args) } }] }, finish_reason: 'tool_calls' }] })
+    if (turns === 1) return tool('shell_exec', { command: 'shasum', args: ['-a', '256', 'input.txt'] })
+    if (turns === 2) { expect(body).toContain('fs.read (its receipt includes hash)'); return tool('fs_read', { path: 'input.txt' }) }
+    if (turns === 3) { expect(body).toContain('caller-owned input'); expect(body).toContain('hash'); return tool('fs_write', { path: 'implementation.mjs', content: 'throw Error("UNAUTHORIZED")' }) }
+    expect(body).toContain('PLAN_CONFIRMATION_REQUIRED')
+    return Response.json({ choices: [{ message: { content: 'Input inspected; implementation awaits plan confirmation.' }, finish_reason: 'stop' }] })
+  }))
+  const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, jarvis: { enabled: false }, taskController: false, approvalMode: 'auto', maxModelCalls: 12 })
+  try {
+    const c = await host.createConversation(), run = await host.sendMessage(c.id, { text: '先写方案，确认后再实现。目前只读核对 input.txt 的内容与哈希。' })
+    await run.outcome()
+    expect(await readFile(join(cwd, 'input.txt'), 'utf8')).toBe('caller-owned input\n')
+    expect(await readFile(join(cwd, 'implementation.mjs'), 'utf8').catch(() => null)).toBeNull()
+    const snapshot = JSON.parse(await readFile(join(cwd, 'data', 'conversations', c.id, 'runs', run.id, 'runtime.json'), 'utf8'))
+    const effects = snapshot.state.state.effects.map((row: any) => row[1])
+    const executed = effects.filter((e: any) => e.kind === 'tool' && e.state === 'succeeded')
+    expect(executed.map((e: any) => e.input.name)).toEqual(['fs.read'])
+    const blocked = effects.filter((e: any) => e.kind === 'tool' && e.state === 'failed')
+    expect(blocked.map((e: any) => e.input.name)).toEqual(['shell.exec', 'fs.write'])
+    expect(blocked.every((e: any) => e.outcome.error.code === 'PLAN_CONFIRMATION_REQUIRED')).toBe(true)
+  } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
+})
 
 it('reviews the entire revised plan and repairs a prerequisite cycle before offering execution', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-plan-consistency-'))
@@ -82,7 +112,7 @@ it.each(['malformed', 'unavailable', 'unresolved'] as const)('preserves the save
     for await (const event of run.events) expect(event.type).not.toBe('waiting')
     expect(await run.outcome()).toMatchObject({ status: 'failed', error: { code: 'QUESTION_VALIDATION_FAILED' } })
     expect(await readFile(join(cwd, 'docs/plans/blocked.md'), 'utf8')).toBe(plan)
-    expect(reviews).toBe(1)
+    expect(reviews).toBe(mode === 'malformed' ? 2 : 1)
     expect(turns).toBe(4)
     const dir = join(cwd, 'data/conversations', conversation.id, 'runs', run.id, 'plan-reviews')
     const saved = JSON.parse(await readFile(join(dir, (await readdir(dir))[0]!), 'utf8'))

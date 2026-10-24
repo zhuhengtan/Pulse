@@ -14,6 +14,29 @@ function finalReview(runtime: PulseRuntime): { value: JsonValue } {
 }
 
 describe('Host task controller', () => {
+  it.each(['38', '39'] as const)('keeps v38 progress correction semantics and supplies bounded detailed recovery in v39 (%s)', async version => {
+    let runtime: PulseRuntime, agentId = '', reviews = 0, reads = 0
+    const program = buildTaskControllerProgram({ version, system: 'test', toolNames: ['read'], readOnlyToolNames: ['read'], approvalMode: 'auto', maxTurns: 32 })
+    runtime = new PulseRuntime({ effectExecutor: async effect => {
+      if (effect.kind === 'tool') return { value: { item: ++reads, content: 'observed evidence' } }
+      if (effect.key?.startsWith('plan')) return { value: { tasks: [{ id: 'inventory', kind: 'verify', goal: 'Inspect current workspace state', check: 'Read enough evidence to report state', dependsOn: [], criterionIds: ['criterion-1'] }] } }
+      const active = globalFor(runtime, agentId).taskController.tasks[0]
+      if (effect.key?.startsWith('progress-review')) {
+        reviews++
+        if (version === '39' && reviews > 1) expect((effect.input as any).inputs.validationErrors).toEqual([expect.objectContaining({ path: ['nextAction'], maximum: 500, type: 'string' })])
+        return { value: { status: 'ready', evidenceRefs: active.evidenceRefs, note: 'Sufficient evidence.', ...(reviews <= 2 ? { nextAction: 'x'.repeat(728) } : {}) } }
+      }
+      if (effect.key?.startsWith('verify-stage')) return { value: { status: 'passed', evidenceRefs: active.evidenceRefs, note: 'Observed state verified.' } }
+      if (effect.key?.startsWith('verify-task')) return finalReview(runtime)
+      return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'read', input: { item: reads + 1 } }] } }
+    } })
+    agentId = runtime.createAgent({ goal: 'Inspect workspace state', program, initialGlobal: initialGlobal(1) }).agentId
+    await runtime.start(agentId).outcome()
+    expect(reviews).toBe(version === '39' ? 3 : 2)
+    expect(reads).toBe(4)
+    expect(globalFor(runtime, agentId).taskOutcome.status).toBe(version === '39' ? 'accepted' : 'incomplete')
+  })
+
   it('omits only a redundant terminal all-criteria review, retaining commands, gates and uncovered requirements', () => {
     const edit = { ...task('task-1'), kind: 'edit' as const }
     const final = { id: 'final', kind: 'verify' as const, goal: '最终核对全部交付物与 criteria 覆盖情况', check: '所有原始要求均有证据', criterionIds: ['criterion-1'], dependsOn: ['task-1'] }
@@ -279,9 +302,10 @@ describe('Host task controller', () => {
     expect(reviews).toBe(2)
   })
 
-  it('uses v18 for new controllers while retaining earlier program versions for restoration', () => {
+  it('uses v54 for new controllers while retaining earlier program versions for restoration', () => {
     expect(buildTaskControllerProgram({ system: 'test', version: '17', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('17')
-    expect(buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('19')
+    expect(buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('54')
+    for (const version of ['42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53'] as const) expect(buildTaskControllerProgram({ system: 'test', version, toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe(version)
     expect(buildTaskControllerProgram({ system: 'test', version: '9', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('9')
     expect(buildTaskControllerProgram({ system: 'test', version: '8', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('8')
     expect(buildTaskControllerProgram({ system: 'test', version: '7', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('7')
