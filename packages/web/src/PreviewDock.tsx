@@ -133,16 +133,16 @@ export function PreviewDock({ scope, projectId, project, conversationId, transpo
   // A restored tool tab must render its content even after the route is cleared.
   if (current?.kind === 'tool') toolPosition.set('workspace', current.tool)
   if (!tabs.length) return null
-  return <aside className="workspace-window" aria-label="独立工作区" style={width ? { '--workspace-window-width': `${width}px` } as CSSProperties : undefined}>
-    <PulseButton className="workspace-divider" onPointerDown={beginResize} aria-label="调整工作窗口宽度" />
+  return <aside className="workspace-window" aria-label="标签页" style={width ? { '--workspace-window-width': `${width}px` } as CSSProperties : undefined}>
+    <PulseButton className="workspace-divider" onPointerDown={beginResize} aria-label="调整标签页面板宽度" />
     <header className="workspace-titlebar">
-      <div ref={tabBar} className="workspace-tabs" role="tablist" aria-label="工作窗口标签">{tabs.map(target => {
+      <div ref={tabBar} className="workspace-tabs" role="tablist" aria-label="标签页">{tabs.map(target => {
         const key = previewKey(target), browser = target.kind === 'browser' ? browserStates[target.sessionId] : undefined
         const pages = browser?.session?.tabs?.items
         if (target.kind === 'browser' && pages?.length) return pages.map(page => <div className={`workspace-tab ${active === key && page.active ? 'active' : ''}`} key={`${key}:${page.index}`}><PulseButton role="tab" aria-selected={active === key && page.active} title={page.url} onClick={() => { setActive(key); clearRoute(); if (!page.active) controllers.current[target.sessionId]?.selectTab(page.index, browser!.session!.tabs!.revision) }}><Icon name="web" size={15}/><span>{page.title || '新标签页'}</span></PulseButton><PulseButton aria-label={`关闭网页 ${page.title || '新标签页'}`} disabled={!browser?.canControl || browser.busy || closing.includes(key)} onClick={() => pages.length === 1 ? close(target) : controllers.current[target.sessionId]?.closeTab(page.index, browser!.session!.tabs!.revision)}><Icon name="close" size={12}/></PulseButton></div>)
         return <div className={`workspace-tab ${active === key ? 'active' : ''}`} key={key}><PulseButton role="tab" aria-selected={active === key} onClick={() => { setActive(key); clearRoute() }} title={target.kind === 'file' || target.kind === 'diff' ? target.path : title(target)}><Icon name={target.kind === 'start' || target.kind === 'browser' ? 'web' : target.kind === 'diff' ? 'edit' : target.kind === 'tool' ? tools.find(item => item.tool === target.tool)!.icon : 'file'} size={15}/><span>{target.kind === 'browser' ? browser?.session?.title || title(target) : title(target)}</span></PulseButton><PulseButton aria-label={`关闭 ${target.kind === 'file' || target.kind === 'diff' ? target.path : title(target)} 标签`} onClick={() => close(target)}><Icon name="close" size={12}/></PulseButton></div>
       })}</div><PulseButton className="workspace-new-tab" title="新建标签页" aria-label="新建标签页" onClick={startPage}><Icon name="plus" size={17}/></PulseButton>
-      {onClose && <PulseButton className="workspace-close" aria-label="关闭工作区" title="关闭全部标签页" disabled={closing.length > 0} onClick={() => void closeTargets(tabs)}><Icon name="close" size={16}/></PulseButton>}
+      {onClose && <PulseButton className="workspace-close" aria-label="关闭全部标签页" title="关闭全部标签页" disabled={closing.length > 0} onClick={() => void closeTargets(tabs)}><Icon name="close" size={16}/></PulseButton>}
     </header>
     {error && <p className="workspace-error" role="alert">{error}</p>}
     <div className="workspace-window-content">

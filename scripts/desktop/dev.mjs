@@ -6,7 +6,7 @@ import { desktopPageUrl } from '../../packages/desktop/src/dev-url.mjs';
 import { realpath } from 'node:fs/promises';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
-const url = desktopPageUrl(false, process.env.PULSE_DESKTOP_DEV_URL ?? 'http://127.0.0.1:5174/work/new?workspace=preview');
+const url = desktopPageUrl(false, process.env.PULSE_DESKTOP_DEV_URL ?? 'http://127.0.0.1:5174/work/new');
 const origin = new URL(url).origin;
 const backend = new URL(process.env.PULSE_H5_TARGET ?? 'http://127.0.0.1:7333').origin;
 const webOnly = process.argv.includes('--web-only');

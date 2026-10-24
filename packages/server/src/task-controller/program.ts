@@ -17,7 +17,7 @@ import { observeStageProgress, stageProgressBlock } from './progress.js'
 import { deliveryChains, stageDelivery } from './delivery.js'
 import { acceptanceFailure, assessAcceptanceResult } from './acceptance.js'
 import { testAdditionsRequested, candidateTestChangesAllowed, isCheck } from '../check-receipt.js'
-import { explicitPlanDecision, planRevisionFeedback, planConfirmationOptions, requiresExplicitPlanConfirmation } from '../plan-confirmation.js'
+import { explicitPlanDecision, PLAN_CONFIRMATION_PENDING, planRevisionFeedback, planConfirmationOptions, requiresExplicitPlanConfirmation } from '../plan-confirmation.js'
 import { isReadyPlanReview } from '../plan-consistency.js'
 
 /**
@@ -668,7 +668,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
             return { actions: [], next: 'report' }
           }
           save(ctx, state)
-          return { actions: [{ type: 'submit_effects', effects: [{ key: 'plan-execution', kind: 'human', concurrencyClass: 'none', input: { kind: 'ask', type: 'choice', toolName: 'ask.choice', prompt: '请审阅已保存的计划 ' + plan.path + '，是否执行？', options: [{ label: '暂不执行', value: 'defer' }, { label: '执行', value: 'execute' }], decisionScope: 'plan-execution', decisionId: 'plan-execution:' + plan.hash } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'plan-confirmation:collect', locals: { ...(ctx.lane.resume.locals as Record<string, JsonValue>), pendingPlan: plan, planConfirmationNext: step } }
+          return { actions: [{ type: 'submit_effects', effects: [{ key: 'plan-execution', kind: 'human', concurrencyClass: 'none', input: { kind: 'ask', type: 'choice', toolName: 'ask.choice', prompt: '请审阅已保存的计划 ' + plan.path + '，是否执行？', planPath: plan.path, options: [{ label: '暂不执行', value: 'defer' }, { label: '执行', value: 'execute' }], decisionScope: 'plan-execution', decisionId: 'plan-execution:' + plan.hash } }], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'plan-confirmation:collect', locals: { ...(ctx.lane.resume.locals as Record<string, JsonValue>), pendingPlan: plan, planConfirmationNext: step } }
         }
       }
       if (boundedTransitions && step === 'dispatch' && !chainState(ctx) && /并行|并发|\b(?:parallel|concurrent)\b/i.test(taskRecordFromGlobal(ctx.global as JsonValue)?.objective ?? ctx.goal)) return { actions: [], next: 'dispatch-stages' }
@@ -1347,6 +1347,12 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
         // Drop all queued operations from the old plan. Only the plan repair
         // tools may run until review and a new hash-bound approval succeed.
         return { next: 'repair-plan', locals: {} }
+      }
+      if (answer && typeof answer === 'object' && !Array.isArray(answer) && answer.dismissed === true && Object.keys(answer).length === 1) {
+        for (const task of state.tasks) if (task.status === 'pending' || task.status === 'running') { task.status = 'blocked'; task.note = PLAN_CONFIRMATION_PENDING }
+        delete state.activeId
+        save(ctx, state)
+        return { next: 'report', locals: {} }
       }
       if (!plan || typeof plan !== 'object' || Array.isArray(plan) || typeof plan.path !== 'string' || typeof plan.hash !== 'string' || !question || typeof question !== 'object' || Array.isArray(question) || question.decisionId !== 'plan-execution:' + plan.hash || !ref || !answer || typeof answer !== 'object' || Array.isArray(answer) || (['37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54'].includes(programVersion) ? explicitPlanDecision(question, answer) !== 'approved' : answer.value !== 'execute')) {
         for (const task of state.tasks) if (task.status === 'pending' || task.status === 'running') { task.status = 'blocked'; task.note = 'APPROVAL_DENIED: plan execution not authorized.' }

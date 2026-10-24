@@ -59,7 +59,7 @@ it('opens the owning turn artifact in the right panel and restores it through br
   await screen.findByText('正文 run-1')
   expect(view.router.state.location.search).toContain('artifactRun=run-1')
   expect(view.router.state.location.search).toContain('workspace=preview')
-  expect(within(screen.getByLabelText('独立工作区')).getByText('正文 run-1')).toBeTruthy()
+  expect(within(screen.getByRole('complementary', { name: '标签页' })).getByText('正文 run-1')).toBeTruthy()
   expect(within(screen.getByText('docs/second.md').closest('section')!).queryByText('正文 run-1')).toBeNull()
   await act(async () => { await view.router.navigate(-1) })
   await waitFor(() => expect(screen.queryByText('正文 run-1')).toBeNull())

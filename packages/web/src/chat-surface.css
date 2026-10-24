@@ -16,6 +16,11 @@
   --message-outgoing:#2d2d2d; --message-outgoing-text:#ededed;
 }
 .chat-surface .messages { width:min(848px,100%); padding:28px 24px 20px; gap:24px; scrollbar-gutter:auto; }
+.chat-surface .navbar-actions { position:static; flex:none; margin-left:auto; max-width:none; gap:6px; overflow:visible; }
+.chat-surface .navbar-actions .navbar-tool { display:inline-flex; align-items:center; justify-content:center; width:38px; min-width:38px; height:38px; min-height:38px; padding:0; border:0; border-radius:8px; background:transparent; color:var(--muted); }
+.chat-surface .navbar-actions .navbar-tool:hover,.chat-surface .navbar-actions .navbar-tool.active { background:var(--soft); color:var(--ink); }
+.chat-surface .navbar-actions .navbar-tool svg { width:21px; height:21px; }
+.navbar-tool-separator { flex:none; width:1px; height:24px; margin:0 7px; background:var(--line); }
 .chat-surface .message.message--chat,.chat-surface .message.message--work { max-width:100%; }
 .chat-surface .message.user { max-width:88%; }
 .chat-surface .message.assistant { width:100%; }
@@ -65,7 +70,7 @@
 .approval-operation { min-width:0; padding:8px 10px; border-radius:8px; background:var(--soft); }
 .approval-tool { display:block; color:var(--muted); font-size:11px; margin-bottom:4px; }
 .approval-operation code,.approval-operation pre { font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; margin:0; color:var(--ink); }
-.technical-details summary,.question-custom summary { padding:8px 0; color:var(--muted); font-size:12px; cursor:pointer; }
+.technical-details summary { padding:8px 0; color:var(--muted); font-size:12px; cursor:pointer; }
 .technical-details pre { max-height:160px; overflow:auto; }
 .interaction-panel .review-note { display:flex; align-items:flex-start; gap:6px; margin:10px 0 0; padding:0; color:var(--muted); background:transparent; font-size:12px; line-height:1.6; }
 .review-note .pulse-icon { margin-top:3px; }
@@ -87,6 +92,9 @@
 .question-options.multi .ant-checkbox-inner::after { border-color:var(--chat-action-fg); }
 .question-hint { margin:0 0 8px; color:var(--muted); font-size:12px; }
 .question-custom { margin-top:8px; }
+.interaction-heading .question-close { margin-left:auto; flex:none; width:28px; height:28px; min-height:28px; padding:4px; color:var(--muted); }
+.question-plan-link { padding:0; border:0; background:transparent; color:var(--accent); font:inherit; text-decoration:underline; text-underline-offset:3px; overflow-wrap:anywhere; cursor:pointer; }
+.question-plan-link:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:3px; }
 .question-custom textarea,.question-input { width:100%; min-height:70px; max-height:160px; resize:vertical; padding:8px 10px; color:var(--ink); border:1px solid var(--line); border-radius:8px; background:transparent; }
 /* Queue is a compact shelf attached to the composer, never a second transcript. */
 .message-queue { flex:0 1 auto; min-height:0; max-height:180px; overflow:auto; overscroll-behavior:contain; width:100%; padding:4px 10px; border:1px solid var(--line); border-radius:12px; background:var(--surface-subtle); font-size:13px; }
@@ -114,6 +122,9 @@
 .chat-surface :is(button,a,summary,textarea):focus-visible { outline:2px solid var(--chat-focus); outline-offset:2px; }
 .chat-surface :is(button,a,summary,textarea,.rich-composer,.queue-actions) { transition:color 140ms ease,background-color 140ms ease,border-color 140ms ease,opacity 140ms ease; }
 @media (max-width:767px) {
+  .chat-surface .navbar-actions { gap:0; }
+  .chat-surface .navbar-actions .navbar-tool { width:44px; min-width:44px; height:44px; min-height:44px; }
+  .navbar-tool-separator { height:22px; margin:0 3px; }
   .chat-surface .messages { padding:20px 12px 16px; }
   .chat.chat-surface[data-chat-theme] .composer-wrap,.chat.chat-surface[data-chat-theme] .composer-wrap.is-empty { width:100%; padding:6px 12px max(8px,env(safe-area-inset-bottom)); max-height:calc(100dvh - 64px); gap:6px; }
   .chat-surface .rich-composer .ProseMirror { max-height:110px; font-size:16px; }

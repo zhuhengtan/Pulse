@@ -28,6 +28,7 @@ interface GitFixture {
   worktree: string
   /** clean driver 真被启动时写入的标记文件，位于 worktree 内（子沙箱可写）。 */
   marker: string
+  secretCommit: string
   cleanup: () => Promise<void>
 }
 
@@ -85,7 +86,11 @@ async function createFixture(): Promise<GitFixture> {
     await git(['diff'], worktree)
     if (!(await readFile(marker, 'utf8')).includes('FIXTURE_CONFIG_READ')) throw new Error('Fixture clean driver did not execute successfully')
     await rm(marker, { force: true })
-    return { repo, worktree, marker, cleanup: async () => { await rm(base, { recursive: true, force: true }) } }
+    await writeFile(join(repo, 'historical-secret.txt'), 'HISTORICAL_SECRET_BLOB\n')
+    await git(['add', 'historical-secret.txt'])
+    await git(['commit', '--quiet', '-m', 'historical secret'])
+    const secretCommit = (await git(['rev-parse', 'HEAD'])).trim()
+    return { repo, worktree, marker, secretCommit, cleanup: async () => { await rm(base, { recursive: true, force: true }) } }
   } catch (error) {
     await rm(base, { recursive: true, force: true }).catch(() => undefined)
     throw error
@@ -106,11 +111,16 @@ describePosix('git metadata exception: real worktree boundary', () => {
 
   it('keeps status, rev-parse and diff working on a real worktree', async () => {
     const current = fixture
-    for (const args of [['status', '--porcelain'], ['rev-parse', '--git-dir'], ['diff', '--name-only']]) {
+    for (const args of [['status', '--porcelain'], ['rev-parse', '--git-dir'], ['diff', '--name-only'], ['diff', '--', 'notes.txt']]) {
       const result = await runShell('git', args, { cwd: current.worktree, env: { PATH: pathEnv }, timeoutMs: 20_000 })
       expect(result.code, `git ${args.join(' ')} 失败：${result.stderr}`).toBe(0)
     }
   }, 90_000)
+
+  it('does not grant a revision diff, so historical blobs stay unread', async () => {
+    const result = await runShell('git', ['diff', fixture.secretCommit, '--', 'historical-secret.txt'], { cwd: fixture.worktree, env: { PATH: pathEnv }, timeoutMs: 20_000 })
+    expect(result.stdout).not.toContain('HISTORICAL_SECRET_BLOB')
+  }, 60_000)
 
   it('refuses cat-file --filters so the filter cannot inherit the read', async () => {
     const current = fixture

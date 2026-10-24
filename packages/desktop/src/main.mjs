@@ -221,7 +221,7 @@ else {
                 return new Response('Forbidden', { status: 403 });
             if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/file-preview/')) {
                 try {
-                    const response = url.pathname.startsWith('/file-preview/') ? await fetch(base + url.pathname + url.search, { redirect: 'error', signal: AbortSignal.timeout(10000) }) : await http(url.pathname + url.search);
+                    const response = url.pathname.startsWith('/file-preview/') ? await fetch(base + url.pathname + url.search, { redirect: 'error', headers: { Cookie: cookie, Origin: base }, signal: AbortSignal.timeout(10000) }) : await http(url.pathname + url.search);
                     return new Response(await response.arrayBuffer(), { status: response.status, headers: { 'Content-Type': response.headers.get('content-type') ?? 'application/octet-stream', 'Content-Disposition': response.headers.get('content-disposition') ?? 'inline', ...(response.headers.get('content-security-policy') ? { 'Content-Security-Policy': response.headers.get('content-security-policy') } : {}), 'X-Content-Type-Options': 'nosniff' } });
                 }
                 catch {

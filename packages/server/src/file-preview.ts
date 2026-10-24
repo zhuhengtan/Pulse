@@ -8,6 +8,18 @@ export const MAX_FILE_BYTES = 128 * 1024 * 1024
 const types: Record<string, string> = { '.md': 'text/markdown', '.txt': 'text/plain', '.log': 'text/plain', '.json': 'application/json', '.html': 'text/html', '.htm': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.mjs': 'text/javascript', '.ts': 'text/plain', '.tsx': 'text/plain', '.jsx': 'text/plain', '.xml': 'text/xml', '.csv': 'text/csv', '.yaml': 'text/plain', '.yml': 'text/plain', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.ico': 'image/x-icon', '.pdf': 'application/pdf', '.woff': 'font/woff', '.woff2': 'font/woff2' }
 export function fileMediaType(path: string): string { return types[extname(path).toLowerCase()] ?? 'application/octet-stream' }
 
+const webResource = /\.(?:js|mjs|css|map|png|jpe?g|gif|webp|avif|svg|ico|woff2?)$/i
+
+/** A ticket reads its own file. HTML may also load static assets beneath that file's directory. */
+export function ticketPathAllowed(ticketPath: string, requested: string): boolean {
+  if (requested === ticketPath) return true
+  if (!/\.html?$/i.test(ticketPath)) return false
+  const slash = ticketPath.lastIndexOf('/')
+  const directory = slash === -1 ? '' : ticketPath.slice(0, slash + 1)
+  if (!directory || !requested.startsWith(directory) || requested.slice(directory.length).split('/').some(part => !part || part === '..' || part.startsWith('.'))) return false
+  return webResource.test(requested)
+}
+
 /** Read and hash the same bounded bytes, including binary artifacts. */
 export async function readPreviewFile(root: string, path: string, expectedHash?: string) {
   const absolutePath = await within(root, path)
@@ -68,7 +80,7 @@ export class FilePreviewServer {
       const ticket = match && this.tickets.get(match[1]!)
       if (!ticket || ticket.expiresAt < Date.now()) { res.writeHead(404).end(); return }
       const path = decodeURIComponent(match![2]!)
-      if (path.split('/').some(part => part.startsWith('.') || part === 'node_modules')) { res.writeHead(404).end(); return }
+      if (path.split('/').some(part => part.startsWith('.') || part === 'node_modules') || !ticketPathAllowed(ticket.path, path)) { res.writeHead(404).end(); return }
       const value = await readPreviewFile(ticket.root, path, path === ticket.path ? ticket.hash : undefined)
       const prefix = `/file-preview/${match![1]}/`
       if (value.mediaType === 'text/html') {

@@ -26,6 +26,23 @@ it.each([false, true])('continues a late caller answer only with the versioned o
   expect([...runtime.state.effects.values()].filter(e => e.kind === 'llm')).toHaveLength(models)
 })
 
+it('does not refill the window when the caller closes without answering', async () => {
+  let models = 0, humans = 0
+  const program = defineLaneProgram({ id: 'plan-answer-dismiss', version: '1' }, builder => {
+    builder.addReActLoopStep('repair', { instruction: 'repair', maxTurns: 2, maxHumanTurnResets: 1, onFinish: () => ({ complete: {} }) })
+  })
+  const runtime = new PulseRuntime({ effectExecutor: async effect => {
+    if (effect.kind === 'human') { humans++; return { value: { dismissed: true } } }
+    models++
+    if (models === 2) expect(JSON.stringify(effect.input)).toContain('No answer or permission was supplied')
+    return { value: { finishReason: 'tool_calls', toolCalls: [{ name: 'ask.input', input: { prompt: 'Which contract?' } }] } }
+  } })
+  const { agentId } = runtime.createAgent('repair', program)
+  expect((await runtime.start(agentId).outcome()).status).toBe('failed')
+  expect(humans).toBe(2)
+  expect(models).toBe(3)
+})
+
 it('does not refill the window for replayed questions or reset cumulative effect accounting', async () => {
   let models = 0, humans = 0
   const program = defineLaneProgram({ id: 'plan-answer-replay', version: '1' }, builder => {

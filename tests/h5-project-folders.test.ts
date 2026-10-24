@@ -38,6 +38,8 @@ describe('project source folders and manual order', () => {
       const project = projects.find((item: { cwd: string }) => item.cwd === initial) ?? await request('/api/projects', 'POST', { name: 'Primary test', cwd: initial }).then(response => response.json())
       const old = await request('/api/conversations', 'POST', { projectId: project.id }).then(response => response.json())
       expect(old.cwd).toBe(initial)
+      const paired = await fetch(base + '/api/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: server.createPairingCode().code, name: 'Phone' }) })
+      expect((await fetch(base + `/api/projects/${project.id}`, { method: 'PATCH', headers: { Cookie: paired.headers.get('set-cookie')!, Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify({ cwd: next, folders: [initial, next] }) })).status).toBe(403)
       const patch = await request(`/api/projects/${project.id}`, 'PATCH', { name: 'Edited', folders: [initial, next], cwd: next })
       expect(patch.status).toBe(200)
       expect(await patch.json()).toMatchObject({ cwd: next, folders: [initial, next] })

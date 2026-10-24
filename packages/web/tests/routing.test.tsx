@@ -5,6 +5,7 @@ import { PulseApp } from '../src/PulseApp.js'
 import { PulseDesignSystem } from '../src/PulseDesignSystem.js'
 import { parsePulseRoute, settingsCategories, workUrl, workspaceTabs } from '../src/routing.js'
 import { previewKey, savePreviewState } from '../src/previewState.js'
+import { followupFixture } from './fixtures/followup.js'
 import { routingFixture } from './fixtures/routing.js'
 
 vi.mock('../src/TerminalConsole.js', () => ({ TerminalConsole: ({ terminalId }: { terminalId: string }) => <div>已连接 {terminalId}</div> }))
@@ -29,17 +30,41 @@ const address = (router: ReturnType<typeof createMemoryRouter>) => router.state.
 const navigate = async (router: ReturnType<typeof createMemoryRouter>, target: string | number) => { await act(async () => { if (typeof target === 'number') await router.navigate(target); else await router.navigate(target) }) }
 
 describe('explicit URL navigation', () => {
-  it('surfaces the internal AI browser in the right panel even when an external session is listed first', async () => {
+  it('opens and hides tabs without losing a document, and keeps export in More and details separate', async () => {
+    const view = show('/work/pulse-chat?file=docs%2Fplan.md&workspace=preview')
+    await screen.findByText('Verified workspace document')
+    const tabs = screen.getByRole('button', { name: '标签页', exact: true })
+    expect(tabs.getAttribute('aria-expanded')).toBe('true')
+    expect(screen.queryByRole('button', { name: '工作区', exact: true })).toBeNull()
+    fireEvent.click(tabs)
+    await waitFor(() => expect(screen.queryByRole('complementary', { name: '标签页' })).toBeNull())
+    fireEvent.click(tabs)
+    await screen.findByText('Verified workspace document')
+    expect(view.calls.some(call => /\/control|\/command/.test(call.path))).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: '更多', exact: true }))
+    expect(await screen.findByRole('menuitem', { name: '导出会话' })).toBeTruthy()
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' })
+    fireEvent.click(screen.getByRole('button', { name: '对话详情', exact: true }))
+    await screen.findByRole('dialog', { name: '对话详情' })
+    expect(view.calls.some(call => call.path.endsWith('/export'))).toBe(false)
+  })
+
+  it('keeps existing browser sessions closed initially, then surfaces a newly created internal browser', async () => {
     const original = window.pulseDesktop
     window.pulseDesktop = { nativeBrowser: true } as NonNullable<typeof window.pulseDesktop>
     try {
       const fixture = routingFixture(), request = fixture.transport.request
+      let addNew = false, snapshots = 0
       const base = { kind: 'browser', state: 'ai', conversationId: 'pulse-chat', owner: 'run:agent' }
       fixture.transport.request = async (path, init) => path === '/api/automation/sessions'
-        ? Response.json({ sessions: [{ ...base, id: 'external', mode: 'dedicated' }, { ...base, id: 'internal', mode: 'native' }], nativeBrowser: true, approvalMode: 'ask' })
+        ? (snapshots++, Response.json({ sessions: [{ ...base, id: 'external', mode: 'dedicated' }, { ...base, id: 'internal', mode: 'native' }, ...(addNew ? [{ ...base, id: 'new-internal', mode: 'native' }] : [])], nativeBrowser: true, approvalMode: 'ask' }))
         : request(path, init)
       const view = show('/work/pulse-chat', fixture)
-      await waitFor(() => expect(new URLSearchParams(view.router.state.location.search).get('automation')).toBe('internal'))
+      await screen.findByText('消息：pulse-chat')
+      await waitFor(() => expect(snapshots).toBeGreaterThan(0))
+      expect(new URLSearchParams(view.router.state.location.search).has('workspace')).toBe(false)
+      addNew = true
+      await waitFor(() => expect(new URLSearchParams(view.router.state.location.search).get('automation')).toBe('new-internal'), { timeout: 4000 })
       expect(new URLSearchParams(view.router.state.location.search).get('workspace')).toBe('preview')
       view.unmount()
     } finally { window.pulseDesktop = original }
@@ -353,4 +378,24 @@ describe('explicit URL navigation', () => {
     await act(async () => { resolve() })
     expect(view.baseElement.querySelector('.ant-drawer-open')).toBeTruthy()
   })
+})
+
+it('opens a pending plan in the right dock using its exact run instead of the unmerged project file', async () => {
+  const fixture = followupFixture('work', true), original = fixture.transport.request
+  const path = 'docs/plans/feature.md', runId = fixture.conversation.activeRunId!
+  fixture.transport.request = async (url, init) => {
+    if (url.endsWith('/state')) return Response.json({ runId, state: 'running', seq: 0, activities: [], interactions: [{ groupId: 'plan-group', kind: 'ask', items: [{ effectId: 'plan-question', input: { type: 'choice', prompt: `请审阅已保存的计划 ${path}，是否执行？`, options: [{ value: 'defer', label: '暂不执行' }, { value: 'execute', label: '执行' }] } }] }] })
+    if (url.includes('/artifacts/raw?')) return new Response('# Pending plan preview\n\nRead before executing.', { headers: { 'Content-Type': 'text/markdown' } })
+    return original(url, init)
+  }
+  const router = createMemoryRouter([{ path: '*', element: <PulseApp transport={fixture.transport}/> }], { initialEntries: ['/work/busy'] })
+  routers.push(router)
+  const view = render(<PulseDesignSystem><RouterProvider router={router}/></PulseDesignSystem>)
+  try {
+    fireEvent.click(await view.findByRole('button', { name: path }))
+    expect(new URLSearchParams(router.state.location.search).get('workspace')).toBe('preview')
+    expect(new URLSearchParams(router.state.location.search).get('artifactRun')).toBe(runId)
+    await view.findByRole('heading', { name: 'Pending plan preview' })
+    expect(fixture.calls.filter(call => call.path.endsWith('/replies'))).toHaveLength(0)
+  } finally { view.unmount() }
 })

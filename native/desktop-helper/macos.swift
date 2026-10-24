@@ -134,7 +134,7 @@ struct Desktop {
     @MainActor static func resolveWindow(_ id:String) async throws -> (NSRunningApplication,AXUIElement?) {
         if id.hasPrefix("sc:"), let captureID=UInt32(id.dropFirst(3)) {
             let content=try await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:false)
-            guard let target=content.windows.first(where: { $0.windowID == captureID }),let pid=target.owningApplication?.processID,let app=NSRunningApplication(processIdentifier:pid),windowTargets[id]?.pid == nil || windowTargets[id]?.pid == pid else { try fail("WINDOW_NOT_FOUND: capture identity is absent or changed") }
+            guard let target=content.windows.first(where: { $0.windowID == captureID }),let pid=target.owningApplication?.processID,let app=NSRunningApplication(processIdentifier:pid),windowTargets[id]?.pid == pid else { try fail("WINDOW_NOT_FOUND: capture identity is absent or changed") }
             let list=attr(applicationElement(pid),kAXWindowsAttribute) as? [AXUIElement] ?? []
             let frames=list.map { (pid,windowBounds($0) ?? .zero) }
             let selected=matchingWindow(frames,pid,target.frame).map { list[$0] }

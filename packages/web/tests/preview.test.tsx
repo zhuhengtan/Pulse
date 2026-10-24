@@ -52,7 +52,7 @@ it('explains an unavailable backend preview endpoint instead of reporting a miss
 it('opens tools in the same standalone window without nested tabs or an expansion control', async () => {
   const fixture = workbenchFixture()
   const view = render(<PulseDesignSystem><PreviewDock scope="new" projectId="pulse" project={workbenchProject} transport={fixture.transport} localAdmin /></PulseDesignSystem>)
-  expect(screen.getByRole('complementary', { name: '独立工作区' })).toBeTruthy()
+  expect(screen.getByRole('complementary', { name: '标签页' })).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '文件', exact: true }))
   await screen.findByText('README.md')
   expect(view.container.querySelectorAll('[role="tablist"]')).toHaveLength(1)
@@ -71,7 +71,7 @@ it('closes the panel and clears saved tabs after closing the final document', as
   await screen.findByRole('heading', { name: 'First result' })
   fireEvent.click(screen.getByRole('button', { name: '关闭 report.md 标签' }))
   await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
-  expect(screen.queryByRole('complementary', { name: '独立工作区' })).toBeNull()
+  expect(screen.queryByRole('complementary', { name: '标签页' })).toBeNull()
   expect(readPreviewState('last').tabs).toEqual([])
 })
 it('normalizes browser addresses and rejects credentials and non-web protocols', () => {

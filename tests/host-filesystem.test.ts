@@ -61,7 +61,7 @@ describe('host filesystem service', () => {
 })
 
 describe('authenticated host filesystem HTTP flow', () => {
-  it('lets an existing paired device browse outside projects, create and register without granting admin privileges', async () => {
+  it('lets an existing paired device browse and create directories without registering a project or gaining admin privileges', async () => {
     const root = await fixture(); const workspace = join(root, 'workspace'); const outside = join(root, 'outside'); await mkdir(workspace); await mkdir(outside)
     const dataDir = join(root, 'data'); const host = createLocalHost({ cwd: workspace, dataDir }); let server = new H5Server(host, { dataDir, host: '127.0.0.1', port: 0 })
     try {
@@ -73,7 +73,7 @@ describe('authenticated host filesystem HTTP flow', () => {
       const post = (path: string, body: unknown, origin = base) => fetch(`${base}${path}`, { method: 'POST', headers: { ...headers(), Origin: origin }, body: JSON.stringify(body) })
       // Persisted pairing works after a server restart, without a new pairing code.
       await server.stop(); server = new H5Server(host, { dataDir, host: '127.0.0.1', port: 0 }); base = `http://127.0.0.1:${(await server.start()).port}`
-      expect(await (await get('/api/session')).json()).toMatchObject({ localAdmin: false, canBrowseHostPaths: true, canRegisterProject: true, canUseTerminal: false, canEditConfig: false })
+      expect(await (await get('/api/session')).json()).toMatchObject({ localAdmin: false, canBrowseHostPaths: true, canRegisterProject: false, canUseTerminal: false, canEditConfig: false })
       expect((await fetch(`${base}/api/host-filesystem/roots`)).status).toBe(401)
       expect((await fetch(`${base}/api/host-filesystem/directories`, { method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify({ parentPath: outside, name: 'anonymous' }) })).status).toBe(401)
       expect((await get('/api/host-filesystem/roots')).status).toBe(200)
@@ -86,8 +86,8 @@ describe('authenticated host filesystem HTTP flow', () => {
       expect((await post('/api/host-filesystem/directories', { parentPath: outside, name: '手机 新项目' })).status).toBe(409)
       expect((await post('/api/host-filesystem/directories', { parentPath: outside, name: '../escape' })).status).toBe(400)
       expect((await post('/api/projects', { name: 'Mobile', cwd: path }, 'http://evil.example')).status).toBe(403)
-      const registered = await post('/api/projects', { name: 'Mobile', cwd: path }); expect(registered.status).toBe(201)
-      expect(await registered.json()).toMatchObject({ cwd: path, name: 'Mobile' })
+      const registered = await post('/api/projects', { name: 'Mobile', cwd: path }); expect(registered.status).toBe(403)
+      expect(await registered.json()).toMatchObject({ error: 'LOCAL_ADMIN_REQUIRED' })
       for (const endpoint of ['/api/config', '/api/terminals']) expect((await get(endpoint)).status).toBe(403)
       expect((await post('/api/projects/select-directory', {})).status).toBe(403)
       expect((await get(`/api/host-filesystem/entries?path=${encodeURIComponent(join(outside, 'missing'))}`)).status).toBe(404)

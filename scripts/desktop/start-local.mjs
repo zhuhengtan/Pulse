@@ -79,7 +79,7 @@ async function main() {
 --web-only  只启动后台和网页，浏览器访问输出的地址。
 --no-build  跳过编译，复用已有 dist（首次启动不要使用）。
 --restart  构建成功后校验并重启开发后台，保留数据及原端口，复用匹配的 Vite 和窗口；运行中任务会中断。
-环境变量：PULSE_DEV_DIR（默认 .pulse-dev）、PULSE_WEB_DEV_PORT（默认 7333）、PULSE_DESKTOP_DEV_URL（默认 http://127.0.0.1:5174/work/new?workspace=preview）。
+环境变量：PULSE_DEV_DIR（默认 .pulse-dev）、PULSE_WEB_DEV_PORT（默认 7333）、PULSE_DESKTOP_DEV_URL（默认 http://127.0.0.1:5174/work/new）。
 新后台会在退出窗口/脚本后继续运行，可从 Electron 菜单停止。仅本脚本新启动的前端会随窗口/脚本退出停止。`); return;
     }
     if (args.includes('--web-only') && electronArgs.length) throw new Error('--web-only 不能同时传入 Electron 参数。');
@@ -87,7 +87,7 @@ async function main() {
     if (major < 22 || major === 22 && minor < 13) throw new Error('需要 Node.js >=22.13。');
     const port = Number(process.env.PULSE_WEB_DEV_PORT ?? 7333);
     if (!Number.isInteger(port) || port < 1 || port > 65535 || port === 7332) throw new Error('开发端口须为 1–65535 的整数；7332 保留给正式服务。');
-    const url = desktopPageUrl(false, process.env.PULSE_DESKTOP_DEV_URL ?? 'http://127.0.0.1:5174/work/new?workspace=preview');
+    const url = desktopPageUrl(false, process.env.PULSE_DESKTOP_DEV_URL ?? 'http://127.0.0.1:5174/work/new');
     if (new URL(url).port === String(port)) throw new Error('前端与后台端口不能相同。');
     const dev = resolve(repo, process.env.PULSE_DEV_DIR ?? '.pulse-dev'), data = join(dev, 'h5', 'data'), logs = join(dev, 'logs');
     const env = { ...process.env, PULSE_DATA_DIR: data, PULSE_DESKTOP_DATA_DIR: data, PULSE_DESKTOP_USER_DATA: join(dev, 'electron'), PULSE_H5_HOST: '127.0.0.1', PULSE_DESKTOP_DEV_URL: url };

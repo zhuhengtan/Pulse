@@ -880,8 +880,6 @@ export class H5Server {
       return
     }
 
-    if (pathname.startsWith('/file-preview/')) { await this.filePreviews.serve(req.url ?? '', res, method); return }
-
     const previewResource = pathname.match(/^\/preview\/([0-9a-f-]{36})(?:\/(.*))?$/i)
     if (previewResource?.[1] && method === 'GET') {
       const ticket = this.previewTickets.get(previewResource[1])
@@ -985,7 +983,11 @@ export class H5Server {
 
     const localAdmin = loopback && authedDevice?.scope === 'local'
     const canBrowseHostPaths = Boolean(authedDevice)
-    const canRegisterProject = Boolean(authedDevice)
+    const canRegisterProject = localAdmin
+    if (pathname.startsWith('/file-preview/')) {
+      await this.filePreviews.serve(req.url ?? '', res, method)
+      return
+    }
     const requireSameOrigin = (): boolean => {
       let origin: string | undefined
       try { origin = typeof req.headers.origin === 'string' ? new URL(req.headers.origin).origin : undefined } catch { origin = undefined }
@@ -1062,7 +1064,7 @@ export class H5Server {
 
     if (pathname === '/api/approval-policy' && (method === 'GET' || method === 'PUT')) {
       if (method === 'PUT') {
-        if (!requireSameOrigin()) { res.writeHead(403).end(); return }
+        if (!localAdmin || !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: localAdmin ? 'SAME_ORIGIN_REQUIRED' : 'LOCAL_ADMIN_REQUIRED' })); return }
         const { policy } = await this.parseJsonBody(req)
         if (policy !== 'manual' && policy !== 'delegate') { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'APPROVAL_POLICY_INVALID' })); return }
         await this.setGlobalApprovalPolicy(policy)
@@ -1347,7 +1349,7 @@ export class H5Server {
       return
     }
     if (pathname === '/api/projects' && method === 'POST') {
-      if (!canRegisterProject || !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: canRegisterProject ? 'SAME_ORIGIN_REQUIRED' : 'UNAUTHORIZED' })); return }
+      if (!localAdmin || !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: localAdmin ? 'SAME_ORIGIN_REQUIRED' : 'LOCAL_ADMIN_REQUIRED' })); return }
       const body = await this.parseJsonBody(req)
       if (typeof body.name !== 'string' || typeof body.cwd !== 'string') { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'PROJECT_INPUT_REQUIRED' })); return }
       try { const project = await this.projects.add(body.name, body.cwd); res.writeHead(201, { 'Content-Type': 'application/json' }).end(JSON.stringify(project)) }
@@ -1400,7 +1402,7 @@ export class H5Server {
     if (projectMatch?.[1] && method === 'PATCH') {
       if (!requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'SAME_ORIGIN_REQUIRED' })); return }
       const body = await this.parseJsonBody(req)
-      if ((body.cwd !== undefined || body.folders !== undefined) && !canRegisterProject) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'UNAUTHORIZED' })); return }
+      if ((body.cwd !== undefined || body.folders !== undefined) && !localAdmin) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'LOCAL_ADMIN_REQUIRED' })); return }
       if (body.cwd !== undefined && (typeof body.cwd !== 'string' || !body.cwd.trim()) || body.folders !== undefined && (!Array.isArray(body.folders) || body.folders.some(path => typeof path !== 'string'))) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'PROJECT_FOLDERS_INVALID' })); return }
       if (body.previewUrl !== undefined && !localAdmin) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'LOCAL_ADMIN_REQUIRED' })); return }
       try { const project = await this.projects.update(decodeURIComponent(projectMatch[1]), { ...(typeof body.cwd === 'string' ? { cwd: body.cwd } : {}), ...(Array.isArray(body.folders) ? { folders: body.folders as string[] } : {}), ...(typeof body.name === 'string' ? { name: body.name } : {}), ...(typeof body.pinned === 'boolean' ? { pinned: body.pinned } : {}), ...(typeof body.previewUrl === 'string' || body.previewUrl === null ? { previewUrl: body.previewUrl as string | null } : {}) }); res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(project)) }

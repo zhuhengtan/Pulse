@@ -23,6 +23,7 @@ it('serves ticketed HTML and related resources from a separate sandboxed origin'
   const directory = await root(); await mkdir(join(directory, 'site'))
   await writeFile(join(directory, 'site/index.html'), '<title>Preview</title><script src="app.js"></script>')
   await writeFile(join(directory, 'site/app.js'), 'document.title="ready"')
+  await writeFile(join(directory, 'secret.txt'), 'SECRET')
   const server = new FilePreviewServer()
   try {
     const ticket = await server.ticket(directory, 'site/index.html')
@@ -30,6 +31,7 @@ it('serves ticketed HTML and related resources from a separate sandboxed origin'
     expect(response.status).toBe(200); expect(response.headers.get('content-security-policy')).toContain('sandbox allow-scripts')
     expect(response.headers.get('content-security-policy')).not.toContain('allow-same-origin')
     expect(await (await fetch(new URL('app.js', ticket.browserUrl))).text()).toContain('ready')
+    expect((await fetch(ticket.browserUrl.replace('site/index.html', 'secret.txt'))).status).toBe(404)
     expect((await fetch(new URL('/api/session', ticket.browserUrl))).status).toBe(404)
     expect((await fetch(ticket.browserUrl.replace(/file-preview\/[a-f0-9-]+/, 'file-preview/00000000-0000-0000-0000-000000000000'))).status).toBe(404)
   } finally { await server.close() }
@@ -47,6 +49,7 @@ it('registers and downloads a binary artifact through the Host and H5, preservin
     const session = await fetch(base + '/api/session/local', { method: 'POST', headers: { Origin: base } })
     const headers = { Cookie: session.headers.get('set-cookie')!.split(';')[0]!, Origin: base }
     const path = `/api/conversations/${conversation.id}/artifacts/raw?path=report.pdf&runId=${run.id}&download=1`
+    expect((await fetch(base + '/file-preview/00000000-0000-0000-0000-000000000000/report.pdf')).status).toBe(401)
     expect((await fetch(base + path)).status).toBe(401)
     const response = await fetch(base + path, { headers }); expect(response.status).toBe(200)
     expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes)

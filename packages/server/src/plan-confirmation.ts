@@ -29,12 +29,15 @@ export function planConfirmationOptions(input: unknown): { defer: string; execut
   return { defer: first.value, execute: second.value }
 }
 
+/** Closing the card supplies no decision. Implementation stays unauthorized and is not a refusal. */
+export const PLAN_CONFIRMATION_PENDING = 'PLAN_CONFIRMATION_PENDING: The user closed the execution question without answering. The saved plan remains, and implementation stays unauthorized until the user explicitly chooses to execute.'
+
 /** Exact, unconditional human decisions only; a substring never grants authority. */
 export function explicitPlanDecision(input: unknown, answer: unknown): 'approved' | 'deferred' | undefined {
   const choices = planConfirmationOptions(input)
   if (!choices || !answer || typeof answer !== 'object' || Array.isArray(answer)) return undefined
   const row = answer as Record<string, unknown>
-  if (row.approved === false) return 'deferred'
+  if (row.approved === false || row.dismissed === true) return 'deferred'
   const selected = row.value === choices.execute ? 'approved' : row.value === choices.defer ? 'deferred' : undefined
   const text = typeof row.text === 'string' ? row.text.trim().replace(/[。！!.]+$/, '').trim() : undefined
   if (text !== undefined && text.length > 0) {

@@ -18,3 +18,4 @@ packages/server/native/
 artifacts/desktop/
 artifacts/desktop-runtime/
 artifacts/desktop-connection-fix/
+artifacts/*

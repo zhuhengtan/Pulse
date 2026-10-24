@@ -7,14 +7,22 @@ export type PendingInteraction = {
   items: Array<{ effectId: string; input: Record<string, unknown> }>
   conversationId?: string; conversationTitle?: string; projectId?: string; approvalPolicy?: 'manual' | 'delegate'
 }
-type Answer = { value: string } | { values: string[] } | { text: string }
+type Answer = { value: string; text?: string } | { values: string[] } | { text: string }
+const executionPhrase = (text: string) => /^(?:同意执行|确认执行|批准执行|按此方案执行|approve execution|execute the plan)$/i.test(text.trim().replace(/[。！!.]+$/u, '').trim())
+const planExecutionQuestion = (input: Record<string, unknown>) => {
+  const options = Array.isArray(input.options) ? input.options : []
+  if (options.length !== 2) return false
+  const label = (option: unknown) => typeof option === 'string' ? option : option && typeof option === 'object' && !Array.isArray(option) && typeof (option as { label?: unknown }).label === 'string' ? (option as { label: string }).label : ''
+  return /^暂不执行/u.test(label(options[0]).trim()) && /^执行/u.test(label(options[1]).trim())
+}
 type Props = {
   interaction: PendingInteraction; context?: string | undefined; reviewNote: string; delegated: boolean
   onOpenConversation?: (() => void) | undefined
+  onOpenFile?: ((path: string) => void) | undefined
   submit: (answers: Array<{ effectId: string; value: Record<string, unknown> }>) => Promise<boolean>
 }
 
-export function InteractionPanel({ interaction, context, reviewNote, delegated, submit, onOpenConversation }: Props) {
+export function InteractionPanel({ interaction, context, reviewNote, delegated, submit, onOpenConversation, onOpenFile }: Props) {
   const key = `pulse-web-interaction:${interaction.runId}:${interaction.groupId}`
   const [answers, setAnswers] = useState<Record<string, Answer>>(() => {
     let restored: Record<string, Answer> = {}
@@ -38,10 +46,23 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
     setAnswers(next); setError('')
     try { localStorage.setItem(key, JSON.stringify(next)) } catch { setError('浏览器无法保存答案草稿，请保持当前页面打开。') }
   }
+  const submittedAnswer = (question: PendingInteraction['items'][number]): Record<string, unknown> => {
+    const answer = answers[question.effectId]
+    if (answer && 'value' in answer && answer.value) return { value: answer.value }
+    if (answer && 'text' in answer && answer.text?.trim()) return { text: answer.text }
+    if (answer && 'values' in answer) return { values: answer.values }
+    return { values: [] }
+  }
   const answerValid = (question: PendingInteraction['items'][number]) => {
     const answer = answers[question.effectId]
-    if (answer && 'text' in answer) return typeof answer.text === 'string' && Boolean(answer.text.trim()) && answer.text.length <= 4000
-    if (question.input.type === 'choice') return Boolean(answer && 'value' in answer && typeof answer.value === 'string' && answer.value.length)
+    if (question.input.type === 'choice' && answer && 'value' in answer && answer.value) return true
+    if (answer && 'text' in answer) {
+      const text = answer.text ?? ''
+      if (!text.trim() || text.length > 4000) return false
+      if (question.input.type === 'choice' && planExecutionQuestion(question.input) && executionPhrase(text)) return false
+      return true
+    }
+    if (question.input.type === 'choice') return false
     if (question.input.type === 'multi') {
       const values = answer && 'values' in answer && Array.isArray(answer.values) ? answer.values : []
       return values.length >= (typeof question.input.min === 'number' ? question.input.min : 0) && values.length <= (typeof question.input.max === 'number' ? question.input.max : Infinity)
@@ -87,11 +108,15 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
     </section>
   }
   const count = interaction.items.length
+  const prompt = String(input.prompt ?? '请回答')
+  const planPath = typeof input.planPath === 'string' ? input.planPath : prompt.match(/docs\/plans\/[^\s`，。；,;？?]+\.md/u)?.[0]
+  const planStart = planPath ? prompt.indexOf(planPath) : -1
+  const openPlan = planPath && onOpenFile ? <button type="button" className="question-plan-link" onClick={() => onOpenFile(planPath)}>{planPath}</button> : null
   return <section className="interaction-panel ask-panel" aria-label="待回答问题" aria-busy={sending}>
-    <div className="interaction-heading"><Icon name="info" size={16}/><strong>需要你的回答</strong>{count > 1 && <span>第 {index + 1} / {count} 题</span>}</div>
+    <div className="interaction-heading"><Icon name="info" size={16}/><strong>需要你的回答</strong>{count > 1 && <span>第 {index + 1} / {count} 题</span>}<PulseButton className="icon-button question-close" aria-label="不作答并关闭" title="不作答并关闭" disabled={sending} onClick={() => void submitBatch(interaction.items.map(question => ({ effectId: question.effectId, value: { dismissed: true } })))}><Icon name="close" size={16}/></PulseButton></div>
     {contextLine}
     <div className="question-scroll">
-      <h3>{String(input.prompt ?? '请回答')}</h3>
+      <h3>{openPlan && planStart >= 0 ? <>{prompt.slice(0, planStart)}{openPlan}{prompt.slice(planStart + planPath!.length)}</> : prompt}</h3>{openPlan && planStart < 0 && <p>{openPlan}</p>}
       {typeof input.context === 'string' && input.context && <p className="question-background">{input.context}</p>}
       {input.type === 'choice' && <div className="question-options">{options.map(choice => {
         const active = Boolean(selected && 'value' in selected && selected.value === choice.value)
@@ -101,10 +126,11 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
         const values = selected && 'values' in selected ? selected.values : [], checked = values.includes(choice.value)
         return <PulseCheckbox key={choice.value} disabled={sending || !checked && values.length >= (typeof input.max === 'number' ? input.max : Infinity)} checked={checked} onChange={() => update({ values: checked ? values.filter(value => value !== choice.value) : [...values, choice.value] })}><strong>{choice.label ?? choice.value}</strong>{choice.description && <span className="question-option-description">{choice.description}</span>}</PulseCheckbox>
       })}</div></>}
-      {(input.type === 'choice' || input.type === 'multi') && <details className="question-custom" open={Boolean(selected && 'text' in selected) || undefined}><summary>自行回答</summary><PulseTextArea aria-label="自行回答" maxLength={4000} rows={2} value={selected && 'text' in selected ? selected.text : ''} disabled={sending} placeholder="输入你的答案…" onChange={event => update({ text: event.target.value })}/></details>}
+      {(input.type === 'choice' || input.type === 'multi') && <div className="question-custom"><PulseTextArea aria-label="自行回答" maxLength={4000} rows={2} value={selected && 'text' in selected ? selected.text ?? '' : ''} disabled={sending} placeholder="输入你的答案…" onChange={event => { const text = event.target.value; if (input.type === 'choice' && selected && 'value' in selected && selected.value && planExecutionQuestion(input)) update({ value: selected.value, text }); else update({ text }) }}/></div>}
+      {input.type === 'choice' && planExecutionQuestion(input) && !(selected && 'value' in selected && selected.value) && executionPhrase(selected && 'text' in selected ? selected.text ?? '' : '') && <p className="interaction-error" role="status">请点选「执行」。输入这句话不能代替确认。</p>}
       {input.type === 'input' && <PulseTextArea aria-label="你的答案" maxLength={4000} rows={3} className="question-input" value={selected && 'text' in selected ? selected.text : ''} disabled={sending} placeholder={typeof input.placeholder === 'string' ? input.placeholder : '请输入'} onChange={event => update({ text: event.target.value })}/>}
     </div>
     {error && <p className="interaction-error" role="alert">{error}</p>}
-    <div className="interaction-actions ask-actions">{count > 1 && <PulseButton disabled={sending || index === 0} onClick={() => setIndex(value => value - 1)}>上一题</PulseButton>}{index < count - 1 ? <PulseButton className="primary" disabled={sending || !item || !answerValid(item)} onClick={() => setIndex(value => value + 1)}>下一题</PulseButton> : <PulseButton className="primary" disabled={sending || interaction.items.some(question => !answerValid(question))} onClick={() => void submitBatch(interaction.items.map(question => ({ effectId: question.effectId, value: (answers[question.effectId] ?? { values: [] }) as Record<string, unknown> })))}>{sending ? '正在提交…' : '提交回答'}</PulseButton>}</div>
+    <div className="interaction-actions ask-actions">{count > 1 && <PulseButton disabled={sending || index === 0} onClick={() => setIndex(value => value - 1)}>上一题</PulseButton>}{index < count - 1 ? <PulseButton className="primary" disabled={sending || !item || !answerValid(item)} onClick={() => setIndex(value => value + 1)}>下一题</PulseButton> : <PulseButton className="primary" disabled={sending || interaction.items.some(question => !answerValid(question))} onClick={() => void submitBatch(interaction.items.map(question => ({ effectId: question.effectId, value: submittedAnswer(question) })))}>{sending ? '正在提交…' : '提交回答'}</PulseButton>}</div>
   </section>
 }

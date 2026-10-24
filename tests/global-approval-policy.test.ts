@@ -20,6 +20,10 @@ it('shares approval across old and new conversations, persists on restart and re
     let { base, headers } = await connect()
     const existing = await host.createConversation({ title: 'Existing' })
     expect((await fetch(`${base}/api/approval-policy`)).status).toBe(401)
+    const paired = await fetch(`${base}/api/pair`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: server.createPairingCode().code, name: 'Phone' }) })
+    const pairedHeaders = { Cookie: paired.headers.get('set-cookie')!, Origin: base, 'Content-Type': 'application/json' }
+    expect((await fetch(`${base}/api/approval-policy`, { method: 'PUT', headers: pairedHeaders, body: JSON.stringify({ policy: 'delegate' }) })).status).toBe(403)
+    expect(await fetch(`${base}/api/approval-policy`, { headers: pairedHeaders }).then(r => r.json())).toEqual({ policy: 'manual' })
     expect(await fetch(`${base}/api/approval-policy`, { headers }).then(r => r.json())).toEqual({ policy: 'manual' })
     expect((await fetch(`${base}/api/approval-policy`, { method: 'PUT', headers: { ...headers, Origin: 'http://other.invalid' }, body: JSON.stringify({ policy: 'delegate' }) })).status).toBe(403)
     expect((await fetch(`${base}/api/approval-policy`, { method: 'PUT', headers, body: JSON.stringify({ policy: 'unrestricted' }) })).status).toBe(400)

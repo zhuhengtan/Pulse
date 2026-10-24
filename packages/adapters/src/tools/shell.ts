@@ -257,6 +257,15 @@ function readOnlyGitArguments(args: string[]): boolean {
   // let through; `--git-dir=<path>`, a pre-subcommand `--git-dir`/`-C` and every
   // other redirect keep hitting GIT_REDIRECT_ARGUMENT below.
   if (subcommand === 'rev-parse' && args.length === 2 && args[1] === '--git-dir') return true
+  // `diff` without a revision compares the worktree to the index. A revision
+  // argument would read arbitrary blobs from the shared object store, including
+  // history and paths that are not checked out in this worktree.
+  if (subcommand === 'diff') {
+    const body = args.slice(1)
+    const separator = body.indexOf('--')
+    const revisions = (separator === -1 ? body : body.slice(0, separator)).filter((arg) => !arg.startsWith('-'))
+    if (revisions.length > 0) return false
+  }
   return !args.some((arg) => GIT_REDIRECT_ARGUMENT.test(arg))
 }
 

@@ -124,6 +124,7 @@ export function useConversationTransfer({ transport, selected, projects, unavail
     finally { setImporting(false) }
   }
   return {
+    exportItem: { key: 'export', label: exporting ? '导出中…' : '导出会话', icon: <Icon name="download"/>, disabled: !selected || unavailable || exporting, title: unavailable ? '运行中或正在加载，请等待任务完成或中断后再导出' : '导出当前工作会话为 ZIP', onClick: () => void download() },
     exportButton: <PulseButton className="details-button transfer-export" disabled={!selected || unavailable || exporting} aria-label="导出会话" title={unavailable ? '运行中或正在加载，请等待任务完成或中断后再导出' : '导出当前工作会话为 ZIP'} onClick={() => void download()}><Icon name="download"/><span>{exporting ? '导出中…' : '导出'}</span></PulseButton>,
     importButton: <PulseButton className="transfer-import" disabled={uploading || importing || Boolean(preview)} aria-label="导入会话" onClick={() => fileInput.current?.click()}><Icon name="upload"/><span>{uploading ? '检查压缩包…' : '导入会话'}</span></PulseButton>,
     dialog: <>

@@ -432,18 +432,20 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
   }))
   const askOption = z.union([z.string().min(1), z.object({ label: z.string().min(1).max(500), value: z.string().min(1).max(500), description: z.string().max(2_000).optional() })])
   const askOptions = z.array(askOption).min(1).max(50)
+  const dismissalHelp = ' A human may return {dismissed:true} to decline answering. This supplies no answer or permission; do not repeat that question unless the user asks.'
+  const dismissedAsk = z.object({ dismissed: z.literal(true) }).strict()
   const decisionFields = { context: z.string().max(2_000).optional(), decisionId: z.string().min(1).max(120).optional(), decisionScope: z.string().min(1).max(120).optional(), decisionPriority: z.enum(['constraint', 'stage', 'normal']).optional() }
   registry.register(defineTool({
-    name: 'ask.confirm', description: 'Pause for an explicit yes/no human confirmation. No action is authorized until the human replies. Uses fixed confirm/cancel choices and returns value="confirm" or value="cancel", or a free-text reply. Respect a cancellation; do not treat it as consent.', tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000) }), output: z.union([z.object({ value: z.enum(['confirm', 'cancel']) }), z.object({ text: z.string() })]), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
+    name: 'ask.confirm', description: 'Pause for an explicit yes/no human confirmation. No action is authorized until the human replies. Uses fixed confirm/cancel choices and returns value="confirm" or value="cancel", or a free-text reply. Respect a cancellation; do not treat it as consent.' + dismissalHelp, tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000) }), output: z.union([z.object({ value: z.enum(['confirm', 'cancel']) }), z.object({ text: z.string() }), dismissedAsk]), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
   }))
   registry.register(defineTool({
-    name: 'ask.choice', description: 'Ask exactly one unresolved decision. prompt is only the question; context is separate background. Each option has label (short title), description (trade-off), and stable value. Mark the recommended option title with （推荐） (English: (Recommended)) and put it first when justified. Never repeat options in prompt or add an empty/Other option: the UI always provides a free-text answer. Replies contain either value or text. Provide stable decisionId and decisionScope; reopen an answered decision only after explicit new user instruction.', tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000), options: askOptions }), output: z.union([z.object({ value: z.string() }), z.object({ text: z.string() })]), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
+    name: 'ask.choice', description: 'Ask exactly one unresolved decision. prompt is only the question; context is separate background. Each option has label (short title), description (trade-off), and stable value. Mark the recommended option title with （推荐） (English: (Recommended)) and put it first when justified. Never repeat options in prompt or add an empty/Other option: the UI always provides a free-text answer. Replies contain either value or text. Provide stable decisionId and decisionScope; reopen an answered decision only after explicit new user instruction.' + dismissalHelp, tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000), options: askOptions }), output: z.union([z.object({ value: z.string() }), z.object({ text: z.string() }), dismissedAsk]), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
   }))
   registry.register(defineTool({
-    name: 'ask.multi', description: 'Ask the human to choose options. prompt is only the question, context is background; options use label, description and value. Never list options in prompt or add an empty/Other option. The UI also accepts a standalone free-text answer, returned as text instead of values.', tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000), options: askOptions, min: z.number().int().min(0).optional(), max: z.number().int().positive().optional() }), output: z.union([z.object({ values: z.array(z.string()) }), z.object({ text: z.string() })]), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
+    name: 'ask.multi', description: 'Ask the human to choose options. prompt is only the question, context is background; options use label, description and value. Never list options in prompt or add an empty/Other option. The UI also accepts a standalone free-text answer, returned as text instead of values.' + dismissalHelp, tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000), options: askOptions, min: z.number().int().min(0).optional(), max: z.number().int().positive().optional() }), output: z.union([z.object({ values: z.array(z.string()) }), z.object({ text: z.string() }), dismissedAsk]), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
   }))
   registry.register(defineTool({
-    name: 'ask.input', description: 'Ask the human to provide free-form text before continuing.', tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000), placeholder: z.string().max(500).optional(), defaultValue: z.string().max(2_000).optional() }), output: z.object({ text: z.string() }), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
+    name: 'ask.input', description: 'Ask the human to provide free-form text before continuing.' + dismissalHelp, tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000), placeholder: z.string().max(500).optional(), defaultValue: z.string().max(2_000).optional() }), output: z.union([z.object({ text: z.string() }), dismissedAsk]), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
   }))
   registry.register(defineTool({
     name: 'fs.read', description: 'Read a UTF-8 workspace file with its full-file hash in windows of up to 3000 bytes. Use startLine (one-based, scanning at most 16 MiB) to read near a search line number; offset is bytes, never a line number. If nextOffset is not null, pass it as offset to continue; do not assume the first window is the complete file. ENOENT means the file does not exist: do not repeat the read; create it with fs.write when the body is at most 16384 bytes, or stream a larger new file with fs.stage.', tags: ['files', 'read'], input: z.object({ path: z.string(), maxBytes: z.number().int().positive().max(200_000).describe('Effective maximum 3000 bytes. Larger legacy requests are clamped to 3000, never a larger window.').optional(), offset: z.number().int().min(0).default(0), startLine: z.number().int().positive().optional() }), output: z.object({ path: z.string(), content: z.string(), truncated: z.boolean(), offset: z.number(), nextOffset: z.number().nullable(), hash: z.string() }), sideEffectPolicy: 'read', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'shared' }], permissions: { workspaceRoots: [root] }, execute: async ({ path, maxBytes, offset, startLine }, context) => { if (startLine !== undefined && offset !== 0) throw editingError('INVALID_READ_RANGE', 'Use startLine or offset, not both.'); const hash = await fsTool.hash(path, context.signal); const readOffset = startLine === undefined ? offset : await fsTool.offsetForLine(path, startLine, context.signal); const result = await fsTool.readRange(path, Math.min(maxBytes ?? 3000, 3000), readOffset, context.signal); if (hash !== await fsTool.hash(path, context.signal)) throw editingError('FILE_BASELINE_CONFLICT', 'File changed while reading; read this window again.'); return { path, ...result, hash } }, summarize: (output) => output,
@@ -1552,6 +1554,10 @@ export function validateAskReply(effectInput: JsonValue | undefined, value: Json
   if (input.kind !== 'ask') return
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('ASK_RESPONSE_INVALID')
   const reply = value as Record<string, JsonValue>
+  if (reply.dismissed !== undefined) {
+    if (reply.dismissed !== true || Object.keys(reply).length !== 1) throw new Error('ASK_RESPONSE_INVALID:dismissed')
+    return
+  }
   if (typeof reply.text === 'string' && reply.value === undefined && reply.values === undefined) {
     if (!reply.text.trim() || reply.text.length > 4_000) throw new Error('ASK_RESPONSE_INVALID:text')
     return
@@ -2219,9 +2225,17 @@ export class LocalHost {
     for (const item of manifest.artifacts ?? []) items.set(scope === 'turn' ? JSON.stringify([item.runId, item.path]) : item.path, { ...item, absolutePath: resolve(root, item.path), workspaceState: root === manifest.cwd ? 'project' : 'isolated' })
     return [...items.values()]
   }
+  private async previewArtifact(manifest: Manifest, path: string, runId: string): Promise<{ path: string; hash: string } | undefined> {
+    const artifact = manifest.artifacts?.find(item => item.path === path && item.runId === runId)
+    if (artifact) return artifact
+    const root = manifest.executionCwd ?? manifest.cwd
+    if (!manifest.runs.includes(runId) || !isAllowedPlanWrite('plan.write', { path }, root)) return undefined
+    const review = await this.readPlanReview(manifest.id, runId, path)
+    return review !== 'missing' && review.path === path && /^[a-f0-9]{64}$/.test(review.hash) ? { path, hash: review.hash } : undefined
+  }
   async readArtifact(id: string, path: string, runId: string): Promise<{ content: string; path: string; absolutePath: string; workspaceState: 'isolated' | 'project' }> {
     const manifest = await this.readManifest(id)
-    const artifact = (manifest.artifacts ?? []).find(item => item.path === path && item.runId === runId)
+    const artifact = await this.previewArtifact(manifest, path, runId)
     if (!artifact) throw new Error('ARTIFACT_NOT_FOUND')
     const root = manifest.executionCwd ?? manifest.cwd
     const absolutePath = await within(root, path)
@@ -2233,7 +2247,7 @@ export class LocalHost {
   async getConversationWorkspace(id: string): Promise<string> { const manifest = await this.readManifest(id); return manifest.executionCwd ?? manifest.cwd }
   async artifactFile(id: string, path: string, runId: string) {
     const manifest = await this.readManifest(id)
-    const artifact = (manifest.artifacts ?? []).find(item => item.path === path && item.runId === runId)
+    const artifact = await this.previewArtifact(manifest, path, runId)
     if (!artifact) throw new Error('ARTIFACT_NOT_FOUND')
     const root = manifest.executionCwd ?? manifest.cwd
     const value = await readPreviewFile(root, path, artifact.hash)
@@ -3118,6 +3132,7 @@ export class LocalHost {
       const input = asRecord(runtime.state.effects.get(effectId)?.input)
       if (input?.kind !== 'ask') return
       const reply = asRecord(value) ?? {}
+      if (reply.dismissed === true) return
       const options = Array.isArray(input.options) ? input.options : []
       const label = (value: JsonValue): string => {
         const option = options.find(option => typeof option === 'string' ? option === value : asRecord(option)?.value === value)

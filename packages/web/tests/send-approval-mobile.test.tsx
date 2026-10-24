@@ -145,7 +145,6 @@ it('shows question, background and option descriptions separately and submits a 
   expect(view.getByText('需要保留现有会话。').className).toBe('question-background')
   expect(view.getByRole('button', { name: /渐进调整（推荐）/ }).textContent).toContain('逐步验证，便于回退。')
   expect(view.container.querySelectorAll('.question-options button')).toHaveLength(1)
-  fireEvent.click(view.getByText('自行回答'))
   const input = view.getByRole('textbox', { name: '自行回答' })
   expect(input.tagName).toBe('TEXTAREA')
   fireEvent.change(input, { target: { value: '按模块迁移。\n保留旧入口。' } })
