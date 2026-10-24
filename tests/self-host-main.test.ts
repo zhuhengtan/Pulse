@@ -92,9 +92,9 @@ const fixture = (tag) => {
 describe('scripts/self-host.mjs main 离线回归', () => {
   it('导入模块不运行 main，也不产生任何标准输出', () => {
     const root = newRoot('import')
-    const probe = write(path.join(root, 'import-probe.mjs'), `await import(${JSON.stringify(SELF_HOST)})\n`)
+    const probe = write(path.join(root, 'import-probe.mjs'), `await import(${JSON.stringify(pathToFileURL(SELF_HOST).href)})\n`)
     const res = spawnSync(NODE, [probe], { encoding: 'utf8' })
-    expect(res.status).toBe(0)
+    expect(res.status, res.stderr || res.error?.message).toBe(0)
     expect(res.stdout).toBe('')
     expect(res.stderr).toBe('')
     expect(typeof main).toBe('function')

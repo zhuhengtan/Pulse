@@ -252,7 +252,8 @@ describe('explicit URL navigation', () => {
 
   it('restores the chosen existing terminal and its history without creating a process', async () => {
     const view = show('/work/pulse-chat?workspace=terminal&terminal=term-2', routingFixture({ canUseTerminal: true }))
-    await screen.findByText('已连接 term-2')
+    // This route test covers async lazy-module readiness, not a 1s render SLA.
+    await screen.findByText('已连接 term-2', {}, { timeout: 4000 })
     expect(view.container.querySelector('.terminal-stage:not([hidden])')?.textContent).toBe('已连接 term-2')
     fireEvent.click(screen.getByRole('button', { name: '终端 1', exact: true }))
     await waitFor(() => expect(view.router.state.location.search).toContain('terminal=term-1'))
