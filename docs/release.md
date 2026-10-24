@@ -70,7 +70,7 @@ pnpm release:npm-publish
 1. 验证标签对应提交的最新 main CI 和三个操作系统任务全部成功；
 2. 安装依赖并运行完整检查；CI 和 Release 使用相同的 pnpm 版本、安装位置与沙箱入口检查；
 3. 构建并验证 `pulse-<version>.tar.gz`，包括启动、安装、卸载与用户数据保留；
-4. 调用桌面打包工作流，验证原生启动、安装及数据保留，构建 macOS arm64/x64、Windows x64 和 Linux x64 的客户端；所有客户端任务通过后才能继续发布；
+4. 调用桌面打包工作流，验证原生启动、安装及数据保留，构建 macOS arm64（Apple Silicon）、Windows x64 和 Linux x64 的客户端；所有客户端任务通过后才能继续发布；
 5. 校验完整的 8 个桌面安装包/压缩包并生成 `pulse-desktop-SHA256SUMS.txt`，按 data、runtime、tool-sdk、adapters、server、cli 的依赖顺序发布 npm 包；
 6. 创建草稿 GitHub Release，上传 CLI 压缩包、四个平台的客户端及校验文件，全部上传成功后再公开 Release。
 
@@ -84,4 +84,4 @@ pnpm release:npm-publish
 
 `.github/workflows/pages.yml` 在站点修改或 Release 工作流成功后部署。它从最新正式 Release 生成下载清单；安装包或校验文件不全时保留“查看发布进度”，不生成失效下载链接。页面使用精确版本的附件链接，因此不会将当前展示版本与下一版尚未齐全的安装包混用。手动重跑 Product page 可刷新下载清单。
 
-桌面文件名固定为 `pulse-macos-{arm64,x64}.{dmg,zip}`、`pulse-windows-x64.{exe,zip}`、`pulse-linux-x86_64.AppImage` 和 `pulse-linux-amd64.deb`。Linux 文件名沿用构建器对 x64 的平台命名。直接链接可采用 GitHub 的 `releases/latest/download/<filename>`；主页通过部署时生成的版本清单链接精确 Release。单独运行 Desktop packages 只上传 Actions artifact，不公开发布。
+桌面文件名固定为 `pulse-macos-arm64.{dmg,zip}`、`pulse-windows-x64.{exe,zip}`、`pulse-linux-x86_64.AppImage` 和 `pulse-linux-amd64.deb`。macOS 仅支持 Apple Silicon。Linux 文件名沿用构建器对 x64 的平台命名。直接链接可采用 GitHub 的 `releases/latest/download/<filename>`；主页通过部署时生成的版本清单链接精确 Release。单独运行 Desktop packages 只上传 Actions artifact，不公开发布。

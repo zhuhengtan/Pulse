@@ -6,7 +6,7 @@
 
 **[下载客户端](https://zhuhengtan.github.io/Pulse/#download)** · **[产品主页](https://zhuhengtan.github.io/Pulse/)** · [安装与使用](docs/desktop/README.md) · [全部版本与校验文件](https://github.com/zhuhengtan/Pulse/releases)
 
-支持 macOS（Apple Silicon / Intel）、Windows x64 与 Linux x64。下载入口仅开放正式 Release 中已完整上传的客户端。
+支持 macOS（Apple Silicon）、Windows x64 与 Linux x64。下载入口仅开放正式 Release 中已完整上传的客户端。
 
 <p><a href="https://zhuhengtan.github.io/Pulse/"><img src="site/assets/workspace.jpg" width="100%" alt="Pulse 工作界面，使用演示数据：任务计划确认与右侧文档预览"></a></p>
 

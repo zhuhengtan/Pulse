@@ -6,7 +6,7 @@
 
 **[Download the desktop app](https://zhuhengtan.github.io/Pulse/#download)** · **[Product website](https://zhuhengtan.github.io/Pulse/)** · [Installation guide](docs/desktop/README.md) · [Releases and checksums](https://github.com/zhuhengtan/Pulse/releases)
 
-Available for macOS (Apple Silicon / Intel), Windows x64, and Linux x64. Downloads appear only when a complete set of desktop assets is available in a public release.
+Available for macOS (Apple Silicon), Windows x64, and Linux x64. Downloads appear only when a complete set of desktop assets is available in a public release.
 
 <p><a href="https://zhuhengtan.github.io/Pulse/"><img src="site/assets/workspace.jpg" width="100%" alt="Pulse workspace with demo data: plan confirmation and document preview"></a></p>
 

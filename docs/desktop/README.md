@@ -54,7 +54,7 @@ pnpm desktop:app:startup-smoke # 无已有服务时启动独立后台
 pnpm desktop:app:install-smoke # 无系统 Node/Chrome 的隔离首启与修复验收
 ```
 
-产物位于 `artifacts/desktop/`。macOS 为 DMG/ZIP，Windows 为 NSIS/ZIP，Linux 为 AppImage/DEB。当前构建未配置代码签名和 macOS 公证，下载后的系统信任提示仍需单独验收。`.github/workflows/desktop.yml` 提供 macOS arm64/x64、Windows x64、Linux x64 的原生构建和验收矩阵；单独通过 workflow_dispatch 运行时只上传 Actions artifact，正式版本由 Release 工作流调用，通过全部构建和验收后上传公开 Release。完整发布门禁见 [发布流程](../release.md)。Runner 标签来源：https://github.com/actions/runner-images 。
+产物位于 `artifacts/desktop/`。macOS 为 DMG/ZIP，仅支持 Apple Silicon；Windows 为 NSIS/ZIP，Linux 为 AppImage/DEB。当前构建未配置代码签名和 macOS 公证，下载后的系统信任提示仍需单独验收。`.github/workflows/desktop.yml` 提供 macOS arm64、Windows x64、Linux x64 的原生构建和验收矩阵；单独通过 workflow_dispatch 运行时只上传 Actions artifact，正式版本由 Release 工作流调用，通过全部构建和验收后上传公开 Release。完整发布门禁见 [发布流程](../release.md)。Runner 标签来源：https://github.com/actions/runner-images 。
 
 测试时使用 `PULSE_DESKTOP_DATA_DIR` 指定隔离数据目录，`PULSE_DESKTOP_USER_DATA` 指定隔离 Electron 用户目录。默认连接现有数据目录中的兼容 `service.json`；未运行时使用随包后台启动。退出桌面不会终止后台。菜单可查看或停止服务。
 

@@ -25,7 +25,7 @@ it('matches actual Linux builder filenames and validates native package configur
 const tag = 'v0.8.0', url = `https://github.com/zhuhengtan/Pulse/releases/tag/${tag}`
 const release = () => ({ tag_name: tag, html_url: url, assets: [...desktopAssets.map(item => ({ name: item.name, state: 'uploaded', size: 123456, browser_download_url: `https://github.com/zhuhengtan/Pulse/releases/download/${tag}/${item.name}` })), { name: 'pulse-desktop-SHA256SUMS.txt', state: 'uploaded', size: 1024 }] })
 it('publishes links only after every supported desktop platform and checksums are uploaded', () => {
-  expect(desktopDownloadManifest(release()).assets).toHaveLength(5)
+  expect(desktopDownloadManifest(release()).assets).toHaveLength(4)
   for (let index = 0; index < release().assets.length; index++) {
     const value = release(); value.assets.splice(index, 1)
     expect(desktopDownloadManifest(value).assets).toEqual([])

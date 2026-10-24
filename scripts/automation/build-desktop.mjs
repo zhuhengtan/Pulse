@@ -7,7 +7,8 @@ import { buildWindowsSandbox } from './build-srt-win.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const arch = process.env.PULSE_DESKTOP_ARCH ?? process.arch
-const target = process.env.PULSE_DESKTOP_TARGET ?? ({darwin:{arm64:'aarch64-apple-darwin',x64:'x86_64-apple-darwin'},win32:{x64:'x86_64-pc-windows-msvc'},linux:{x64:'x86_64-unknown-linux-gnu'}}[process.platform]?.[arch])
+if (process.platform === 'darwin' && arch !== 'arm64') throw new Error('macOS desktop builds require Apple Silicon (arm64)')
+const target = process.env.PULSE_DESKTOP_TARGET ?? ({darwin:{arm64:'aarch64-apple-darwin'},win32:{x64:'x86_64-pc-windows-msvc'},linux:{x64:'x86_64-unknown-linux-gnu'}}[process.platform]?.[arch])
 if (!target) throw new Error(`Unsupported native target: ${process.platform}/${arch}`)
 const destination = resolve(root, `packages/server/native/${process.platform}-${arch}`)
 await mkdir(destination, { recursive: true })
@@ -50,7 +51,7 @@ if (process.platform === 'darwin') {
 <key>LSUIElement</key><true/>
 <key>NSScreenCaptureUsageDescription</key><string>Pulse captures screenshots only for desktop automation sessions you authorize.</string>
 </dict></plist>\n`)
-  run('swiftc', ['-module-cache-path', process.env.TMPDIR ? resolve(process.env.TMPDIR,'pulse-swift-cache') : '/tmp/pulse-swift-cache', '-target', `${arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx14.0`, '-parse-as-library', '-O', 'native/desktop-helper/macos.swift', '-o', resolve(bundle, 'Contents/MacOS/PulseDesktopHelper')])
+  run('swiftc', ['-module-cache-path', process.env.TMPDIR ? resolve(process.env.TMPDIR,'pulse-swift-cache') : '/tmp/pulse-swift-cache', '-target', 'arm64-apple-macosx14.0', '-parse-as-library', '-O', 'native/desktop-helper/macos.swift', '-o', resolve(bundle, 'Contents/MacOS/PulseDesktopHelper')])
   // Developer ID signing can be supplied by release infrastructure. Local
   // builds use ad-hoc signing and may require renewed consent after a rebuild.
   run('codesign', ['--force', '--sign', process.env.PULSE_MACOS_SIGN_IDENTITY ?? '-', '--identifier', bundleIdentifier, bundle])
