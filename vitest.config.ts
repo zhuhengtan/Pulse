@@ -23,6 +23,7 @@ export default defineConfig({
     // Windows SRT provisions one OS sandbox account and stamps filesystem ACLs.
     // Separate test processes must not race that machine-wide policy lifecycle.
     fileParallelism: process.platform !== 'win32',
-    testTimeout: process.platform === 'win32' ? 120_000 : 10_000,
+    // A single cold SRT launch measured up to 146 seconds on hosted Windows.
+    testTimeout: process.platform === 'win32' ? 180_000 : 10_000,
   },
 })

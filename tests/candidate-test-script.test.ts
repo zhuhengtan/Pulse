@@ -119,11 +119,12 @@ it('runs a corrected new test script through the actual sandboxed Host before ac
       const run=(command,args)=>{const r=spawnSync(command,args,{encoding:'utf8'});return {command,args,status:r.status,signal:r.signal,error:r.error?.code,stdout:r.stdout,stderr:r.stderr}};
       console.log(JSON.stringify({node:process.version,execPath:process.execPath,probes:[
         run('node',['--version']),run('npm',['--version']),run('npm',['config','get','script-shell']),
-        run(process.execPath,['--test','test/fixture.test.js']),run('npm',['test'])
+        run(process.execPath,['--test','test/fixture.test.js']),run('npm',['test','--loglevel=verbose'])
       ]}));
     `], { cwd, timeoutMs: 20_000 })
     if (task?.status !== 'accepted') await cp(cwd, join(process.cwd(), '.pulse-dev/autonomy-failed-rerun-20261023', 'v52-unit-host-failure-' + Date.now()), { recursive: true })
     expect(task, JSON.stringify({ task, version: input.controllerVersion, failures, checks, diagnostics })).toMatchObject({ status: 'accepted' })
     expect(successfulWarning).toBe(true)
   } finally { await host.close(); vi.unstubAllGlobals(); await rm(cwd, { recursive: true, force: true }) }
-}, 30_000)
+// Two actual cold Windows sandbox launches plus bounded failure diagnostics.
+}, process.platform === 'win32' ? 600_000 : 30_000)

@@ -553,7 +553,9 @@ describe('M1-3 context, models and adapters', () => {
       await rm(sibling, { recursive: true, force: true })
       if (privateProfile) await rm(privateProfile, { recursive: true, force: true })
     }
-  }, process.platform === 'win32' ? 600_000 : 60_000)
+  // Seven cold Windows launches include ACL setup and teardown, not just the
+  // command timeout. Do not abandon a live policy halfway through this test.
+  }, process.platform === 'win32' ? 1_200_000 : 60_000)
 
   it('runs the installed development toolchain inside the sandbox by name', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse toolchain 雪-'))
