@@ -8,6 +8,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 // @ts-expect-error scripts/*.mjs 是没有类型声明的运行脚本
 import { createSnapshot, verifySnapshot, EXIT, MANIFEST_DIR, MANIFEST_NAME } from '../scripts/self-host-snapshot.mjs'
@@ -447,7 +448,7 @@ describe('self-host-snapshot：只复制代码的稳定运行胶囊', () => {
   })
 
   it('真实 --help 同步说明输入与输出边界', async () => {
-    const toolPath = new URL('../scripts/self-host-snapshot.mjs', import.meta.url).pathname
+    const toolPath = fileURLToPath(new URL('../scripts/self-host-snapshot.mjs', import.meta.url))
     const help = spawnSync(process.execPath, [toolPath, '--help'], { encoding: 'utf8' })
     expect(help.status, help.stderr).toBe(0)
     expect(help.stdout).toContain('允许位于 --cwd 内')

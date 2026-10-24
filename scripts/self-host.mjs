@@ -1962,7 +1962,7 @@ export function moduleFilePathFromUrl(metaUrl) {
   if (typeof metaUrl !== 'string' || metaUrl.length === 0) return null
   if (!metaUrl.startsWith('file://')) return null
   try {
-    return path.resolve(decodeURIComponent(new URL(metaUrl).pathname))
+    return fileURLToPath(metaUrl)
   } catch {
     return null
   }

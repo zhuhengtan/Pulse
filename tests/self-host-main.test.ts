@@ -4,14 +4,23 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-import { main } from '../scripts/self-host.mjs'
+import { main, moduleFilePathFromUrl } from '../scripts/self-host.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SELF_HOST = path.resolve(HERE, '..', 'scripts', 'self-host.mjs')
 const NODE = process.execPath
+
+it('resolves executable file URLs using native paths with encoded characters', () => {
+  for (const name of ['entry.mjs', 'snow 雪 #100%.mjs']) {
+    const file = path.join(tmpdir(), 'pulse module paths', name)
+    expect(moduleFilePathFromUrl(pathToFileURL(file).href)).toBe(file)
+  }
+  expect(moduleFilePathFromUrl('https://example.test/entry.mjs')).toBe(null)
+  expect(moduleFilePathFromUrl('file:///invalid%2Fentry.mjs')).toBe(null)
+})
 
 const write = (file, content) => {
   mkdirSync(path.dirname(file), { recursive: true })

@@ -1,2 +1,4 @@
 tests/fixtures/document-tools.pdf -diff
 native/srt-win-patch/*.patch text eol=lf
+# Vite's executable-module loader cannot strip CRLF hashbangs.
+*.mjs text eol=lf
