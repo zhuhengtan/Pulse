@@ -13,6 +13,7 @@ import WebSocket from 'ws';
 import { desktopDataDirectory, saveDesktopDataDirectory, assertDesktopDataReady, desktopServiceMessage } from './data-directory.mjs';
 import { desktopPageUrl, isDesktopPageUrl } from './dev-url.mjs';
 const pageUrl = desktopPageUrl(app.isPackaged, process.env.PULSE_DESKTOP_DEV_URL);
+const appIcon = fileURLToPath(new URL('./assets/icon.png', import.meta.url));
 if (process.env.PULSE_DESKTOP_USER_DATA)
     app.setPath('userData', resolve(process.env.PULSE_DESKTOP_USER_DATA));
 protocol.registerSchemesAsPrivileged([{ scheme: 'pulse', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
@@ -201,6 +202,7 @@ else {
     function trusted(event) { if (event.sender !== window?.webContents || event.senderFrame !== window?.webContents.mainFrame || !isDesktopPageUrl(event.senderFrame?.url ?? '', pageUrl))
         throw new Error('IPC_SENDER_INVALID'); }
     app.whenReady().then(async () => {
+        if (process.platform === 'darwin') app.dock?.setIcon(appIcon);
         directory = await desktopDataDirectory(app.getPath('userData'), process.env, homedir());
         const root = resolve(process.env.PULSE_DESKTOP_INSTALL_ROOT ?? process.env.PULSE_HOME ?? join(homedir(), '.pulse'));
         const source = app.isPackaged ? join(process.resourcesPath, 'runtime') : process.env.PULSE_DESKTOP_RUNTIME_DIR;
@@ -373,7 +375,7 @@ else {
         ipcMain.handle('pulse:unsubscribe', (event, id) => { trusted(event); const sub = subscriptions.get(id); sub?.controller.abort(); subscriptions.delete(id); if (sub?.kind === 'chat' && chat?.readyState === WebSocket.OPEN)
             chat.send(JSON.stringify({ type: 'unsubscribe', runId: sub.runId })); });
         function createWindow() {
-            window = new BrowserWindow({ width: pageUrl.startsWith('http:') ? 1440 : 1200, height: pageUrl.startsWith('http:') ? 950 : 850, minWidth: 390, minHeight: 600, title: pageUrl.startsWith('http:') ? 'Pulse · 开发预览' : 'Pulse', webPreferences: { preload: fileURLToPath(new URL('./preload.cjs', import.meta.url)), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+            window = new BrowserWindow({ width: pageUrl.startsWith('http:') ? 1440 : 1200, height: pageUrl.startsWith('http:') ? 950 : 850, minWidth: 390, minHeight: 600, title: pageUrl.startsWith('http:') ? 'Pulse · 开发预览' : 'Pulse', icon: appIcon, webPreferences: { preload: fileURLToPath(new URL('./preload.cjs', import.meta.url)), contextIsolation: true, nodeIntegration: false, sandbox: true } });
             window.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//.test(url))
                 void shell.openExternal(url); return { action: 'deny' }; });
             window.webContents.on('did-start-loading', () => browser.hideAll());

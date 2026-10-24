@@ -3,6 +3,7 @@ import { Button, Spin, Tag } from 'antd'
 import { useNavigate } from 'react-router'
 import { ApiError, apiJson, browserTransport, jsonRequest, type PulseWebTransport } from './transport.js'
 import { Icon } from './Icon.js'
+import { PulseBrand } from './PulseBrand.js'
 
 export interface DesktopSetupStatus {
   phase: 'preparing' | 'starting' | 'ready' | 'error'
@@ -52,7 +53,7 @@ export function DesktopEnvironment({ transport, welcome = false, onContinue, onC
   }
   const preparing = !status || ['preparing', 'starting'].includes(status.phase)
   return <section className={welcome ? 'desktop-welcome-card' : 'settings-card desktop-environment'}>
-    <div className="desktop-setup-intro"><div className="desktop-setup-mark">✳</div><div><h2>{welcome ? '欢迎使用 Pulse' : '桌面环境'}</h2><p>{preparing ? '正在准备运行环境，首次启动可能需要一点时间。' : status?.phase === 'error' ? '环境准备尚未完成，可在这里修复或更换数据目录。' : '运行环境已准备完成。'}</p></div></div>
+    <div className="desktop-setup-intro"><div className="desktop-setup-mark"><PulseBrand variant="app" /></div><div><h2>{welcome ? '欢迎使用 Pulse' : '桌面环境'}</h2><p>{preparing ? '正在准备运行环境，首次启动可能需要一点时间。' : status?.phase === 'error' ? '环境准备尚未完成，可在这里修复或更换数据目录。' : '运行环境已准备完成。'}</p></div></div>
     {!status && !error && <div role="status"><Spin/> 正在检查安装状态…</div>}
     {status?.development && <p className="desktop-setup-note">开发预览使用仓库运行环境，不会注册系统命令或修改终端配置。</p>}
     {status?.version && <p className="desktop-setup-version">运行版本：{status.version}</p>}

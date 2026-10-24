@@ -30,6 +30,7 @@ import { copyText } from './clipboard.js'
 import { SettingsPage } from './SettingsPage.js'
 import { ArchivePage } from './ArchivePage.js'
 import { Icon } from './Icon.js'
+import { PulseBrand } from './PulseBrand.js'
 import { ApprovalPolicySelect, useApprovalPolicy } from './ApprovalPolicyMenu.js'
 import { useBlocker } from 'react-router'
 import { usePulseNavigation, workUrl, parsePulseRoute } from './routing.js'
@@ -1215,7 +1216,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const switchInHistory = surfaceMode === 'work' && (drawerOpen || (!mobileLayout && !sidebarCollapsed))
   const modeSwitch = <div className="surface-switch" role="tablist" aria-label="Pulse 工作模式"><PulseButton role="tab" aria-selected={surfaceMode === 'chat'} className={surfaceMode === 'chat' ? 'active' : ''} onClick={() => switchMode('chat')}>聊天</PulseButton><PulseButton role="tab" aria-selected={surfaceMode === 'work'} className={surfaceMode === 'work' ? 'active' : ''} onClick={() => switchMode('work')}>工作</PulseButton></div>
   const history = <aside className="history" aria-label="历史对话">
-    <div className={`history-head ${switchInHistory ? 'has-mode-switch' : ''}`}><strong>Pulse</strong>{switchInHistory && modeSwitch}<PulseButton className="new-button" onClick={createConversation} aria-label="新建对话" title="新建对话"><Icon name="plus"/> <span>新对话</span></PulseButton></div>
+    <div className={`history-head ${switchInHistory ? 'has-mode-switch' : ''}`}><strong><PulseBrand /></strong>{switchInHistory && modeSwitch}<PulseButton className="new-button" onClick={createConversation} aria-label="新建对话" title="新建对话"><Icon name="plus"/> <span>新对话</span></PulseButton></div>
     <div className="history-primary">{!mobileLayout && transfer.importButton}<PulseButton onClick={() => selectProject(undefined)}><Icon name="home"/><span>全部对话</span></PulseButton></div>
     <label className="history-search"><Icon name="search"/><PulseInput ref={searchRef} value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索对话" aria-label="搜索对话" /><kbd>⌘ K</kbd></label>
     <div className="history-list">
@@ -1380,7 +1381,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       {loadError && <div className="alert" role="alert"><span>{loadError}</span><PulseButton onClick={() => { if (paired) setRouteRevision(value => value + 1); else void bootstrap() }}>重试</PulseButton></div>}
       <section ref={messagesEl} className={`messages ${emptyConversation ? 'is-empty' : ''}`} aria-live="polite" aria-label="聊天消息" onScroll={event => { const el = event.currentTarget; const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 96; followBottom.current = bottom; setAtBottom(bottom) }}>
         {loading && <div className="empty"><span className="spinner" />正在加载对话…</div>}
-        {!loading && emptyConversation && paired && <div className="empty"><div className="empty-mark"><Icon name="spark" size={27}/></div><h1>我们要做什么？</h1><p>在 Pulse 工作区中提问或交代任务。</p></div>}
+        {!loading && emptyConversation && paired && <div className="empty"><div className="empty-mark"><PulseBrand variant="mark" /></div><h1>我们要做什么？</h1><p>在 Pulse 工作区中提问或交代任务。</p></div>}
       {olderCursor && <PulseButton onClick={() => void loadOlderMessages()} disabled={loadingOlder}>{loadingOlder ? '加载中…' : '加载更早消息'}</PulseButton>}
       <WindowedMessages items={renderMessages()} container={messagesEl} follow={followBottom} />
       </section>

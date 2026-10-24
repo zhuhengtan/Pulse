@@ -1,0 +1,20 @@
+{
+  "generator": "built-in image_gen",
+  "date": "2026-10-24",
+  "approvedReference": "output/imagegen/pulse-logo-20261024/pulse-logo-concept.png",
+  "conversion": "sips resize with alpha preserved; iconutil ICNS; PNG-backed ICO entries",
+  "sources": [
+    {
+      "path": "pulse-logo.png",
+      "sha256": "f01bd02db6020381283613be32da5c34621910d650a54aea4fd419588a8f254e"
+    },
+    {
+      "path": "pulse-mark.png",
+      "sha256": "a3c1c3bd1737db8237ab9577190a38bb4ee02e336d64510daf3adde61eddb383"
+    },
+    {
+      "path": "pulse-app-icon.png",
+      "sha256": "e2fcd4fe6cf3a88650f8d698e943be53ef618e59c61d3949c084d5a0ffa40da1"
+    }
+  ]
+}

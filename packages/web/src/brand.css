@@ -1,0 +1,11 @@
+.pulse-brand { display:block; flex:none; object-fit:contain; }
+.pulse-brand--logo { width:96px; height:32px; }
+.pulse-brand--mark { width:48px; height:48px; }
+.pulse-brand--app { width:48px; height:48px; }
+.history-head.has-mode-switch .pulse-brand--logo { width:78px; height:26px; }
+:root[data-theme="dark"] .pulse-brand--logo { filter:brightness(0) invert(1); }
+@media (prefers-color-scheme:dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) .pulse-brand--logo { filter:brightness(0) invert(1); }
+}
+.messages.is-empty .empty-mark:has(.pulse-brand) { display:flex; justify-content:center; opacity:1; }
+.desktop-setup-mark:has(.pulse-brand) { background:transparent; }
