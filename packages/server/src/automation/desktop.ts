@@ -56,7 +56,10 @@ export class DesktopBackend implements AutomationBackend {
       this.child!.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params: { ...params, ...(this.displayId ? { displayId: this.displayId } : {}) } }) + '\n')
     })
   }
-  observe(signal?: AbortSignal): Promise<BackendObservation> { return this.call('observe', {}, signal) }
+  async observe(signal?: AbortSignal, windowId?: string): Promise<BackendObservation> {
+    if (windowId && process.platform !== 'darwin') throw automationError('READ_ONLY_WINDOW_CAPTURE_UNSUPPORTED')
+    return this.call('observe', windowId ? { windowId } : {}, signal)
+  }
   async act(action: AutomationAction, observation: BackendObservation, signal?: AbortSignal): Promise<void> { await this.call('act', { action, geometry: observation.geometry }, signal) }
   async release(): Promise<void> { if (this.child) await this.call('release').catch(() => undefined) }
   async close(): Promise<void> {

@@ -15,6 +15,7 @@ export interface TaskRecord {
   schemaVersion: 1
   runId: string
   objective: string
+  criteriaParsingVersion?: 2
   continuedFromRunId?: string
   assessments?: TaskCriterionAssessment[]
   acceptanceCriteria: AcceptanceCriterion[]
@@ -37,6 +38,8 @@ export interface TaskCriterionAssessment {
 }
 
 export interface TaskOutcome {
+  blockers?: Array<{ stageId?: string; code: string; reason: string; recovery: string }>
+  interventions?: { approvalRequests: number; clarificationRequests: number }
   schemaVersion: 1
   status: 'accepted' | 'incomplete' | 'unverifiable' | 'failed' | 'cancelled'
   verifier: 'llm' | 'host'
@@ -83,6 +86,7 @@ export function taskRecordFromGlobal(global: JsonValue): TaskRecord | undefined 
     schemaVersion: 1,
     runId: value.runId,
     objective: value.objective,
+    ...(value.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 as const } : {}),
     ...(typeof value.continuedFromRunId === 'string' ? { continuedFromRunId: value.continuedFromRunId } : {}),
     ...(Array.isArray(value.assessments) ? { assessments: value.assessments.filter((item) => item && typeof item === 'object' && !Array.isArray(item) && typeof item.criterionId === 'string' && ['passed', 'not_met', 'unverifiable'].includes(String(item.status)) && typeof item.rationale === 'string' && Array.isArray(item.evidenceRefs)) as unknown as TaskCriterionAssessment[] } : {}),
     acceptanceCriteria: criteria,
@@ -114,17 +118,26 @@ export function hasTaskProgress(previous: TaskAttempt | undefined, current: Task
 }
 
 /** Preserve explicit checklist lines and sentence boundaries in the user request. */
-export function acceptanceCriteriaFromObjective(objective: string, document?: string): AcceptanceCriterion[] {
+export function acceptanceCriteriaFromObjective(objective: string, document?: string, version?: 2): AcceptanceCriterion[] {
   const sourceHash = createHash('sha256').update(objective).digest('hex')
   const clauses: Array<{ description: string; start: number; end: number }> = []
   let cursor = 0
+  let fence: string | undefined
   for (const line of objective.split(/\r?\n/)) {
+    const fenceMarker = line.match(/^\s*(`{3,}|~{3,})/)?.[1]
+    const literalLine = !!fence || !!fenceMarker
+    if (fenceMarker) fence = fence && fence[0] === fenceMarker[0] && fenceMarker.length >= fence.length ? undefined : fence ?? fenceMarker
     const prefix = line.match(/^\s*(?:[-*•]\s+|\d+[.)、]\s*)/)?.[0] ?? ''
     const body = line.slice(prefix.length)
     let offset = 0
+    const lineClauseStart = clauses.length
     for (const part of body.split(/(?<=[.!?;])\s+|(?<=[。！？；])\s*/)) {
       const description = part.trim()
-      if (description) {
+      // A Markdown hard break after sentence punctuation can otherwise become
+      // its own "deliverable". Ignore only that formatting-only continuation;
+      // preserve literal lines, fenced/inline code, paths and escaped slashes.
+      const formattingOnly = version === 2 && !literalLine && description === '\\' && clauses.length > lineClauseStart && line.endsWith('\\') && !line.endsWith('\\\\') && cursor + line.length < objective.length && (body.slice(0, offset).match(/`/g)?.length ?? 0) % 2 === 0
+      if (description && !formattingOnly) {
         const start = cursor + prefix.length + offset + part.indexOf(description)
         clauses.push({ description, start, end: start + description.length })
       }
@@ -156,6 +169,13 @@ export function isTaskContinuation(text: string): boolean {
   return /^(?:继续|接着|恢复(?:任务|执行)|continue(?:\b)|resume(?:\b))/i.test(request) || /^(?:(?:你|这|这个|刚才|之前|还是|仍然|怎么|为什么|为啥)[，,\s]*){0,3}(?:没有|没看到|找不到|缺少|遗漏|漏了)[^。！？!?\n]{0,30}(?:计划|文件|产物|报告|测试|功能|修改|结果)|^(?:这个|刚才的|之前的).{0,16}(?:不对|有问题|没修好)|^(?:the |that )?(?:plan|file|artifact|report|test|fix).{0,20}(?:missing|not found|still broken)/i.test(request)
 }
 
+/** Explicit interruption followed by an instruction to resume the same work. */
+export function isInterruptedTaskContinuation(text: string): boolean {
+  const request = text.trim()
+  if (isExplicitNewTask(request) || /(?:不要|别|不用|do not|don't)\s*(?:继续|恢复|resume|continue)/i.test(request)) return false
+  return /^(?:刚才|上次|之前|(?:the |my )?previous)[\s\S]{0,120}(?:中断|打断|interrupted|crashed)/i.test(request) && /(?:继续.{0,16}(?:剩余|未完成|迁移|任务|工作)|恢复(?:原|上次|之前)?(?:任务|执行)|(?:resume|continue).{0,30}(?:remaining|unfinished|task|work))/i.test(request)
+}
+
 /** A follow-up that asks for the previous run's factual work log rather than new mutations. */
 export function isExecutionSummaryFollowup(text: string): boolean {
   return /(?:上一轮|上一次|刚才|之前|已完成|刚完成|改了什么|修改了什么|哪些文件|根因|验证(?:命令|结果)?|运行了什么|操作记录|执行记录|what did (?:you|we) change|previous run|work log|verification)/i.test(text.trim())
@@ -163,6 +183,7 @@ export function isExecutionSummaryFollowup(text: string): boolean {
 
 export function continueTaskRecord(previous: TaskRecord, runId: string): TaskRecord {
   return { schemaVersion: 1, runId, objective: previous.objective,
+    ...(previous.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 as const } : {}),
     acceptanceCriteria: structuredClone(previous.acceptanceCriteria),
     ...(previous.acceptanceChecks ? { acceptanceChecks: structuredClone(previous.acceptanceChecks) } : {}),
     ...(previous.supersededCriteria ? { supersededCriteria: structuredClone(previous.supersededCriteria) } : {}),

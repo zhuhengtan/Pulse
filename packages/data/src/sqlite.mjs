@@ -34,7 +34,7 @@ export class ConversationDatabase {
         const messages = page.items.map(decorate), seen = new Set(messages.map(message => message.id));
         for (const item of inbox.messages)
             if (item.state !== 'completed' && !seen.has(`msg-${item.messageId}`))
-                messages.push({ id: `msg-${item.messageId}`, runId: item.runId, role: 'user', text: item.text, createdAt: item.createdAt, deliveryState: item.state, requestId: item.messageId, ...(item.attachments ? { attachments: item.attachments } : {}), ...(item.skills ? { skills: item.skills } : {}), ...(item.mentionedFiles ? { mentionedFiles: item.mentionedFiles } : {}) });
+                messages.push({ id: `msg-${item.messageId}`, runId: item.runId, role: 'user', text: item.text, createdAt: item.createdAt, deliveryState: item.state, requestId: item.messageId, ...(item.attachments ? { attachments: item.attachments } : {}), ...(item.skills ? { skills: item.skills } : {}), ...(item.mentionedFiles ? { mentionedFiles: item.mentionedFiles } : {}), ...(item.richContent ? { richContent: item.richContent } : {}) });
         const workInteractions = [], live = [];
         for (const work of this.list()) {
             if (work.id !== conversation.id && work.origin !== 'assistant' || work.archivedAt || !work.activeRunId)

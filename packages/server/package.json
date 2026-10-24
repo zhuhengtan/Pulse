@@ -14,6 +14,10 @@
     },
     "./protocol": {
       "types": "./dist/protocol.d.ts"
+    },
+    "./rich-content": {
+      "types": "./dist/rich-content.d.ts",
+      "import": "./dist/rich-content.js"
     }
   },
   "main": "dist/index.js",

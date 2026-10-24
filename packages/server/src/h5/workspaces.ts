@@ -184,6 +184,15 @@ export class H5WorkspaceManager {
     projectRoot = await realpath(projectRoot)
     if (!inside(projectRoot, projectCwd)) throw new Error('PROJECT_DIRECTORY_OUTSIDE_GIT_ROOT')
     const projectSubdirectory = relative(projectRoot, projectCwd)
+    // An ignored, untracked project is not represented in its ancestor repository.
+    // Keep the explicitly selected directory and the existing shared-directory lock.
+    if (projectSubdirectory && !(await git(projectRoot, ['ls-files', '-z', '--', projectSubdirectory])).trim()) {
+      const ignored = await git(projectRoot, ['check-ignore', '--', projectSubdirectory + '/']).then(() => true, error => {
+        if (error.code === 1) return false
+        throw error
+      })
+      if (ignored) return this.prepareShared(conversationId, projectId, projectCwd)
+    }
     const worktreeRoot = join(this.root, 'git', conversationId)
     const scratch = join(this.scratchRoot, conversationId)
     await mkdir(scratch, { recursive: true })
@@ -192,6 +201,8 @@ export class H5WorkspaceManager {
     try {
       await git(projectRoot, ['worktree', 'add', '--detach', worktreeRoot, head])
       await applyTrackedSnapshot(projectRoot, worktreeRoot, head, scratch, excludedRoot)
+      // Git does not materialize empty project directories.
+      await mkdir(join(worktreeRoot, projectSubdirectory), { recursive: true })
       const baselineCommit = await commitSnapshot(worktreeRoot, 'Pulse task starting snapshot')
       await this.prepareDependencies(projectRoot, worktreeRoot)
       const record: WorktreeRecord = { schemaVersion: 1, kind: 'git', conversationId, projectId, projectRoot, worktreeRoot, projectSubdirectory, baselineCommit, status: 'running', updatedAt: new Date().toISOString() }

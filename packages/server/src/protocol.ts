@@ -1,3 +1,4 @@
+import type { RichContent } from './rich-content.js'
 /** Browser-safe DTOs shared by the H5 server and independent Web client. */
 export interface WebConversation {
   id: string
@@ -15,6 +16,8 @@ export interface WebConversation {
 }
 
 export interface WebProject {
+  /** Registered source folders; cwd is the primary/default folder. */
+  folders?: string[]
   id: string
   name: string
   cwd: string
@@ -68,6 +71,7 @@ export interface WebMessage {
   attachments?: WebAttachment[]
   skills?: string[]
   mentionedFiles?: string[]
+  richContent?: RichContent
 }
 
 export interface WebAssistantMessageReceipt {

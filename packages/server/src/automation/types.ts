@@ -15,6 +15,10 @@ export interface AutomationConfig {
   computer?: { helperPath?: string; displayId?: string }
 }
 export interface BackendObservation {
+  captureScope?: 'window' | 'display'
+  targetWindowId?: string
+  captureBounds?: { x: number; y: number; width: number; height: number }
+  accessibilityTruncated?: boolean
   tabs?: NonNullable<AutomationSessionView['tabs']>
   title?: string
   url?: string
@@ -26,9 +30,10 @@ export interface BackendObservation {
 }
 export interface AutomationBackend {
   call(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
-  observe(signal?: AbortSignal): Promise<BackendObservation>
+  observe(signal?: AbortSignal, windowId?: string): Promise<BackendObservation>
   act(action: AutomationAction, observation: BackendObservation, signal?: AbortSignal): Promise<void>
   release(): Promise<void>
+  setControl?(state: string, until?: number): Promise<void>
   close(): Promise<void>
 }
 export interface AutomationSessionView {

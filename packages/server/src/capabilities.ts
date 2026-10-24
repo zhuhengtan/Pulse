@@ -126,7 +126,7 @@ export const referenceCapabilityPackCatalog: readonly CapabilityPackManifest[] =
   { id: 'mcp', version: '1', kind: 'mcp', title: 'MCP servers', description: 'Host-installed Model Context Protocol servers with explicit tool and network policies.' },
   { id: 'skills', version: '1', kind: 'skill', title: 'Skills', description: 'Reviewed, host-installed task instructions and workflows; project files cannot execute as plugins.' },
   { id: 'jarvis', version: '1', kind: 'integration', title: 'Jarvis memory', description: 'Optional session-scoped memory and context integration.' },
-  { id: 'browser', version: '1', kind: 'integration', title: 'Browser', description: 'Optional Playwright-based browser research and interaction adapter.' },
+  { id: 'browser', version: '1', kind: 'integration', title: 'Browser', description: 'Browse and interact in the internal right-panel browser by default. External Playwright browsers are used only when explicitly requested by the user.' },
   { id: 'computer', version: '1', kind: 'integration', title: 'Computer', description: 'Optional native desktop observation and input with explicit system permissions.' },
   { id: 'pdf', version: '1', kind: 'integration', title: 'PDF', description: 'Optional PDF.js-based document extraction adapter.' },
   { id: 'spreadsheet', version: '1', kind: 'integration', title: 'Spreadsheets', description: 'Optional ExcelJS-based spreadsheet read/write adapter.' },

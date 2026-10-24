@@ -88,7 +88,22 @@ export class FilesystemTool {
       const buffer = Buffer.alloc(maxBytes + 1)
       const { bytesRead } = await handle.read(buffer, 0, maxBytes + 1, offset)
       if (signal?.aborted) throw filesystemError('ABORTED')
-      if (bytesRead && (buffer[0]! & 0xc0) === 0x80) throw filesystemError('INVALID_UTF8_OFFSET')
+      if (bytesRead && (buffer[0]! & 0xc0) === 0x80) {
+        // Keep the requested byte range strict, but give callers a bounded,
+        // concrete correction instead of forcing another guessed offset.
+        const start = Math.max(0, offset - 3)
+        const prefix = Buffer.alloc(offset - start + 1)
+        await handle.read(prefix, 0, prefix.length, start)
+        let index = prefix.length - 1
+        while (index > 0 && (prefix[index]! & 0xc0) === 0x80) index--
+        const lead = prefix[index]!
+        const width = lead >= 0xc2 && lead <= 0xdf ? 2 : lead >= 0xe0 && lead <= 0xef ? 3 : lead >= 0xf0 && lead <= 0xf4 ? 4 : 0
+        const suggestedOffset = width > offset - start - index ? start + index : undefined
+        throw Object.assign(filesystemError('INVALID_UTF8_OFFSET'), {
+          message: `INVALID_UTF8_OFFSET: offset ${offset} is inside a UTF-8 character. Use the previous nextOffset or startLine, not a guessed byte offset.${suggestedOffset === undefined ? '' : ` Retry from byte offset ${suggestedOffset}.`}`,
+          details: { field: 'offset', requestedOffset: offset, constraint: 'UTF-8 character boundary', ...(suggestedOffset === undefined ? {} : { suggestedRead: { path, offset: suggestedOffset, maxBytes: Math.max(4, maxBytes) } }) },
+        })
+      }
       let end = Math.min(bytesRead, maxBytes)
       if (bytesRead > maxBytes) {
         // The byte after the window is a continuation: drop the partial codepoint.

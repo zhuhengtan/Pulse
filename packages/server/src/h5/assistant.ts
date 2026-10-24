@@ -1,3 +1,4 @@
+import { parseRichContent, type RichContent } from '../rich-content.js'
 import { ConversationData } from '@hunterzhu/pulse-data'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -9,6 +10,7 @@ export interface QueuedAssistantMessage extends WebAssistantMessageReceipt {
   text: string
   attachments?: WebAttachment[]
   skills?: string[]
+  richContent?: RichContent
   mentionedFiles?: string[]
 }
 interface AssistantQueueFile { schemaVersion: 1; conversationId: string; messages: QueuedAssistantMessage[]; notices?: WebMessage[]; workLinks?: Record<string, { projectId: string; title: string }> }
@@ -40,12 +42,13 @@ export class AssistantConversationStore {
     return this.state.conversationId
   }
 
-  async enqueue(input: { requestId: string; text: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }): Promise<{ message: QueuedAssistantMessage; duplicate: boolean }> {
+  async enqueue(input: { requestId: string; text: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[] }): Promise<{ message: QueuedAssistantMessage; duplicate: boolean }> {
+    if (input.richContent) input = { ...input, richContent: parseRichContent(input.richContent)! }
     return this.serial(async () => {
       const state = this.requireState()
       const existing = state.messages.find(item => item.messageId === input.requestId)
       if (existing) {
-        if (JSON.stringify({ text: existing.text, attachments: existing.attachments ?? [], skills: existing.skills ?? [], mentionedFiles: existing.mentionedFiles ?? [] }) !== JSON.stringify({ text: input.text, attachments: input.attachments ?? [], skills: input.skills ?? [], mentionedFiles: input.mentionedFiles ?? [] })) throw new Error('REQUEST_ID_REUSED')
+        if (JSON.stringify({ text: existing.text, attachments: existing.attachments ?? [], skills: existing.skills ?? [], mentionedFiles: existing.mentionedFiles ?? [], richContent: existing.richContent ?? null }) !== JSON.stringify({ text: input.text, attachments: input.attachments ?? [], skills: input.skills ?? [], mentionedFiles: input.mentionedFiles ?? [], richContent: input.richContent ?? null })) throw new Error('REQUEST_ID_REUSED')
         return { message: structuredClone(existing), duplicate: true }
       }
       const now = new Date().toISOString()
@@ -58,7 +61,7 @@ export class AssistantConversationStore {
         updatedAt: now,
         ...(input.attachments ? { attachments: input.attachments } : {}),
         ...(input.skills ? { skills: input.skills } : {}),
-        ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}),
+        ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}),
       }
       state.messages.push(message)
       await this.save()
@@ -66,17 +69,17 @@ export class AssistantConversationStore {
     })
   }
 
-  async acceptInput(input: { requestId: string; text: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }, runId: string): Promise<void> {
+  async acceptInput(input: { requestId: string; text: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[] }, runId: string): Promise<void> {
     await this.serial(async () => {
       const state = this.requireState()
       if (state.messages.some(message => message.messageId === input.requestId)) return
       const now = new Date().toISOString()
-      state.messages.push({ messageId: input.requestId, text: input.text, runId, state: state.messages.find(message => message.runId === runId)?.state ?? 'replying', createdAt: now, updatedAt: now, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}) })
+      state.messages.push({ messageId: input.requestId, text: input.text, runId, state: state.messages.find(message => message.runId === runId)?.state ?? 'replying', createdAt: now, updatedAt: now, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) })
       await this.save()
     })
   }
 
-  async retry(requestId: string, text: string, attachments?: WebAttachment[], skills?: string[], mentionedFiles?: string[]): Promise<{ message: QueuedAssistantMessage; duplicate: boolean }> {
+  async retry(requestId: string, text: string, attachments?: WebAttachment[], skills?: string[], mentionedFiles?: string[], richContent?: RichContent): Promise<{ message: QueuedAssistantMessage; duplicate: boolean }> {
     return this.serial(async () => {
       const state = this.requireState()
       const existing = state.messages.find(item => item.messageId === requestId)
@@ -91,13 +94,13 @@ export class AssistantConversationStore {
           updatedAt: now,
           ...(attachments ? { attachments } : {}),
           ...(skills ? { skills } : {}),
-          ...(mentionedFiles ? { mentionedFiles } : {}),
+          ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}),
         }
         state.messages.push(created)
         await this.save()
         return { message: structuredClone(created), duplicate: false }
       }
-      if (existing.text !== text) throw new Error('REQUEST_ID_REUSED')
+      if (existing.text !== text || JSON.stringify(existing.richContent ?? null) !== JSON.stringify(richContent ?? null)) throw new Error('REQUEST_ID_REUSED')
       if (existing.state === 'queued' || existing.state === 'replying') return { message: structuredClone(existing), duplicate: true }
       if (existing.state === 'completed') throw new Error('ASSISTANT_MESSAGE_ALREADY_COMPLETED')
       existing.runId = `run-${randomUUID()}`
@@ -106,6 +109,7 @@ export class AssistantConversationStore {
       if (attachments) existing.attachments = attachments
       if (skills) existing.skills = skills
       if (mentionedFiles) existing.mentionedFiles = mentionedFiles
+      if (richContent) existing.richContent = richContent
       delete existing.error
       await this.save()
       return { message: structuredClone(existing), duplicate: false }
@@ -141,7 +145,7 @@ export class AssistantConversationStore {
     return this.requireState().messages.map(({ text: _text, ...message }) => structuredClone(message))
   }
 
-  transcript(pendingOnly = false): Array<{ requestId: string; runId: string; text: string; createdAt: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }> {
+  transcript(pendingOnly = false): Array<{ requestId: string; runId: string; text: string; createdAt: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[] }> {
     return this.requireState().messages.filter(message => !pendingOnly || message.state === 'queued' || message.state === 'interrupted').map(message => ({
       requestId: message.messageId,
       runId: message.runId,
@@ -149,7 +153,7 @@ export class AssistantConversationStore {
       createdAt: message.createdAt,
       ...(message.attachments ? { attachments: message.attachments } : {}),
       ...(message.skills ? { skills: message.skills } : {}),
-      ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}),
+      ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}),
     }))
   }
 

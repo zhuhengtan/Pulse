@@ -2,7 +2,7 @@ import type { TaskOutcome } from '../task.js'
 import { isCascadeBlocked, rootBlockedDependency, type ControlledTask, type TaskControllerState } from './state.js'
 
 /** Keep criterion assessments intact; the human projection expands each cause once. */
-export function controllerReport(state: TaskControllerState, criteria: TaskOutcome['criteria'], accepted: boolean, zh: boolean, artifacts: (t: ControlledTask) => string[], candidate: (t: ControlledTask) => string | undefined): string {
+export function controllerReport(state: TaskControllerState, criteria: TaskOutcome['criteria'], accepted: boolean, zh: boolean, artifacts: (t: ControlledTask) => string[], candidate: (t: ControlledTask) => string | undefined, auditedCandidateOnly = false): string {
   const parts = [accepted ? (zh ? '任务逐项验收通过。' : 'All task stages accepted.') : (zh ? '任务尚未全部完成，已保留完成项与阻塞原因。' : 'Task incomplete; completed work and blockers retained.')]
   const roots = state.tasks.filter(t => t.status === 'blocked' && !isCascadeBlocked(t, state.tasks))
   const expanded = new Set<string>()
@@ -29,6 +29,11 @@ export function controllerReport(state: TaskControllerState, criteria: TaskOutco
   }
   for (const [reason, ids] of failures) { const text = emit(reason); if (text) parts.push(`${ids.join(', ')}: ${text}`) }
   for (const t of state.tasks.filter(t => t.status === 'passed')) {
+    if (auditedCandidateOnly) {
+      const body = candidate(t)
+      if (body) { const delivery = emit(body); if (delivery) parts.push(delivery) }
+      continue
+    }
     const note = emit(!accepted && roots.length ? (zh ? '阶段检查已通过；整体验收仍未通过。' : 'Stage checks passed; overall acceptance remains incomplete.') : t.note ?? t.status), body = candidate(t), delivery = body ? emit(body) : ''
     parts.push(`✓ ${t.id} ${t.goal}${note ? `\n${note}` : ''}${delivery ? `\n${delivery}` : ''}`)
   }

@@ -4,9 +4,11 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { dirname, extname, join, relative, resolve } from 'node:path'
 import { FilesystemTool } from '@hunterzhu/pulse-adapters'
+import { candidateScriptCoverage, type CandidateScriptCoverage } from './task-controller/candidate-script-coverage.js'
 
 export interface CheckReceipt {
-  schemaVersion: 1
+  schemaVersion: 1 | 2 | 3
+  scope?: { mode: 'explicit' | 'project'; inputs: string[]; coverage: 'declared-inputs' | 'unknown-dynamic' | 'conservative' }
   command: string
   args: string[]
   cwd: string
@@ -15,8 +17,9 @@ export interface CheckReceipt {
   environment: { platform: string; node: string }
   stable: boolean
   definitionChanged: boolean
+  candidateScriptCoverage?: CandidateScriptCoverage[]
 }
-export const isCheck = (command: string, args: string[]) => /(?:--(?:test|check)|(?:test|check|verify|lint|typecheck|pytest|vitest|jest)(?:[.\s/\\-]|$))/i.test([command, ...args].join(' '))
+export const isCheck = (command: string, args: string[]) => /(?:^|[/\\])xmllint$/.test(command) || /(?:--(?:test|check)|(?:test|check|verify|lint|typecheck|pytest|vitest|jest)(?:[.\s/\\-]|$))/i.test([command, ...args].join(' '))
 const portableKeys = (record: Record<string, string>) => Object.fromEntries(Object.entries(record).map(([key, value]) => [key.replaceAll('\\', '/'), value]))
 const hash = (text: string) => createHash('sha256').update(text).digest('hex')
 export function testAdditionsRequested(intent: string): boolean {
@@ -170,21 +173,46 @@ export async function assertCheckEdit(root: string, store: string, path: string,
   try { sources = portableKeys(JSON.parse(await fs.readFile(join(store, 'test-sources.json'), 'utf8'))) }
   catch (error) { if ((error as { code?: string }).code !== 'ENOENT') throw error }
   if (sources[key] !== undefined && preservesTestBaseline(root, key, sources[key]!, proposed)) return
-  throw Object.assign(new Error('FROZEN_TEST_CHANGE: no file written. Preserve every original import and the complete original test body, including placeholder assertions. If test additions are authorized, append new cases after that body; otherwise create a separate candidate test. Do not replace or remove the baseline.'), { code: 'FROZEN_TEST_CHANGE', details: { path: key, additionsAllowed: sources[key] !== undefined, suggestedRead: { path: key }, nextTools: ['fs.read', 'fs.apply_patch'] } })
+  const appendConstraint = 'Append only top-level test(...) or it(...) registrations. Extra top-level imports, variable/function declarations and module side effects are not accepted. Put per-test imports, setup and helpers inside the appended test callback, or use a separate authorized candidate test file.'
+  throw Object.assign(new Error('FROZEN_TEST_CHANGE: no file written. Preserve every original import and the complete original test body, including placeholder assertions. If test additions are authorized, append new cases after that body; otherwise create a separate candidate test. Do not replace or remove the baseline. ' + appendConstraint), { code: 'FROZEN_TEST_CHANGE', details: { path: key, additionsAllowed: sources[key] !== undefined, constraints: appendConstraint, suggestedRead: { path: key }, nextTools: ['fs.read', 'fs.apply_patch'] } })
 }
 
 /** Named checks include their local import closure. Project scripts use a conservative source tree. */
-export async function captureCheck(root: string, cwd: string, command: string, args: string[], allDefinitions = false): Promise<CheckReceipt> {
+export async function captureCheck(root: string, cwd: string, command: string, args: string[], allDefinitions = false, version: 1 | 2 | 3 = 2, savedScope?: CheckReceipt['scope']): Promise<CheckReceipt> {
   root = await fs.realpath(root)
   cwd = await fs.realpath(cwd)
   const files = new FilesystemTool(root), versions: Record<string, string> = {}, definitions: Record<string, string> = {}
-  const pending = args.filter(arg => !arg.startsWith('-') && /\.(?:[cm]?[jt]sx?|py|sh)$/.test(arg)).map(arg => resolve(cwd, arg))
-  const named = pending.length > 0
+  const legacyInputs = args.filter(arg => !arg.startsWith('-') && /\.(?:[cm]?[jt]sx?|py|sh)$/.test(arg)).map(arg => resolve(cwd, arg))
+  const directInputs: string[] = []
+  if (version >= 2 && !savedScope && /(?:^|[/\\])(?:node|python3?|ruby|perl|xmllint|jq)$/.test(command)) {
+    for (const arg of args) {
+      if (arg.startsWith('-') || arg.includes('\n') || /^[a-z]+:\/\//i.test(arg) || !/\.[a-z0-9]{1,12}$/i.test(arg)) continue
+      const path = resolve(cwd, arg)
+      if ((await fs.stat(path).catch(() => undefined))?.isFile()) directInputs.push(path)
+    }
+  }
+  // unittest accepts dotted module selectors rather than file operands.
+  // Resolve only whole local modules; method selectors/flags remain conservative.
+  if (version === 3 && !savedScope && /(?:^|[/\\])python3?$/.test(command) && args[0] === '-m' && args[1] === 'unittest') {
+    for (const arg of args.slice(2)) if (/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(arg)) {
+      const path = resolve(cwd, arg.replaceAll('.', '/') + '.py')
+      if ((await fs.stat(path).catch(() => undefined))?.isFile()) directInputs.push(path)
+    }
+  }
+  const seeds = version === 1 ? legacyInputs : savedScope ? savedScope.inputs.map(p => resolve(root, p)) : [...new Set([...legacyInputs, ...directInputs])]
+  const pending = [...seeds]
+  const named = savedScope ? savedScope.mode === 'explicit' : pending.length > 0
+  const scope: NonNullable<CheckReceipt['scope']> = { mode: named ? 'explicit' : 'project', inputs: seeds.map(p => relative(root, p).replaceAll('\\', '/')), coverage: named ? /(?:^|[/\\])(?:xmllint|jq)$/.test(command) ? 'declared-inputs' : 'unknown-dynamic' : 'conservative' }
+
   if (!named) {
     // Include tracked checks even if ignored later, but exclude ignored generated
     // run data. A broad filesystem walk otherwise freezes old Runtime snapshots.
     let inventory: string | undefined
     try {
+      if (version === 3) {
+        const top = (await promisify(execFile)('git', ['rev-parse', '--show-toplevel'], { cwd, timeout: 10_000 })).stdout.trim()
+        if (relative(root, top).startsWith('..')) throw Object.assign(new Error('parent repository is not a git repository for this workspace'), { stderr: 'not a git repository' })
+      }
       inventory = (await promisify(execFile)('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', '.'], { cwd, timeout: 10_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true })).stdout
     } catch (error) {
       if ((error as { code?: string | number }).code !== 'ENOENT' && !/not a git repository/i.test(String((error as { stderr?: string }).stderr ?? ''))) throw error
@@ -213,6 +241,10 @@ export async function captureCheck(root: string, cwd: string, command: string, a
   while (pending.length) {
     const path = pending.pop()!, key = relative(root, path).replaceAll('\\', '/')
     if (key.startsWith('../') || key === '..' || versions[key]) continue
+    if (version >= 2 && !/\.(?:[cm]?[jt]sx?|py|sh|json|toml|yaml|yml)$/.test(path)) {
+      try { versions[key] = await files.hash(path) } catch (error) { if ((error as { code?: string }).code !== 'ENOENT') throw error }
+      continue
+    }
     let text: string
     try { const read = await files.readLimited(path, 1_000_000); if (read.truncated) throw Object.assign(new Error('Check input exceeds per-file manifest bound.'), { code: 'CHECK_SCOPE_TOO_LARGE' }); text = read.content } catch (e) { if ((e as { code?: string }).code === 'ENOENT') continue; throw e }
     bytes += Buffer.byteLength(text)
@@ -224,6 +256,12 @@ export async function captureCheck(root: string, cwd: string, command: string, a
       const script = args.filter(arg => !arg.startsWith('-')); const selected = script[0] === 'run' ? script[1] : script[0]
       for (const [name, scriptCommand] of Object.entries(body.scripts ?? {})) if (allDefinitions || /^(?:npm|pnpm|yarn|bun)$/.test(command) && name === selected) definitions[`${key}#scripts:${name}`] = hash(scriptCommand)
     }
+    if (version === 3 && path.endsWith('.py')) for (const match of text.matchAll(/^\s*(?:from\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+import|import\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*))/gm)) {
+      const module = (match[1] ?? match[2]!).replaceAll('.', '/')
+      for (const candidate of [resolve(cwd, module + '.py'), resolve(root, module + '.py'), resolve(cwd, module, '__init__.py')]) {
+        if ((await fs.stat(candidate).catch(() => undefined))?.isFile()) { pending.push(candidate); break }
+      }
+    }
     if (named) for (const match of text.matchAll(/(?:from\s*|import\s*(?:\(\s*)?|require\s*\()\s*['"](\.[^'"]+)['"]/g)) {
       const base = resolve(dirname(path), match[1]!)
       for (const candidate of [base, base.replace(/\.js$/, '.ts'), ...['.ts', '.js', '.mjs', '.tsx', '/index.ts', '/index.js'].map(ext => base + ext)]) {
@@ -231,13 +269,13 @@ export async function captureCheck(root: string, cwd: string, command: string, a
       }
     }
   }
-  return { schemaVersion: 1, command, args, cwd: relative(root, cwd) || '.', files: versions, definitions, environment: { platform: process.platform, node: process.version }, stable: true, definitionChanged: false }
+  return { schemaVersion: version, ...(version >= 2 ? { scope } : {}), command, args, cwd: relative(root, cwd) || '.', files: versions, definitions, environment: { platform: process.platform, node: process.version }, stable: true, definitionChanged: false }
 }
 
 /** First observed check definition is frozen in Host data, never in the agent workspace. */
-export async function finishCheck(root: string, before: CheckReceipt, store?: string): Promise<CheckReceipt> {
+export async function finishCheck(root: string, before: CheckReceipt, store?: string, allowCandidateScripts = false): Promise<CheckReceipt> {
   before.files = portableKeys(before.files); before.definitions = portableKeys(before.definitions)
-  const after = await captureCheck(root, resolve(root, before.cwd), before.command, before.args)
+  const after = await captureCheck(root, resolve(root, before.cwd), before.command, before.args, false, before.schemaVersion, before.scope)
   before.stable = JSON.stringify(before.files) === JSON.stringify(after.files)
   if (store) {
     await fs.mkdir(store, { recursive: true })
@@ -264,6 +302,13 @@ export async function finishCheck(root: string, before: CheckReceipt, store?: st
       const candidate = originalSnapshot && /\.(?:[cm]?[jt]sx?|py|sh)$/.test(path) && before.definitions[path] !== undefined && originalDefinitions[path] === undefined
       if (candidate && candidatePolicy === false) return true
       if (before.definitions[path] === expected) return false
+      if (allowCandidateScripts && before.stable && originalSnapshot && candidatePolicy === true && originalDefinitions[path] === undefined) {
+        const coverage = await candidateScriptCoverage(root, before, path)
+        if (coverage && coverage.scriptHash === before.definitions[path]) {
+          before.candidateScriptCoverage = [...(before.candidateScriptCoverage ?? []), coverage]
+          return false
+        }
+      }
       // New candidate verification files have no caller-owned baseline, even when the task
       // requests a refactor rather than explicit test additions. Require a
       // trusted run-start snapshot/policy and a fresh execution after any edit.
@@ -282,9 +327,9 @@ export async function finishCheck(root: string, before: CheckReceipt, store?: st
   return before
 }
 
-export async function freezeCheckDefinitions(root: string, store: string, allowTestAdditions = false, allowCandidateChanges = true): Promise<void> {
+export async function freezeCheckDefinitions(root: string, store: string, allowTestAdditions = false, allowCandidateChanges = true, version: 2 | 3 = 2): Promise<void> {
   try { await fs.access(join(store, 'original.json')); return } catch { /* New run. */ }
-  const receipt = await captureCheck(root, root, 'node', ['--test'], true)
+  const receipt = await captureCheck(root, root, 'node', ['--test'], true, version)
   await fs.mkdir(store, { recursive: true })
   await fs.writeFile(join(store, 'candidate-test-policy.json'), JSON.stringify({ mutable: allowCandidateChanges }), { flag: 'wx', mode: 0o600 }).catch(error => { if (error.code !== 'EEXIST') throw error })
   if (allowTestAdditions) {

@@ -1559,6 +1559,14 @@ export class PulseRuntime {
     return this.scheduleRuntimeTimer(this.clock.now() + delayMs, callback)
   }
 
+  private cancelExecutionTimers(effectId: string): void {
+    const execution = this.executions.get(effectId)
+    if (!execution) return
+    for (const timer of [execution.timeoutTimer, execution.deadlineTimer, execution.cancelTimer]) {
+      if (timer !== undefined) this.clock.timers.cancel(timer)
+    }
+  }
+
   private seriesStep(program: LaneProgram, context: LaneStepContext, series?: SeriesLaneSpec): LaneStepOutput {
     const locals = context.lane.resume.locals && typeof context.lane.resume.locals === 'object' && !Array.isArray(context.lane.resume.locals) ? context.lane.resume.locals as Record<string, JsonValue> : {}
     const sdkValue = locals.$sdk && typeof locals.$sdk === 'object' && !Array.isArray(locals.$sdk) ? locals.$sdk as Record<string, JsonValue> : {}
@@ -1811,7 +1819,7 @@ export class PulseRuntime {
         const message = cause instanceof Error ? cause.message : String(cause)
         const candidate = cause && typeof cause === 'object' ? cause as { code?: unknown } : undefined
         const code = typeof candidate?.code === 'string' ? candidate.code : message.split(':', 1)[0] || 'STEP_OUTPUT_PREPARATION_FAILED'
-        const rejection: RuntimeError = { code, message }
+        const rejection: RuntimeError = runtimeErrorFromCause(cause, code)
         const consecutive = (lane.consecutiveControlErrors ?? 0) + 1
         const controlInput: ResumeInput = { type: 'control_error', error: rejection, ...(lane.pendingResumeInput ? { original: lane.pendingResumeInput } : {}) }
         if (consecutive >= this.maxConsecutiveControlErrors) this.failLane(lane, repeatedControlFailure(rejection, consecutive))
@@ -1973,6 +1981,29 @@ export class PulseRuntime {
   }
 
   async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup() || this.hasDueTimer()) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await this.waitForFact(); else if (this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup() || this.hasDueTimer()) await new Promise<void>((resolve) => setImmediate(resolve)) } await this.flushPersistence() }
+
+  /** A restart may retain a durable human wait, never an executing write or model call. */
+  async checkpointHumanWait(): Promise<boolean> {
+    const open = [...this.state.effects.values()].filter(effect => !effect.outcome && effect.state !== 'cancelled')
+    const checkpoint = {
+      ready: this.ready.size,
+      executing: this.executions.size,
+      preparingModels: this.preparingLLMs.size,
+      queuedEffects: this.hasQueuedEffects(),
+      inbox: this.factInbox.size,
+      pendingCleanup: this.hasPendingTickCleanup(),
+      dueTimer: this.hasDueTimer(),
+      pendingHuman: this.hasPendingHostInteraction(),
+      openEffects: open.map(effect => ({ id: effect.id, kind: effect.kind })),
+    }
+    const preserved = !checkpoint.ready && !checkpoint.executing && !checkpoint.preparingModels && !checkpoint.queuedEffects && !checkpoint.inbox && !checkpoint.pendingCleanup && !checkpoint.dueTimer && checkpoint.pendingHuman && open.length > 0 && open.every(effect => effect.kind === 'human')
+    // This receipt diagnoses the real shutdown decision without logging user
+    // answers or weakening the quiescence requirement for in-flight effects.
+    this.emit({ type: 'runtime.human_wait_checkpoint', data: { preserved, ...checkpoint } })
+    this.schedulePersistence()
+    await this.flushPersistence()
+    return preserved
+  }
 
   async shutdown(timeoutMs = 5_000): Promise<{ status: 'stopped' | 'timed_out'; unresolvedEffectIds: string[]; quarantine: string[] }> {
     this.shuttingDown = true
@@ -2220,6 +2251,7 @@ export class PulseRuntime {
     const wasQuarantined = storedEffect.state === 'reconcile_required'
     const effect = structuredClone(storedEffect)
     const running = this.executions.get(effectId)
+    this.cancelExecutionTimers(effectId)
     if (running) { running.controller.abort(); this.executions.delete(effectId) }
     if (execution.executionState === 'remote_unknown') { this.markRemoteUnknown(effectId, execution.sideEffectState ?? 'none'); return false }
     let effectiveExecution = execution
@@ -2961,6 +2993,7 @@ export class PulseRuntime {
     admission.push(...additionalMutations.map((mutation) => structuredClone(mutation)))
     admission.push({ op: 'appendEvent', event: terminalEvent })
     this.assertStorageAdmission(admission)
+    this.cancelExecutionTimers(effectId)
     if (execution) { execution.controller.abort(); this.executions.delete(effectId) }
     this.releaseEffectLocks(effectId)
     commitMutationTransaction(this.state, this.mutationLog, `effect:${effect.id}:${effect.attemptId}:quarantined`, admission, this.state.now, this.sessionId)

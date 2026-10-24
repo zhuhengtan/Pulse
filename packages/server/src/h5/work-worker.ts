@@ -1,3 +1,4 @@
+import type { RichContent } from '../rich-content.js'
 import type { WebAttachment } from '../protocol.js'
 import { fork, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -6,7 +7,7 @@ import type { AssistantEvent, LocalHost, LocalHostOptions, RunHandle, RunUsage, 
 
 export const H5_WORKER_PROTOCOL_VERSION = 1 as const
 
-type WorkerPayload = { requestId?: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }
+type WorkerPayload = { requestId?: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[] }
 type WorkerStart = Omit<WorkerPayload, 'requestId'> & { messageRequestId?: string } & { schemaVersion: 1; type: 'start'; requestId: string; conversationId: string; text: string; resume: boolean }
 type WorkerConfigure = { schemaVersion: 1; type: 'configure'; runtimeOptions: WorkWorkerRuntimeOptions }
 type WorkerRpc = { schemaVersion: 1; type: 'rpc'; requestId: string; method: 'cancel' | 'reply' | 'replyBatch' | 'pendingInteractions' | 'reviewApproval' | 'submitHumanInput'; args: unknown[] }
@@ -167,10 +168,10 @@ class RemoteWorkRun {
       },
       submitHumanInput: async (text, targetEffectId, options) => { await this.rpc('submitHumanInput', [text, targetEffectId, options]) },
       shutdown: async () => {
-        if (!this.settledValue && this.child.connected) await this.rpc('cancel', ['H5_SERVER_SHUTDOWN'], 2_000).catch(() => undefined)
+        if (!this.settledValue && this.child.connected) await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'shutdown' }).catch(() => undefined)
         const timer = setTimeout(() => {
           if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGTERM')
-        }, 3_000)
+        }, 10_000)
         try { await this.closed } finally { clearTimeout(timer) }
       },
     }
@@ -186,7 +187,7 @@ class RemoteWorkRun {
       await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'configure', runtimeOptions })
       await this.configured
       const requestId = this.startRequestId
-      await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'start', requestId, conversationId: this.conversationId, text, resume, ...(input.requestId ? { messageRequestId: input.requestId } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}) })
+      await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'start', requestId, conversationId: this.conversationId, text, resume, ...(input.requestId ? { messageRequestId: input.requestId } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) })
       const started = await this.started
       this.runId = started.runId
     } catch (error) {
@@ -196,7 +197,7 @@ class RemoteWorkRun {
     }
   }
 
-  private sendParent(message: WorkerConfigure | WorkerStart): Promise<void> {
+  private sendParent(message: WorkerConfigure | WorkerStart | WorkerShutdown): Promise<void> {
     if (!this.child.connected) return Promise.reject(new Error('WORKER_NOT_CONNECTED'))
     return new Promise((resolve, reject) => this.child.send(message satisfies ParentMessage, error => error ? reject(error) : resolve()))
   }
@@ -305,7 +306,7 @@ export async function runH5WorkWorker(host: LocalHost, conversationId: string): 
 
   let handle: RunHandle
   try {
-    handle = start.resume ? await host.resumeRun(conversationId) : await host.sendMessage(conversationId, { text: start.text, ...(start.messageRequestId ? { requestId: start.messageRequestId } : {}), ...(start.attachments ? { attachments: start.attachments } : {}), ...(start.skills ? { skills: start.skills } : {}), ...(start.mentionedFiles ? { mentionedFiles: start.mentionedFiles } : {}) })
+    handle = start.resume ? await host.resumeRun(conversationId) : await host.sendMessage(conversationId, { text: start.text, ...(start.messageRequestId ? { requestId: start.messageRequestId } : {}), ...(start.attachments ? { attachments: start.attachments } : {}), ...(start.skills ? { skills: start.skills } : {}), ...(start.mentionedFiles ? { mentionedFiles: start.mentionedFiles } : {}), ...(start.richContent ? { richContent: start.richContent } : {}) })
     await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'started', requestId: start.requestId, runId: handle.id, conversationId })
   } catch (error) {
     await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'fatal', message: errorText(error).slice(0, 400) }).catch(() => undefined)
@@ -315,16 +316,23 @@ export async function runH5WorkWorker(host: LocalHost, conversationId: string): 
   }
 
   let settled = false
+  let suspending = false
   process.once('disconnect', () => {
     if (settled) return
-    void handle.cancel('PARENT_DISCONNECTED').finally(async () => {
-      await host.close().catch(() => undefined)
-      process.exit(1)
-    })
+    suspending = true
+    settled = true
+    void host.close({ preserveHumanWaits: true }).finally(() => process.exit(1))
   })
 
   process.on('message', (raw: unknown) => {
-    if (!isObject(raw) || raw.schemaVersion !== H5_WORKER_PROTOCOL_VERSION || raw.type !== 'rpc' || typeof raw.requestId !== 'string' || typeof raw.method !== 'string' || !Array.isArray(raw.args)) return
+    if (isObject(raw) && raw.schemaVersion === H5_WORKER_PROTOCOL_VERSION && raw.type === 'shutdown') {
+      if (suspending || settled) return
+      suspending = true
+      settled = true // Parent disconnect is expected after the checkpoint closes.
+      void host.close({ preserveHumanWaits: true }).then(() => process.exit(0), () => process.exit(1))
+      return
+    }
+    if (suspending || !isObject(raw) || raw.schemaVersion !== H5_WORKER_PROTOCOL_VERSION || raw.type !== 'rpc' || typeof raw.requestId !== 'string' || typeof raw.method !== 'string' || !Array.isArray(raw.args)) return
     const request = raw as WorkerRpc
     void (async () => {
       try {

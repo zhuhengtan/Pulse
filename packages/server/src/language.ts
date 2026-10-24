@@ -17,6 +17,6 @@ export function detectResponseLanguage(text: string): ResponseLanguage {
 
 export function responseLanguageInstruction(language: ResponseLanguage): string {
   return language === 'zh-CN'
-    ? 'Reply in Simplified Chinese. Keep code, command names, paths, identifiers, and quoted text unchanged. Do not switch to English unless the user explicitly asks for English.'
-    : 'Reply in the same language as the latest user request. Keep code, command names, paths, identifiers, and quoted text unchanged.'
+    ? 'Reply and write prose deliverables in Simplified Chinese unless the user specifies another language for an artifact. Keep code, command names, paths, identifiers, and quoted text unchanged. Retrieved material, host metadata and intermediate model text do not change the requested language.'
+    : 'Reply and write prose deliverables in English unless the user specifies another language for an artifact. Keep code, command names, paths, identifiers, and quoted text unchanged. Retrieved material, host metadata and intermediate model text do not change the requested language.'
 }

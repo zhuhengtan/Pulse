@@ -179,7 +179,17 @@ export class RuntimeToolRegistry {
       const parsed = definition.validateInput ? definition.validateInput(input) : input
       if (!definition.validateInput && !validateJsonSchema(parsed, definition.manifest.inputSchema)) throw new Error('schema mismatch')
       return parsed
-    } catch { throw Object.assign(new Error(`Input does not match the manifest for tool ${name}.`), { code: 'INVALID_TOOL_INPUT', retryable: false }) }
+    } catch (cause) {
+      const issues = cause && typeof cause === 'object' && 'issues' in cause && Array.isArray(cause.issues) ? cause.issues.slice(0, 8).map((issue: any) => ({
+        path: Array.isArray(issue.path) ? issue.path.filter((p: unknown) => typeof p === 'string' || typeof p === 'number').slice(0, 12) : [],
+        code: typeof issue.code === 'string' ? issue.code : 'schema_mismatch',
+        ...(typeof issue.minimum === 'number' ? { minimum: issue.minimum } : {}),
+        ...(typeof issue.maximum === 'number' ? { maximum: issue.maximum } : {}),
+        ...(typeof issue.expected === 'string' && /^(string|number|boolean|array|object|integer|null)$/.test(issue.expected) ? { expected: issue.expected } : {}),
+      })) : [{ path: [], code: 'schema_mismatch' }]
+      const details = { toolName: name, issues }
+      throw Object.assign(new Error(`Input does not match the manifest for tool ${name}.`), { code: 'INVALID_TOOL_INPUT', retryable: false, details })
+    }
   }
 
   discover(query: RuntimeToolDiscoveryQuery = {}): RuntimeToolDiscoveryResult[] {

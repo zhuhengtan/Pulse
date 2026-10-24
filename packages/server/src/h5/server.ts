@@ -1,3 +1,5 @@
+import { parseRichContent, type RichContent } from '../rich-content.js'
+import { NativeBrowserHost } from '../automation/native-browser.js'
 import { readGitDiff } from '../git-diff.js'
 import { FilePreviewServer, readPreviewFile, sendPreviewBytes } from '../file-preview.js'
 import { AttachmentStore, MAX_ATTACHMENT_REQUEST, attachmentDownload } from '../attachments.js'
@@ -168,6 +170,7 @@ export class H5Server {
   private readonly projectionWrites = new Map<string, Promise<unknown>>()
   private readonly projectionTimers = new Map<string, NodeJS.Timeout>()
   private readonly terminalSockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
+  private readonly nativeBrowserSockets = new WebSocketServer({ noServer: true, maxPayload: 6 * 1024 * 1024 })
   private readonly automationSockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
   private readonly previewSockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
   private configWriteTail: Promise<void> = Promise.resolve()
@@ -283,7 +286,7 @@ export class H5Server {
     await this.auth.init()
     const assistantId = await this.assistantInbox.init(async () => (await this.host.createConversation({ title: 'Pulse 助理' })).id)
     for (const message of this.assistantInbox.transcript(true)) {
-      await this.host.appendAssistantUserMessage(assistantId, { id: `msg-${message.requestId}`, runId: message.runId, text: message.text, createdAt: message.createdAt, ...(message.attachments ? { attachments: message.attachments } : {}), ...(message.skills ? { skills: message.skills } : {}), ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}) })
+      await this.host.appendAssistantUserMessage(assistantId, { id: `msg-${message.requestId}`, runId: message.runId, text: message.text, createdAt: message.createdAt, ...(message.attachments ? { attachments: message.attachments } : {}), ...(message.skills ? { skills: message.skills } : {}), ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}) })
     }
     const initialConversations = (await this.host.listConversations()).filter(conversation => conversation.id !== assistantId)
     await this.projects.migrate(initialConversations)
@@ -301,9 +304,9 @@ export class H5Server {
           process.stderr.write(`h5 request failed: ${message}\n`)
         }
         if (!res.headersSent) {
-          const status = message === 'PAYLOAD_TOO_LARGE' ? 413 : message === 'INVALID_JSON' ? 400 : message === 'CONVERSATION_BUSY' || message === 'REQUEST_ID_REUSED' || message === 'ASSISTANT_MESSAGE_ALREADY_COMPLETED' ? 409 : 500
+          const status = message === 'PAYLOAD_TOO_LARGE' ? 413 : message === 'INVALID_JSON' || message === 'RICH_CONTENT_INVALID' ? 400 : message === 'CONVERSATION_BUSY' || message === 'REQUEST_ID_REUSED' || message === 'ASSISTANT_MESSAGE_ALREADY_COMPLETED' ? 409 : 500
           res.writeHead(status, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: message === 'PAYLOAD_TOO_LARGE' || message === 'INVALID_JSON' || message === 'CONVERSATION_BUSY' || message === 'REQUEST_ID_REUSED' || message === 'ASSISTANT_MESSAGE_ALREADY_COMPLETED' ? message : 'INTERNAL_ERROR' }))
+          res.end(JSON.stringify({ error: message === 'PAYLOAD_TOO_LARGE' || message === 'INVALID_JSON' || message === 'RICH_CONTENT_INVALID' || message === 'CONVERSATION_BUSY' || message === 'REQUEST_ID_REUSED' || message === 'ASSISTANT_MESSAGE_ALREADY_COMPLETED' ? message : 'INTERNAL_ERROR' }))
         } else if (!res.writableEnded) {
           res.destroy(err instanceof Error ? err : undefined)
         }
@@ -311,6 +314,7 @@ export class H5Server {
     })
     server.on('upgrade', (req, socket, head) => {
       if ((req.url ?? '').startsWith('/api/chat/socket')) void this.handleChatUpgrade(req, socket, head)
+      else if (req.url === '/api/automation/native-host') void this.handleNativeBrowserUpgrade(req, socket, head)
       else if ((req.url ?? '').startsWith('/api/automation/socket')) void this.handleAutomationUpgrade(req, socket, head)
       else if ((req.url ?? '').startsWith('/preview/')) void this.handlePreviewUpgrade(req, socket, head)
       else void this.handleTerminalUpgrade(req, socket, head)
@@ -378,6 +382,7 @@ export class H5Server {
       try { terminal.process.kill() } catch { /* process already exited */ }
     }
     this.terminals.clear()
+    for (const client of this.nativeBrowserSockets.clients) client.close(1001, 'Pulse server stopped')
     for (const client of this.automationSockets.clients) client.close(1001, 'Pulse server stopped')
     if (this.server) {
       await new Promise<void>((resolve) => this.server?.close(() => resolve()))
@@ -398,7 +403,19 @@ export class H5Server {
   }
 
   private readonly workStarts = new Map<string, { digest: string; promise: Promise<RunHandle> }>()
-  private async startConversationRun(conversationId: string, text: string, options?: { requestId?: string; attachments?: WebAttachment[]; skills?: string[]; mentionedFiles?: string[] }): Promise<RunHandle> {
+  private readonly pendingWorkStarts = new Map<Promise<RunHandle>, string>()
+
+  private async awaitWorkStart(runId: string): Promise<void> {
+    if (this.activeRuns.has(runId) || this.pendingWorkStarts.size === 0) return
+    // A persisted message can expose its runId before the worker's started
+    // handshake arrives. A read-back client must not see that run as finished.
+    const conversationId = await this.host.findConversationByRunId(runId)
+    // A worker may commit its message before the parent's conversation lookup
+    // observes that commit. Wait for the bounded startup handshakes in that
+    // case too; absence from the parent lookup is not evidence of completion.
+    await Promise.allSettled([...this.pendingWorkStarts].filter(([, id]) => !conversationId || id === conversationId).map(([promise]) => promise))
+  }
+  private async startConversationRun(conversationId: string, text: string, options?: { requestId?: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[] }): Promise<RunHandle> {
     const key = options?.requestId ? `${conversationId}:${options.requestId}` : undefined
     const digest = createHash('sha256').update(JSON.stringify({ text, options })).digest('hex')
     const prior = key ? this.workStarts.get(key) : undefined
@@ -412,8 +429,9 @@ export class H5Server {
       this.attachRun(handle)
       return handle
     })()
+    this.pendingWorkStarts.set(promise, conversationId)
     if (key) this.workStarts.set(key, { digest, promise })
-    try { return await promise } finally { if (key) this.workStarts.delete(key) }
+    try { return await promise } finally { this.pendingWorkStarts.delete(promise); if (key) this.workStarts.delete(key) }
   }
 
   private async prepareWorkConversation(conversationId: string): Promise<void> {
@@ -448,7 +466,7 @@ export class H5Server {
             createdAt: message.createdAt,
             ...(message.attachments ? { attachments: message.attachments } : {}),
             ...(message.skills ? { skills: message.skills } : {}),
-            ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}),
+            ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}),
           })
           if (this.stopping) { await this.assistantInbox.update(message.runId, 'interrupted', 'Server stopped before launch'); return }
           const handle = await this.host.sendMessage(conversationId, {
@@ -459,7 +477,7 @@ export class H5Server {
             userMessageRecorded: true,
             ...(message.attachments ? { attachments: message.attachments } : {}),
             ...(message.skills ? { skills: message.skills } : {}),
-            ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}),
+            ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}),
           })
           this.attachRun(handle, false)
           if (this.stopping) await (handle.shutdown ? handle.shutdown() : handle.cancel('SERVER_STOPPED'))
@@ -708,6 +726,20 @@ export class H5Server {
     } catch { reject(400, 'Bad Request') }
   }
 
+  private async handleNativeBrowserUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
+    const reject = () => socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+    try {
+      const host = req.headers.host, origin = req.headers.origin
+      const device = await this.auth.authenticateToken(this.parseCookies(req).pulse_device)
+      if (!isLoopbackIp(req.socket.remoteAddress) || device?.scope !== 'local' || device.clientType !== 'electron' || req.headers['x-pulse-client'] !== 'electron' || typeof host !== 'string' || !isAllowedH5Host(host) || typeof origin !== 'string' || new URL(origin).origin !== `http://${host}` || this.host.automation.nativeBrowserAvailable) { reject(); return }
+      this.nativeBrowserSockets.handleUpgrade(req, socket, head, client => {
+        const detach = this.host.automation.setNativeHost(new NativeBrowserHost(client))
+        const timer = setInterval(() => { void this.auth.authenticateToken(this.parseCookies(req).pulse_device).then(device => { if (device?.scope !== 'local' || device.clientType !== 'electron') client.close(1008) }) }, 10000)
+        client.once('close', () => { clearInterval(timer); detach() })
+      })
+    } catch { reject() }
+  }
+
   private async handleAutomationUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     const reject = () => socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
     try {
@@ -725,7 +757,7 @@ export class H5Server {
             const device = await allowed()
             if (!device) { client.close(1008, 'Permission revoked'); return }
             const localAdmin = device.scope === 'local' && isLoopbackIp(req.socket.remoteAddress)
-            const data = this.host.automation.list().filter(item => localAdmin || item.kind === 'browser'), serialized = JSON.stringify(data)
+            const data = this.host.automation.list().filter(item => localAdmin && (item.kind !== 'browser' || device.clientType === 'electron')), serialized = JSON.stringify(data)
             if (serialized !== previous) { previous = serialized; client.send(JSON.stringify({ type: 'automation', seq: ++sequence, sessions: data })) }
           } finally { pending = false }
         }
@@ -980,13 +1012,15 @@ export class H5Server {
           res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.host.requestAutomationPermissions())); return
         }
         const target = pathname.match(/^\/api\/automation\/sessions\/([^/]+)(?:\/(observe|frame|control|input|heartbeat|command))?$/)
+        if (target && manager.list().find(item => item.id === target[1])?.kind === 'browser' && (!localAdmin || clientType !== 'electron')) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'NATIVE_BROWSER_REQUIRED' })); return }
         if (target && !localAdmin && manager.list().find(item => item.id === target[1])?.kind === 'computer') { res.writeHead(403).end(); return }
         let value: unknown
-        if (pathname === '/api/automation/sessions' && method === 'GET') value = { sessions: manager.list().filter(item => localAdmin || item.kind === 'browser'), ...options, manualBrowser: true }
+        if (pathname === '/api/automation/sessions' && method === 'GET') value = { sessions: manager.list().filter(item => localAdmin && (item.kind !== 'browser' || clientType === 'electron')), ...options, nativeBrowser: localAdmin && clientType === 'electron' && manager.nativeBrowserAvailable, manualBrowser: localAdmin && clientType === 'electron' && manager.nativeBrowserAvailable }
         else if (pathname === '/api/automation/sessions' && method === 'POST') {
           if (!requireSameOrigin() || options.approvalMode === 'read-only') { res.writeHead(403).end(); return }
           const body = await this.parseJsonBody(req)
-          if (!['browser', 'computer'].includes(String(body.kind)) || (body.mode !== undefined && !['dedicated','existing'].includes(String(body.mode)))) { res.writeHead(400).end(); return }
+          if (!['browser', 'computer'].includes(String(body.kind)) || (body.mode !== undefined && !['native','dedicated','existing'].includes(String(body.mode)))) { res.writeHead(400).end(); return }
+          if (body.kind === 'browser' && (!localAdmin || clientType !== 'electron' || !manager.nativeBrowserAvailable || body.mode !== undefined && body.mode !== 'native')) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'NATIVE_BROWSER_REQUIRED' })); return }
           if (body.kind === 'computer' && !localAdmin) { res.writeHead(403).end(); return }
           // A user opening a workspace webpage does not enable AI browser tools.
           // Device grants, same-origin, read-only and backend network policy still apply.
@@ -994,10 +1028,13 @@ export class H5Server {
             res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'AUTOMATION_CAPABILITY_DISABLED' })); return
           }
           const project = typeof body.projectId === 'string' ? await this.projects.get(body.projectId) : undefined
-          if (!project) { res.writeHead(400).end(); return }
+          const standalone = body.kind === 'browser' && body.manual === true && body.projectId === undefined
+          if (!project && !standalone) { res.writeHead(400).end(); return }
           const conversation = typeof body.conversationId === 'string' ? await this.host.getConversation(body.conversationId) : undefined
-          if (body.conversationId && (!conversation || resolve(conversation.summary.cwd) !== resolve(project.cwd))) { res.writeHead(403).end(); return }
-          value = await manager.open(body.kind as 'browser' | 'computer', `device:${authedDevice!.id}`, conversation ? await this.host.getConversationWorkspace(conversation.id) : project.cwd, body.mode as 'dedicated' | 'existing' | undefined, conversation ? { conversationId: conversation.id, projectId: project.id } : undefined)
+          if (body.conversationId && (!conversation || project && resolve(conversation.summary.cwd) !== resolve(project.cwd))) { res.writeHead(403).end(); return }
+          const workspace = conversation ? await this.host.getConversationWorkspace(conversation.id) : project?.cwd ?? join(this.dataDir, 'automation', 'manual', createHash('sha256').update(authedDevice!.id).digest('hex').slice(0, 20))
+          if (standalone && !conversation) await mkdir(workspace, { recursive: true, mode: 0o700 })
+          value = await manager.open(body.kind as 'browser' | 'computer', `device:${authedDevice!.id}`, workspace, body.mode as 'native' | undefined, conversation ? { conversationId: conversation.id, ...(project ? { projectId: project.id } : {}) } : undefined)
         } else if (target && method === 'GET' && target[2] === 'frame') {
           const frame = await manager.frame(target[1]!)
           res.writeHead(200, { 'Content-Type': frame.mediaType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }).end(frame.bytes); return
@@ -1052,6 +1089,7 @@ export class H5Server {
       if (!requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'SAME_ORIGIN_REQUIRED' })); return }
       const body = await this.parseJsonBody(req)
       const text = typeof body.text === 'string' ? body.text.trim() : ''
+      const richContent = parseRichContent(body.richContent)
       const requestId = typeof body.requestId === 'string' ? body.requestId : ''
       const attachments = await this.saveAttachments(this.assistantInbox.conversationId, Array.isArray(body.attachments) ? body.attachments : [])
       const skills = Array.isArray(body.skills) ? body.skills.filter((s): s is string => typeof s === 'string') : undefined
@@ -1063,15 +1101,15 @@ export class H5Server {
         const conversationId = this.assistantInbox.conversationId
         const previous = (await this.host.getConversationMessages(conversationId)).find(message => message.id === `msg-${requestId}`)
         if (previous?.runId) {
-          if (previous.text !== text || JSON.stringify(previous.attachments ?? []) !== JSON.stringify(attachments) || JSON.stringify(previous.skills ?? []) !== JSON.stringify(skills ?? []) || JSON.stringify(previous.mentionedFiles ?? []) !== JSON.stringify(mentionedFiles ?? [])) throw new Error('REQUEST_ID_REUSED')
+          if (previous.text !== text || JSON.stringify(previous.richContent ?? null) !== JSON.stringify(richContent ?? null) || JSON.stringify(previous.attachments ?? []) !== JSON.stringify(attachments) || JSON.stringify(previous.skills ?? []) !== JSON.stringify(skills ?? []) || JSON.stringify(previous.mentionedFiles ?? []) !== JSON.stringify(mentionedFiles ?? [])) throw new Error('REQUEST_ID_REUSED')
           const receipt = this.assistantInbox.list().find(item => item.messageId === requestId)
           if (!(body.retry === true && receipt && ['failed', 'interrupted'].includes(receipt.state))) { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ conversationId, messageId: requestId, runId: receipt?.runId ?? previous.runId, state: receipt?.state ?? (this.activeRuns.has(previous.runId) ? 'replying' : 'completed'), duplicate: true })); return }
         }
         const conversation = await this.host.getConversation(conversationId)
         const active = conversation.summary.activeRunId ? this.activeRuns.get(conversation.summary.activeRunId) : undefined
         if (active && body.delivery === 'immediate') {
-          await active.submitHumanInput(text, undefined, { requestId, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}) })
-          await this.assistantInbox.acceptInput({ requestId, text, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}) }, active.id)
+          await active.submitHumanInput(text, undefined, { requestId, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}) })
+          await this.assistantInbox.acceptInput({ requestId, text, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}) }, active.id)
           res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ conversationId, messageId: requestId, runId: active.id, state: this.assistantInbox.list().find(item => item.messageId === requestId)?.state ?? 'replying' })); return
         }
         const existing = this.assistantInbox.list().find(item => item.messageId === requestId)
@@ -1079,13 +1117,13 @@ export class H5Server {
         if (!existing && (conversation.summary.activeRunId || this.assistantPendingRuns.size || this.assistantInbox.hasQueued())) throw new Error('CONVERSATION_BUSY')
       }
       const accepted = body.retry === true
-        ? await this.assistantInbox.retry(requestId, text, attachments.length ? attachments : undefined, skills, mentionedFiles)
+        ? await this.assistantInbox.retry(requestId, text, attachments.length ? attachments : undefined, skills, mentionedFiles, richContent)
         : await this.assistantInbox.enqueue({
             requestId,
             text,
             ...(attachments.length ? { attachments } : {}),
             ...(skills ? { skills } : {}),
-            ...(mentionedFiles ? { mentionedFiles } : {}),
+            ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}),
           })
       if (accepted.message.state === 'queued') {
         this.assistantPendingRuns.add(accepted.message.runId)
@@ -1243,7 +1281,11 @@ export class H5Server {
           const prepared = await this.validateConfigCandidate(candidate)
           if (configVersion(await this.configText()) !== body.version) throw new Error('CONFIG_VERSION_CONFLICT')
           await this.replaceConfig(prepared.text)
-          const applied = this.host.applyLiveOptions(prepared.options)
+          // Unchanged config fields must not erase a launch-time safety override.
+          const runtimeOptions = candidate.approvalMode === this.parseConfig(raw).approvalMode
+            ? { ...prepared.options, approvalMode: this.host.getAutomationOptions().approvalMode }
+            : prepared.options
+          const applied = this.host.applyLiveOptions(runtimeOptions)
           return { path: this.configuration!.path, version: configVersion(prepared.text), applied: applied.applied, restartRequired: applied.restartRequired, config: maskConfigSecrets(JSON.parse(prepared.text) as Record<string, unknown>) }
         })
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ ok: true, ...result }))
@@ -1358,8 +1400,10 @@ export class H5Server {
     if (projectMatch?.[1] && method === 'PATCH') {
       if (!requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'SAME_ORIGIN_REQUIRED' })); return }
       const body = await this.parseJsonBody(req)
+      if ((body.cwd !== undefined || body.folders !== undefined) && !canRegisterProject) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'UNAUTHORIZED' })); return }
+      if (body.cwd !== undefined && (typeof body.cwd !== 'string' || !body.cwd.trim()) || body.folders !== undefined && (!Array.isArray(body.folders) || body.folders.some(path => typeof path !== 'string'))) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'PROJECT_FOLDERS_INVALID' })); return }
       if (body.previewUrl !== undefined && !localAdmin) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'LOCAL_ADMIN_REQUIRED' })); return }
-      try { const project = await this.projects.update(decodeURIComponent(projectMatch[1]), { ...(typeof body.name === 'string' ? { name: body.name } : {}), ...(typeof body.pinned === 'boolean' ? { pinned: body.pinned } : {}), ...(typeof body.previewUrl === 'string' || body.previewUrl === null ? { previewUrl: body.previewUrl as string | null } : {}) }); res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(project)) }
+      try { const project = await this.projects.update(decodeURIComponent(projectMatch[1]), { ...(typeof body.cwd === 'string' ? { cwd: body.cwd } : {}), ...(Array.isArray(body.folders) ? { folders: body.folders as string[] } : {}), ...(typeof body.name === 'string' ? { name: body.name } : {}), ...(typeof body.pinned === 'boolean' ? { pinned: body.pinned } : {}), ...(typeof body.previewUrl === 'string' || body.previewUrl === null ? { previewUrl: body.previewUrl as string | null } : {}) }); res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(project)) }
       catch (error) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error instanceof Error ? error.message : 'PROJECT_UPDATE_FAILED' })) }
       return
     }
@@ -1791,11 +1835,12 @@ export class H5Server {
       if (convId) {
         const body = await this.parseJsonBody(req)
         const text = typeof body.text === 'string' ? body.text : ''
+        const richContent = parseRichContent(body.richContent)
         const requestId = typeof body.requestId === 'string' ? body.requestId : undefined
         if (requestId !== undefined && !/^[A-Za-z0-9._:-]{8,128}$/.test(requestId)) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'REQUEST_ID_INVALID' })); return }
         if (requestId) {
           const previous = (await this.host.getConversationMessages(convId)).find(message => message.id === `msg-${requestId}`)
-          if (previous && (previous.text !== text || JSON.stringify((previous.attachments ?? []).map(item => item.id)) !== JSON.stringify(Array.isArray(body.attachments) ? body.attachments.map(item => item?.id) : []) || JSON.stringify(previous.skills ?? []) !== JSON.stringify(body.skills ?? []) || JSON.stringify(previous.mentionedFiles ?? []) !== JSON.stringify(body.mentionedFiles ?? []))) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'REQUEST_ID_REUSED' })); return }
+          if (previous && (previous.text !== text || JSON.stringify(previous.richContent ?? null) !== JSON.stringify(richContent ?? null) || JSON.stringify((previous.attachments ?? []).map(item => item.id)) !== JSON.stringify(Array.isArray(body.attachments) ? body.attachments.map(item => item?.id) : []) || JSON.stringify(previous.skills ?? []) !== JSON.stringify(body.skills ?? []) || JSON.stringify(previous.mentionedFiles ?? []) !== JSON.stringify(body.mentionedFiles ?? []))) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'REQUEST_ID_REUSED' })); return }
           if (previous?.runId) { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId: previous.runId })); return }
         }
         const attachments = await this.saveAttachments(convId, Array.isArray(body.attachments) ? body.attachments : [])
@@ -1811,7 +1856,7 @@ export class H5Server {
           const conversation = await this.host.getConversation(convId)
           const active = conversation.summary.activeRunId ? this.activeRuns.get(conversation.summary.activeRunId) : undefined
           if (active && body.delivery === 'immediate') {
-            await active.submitHumanInput(text, undefined, { ...(requestId ? { requestId } : {}), ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}) })
+            await active.submitHumanInput(text, undefined, { ...(requestId ? { requestId } : {}), ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}) })
             res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId: active.id })); return
           }
           if (conversation.summary.activeRunId || [...this.activeRuns.values()].some(handle => handle.conversationId === convId)) throw new Error('CONVERSATION_BUSY')
@@ -1820,7 +1865,7 @@ export class H5Server {
           ...(requestId ? { requestId } : {}),
           ...(attachments.length ? { attachments } : {}),
           ...(skills ? { skills } : {}),
-          ...(mentionedFiles ? { mentionedFiles } : {}),
+          ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}),
         })
         const runId = handle.id
 
@@ -1843,6 +1888,7 @@ export class H5Server {
     if (runStateMatch && method === 'GET') {
       const runId = runStateMatch[1]
       if (!runId) { res.writeHead(404).end(); return }
+      await this.awaitWorkStart(runId)
       const buffer = this.runEventBuffers.get(runId) ?? []
       const snapshot = await this.snapshotRun(runId, buffer, this.activeRuns.has(runId) || this.assistantPendingRuns.has(runId))
       const conversationId = this.runConversations.get(runId) ?? await this.host.findConversationByRunId(runId)
@@ -1856,6 +1902,7 @@ export class H5Server {
     if (runEventsMatch && method === 'GET') {
       const runId = runEventsMatch[1]
       if (runId) {
+        await this.awaitWorkStart(runId)
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
@@ -2087,6 +2134,10 @@ export class H5Server {
   private pushEvent(runId: string, event: WebRunEvent): void {
     const buffer = this.runEventBuffers.get(runId)
     if (!buffer) return
+    // Async approval snapshots can finish after newer worker events. Give the
+    // projection its own monotonic cursor so clients do not discard the clear.
+    const watermark = Math.max(this.runSnapshots.get(runId)?.seq ?? 0, buffer.at(-1)?.seq ?? 0)
+    if (event.seq <= watermark) event = { ...event, seq: watermark + 0.001 }
     buffer.push(prepareRunEvent(event, (buffer[0] as unknown as WebRunEvent | undefined)?.runStartedAt) as unknown as AssistantEvent)
     const previous = this.runSnapshots.get(runId) ?? { runId, state: 'running' as const, seq: 0, activities: [] }
     const next: WebRunSnapshot = { ...previous, seq: Math.max(previous.seq, event.seq ?? 0) }
@@ -2174,8 +2225,9 @@ export class H5Server {
         const result = await handle.reviewApproval(next.effectId, controller.signal)
         if (controller.signal.aborted) return
         if (result.status === 'manual') {
-          const reasons: Record<string, string> = { reviewer_not_configured: '尚未配置本机审核模型', reviewer_must_be_local: '审核模型需要使用本机服务', review_timeout: '本机审核模型响应超时', review_failed: '本机审核模型调用失败', review_output_truncated: '审核回复不完整', review_not_explicitly_approved: '审核模型未明确批准本次操作', risk_requires_user: '本次操作涉及风险或尚未支持的工具', path_outside_workspace: '目标路径超出当前工作区', invalid_shell_syntax: '命令格式需要人工确认' }
+          const reasons: Record<string, string> = { reviewer_not_configured: '尚未配置审核模型', reviewer_must_be_local: '审核模型需要使用本机服务', review_timeout: '审核模型响应超时', review_failed: '审核模型调用失败', review_output_truncated: '审核回复不完整', review_not_explicitly_approved: '审核模型未明确批准本次操作', risk_requires_user: '本次操作涉及风险或尚未支持的工具', path_outside_workspace: '目标路径超出当前工作区', invalid_shell_syntax: '命令格式需要人工确认' }
           reasons.reviewer_unavailable = '本机审核服务未启动或无法连接'
+          reasons.review_context_too_large = '本次操作内容过多，无法完整自动审核，请拆分操作或人工确认'
           this.reviewNotes.set(runId, `需要你决定：${reasons[result.reason] ?? '代审无法确认本次操作'}。`)
         }
         else this.reviewNotes.delete(runId)

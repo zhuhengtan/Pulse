@@ -8,6 +8,7 @@ interface StoredProject {
   id: string
   name: string
   cwd: string
+  folders?: string[]
   createdAt: string
   updatedAt: string
   pinned: boolean
@@ -34,7 +35,7 @@ export class H5ProjectCatalog {
       const value = JSON.parse(await readFile(this.path, 'utf8')) as ProjectFile
       if (value.schemaVersion === 1 && Array.isArray(value.projects)) {
         this.projects = value.projects.filter(item => item && typeof item.id === 'string' && typeof item.name === 'string' && typeof item.cwd === 'string')
-          .map(item => ({ ...item, cwd: resolve(item.cwd), pinned: item.pinned === true }))
+          .map(item => ({ ...item, cwd: resolve(item.cwd), folders: [...new Set([...(Array.isArray(item.folders) ? item.folders.filter(path => typeof path === 'string').map(path => resolve(path)) : []), resolve(item.cwd)])], pinned: item.pinned === true }))
       }
     } catch { this.projects = [] }
     this.loaded = true
@@ -66,7 +67,7 @@ export class H5ProjectCatalog {
   async findByCwd(cwd: string): Promise<WebProject | undefined> {
     await this.load()
     const canonical = await realpath(resolve(cwd)).catch(() => resolve(cwd))
-    const item = this.projects.find(project => project.cwd === canonical)
+    const item = this.projects.find(project => project.cwd === canonical) ?? this.projects.find(project => project.folders?.includes(canonical))
     return item ? this.get(item.id) : undefined
   }
 
@@ -77,7 +78,7 @@ export class H5ProjectCatalog {
     for (const conversation of conversations) {
       if (conversation.projectUnassigned) continue
       const canonical = await realpath(resolve(conversation.cwd)).catch(() => resolve(conversation.cwd))
-      if (this.projects.some(project => project.cwd === canonical)) continue
+      if (this.projects.some(project => project.cwd === canonical || project.folders?.includes(canonical))) continue
       const base = canonical.split(/[\\/]/).filter(Boolean).at(-1) || '工作区'
       const now = new Date().toISOString()
       this.projects.push({ id: automaticProjectId(canonical), name: base, cwd: canonical, createdAt: now, updatedAt: now, pinned: false })
@@ -93,21 +94,36 @@ export class H5ProjectCatalog {
     const existing = this.projects.find(item => item.cwd === cwd)
     if (existing) throw new Error('PROJECT_ALREADY_REGISTERED')
     const now = new Date().toISOString()
-    const project: StoredProject = { id: `project-${randomUUID()}`, name: name.trim().slice(0, 80), cwd, createdAt: now, updatedAt: now, pinned: false }
+    const project: StoredProject = { folders: [cwd], id: `project-${randomUUID()}`, name: name.trim().slice(0, 80), cwd, createdAt: now, updatedAt: now, pinned: false }
     if (!project.name) throw new Error('PROJECT_NAME_REQUIRED')
     this.projects.unshift(project)
     await this.save()
     return { ...project, available: true }
   }
 
-  async update(id: string, update: { name?: string; pinned?: boolean; previewUrl?: string | null }): Promise<WebProject> {
+  async update(id: string, update: { name?: string; pinned?: boolean; previewUrl?: string | null; cwd?: string; folders?: string[] }): Promise<WebProject> {
     await this.load()
-    const project = this.projects.find(item => item.id === id)
-    if (!project) throw new Error('PROJECT_NOT_FOUND')
+    const original = this.projects.find(item => item.id === id)
+    if (!original) throw new Error('PROJECT_NOT_FOUND')
+    const project = { ...original }
     if (update.name !== undefined) {
       const name = update.name.trim().slice(0, 80)
       if (!name) throw new Error('PROJECT_NAME_REQUIRED')
       project.name = name
+    }
+    if (update.cwd !== undefined || update.folders !== undefined) {
+      const paths = update.folders ?? project.folders ?? [project.cwd]
+      if (!Array.isArray(paths) || paths.length < 1 || paths.length > 16 || paths.some(path => typeof path !== 'string' || !path.trim())) throw new Error('PROJECT_FOLDERS_INVALID')
+      const folders = [...new Set(await Promise.all(paths.map(async path => {
+        const canonical = await realpath(resolve(path))
+        if (!(await stat(canonical)).isDirectory()) throw new Error('PROJECT_DIRECTORY_REQUIRED')
+        return canonical
+      }))) ]
+      const primary = await realpath(resolve(update.cwd ?? project.cwd))
+      if (!folders.includes(primary)) throw new Error('PROJECT_PRIMARY_FOLDER_REQUIRED')
+      if (this.projects.some(item => item.id !== id && item.cwd === primary)) throw new Error('PROJECT_ALREADY_REGISTERED')
+      project.folders = folders
+      project.cwd = primary
     }
     if (update.pinned !== undefined) project.pinned = update.pinned
     if (update.previewUrl !== undefined) {
@@ -119,6 +135,8 @@ export class H5ProjectCatalog {
       }
     }
     project.updatedAt = new Date().toISOString()
+    this.projects = this.projects.map(item => item.id === id ? project : item)
+    if (update.pinned === true && original.pinned !== true) this.projects = [project, ...this.projects.filter(item => item.id !== id)]
     await this.save()
     return { ...project, available: await lstat(project.cwd).then(info => info.isDirectory() && !info.isSymbolicLink(), () => false) }
   }

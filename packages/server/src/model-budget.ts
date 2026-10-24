@@ -37,6 +37,7 @@ export type UsageMetric = typeof usageMetricNames[number]
 type UsageMetrics = Partial<Record<UsageMetric, { total: number; known: number }>>
 
 interface State {
+  inheritedFrom?: string | undefined
   truncationEvents?: number | undefined
   metrics?: UsageMetrics | undefined
   usageReceipts?: string[] | undefined
@@ -71,7 +72,8 @@ function parseState(raw: string): State {
   if (record.costs !== undefined && (typeof record.costs !== 'object' || record.costs === null || Object.values(record.costs).some(n => typeof n !== 'number' || !Number.isFinite(n) || n < 0))) throw fail(CORRUPT, 'Invalid budget costs.')
   if (record.metrics !== undefined && (typeof record.metrics !== 'object' || record.metrics === null || Object.entries(record.metrics).some(([key, value]) => !usageMetricNames.includes(key as UsageMetric) || !value || typeof value !== 'object' || typeof (value as any).total !== 'number' || !Number.isFinite((value as any).total) || (value as any).total < 0 || !isCount((value as any).known)))) throw fail(CORRUPT, 'Invalid usage metrics.')
   if (record.usageReceipts !== undefined && (!Array.isArray(record.usageReceipts) || record.usageReceipts.some(id => typeof id !== 'string'))) throw fail(CORRUPT, 'Invalid usage receipts.')
-  return { truncationEvents: record.truncationEvents as number | undefined, limit: record.limit, used: record.used, metrics: record.metrics as UsageMetrics | undefined, usageReceipts: record.usageReceipts as string[] | undefined, policy: record.policy as ModelBudgetPolicy | undefined, purposes: record.purposes as Record<string, number> | undefined, reportedUsage: record.reportedUsage as number | undefined, inputTokens: record.inputTokens as number | undefined, outputTokens: record.outputTokens as number | undefined, tokens: record.tokens as number | undefined, costs: record.costs as Record<string, number> | undefined, unknown: record.unknown as number | undefined }
+  if (record.inheritedFrom !== undefined && typeof record.inheritedFrom !== 'string') throw fail(CORRUPT, 'Invalid budget lineage.')
+  return { inheritedFrom: record.inheritedFrom as string | undefined, truncationEvents: record.truncationEvents as number | undefined, limit: record.limit, used: record.used, metrics: record.metrics as UsageMetrics | undefined, usageReceipts: record.usageReceipts as string[] | undefined, policy: record.policy as ModelBudgetPolicy | undefined, purposes: record.purposes as Record<string, number> | undefined, reportedUsage: record.reportedUsage as number | undefined, inputTokens: record.inputTokens as number | undefined, outputTokens: record.outputTokens as number | undefined, tokens: record.tokens as number | undefined, costs: record.costs as Record<string, number> | undefined, unknown: record.unknown as number | undefined }
 }
 
 /** One instance per running task; LocalHost holds the conversation lock. */
@@ -120,7 +122,7 @@ export class ModelAttemptBudget {
       if (!isMissing(error)) throw error
     }
     if (state !== undefined)
-      return new ModelAttemptBudget(filePath, state.limit, state.used, state)
+    return new ModelAttemptBudget(filePath, state.limit, state.used, state)
     const budget = new ModelAttemptBudget(filePath, limit, initialUsed, { limit, used: initialUsed, ...(policy ? { policy: structuredClone(policy) } : {}) })
     await budget.persist(budget.state)
     return budget
@@ -133,6 +135,19 @@ export class ModelAttemptBudget {
       () => undefined,
     )
     return run
+  }
+
+  /** A continuation gets only its parent's unspent calls, never a fresh limit.
+   * Counters remain per-run so evaluation can sum attempts without double counting.
+   * Called before compaction/planning and while the conversation lock is held. */
+  async inheritRemaining(previousPath: string): Promise<void> {
+    if (this.state.inheritedFrom === previousPath) return
+    if (this.used !== 0 || this.state.inheritedFrom) throw fail(CORRUPT, 'Budget inheritance must precede all model calls.')
+    const previous = parseState(await fs.readFile(previousPath, 'utf8'))
+    const limit = Math.min(this.limit, Math.max(0, previous.limit - previous.used))
+    const next = { ...this.state, limit, inheritedFrom: previousPath }
+    await this.persist(next)
+    this.state = next; this.limitCount = limit
   }
 
   /** Host scheduling consults the same durable admission policy as dispatch. */

@@ -171,7 +171,9 @@ export class ToolRegistry {
       if (!definition.validateInput && !matchesJsonSchema(parsed, definition.manifest.inputSchema)) throw new Error('schema mismatch')
       return parsed
     }
-    catch { throw new ToolError('INVALID_TOOL_INPUT', `Input does not match the manifest for tool ${name}.`, { retryable: false }) }
+    catch (cause) {
+      throw invalidToolInput(name, cause)
+    }
   }
   isAllowed(name: string): boolean {
     const definition = this.definitions.get(name)
@@ -368,4 +370,28 @@ export function defineTool<TInput, TOutput>(config: {
 }): ToolDefinition<TInput, TOutput> {
   const manifest: ToolManifest = { name: config.name, version: config.version ?? '1', description: config.description, ...(config.tags === undefined ? {} : { tags: [...new Set(config.tags)] }), inputSchema: zodToJsonSchema(config.input), outputSchema: zodToJsonSchema(config.output), concurrencyClass: config.concurrencyClass ?? 'tool', locks: config.locks ?? [], ...(config.resources === undefined ? {} : { resources: config.resources }), supportsAbortSignal: config.supportsAbortSignal ?? true, sideEffectPolicy: config.sideEffectPolicy ?? 'none', retrySafety: config.retrySafety ?? (config.sideEffectPolicy === 'write' || config.sideEffectPolicy === 'external' ? 'unsafe' : 'read_only'), defaultTimeoutMs: config.defaultTimeoutMs ?? 30_000, ...(config.maxResultSummaryBytes === undefined ? {} : { maxResultSummaryBytes: config.maxResultSummaryBytes }), ...(config.permissions === undefined ? {} : { permissions: structuredClone(config.permissions) }) }
   return { manifest, ...(config.resolveTimeoutMs ? { resolveTimeoutMs: (input: TInput) => config.resolveTimeoutMs!(config.input.parse(input)) } : {}), resourceAdmissionMode: config.resolveResources !== undefined || config.resources !== undefined || config.locks !== undefined ? 'explicit' : 'default', validateInput: (input: unknown) => config.input.parse(input), execute: async (input, context) => config.output.parse(await config.execute(config.input.parse(input), context)), ...(config.executionRef === undefined ? {} : { executionRef: (input: TInput, context: ToolContext) => config.executionRef!(config.input.parse(input), context) }), ...(config.resolveResources === undefined ? {} : { resolveResources: (input: TInput) => config.resolveResources!(config.input.parse(input)) }), ...(config.reconcile === undefined ? {} : { reconcile: async (executionRef: JsonValue, context: ReconcileContext) => { const result = await config.reconcile!(executionRef, context); return result.status === 'succeeded' && result.output !== undefined ? { ...result, output: config.output.parse(result.output) } : result } }), ...(config.normalize === undefined ? {} : { normalize: config.normalize }), ...(config.summarize === undefined ? {} : { summarize: (output: TOutput) => config.summarize!(output) }) }
+}
+
+/** Snapshot only trusted input validators outside a pure Runtime step. No policy/IO in this callback. */
+export function createToolInputValidator(registry: ToolRegistry): (name: string, input: JsonValue) => void {
+  const definitions = new Map(registry.list().map(manifest => [manifest.name, registry.get(manifest.name)!]))
+  return (name, input) => {
+    const definition = definitions.get(name)
+    if (!definition) throw new ToolError('TOOL_NOT_AVAILABLE', `Tool ${name} was not in the run snapshot.`)
+    try {
+      if (definition.validateInput) definition.validateInput(input)
+      else if (!matchesJsonSchema(input, definition.manifest.inputSchema)) throw Error('schema mismatch')
+    } catch (cause) { throw invalidToolInput(name, cause) }
+  }
+}
+function invalidToolInput(name: string, cause: unknown): ToolError {
+      const issues = cause && typeof cause === 'object' && 'issues' in cause && Array.isArray(cause.issues) ? cause.issues.slice(0, 8).map((issue: any) => ({
+        path: Array.isArray(issue.path) ? issue.path.filter((p: unknown) => typeof p === 'string' || typeof p === 'number').slice(0, 12) : [],
+        code: typeof issue.code === 'string' ? issue.code : 'schema_mismatch',
+        ...(typeof issue.minimum === 'number' ? { minimum: issue.minimum } : {}),
+        ...(typeof issue.maximum === 'number' ? { maximum: issue.maximum } : {}),
+        ...(typeof issue.expected === 'string' && /^(string|number|boolean|array|object|integer|null)$/.test(issue.expected) ? { expected: issue.expected } : {}),
+      })) : [{ path: [], code: 'schema_mismatch' }]
+      const details = { toolName: name, issues }
+      return new ToolError('INVALID_TOOL_INPUT', `Input does not match the manifest for tool ${name}.`, { retryable: false, details })
 }

@@ -65,6 +65,8 @@ export interface Checkpoint {
   evidence: Record<string, JsonValue[]>
   stageFileHashes?: Record<string, Record<string, string>>
   facts?: Array<{ stageId: string; sourceRef: string; tool: string; result: JsonValue }>
+  continuationVersion?: 2
+  completedCommands?: Array<{ stageId: string; sourceRef: string; command: string; args: string[]; cwd: string; scriptHashes: Record<string, string>; exitCode: 0 }>
 }
 const object = (value: unknown): Record<string, any> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {}
 async function fileHash(root: string, path: string): Promise<string | undefined> {
@@ -76,7 +78,7 @@ async function fileHash(root: string, path: string): Promise<string | undefined>
     return await boundedHash(target)
   } catch { return undefined }
 }
-export async function createCheckpoint(runtime: Pick<PulseRuntime, 'state'>, root: string, runId: string, global: JsonValue, prior?: Checkpoint): Promise<Checkpoint | undefined> {
+export async function createCheckpoint(runtime: Pick<PulseRuntime, 'state'>, root: string, runId: string, global: JsonValue, prior?: Checkpoint, options?: { continuationCommands: true }): Promise<Checkpoint | undefined> {
   const controller = controllerFromGlobal(global); const objective = object(object(global).taskRecord).objective
   if (!controller || typeof objective !== 'string') return undefined
   const inherited = prior ? await validateCheckpoint(root, prior, objective) : undefined
@@ -113,7 +115,32 @@ export async function createCheckpoint(runtime: Pick<PulseRuntime, 'state'>, roo
     }
     if (valid && stamp.available && Buffer.byteLength(JSON.stringify(values)) <= 32_000) { reusableIds.push(task.id); evidence[task.id] = values; stageFileHashes[task.id] = hashes; Object.assign(fileHashes, hashes) }
   }
-  return { schemaVersion: 1, sourceRunId: runId, objective, controller, stamp, fileHashes, stageFileHashes, reusableIds, evidence, facts }
+  const completedCommands: NonNullable<Checkpoint['completedCommands']> = []
+  if (options?.continuationCommands && stamp.available) for (const effect of runtime.state.effects.values()) {
+    const input = object(effect.input), args = object(input.arguments)
+    const ref = effect.outcome?.resultRef, result = ref ? runtime.state.results.get(ref) : undefined
+    const value = object(result?.value ?? result?.summary)
+    if (input.name !== 'shell.exec' || effect.outcome?.status !== 'succeeded' || result?.privacy !== 'public' || result.privacyTaints?.length || value.code !== 0 || value.aborted || value.timedOut || value.truncated) continue
+    // Carry only bounded local script invocations. Never echo arbitrary argv,
+    // network credentials, inline code, or a successful command as a fresh check.
+    if (!['node', 'python', 'python3'].includes(args.command) || !Array.isArray(args.args) || !args.args.length || args.args.length > 8 || args.args.some((arg: unknown) => typeof arg !== 'string' || arg.length > 256 || !/^[\w./-]+$/.test(arg) || !(arg in stamp.files) && !['--test', '--check'].includes(arg))) continue
+    const scriptHashes: Record<string, string> = {}
+    for (const path of args.args as string[]) {
+      if (!/\.(?:mjs|cjs|js|py)$/.test(path) || !(path in stamp.files)) continue
+      const before = [...runtime.state.results.values()].filter(record => {
+        const origin = record.producer?.kind === 'effect' ? runtime.state.effects.get(record.producer.id) : undefined
+        const body = object(record.value ?? record.summary), call = object(origin?.input)
+        return record.privacy === 'public' && !record.privacyTaints?.length && origin?.outcome?.status === 'succeeded' && ['fs.read', 'fs.write', 'fs.apply_patch', 'fs.apply_patches'].includes(call.name) && Number(origin.id.split('-').at(-1)) < Number(effect.id.split('-').at(-1)) && body.path === path && body.hash === stamp.files[path]
+      })
+      if (before.length) scriptHashes[path] = stamp.files[path]!
+    }
+    if (!Object.keys(scriptHashes).length) continue
+    const stageId = controller.tasks.find(task => ref && task.evidenceRefs.includes(ref))?.id
+    if (!stageId || !ref) continue
+    const command = { stageId, sourceRef: ref, command: args.command as string, args: args.args as string[], cwd: typeof args.cwd === 'string' ? args.cwd : '.', scriptHashes, exitCode: 0 as const }
+    if (completedCommands.length < 16 && Buffer.byteLength(JSON.stringify([...completedCommands, command])) <= 12000) completedCommands.push(command)
+  }
+  return { schemaVersion: 1, sourceRunId: runId, objective, controller, stamp, fileHashes, stageFileHashes, reusableIds, evidence, facts, ...(options?.continuationCommands ? { continuationVersion: 2 as const, completedCommands } : {}) }
 }
 export function checkpointReceipt(checkpoint: Checkpoint) {
   const stages: Array<{ id: string; goal: string; check: string; note: string; evidence: string }> = []
@@ -122,7 +149,7 @@ export function checkpointReceipt(checkpoint: Checkpoint) {
     const item = { id: task.id, goal: task.goal, check: task.check, note: task.note ?? '', evidence: JSON.stringify(checkpoint.evidence[task.id]) }
     if (Buffer.byteLength(JSON.stringify([...stages, item])) <= 2800) stages.push(item)
   }
-  return { valid: true, sourceRunId: checkpoint.sourceRunId, reusableIds: stages.map((stage) => stage.id), stages, facts: checkpoint.facts ?? [], verification: 'Workspace and referenced hashes match. These are historical filesystem facts, not fresh shell or external checks.' }
+  return { valid: true, sourceRunId: checkpoint.sourceRunId, reusableIds: stages.map((stage) => stage.id), stages, facts: checkpoint.facts ?? [], ...(checkpoint.continuationVersion === 2 ? { completedCommands: checkpoint.completedCommands ?? [], fileInventory: Object.entries(checkpoint.stamp.files).slice(0, 128).map(([path, hash]) => ({ path, hash })) } : {}), verification: 'Workspace and referenced hashes match. These are historical filesystem facts, not fresh shell or external checks.' }
 }
 export async function validateCheckpoint(root: string, checkpoint: Checkpoint, objective: string): Promise<Checkpoint | undefined> {
   try {
@@ -156,7 +183,12 @@ export async function validateCheckpoint(root: string, checkpoint: Checkpoint, o
     }
     if (!valid.size && !facts.length) return undefined
     const reusableIds = checkpoint.reusableIds.filter(id => valid.has(id))
-    return { ...checkpoint, facts, stamp: current, reusableIds, stageFileHashes: Object.fromEntries(reusableIds.map(id => [id, stageFileHashes[id]!])), fileHashes: Object.assign({}, ...reusableIds.map(id => stageFileHashes[id])), evidence: Object.fromEntries(reusableIds.map(id => [id, checkpoint.evidence[id]!])) }
+    const completedCommands: NonNullable<Checkpoint['completedCommands']> = []
+    if (checkpoint.continuationVersion === 2) for (const command of checkpoint.completedCommands ?? []) {
+      if (command.exitCode !== 0 || !controller.tasks.some(t => t.id === command.stageId) || !Object.keys(command.scriptHashes ?? {}).length) continue
+      if ((await Promise.all(Object.entries(command.scriptHashes).map(async ([path, hash]) => typeof hash === 'string' && await fileHash(root, path) === hash))).every(Boolean)) completedCommands.push(command)
+    }
+    return { ...checkpoint, facts, stamp: current, reusableIds, ...(checkpoint.continuationVersion === 2 ? { completedCommands } : {}), stageFileHashes: Object.fromEntries(reusableIds.map(id => [id, stageFileHashes[id]!])), fileHashes: Object.assign({}, ...reusableIds.map(id => stageFileHashes[id])), evidence: Object.fromEntries(reusableIds.map(id => [id, checkpoint.evidence[id]!])) }
   } catch { return undefined }
 }
 

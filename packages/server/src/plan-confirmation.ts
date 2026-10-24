@@ -28,3 +28,31 @@ export function planConfirmationOptions(input: unknown): { defer: string; execut
   if (!first.value || !second.value || first.value === second.value) return undefined
   return { defer: first.value, execute: second.value }
 }
+
+/** Exact, unconditional human decisions only; a substring never grants authority. */
+export function explicitPlanDecision(input: unknown, answer: unknown): 'approved' | 'deferred' | undefined {
+  const choices = planConfirmationOptions(input)
+  if (!choices || !answer || typeof answer !== 'object' || Array.isArray(answer)) return undefined
+  const row = answer as Record<string, unknown>
+  if (row.approved === false) return 'deferred'
+  const selected = row.value === choices.execute ? 'approved' : row.value === choices.defer ? 'deferred' : undefined
+  const text = typeof row.text === 'string' ? row.text.trim().replace(/[。！!.]+$/, '').trim() : undefined
+  if (text !== undefined && text.length > 0) {
+    const written = /^(?:同意执行|确认执行|批准执行|按此方案执行|approve execution|execute the plan)$/i.test(text) ? 'approved'
+      : /^(?:暂不执行|不执行|不同意执行|取消执行|不要执行|do not execute|defer execution|cancel execution)$/i.test(text) ? 'deferred' : undefined
+    // A conflicting selected option and free-text explanation is not consent.
+    return written && (!selected || selected === written) ? written : undefined
+  }
+  return selected
+}
+
+/** Free-form feedback is data for plan repair, never an execution decision. */
+export function planRevisionFeedback(input: unknown, answer: unknown, rejectConditionalDecision = false): string | undefined {
+  if (!planConfirmationOptions(input) || !answer || typeof answer !== 'object' || Array.isArray(answer) || explicitPlanDecision(input, answer) !== undefined) return undefined
+  const row = answer as Record<string, unknown>
+  // Conflicting selected options/approval fields must stay pending.
+  if (row.value !== undefined || row.values !== undefined || row.approved !== undefined || typeof row.text !== 'string') return undefined
+  const text = row.text.trim()
+  if (rejectConditionalDecision && /^(?:同意执行|确认执行|批准执行|按此方案执行|approve execution\b|execute the plan\b)/i.test(text)) return undefined
+  return text.length > 0 && text.length <= 4000 ? text : undefined
+}

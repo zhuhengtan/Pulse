@@ -10,6 +10,7 @@ export class BrowserBackend implements AutomationBackend {
   private readonly client: McpStdioClient
   private tools = new Set<string>()
   private started = false
+  private closed = false
   private readonly outputDir: string
   private readonly observationDir: string
   private readonly dedicated: boolean
@@ -18,9 +19,10 @@ export class BrowserBackend implements AutomationBackend {
     this.dedicated = config.mode !== 'existing'
     this.outputDir = resolve(workspace, '.pulse', 'automation-downloads', createHash('sha256').update(profile).digest('hex').slice(0, 16))
     this.observationDir = resolve(workspace, '.pulse', 'automation-observations', createHash('sha256').update(profile).digest('hex').slice(0, 16))
-    this.client = new McpStdioClient({ command: config.command ?? process.execPath, args: config.args ?? [resolve(createRequire(import.meta.url).resolve('@playwright/mcp/package.json'), '../cli.js'), ...(config.mode === 'existing' ? ['--extension'] : ['--user-data-dir', profile, ...(config.channel ? ['--browser', config.channel] : process.env.PULSE_BROWSER_EXECUTABLE ? ['--executable-path', process.env.PULSE_BROWSER_EXECUTABLE] : []), '--viewport-size', '1280,800']), '--caps', 'vision', '--image-responses', 'allow', '--output-dir', this.outputDir], cwd: workspace, maxLineBytes: 8 * 1024 * 1024, timeoutMs: 60000, shutdownTimeoutMs: 3000 })
+    this.client = new McpStdioClient({ command: config.command ?? process.execPath, args: config.args ?? [resolve(createRequire(import.meta.url).resolve('@playwright/mcp/package.json'), '../cli.js'), ...(config.mode === 'existing' ? ['--extension'] : ['--headless', '--user-data-dir', profile, ...(config.channel ? ['--browser', config.channel] : process.env.PULSE_BROWSER_EXECUTABLE ? ['--executable-path', process.env.PULSE_BROWSER_EXECUTABLE] : []), '--viewport-size', '1280,800']), '--caps', 'vision', '--image-responses', 'allow', '--output-dir', this.outputDir], cwd: workspace, maxLineBytes: 8 * 1024 * 1024, timeoutMs: 60000, shutdownTimeoutMs: 3000 })
   }
   private async start(): Promise<void> {
+    if (this.closed) throw automationError('AUTOMATION_SESSION_NOT_FOUND')
     if (this.started) return
     const root = await realpath(this.workspace)
     for (const directory of [this.outputDir, this.observationDir]) {
@@ -43,6 +45,10 @@ export class BrowserBackend implements AutomationBackend {
       const tabs = await this.readTabs(signal)
       if (params.revision && params.revision !== tabs.revision) throw automationError('STALE_BROWSER_TABS')
       if (!Number.isInteger(params.index) || !tabs.items.some(item => item.index === params.index)) throw automationError('BROWSER_TAB_NOT_FOUND')
+      if (method === 'closeTab' && tabs.items.length === 1) {
+        await this.close()
+        return { revision: createHash('sha256').update('[]').digest('hex'), items: [] }
+      }
       await this.tool('browser_tabs', { action: method === 'selectTab' ? 'select' : 'close', index: params.index }, signal)
       return this.readTabs(signal)
     }
@@ -104,6 +110,8 @@ export class BrowserBackend implements AutomationBackend {
   }
   async release(): Promise<void> { /* Playwright input operations do not retain pressed keys. */ }
   async close(): Promise<void> {
+    if (this.closed) return
+    this.closed = true
     // Let an owned persistent browser flush its cookies/profile before ending
     // the MCP transport. Attached user browsers are only disconnected.
     if (this.started && this.dedicated && this.tools.has('browser_close')) await this.client.callTool('browser_close', {}, { timeoutMs: 5000 }).catch(() => undefined)
