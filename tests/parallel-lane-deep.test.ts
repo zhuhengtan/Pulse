@@ -67,9 +67,6 @@ describe('Pulse Parallel Lane & Long Task Interruption Deep Tests', () => {
 
       // 2. Stage Verification
       if (text.includes('Verify ONLY the active taskController stage')) {
-        if (text.includes('"id":"stage-alpha"')) {
-          run1VerifiedA = true
-        }
         const results = suppliedRequestResults(request.messages)
         const refs = results.map(r => r.id)
         return reply({
@@ -175,7 +172,6 @@ describe('Pulse Parallel Lane & Long Task Interruption Deep Tests', () => {
     const critB = criteria[1]?.id ?? 'criterion-2'
 
     let run1WrittenA = false
-    let run1VerifiedA = false
     let run1Cancelled = false
     let run2WrittenB = false
     let run2WroteA = false
@@ -219,9 +215,6 @@ describe('Pulse Parallel Lane & Long Task Interruption Deep Tests', () => {
 
       // 2. Stage Verification
       if (text.includes('Verify ONLY the active taskController stage')) {
-        if (text.includes('"id":"stage-alpha"')) {
-          run1VerifiedA = true
-        }
         const results = suppliedRequestResults(request.messages)
         const refs = results.map(r => r.id)
         return reply({
@@ -282,11 +275,13 @@ describe('Pulse Parallel Lane & Long Task Interruption Deep Tests', () => {
       const conversation = await host.createConversation()
       const run1 = await host.sendMessage(conversation.id, { text: objective })
 
-      // Wait until stage-alpha is verified and alpha.ts exists
+      // The verifier request starts before the Host commits its result. Cancel
+      // only after the completed stage and its delivery are durably recorded.
       await expect.poll(async () => {
         try {
           await readFile(join(cwd, 'alpha.ts'), 'utf8')
-          return run1VerifiedA
+          const snapshot = JSON.parse(await readFile(join(dataDir, 'conversations', conversation.id, 'runs', run1.id, 'runtime.json'), 'utf8')).state.state
+          return snapshot.lanes.some(([, lane]: any) => lane.context.state?.taskControllerChain?.tasks?.some((task: any) => task.id === 'stage-alpha' && task.status === 'passed' && Boolean(task.delivery)))
         } catch {
           return false
         }
