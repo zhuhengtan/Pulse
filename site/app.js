@@ -1,5 +1,5 @@
 const releases = 'https://github.com/zhuhengtan/Pulse/releases';
-const labels = { 'macos-arm64': ['下载 DMG', 'Apple Silicon'], 'macos-x64': ['下载 DMG', 'Intel Mac'], 'windows-x64': ['下载安装程序', 'x64'], 'linux-x64': ['下载 AppImage', 'x64'], 'linux-deb-x64': ['下载 DEB', 'x64'] };
+const labels = { 'macos-arm64': ['下载 DMG', 'Apple Silicon', 'pulse-macos-arm64.dmg'], 'windows-x64': ['下载安装程序', 'x64', 'pulse-windows-x64.exe'], 'linux-x64': ['下载 AppImage', 'x64', 'pulse-linux-x86_64.AppImage'], 'linux-deb-x64': ['下载 DEB', 'x64', 'pulse-linux-amd64.deb'] };
 const status = document.querySelector('#release-status');
 async function showDownloads() {
   try {
@@ -10,7 +10,7 @@ async function showDownloads() {
     let available = 0;
     for (const link of document.querySelectorAll('[data-download]')) {
       const key = link.dataset.download, asset = manifest.assets?.find(item => item.platform === key);
-      if (!tag || !asset || !Number.isSafeInteger(asset.size) || asset.size <= 0 || !/^pulse-(?:macos|windows|linux)-(?:arm64|x64)\.(?:dmg|exe|AppImage|deb)$/.test(asset.name)) continue;
+      if (!tag || !asset || !labels[key] || !Number.isSafeInteger(asset.size) || asset.size <= 0 || asset.name !== labels[key][2]) continue;
       const expected = `${releases}/download/${tag}/${asset.name}`;
       if (asset.url !== expected) continue;
       link.href = expected; link.classList.remove('unavailable'); link.textContent = labels[key][0];
