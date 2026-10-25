@@ -26,16 +26,16 @@ export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>
       "en": "Question cards show text inputs directly and can be closed without answering; dismissal does not submit drafts, infer choices, or grant execution permission."
     },
     {
-      "zh": "改善任务计划的准则标识容错、纯分析阶段证据判定、并发 Lane 的中断恢复，以及读取和验证失败后的续执行。",
-      "en": "Improved plan criterion identifier normalization, analysis-stage evidence handling, interrupted parallel Lane restoration, and continuation after read or verification failures."
+      "zh": "改善任务计划的准则标识容错、纯分析阶段证据判定、并发 Lane 的中断恢复，以及读取和验证失败后的续执行；修复 Windows 状态快照替换的瞬时文件占用，并保留后台落盘失败的诊断与显式错误。",
+      "en": "Improved plan criterion identifier normalization, analysis-stage evidence handling, interrupted parallel Lane restoration, and continuation after read or verification failures; retry transient Windows snapshot sharing violations while retaining background persistence diagnostics and explicit errors."
     },
     {
       "zh": "数据服务改用有界启动就绪握手，保留退出与启动失败的诊断；重连前确认 writer 可用，最后一个客户端显式关闭时释放数据库文件，避免关闭竞态、冷启动误判与 Windows 文件占用。",
       "en": "Data services use a bounded startup-readiness handshake, retain exit and startup diagnostics, confirm writer readiness before reconnecting, and release database files when the last client explicitly closes, avoiding shutdown races, premature cold-start failures, and locked files on Windows."
     },
     {
-      "zh": "修复 macOS 沙箱中 npm 默认脚本 shell 受 PATH 隔离影响的启动问题，并保留工作区和环境中的显式 shell 设置。",
-      "en": "Fixed npm lifecycle startup through isolated PATH entries in the macOS sandbox while retaining explicit workspace and environment script-shell settings."
+      "zh": "修复 macOS 沙箱中 npm 默认脚本 shell 受 PATH 隔离影响的启动问题，并保留工作区和环境中的显式 shell 设置；Windows 沙箱向实际命令传递受控执行环境，避免 pnpm 隐式重装依赖。",
+      "en": "Fixed npm lifecycle startup through isolated PATH entries in the macOS sandbox while retaining explicit workspace and environment script-shell settings; forward controlled execution settings to the actual Windows sandbox command to prevent implicit pnpm dependency reinstalls."
     },
     {
       "zh": "复用消息时间格式化器与 Markdown 解析器，缓存有界语法树并延迟创建未打开的消息菜单，减少长历史切换的渲染开销；修复虚拟列表首次挂载的滚动监听和高度变化后的定位。",
