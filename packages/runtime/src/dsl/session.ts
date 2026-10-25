@@ -18,11 +18,10 @@ export class PulseSession {
     this.execution = runtime.runAgent(agentId).then((result) => {
       const root = runtime.state.lanes.get(runtime.state.agents.get(agentId)?.rootLaneId ?? '')
       return {
-        status: result.status,
-        ...(root?.resultRef === undefined ? {} : { resultRef: root.resultRef }),
-        ...(root?.failure === undefined ? {} : { error: root.failure.error }),
-        ...(result.status === 'cancelled' && root?.cancelReason !== undefined ? { reason: root.cancelReason } : {}),
-        ...((result.unresolvedEffectIds ?? []).length ? { unresolvedEffectIds: [...(result.unresolvedEffectIds ?? [])] } : {}),
+        ...result,
+        ...(result.status === 'succeeded' && result.resultRef === undefined && root?.resultRef !== undefined ? { resultRef: root.resultRef } : {}),
+        ...(result.error === undefined && root?.failure !== undefined ? { error: root.failure.error } : {}),
+        ...(result.status === 'cancelled' && result.reason === undefined && root?.cancelReason !== undefined ? { reason: root.cancelReason } : {}),
       }
     })
   }

@@ -482,6 +482,26 @@ function runOutcome(lane: LaneRecord | undefined, unresolvedEffectIds: string[])
   return { status: 'failed', error: { code: 'RUNTIME_IDLE_BLOCKED', message: 'Runtime stopped before the root Lane reached a terminal state.' }, unresolvedEffectIds: unresolved }
 }
 
+/** A partially settled all-wait is still waiting, not runnable cleanup. */
+function waitProgress(state: RuntimeState, wait: WaitRecord) {
+  const observations: Record<string, import('../core/types.js').DependencyObservation> = {}
+  let pending = false, satisfied = 0, ignored = 0, pendingCount = 0
+  let unsatisfied: RuntimeError | undefined
+  for (const dependency of wait.spec.dependencies) {
+    const target = dependency.target as TargetRef
+    const lane = target.kind === 'lane' ? state.lanes.get(target.id) : undefined
+    const outcome = target.kind === 'lane' ? lane && outcomeForSeriesMember(state, lane, dependency.key) : state.effects.get(target.id)?.outcome
+    if (!outcome) { observations[dependency.key] = { state: 'pending', target }; pending = true; pendingCount++; continue }
+    if (outcome.status === 'cancelled' && wait.spec.onCancelled === 'ignore') { observations[dependency.key] = { state: 'ignored', target, outcome }; ignored++ }
+    else if (dependency.condition === 'success' && outcome.status !== 'succeeded') { observations[dependency.key] = { state: 'settled', target, outcome }; unsatisfied = { code: 'DEPENDENCY_FAILED', message: `${dependency.key} did not succeed` } }
+    else { observations[dependency.key] = { state: 'settled', target, outcome }; satisfied++ }
+  }
+  const required = wait.spec.mode === 'all' ? wait.spec.dependencies.length - ignored : wait.spec.mode === 'any' ? 1 : wait.spec.quorum!
+  const modeSatisfied = satisfied >= required
+  const impossible = wait.spec.mode === 'all' ? Boolean(unsatisfied && !pending) : satisfied + pendingCount < required
+  return { observations, pending, unsatisfied, modeSatisfied, modeUnsatisfied: !modeSatisfied && (impossible || (!pending && satisfied < required)), hardFailure: wait.spec.mode === 'all' && unsatisfied !== undefined }
+}
+
 function outcomeForSeriesMember(state: RuntimeState, lane: LaneRecord, key: string): Outcome | undefined {
   const aggregate = outcomeForLane(lane)
   if (!aggregate || lane.series === undefined || lane.resultRef === undefined) return aggregate
@@ -1623,7 +1643,8 @@ export class PulseRuntime {
     let tickOperations = 0
     const canStartTickOperation = (): boolean => tickOperations === 0 || performance.now() - tickStartedAt < this.maxTickMs
     this.tickBudget = { canStart: canStartTickOperation, consume: () => { tickOperations++ } }
-    if (this.hasPendingTickCleanup()) this.refreshWaits()
+    // Overdue recovery timers must settle deadlines before dependency cleanup.
+    if (!this.hasDueTimer() && this.hasPendingTickCleanup()) this.refreshWaits()
     while (this.factInbox.size > 0 && canStartTickOperation()) {
       const before = this.factInbox.snapshot()
       const envelope = this.factInbox.drain(1)[0]
@@ -2207,14 +2228,8 @@ export class PulseRuntime {
     }
     for (const wait of this.state.waits.values()) {
       if (wait.state !== 'pending') continue
-      for (const dependency of wait.spec.dependencies) {
-        const target = dependency.target as TargetRef
-        if (target.kind === 'effect' && this.state.effects.get(target.id)?.outcome !== undefined) return true
-        if (target.kind === 'lane') {
-          const lane = this.state.lanes.get(target.id)
-          if (lane !== undefined && ['succeeded', 'failed', 'cancelled'].includes(lane.status)) return true
-        }
-      }
+      const progress = waitProgress(this.state, wait)
+      if (progress.modeSatisfied || progress.modeUnsatisfied || progress.hardFailure && (wait.spec.onUnsatisfied === 'fail_lane' || !progress.pending)) return true
     }
     return false
   }
@@ -3229,25 +3244,7 @@ export class PulseRuntime {
           if (nextLane.visibleResultRefs) for (const ref of refs) nextLane.visibleResultRefs.add(ref)
           else nextLane.visibleResultRefs = new Set(refs)
         }
-        const observations: Record<string, import('../core/types.js').DependencyObservation> = {}
-        let pending = false
-        let unsatisfied: RuntimeError | undefined
-        let satisfied = 0
-        let ignored = 0
-        let pendingCount = 0
-        for (const dependency of wait.spec.dependencies) {
-          const target = dependency.target as TargetRef
-          const outcome = target.kind === 'lane' ? outcomeForSeriesMember(this.state, this.state.lanes.get(target.id)!, dependency.key) : this.state.effects.get(target.id)?.outcome
-          if (!outcome) { observations[dependency.key] = { state: 'pending', target }; pending = true; pendingCount++; continue }
-          if (outcome.status === 'cancelled' && wait.spec.onCancelled === 'ignore') { observations[dependency.key] = { state: 'ignored', target, outcome }; ignored++ }
-          else if (dependency.condition === 'success' && outcome.status !== 'succeeded') { observations[dependency.key] = { state: 'settled', target, outcome }; unsatisfied = { code: 'DEPENDENCY_FAILED', message: `${dependency.key} did not succeed` } }
-          else { observations[dependency.key] = { state: 'settled', target, outcome }; satisfied++ }
-        }
-        const required = wait.spec.mode === 'all' ? wait.spec.dependencies.length - ignored : wait.spec.mode === 'any' ? 1 : wait.spec.quorum!
-        const modeSatisfied = satisfied >= required
-        const impossible = wait.spec.mode === 'all' ? Boolean(unsatisfied && !pending) : satisfied + pendingCount < required
-        const modeUnsatisfied = !modeSatisfied && (impossible || (!pending && satisfied < required))
-        const hardFailure = wait.spec.mode === 'all' && unsatisfied !== undefined
+        const { observations, pending, unsatisfied, modeSatisfied, modeUnsatisfied, hardFailure } = waitProgress(this.state, wait)
         if ((hardFailure || modeUnsatisfied) && wait.spec.onUnsatisfied === 'fail_lane') {
           const error = unsatisfied ?? { code: 'WAIT_QUORUM_UNREACHABLE', message: 'Wait can no longer satisfy its quorum.' }
           const resolution = { waitId: wait.id, status: 'unsatisfied' as const, dependencies: observations, error }
