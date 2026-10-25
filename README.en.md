@@ -409,6 +409,8 @@ When an Agent needs input, it calls `ask.choice`, `ask.multi`, or `ask.input`. T
 }
 ```
 
+The local **Settings → Tools and skills** page includes a skill marketplace: search skills.sh or inspect a public GitHub repository, then install, manually update or uninstall. Installed skills appear in slash suggestions without restarting. Use `skills.read` and `skills.materialize` for accompanying resources; scripts retain normal approvals and sandboxing. The built-in `/skill-creator` supports workspace drafts, validation, trials and requested installation. See [skill configuration](docs/cli-config.en.md#skill-marketplace-and-built-in-creator).
+
 MCP configuration starts a local process, so only configure services you trust. Their tools are treated as external side effects and follow the active approval mode. Skills are automatically indexed by name from user-installed and explicitly trusted directories. Type `/` to search, use ↑/↓ to select and Tab to complete, then invoke with `/skill-name task`; only then is `SKILL.md` read into the current task context. The index stores names only, and the body is treated as untrusted reference instructions; code in it is not executed. Managed browser and computer automation are available through the opt-in `browser` / `computer` capabilities; see [setup and verification](docs/browser-computer-use.md). Jarvis still requires an explicitly configured external service.
 
 A foreground Worker can process persistent scheduled tasks:

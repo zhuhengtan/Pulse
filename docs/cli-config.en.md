@@ -143,7 +143,15 @@ Type `/` in the input field to search commands and skill names; continue with a 
 /review Check the current changes
 ```
 
-Built-in commands with the same name take precedence. A skill can always be invoked as `/skill:review Check the current changes`. Only the submitted skill body is added to the current task context; a later ordinary message does not inject the skill again. Wait for a task to finish or run `/cancel` before invoking another skill. A single body is limited to 64 KiB; the index is no longer limited by the former 32-loaded-skill cap. Skills provide untrusted reference instructions only; scripts and companion files are not automatically run or loaded.
+Built-in commands with the same name take precedence. A skill can always be invoked as `/skill:review Check the current changes`. Only the submitted skill body is added to the current task context; a later ordinary message does not inject the skill again. Wait for a task to finish or run `/cancel` before invoking another skill. A single body is limited to 64 KiB; the index is no longer limited by the former 32-loaded-skill cap. Skills remain untrusted guidance. Selected skills expose references through `skills.read`; `skills.materialize` copies their complete resource snapshot into a new workspace directory. Run helpers using `shell.exec` under the existing approval, sandbox and network rules. Each run retains its own snapshot across later updates and removal.
+
+## Skill marketplace and built-in creator
+
+Local administrators can use **Settings → Tools and skills** to search skills.sh, inspect a public GitHub repository, install, manually update or uninstall skills. Sources accept `owner/repo@skill` and `https://github.com/owner/repo/tree/<ref>/<directory>`; URL-encode `/` in branch names. Version one supports GitHub sources only. Direct repository inspection remains available when search is unavailable.
+
+Installation preserves the complete skill directory in `~/.pulse/skills/<name>` and records its repository, directory, immutable commit and file digests. It enables the `skills` capability and appends the installed name to an existing allow-list without changing unrelated configuration. Save or discard pending settings edits first. Slash suggestions refresh without restarting. Installation never executes scripts or installs dependencies. Name collisions and local modifications prevent silent overwrites; locally modified skills also cannot be removed by the manager. Trusted external roots continue using the existing configuration; management operations affect only managed installations in Pulse's default directory.
+
+`/skill-creator` ships with the application, including its references, template, source attribution and Apache-2.0 license, adapted from Anthropic skill-creator. It creates workspace drafts, checks metadata and references with `skills.validate`, supports realistic trials and feedback, and publishes through `skills.installLocal` when installation is requested. Structural validation is separate from task quality. Automated batch baseline comparisons and trigger optimization are excluded from version one. Report missing interpreters, packages and external tools separately from actual execution failures; successful installation does not prove successful execution.
 
 ## Long-task recovery and diagnostics
 

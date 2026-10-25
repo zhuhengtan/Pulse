@@ -405,6 +405,8 @@ Agent 需要询问你时，会调用 `ask.choice`、`ask.multi` 或 `ask.input`�
 }
 ```
 
+本机“设置 → 工具与技能”现提供技能市场：搜索 skills.sh 或填写公开 GitHub 仓库地址，查看详情后安装，支持手动更新与卸载。安装后无需重启即可通过 `/技能名` 选择使用；附带资源通过 `skills.read`、`skills.materialize` 使用，脚本沿用现有审批和沙箱。内置 `/skill-creator` 支持工作区草稿、校验、试用及按请求安装，详见 [技能配置](docs/cli-config.md#技能市场与内置创建器)。
+
 MCP 配置会启动本机进程，必须只填写自己信任的服务；服务工具按外部副作用处理并遵守当前审批模式。Skill 自动索引用户级安装目录及显式信任目录下的技能名称；输入 `/` 搜索、↑/↓ 选择、Tab 补全，用 `/技能名 任务` 调用时才读取 `SKILL.md` 加入当前任务上下文。索引仅保存名称，正文作为不可信参考指令，不执行其中代码。浏览器和桌面自动化支持受管理的 `browser` / `computer` 能力、独立视觉模型及 CLI/H5 接管，详见 [Browser/Computer Use](docs/browser-computer-use.md)。已有同名 MCP 配置继续兼容；Jarvis 仍需显式配置外部服务。
 
 持久化定时任务可由一个前台 Worker 处理：
