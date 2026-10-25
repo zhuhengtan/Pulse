@@ -2075,6 +2075,9 @@ export class PulseRuntime {
       this.persistenceScheduled = false
       if (this.persistenceDirty && !this.persistenceBackoff) this.schedulePersistence()
     })
+    // Scheduling is fire-and-forget until the next flush. Observe rejection
+    // now, while retaining the rejecting promise for explicit flush callers.
+    void this.persistencePending.catch(() => undefined)
   }
 
   private persistenceState(): RuntimeState {

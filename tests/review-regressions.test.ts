@@ -262,6 +262,8 @@ describe('persistence failures are observable', () => {
     const runtime = new PulseRuntime({ maxTickMs: 1000, persistenceBackend: backend })
     runtime.createAgent('p', { id: 'p', version: '1', step: () => ({ actions: [{ type: 'complete', result: null }], next: point('p', 'done') }) })
     runtime.tick()
+    // Let the background write fail before a caller attaches its flush await.
+    await expect.poll(() => runtime.state.events.some(event => event.type === 'persistence.failed')).toBe(true)
     await expect(runtime.flushPersistence()).rejects.toThrow('DISK_FULL')
     expect(runtime.state.events.some((event) => event.type === 'persistence.failed')).toBe(true)
     fail = false

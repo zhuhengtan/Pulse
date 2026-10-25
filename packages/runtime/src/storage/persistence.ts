@@ -1,4 +1,5 @@
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
+import { mkdir, open, readFile, rm } from 'node:fs/promises'
+import { replaceRuntimeFile } from './atomic-file.js'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -116,7 +117,7 @@ export class FileRuntimeContentStore implements RuntimeResultStore, RuntimeSnaps
         await handle.sync()
         await handle.close()
         handle = undefined
-        await rename(temporaryPath, target)
+        await replaceRuntimeFile(temporaryPath, target)
       } finally {
         if (handle) await handle.close().catch(() => undefined)
         await rm(temporaryPath, { force: true }).catch(() => undefined)
@@ -365,7 +366,7 @@ export class FileRuntimeEventArchive implements RuntimeEventArchive {
       await handle.sync()
       await handle.close()
       handle = undefined
-      await rename(temporaryPath, this.filePath)
+      await replaceRuntimeFile(temporaryPath, this.filePath)
     } finally {
       if (handle) await handle.close().catch(() => undefined)
       await rm(temporaryPath, { force: true }).catch(() => undefined)
@@ -468,7 +469,7 @@ export class FileRuntimeFactInboxDedupeArchive implements FactInboxDedupeArchive
         await handle.sync()
         await handle.close()
         handle = undefined
-        await rename(temporaryPath, this.filePath)
+        await replaceRuntimeFile(temporaryPath, this.filePath)
         this.entries = merged
       } finally {
         if (handle) await handle.close().catch(() => undefined)
@@ -713,7 +714,7 @@ export class FileRuntimePersistenceBackend implements RuntimePersistenceBackend 
           await handle.sync()
           await handle.close()
           handle = undefined
-          await rename(temporaryPath, this.filePath)
+          await replaceRuntimeFile(temporaryPath, this.filePath)
           try {
             const directory = await open(dirname(this.filePath), 'r')
             try { await directory.sync() } finally { await directory.close() }
