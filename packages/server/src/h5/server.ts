@@ -1,3 +1,5 @@
+import { SkillManagement } from '../skill-management.js'
+import { withEnabledSkill } from '../skill-config.js'
 import { frontendResource } from '../updates/frontend.js'
 import { UpdateManager, protocols, ReaderClient, type UpdateOptions } from '../updates/index.js'
 import { parseRichContent, type RichContent } from '../rich-content.js'
@@ -135,6 +137,7 @@ export interface H5ServerOptions {
 }
 
 export class H5Server {
+  private readonly skillManagement = new SkillManagement()
   private readonly port: number
   private effectivePort: number
   private readonly hostAddress: string
@@ -239,7 +242,7 @@ export class H5Server {
       await writeFile(temporary, text, { flag: 'wx', mode: 0o600 })
       await chmod(temporary, 0o600)
       const options = await this.configuration.prepare(temporary)
-      return { text, options }
+      return { text, options: { ...options, skillConfigPath: resolve(this.configuration.path) } }
     } finally { await rm(temporary, { force: true }).catch(() => undefined) }
   }
 
@@ -434,6 +437,7 @@ export class H5Server {
     await Promise.allSettled([...this.pendingWorkStarts].filter(([, id]) => !conversationId || id === conversationId).map(([promise]) => promise))
   }
   private async startConversationRun(conversationId: string, text: string, options?: { requestId?: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[] }): Promise<RunHandle> {
+    await this.host.listSkills()
     const key = options?.requestId ? `${conversationId}:${options.requestId}` : undefined
     const digest = createHash('sha256').update(JSON.stringify({ text, options })).digest('hex')
     const prior = key ? this.workStarts.get(key) : undefined
@@ -1139,6 +1143,45 @@ export class H5Server {
         await this.setGlobalApprovalPolicy(policy)
       }
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ policy: await this.globalApprovalPolicy() }))
+      return
+    }
+
+    if (pathname.startsWith('/api/skill-marketplace/')) {
+      if (!localAdmin || method !== 'GET' && !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: localAdmin ? 'SAME_ORIGIN_REQUIRED' : 'LOCAL_ADMIN_REQUIRED' })); return }
+      try {
+        const action = pathname.slice('/api/skill-marketplace/'.length)
+        const enable = async (name: string) => {
+          if (!this.configuration) { await this.host.enableInstalledSkill(name); return }
+          await this.withConfigWriteLock(async () => {
+            const raw = await this.configText()
+            const candidate = withEnabledSkill(this.parseConfig(raw), name)
+            const prepared = await this.validateConfigCandidate(candidate)
+            if (configVersion(await this.configText()) !== configVersion(raw)) throw new Error('CONFIG_VERSION_CONFLICT')
+            await this.replaceConfig(prepared.text)
+            this.host.applyLiveOptions({ ...prepared.options, approvalMode: this.host.getAutomationOptions().approvalMode })
+          })
+        }
+        let value: unknown
+        if (method === 'GET' && action === 'search') value = await this.skillManagement.search(url.searchParams.get('q') ?? '')
+        else if (method === 'GET' && action === 'installed') value = await this.skillManagement.installed()
+        else if (method === 'GET' && action === 'detail') value = await this.skillManagement.detail(url.searchParams.get('name') ?? '')
+        else if (method === 'POST') {
+          const body = await this.parseJsonBody(req)
+          if (action === 'inspect' && typeof body.source === 'string') value = await this.skillManagement.inspect(body.source)
+          else if (['install', 'update'].includes(action) && this.configuration && body.configVersion !== configVersion(await this.configText())) throw new Error('CONFIG_VERSION_CONFLICT')
+          else if (action === 'install' && typeof body.previewId === 'string' && typeof body.name === 'string' && typeof body.directory === 'string') {
+            await this.host.assertSkillInstallable(body.name)
+            value = await this.skillManagement.install({ previewId: body.previewId, name: body.name, directory: body.directory }, enable)
+          }
+          else if (action === 'update' && typeof body.name === 'string') value = await this.skillManagement.update(body.name, enable)
+          else if (action === 'uninstall' && typeof body.name === 'string') value = await this.skillManagement.uninstall(body.name)
+          else throw new Error('SKILL_REQUEST_INVALID')
+        } else { res.writeHead(404).end(); return }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(value))
+      } catch (error) {
+        const code = error instanceof Error ? error.message : 'SKILL_OPERATION_FAILED'
+        res.writeHead(code === 'CONFIG_VERSION_CONFLICT' || code === 'SKILL_LOCALLY_MODIFIED' || code === 'SKILL_ALREADY_INSTALLED' ? 409 : 400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: code }))
+      }
       return
     }
 

@@ -437,6 +437,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     modelPricing: Object.fromEntries(selections.flatMap(({ id, model }) => model.pricing ? [[id, model.pricing]] : [])),
     ...(taskRouting === undefined ? {} : { taskRouting }),
     capabilityPacks,
+    skillConfigPath: resolve(expandHome(option(parsed.options, 'config') ?? process.env.PULSE_CONFIG) ?? defaultPulseConfigPath()),
     enabledCapabilityPacks,
     capabilityConfig: capabilitySettings.skills === undefined ? {} : { skills: skillNames },
     activeProviderCode: providerName,

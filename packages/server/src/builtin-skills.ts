@@ -1,3 +1,5 @@
+import { skillCreatorFiles } from './skill-creator-content.js'
+import { digest, snapshot, type SkillSnapshot } from './skill-store.js'
 import type { CapabilityPack, CapabilityPackContext } from './capabilities.js'
 import { builtinSkillContents, type BuiltinSkillContent } from './builtin-skills-content.js'
 
@@ -44,9 +46,18 @@ export function createBuiltinSkillCapabilityPack(): CapabilityPack {
     activate: async (context: CapabilityPackContext) => {
       const instructions = (context.selectedSkills ?? []).flatMap((name) => {
         const skill = byName.get(name)
-        return skill ? [instruction(skill)] : []
+        return skill ? [instruction({ ...skill, content: context.skillSnapshots?.get(name)?.files.get('SKILL.md')?.toString('utf8') ?? skill.content })] : []
       })
-      return { tools: [], instructions }
+      const resources = new Map<string, SkillSnapshot>()
+      for (const name of context.selectedSkills ?? []) {
+        const skill = byName.get(name)
+        if (!skill) continue
+        const saved = context.skillSnapshots?.get(name)
+        resources.set(name, saved ?? (name === 'skill-creator'
+          ? snapshot(new Map(Object.entries(skillCreatorFiles).map(([path, content]) => [path, Buffer.from(content)])))
+          : { name, description: skill.description, files: new Map([['SKILL.md', Buffer.from(skill.content)]]), hash: digest(Buffer.from(skill.content)), warnings: [] }))
+      }
+      return { tools: [], instructions, skillSnapshots: resources }
     },
   }
 }

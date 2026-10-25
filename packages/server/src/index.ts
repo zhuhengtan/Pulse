@@ -1,3 +1,7 @@
+import { createSkillTools } from './skill-tools.js'
+import { loadRunSkills, saveRunSkills } from './skill-run-snapshot.js'
+import { enableSkillConfig } from './skill-config.js'
+import { listBuiltinSkills as builtinSkillNames } from './builtin-skills.js'
 import { planDecisionEvidence } from './plan-decision-evidence.js'
 import { captureCopy, finishCopy } from './task-controller/copy-evidence.js'
 import { captureInPlace, finishInPlace } from './task-controller/inplace-evidence.js'
@@ -137,6 +141,8 @@ export interface LocalHostOptions {
   capabilityPacks?: CapabilityPack[]
   /** Capability IDs explicitly enabled for new and restored Runs. */
   enabledCapabilityPacks?: string[]
+  /** Host-owned user config path for installation and cross-process skill refresh. */
+  skillConfigPath?: string
   /** Host-owned configuration for enabled packs, such as explicitly selected skills. */
   capabilityConfig?: Record<string, JsonValue>
   activeProviderCode?: string
@@ -888,7 +894,7 @@ ${responseLanguageInstruction(detectResponseLanguage(text))}`
 }
 
 const assistantToolAllowList = [
-  'capability.status',
+  'capability.status', 'skills.read',
   'fs.list', 'fs.read', 'fs.search', 'web.fetch', 'web.search', 'attachment.read', 'attachment.list',
   'jarvis.context', 'jarvis.search', 'jarvis.get', 'jarvis.record', 'jarvis.remember', 'jarvis.candidates', 'jarvis.status',
   'work.start', 'work.list', 'work.status', 'work.send', 'work.stop', 'work.resume',
@@ -1618,6 +1624,7 @@ function snapshotHostOptions(source: LocalHostOptions): LocalHostOptions {
     ...(source.maxCostByCurrency ? { maxCostByCurrency: { ...source.maxCostByCurrency } } : {}),
     ...(source.taskRouting ? { taskRouting: structuredClone(source.taskRouting) } : {}),
     ...(source.enabledCapabilityPacks ? { enabledCapabilityPacks: [...source.enabledCapabilityPacks] } : {}),
+    ...(source.skillConfigPath ? { skillConfigPath: source.skillConfigPath } : {}),
     ...(source.capabilityConfig ? { capabilityConfig: structuredClone(source.capabilityConfig) } : {}),
     ...(source.networkHosts ? { networkHosts: [...source.networkHosts] } : {}),
     ...(source.assistantModel ? { assistantModel: source.assistantModel } : {}),
@@ -1723,8 +1730,28 @@ export class LocalHost {
       finally { await this.releaseConversationLock(entry.name) }
     }
   }
+  async assertSkillInstallable(name: string): Promise<void> {
+    if (builtinSkillNames().includes(name)) throw new Error('SKILL_BUILTIN_PROTECTED')
+    for (const pack of this.options.capabilityPacks ?? []) if (await pack.hasSkill?.(name)) throw new Error('SKILL_ALREADY_INSTALLED')
+  }
+  async enableInstalledSkill(name: string): Promise<void> {
+    if (this.options.skillConfigPath) await enableSkillConfig(this.options.skillConfigPath, name)
+    this.options.enabledCapabilityPacks = [...new Set([...(this.options.enabledCapabilityPacks ?? []), 'skills'])]
+    if (Array.isArray(this.options.capabilityConfig?.skills)) this.options.capabilityConfig = { ...this.options.capabilityConfig, skills: [...new Set([...this.options.capabilityConfig.skills, name])] }
+  }
   /** Refresh and persist names only; the cache is never an authority for paths or content. */
   async listSkills(): Promise<string[]> {
+    // A work process may have installed a skill; refresh only the user-owned skill settings.
+    if (this.options.skillConfigPath) {
+      const saved = JSON.parse(await readFile(this.options.skillConfigPath, 'utf8').catch(error => { if (error.code === 'ENOENT') return '{}'; throw error })) as { capabilities?: { enabled?: string[]; skills?: string[] } }
+      if (saved.capabilities) {
+        const enabled = saved.capabilities.enabled?.includes('skills') === true
+        this.options.enabledCapabilityPacks = [...(this.options.enabledCapabilityPacks ?? []).filter(id => id !== 'skills'), ...(enabled ? ['skills'] : [])]
+        this.options.capabilityConfig = { ...this.options.capabilityConfig }
+        if (saved.capabilities.skills === undefined) delete this.options.capabilityConfig.skills
+        else this.options.capabilityConfig.skills = saved.capabilities.skills
+      }
+    }
     const names = new Set<string>()
     for (const pack of this.options.capabilityPacks ?? []) {
       if (!this.options.enabledCapabilityPacks?.includes(pack.manifest.id) || !pack.discoverSkills) continue
@@ -2485,7 +2512,10 @@ export class LocalHost {
     const activatedPackIds = assistantChat
       ? (options.enabledCapabilityPacks ?? []).filter(id => id === 'skills' || id === 'builtin-skills')
       : (options.enabledCapabilityPacks ?? []).filter(id => (id !== 'browser' && id !== 'computer') || options.capabilityPacks?.some(pack => pack.manifest.id === id))
-    const capabilities = await capabilityRegistry.activate(activatedPackIds, { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: await this.selectedSkillsFor(skillInput) })
+    const savedSkills = await loadRunSkills(join(this.runDir(conversationId, runId), 'skill-snapshot.json'))
+    const capabilities = await capabilityRegistry.activate(activatedPackIds, { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, ...(savedSkills ? { skillSnapshots: savedSkills } : {}), selectedSkills: savedSkills ? [...savedSkills.keys()] : await this.selectedSkillsFor(skillInput) })
+    await saveRunSkills(join(this.runDir(conversationId, runId), 'skill-snapshot.json'), capabilities.skillSnapshots ?? new Map())
+    capabilities.tools.push(...createSkillTools(capabilities.skillSnapshots ?? new Map(), cwd, { mode: assistantChat ? 'read-only' : options.approvalMode ?? 'ask', approved: id => this.approvedToolCalls.get(runId)?.has(id) === true, enable: name => this.enableInstalledSkill(name), beforeInstall: name => this.assertSkillInstallable(name), protectedNames: builtinSkillNames() }))
     if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) capabilities.tools.push(...createAutomationTools(this.automationClient, cwd, options.enabledCapabilityPacks.filter(id => !options.capabilityPacks?.some(pack => pack.manifest.id === id)), runId, conversationId, (await this.readManifest(conversationId)).projectId, visionAvailable))
     if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) {
       const dispose = capabilities.dispose.bind(capabilities)
@@ -2877,7 +2907,9 @@ export class LocalHost {
     const activatedPackIds = assistantChat
       ? (options.enabledCapabilityPacks ?? []).filter(id => id === 'skills' || id === 'builtin-skills')
       : (options.enabledCapabilityPacks ?? []).filter(id => (id !== 'browser' && id !== 'computer') || options.capabilityPacks?.some(pack => pack.manifest.id === id))
-    const capabilities = await capabilityRegistry.activate(activatedPackIds, { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, selectedSkills: await this.selectedSkillsFor(typeof savedInput.goal === 'string' ? savedInput.goal : userIntent) })
+    const savedSkills = await loadRunSkills(join(this.runDir(conversationId, runId), 'skill-snapshot.json'))
+    const capabilities = await capabilityRegistry.activate(activatedPackIds, { workspaceRoot: cwd, config: options.capabilityConfig ?? {}, signal: capabilityController.signal, ...(savedSkills ? { skillSnapshots: savedSkills } : {}), selectedSkills: savedSkills ? [...savedSkills.keys()] : await this.selectedSkillsFor(typeof savedInput.goal === 'string' ? savedInput.goal : userIntent) })
+    capabilities.tools.push(...createSkillTools(capabilities.skillSnapshots ?? new Map(), cwd, { mode: assistantChat ? 'read-only' : options.approvalMode ?? 'ask', approved: id => this.approvedToolCalls.get(runId)?.has(id) === true, enable: name => this.enableInstalledSkill(name), beforeInstall: name => this.assertSkillInstallable(name), protectedNames: builtinSkillNames() }))
     if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) capabilities.tools.push(...createAutomationTools(this.automationClient, cwd, options.enabledCapabilityPacks.filter(id => !options.capabilityPacks?.some(pack => pack.manifest.id === id)), runId, conversationId, (await this.readManifest(conversationId)).projectId, ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54'].includes(String(savedInput.controllerVersion)) ? visionAvailable : undefined))
     if (!assistantChat && options.enabledCapabilityPacks?.some(id => (id === 'browser' || id === 'computer') && !options.capabilityPacks?.some(pack => pack.manifest.id === id))) {
       const dispose = capabilities.dispose.bind(capabilities)
@@ -3390,6 +3422,7 @@ export class LocalHost {
     if (explicitSkills.length) { const known = await this.listSkills(); for (const skill of explicitSkills) if (!known.includes(skill)) throw new Error(`SKILL_NOT_FOUND:${skill}`) }
     const normalizedAttachments = input.attachments?.length ? await new AttachmentStore(this.dataDir, conversationId).save(input.attachments) : undefined
     input = { ...input, ...(normalizedAttachments ? { attachments: normalizedAttachments } : {}) }
+    if (this.options.skillConfigPath) await this.listSkills()
     let runOptions = snapshotHostOptions(this.options)
     if (input.assistantChat) {
       const selectedModel = runOptions.assistantModel ?? runOptions.activeModel
@@ -3715,6 +3748,7 @@ export class LocalHost {
     if (!runId) throw new Error('NO_ACTIVE_RUN')
     const existing = this.active.get(runId)
     if (existing) return this.makeRunHandle(conversationId, runId, existing.runtime, existing.session)
+    if (this.options.skillConfigPath) await this.listSkills()
     let runOptions = snapshotHostOptions(this.options)
     const runJarvisClient = this.jarvisClient
     await this.acquireConversationLock(conversationId, runId)

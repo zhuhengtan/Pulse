@@ -1,3 +1,4 @@
+import type { SkillSnapshot } from './skill-store.js'
 import type { ToolDefinition } from '@hunterzhu/pulse-tool-sdk'
 import type { JsonValue } from '@hunterzhu/pulse-runtime'
 import { createDocumentTools } from '@hunterzhu/pulse-adapters'
@@ -18,10 +19,12 @@ export interface CapabilityPackContext {
   workspaceRoot: string
   config: Readonly<Record<string, JsonValue>>
   signal: AbortSignal
+  skillSnapshots?: Map<string, SkillSnapshot>
   selectedSkills?: readonly string[]
 }
 
 export interface CapabilityPackActivation {
+  skillSnapshots?: Map<string, SkillSnapshot>
   tools: ToolDefinition[]
   instructions?: string[]
   dispose?: () => Promise<void> | void
@@ -33,11 +36,13 @@ export interface CapabilityPackActivation {
  */
 export interface CapabilityPack {
   manifest: CapabilityPackManifest
+  hasSkill?(name: string): Promise<boolean>
   discoverSkills?(config: Readonly<Record<string, JsonValue>>): Promise<string[]>
   activate(context: CapabilityPackContext): Promise<CapabilityPackActivation>
 }
 
 export interface ActiveCapabilityPacks {
+  skillSnapshots?: Map<string, SkillSnapshot>
   tools: ToolDefinition[]
   instructions: string[]
   manifests: CapabilityPackManifest[]
@@ -101,6 +106,7 @@ export class CapabilityPackRegistry {
     let disposed = false
     return {
       tools,
+      skillSnapshots: new Map(active.flatMap(item => [...(item.skillSnapshots ?? [])])),
       instructions: active.flatMap((activation) => activation.instructions ?? []),
       manifests,
       dispose: async () => {

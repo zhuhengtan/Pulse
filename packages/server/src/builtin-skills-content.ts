@@ -1,3 +1,4 @@
+import { skillCreatorFiles } from './skill-creator-content.js'
 /**
  * Skill text compiled into Pulse. Kept as plain data so it ships inside the
  * server bundle and needs no external skills directory at runtime.
@@ -10,6 +11,7 @@ export interface BuiltinSkillContent {
 }
 
 export const builtinSkillContents: readonly BuiltinSkillContent[] = [
+  { name: 'skill-creator', title: 'Skill Creator', description: '创建、修改、验证和安装 Pulse 技能。', content: skillCreatorFiles['SKILL.md']! },
   {
     name: 'grill-and-plan',
     title: 'Grill and plan',
