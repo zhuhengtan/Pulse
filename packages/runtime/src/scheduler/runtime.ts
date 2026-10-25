@@ -1893,8 +1893,11 @@ export class PulseRuntime {
     // waiting run rewrites the full runtime snapshot on every wake.
     if (tickMutated) this.schedulePersistence()
     const pendingTickCleanup = this.hasPendingTickCleanup()
+    // A completion or lane step can exhaust a budget with another lane ready.
+    // Keep draining that work even when all remaining external calls are held.
+    const readyAfterYield = this.inDrain && this.ready.size > 0 && (!canStartTickOperation() || (this.maxSteps > 0 && progressed >= this.maxSteps))
     this.tickBudget = undefined
-    if (pendingTickCleanup) this.scheduleWake(true)
+    if (pendingTickCleanup || readyAfterYield) this.scheduleWake(true)
     this.notifyActivity()
     return progressed
   }
@@ -1915,6 +1918,10 @@ export class PulseRuntime {
         const nextAt = this.clock.timers.nextAt()
         if (nextAt !== undefined) { if (nextAt > this.clock.now()) { if (this.clock.waitUntil) await this.clock.waitUntil(nextAt); else this.clock.set(nextAt) }; continue }
         break
+      }
+      if (work === 0 && (this.ready.size > 0 || this.factInbox.size > 0 || this.hasPendingTickCleanup())) {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        continue
       }
       if (work === 0 && this.executions.size) {
         const nextAt = this.clock.timers.nextAt()
@@ -1961,6 +1968,10 @@ export class PulseRuntime {
         if (nextAt !== undefined) { if (nextAt > this.clock.now()) { if (this.clock.waitUntil) await this.clock.waitUntil(nextAt); else this.clock.set(nextAt) }; continue }
         break
       }
+      if (work === 0 && (this.ready.size > 0 || this.factInbox.size > 0 || this.hasPendingTickCleanup())) {
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        continue
+      }
       if (work === 0 && this.executions.size) {
         const executions = [...this.executions.entries()].filter(([effectId]) => this.state.effects.get(effectId)?.agentId === agentId).map(([, execution]) => execution.promise)
         const nextAt = this.clock.timers.nextAt()
@@ -1980,7 +1991,16 @@ export class PulseRuntime {
     return runOutcome(root, this.quarantine.unresolvedEffectIds.filter((effectId) => effectIds.has(effectId)))
   }
 
-  async waitForIdle(): Promise<void> { while (this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup() || this.hasDueTimer()) { this.tick(); if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise)); else if (this.preparingLLMs.size) await this.waitForFact(); else if (this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup() || this.hasDueTimer()) await new Promise<void>((resolve) => setImmediate(resolve)) } await this.flushPersistence() }
+  async waitForIdle(): Promise<void> {
+    while (this.ready.size || this.executions.size || this.preparingLLMs.size || this.hasQueuedEffects() || this.factInbox.size || this.hasPendingTickCleanup() || this.hasDueTimer()) {
+      this.tick()
+      if (this.ready.size || this.factInbox.size || this.hasPendingTickCleanup()) { await new Promise<void>((resolve) => setImmediate(resolve)); continue }
+      if (this.executions.size) await Promise.race([...this.executions.values()].map((execution) => execution.promise))
+      else if (this.preparingLLMs.size) await this.waitForFact()
+      else if (this.hasQueuedEffects() || this.hasDueTimer()) await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    await this.flushPersistence()
+  }
 
   /** A restart may retain a durable human wait, never an executing write or model call. */
   async checkpointHumanWait(): Promise<boolean> {
