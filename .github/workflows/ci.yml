@@ -86,7 +86,10 @@ jobs:
       - name: Verify Windows candidate test runner
         if: runner.os == 'Windows'
         timeout-minutes: 12
-        run: pnpm exec vitest run tests/candidate-test-script.test.ts -t "runs a corrected new test script|revalidates the corrected entrypoint" --reporter verbose
+        run: |
+          pnpm exec vitest run tests/candidate-test-script.test.ts -t "runs a corrected new test script|revalidates the corrected entrypoint" --reporter verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm exec vitest run tests/shell-pnpm-exec.test.ts tests/windows-shell-environment.test.ts tests/runtime-persistence-sharing.test.ts tests/review-regressions.test.ts --reporter verbose
       - name: Run shared local and cloud checks
         # Windows runs serially because SRT owns machine-wide ACL state; each
         # real tool launch includes its cold permission setup and cleanup.
