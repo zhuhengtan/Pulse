@@ -280,17 +280,14 @@ export function RichComposer({
   const suggestionMenuRef = useRef<HTMLDivElement>(null)
   useEffect(() => { suggestionMenuRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest' }) }, [suggestionState?.selectedIndex, suggestionState?.items])
 
-  const cachedSkills = useRef<SuggestionItem[] | null>(null)
   const currentProjectIdRef = useRef(projectId)
   currentProjectIdRef.current = projectId
 
   // Fetch skills helper
   const fetchSkills = useCallback(async (): Promise<SuggestionItem[]> => {
-    if (cachedSkills.current) return cachedSkills.current
     try {
       const res = await apiJson<{ skills: Array<{ id: string; name: string }> }>(transport, '/api/skills')
-      cachedSkills.current = res.skills || []
-      return cachedSkills.current
+      return res.skills || []
     } catch {
       return []
     }
