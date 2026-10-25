@@ -17,6 +17,7 @@ import { runServiceCommand } from './commands/service.js'
 import { runTemplateCommand } from './commands/template.js'
 import { runMcpDoctor } from './commands/mcp.js'
 import { runH5Command } from './commands/h5.js'
+import { runUpdateCommand } from './commands/update.js'
 import { isSameModulePath } from './utils/is-main-module.js'
 import { formatVersionOutput, shouldUseColor } from './presentation.js'
 
@@ -38,6 +39,8 @@ Usage:
   pulse drafts <conversation-id> <run-id> <draft-id> [--revision <hash> --confirm-owner]\n                                          preview or explicitly migrate an ownerless draft\n  pulse doctor [options]                  check local configuration
   pulse h5 [start|qr|devices|revoke|install|status|stop|uninstall]
                                           mobile web assistant and launchd daemon
+  pulse update [status|check|download|apply|rollback|enable|auto-download on|off]
+                                          independent backend and frontend updates
   pulse schedule <add|list|pause|resume|remove|daemon> [options]
                                           manage recurring tasks (daemon requires read-only or auto approval)
   pulse service <install|status|start|stop|uninstall>
@@ -154,7 +157,7 @@ export function parse(argv: string[]): Parsed {
       options[key] = true
       continue
     }
-  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp', 'h5', 'automation', 'drafts'].includes(arg)) {
+  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp', 'h5', 'update', 'automation', 'drafts'].includes(arg)) {
       command = arg
     } else {
       positionals.push(arg)
@@ -490,6 +493,8 @@ export async function main(): Promise<number> {
   if (parsed.command === 'setup') {
     return runSetup(parsed.options.force === true, expandHome(option(parsed.options, 'config')))
   }
+
+  if (parsed.command === 'update') return runUpdateCommand(parsed.positionals, parsed.options, version)
 
   const options = await hostOptions(parsed)
 

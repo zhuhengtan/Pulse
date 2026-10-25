@@ -1,8 +1,9 @@
-import { access, mkdir, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { supervise, updateRoot } from '@hunterzhu/pulse-server/updates'
 import QRCode from 'qrcode'
 import { createLocalHost, H5Server, H5AuthStore, DEFAULT_H5_PORT, runH5WorkWorker, type LocalHostOptions } from '@hunterzhu/pulse-server'
 
@@ -73,8 +74,10 @@ export async function runH5Command(
     process.stderr.write('错误: 后台服务需要固定端口，不能使用端口 0。\n')
     return 1
   }
-  const home = process.env.PULSE_HOME ?? homedir()
-  const data = options.dataDir ?? process.env.PULSE_DATA_DIR ?? join(home, '.pulse', 'data')
+  const managed = process.env.PULSE_MANAGED === '1'
+  const home = managed ? homedir() : process.env.PULSE_HOME ?? homedir()
+  const pulseHome = managed ? updateRoot() : join(home, '.pulse')
+  const data = options.dataDir ?? process.env.PULSE_DATA_DIR ?? join(pulseHome, 'data')
   const cwd = options.cwd ?? process.cwd()
   const platform = process.platform
 
@@ -152,8 +155,9 @@ export async function runH5Command(
     }
     const executable = process.execPath
     const entry = fileURLToPath(new URL('../bin.js', import.meta.url))
-    const config = process.env.PULSE_CONFIG ?? join(home, '.pulse', 'config.json')
-    const daemonArguments = h5DaemonArguments(executable, entry, port ?? DEFAULT_H5_PORT)
+    const config = process.env.PULSE_CONFIG ?? join(pulseHome, 'config.json')
+    const base = managed ? (JSON.parse(await readFile(join(updateRoot(), 'updates/bootstrap.json'), 'utf8')) as { directory: string }).directory : undefined
+    const daemonArguments = base ? [join(base, process.platform === 'win32' ? 'node.exe' : 'node'), join(base, 'app/node_modules/@hunterzhu/pulse-server/dist/updates/launcher.js'), updateRoot(), base, 'h5', 'daemon', '--port', String(port ?? DEFAULT_H5_PORT)] : h5DaemonArguments(executable, entry, port ?? DEFAULT_H5_PORT)
 
     if (platform === 'darwin') {
       const directory = join(home, 'Library', 'LaunchAgents')
@@ -176,7 +180,7 @@ ${daemonArguments.map((argument) => `    <string>${xml(argument)}</string>`).joi
   <key>EnvironmentVariables</key>
   <dict>
     <key>PULSE_HOME</key>
-    <string>${xml(home)}</string>
+    <string>${xml(managed ? pulseHome : home)}</string>
     <key>PULSE_CONFIG</key>
     <string>${xml(config)}</string>
     <key>PULSE_DATA_DIR</key>
@@ -216,7 +220,7 @@ Description=Pulse H5 mobile web assistant service
 [Service]
 Type=simple
 WorkingDirectory=${quoteSystemd(cwd)}
-Environment=${quoteSystemd(`PULSE_HOME=${home}`)}
+Environment=${quoteSystemd(`PULSE_HOME=${managed ? pulseHome : home}`)}
 Environment=${quoteSystemd(`PULSE_CONFIG=${config}`)}
 Environment=${quoteSystemd(`PULSE_DATA_DIR=${data}`)}
 ExecStart=${daemonArguments.map(quoteSystemd).join(' ')}
@@ -284,6 +288,9 @@ WantedBy=default.target
   }
 
   // 6. Foreground server / daemon worker
+  if (process.env.PULSE_MANAGED === '1' && process.env.PULSE_UPDATE_CHILD !== '1') {
+    return supervise({ node: process.execPath, entry: fileURLToPath(new URL('../bin.js', import.meta.url)), args: process.argv.slice(2), dataDir: data, root: updateRoot(), ...(process.env.PULSE_RUNTIME_DIR ? { runtimeDirectory: process.env.PULSE_RUNTIME_DIR } : {}) })
+  }
   const isDaemon = action === 'daemon'
   const runtimeOptions = h5RuntimeOptions(options, cliOptions)
   if (options.approvalMode === 'auto' && runtimeOptions.approvalMode === 'ask') {
@@ -329,10 +336,12 @@ WantedBy=default.target
         return
       }
       shuttingDown = true
-      void server.stop().then(() => host.close()).then(() => resolve(), () => resolve())
+      const done = () => { process.off('disconnect', shutdown); if (process.env.PULSE_UPDATE_CHILD === '1' && process.connected) process.disconnect(); resolve() }
+      void server.stop().then(() => host.close()).then(done, done)
     }
     process.once('SIGINT', shutdown)
     process.once('SIGTERM', shutdown)
+    if (process.env.PULSE_UPDATE_CHILD === '1') process.once('disconnect', shutdown)
   })
 
   return 0

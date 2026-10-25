@@ -1,5 +1,7 @@
 import { createServer } from 'node:net';
-import { chmodSync, existsSync, unlinkSync, openSync, writeFileSync, closeSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, unlinkSync, openSync, writeFileSync, closeSync, readFileSync, renameSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { ConversationDatabase, readMethods, writeMethods } from './sqlite.mjs';
 // Startup status contains fixed phases and error codes only, never persisted data.
@@ -20,7 +22,7 @@ let lock;
 for (;;) {
     try {
         lock = openSync(lockPath, 'wx', 0o600);
-        writeFileSync(lock, JSON.stringify({ pid: process.pid }));
+        writeFileSync(lock, JSON.stringify({ pid: process.pid, protocol: 2, version: createRequire(import.meta.url)('../package.json').version }));
         break;
     }
     catch (error) {
@@ -56,9 +58,17 @@ catch { } });
 if (process.platform !== 'win32' && existsSync(endpoint))
     unlinkSync(endpoint);
 const clients = new Set();
+const updateLeasePath = join(directory, '.update-maintenance.json');
+const updateLease = () => {
+    let lease;
+    try { lease = JSON.parse(readFileSync(updateLeasePath, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
+    try { process.kill(lease.pid, 0); } catch (error) { if (error.code === 'ESRCH') { unlinkSync(updateLeasePath); return undefined; } throw error; }
+    return lease;
+};
 let database;
 let idle;
 let stopping = false;
+let updateOwnerSocket;
 const stop = () => { try {
     database?.close();
 }
@@ -72,8 +82,15 @@ const server = createServer(socket => {
     socket.setEncoding('utf8');
     let buffer = '';
     socket.on('error', () => { });
-    socket.on('close', () => { clients.delete(socket); if (!stopping && !clients.size)
-        idle = setTimeout(() => server.close(stop), 1500); });
+    socket.on('close', () => {
+        clients.delete(socket);
+        if (!stopping && socket === updateOwnerSocket && updateLease()) {
+            stopping = true; clearTimeout(idle);
+            for (const client of clients) client.destroy();
+            server.close(stop); return;
+        }
+        if (!stopping && !clients.size) idle = setTimeout(() => server.close(stop), 1500);
+    });
     socket.on('data', chunk => {
         buffer += chunk;
         if (Buffer.byteLength(buffer) > 32 * 1024 * 1024) {
@@ -87,6 +104,24 @@ const server = createServer(socket => {
             let request;
             try {
                 request = JSON.parse(line);
+                if (request.method === 'acquireUpdateLease') {
+                    const [pid, token] = request.args ?? [];
+                    if (clients.size !== 1) throw new Error('UPDATE_OTHER_DATA_CLIENTS');
+                    if (!Number.isSafeInteger(pid) || pid < 1 || typeof token !== 'string' || !/^[a-f0-9-]{36}$/.test(token)) throw new Error('UPDATE_LEASE_INVALID');
+                    const prior = updateLease();
+                    if (prior && (prior.pid !== pid || prior.token !== token)) throw new Error('UPDATE_BUSY');
+                    if (!prior) {
+                        const temporary = updateLeasePath + '.' + randomUUID();
+                        try {
+                            const fd = openSync(temporary, 'wx', 0o600);
+                            try { writeFileSync(fd, JSON.stringify({ pid, token })); } finally { closeSync(fd); }
+                            renameSync(temporary, updateLeasePath);
+                        } finally { if (existsSync(temporary)) unlinkSync(temporary); }
+                    }
+                    updateOwnerSocket = socket;
+                    socket.write(JSON.stringify({ id: request.id, value: true }) + '\n');
+                    continue;
+                }
                 if (request.method === 'disconnect' && Array.isArray(request.args) && request.args.length === 0) {
                     clients.delete(socket);
                     const lastClient = clients.size === 0;
@@ -104,6 +139,9 @@ const server = createServer(socket => {
                     throw new Error('DATA_METHOD_INVALID');
                 if (!Array.isArray(request.args))
                     throw new Error('DATA_ARGS_INVALID');
+                const lease = updateLease();
+                if (lease && request.updateToken !== lease.token) throw new Error('SERVICE_UPDATING');
+                if (lease && !updateOwnerSocket) updateOwnerSocket = socket;
                 const value = database[request.method](...request.args);
                 socket.write(JSON.stringify({ id: request.id, value }) + '\n');
                 if (writeMethods.has(request.method)) {

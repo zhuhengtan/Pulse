@@ -57,16 +57,20 @@ export async function runScheduledCommand(options: LocalHostOptions, args: strin
   if (action !== 'daemon' && action !== 'run-once') throw new Error(`UNKNOWN_SCHEDULE_ACTION:${action}`)
   if (options.approvalMode !== 'read-only' && options.approvalMode !== 'auto') throw new Error('SCHEDULED_EXECUTION_REQUIRES_READ_ONLY_OR_AUTO_APPROVAL')
 
-  const host = createLocalHost(options)
-  await host.init()
-  let currentRun: Awaited<ReturnType<typeof host.sendMessage>> | undefined
+  let currentHost: ReturnType<typeof createLocalHost> | undefined
+  let currentRun: Awaited<ReturnType<ReturnType<typeof createLocalHost>['sendMessage']>> | undefined
   const worker = new ScheduledTaskWorker(store, async (task, signal) => {
     if (signal.aborted) throw Object.assign(new Error('SCHEDULED_RUN_ABORTED'), { code: 'SCHEDULED_RUN_ABORTED' })
     if (!task.workspace) throw new Error('SCHEDULED_TASK_WORKSPACE_REQUIRED: recreate this legacy task')
+    const host = currentHost = createLocalHost(options)
+    let run: Awaited<ReturnType<typeof host.sendMessage>> | undefined
+    try {
+    await host.init()
     const conversation = await host.createConversation({ cwd: task.workspace, title: `Scheduled: ${task.name}` })
-    const run = await host.sendMessage(conversation.id, { text: task.instruction })
+    run = await host.sendMessage(conversation.id, { text: task.instruction })
     currentRun = run
-    const abort = (): void => { void run.cancel('SCHEDULED_WORKER_STOPPING').catch(() => {}) }
+    const ownedRun = run
+    const abort = (): void => { void ownedRun.cancel('SCHEDULED_WORKER_STOPPING').catch(() => {}) }
     signal.addEventListener('abort', abort, { once: true })
     if (signal.aborted) abort()
     try {
@@ -87,6 +91,7 @@ export async function runScheduledCommand(options: LocalHostOptions, args: strin
       signal.removeEventListener('abort', abort)
       if (currentRun === run) currentRun = undefined
     }
+    } finally { await host.close(); if (currentHost === host) currentHost = undefined }
   })
   const controller = new AbortController()
   const stop = (): void => { controller.abort(); void currentRun?.cancel('SCHEDULED_WORKER_STOPPING') }
@@ -99,7 +104,7 @@ export async function runScheduledCommand(options: LocalHostOptions, args: strin
   } finally {
     process.removeListener('SIGINT', stop)
     process.removeListener('SIGTERM', stop)
-    await host.close()
+    await currentHost?.close()
   }
   return runOnceSummary && runOnceSummary.failed > 0 ? 1 : 0
 }

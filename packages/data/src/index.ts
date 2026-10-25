@@ -36,6 +36,7 @@ function connectReadySocket(endpoint: string): Promise<Socket> {
                 try {
                     const response = JSON.parse(line);
                     if (response.id !== 0) continue;
+                if (typeof response.error === 'string') { fail(Object.assign(new Error(response.error), { code: response.error })); return; }
                     if (!Number.isSafeInteger(response.value) || response.value < 0) { fail(new Error('DATA_SERVICE_NOT_READY')); return; }
                     socket.pause(); cleanup();
                     if (buffer) socket.unshift(buffer);
@@ -44,7 +45,7 @@ function connectReadySocket(endpoint: string): Promise<Socket> {
             }
         };
         socket.on('error', fail); socket.on('close', closed); socket.on('data', receive);
-        socket.once('connect', () => socket.write(JSON.stringify({ id: 0, method: 'revision', args: [] }) + '\n'));
+        socket.once('connect', () => socket.write(JSON.stringify({ id: 0, method: 'revision', args: [], ...(process.env.PULSE_UPDATE_TOKEN ? { updateToken: process.env.PULSE_UPDATE_TOKEN } : {}) }) + '\n'));
     });
 }
 /** One writer service per data directory; clients never perform synchronous SQL in the gateway. */
@@ -74,6 +75,11 @@ export class ConversationData {
     }
     private async open(): Promise<void> {
         await mkdir(this.directory, { recursive: true, mode: 0o700 });
+        const maintenance = await readFile(join(this.directory, '.update-maintenance.json'), 'utf8').then(JSON.parse).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; });
+        if (maintenance && maintenance.token !== process.env.PULSE_UPDATE_TOKEN) {
+            let active = true; try { process.kill(maintenance.pid, 0); } catch (error) { active = (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+            if (active) throw Object.assign(new Error('SERVICE_UPDATING'), { code: 'SERVICE_UPDATING' });
+        }
         if (await access(join(this.directory, 'migration.lock')).then(() => true, () => false))
             throw new Error('DATA_MIGRATION_IN_PROGRESS');
         if (!await access(join(this.directory, 'pulse.sqlite')).then(() => true, () => false)) {
@@ -98,6 +104,7 @@ export class ConversationData {
                 socket = await attempt();
             }
             catch (error) {
+                if ((error as NodeJS.ErrnoException).code === 'SERVICE_UPDATING') throw error;
                 const child = spawn(process.execPath, [fileURLToPath(new URL('./service.mjs', import.meta.url)), resolve(this.directory), endpoint], { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
                 child.unref();
                 const startedAt = openStartedAt;
@@ -211,7 +218,7 @@ export class ConversationData {
     private request<T>(method: string, args: unknown[]): Promise<T> { return new Promise<T>((resolveCall, reject) => { if (this.pending.size >= 256) {
         reject(new Error('DATA_QUEUE_FULL'));
         return;
-    } const id = ++this.serial; const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('DATA_REQUEST_TIMEOUT')); }, 10000); this.pending.set(id, { resolve: v => resolveCall(v as T), reject, timer }); this.socket!.ref(); this.socket!.write(JSON.stringify({ id, method, args }) + '\n'); }); }
+    } const id = ++this.serial; const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('DATA_REQUEST_TIMEOUT')); }, 10000); this.pending.set(id, { resolve: v => resolveCall(v as T), reject, timer }); this.socket!.ref(); this.socket!.write(JSON.stringify({ id, method, args, ...(process.env.PULSE_UPDATE_TOKEN ? { updateToken: process.env.PULSE_UPDATE_TOKEN } : {}) }) + '\n'); }); }
     close(): Promise<void> {
         if (this.closing) return this.closing;
         this.closed = true;

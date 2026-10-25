@@ -19,10 +19,11 @@ interface AssistantQueueFile { schemaVersion: 1; conversationId: string; message
  * process startup are interrupted rather than replayed because a tool may have run. */
 export class AssistantConversationStore {
   private readonly data: ConversationData
+  private readonly ownsData: boolean
   private state: AssistantQueueFile | undefined
   private tail: Promise<void> = Promise.resolve()
 
-  constructor(dataDir: string) { this.data = new ConversationData(dataDir) }
+  constructor(dataDir: string, shared?: ConversationData) { this.data = shared ?? new ConversationData(dataDir); this.ownsData = !shared }
 
   async init(createConversation: () => Promise<string>): Promise<string> {
     if (!this.state) {
@@ -197,7 +198,7 @@ export class AssistantConversationStore {
     await this.data.call('saveState', 'assistant-inbox', this.requireState())
   }
 
-  close(): Promise<void> { return this.data.close() }
+  close(): Promise<void> { return this.ownsData ? this.data.close() : Promise.resolve() }
 
   private async serial<T>(operation: () => Promise<T>): Promise<T> {
     const previous = this.tail

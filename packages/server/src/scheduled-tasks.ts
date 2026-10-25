@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises'
-import { dirname, resolve, isAbsolute } from 'node:path'
+import { dirname, resolve, isAbsolute, join } from 'node:path'
 import { z } from 'zod'
 
 export const MIN_SCHEDULED_TASK_INTERVAL_MS = 1_000
@@ -191,6 +191,8 @@ export class ScheduledTaskStore {
     if (limit !== 1) throw taskError('INVALID_SCHEDULED_TASK_CLAIM_LIMIT')
     if (!Number.isSafeInteger(now) || now < 0) throw taskError('INVALID_SCHEDULED_TASK_CLOCK')
     return this.withLock(async () => {
+      const maintenance = await readFile(join(dirname(this.filePath), '.update-maintenance.json'), 'utf8').then(JSON.parse).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error })
+      if (maintenance) { try { process.kill(maintenance.pid, 0); return [] } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return [] } }
       const document = await this.loadUnlocked()
       const recovered = await this.recoverInterrupted(document)
       // This store deliberately permits one running task at a time across all
@@ -273,6 +275,16 @@ export class ScheduledTaskStore {
       task.updatedAt = finishedAt
       await this.saveUnlocked(document)
       return cloneTask(task)
+    })
+  }
+
+  /** Only used when admission failed before a scheduled task could start. */
+  async deferForUpdate(id: string, runId: string): Promise<void> {
+    await this.withLock(async () => {
+      const document = await this.loadUnlocked(), task = document.tasks.find(item => item.id === id)
+      if (!task?.run || task.run.id !== runId) throw taskError('SCHEDULED_TASK_RUN_MISMATCH')
+      task.nextRunAt = task.run.scheduledFor; task.runCount = Math.max(0, task.runCount - 1); delete task.run; task.updatedAt = this.timestamp()
+      await this.saveUnlocked(document)
     })
   }
 
@@ -474,6 +486,7 @@ export class ScheduledTaskWorker {
           throw taskError('SCHEDULED_TASK_CANCELLATION_UNCONFIRMED', error)
         }
         const failure = sanitizedError(error)
+        if ((error as Error)?.message === 'SERVICE_UPDATING' || failure.code === 'SERVICE_UPDATING') { await this.store.deferForUpdate(task.id, task.run.id); summary.claimed--; break }
         const completed = await this.store.finish(task.id, task.run.id, 'failed', failure)
         if (completed) summary.failed++
       } finally {

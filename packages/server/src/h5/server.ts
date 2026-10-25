@@ -1,3 +1,5 @@
+import { frontendResource } from '../updates/frontend.js'
+import { UpdateManager, protocols, ReaderClient, type UpdateOptions } from '../updates/index.js'
 import { parseRichContent, type RichContent } from '../rich-content.js'
 import { NativeBrowserHost } from '../automation/native-browser.js'
 import { readGitDiff } from '../git-diff.js'
@@ -129,6 +131,7 @@ export interface H5ServerOptions {
   configuration?: { path: string; prepare: (candidatePath: string) => Promise<LocalHostOptions> }
   /** CLI entry used to launch isolated work-run processes. Omitted in embedded/test hosts. */
   workWorker?: H5WorkWorkerLaunchOptions
+  updates?: Partial<UpdateOptions>
 }
 
 export class H5Server {
@@ -161,6 +164,11 @@ export class H5Server {
   private readonly assistantPendingRuns = new Set<string>()
   private assistantPump: Promise<void> | undefined
   private serviceLock: Awaited<ReturnType<typeof open>> | undefined
+  readonly updates: UpdateManager
+  private maintenance = process.env.PULSE_UPDATE_MAINTENANCE === '1'
+  private updateRequests = 0
+  private updateTransition = false
+  private updateMessages = (message: unknown) => { if ((message as { type?: string })?.type === 'update-resume') { this.maintenance = false; this.updateTransition = false; void this.pumpAssistantInbox() } }
   private stopping = false
   private jarvisSyncTimer: NodeJS.Timeout | undefined
   private readonly chatSockets = new WebSocketServer({ noServer: true, maxPayload: MAX_ATTACHMENT_REQUEST })
@@ -185,10 +193,11 @@ export class H5Server {
     this.effectivePort = this.port
     this.hostAddress = options.host ?? '0.0.0.0'
     this.dataDir = resolve(options.dataDir)
+    this.updates = new UpdateManager({ dataDir: this.dataDir, backendVersion: (require('../../package.json') as { version: string }).version, development: process.env.PULSE_MANAGED !== '1', ...(process.env.PULSE_RUNTIME_DIR ? { runtimeDirectory: process.env.PULSE_RUNTIME_DIR } : {}), ...options.updates })
     this.auth = new H5AuthStore(options.dataDir)
     this.projects = new H5ProjectCatalog(options.dataDir)
     this.workspaces = new H5WorkspaceManager(options.dataDir)
-    this.assistantInbox = new AssistantConversationStore(options.dataDir)
+    this.assistantInbox = new AssistantConversationStore(options.dataDir, this.host.conversationData)
     this.configuration = options.configuration
     this.workWorker = options.workWorker
     this.host.setAssistantWorkTools({
@@ -294,7 +303,7 @@ export class H5Server {
       const project = await this.projects.findByCwd(conversation.cwd)
       if (project) await this.host.updateConversationOrganization(conversation.id, { projectId: project.id })
     }
-    for (const candidate of webDistCandidates) {
+    for (const candidate of [...(process.env.PULSE_BOOTSTRAP_RUNTIME ? [join(process.env.PULSE_BOOTSTRAP_RUNTIME, 'app/node_modules/@hunterzhu/pulse-server/dist/web')] : []), ...webDistCandidates]) {
       if (await access(resolve(candidate, 'index.html')).then(() => true, () => false)) { this.webDistDirectory = candidate; break }
     }
     const server = createServer((req, res) => {
@@ -313,6 +322,7 @@ export class H5Server {
       })
     })
     server.on('upgrade', (req, socket, head) => {
+      if (this.maintenance) { socket.end('HTTP/1.1 503 Service Unavailable\r\nRetry-After: 2\r\nConnection: close\r\n\r\n'); return }
       if ((req.url ?? '').startsWith('/api/chat/socket')) void this.handleChatUpgrade(req, socket, head)
       else if (req.url === '/api/automation/native-host') void this.handleNativeBrowserUpgrade(req, socket, head)
       else if ((req.url ?? '').startsWith('/api/automation/socket')) void this.handleAutomationUpgrade(req, socket, head)
@@ -328,7 +338,7 @@ export class H5Server {
     this.dataChanged = this.host.conversationData.onChange(revision => {
       for (const client of this.chatSockets.clients) this.sendChat(client, { type: 'changed', revision })
     })
-    void this.pumpAssistantInbox()
+    if (!this.maintenance) void this.pumpAssistantInbox()
     void this.host.retryJarvisSync()
     this.jarvisSyncTimer = setInterval(() => { void this.host.retryJarvisSync() }, 15_000)
 
@@ -339,12 +349,20 @@ export class H5Server {
     const pairing = this.auth.createPairingCode()
     const pairUrl = `http://${lanIp}:${this.effectivePort}/?code=${pairing.code}`
 
-    await writeFile(join(this.dataDir, 'service.json'), JSON.stringify({ protocol: 1, pid: process.pid, port: this.effectivePort, dataDir: this.dataDir }), { mode: 0o600 })
+    await writeFile(join(this.dataDir, 'service.json'), JSON.stringify({ protocol: 1, pid: process.pid, port: this.effectivePort, host: this.hostAddress, dataDir: this.dataDir, managed: process.env.PULSE_UPDATE_CHILD === '1', supervisorPid: process.env.PULSE_UPDATE_OWNER ? Number(process.env.PULSE_UPDATE_OWNER) : undefined, runtimeDirectory: process.env.PULSE_RUNTIME_DIR }), { mode: 0o600 })
+    process.on('message', this.updateMessages)
+    if (process.send && process.env.PULSE_UPDATE_CHILD === '1') {
+      const reader = new ReaderClient(this.dataDir)
+      try { const health = await reader.query('/_health'); if (health.status !== 200) throw new Error('UPDATE_READER_UNHEALTHY'); await this.host.conversationData.call('revision') } finally { reader.close() }
+      process.send({ type: 'update-health', port: this.effectivePort, dataDir: this.dataDir, pid: process.pid, version: this.updates.options.backendVersion })
+    }
+    this.updates.start(() => this.tryApplyUpdate())
     return { port: this.effectivePort, lanIp, pairUrl }
     } catch (error) { await this.releaseService(); throw error }
   }
 
   async stop(): Promise<void> {
+    this.updates.stop(); process.off('message', this.updateMessages)
     await this.filePreviews.close()
     this.stopping = true
     this.dataChanged?.(); this.dataChanged = undefined
@@ -446,11 +464,11 @@ export class H5Server {
   }
 
   private async pumpAssistantInbox(): Promise<void> {
-    if (this.stopping) return
+    if (this.stopping || this.maintenance) return
     if (this.assistantPump) return this.assistantPump
     this.assistantPump = (async () => {
       const conversationId = this.assistantInbox.conversationId
-      while (!this.stopping) {
+      while (!this.stopping && !this.maintenance) {
         const message = await this.assistantInbox.next()
         if (!message) return
         if (this.stopping) { await this.assistantInbox.update(message.runId, 'interrupted', 'Server stopped before launch'); return }
@@ -637,6 +655,7 @@ export class H5Server {
       if (typeof host !== 'string' || !isAllowedH5Host(host) || typeof origin !== 'string' || new URL(origin).origin !== `http://${host}` || new URL(req.url!, `http://${host}`).pathname !== '/api/chat/socket') { reject(); return }
       const token = this.parseCookies(req).pulse_device
       if (!await this.auth.authenticateToken(token)) { reject(); return }
+      if (this.maintenance) { reject(); return }
       this.chatSockets.handleUpgrade(req, socket, head, client => {
         const subscriptions = new Map<string, number>(); this.chatSubscriptions.set(client, subscriptions)
         let inFlight = 0
@@ -729,6 +748,7 @@ export class H5Server {
   private async handleNativeBrowserUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     const reject = () => socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
     try {
+      if (req.headers['x-pulse-native-protocol'] && req.headers['x-pulse-native-protocol'] !== '1') throw new Error('NATIVE_PROTOCOL_INCOMPATIBLE')
       const host = req.headers.host, origin = req.headers.origin
       const device = await this.auth.authenticateToken(this.parseCookies(req).pulse_device)
       if (!isLoopbackIp(req.socket.remoteAddress) || device?.scope !== 'local' || device.clientType !== 'electron' || req.headers['x-pulse-client'] !== 'electron' || typeof host !== 'string' || !isAllowedH5Host(host) || typeof origin !== 'string' || new URL(origin).origin !== `http://${host}` || this.host.automation.nativeBrowserAvailable) { reject(); return }
@@ -840,7 +860,46 @@ export class H5Server {
     return new AttachmentStore(this.dataDir, conversationId).save(attachments)
   }
 
+  private async tryApplyUpdate(): Promise<void> {
+    if (this.updateTransition || this.stopping) return
+    if (await this.updates.applyFrontend()) return
+    const reasons = this.updateBlockers()
+    if (reasons.length) { await this.updates.recordBlocked(reasons); return }
+    if (!process.send || process.env.PULSE_UPDATE_CHILD !== '1') { await this.updates.recordBlocked(['MANAGED_SERVICE_REQUIRED']); return }
+    // No await between this final test and closing admission.
+    if (this.updateBlockers().length) return
+    this.maintenance = true; this.updateTransition = true
+    try {
+      const schedules = await readFile(join(this.dataDir, 'scheduled-tasks.json'), 'utf8').then(JSON.parse).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error })
+      if (schedules?.tasks?.some((task: { run?: unknown }) => task.run)) throw new Error('SCHEDULED_TASK_ACTIVE')
+      await this.host.conversationData.call('acquireUpdateLease', Number(process.env.PULSE_UPDATE_OWNER), process.env.PULSE_UPDATE_TOKEN)
+      process.send({ type: 'update-ready' })
+    } catch (error) {
+      this.maintenance = false; this.updateTransition = false
+      await this.updates.recordBlocked([error instanceof Error ? error.message : 'UPDATE_DATA_BUSY'])
+    }
+  }
+
+  private updateBlockers(): string[] {
+    const reasons: string[] = []
+    if (this.activeRuns.size || this.pendingWorkStarts.size || this.assistantPendingRuns.size || this.assistantPump || this.assistantInbox.hasQueued()) reasons.push('TASKS_OR_MESSAGES_ACTIVE')
+    if (this.updateRequests || this.projectionWrites.size || this.projectionTimers.size || this.bundleImports.size || this.bundleUploads.size) reasons.push('DATA_REQUESTS_ACTIVE')
+    if ([...this.terminals.values()].some(item => !item.exited)) reasons.push('TERMINAL_ACTIVE')
+    if (this.host.automation.list().some(item => item.state !== 'closed')) reasons.push('AUTOMATION_ACTIVE')
+    return reasons
+  }
+
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const path = new URL(req.url ?? '/', 'http://localhost').pathname
+    const exempt = path.startsWith('/api/updates') || path === '/api/session' || path === '/api/session/local'
+    if (this.maintenance && path.startsWith('/api/') && !exempt) {
+      res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '2' }).end(JSON.stringify({ error: 'SERVICE_UPDATING' })); return
+    }
+    if (!exempt) this.updateRequests++
+    try { await this.handleRequestBody(req, res) } finally { if (!exempt) this.updateRequests-- }
+  }
+
+  private async handleRequestBody(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
     const pathname = url.pathname
     const method = req.method ?? 'GET'
@@ -861,22 +920,12 @@ export class H5Server {
 
     // Web UI routes and fingerprinted assets are served from the standalone workspace build.
     const webPage = pathname === '/' || /^\/(chat|work|settings|archive|pair)(\/[^.]*)?$/.test(pathname)
-    if (method === 'GET' && (webPage || pathname.startsWith('/assets/'))) {
-      const relativePath = webPage ? 'index.html' : pathname.slice(1)
-      const webRoot = this.webDistDirectory
-      if (!webRoot) { res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Pulse Web assets are missing. Build packages/web before starting H5.'); return }
-      const path = resolve(webRoot, relativePath)
-      if (path !== webRoot && !path.startsWith(`${webRoot}${sep}`)) {
-        res.writeHead(404).end()
-        return
-      }
+    if (method === 'GET' && (webPage || pathname.startsWith('/assets/') || pathname.startsWith('/_pulse/'))) {
       try {
-        const [content, file] = await Promise.all([readFile(path), stat(path)])
-        res.writeHead(200, { 'Content-Type': webPage ? 'text/html; charset=utf-8' : assetTypes[extname(path)] ?? 'application/octet-stream', 'Cache-Control': pathname.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache', 'Content-Length': file.size })
-        res.end(content)
-      } catch {
-        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Pulse Web assets are missing. Build packages/web before starting H5.')
-      }
+        const resource = await frontendResource(this.updates, this.webDistDirectory, pathname, webPage)
+        if (!resource) { res.writeHead(404).end(); return }
+        res.writeHead(200, { 'Content-Type': resource.type, 'Cache-Control': resource.immutable ? 'public, max-age=31536000, immutable' : 'no-cache', 'Content-Length': resource.content.length, 'X-Content-Type-Options': 'nosniff' }).end(resource.content)
+      } catch { res.writeHead(404).end('Pulse Web assets unavailable') }
       return
     }
 
@@ -994,6 +1043,26 @@ export class H5Server {
       return Boolean(origin && origin === `http://${hostHeader}`)
     }
 
+    if (pathname === '/api/updates' && method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.updates.status(localAdmin))); return
+    }
+    if (pathname.startsWith('/api/updates/') && method === 'POST') {
+      if (!localAdmin || !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'LOCAL_ADMIN_REQUIRED' })); return }
+      const action = pathname.slice('/api/updates/'.length)
+      try {
+        if (action === 'check') void this.updates.check().catch(() => {})
+        else if (action === 'download') void this.updates.download(true).catch(() => {})
+        else if (action === 'apply' || action === 'rollback') await this.updates.requestApply(action === 'rollback')
+        else if (action === 'settings') { const body = await this.parseJsonBody(req); if (typeof body.autoDownload !== 'boolean') throw new Error('UPDATE_SETTINGS_INVALID'); await this.updates.settings(body.autoDownload) }
+        else { res.writeHead(404).end(); return }
+        res.writeHead(action === 'check' || action === 'download' ? 202 : 200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.updates.status(true)))
+        if (action === 'apply' || action === 'rollback') void this.tryApplyUpdate()
+      } catch (error) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error instanceof Error ? error.message : 'UPDATE_FAILED' })) }
+      return
+    }
+    if (localAdmin && req.headers['x-pulse-shell-version'] && /^\d+\.\d+\.\d+$/.test(String(req.headers['x-pulse-shell-version']))) {
+      const chromium = Number(req.headers['x-pulse-chromium']); if (Number.isInteger(chromium) && chromium > 0) void this.updates.registerShell(String(req.headers['x-pulse-shell-version']), chromium).catch(() => {})
+    }
     const canControlAutomation = Boolean(authedDevice)
     if (pathname === '/api/automation/vision-probe' && method === 'POST') {
       if (!localAdmin || !requireSameOrigin()) { res.writeHead(403).end(); return }
@@ -1058,7 +1127,7 @@ export class H5Server {
     }
     if (pathname === '/api/session' && method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify({ ok: true, serverVersion: (require('../../package.json') as { version: string }).version, serverPid: process.pid, runtimeId: process.env.PULSE_RUNTIME_ID, queueScope: createHash('sha256').update(resolve(this.dataDir)).digest('hex').slice(0, 32), deviceId: authedDevice?.id, localAdmin, canBrowseHostPaths, canRegisterProject, canUseTerminal: localAdmin, canEditConfig: localAdmin, canControlAutomation }))
+      res.end(JSON.stringify({ ok: true, protocols, capabilities: { updates: true, versionedFrontend: true, reader: true }, maintenance: this.maintenance, serverVersion: (require('../../package.json') as { version: string }).version, serverPid: process.pid, runtimeId: process.env.PULSE_RUNTIME_ID, queueScope: createHash('sha256').update(resolve(this.dataDir)).digest('hex').slice(0, 32), deviceId: authedDevice?.id, localAdmin, canBrowseHostPaths, canRegisterProject, canUseTerminal: localAdmin, canEditConfig: localAdmin, canControlAutomation }))
       return
     }
 
