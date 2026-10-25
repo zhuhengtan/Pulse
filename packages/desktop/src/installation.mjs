@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readRuntimeManifest, verifyRuntime } from './runtime-manifest.mjs';
+import { selectedBackend } from './update-loader.mjs';
 
 const execute = promisify(execFile);
 const marker = 'Pulse Desktop managed launcher';
@@ -79,8 +80,8 @@ export async function registerPath(bin, home, env = process.env, platform = proc
     return { files: profiles, restartTerminal: true };
 }
 export class DesktopInstallation {
-    constructor({ root, userData, source, node, entry, shellHome, dataDirectory, packaged = false, env = process.env, platform = process.platform, arch = process.arch }) {
-        Object.assign(this, { root, userData, source, node, entry, shellHome, dataDirectory, packaged, env, platform, arch });
+    constructor({ root, userData, source, node, entry, shellHome, dataDirectory, shellVersion = '0.8.0', chromium = 0, packaged = false, env = process.env, platform = process.platform, arch = process.arch }) {
+        Object.assign(this, { root, userData, source, node, entry, shellHome, dataDirectory, shellVersion, chromium, packaged, env, platform, arch });
         this.state = { phase: 'preparing', firstRun: false, steps: [], development: !packaged && !source };
         this.statePath = join(userData, 'desktop-installation.json');
     }
@@ -103,11 +104,13 @@ export class DesktopInstallation {
         try {
             this.step('runtime', '准备 Pulse 运行环境', 'running');
             if (this.source) {
-                const manifest = await readRuntimeManifest(this.source, this.platform, this.arch);
-                await verifyRuntime(this.source, manifest);
+                const selected = await selectedBackend(this.root, this.dataDirectory, this.shellVersion, this.chromium, full);
+                const seed = selected ?? this.source;
+                const manifest = await readRuntimeManifest(seed, this.platform, this.arch);
+                await verifyRuntime(seed, manifest);
                 const release = `${manifest.version}-${manifest.buildId.slice(0, 16)}`;
                 const managed = join(this.root, 'desktop', 'runtimes');
-                let target = saved.buildId === manifest.buildId && typeof saved.runtimeDirectory === 'string' && dirname(saved.runtimeDirectory) === managed ? saved.runtimeDirectory : join(managed, release);
+                let target = selected ?? (saved.buildId === manifest.buildId && typeof saved.runtimeDirectory === 'string' && dirname(saved.runtimeDirectory) === managed ? saved.runtimeDirectory : join(managed, release));
                 this.step('runtime', '准备 Pulse 运行环境', 'running', '正在检查已安装的运行环境');
                 const healthy = await verifyRuntime(target, manifest, full).then(() => true, () => false);
                 if (!healthy) {
@@ -130,7 +133,7 @@ export class DesktopInstallation {
                 this.state.version = manifest.version; this.state.buildId = manifest.buildId; this.state.runtimeDirectory = target;
                 this.state.runtimeId = createHash('sha256').update(manifest.buildId + target).digest('hex');
                 this.browserExecutable = manifest.browserExecutable ? join(target, manifest.browserExecutable) : undefined;
-                const version = await execute(this.node, ['--version'], { timeout: 10000, env: { ...this.env, ELECTRON_RUN_AS_NODE: '1' } });
+                const version = await execute(this.node, ['--version'], { timeout: 30000, env: { ...this.env, ELECTRON_RUN_AS_NODE: '1' } });
                 const match = version.stdout.trim().match(/^v(\d+)\.(\d+)\./);
                 if (!match || Number(match[1]) < 22 || Number(match[1]) === 22 && Number(match[2]) < 13) throw new Error('NODE_RUNTIME_UNSUPPORTED');
             } else {
@@ -147,7 +150,11 @@ export class DesktopInstallation {
             this.step('config', '初始化配置和数据', 'ready', this.state.configPath);
             if (!this.state.development) {
                 this.step('cli', '注册 pulse 命令', 'running');
-                this.state.cli = await registerLauncher(this.root, this.node, this.entry, this.platform === 'win32', this.browserExecutable, this.state.runtimeId, { configPath: this.state.configPath, dataDirectory: this.dataDirectory });
+                const bootstrap = join(dirname(this.entry), '../../pulse-server/dist/updates/bootstrap.js');
+                if (await exists(bootstrap)) {
+                    const result = await execute(this.node, ['--input-type=module', '-e', `const m=await import(${JSON.stringify(pathToFileURL(bootstrap).href)}); console.log(await m.installManagedLauncher(${JSON.stringify(this.root)}, ${JSON.stringify(this.state.runtimeDirectory)}, ${JSON.stringify(this.dataDirectory)}, ${JSON.stringify(this.state.configPath)}));`], { env: { ...this.env, ELECTRON_RUN_AS_NODE: '1' }, timeout: 15000 });
+                    this.state.cli = { path: result.stdout.trim() };
+                } else this.state.cli = await registerLauncher(this.root, this.node, this.entry, this.platform === 'win32', this.browserExecutable, this.state.runtimeId, { configPath: this.state.configPath, dataDirectory: this.dataDirectory });
                 const detected = await detectCommand(this.env.PATH, this.platform === 'win32');
                 if (detected && resolve(detected) !== resolve(this.state.cli.path)) this.state.cli.conflict = detected;
                 this.step('cli', '注册 pulse 命令', this.state.cli.conflict ? 'warning' : 'ready', this.state.cli.conflict ? `保留已有命令：${this.state.cli.conflict}` : this.state.cli.path);

@@ -14,7 +14,6 @@
     "dist": "electron-builder"
   },
   "dependencies": {
-    "@hunterzhu/pulse-data": "workspace:*",
     "ws": "^8.21.3"
   },
   "devDependencies": {
@@ -30,9 +29,6 @@
     "files": [
       "src/**",
       "package.json"
-    ],
-    "asarUnpack": [
-      "node_modules/@hunterzhu/pulse-data/**"
     ],
     "extraResources": [
       {

@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Worker } from 'node:worker_threads'
+import { ReaderClient } from '../packages/server/src/updates/reader-client.js'
 import { expect, it, vi } from 'vitest'
 import { createLocalHost, H5Server } from '../packages/server/src/index.js'
 
@@ -10,7 +10,7 @@ it('shares approval across old and new conversations, persists on restart and re
   const options = { cwd: root, dataDir: root, approvalMode: 'ask' as const, mockToolCalls: [{ name: 'fs.write', input: { path: 'result.txt', content: 'test' } }] }
   let host = createLocalHost(options)
   let server = new H5Server(host, { dataDir: root, port: 0, host: '127.0.0.1' })
-  let reader: Worker | undefined
+  let reader: ReaderClient | undefined
   const connect = async () => {
     const { port } = await server.start(), base = `http://127.0.0.1:${port}`
     const session = await fetch(`${base}/api/session/local`, { method: 'POST', headers: { Origin: base } })
@@ -54,9 +54,7 @@ it('shares approval across old and new conversations, persists on restart and re
     ;({ base, headers } = await connect())
     expect(await fetch(`${base}/api/approval-policy`, { headers }).then(r => r.json())).toEqual({ policy: 'delegate' })
     await server.stop()
-    reader = new Worker(new URL('../packages/desktop/src/read-worker.mjs', import.meta.url), { workerData: { directory: root } })
-    const result = new Promise(resolve => reader!.once('message', resolve))
-    reader.postMessage({ id: 'offline-policy', path: '/api/approval-policy' })
-    expect(await result).toEqual({ id: 'offline-policy', status: 200, body: { policy: 'delegate' } })
-  } finally { await reader?.terminate(); await server.stop(); await host.close(); await rm(root, { recursive: true, force: true }) }
+    reader = new ReaderClient(root)
+    expect(await reader.query('/api/approval-policy')).toMatchObject({ status: 200, body: { policy: 'delegate' } })
+  } finally { reader?.close(); await server.stop(); await host.close(); await rm(root, { recursive: true, force: true }) }
 }, 20_000)

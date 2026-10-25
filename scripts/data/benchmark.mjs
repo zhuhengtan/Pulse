@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Worker } from 'node:worker_threads';
+import { ReaderClient } from '../../packages/server/dist/updates/reader-client.js';
 import { createLocalHost, H5Server } from '../../packages/server/dist/index.js';
 const directory = await mkdtemp(join(tmpdir(), 'pulse-query-bench-')), host = createLocalHost({ cwd: directory, dataDir: directory }), server = new H5Server(host, { dataDir: directory, port: 0, host: '127.0.0.1' });
 let reader, timer;
@@ -26,14 +26,12 @@ try {
     }
     timer = setInterval(() => { for (const runId of ['run-bench-a', 'run-bench-b'])
         server.pushEvent(runId, { type: 'status', runId, conversationId: work.id, seq: ++events, data: { kind: 'working', label: 'Benchmark progress' } }); }, 100);
-    reader = new Worker(new URL('../../packages/desktop/src/read-worker.mjs', import.meta.url), { workerData: { directory } });
-    const pending = new Map();
-    reader.on('message', message => { pending.get(message.id)?.(message); pending.delete(message.id); });
+    reader = new ReaderClient(directory);
     const native = [], http = [], chat = [];
     for (let i = 0; i < 100; i++) {
         const start = performance.now();
         const path = `/api/data/conversations/${work.id}/messages`;
-        const local = new Promise(resolve => { pending.set(String(i), resolve); reader.postMessage({ id: String(i), path }); });
+        const local = reader.query(path);
         const remote = fetch(base + path, { headers: { Cookie: cookie } }).then(async (response) => { if (!response.ok)
             throw new Error('HTTP_QUERY_FAILED'); await response.json(); http.push(performance.now() - start); });
         const assistant = fetch(base + '/api/assistant', { headers: { Cookie: cookie } }).then(async (response) => { if (!response.ok)
@@ -54,7 +52,7 @@ try {
 }
 finally {
     clearInterval(timer);
-    await reader?.terminate();
+    reader?.close();
     server.activeRuns.clear();
     await server.stop();
     await host.close();

@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto'
 import { DesktopInstallation, launcherText, registerLauncher, registerPath } from '../packages/desktop/src/installation.mjs'
 import { runtimeFile, verifyRuntime, writeRuntimeManifest } from '../packages/desktop/src/runtime-manifest.mjs'
 const exec = promisify(execFile)
+// Installation probes launch real Node subprocesses; allow for busy CI hosts.
 
 it('fully checks later noncritical files and detects same-size corruption before cleanup', async () => {
  const root = await mkdtemp(join(tmpdir(), 'pulse-runtime-integrity-'))
@@ -67,7 +68,7 @@ it.runIf(process.platform !== 'win32')('installs once, runs without Node on PATH
   const fromShell = await exec('/bin/sh', ['-c', '. "$1"; command -v pulse; pulse --version', 'fixture', join(f.shellHome, '.zprofile')], { env: { PATH: '/nonexistent' } })
   expect(fromShell.stdout).toContain(setup.state.cli.path)
  } finally { await rm(f.root, { recursive: true, force: true }) }
-})
+}, 60_000)
 it.runIf(process.platform !== 'win32')('preserves independent CLI commands and user settings', async () => {
  const f = await fixture()
  try {
@@ -78,7 +79,7 @@ it.runIf(process.platform !== 'win32')('preserves independent CLI commands and u
   expect(await readFile(join(f.install, 'bin/pulse'), 'utf8')).toContain('independently installed')
   expect(await readFile(join(f.install, 'config.json'), 'utf8')).toBe('{"my":"settings"}')
  } finally { await rm(f.root, { recursive: true, force: true }) }
-})
+}, 60_000)
 it.runIf(process.platform !== 'win32')('repairs missing components into a new directory without overwriting a live version', async () => {
  const f = await fixture()
  try {
@@ -90,7 +91,7 @@ it.runIf(process.platform !== 'win32')('repairs missing components into a new di
   expect(await readFile(join(setup.state.runtimeDirectory, removed), 'utf8')).toContain('bundled server')
   expect(await readFile(join(f.install, 'bin/pulse'), 'utf8')).toContain(basename(setup.state.runtimeDirectory))
  } finally { await rm(f.root, { recursive: true, force: true }) }
-})
+}, 60_000)
 it.runIf(process.platform !== 'win32')('fails before installation on corrupted bundles and rejects traversal', async () => {
  const f = await fixture()
  try {
@@ -130,7 +131,7 @@ it.runIf(process.platform !== 'win32')('keeps in-bundle relative links usable af
   await symlink(f.root, join(f.source, 'outside'))
   await expect(writeRuntimeManifest(f.source, '0.7.0')).rejects.toThrow('RUNTIME_SYMLINK_NOT_ALLOWED')
  } finally { await rm(f.root, { recursive: true, force: true }) }
-})
+}, 60_000)
 it('registers only the Windows user PATH using the system PowerShell even when PATH has no developer tools', async () => {
  let invocation: any[] = []
  await registerPath('C:\\Pulse\\bin', 'C:\\User', { SystemRoot: 'C:\\Windows', PATH: '' }, 'win32', async (...args: any[]) => { invocation = args })

@@ -1,11 +1,12 @@
+import { selectedFrontend } from './update-loader.mjs';
+import { controlUpdate } from './update-control.mjs';
 import { NativeBrowser } from './native-browser.mjs';
 import { DesktopInstallation } from './installation.mjs';
 import { deviceSessionPartition, restoreDeviceCookie, saveDeviceCookie } from './device-session.mjs';
 import { app, BrowserWindow, ipcMain, protocol, net, Menu, dialog, shell, session as electronSession } from 'electron';
-import { Worker } from 'node:worker_threads';
 import { spawn } from 'node:child_process';
 import { readFile, mkdir, open, rm } from 'node:fs/promises';
-import { join, resolve, extname } from 'node:path';
+import { join, resolve, dirname, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -30,7 +31,7 @@ else {
     const browserRequests = new Map();
     function connectBrowserHost() {
         if (!base || app.isQuitting || browserHost?.readyState === WebSocket.OPEN || browserHost?.readyState === WebSocket.CONNECTING) return;
-        const socket = browserHost = new WebSocket(base.replace('http:', 'ws:') + '/api/automation/native-host', { headers: { Origin: base, Cookie: cookie, 'X-Pulse-Client': 'electron' }, maxPayload: 1024 * 1024 });
+        const socket = browserHost = new WebSocket(base.replace('http:', 'ws:') + '/api/automation/native-host', { headers: { Origin: base, Cookie: cookie, 'X-Pulse-Client': 'electron', 'X-Pulse-Native-Protocol': '1' }, maxPayload: 1024 * 1024 });
         socket.on('message', async raw => {
             let frame; try { frame = JSON.parse(raw.toString()); } catch { return; }
             if (frame.method === 'cancel') { const pending = browserRequests.get(frame.params?.requestId); if (pending) { pending.aborted = true; browser.groups.get(pending.groupId)?.active?.webContents.stop(); } return; }
@@ -45,14 +46,14 @@ else {
     const allowedPath = path => { if (typeof path !== 'string' || !path.startsWith('/api/') || path.startsWith('//') || path.includes('\\') || path.length > 4096)
         throw new Error('API_PATH_INVALID'); return path; };
     const localQuery = path => /^\/api\/(approval-policy$|assistant(?:\?|$)|conversations(?:\?|$|\/[^/]+$)|projects$|data\/conversations\/[^/]+\/(?:messages|body|search)(?:\?|$))/.test(path);
-    function query(path) { return new Promise((resolveQuery, reject) => { if (pendingReads.size >= 64) {
+    async function query(path) { await ensureReader(); return new Promise((resolveQuery, reject) => { if (pendingReads.size >= 64) {
         reject(new Error('LOCAL_QUERY_QUEUE_FULL'));
         return;
-    } const id = randomUUID(), timer = setTimeout(() => { pendingReads.delete(id); reject(new Error('LOCAL_QUERY_TIMEOUT')); }, 5000); pendingReads.set(id, { resolve: resolveQuery, reject, timer }); reader.postMessage({ id, path }); }); }
+    } const id = randomUUID(), timer = setTimeout(() => { pendingReads.delete(id); reject(new Error('LOCAL_QUERY_TIMEOUT')); }, 5000); pendingReads.set(id, { resolve: resolveQuery, reject, timer }); reader.send({ protocol: 1, id, path }); }); }
     async function http(path, init = {}) {
         if (!base)
             throw new Error(serviceError || 'PULSE_SERVICE_UNAVAILABLE');
-        const headers = { 'Origin': base, 'Cookie': cookie, 'X-Pulse-Client': 'electron', 'User-Agent': `Pulse Electron/${app.getVersion()} (${process.platform})`, ...(init.body ? { 'Content-Type': 'application/json' } : {}) };
+        const headers = { 'Origin': base, 'Cookie': cookie, 'X-Pulse-Client': 'electron', 'X-Pulse-Shell-Version': app.getVersion(), 'X-Pulse-Chromium': process.versions.chrome.split('.')[0], 'User-Agent': `Pulse Electron/${app.getVersion()} (${process.platform})`, ...(init.body ? { 'Content-Type': 'application/json' } : {}) };
         const response = await fetch(base + allowedPath(path), { method: init.method ?? 'GET', headers, ...(typeof init.body === 'string' ? { body: init.body } : {}), signal: AbortSignal.timeout(10000), redirect: 'error' });
         const setCookie = response.headers.get('set-cookie');
         if (setCookie) {
@@ -134,12 +135,12 @@ else {
         if (!base) {
             const entry = installation.entry;
             const runtime = installation.node;
-            const child = spawn(runtime, [entry, 'h5', 'start', '--port', '0', '--data-dir', directory], { detached: true, stdio: 'ignore', cwd: homedir(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PULSE_DATA_DIR: directory, PULSE_H5_HOST: '127.0.0.1', ...(installation.source ? { PULSE_HOME: installation.root, PULSE_CONFIG: installation.state.configPath, PULSE_RUNTIME_ID: installation.state.runtimeId, ...(installation.browserExecutable ? { PULSE_BROWSER_EXECUTABLE: installation.browserExecutable } : {}) } : {}) } });
+            const child = spawn(runtime, [entry, 'h5', 'start', '--port', '0', '--data-dir', directory], { detached: true, stdio: 'ignore', cwd: homedir(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PULSE_DATA_DIR: directory, PULSE_H5_HOST: '127.0.0.1', ...(installation.source ? { PULSE_HOME: installation.root, PULSE_CONFIG: installation.state.configPath, PULSE_RUNTIME_ID: installation.state.runtimeId, PULSE_MANAGED: '1', PULSE_RUNTIME_DIR: installation.state.runtimeDirectory, ...(installation.browserExecutable ? { PULSE_BROWSER_EXECUTABLE: installation.browserExecutable } : {}) } : {}) } });
             child.unref();
             child.on('error', () => { });
             for (let i = 0; i < 600; i++) {
                 const descriptor = await readFile(join(directory, 'service.json'), 'utf8').then(JSON.parse).catch(() => undefined);
-                if (descriptor?.protocol === 1 && descriptor.pid === child.pid) {
+                if (descriptor?.protocol === 1 && (descriptor.pid === child.pid || descriptor.supervisorPid === child.pid)) {
                     base = `http://127.0.0.1:${descriptor.port}`;
                     ownedPid = child.pid;
                     break;
@@ -157,8 +158,24 @@ else {
         if (!info.ok) throw new Error('PULSE_SERVICE_AUTH_FAILED');
         const sessionInfo = await info.json();
         backendInfo = { connected: true, version: sessionInfo.serverVersion, pid: sessionInfo.serverPid, outdated: Boolean(installation.source && (sessionInfo.serverVersion !== installation.state.version || sessionInfo.runtimeId !== installation.state.runtimeId)) };
+        await ensureReader();
         void connectChat().catch(() => { });
         connectBrowserHost();
+    }
+    let readerRuntime;
+    async function ensureReader() {
+        if (!installation) throw new Error('READER_NOT_READY');
+        if (!installation.state.version) await installation.prepare();
+        const entry = installation.source ? resolve(dirname(installation.entry), '../../pulse-server/dist/updates/reader.js') : fileURLToPath(new URL('../../server/dist/updates/reader.js', import.meta.url));
+        if (reader?.connected && readerRuntime === entry) return;
+        if (reader?.connected) reader.disconnect(); reader?.kill('SIGTERM');
+        for (const item of pendingReads.values()) { clearTimeout(item.timer); item.reject(new Error('READER_RECONNECTING')); } pendingReads.clear();
+        const web = app.isPackaged ? join(process.resourcesPath, 'web') : fileURLToPath(new URL('../../web/dist', import.meta.url));
+        readerRuntime = entry;
+        reader = spawn(installation.node, [entry, directory, installation.root, web], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
+        reader.on('message', value => { const item = pendingReads.get(value.id); if (item) { clearTimeout(item.timer); pendingReads.delete(value.id); item.resolve(value); } });
+        const failed = () => { for (const item of pendingReads.values()) { clearTimeout(item.timer); item.reject(new Error('READER_DISCONNECTED')); } pendingReads.clear(); };
+        reader.on('error', failed); reader.on('exit', failed);
     }
     function setupSnapshot() { return { ...installation.snapshot(), dataDirectory: directory, service: { ...backendInfo, connected: Boolean(base), error: serviceError } }; }
     async function prepareDesktop(full = false) {
@@ -206,17 +223,7 @@ else {
         directory = await desktopDataDirectory(app.getPath('userData'), process.env, homedir());
         const root = resolve(process.env.PULSE_DESKTOP_INSTALL_ROOT ?? process.env.PULSE_HOME ?? join(homedir(), '.pulse'));
         const source = app.isPackaged ? join(process.resourcesPath, 'runtime') : process.env.PULSE_DESKTOP_RUNTIME_DIR;
-        installation = new DesktopInstallation({ root, userData: app.getPath('userData'), source, dataDirectory: directory, packaged: app.isPackaged, node: process.execPath, entry: fileURLToPath(new URL('../../cli/dist/bin.js', import.meta.url)), shellHome: process.env.PULSE_DESKTOP_SHELL_HOME ?? (source && !app.isPackaged ? join(app.getPath('userData'), 'shell-profile') : homedir()) });
-        reader = new Worker(new URL('./read-worker.mjs', import.meta.url), { workerData: { directory } });
-        reader.on('message', value => { const item = pendingReads.get(value.id); if (item) {
-            clearTimeout(item.timer);
-            pendingReads.delete(value.id);
-            item.resolve(value);
-        } });
-        reader.on('error', error => { for (const item of pendingReads.values()) {
-            clearTimeout(item.timer);
-            item.reject(error);
-        } pendingReads.clear(); });
+        installation = new DesktopInstallation({ root, userData: app.getPath('userData'), source, dataDirectory: directory, packaged: app.isPackaged, node: process.execPath, entry: fileURLToPath(new URL('../../cli/dist/bin.js', import.meta.url)), shellVersion: app.getVersion(), chromium: Number(process.versions.chrome.split('.')[0]), shellHome: process.env.PULSE_DESKTOP_SHELL_HOME ?? (source && !app.isPackaged ? join(app.getPath('userData'), 'shell-profile') : homedir()) });
         protocol.handle('pulse', async (request) => {
             const url = new URL(request.url);
             if (url.host !== 'app')
@@ -230,11 +237,15 @@ else {
                     return new Response('Service unavailable', { status: 503 });
                 }
             }
-            const web = app.isPackaged ? join(process.resourcesPath, 'web') : fileURLToPath(new URL('../../web/dist', import.meta.url));
-            const resource = url.pathname.startsWith('/assets/') ? resolve(web, '.' + decodeURIComponent(url.pathname)) : join(web, 'index.html');
-            if (!resource.startsWith(web + (process.platform === 'win32' ? '\\' : '/')))
-                return new Response('Forbidden', { status: 403 });
-            const response = await net.fetch(pathToFileURL(resource).href);
+            const versioned = url.pathname.match(/^\/_pulse\/([a-zA-Z0-9.-]+)\/(assets\/.+)$/);
+            const page = !url.pathname.startsWith('/assets/') && !versioned;
+            const selected = versioned?.[1] === 'bundled' ? undefined : await selectedFrontend(installation.root, directory, app.getVersion(), Number(process.versions.chrome.split('.')[0]), versioned?.[1]);
+            const web = selected?.directory ?? (app.isPackaged ? join(process.resourcesPath, 'web') : fileURLToPath(new URL('../../web/dist', import.meta.url)));
+            const name = page ? 'index.html' : versioned ? decodeURIComponent(versioned[2]) : decodeURIComponent(url.pathname.slice(1));
+            const resource = resolve(web, name);
+            if (!resource.startsWith(web + (process.platform === 'win32' ? '\\' : '/'))) return new Response('Forbidden', { status: 403 });
+            let response = await net.fetch(pathToFileURL(resource).href);
+            if (page) { const prefix = '/_pulse/' + (selected?.id ?? 'bundled') + '/'; const html = (await response.text()).replace('<head>', `<head><base href="${prefix}"><meta name="pulse-frontend" content="${selected?.id ?? 'bundled'}">`).replace(/(["'])\/assets\//g, `$1${prefix}assets/`); response = new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } }); }
             const headers = new Headers(response.headers);
             headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self' http://127.0.0.1:* http://localhost:*; object-src 'none'");
             return new Response(response.body, { status: response.status, headers });
@@ -244,6 +255,10 @@ else {
             allowedPath(path);
             if (!['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].includes(init.method ?? 'GET') || init.body && typeof init.body !== 'string')
                 throw new Error('API_REQUEST_INVALID');
+            if (path === '/api/updates' || /^\/api\/updates\/(check|download|apply|rollback|settings)$/.test(path)) {
+                try { const response = await http(path, init); if (response.status < 500 && response.status !== 404) return { status: response.status, body: await response.json() }; } catch {}
+                return controlUpdate(installation, app.getVersion(), Number(process.versions.chrome.split('.')[0]), path, init);
+            }
             if (path === '/api/desktop/setup' && (init.method ?? 'GET') === 'GET') return { status: 200, body: setupSnapshot() };
             if (path === '/api/desktop/setup/data-directory' && init.method === 'POST') { void chooseDataDirectory(); return { status: 202, body: setupSnapshot() }; }
             if (path === '/api/desktop/setup/repair' && init.method === 'POST') { void prepareDesktop(true); return { status: 202, body: setupSnapshot() }; }
@@ -388,13 +403,20 @@ else {
                 sub.controller.abort(); subscriptions.clear(); });
             void window.loadURL(pageUrl);
         }
-        Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Pulse', submenu: [{ label: '环境检查与修复…', click: () => { if (window) void window.loadURL(pageUrl.startsWith('http:') ? new URL('/settings/desktop', pageUrl).href : 'pulse://app/settings/desktop'); } }, { label: '数据目录…', click: () => void chooseDataDirectory() }, { label: '后台服务状态', click: () => void dialog.showMessageBox(window, { message: base ? '后台服务运行中' : desktopServiceMessage(serviceError), detail: `数据目录：${directory}${base ? `\n服务地址：${base}` : ''}` }) }, { label: '停止后台服务…', click: async () => { const result = await dialog.showMessageBox(window, { message: '停止后台服务会中断执行中的任务。', buttons: ['取消', '停止'], defaultId: 0, cancelId: 0 }); if (result.response === 1 && base) {
+        Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Pulse', submenu: [{ label: '检查更新…', click: () => { if (window) void window.loadURL(pageUrl.startsWith('http:') ? new URL('/settings/updates', pageUrl).href : 'pulse://app/settings/updates'); } }, { label: '环境检查与修复…', click: () => { if (window) void window.loadURL(pageUrl.startsWith('http:') ? new URL('/settings/desktop', pageUrl).href : 'pulse://app/settings/desktop'); } }, { label: '数据目录…', click: () => void chooseDataDirectory() }, { label: '后台服务状态', click: () => void dialog.showMessageBox(window, { message: base ? '后台服务运行中' : desktopServiceMessage(serviceError), detail: `数据目录：${directory}${base ? `\n服务地址：${base}` : ''}` }) }, { label: '停止后台服务…', click: async () => { const result = await dialog.showMessageBox(window, { message: '停止后台服务会中断执行中的任务。', buttons: ['取消', '停止'], defaultId: 0, cancelId: 0 }); if (result.response === 1 && base) {
                             const descriptor = JSON.parse(await readFile(join(directory, 'service.json'), 'utf8'));
                             process.kill(descriptor.pid, 'SIGTERM');
                             base = '';
                         } } }, { type: 'separator' }, { role: 'quit' }] }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }]));
         createWindow();
         void prepareDesktop();
+        let monitorBusy = false;
+        const serviceMonitor = setInterval(async () => {
+            if (monitorBusy || !base || setupPending) return;
+            monitorBusy = true;
+            try { const response = await http('/api/session'); if (response.ok) { const info = await response.json(); if (backendInfo?.pid !== info.serverPid || backendInfo?.version !== info.serverVersion) await prepareDesktop(); } } catch {} finally { monitorBusy = false; }
+        }, 2000);
+        serviceMonitor.unref(); app.once('before-quit', () => clearInterval(serviceMonitor));
         app.on('activate', () => { if (!BrowserWindow.getAllWindows().length)
             createWindow(); });
         app.on('second-instance', () => { if (window) {
@@ -406,6 +428,6 @@ else {
             createWindow(); });
         app.on('window-all-closed', () => app.quit());
         app.on('before-quit', () => { app.isQuitting = true; clearTimeout(browserRetry); browserHost?.close(); browser.closeAll(); clearTimeout(retry); chat?.close(); for (const sub of subscriptions.values())
-            sub.controller.abort(); void reader.terminate(); });
+            sub.controller.abort(); if (reader?.connected) reader.disconnect(); reader?.kill('SIGTERM'); });
     }).catch(error => { console.error('Pulse desktop startup failed:', error.message); app.quit(); });
 }
