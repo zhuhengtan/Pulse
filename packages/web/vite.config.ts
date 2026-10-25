@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 const pulseH5Target = process.env.PULSE_H5_TARGET ?? 'http://127.0.0.1:7333'
 
 export default defineConfig({
-  base: '/',
+  base: './',
   plugins: [{
     name: 'pulse-development-info',
     configureServer(server) {

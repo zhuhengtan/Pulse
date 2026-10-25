@@ -1,3 +1,4 @@
+import { FrontendUpdateNotice } from './Updates.js'
 import { ProjectHoverCard } from './ProjectHoverCard.js'
 import { ProjectEditor } from './ProjectEditor.js'
 import { HoverTitle } from './HoverTitle.js'
@@ -136,6 +137,19 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     return [...older, ...persisted, ...pending].map(message => { const old = byId.get(message.id); return old && JSON.stringify(old) === JSON.stringify(message) ? old : message })
   }
   const [drafts, setDrafts] = useState<Record<string, ComposerDraft>>({})
+  const restoredDraftScope = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    if (!queueScope || restoredDraftScope.current === queueScope) return
+    restoredDraftScope.current = queueScope
+    try { const saved = sessionStorage.getItem('pulse-update-drafts:' + queueScope); if (saved) { const value = JSON.parse(saved); if (value && typeof value === 'object' && !Array.isArray(value)) setDrafts(value); sessionStorage.removeItem('pulse-update-drafts:' + queueScope) } } catch {}
+  }, [queueScope])
+  const refreshFrontend = () => {
+    if (submitting || Object.values(drafts).some(item => item.processing > 0)) { dialogs.alert('消息或附件正在处理，请完成后再刷新。'); return }
+    try {
+      if (Object.keys(drafts).length) { if (!queueScope) throw new Error('DRAFT_SCOPE_UNAVAILABLE'); sessionStorage.setItem('pulse-update-drafts:' + queueScope, JSON.stringify(drafts)) }
+      window.location.reload()
+    } catch { dialogs.alert('暂时无法保存草稿，请先发送或复制草稿后再刷新。') }
+  }
   const submittedDrafts = useRef(new Map<string, { keys: string[]; draft: ComposerDraft; clearedRevision: number; restoredDraft?: ComposerDraft }>())
   const submittedDelivery = useRef(new Map<string, FollowupBehavior>())
   const interactionRequests = useRef(new Map<string, string>())
@@ -1411,6 +1425,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     </ChatSurface>
     {workbenchOpen && <Suspense fallback={<div className="workbench-loading" role="status">正在打开标签页…</div>}><PreviewDock key={selectedId ?? selectedProjectId ?? 'unassigned'} scope={selectedId ?? selectedProjectId ?? 'unassigned'} conversationId={selectedId} projectId={selected?.projectId ?? selectedProjectId} project={projects.find(project => project.id === (selected?.projectId ?? selectedProjectId))} transport={transport} localAdmin={sessionCapabilities.localAdmin} canUseTerminal={sessionCapabilities.canUseTerminal} position={route.query} onNavigate={patchQuery} onClose={() => patchQuery({ workspace: undefined, artifact: undefined, artifactRun: undefined, file: undefined, automation: undefined, diff: undefined, staged: undefined, previewHidden: '1' })} /></Suspense>}
     {surfaceMode === 'work' && transfer.dialog}
+    <FrontendUpdateNotice transport={transport} enabled={paired} refresh={refreshFrontend} />
     {toast && <PulseToast text={toast} />}
   </main>
 }
