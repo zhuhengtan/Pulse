@@ -422,9 +422,9 @@ function inheritedBlockNote(blocker: ControlledTask, tasks: readonly ControlledT
 }
 
 /** Permission, user, and environment limits are not fixed by repeating another plan. A local model such as Ollama is an authorized path. */
-const EXTERNAL_GOAL_BLOCK = /permission|denied|not authorized|unauthorized|deferred|user must|awaiting user|external|sandbox|EPERM|审批被拒|权限|外部|用户必须|延期/i
+const EXTERNAL_GOAL_BLOCK = /permission|denied|not authorized|unauthorized|not permitted|PATH_OUTSIDE_SANDBOX|EACCES|TCC|隐私授权|deferred|user must|awaiting user|external|sandbox|EPERM|审批被拒|权限|外部|用户必须|延期/i
 const LOCAL_MODEL_PATH = /ollama|本机|本地模型/i
-const HARD_AUTH_BLOCK = /permission|denied|not authorized|unauthorized|EPERM|审批被拒|权限/i
+const HARD_AUTH_BLOCK = /permission|denied|not authorized|unauthorized|not permitted|PATH_OUTSIDE_SANDBOX|EACCES|TCC|隐私授权|EPERM|审批被拒|权限/i
 
 function isExternalGoalBlock(note: string): boolean {
   if (LOCAL_MODEL_PATH.test(note) && !HARD_AUTH_BLOCK.test(note)) return false

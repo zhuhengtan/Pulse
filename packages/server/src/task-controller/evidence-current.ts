@@ -1,5 +1,6 @@
 import { coversUnavailablePythonCheck } from './check-coverage.js'
 import { copyChanges } from './copy-evidence.js'
+import { inPlaceChanges } from './inplace-evidence.js'
 import { captureCheck } from '../check-receipt.js'
 import { resolve } from 'node:path'
 import { FilesystemTool } from '@hunterzhu/pulse-adapters'
@@ -11,10 +12,15 @@ export async function staleFileEvidence(root: string, refs: string[], runtime: P
   // Passed sibling stages can legitimately update a file inspected by a shared
   // preparatory dependency. Their receipts refresh file versions only; they do
   // not contribute successful checks or authorize acceptance of this stage.
-  for (const ref of [...refs, ...snapshotRefs]) {
+  for (const ref of [...refs, ...snapshotRefs].sort((a, b) => Number(a.match(/(\d+)$/)?.[1] ?? 0) - Number(b.match(/(\d+)$/)?.[1] ?? 0))) {
     const result = runtime.state.results.get(ref), value = result?.value
     const effect = result?.producer?.kind === 'effect' ? runtime.state.effects.get(result.producer.id) : undefined
     if (effect?.outcome?.status === 'succeeded' && effect.kind === 'tool' && effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) && effect.input.name === 'shell.exec') {
+      for (const entry of inPlaceChanges(value ?? result?.summary)) {
+        const key = resolve(root, entry.path), previous = paths.get(key), order = Number(ref.match(/(\d+)$/)?.[1] ?? 0)
+        // A command's receipt refreshes only the exact version it observed.
+        if (previous && previous.order < order && previous.hash === entry.beforeHash) paths.set(key, { hash: entry.hash, order, refs: [...previous.refs, ref] })
+      }
       for (const entry of copyChanges(value ?? result?.summary)) for (const [path, hash] of [[entry.path, entry.hash], [entry.source, entry.sourceHash]]) {
         const key = resolve(root, path!), previous = paths.get(key), order = Number(ref.match(/(\d+)$/)?.[1] ?? 0)
         paths.set(key, { hash: previous && previous.order > order ? previous.hash : hash!, order: Math.max(previous?.order ?? 0, order), refs: [...(previous?.refs ?? []), ref] })
