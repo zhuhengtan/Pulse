@@ -30,6 +30,24 @@ const address = (router: ReturnType<typeof createMemoryRouter>) => router.state.
 const navigate = async (router: ReturnType<typeof createMemoryRouter>, target: string | number) => { await act(async () => { if (typeof target === 'number') await router.navigate(target); else await router.navigate(target) }) }
 
 describe('explicit URL navigation', () => {
+  it.each(['button', 'mask', 'escape'] as const)('closes mobile conversation details via %s without leaving the conversation', async method => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(query => ({ matches: query === '(max-width: 767px)', media: query, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList)
+    const view = show('/work/pulse-chat')
+    await screen.findByText('消息：pulse-chat')
+    const trigger = screen.getByRole('button', { name: '对话详情', exact: true })
+    fireEvent.click(trigger)
+    const dialog = await screen.findByRole('dialog', { name: '对话详情' })
+    expect(dialog.closest('.pulse-details-sheet')).toBeTruthy()
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(address(view.router)).toContain('details=1')
+    if (method === 'button') fireEvent.click(screen.getByRole('button', { name: '关闭', exact: true }))
+    else if (method === 'mask') fireEvent.click(document.querySelector('.pulse-details-sheet .ant-drawer-mask')!)
+    else fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape', keyCode: 27 })
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '对话详情' })).toBeNull())
+    expect(address(view.router)).toBe('/work/pulse-chat')
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+  })
+
   it('opens and hides tabs without losing a document, and keeps export in More and details separate', async () => {
     const view = show('/work/pulse-chat?file=docs%2Fplan.md&workspace=preview')
     await screen.findByText('Verified workspace document')
