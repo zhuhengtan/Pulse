@@ -2,9 +2,13 @@
 
 Pulse 使用 pnpm monorepo 管理 `packages/*`，根目录同时声明了 npm `workspaces`，因此 npm 和 pnpm 都能识别工作区。
 
+## 分模块发布
+
+桌面壳、后台运行包与 Web/H5 前端现已支持分别版本化及发布，详见[分模块更新](updates.md)。新发布使用 `shell-v*`、`backend-v*`、`frontend-v*` 标签；下文 `v*` 流程保留给旧版整体发布。`release:version <version>` 默认只修改后台内部配套包；使用 `release:version shell <version>` 或 `release:version frontend <version>` 单独修改壳或前端。
+
 ## 版本与检查
 
-所有可发布包（含 `data`）保持同一版本，桌面客户端也使用该版本。发布前先在根目录的 [中文更新日志](../CHANGELOG.md) 和 [English changelog](../CHANGELOG.en.md) 分别补齐目标版本说明；两个文件共同为 `pulse --version` 提供版本亮点。随后修改版本号并运行完整本地 CI：
+所有后台可发布包（含 `data`）保持同一版本，桌面壳和前端分别维护自己的版本。发布前先在根目录的 [中文更新日志](../CHANGELOG.md) 和 [English changelog](../CHANGELOG.en.md) 分别补齐目标版本说明；两个文件共同为 `pulse --version` 提供版本亮点。随后修改版本号并运行完整本地 CI：
 
 ```bash
 pnpm release:version 0.4.1 # replace with the target version

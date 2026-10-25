@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,7 +25,7 @@ async function verify(app, format) {
     const id = await execute('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', info]);
     assert.equal(id.stdout.trim(), 'com.hunterzhu.pulse.desktop');
     const version = await execute('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', info]);
-    assert.equal(version.stdout.trim(), manifest.version);
+    assert.equal(version.stdout.trim(), JSON.parse(await readFile(new URL('../../packages/desktop/package.json', import.meta.url), 'utf8')).version);
     const assessment = await execute('spctl', ['--assess', '--type', 'execute', '--verbose=4', app])
         .then(value => ({ accepted: true, detail: value.stderr.trim() }))
         .catch(error => {

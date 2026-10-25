@@ -8,7 +8,7 @@ export const requiredDesktopFiles = [...desktopAssets.map(item => item.name), 'p
 /** Only complete, public releases supply public download links. */
 export function desktopDownloadManifest(release) {
   const fallback = { version: null, releaseUrl: 'https://github.com/zhuhengtan/Pulse/releases', assets: [] };
-  if (!release || release.draft || release.prerelease || !/^v\d+\.\d+\.\d+$/.test(release.tag_name ?? '')) return fallback;
+  if (!release || release.draft || release.prerelease || !/^(?:shell-)?v\d+\.\d+\.\d+$/.test(release.tag_name ?? '')) return fallback;
   const tag = release.tag_name, releaseUrl = `https://github.com/zhuhengtan/Pulse/releases/tag/${tag}`;
   if (release.html_url !== releaseUrl) return fallback;
   const assets = desktopAssets.map(expected => {
@@ -18,5 +18,5 @@ export function desktopDownloadManifest(release) {
     return asset?.state === 'uploaded' && Number.isSafeInteger(asset.size) && asset.size > 0 && asset.browser_download_url === url ? { ...expected, size: asset.size, url } : undefined;
   });
   const checksums = (release.assets ?? []).some(item => item.name === 'pulse-desktop-SHA256SUMS.txt' && item.state === 'uploaded' && item.size > 0);
-  return assets.every(Boolean) && checksums ? { version: tag.slice(1), releaseUrl, assets } : fallback;
+  return assets.every(Boolean) && checksums ? { version: tag.replace(/^(?:shell-)?v/, ''), releaseUrl, assets } : fallback;
 }

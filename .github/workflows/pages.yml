@@ -4,8 +4,10 @@ on:
     branches: [main]
     paths: ['site/**', 'scripts/site/**', 'scripts/release/desktop-assets.mjs', '.github/workflows/pages.yml']
   workflow_run:
-    workflows: [Release]
+    workflows: [Release, Component release]
     types: [completed]
+  schedule:
+    - cron: '17 3 * * 1'
   workflow_dispatch:
 permissions:
   contents: read
@@ -31,6 +33,21 @@ jobs:
         run: node scripts/site/downloads.mjs
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      - uses: pnpm/action-setup@v4
+        with: { version: 12.4.2 }
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm exec tsc -b packages/server --pretty false
+      - name: Build signed component index
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          UPDATE_KEY: ${{ secrets.PULSE_UPDATE_SIGNING_KEY }}
+          UPDATE_KEY_ID: ${{ vars.PULSE_UPDATE_KEY_ID }}
+        run: |
+          node --input-type=module -e 'import {writeFileSync} from "node:fs";import {join} from "node:path";if(!process.env.UPDATE_KEY)throw Error("PULSE_UPDATE_SIGNING_KEY is required");const path=join(process.env.RUNNER_TEMP,"pulse-update-key.pem");writeFileSync(path,process.env.UPDATE_KEY,{mode:0o600});writeFileSync(process.env.GITHUB_ENV,`PULSE_UPDATE_PRIVATE_KEY_FILE=${path}\nPULSE_UPDATE_KEY_ID=${process.env.UPDATE_KEY_ID || "pulse-20261025"}\n`,{flag:"a"});'
+          PULSE_UPDATE_PRIVATE_KEY_FILE="$RUNNER_TEMP/pulse-update-key.pem" PULSE_UPDATE_KEY_ID="${UPDATE_KEY_ID:-pulse-20261025}" node scripts/updates/index.mjs
+      - name: Remove signing key
+        if: always()
+        run: node -e 'require("node:fs").rmSync(require("node:path").join(process.env.RUNNER_TEMP,"pulse-update-key.pem"),{force:true})'
       - run: node scripts/site/check.mjs
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

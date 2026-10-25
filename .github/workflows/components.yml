@@ -1,0 +1,161 @@
+name: Component release
+on:
+  push:
+    tags: ['shell-v*', 'backend-v*', 'frontend-v*']
+permissions:
+  contents: write
+  actions: read
+  id-token: write
+concurrency:
+  group: component-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      component: ${{ steps.component.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: node scripts/updates/require-ci.mjs
+        env: { GITHUB_TOKEN: '${{ github.token }}' }
+      - id: component
+        shell: bash
+        run: echo "value=${GITHUB_REF_NAME%%-v*}" >> "$GITHUB_OUTPUT"
+  shell:
+    needs: verify
+    if: needs.verify.outputs.component == 'shell'
+    uses: ./.github/workflows/desktop.yml
+    with:
+      ref: ${{ github.ref }}
+  build:
+    needs: [verify, shell]
+    if: always() && needs.verify.result == 'success' && (needs.shell.result == 'success' || needs.shell.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    env:
+      COMPONENT: ${{ needs.verify.outputs.component }}
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 12.4.2 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: pnpm }
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm native:prepare
+      - run: pnpm desktop:build
+        if: env.COMPONENT == 'backend'
+      - uses: actions/upload-artifact@v4
+        if: env.COMPONENT == 'backend'
+        with:
+          name: backend-native-${{ matrix.os }}
+          path: |
+            packages/server/native/**
+            packages/adapters/dist/native/**
+          if-no-files-found: error
+      - run: pnpm build
+      - run: pnpm desktop:app:prepare
+        if: env.COMPONENT == 'backend'
+      - run: node scripts/desktop/runtime-smoke.mjs
+        if: env.COMPONENT == 'backend'
+      - run: pnpm exec vitest run tests/updates.test.ts tests/update-service.test.ts
+      - uses: actions/download-artifact@v4
+        if: env.COMPONENT == 'shell'
+        with: { pattern: 'pulse-desktop-*', path: artifacts/desktop, merge-multiple: true }
+      - name: Prepare signing key
+        shell: bash
+        env:
+          UPDATE_KEY: ${{ secrets.PULSE_UPDATE_SIGNING_KEY }}
+          UPDATE_KEY_ID: ${{ vars.PULSE_UPDATE_KEY_ID }}
+        run: |
+          node --input-type=module -e 'import {writeFileSync} from "node:fs";import {join} from "node:path";if(!process.env.UPDATE_KEY)throw Error("PULSE_UPDATE_SIGNING_KEY is required");const path=join(process.env.RUNNER_TEMP,"pulse-update-key.pem");writeFileSync(path,process.env.UPDATE_KEY,{mode:0o600});writeFileSync(process.env.GITHUB_ENV,`PULSE_UPDATE_PRIVATE_KEY_FILE=${path}\nPULSE_UPDATE_KEY_ID=${process.env.UPDATE_KEY_ID || "pulse-20261025"}\n`,{flag:"a"});'
+      - name: Package component
+        shell: bash
+        run: |
+          if [ "$COMPONENT" = frontend ]; then
+            if [ "$RUNNER_OS" = Linux ]; then node scripts/updates/pack.mjs frontend; fi
+          elif [ "$COMPONENT" = backend ]; then
+            node scripts/updates/pack.mjs backend
+          elif [ "$RUNNER_OS" = macOS ]; then
+            node scripts/updates/pack.mjs shell artifacts/desktop/pulse-macos-arm64.dmg
+          elif [ "$RUNNER_OS" = Windows ]; then
+            node scripts/updates/pack.mjs shell artifacts/desktop/pulse-windows-x64.exe
+          else
+            node scripts/updates/pack.mjs shell artifacts/desktop/pulse-linux-x86_64.AppImage
+          fi
+      - name: Verify real backend update and startup-failure rollback
+        if: env.COMPONENT == 'backend'
+        run: node scripts/updates/backend-smoke.mjs
+      - name: Install frontend acceptance shell
+        if: env.COMPONENT == 'frontend'
+        run: node packages/desktop/node_modules/electron/install.js
+      - name: Prepare Linux frontend acceptance sandbox
+        if: env.COMPONENT == 'frontend' && runner.os == 'Linux'
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Verify signed frontend updates in Electron
+        if: env.COMPONENT == 'frontend' && runner.os != 'Linux'
+        run: node scripts/updates/frontend-smoke.mjs
+      - name: Verify signed frontend updates in Linux Electron
+        if: env.COMPONENT == 'frontend' && runner.os == 'Linux'
+        run: xvfb-run --auto-servernum node scripts/updates/frontend-smoke.mjs
+      - name: Remove signing key
+        if: always()
+        shell: bash
+        run: node -e 'require("node:fs").rmSync(require("node:path").join(process.env.RUNNER_TEMP,"pulse-update-key.pem"),{force:true})'
+      - uses: actions/upload-artifact@v4
+        if: env.COMPONENT != 'frontend' || runner.os == 'Linux'
+        with: { name: 'component-${{ matrix.os }}', path: artifacts/updates, if-no-files-found: error }
+  publish:
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      COMPONENT: ${{ needs.verify.outputs.component }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'component-*', path: artifacts/updates, merge-multiple: true }
+      - uses: actions/download-artifact@v4
+        if: env.COMPONENT == 'shell'
+        with: { pattern: 'pulse-desktop-*', path: artifacts/desktop, merge-multiple: true }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, registry-url: 'https://registry.npmjs.org' }
+      - uses: pnpm/action-setup@v4
+        if: env.COMPONENT == 'backend'
+        with: { version: 12.4.2 }
+      - uses: actions/download-artifact@v4
+        if: env.COMPONENT == 'backend'
+        with: { pattern: 'backend-native-*', path: packages, merge-multiple: true }
+      - name: Publish the matching backend npm package group
+        if: env.COMPONENT == 'backend'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PULSE_VERIFY_WINDOWS_SANDBOX: '1'
+        run: |
+          npm install --global npm@11.15.0
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm native:prepare
+          chmod +x packages/server/native/*/pulse-desktop-helper packages/server/native/darwin-*/Pulse\ Desktop\ Helper.app/Contents/MacOS/PulseDesktopHelper
+          pnpm release:npm-publish
+      - name: Publish complete component release
+        shell: bash
+        run: |
+          gh release create "$GITHUB_REF_NAME" artifacts/updates/* --verify-tag --draft --generate-notes --latest=false
+          if [ "$COMPONENT" = shell ]; then
+            node scripts/release/verify-desktop-assets.mjs
+            gh release upload "$GITHUB_REF_NAME" artifacts/desktop/*.dmg artifacts/desktop/*.zip artifacts/desktop/*.exe artifacts/desktop/*.AppImage artifacts/desktop/*.deb artifacts/desktop/pulse-desktop-SHA256SUMS.txt
+          fi
+          if [ "$COMPONENT" = shell ]; then
+            gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+          else
+            gh release edit "$GITHUB_REF_NAME" --draft=false --latest=false
+          fi
