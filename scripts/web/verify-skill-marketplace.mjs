@@ -33,6 +33,10 @@ try {
     browser = await chromium.launch({ headless: true }); const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } }); const split = cookie.indexOf('='); await context.addCookies([{ name: cookie.slice(0, split), value: cookie.slice(split + 1), url: base }]); page = await context.newPage()
   }
   page.on('pageerror', error => errors.push(error.message))
+  await page.goto(base + '/settings/versions')
+  await page.getByText('@hunterzhu/pulse-data', { exact: true }).waitFor()
+  await page.getByRole('article', { name: 'Web / H5 界面' }).waitFor()
+  await page.screenshot({ path: out + '/00-component-versions.png' }); checks.push('dedicated Pulse component versions page')
   await page.goto(base + '/settings/tools')
   await page.getByRole('button', { name: '已安装', exact: true }).click()
   await page.getByText('/skill-creator', { exact: false }).waitFor(); checks.push('offline built-in creator visible')
@@ -54,7 +58,13 @@ try {
   await page.screenshot({ path: out + '/03-slash.png' })
   await page.goto(base + '/settings/tools'); await page.getByRole('button', { name: '已安装', exact: true }).click()
   const row = page.locator('.skill-list article').filter({ hasText: '/find-skills' })
-  await row.getByRole('button', { name: '更新', exact: true }).click(); await page.getByText('技能已安装并启用，可在输入框键入 / 后选择。', { exact: true }).waitFor({ timeout: 75000 }); checks.push('real manual update')
+  await row.getByRole('button', { name: '检查 find-skills 更新', exact: true }).click()
+  await page.getByText(/技能版本检查完成/).waitFor({ timeout: 75000 })
+  assert(await row.getByText('当前版本：', { exact: false }).innerText()); assert(await row.getByText('最新版本：', { exact: false }).innerText())
+  const update = row.getByRole('button', { name: '更新至最新版', exact: true })
+  if (await update.isVisible()) { await update.click(); await page.getByText('技能已同步市场最新版。', { exact: true }).waitFor({ timeout: 75000 }); checks.push('real manual update') }
+  else { await row.getByText(/内容已是最新/).waitFor(); checks.push('fresh installation matches market revision') }
+  await page.screenshot({ path: out + '/05-skill-versions.png' }); checks.push('installed and market revision comparison')
   await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: out + '/04-mobile.png' }); assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)); checks.push('mobile viewport no horizontal overflow')
   assert.deepEqual(errors, [])
   await writeFile(out + '/result.json', JSON.stringify({ success: true, platform: process.platform, mode: electron ? 'electron' : 'chromium', checks, origin: receipt.origin, errors }, null, 2))

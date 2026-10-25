@@ -51,11 +51,16 @@ export class SkillMarketplace {
       return [{ id: item.id, name: item.name, source: item.source, installs: item.installs }]
     })
   }
-  async discover(raw: string): Promise<RemoteSkill[]> {
+  async latestCommit(raw: string): Promise<string> {
     const source = parseSkillSource(raw)
     const data = JSON.parse((await boundedFetch(`https://api.github.com/repos/${source.repository}/commits/${encodeURIComponent(source.ref)}`, 1024 * 1024, this.fetcher)).toString()) as { sha?: string }
     if (!data.sha || !/^[a-f0-9]{40}$/.test(data.sha)) throw new Error('SKILL_COMMIT_INVALID')
-    const archive = await boundedFetch(`https://codeload.github.com/${source.repository}/zip/${data.sha}`, 100 * 1024 * 1024, this.fetcher)
+    return data.sha
+  }
+  async discover(raw: string, commit?: string): Promise<RemoteSkill[]> {
+    const source = parseSkillSource(raw), revision = commit ?? await this.latestCommit(raw)
+    if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error('SKILL_COMMIT_INVALID')
+    const archive = await boundedFetch(`https://codeload.github.com/${source.repository}/zip/${revision}`, 100 * 1024 * 1024, this.fetcher)
     const { files, unsafe } = await readArchive(archive), candidates: RemoteSkill[] = []
     let candidateBytes = 0
     for (const [path, bytes] of files) {
@@ -71,14 +76,14 @@ export class SkillMarketplace {
       candidateBytes += [...selected.values()].reduce((total, bytes) => total + bytes.length, 0)
       if (candidateBytes > 60 * 1024 * 1024) throw new Error('SKILL_PREVIEW_TOO_LARGE')
       const skill = snapshot(selected)
-      candidates.push({ ...skill, origin: { repository: source.repository, directory, commit: data.sha, ref: source.ref } })
+      candidates.push({ ...skill, origin: { repository: source.repository, directory, commit: revision, ref: source.ref } })
       if (candidates.length > 200) throw new Error('SKILL_CANDIDATE_LIMIT_EXCEEDED')
     }
     if (!candidates.length) throw new Error(unsafe.length ? 'SKILL_SYMLINK_OR_FILE_TYPE_REJECTED' : 'SKILL_REMOTE_NOT_FOUND')
     return candidates
   }
-  async resolve(raw: string, name: string, directory?: string): Promise<RemoteSkill> {
-    const matches = (await this.discover(raw)).filter(skill => skill.name === name && (directory === undefined || skill.origin.directory === directory))
+  async resolve(raw: string, name: string, directory?: string, commit?: string): Promise<RemoteSkill> {
+    const matches = (await this.discover(raw, commit)).filter(skill => skill.name === name && (directory === undefined || skill.origin.directory === directory))
     if (matches.length !== 1) throw new Error(matches.length ? 'SKILL_AMBIGUOUS' : 'SKILL_REMOTE_NOT_FOUND')
     return matches[0]!
   }

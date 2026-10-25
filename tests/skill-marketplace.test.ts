@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { SkillMarketplace, parseSkillSource } from '../packages/server/src/skill-marketplace.js'
+import { SkillManagement } from '../packages/server/src/skill-management.js'
 import { snapshot, metadata, publishSkill, readSkillDirectory, receipt, uninstallSkill, skillPath, skillRoot, skillLimits } from '../packages/server/src/skill-store.js'
 import { createSkillCapabilityPack } from '../packages/server/src/skill-pack.js'
 import { createBuiltinSkillCapabilityPack, listBuiltinSkills } from '../packages/server/src/builtin-skills.js'
@@ -69,6 +70,32 @@ describe('skill sources and registry transport', () => {
 })
 
 describe('skill store invariants', () => {
+  it('checks market versions independently without changing installed files or fetching local skills', async () => {
+    await publishSkill(snapshot(files()), { origin: { repository: 'owner/repo', directory: 'skills/demo', ref: 'HEAD', commit: 'a'.repeat(40) } })
+    await publishSkill(snapshot(files('other')), { origin: { repository: 'owner/unavailable', directory: 'skills/other', ref: 'main', commit: 'a'.repeat(40) } })
+    await publishSkill(snapshot(files('local')))
+    const archive = await zip({ 'skills/demo/SKILL.md': text(), 'skills/demo/references/guide.md': 'NEW_REFERENCE' })
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async input => {
+      const url = String(input)
+      if (url.includes('/owner/unavailable/')) return new Response('', { status: 429 })
+      return url.includes('/commits/') ? Response.json({ sha: 'b'.repeat(40) }) : new Response(archive)
+    })
+    vi.stubGlobal('fetch', fetcher)
+    const manager = new SkillManagement(), before = await receipt('demo')
+    const result = await manager.checkUpdates()
+    expect(result.skills.find(skill => skill.name === 'demo')).toMatchObject({ version: 'a'.repeat(40), update: { status: 'available', latestCommit: 'b'.repeat(40) } })
+    expect(result.skills.find(skill => skill.name === 'other')).toMatchObject({ update: { status: 'error', error: 'SKILL_REMOTE_RATE_LIMITED' } })
+    expect(result.skills.find(skill => skill.name === 'local')).not.toHaveProperty('origin', expect.anything())
+    expect(fetcher).toHaveBeenCalledTimes(3)
+    expect(await receipt('demo')).toEqual(before)
+    expect(await readFile(join(skillRoot(), 'demo/references/guide.md'), 'utf8')).toBe('ORIGINAL_REFERENCE')
+    await publishSkill(snapshot(files()), { update: true, origin: { ...before!.origin!, commit: 'b'.repeat(40) } })
+    fetcher.mockClear()
+    expect((await manager.checkUpdates('demo')).skills.find(skill => skill.name === 'demo')).toMatchObject({ update: { status: 'current' } })
+    expect(fetcher).toHaveBeenCalledTimes(1) // Unchanged source revision needs no archive download.
+    await expect(manager.checkUpdates('../escape')).rejects.toThrow('INVALID_SKILL_NAME')
+    await expect(manager.checkUpdates('local')).rejects.toThrow('SKILL_NOT_REMOTE_MANAGED')
+  })
   it('validates metadata, links and portable paths', () => {
     expect(snapshot(files()).warnings).toEqual([])
     expect(snapshot(files('demo', '```md\n[example](not-a-real-file.md)\n```')).warnings).toEqual([])

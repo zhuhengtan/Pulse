@@ -1168,13 +1168,14 @@ export class H5Server {
         else if (method === 'GET' && action === 'detail') value = await this.skillManagement.detail(url.searchParams.get('name') ?? '')
         else if (method === 'POST') {
           const body = await this.parseJsonBody(req)
-          if (action === 'inspect' && typeof body.source === 'string') value = await this.skillManagement.inspect(body.source)
+          if (action === 'check-updates' && (body.name === undefined || typeof body.name === 'string')) value = await this.skillManagement.checkUpdates(body.name as string | undefined)
+          else if (action === 'inspect' && typeof body.source === 'string') value = await this.skillManagement.inspect(body.source)
           else if (['install', 'update'].includes(action) && this.configuration && body.configVersion !== configVersion(await this.configText())) throw new Error('CONFIG_VERSION_CONFLICT')
           else if (action === 'install' && typeof body.previewId === 'string' && typeof body.name === 'string' && typeof body.directory === 'string') {
             await this.host.assertSkillInstallable(body.name)
             value = await this.skillManagement.install({ previewId: body.previewId, name: body.name, directory: body.directory }, enable)
           }
-          else if (action === 'update' && typeof body.name === 'string') value = await this.skillManagement.update(body.name, enable)
+          else if (action === 'update' && typeof body.name === 'string' && (body.expectedCommit === undefined || typeof body.expectedCommit === 'string')) value = await this.skillManagement.update(body.name, enable, body.expectedCommit as string | undefined)
           else if (action === 'uninstall' && typeof body.name === 'string') value = await this.skillManagement.uninstall(body.name)
           else throw new Error('SKILL_REQUEST_INVALID')
         } else { res.writeHead(404).end(); return }
