@@ -70,6 +70,9 @@ $psi.RedirectStandardError = $true
 $psi.RedirectStandardInput = $true
 $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
 $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+foreach ($entry in $spec.environment.PSObject.Properties) {
+  $psi.EnvironmentVariables[[string]$entry.Name] = [string]$entry.Value
+}
 $child = [System.Diagnostics.Process]::new()
 $child.StartInfo = $psi
 try { if (-not $child.Start()) { exit 127 } }
@@ -92,13 +95,13 @@ exit $child.ExitCode
 `.trim()
 
 /** Build the command text expected by srt without interpreting model argv as shell syntax. */
-export function encodeSandboxCommand(command: string, args: string[], platform: NodeJS.Platform = process.platform): string {
+export function encodeSandboxCommand(command: string, args: string[], platform: NodeJS.Platform = process.platform, environment: Record<string, string | undefined> = {}): string {
   if ([command, ...args].some((value) => value.includes('\0'))) throw shellError('INVALID_SHELL_ARGUMENT')
   if (platform === 'win32') {
     // The only bytes placed in cmd.exe's command string are fixed tokens and
     // base64. PowerShell decodes JSON and ProcessStartInfo.Arguments uses a
     // Windows CRT-compatible encoder, preserving argv without a shell parse.
-    const payload = Buffer.from(JSON.stringify({ command, arguments: args.map(quoteWindowsArgument).join(' ') }), 'utf8').toString('base64')
+    const payload = Buffer.from(JSON.stringify({ command, arguments: args.map(quoteWindowsArgument).join(' '), environment }), 'utf8').toString('base64')
     const encoded = Buffer.from(powershellArgvRunner.replace('__PULSE_ARGV_JSON__', payload), 'utf16le').toString('base64')
     const commandText = `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${encoded}`
     if (commandText.length > 24_000) throw shellError('INVALID_SHELL_ARGUMENTS_TOO_LARGE')
@@ -565,7 +568,10 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       setupStage = 'initialize'
       await initializeShellSandbox(policy, process.platform, options.signal)
       checkpoint('initialized')
-      const commandText = encodeSandboxCommand(executable, executableArgs)
+      // Windows SRT re-logon discards the broker's environment. Apply only our
+      // deliberate execution overrides to the final child, retaining SRT's
+      // generated proxy/CA settings and isolated user profile/temp directories.
+      const commandText = encodeSandboxCommand(executable, executableArgs, process.platform, executionEnv)
       setupStage = 'wrap'
       const descriptor = await SandboxManager.wrapWithSandboxArgv(commandText, undefined, undefined, options.signal, cwd, { commandId: invocationId, commandText: 'shell.exec' })
       checkpoint('wrapped')
