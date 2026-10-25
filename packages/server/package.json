@@ -8,6 +8,10 @@
   },
   "type": "module",
   "exports": {
+    "./updates": {
+      "types": "./dist/updates/index.d.ts",
+      "import": "./dist/updates/index.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
