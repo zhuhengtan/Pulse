@@ -26,8 +26,8 @@ export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>
       "en": "Question cards show text inputs directly and can be closed without answering; dismissal does not submit drafts, infer choices, or grant execution permission."
     },
     {
-      "zh": "改善任务计划的准则标识容错、纯分析阶段证据判定、并发 Lane 的中断恢复，以及读取和验证失败后的续执行；修复 Windows 状态快照替换的瞬时文件占用，并保留后台落盘失败的诊断与显式错误。",
-      "en": "Improved plan criterion identifier normalization, analysis-stage evidence handling, interrupted parallel Lane restoration, and continuation after read or verification failures; retry transient Windows snapshot sharing violations while retaining background persistence diagnostics and explicit errors."
+      "zh": "改善任务计划的准则标识容错、纯分析阶段证据判定、并发 Lane 的中断恢复，以及读取和验证失败后的续执行；修复并发任务在等待其他请求时停止推进的问题，以及 Windows 状态快照替换的瞬时文件占用，保留后台落盘失败的诊断与显式错误。",
+      "en": "Improved plan criterion identifier normalization, analysis-stage evidence handling, interrupted parallel Lane restoration, and continuation after read or verification failures; keep ready parallel work progressing while other requests wait, and retry transient Windows snapshot sharing violations while retaining background persistence diagnostics and explicit errors."
     },
     {
       "zh": "数据服务改用有界启动就绪握手，保留退出与启动失败的诊断；重连前确认 writer 可用，最后一个客户端显式关闭时释放数据库文件，避免关闭竞态、冷启动误判与 Windows 文件占用。",

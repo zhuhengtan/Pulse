@@ -15,7 +15,7 @@ This file records Pulse release notes in English and is the source for `pulse --
 ### Fixed
 
 - Question cards show text inputs directly and can be closed without answering; dismissal does not submit drafts, infer choices, or grant execution permission.
-- Improved plan criterion identifier normalization, analysis-stage evidence handling, interrupted parallel Lane restoration, and continuation after read or verification failures; retry transient Windows snapshot sharing violations while retaining background persistence diagnostics and explicit errors.
+- Improved plan criterion identifier normalization, analysis-stage evidence handling, interrupted parallel Lane restoration, and continuation after read or verification failures; keep ready parallel work progressing while other requests wait, and retry transient Windows snapshot sharing violations while retaining background persistence diagnostics and explicit errors.
 - Data services use a bounded startup-readiness handshake, retain exit and startup diagnostics, confirm writer readiness before reconnecting, and release database files when the last client explicitly closes, avoiding shutdown races, premature cold-start failures, and locked files on Windows.
 - Fixed npm lifecycle startup through isolated PATH entries in the macOS sandbox while retaining explicit workspace and environment script-shell settings; forward controlled execution settings to the actual Windows sandbox command to prevent implicit pnpm dependency reinstalls.
 - Reuse message date formatters and Markdown parsers, bound cached syntax trees, and defer unopened message menus to reduce rendering work when switching long histories; fix initial scroll listeners and position restoration after virtual-row height changes.
