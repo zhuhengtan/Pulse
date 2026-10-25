@@ -50,6 +50,10 @@ jobs:
       - run: pnpm native:prepare
       - run: pnpm desktop:build
       - run: pnpm desktop:app:prepare
+      - name: Verify runtime pruning and dependency resolution
+        run: pnpm exec vitest run tests/desktop-runtime-optimization.test.ts
+      - name: Verify bundled runtime document and terminal features
+        run: node scripts/desktop/runtime-smoke.mjs
       - name: Verify storage and chat protocol
         run: pnpm exec vitest run tests/conversation-data.test.ts tests/data-migration.test.ts tests/chat-websocket.test.ts
       - name: Native desktop chat smoke
@@ -72,6 +76,14 @@ jobs:
         run: xvfb-run --auto-servernum pnpm desktop:app:install-smoke
       - name: Build native packages
         run: pnpm --filter @hunterzhu/pulse-desktop run dist --${{ matrix.arch }} --publish never
+      - name: Verify final Mac app signatures and runtime manifests
+        if: runner.os == 'macOS'
+        run: node scripts/desktop/verify-mac-artifacts.mjs
+      - name: Native packaged Mac installation smoke
+        if: runner.os == 'macOS'
+        run: pnpm desktop:app:install-smoke
+        env:
+          PULSE_DESKTOP_EXECUTABLE: ${{ github.workspace }}/artifacts/desktop/mac-arm64/Pulse.app/Contents/MacOS/Pulse
       - name: Preserve desktop failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4

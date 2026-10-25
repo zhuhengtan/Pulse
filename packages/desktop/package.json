@@ -46,6 +46,8 @@
     ],
     "npmRebuild": false,
     "mac": {
+      "identity": "-",
+      "sign": "../../scripts/desktop/sign-mac.mjs",
       "target": [
         "dmg",
         "zip"

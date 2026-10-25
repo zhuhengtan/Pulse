@@ -52,11 +52,15 @@ pnpm desktop:app:dist     # 生成当前平台安装包
 pnpm desktop:app:smoke    # 隔离数据、模拟模型的真实 Electron 验收
 pnpm desktop:app:startup-smoke # 无已有服务时启动独立后台
 pnpm desktop:app:install-smoke # 无系统 Node/Chrome 的隔离首启与修复验收
+node scripts/desktop/verify-mac-artifacts.mjs # 在 macOS 上验证最终 DMG/ZIP 的签名及运行环境清单
+node scripts/desktop/runtime-smoke.mjs # 在仓库外隔离副本中验证内置 Node、CLI、文档解析和原生终端
 ```
 
-产物位于 `artifacts/desktop/`。macOS 为 DMG/ZIP，仅支持 Apple Silicon；Windows 为 NSIS/ZIP，Linux 为 AppImage/DEB。当前构建未配置代码签名和 macOS 公证，下载后的系统信任提示仍需单独验收。`.github/workflows/desktop.yml` 提供 macOS arm64、Windows x64、Linux x64 的原生构建和验收矩阵；单独通过 workflow_dispatch 运行时只上传 Actions artifact，正式版本由 Release 工作流调用，通过全部构建和验收后上传公开 Release。完整发布门禁见 [发布流程](../release.md)。Runner 标签来源：https://github.com/actions/runner-images 。
+产物位于 `artifacts/desktop/`。macOS 为 DMG/ZIP，仅支持 Apple Silicon；Windows 为 NSIS/ZIP，Linux 为 AppImage/DEB。Mac 构建显式使用 ad-hoc 签名，嵌套运行文件签名后重建完整运行环境清单，再封装外层应用；最终 DMG/ZIP 必须通过 `codesign --verify --deep --strict` 和完整清单校验。CI 还会对打包后的 Mac 应用执行隔离安装验收。ad-hoc 签名不等于 Developer ID 签名或 Apple 公证；系统信任检查单独记录，不能用直接启动包内程序的通过结果宣称普通下载可直接打开。当前尚未配置 Developer ID 和公证，正常分发仍需补齐这两项。`.github/workflows/desktop.yml` 提供 macOS arm64、Windows x64、Linux x64 的原生构建和验收矩阵；单独通过 workflow_dispatch 运行时只上传 Actions artifact，正式版本由 Release 工作流调用，通过全部构建和验收后上传公开 Release。完整发布门禁见 [发布流程](../release.md)。Runner 标签来源：https://github.com/actions/runner-images 。
 
 测试时使用 `PULSE_DESKTOP_DATA_DIR` 指定隔离数据目录，`PULSE_DESKTOP_USER_DATA` 指定隔离 Electron 用户目录。默认连接现有数据目录中的兼容 `service.json`；未运行时使用随包后台启动。退出桌面不会终止后台。菜单可查看或停止服务。
+
+`desktop:app:prepare` 只在桌面运行环境副本中裁剪：保留当前系统/CPU 的 PTY、桌面辅助程序及沙箱二进制，移除其他平台文件、第三方调试 source map 和重复依赖。依赖合并要求文件内容及完整依赖解析（含 peer/optional 依赖）等价；不同版本或解析环境继续隔离，不创建需要 Windows 特权的符号链接。内置 Chromium、文档解析 worker/字体和许可证保留。准备后扫描可执行文件头，拒绝其他操作系统的原生文件，明细写入 `artifacts/desktop-runtime/optimization.json`；通用 CLI 归档不做此平台裁剪。Mac 签名后还会刷新原生辅助程序及整个运行环境的校验清单。
 
 安装包默认使用 `~/.pulse/data`，不会自动选择仓库的开发目录。若该目录尚未迁移，桌面会明确提示「旧版数据」，不会尝试另起后台写入旧数据。通过菜单「Pulse → 数据目录…」选择已迁移的目录，选择会保存在当前桌面用户配置中；重启桌面后生效，已有后台任务继续运行。服务状态窗口同时显示实际数据目录和服务地址。
 
@@ -118,7 +122,7 @@ pnpm desktop:app:smoke
 
 真实 Electron smoke 验证本地历史绕过 Server、聊天 WS、工作 POST+SSE、分页和窗口化、30次切换、窗口退出后服务继续，以及服务停止后刷新仍可读取历史。使用临时数据和模拟模型，不读取用户配置或发送外部模型请求。
 
-本机 macOS 的实测证据和执行状态见 [验收记录](./acceptance-2026-10-21.md)。Windows/Linux 与 macOS x64 必须由对应 CI/设备验证，不能用 macOS arm64 的通过结果代替。
+本机 macOS 的实测证据和执行状态见 [验收记录](./acceptance-2026-10-21.md)。Windows/Linux 必须由对应 CI/设备验证，不能用 macOS arm64 的通过结果代替。
 
 ## 内置浏览器
 

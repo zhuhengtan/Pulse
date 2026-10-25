@@ -1,7 +1,9 @@
 import { createRequire } from 'node:module';
 import { writeRuntimeManifest } from '../../packages/desktop/src/runtime-manifest.mjs';
+import { optimizeRuntime } from './optimize-runtime.mjs';
+import { verifyRuntimePlatform } from './verify-runtime-platform.mjs';
 import { spawnSync } from 'node:child_process';
-import { mkdir, rm, readFile, copyFile, chmod, cp, access } from 'node:fs/promises';
+import { mkdir, rm, readFile, writeFile, copyFile, chmod, cp, access } from 'node:fs/promises';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -20,6 +22,7 @@ await copyFile(process.execPath, join(destination, 'pulse', nodeName));
 if (process.platform !== 'win32')
     await chmod(join(destination, 'pulse', nodeName), 0o755);
 const bundle = join(destination, 'pulse');
+const optimization = await optimizeRuntime(bundle);
 await copyFile(join(dirname(process.execPath), '../LICENSE'), join(bundle, 'LICENSES/Node.LICENSE')).catch(() => {});
 const require = createRequire(new URL('../../packages/server/package.json', import.meta.url));
 const pw = createRequire(require.resolve('@playwright/mcp'));
@@ -41,5 +44,7 @@ if (process.env.PULSE_DESKTOP_BUNDLE_BROWSER !== '0') {
         browserExecutable = relative(bundle, result.stdout.trim()).split(sep).join('/');
     }
 }
+optimization.nativePayloads = await verifyRuntimePlatform(bundle);
+await writeFile(join(destination, 'optimization.json'), JSON.stringify(optimization, null, 2) + '\n');
 await writeRuntimeManifest(bundle, version, process.platform, process.arch, browserExecutable ? { browserExecutable } : {});
 console.log('Desktop runtime prepared; execute pnpm desktop:app:pack or pnpm desktop:app:dist.');
