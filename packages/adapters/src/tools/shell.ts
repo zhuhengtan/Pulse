@@ -8,6 +8,7 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { SandboxManager, checkWindowsDependenciesAsync, resolveSrtWin, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import { resolveWindowsPackageManager } from './windows-package-manager.js'
+import { windowsShellEnvironment } from './windows-shell-environment.js'
 import { carveWindowsReadDenies, windowsReadDenyRoots, windowsToolchainWriteDenies } from './windows-read-policy.js'
 import { initializeShellSandbox } from './sandbox-initialization.js'
 import { installationDependencyRoots, workspaceUsesInstallationDependencies } from './installation-dependencies.js'
@@ -70,9 +71,6 @@ $psi.RedirectStandardError = $true
 $psi.RedirectStandardInput = $true
 $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
 $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
-foreach ($entry in $spec.environment.PSObject.Properties) {
-  $psi.EnvironmentVariables[[string]$entry.Name] = [string]$entry.Value
-}
 $child = [System.Diagnostics.Process]::new()
 $child.StartInfo = $psi
 try { if (-not $child.Start()) { exit 127 } }
@@ -95,16 +93,18 @@ exit $child.ExitCode
 `.trim()
 
 /** Build the command text expected by srt without interpreting model argv as shell syntax. */
-export function encodeSandboxCommand(command: string, args: string[], platform: NodeJS.Platform = process.platform, environment: Record<string, string | undefined> = {}): string {
+export function encodeSandboxCommand(command: string, args: string[], platform: NodeJS.Platform = process.platform): string {
   if ([command, ...args].some((value) => value.includes('\0'))) throw shellError('INVALID_SHELL_ARGUMENT')
   if (platform === 'win32') {
     // The only bytes placed in cmd.exe's command string are fixed tokens and
     // base64. PowerShell decodes JSON and ProcessStartInfo.Arguments uses a
     // Windows CRT-compatible encoder, preserving argv without a shell parse.
-    const payload = Buffer.from(JSON.stringify({ command, arguments: args.map(quoteWindowsArgument).join(' '), environment }), 'utf8').toString('base64')
+    const payload = Buffer.from(JSON.stringify({ command, arguments: args.map(quoteWindowsArgument).join(' ') }), 'utf8').toString('base64')
     const encoded = Buffer.from(powershellArgvRunner.replace('__PULSE_ARGV_JSON__', payload), 'utf16le').toString('base64')
     const commandText = `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${encoded}`
-    if (commandText.length > 24_000) throw shellError('INVALID_SHELL_ARGUMENTS_TOO_LARGE')
+    // SRT's default inner shell is cmd.exe, whose command text limit is 8,191
+    // characters; leave headroom for its fixed invocation/outer quotes.
+    if (commandText.length > 8_000) throw shellError('INVALID_SHELL_ARGUMENTS_TOO_LARGE')
     return commandText
   }
   return `exec ${[command, ...args].map(quotePosix).join(' ')}`
@@ -568,19 +568,17 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       setupStage = 'initialize'
       await initializeShellSandbox(policy, process.platform, options.signal)
       checkpoint('initialized')
-      // Windows SRT re-logon discards the broker's environment. Apply only our
-      // deliberate execution overrides to the final child, retaining SRT's
-      // generated proxy/CA settings and isolated user profile/temp directories.
-      const commandText = encodeSandboxCommand(executable, executableArgs, process.platform, executionEnv)
+      const commandText = encodeSandboxCommand(executable, executableArgs)
       setupStage = 'wrap'
       const descriptor = await SandboxManager.wrapWithSandboxArgv(commandText, undefined, undefined, options.signal, cwd, { commandId: invocationId, commandText: 'shell.exec' })
+      const sandboxArgv = process.platform === 'win32' ? windowsShellEnvironment(descriptor.argv, executionEnv) : descriptor.argv
       checkpoint('wrapped')
       if (options.signal?.aborted) {
         SandboxManager.cleanupAfterCommand()
         await SandboxManager.reset()
         return { code: null, stdout: '', stderr: '', truncated: false, timedOut: false, aborted: true }
       }
-      child = spawn(descriptor.argv[0]!, descriptor.argv.slice(1), {
+      child = spawn(sandboxArgv[0]!, sandboxArgv.slice(1), {
         cwd,
         env: { ...baseEnv, ...shellEnvironment(descriptor.env), ...executionEnv },
         shell: false,
