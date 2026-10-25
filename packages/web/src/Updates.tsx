@@ -3,7 +3,7 @@ import './updates.css'
 import { Button, Card, Switch, Tag } from 'antd'
 import { apiJson, jsonRequest, type PulseWebTransport } from './transport.js'
 
-interface UpdateStatus {
+export interface UpdateStatus {
   frontend: string; frontendVersion?: string; enabled?: boolean; trusted?: boolean; autoDownload?: boolean;
   running?: { backend: string; shell?: string }; active?: Record<string, { version: string }>;
   previous?: Record<string, { version: string }>; staged?: Record<string, { version: string }>;
@@ -11,11 +11,13 @@ interface UpdateStatus {
   lastFailure?: { version: string; code: string; at: string };
   serviceOffline?: boolean;
   progress?: { received: number; total: number };
-  available?: Array<{ component: string; version: string; notes: string; downloadUrl: string }>
+  modules?: Array<{ name: string; title: string; version?: string }>;
+  environment?: { node: string; chromium?: number };
+  available?: Array<{ component: string; version: string; notes: string; downloadUrl: string; requires?: { backend?: string; shell?: string; chromium?: number } }>
 }
 const phases: Record<string, string> = { idle: '已就绪', checking: '检查中', downloading: '下载中', ready: '等待应用', waiting: '等待后台空闲', applying: '正在应用', failed: '更新未完成' }
 const reasons: Record<string, string> = { TASKS_OR_MESSAGES_ACTIVE: '任务或消息尚未处理完', DATA_REQUESTS_ACTIVE: '正在处理数据请求', TERMINAL_ACTIVE: '终端仍在运行', AUTOMATION_ACTIVE: '浏览器或自动化会话仍在使用', UPDATE_OTHER_DATA_CLIENTS: '其他 CLI 或服务正在使用数据', MANAGED_SERVICE_REQUIRED: '请从托管启动器重启一次后台', SHELL_REQUIRED: '需要更新桌面客户端', CHROMIUM_REQUIRED: '需要更新桌面客户端的浏览器内核', MANUAL_DATA_MIGRATION_REQUIRED: '需要手动维护升级' }
-function useUpdateStatus(transport: PulseWebTransport, enabled = true) {
+export function useUpdateStatus(transport: PulseWebTransport, enabled = true) {
   const [status, setStatus] = useState<UpdateStatus>(), [error, setError] = useState('')
   useEffect(() => {
     if (!enabled) return

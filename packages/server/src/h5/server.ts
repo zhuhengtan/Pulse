@@ -309,6 +309,7 @@ export class H5Server {
     for (const candidate of [...(process.env.PULSE_BOOTSTRAP_RUNTIME ? [join(process.env.PULSE_BOOTSTRAP_RUNTIME, 'app/node_modules/@hunterzhu/pulse-server/dist/web')] : []), ...webDistCandidates]) {
       if (await access(resolve(candidate, 'index.html')).then(() => true, () => false)) { this.webDistDirectory = candidate; break }
     }
+    if (this.webDistDirectory) this.updates.options.frontendDirectory = this.webDistDirectory
     const server = createServer((req, res) => {
       this.handleRequest(req, res).catch((err) => {
         const message = err instanceof Error ? err.message : String(err)

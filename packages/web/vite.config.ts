@@ -1,12 +1,18 @@
 import { defineConfig } from 'vite'
 import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
 
 const pulseH5Target = process.env.PULSE_H5_TARGET ?? 'http://127.0.0.1:7333'
+const { version } = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string }
 
 export default defineConfig({
   base: './',
   plugins: [{
     name: 'pulse-development-info',
+    transformIndexHtml() { return [{ tag: 'meta', attrs: { name: 'pulse-frontend-version', content: version }, injectTo: 'head' }] },
+    generateBundle() {
+      this.emitFile({ type: 'asset', fileName: 'version.json', source: JSON.stringify({ version }) })
+    },
     configureServer(server) {
       server.middlewares.use((request, response, next) => {
         if (request.url !== '/__pulse_dev') { next(); return }

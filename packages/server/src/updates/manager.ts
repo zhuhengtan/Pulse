@@ -7,6 +7,7 @@ import { componentSchema, compatible, compareVersion, indexSchema, releaseId, ty
 import { assertUpdateUrl, fetchBytes, readJson, sha256, signedValue, trustedKeys, verifyFiles } from './security.js'
 import { atomicJson, atomicWrite, readState, scopeId, statePath, updateRoot, withUpdateLock } from './store.js'
 import { downloadArtifact, extractArtifact } from './archive.js'
+import { backendModuleVersions, bundledFrontendVersion } from './versions.js'
 
 export interface UpdateOptions {
   root?: string; dataDir: string; backendVersion: string; runtimeDirectory?: string; frontendDirectory?: string;
@@ -23,6 +24,7 @@ export class UpdateManager {
   private verifiedFrontends = new Set<string>()
   private registeredShell: string | undefined
   private shellRegistration: Promise<void> | undefined
+  private moduleVersions: ReturnType<typeof backendModuleVersions> | undefined
   constructor(readonly options: UpdateOptions) { this.root = resolve(options.root ?? updateRoot()) }
   private keys(): Record<string, string> { return this.options.keys ?? trustedKeys }
   context(backend = this.options.backendVersion, remembered?: UpdateState['shell']) {
@@ -39,11 +41,13 @@ export class UpdateManager {
   async status(local = true) {
     const state = await readState(this.root, this.options.dataDir)
     const frontend = state.active.frontend
-    const publicState = { frontend: frontend ? releaseId(frontend.manifest) : 'bundled', frontendVersion: frontend?.manifest.version, protocols: { http: 1, events: 1 } }
+    const publicState = { frontend: frontend ? releaseId(frontend.manifest) : 'bundled', frontendVersion: frontend?.manifest.version ?? await bundledFrontendVersion(this.options.frontendDirectory), protocols: { http: 1, events: 1 } }
     if (!local) return publicState
     return { ...state, ...publicState, progress: this.downloadProgress ?? state.progress,
       lastBackend: state.lastBackend ? { version: state.lastBackend.manifest.version } : undefined,
       running: { backend: this.options.backendVersion, shell: this.options.shellVersion ?? state.shell?.version, runtimeDirectory: this.options.runtimeDirectory },
+      modules: await (this.moduleVersions ??= backendModuleVersions()),
+      environment: { node: process.versions.node, chromium: this.options.chromium ?? state.shell?.chromium },
       enabled: !this.options.development, trusted: Object.keys(this.keys()).length > 0,
       // Paths, envelopes and key material are not needed in the management UI.
       active: this.summary(state.active), previous: state.previous ? this.summary(state.previous) : undefined,

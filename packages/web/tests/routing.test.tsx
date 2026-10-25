@@ -195,6 +195,19 @@ describe('explicit URL navigation', () => {
     expect(view.calls.some(call => call.method === 'PUT')).toBe(false)
   })
 
+  it('opens component versions and navigates to software updates without a missing route', async () => {
+    const fixture = routingFixture(), request = fixture.transport.request
+    fixture.transport.request = async (path, init) => path === '/api/updates'
+      ? Response.json({ frontend: 'bundled', running: { backend: '0.8.0' }, modules: [{ title: 'Data', name: '@hunterzhu/pulse-data', version: '0.8.0' }] })
+      : request(path, init)
+    const view = show('/settings/versions', fixture)
+    await screen.findByText('@hunterzhu/pulse-data')
+    expect(screen.queryByText('页面不存在')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '前往软件更新' }))
+    await waitFor(() => expect(address(view.router)).toBe('/settings/updates'))
+    await screen.findByRole('button', { name: '检查更新', exact: true })
+  })
+
   it('blocks browser Back and page close for invalid JSON, preserving URL and text on cancel', async () => {
     const view = show('/chat'); await screen.findByText('我们要做什么？')
     fireEvent.click(screen.getByRole('button', { name: '设置', exact: true }))

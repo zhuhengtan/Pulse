@@ -17,6 +17,19 @@ async function setup() {
   return { ...f, manager }
 }
 describe('signed independent updates', () => {
+  it('reports actual backend module metadata and the bundled frontend version', async () => {
+    const f = await setup(), directory = join(f.root, 'bundled-web')
+    await mkdir(directory); await writeFile(join(directory, 'version.json'), JSON.stringify({ version: '0.8.1' }))
+    f.manager.options.frontendDirectory = directory
+    const status = await f.manager.status()
+    expect(status.frontendVersion).toBe('0.8.1')
+    expect(status.modules?.map(module => module.title)).toEqual(['Server', 'CLI', 'Runtime', 'Data', 'Adapters', 'Tool SDK'])
+    for (const module of status.modules ?? []) expect(module.version).toMatch(/^\d+\.\d+\.\d+$/)
+    expect(status.environment?.node).toBe(process.versions.node)
+    const paired = await f.manager.status(false)
+    expect(paired).not.toHaveProperty('modules')
+    expect(paired).not.toHaveProperty('environment')
+  })
   it('rejects forged signatures, unknown keys and escaping paths', async () => {
     const f = await setup(), manifest = await f.add()
     const envelope = f.signed(manifest)
