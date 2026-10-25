@@ -23,15 +23,15 @@ export function inside(root: string, name: string): string {
 export async function sha256(path: string): Promise<string> {
   const hash = createHash('sha256'); for await (const chunk of createReadStream(path)) hash.update(chunk); return hash.digest('hex')
 }
+export async function verifyListedFile(root: string, name: string, expected: ComponentManifest['files'][string]): Promise<void> {
+  const path = inside(root, name), info = await lstat(path), rel = relative(await realpath(root), await realpath(path))
+  if (rel === '..' || rel.startsWith('..' + sep)) throw new Error('UPDATE_PATH_INVALID')
+  if ('link' in expected) {
+    if (!info.isSymbolicLink() || await readlink(path) !== expected.link) throw new Error('UPDATE_FILE_INVALID')
+  } else if (!info.isFile() || info.isSymbolicLink() || info.size !== expected.bytes || await sha256(path) !== expected.sha256) throw new Error('UPDATE_FILE_INVALID')
+}
 export async function verifyFiles(root: string, manifest: ComponentManifest): Promise<void> {
-  const base = await realpath(root)
-  for (const [name, expected] of Object.entries(manifest.files)) {
-    const path = inside(root, name), info = await lstat(path), rel = relative(base, await realpath(path))
-    if (rel === '..' || rel.startsWith('..' + sep)) throw new Error('UPDATE_PATH_INVALID')
-    if ('link' in expected) {
-      if (!info.isSymbolicLink() || await readlink(path) !== expected.link) throw new Error('UPDATE_FILE_INVALID')
-    } else if (!info.isFile() || info.isSymbolicLink() || info.size !== expected.bytes || await sha256(path) !== expected.sha256) throw new Error('UPDATE_FILE_INVALID')
-  }
+  for (const [name, expected] of Object.entries(manifest.files)) await verifyListedFile(root, name, expected)
   const required = manifest.component === 'backend' ? [process.platform === 'win32' ? 'node.exe' : 'node', 'app/node_modules/@hunterzhu/pulse-cli/dist/bin.js', 'app/node_modules/@hunterzhu/pulse-server/dist/updates/coordinator.js', 'app/node_modules/@hunterzhu/pulse-server/dist/updates/reader.js'] : manifest.component === 'frontend' ? ['index.html'] : []
   if (required.some(name => !manifest.files[name])) throw new Error('UPDATE_COMPONENT_INCOMPLETE')
 }

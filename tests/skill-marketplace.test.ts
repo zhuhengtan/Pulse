@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, readdir } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, readdir, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
@@ -131,6 +131,19 @@ describe('skill store invariants', () => {
     expect(await pack.discoverSkills!({ skills: [] })).toEqual([])
     expect(await pack.hasSkill!('demo')).toBe(true)
     expect(await pack.hasSkill!('missing')).toBe(false)
+  })
+  it('reclaims a stale skill lock that has no live owner', async () => {
+    const lock = join(skillRoot(), '.store-lock')
+    await mkdir(lock, { recursive: true })
+    const stale = new Date(Date.now() - 60_000)
+    await utimes(lock, stale, stale)
+    await publishSkill(snapshot(files()))
+    expect(await readdir(skillRoot())).toEqual(['demo'])
+    await rm(join(skillRoot(), 'demo'), { recursive: true })
+    await mkdir(lock)
+    await writeFile(join(lock, 'owner'), '2147483646')
+    await publishSkill(snapshot(files()))
+    expect(await readdir(skillRoot())).toEqual(['demo'])
   })
   it('protects locally modified files during update and removal', async () => {
     await publishSkill(snapshot(files()))

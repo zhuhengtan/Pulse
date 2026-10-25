@@ -1,4 +1,4 @@
-import { selectedFrontend } from './update-loader.mjs';
+import { selectedFrontend, verifySelectedFile } from './update-loader.mjs';
 import { controlUpdate } from './update-control.mjs';
 import { NativeBrowser } from './native-browser.mjs';
 import { DesktopInstallation } from './installation.mjs';
@@ -239,13 +239,39 @@ else {
             }
             const versioned = url.pathname.match(/^\/_pulse\/([a-zA-Z0-9.-]+)\/(assets\/.+)$/);
             const page = !url.pathname.startsWith('/assets/') && !versioned;
-            const selected = versioned?.[1] === 'bundled' ? undefined : await selectedFrontend(installation.root, directory, app.getVersion(), Number(process.versions.chrome.split('.')[0]), versioned?.[1]);
-            const web = selected?.directory ?? (app.isPackaged ? join(process.resourcesPath, 'web') : fileURLToPath(new URL('../../web/dist', import.meta.url)));
+            const requestedId = versioned?.[1];
+            const bundledWeb = app.isPackaged ? join(process.resourcesPath, 'web') : fileURLToPath(new URL('../../web/dist', import.meta.url));
+            let selected;
+            if (requestedId !== 'bundled') {
+                try { selected = await selectedFrontend(installation.root, directory, app.getVersion(), Number(process.versions.chrome.split('.')[0]), requestedId); }
+                catch { if (requestedId) return new Response('Frontend unavailable', { status: 404 }); }
+            }
+            let web = selected?.directory ?? bundledWeb;
             const name = page ? 'index.html' : versioned ? decodeURIComponent(versioned[2]) : decodeURIComponent(url.pathname.slice(1));
+            if (selected) {
+                try {
+                    for (const file of page ? Object.keys(selected.files) : [name]) await verifySelectedFile(selected.directory, selected.files, file);
+                }
+                catch {
+                    if (requestedId) return new Response('Frontend unavailable', { status: 404 });
+                    selected = undefined;
+                    web = bundledWeb;
+                }
+            }
             const resource = resolve(web, name);
             if (!resource.startsWith(web + (process.platform === 'win32' ? '\\' : '/'))) return new Response('Forbidden', { status: 403 });
             let response = await net.fetch(pathToFileURL(resource).href);
-            if (page) { const prefix = '/_pulse/' + (selected?.id ?? 'bundled') + '/'; const html = (await response.text()).replace('<head>', `<head><base href="${prefix}"><meta name="pulse-frontend" content="${selected?.id ?? 'bundled'}">`).replace(/(["'])\/assets\//g, `$1${prefix}assets/`); response = new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } }); }
+            if (page) {
+                const id = selected?.id ?? 'bundled';
+                const prefix = `/_pulse/${id}/`;
+                let version = selected?.version;
+                if (!version) { try { version = JSON.parse(await readFile(join(web, 'version.json'), 'utf8')).version; } catch { version = undefined; } }
+                const safeVersion = /^\d+\.\d+\.\d+$/.test(String(version ?? '')) ? version : undefined;
+                const stripped = (await response.text()).replace(/<meta\s+name="pulse-frontend-version"\s+content="[^"]*"\s*\/?>/gi, '');
+                const versionTag = safeVersion ? `<meta name="pulse-frontend-version" content="${safeVersion}">` : '';
+                const html = stripped.replace('<head>', `<head><base href="${prefix}">${versionTag}<meta name="pulse-frontend" content="${id}">`).replace(/(["'])\/assets\//g, `$1${prefix}assets/`);
+                response = new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+            }
             const headers = new Headers(response.headers);
             headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self' http://127.0.0.1:* http://localhost:*; object-src 'none'");
             return new Response(response.body, { status: response.status, headers });

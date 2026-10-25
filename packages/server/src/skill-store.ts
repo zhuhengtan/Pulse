@@ -103,14 +103,25 @@ export async function withSkillLock<T>(work: () => Promise<T>): Promise<T> {
   const lock = join(root, '.store-lock')
   const deadline = Date.now() + 10_000
   for (;;) {
-    try { await mkdir(lock); await writeFile(join(lock, 'owner'), String(process.pid), { flag: 'wx' }); break } catch (error) {
+    try { await mkdir(lock) } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      const owner = Number(await readFile(join(lock, 'owner'), 'utf8').catch(() => '0'))
-      let alive = true
-      if (owner > 0) { try { process.kill(owner, 0) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') alive = false } }
-      if (!alive) { await rm(lock, { recursive: true, force: true }); continue }
-      if (Date.now() >= deadline) throw new Error('SKILL_STORE_BUSY')
-      await new Promise(resolveWait => setTimeout(resolveWait, 25))
+      const owner = Number(await readFile(join(lock, 'owner'), 'utf8').catch(() => ''))
+      let alive = false
+      if (owner > 0) { try { process.kill(owner, 0); alive = true } catch (error) { alive = (error as NodeJS.ErrnoException).code !== 'ESRCH' } }
+      const info = await lstat(lock).catch(() => undefined)
+      const freshUnowned = !(owner > 0) && info !== undefined && Date.now() - info.mtimeMs < 5_000
+      if (alive || !info || freshUnowned) {
+        if (Date.now() >= deadline) throw new Error('SKILL_STORE_BUSY')
+        await new Promise(resolveWait => setTimeout(resolveWait, 25))
+        continue
+      }
+      await rm(lock, { recursive: true, force: true })
+      continue
+    }
+    try { await writeFile(join(lock, 'owner'), String(process.pid), { flag: 'wx' }); break } catch (error) {
+      await rm(lock, { recursive: true, force: true })
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue
+      throw error
     }
   }
   try { return await work() } finally { await rm(lock, { recursive: true, force: true }) }

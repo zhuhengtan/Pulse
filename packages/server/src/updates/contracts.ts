@@ -50,8 +50,8 @@ export function compatible(m: ComponentMetadata, context: { backend: string; she
   for (const key of ['http', 'events', 'bridge', 'nativeBrowser', 'reader'] as const) if (m.requires[key] !== protocols[key]) reasons.push(`${key.toUpperCase()}_PROTOCOL_REQUIRED`)
   if (m.platform !== 'any' && m.platform !== process.platform || m.arch !== 'any' && m.arch !== process.arch) reasons.push('PLATFORM_MISMATCH')
   if (m.requires.backend && compareVersion(context.backend, m.requires.backend) < 0) reasons.push('BACKEND_REQUIRED')
-  if (context.shell && m.requires.shell && compareVersion(context.shell, m.requires.shell) < 0) reasons.push('SHELL_REQUIRED')
-  if (context.chromium !== undefined && m.requires.chromium && context.chromium < m.requires.chromium) reasons.push('CHROMIUM_REQUIRED')
+  if (m.requires.shell && (!context.shell || compareVersion(context.shell, m.requires.shell) < 0)) reasons.push('SHELL_REQUIRED')
+  if (m.requires.chromium && (context.chromium === undefined || context.chromium < m.requires.chromium)) reasons.push('CHROMIUM_REQUIRED')
   if (context.data < m.data.min || context.data > m.data.max || m.data.writes !== context.data || !m.data.reversible) reasons.push('MANUAL_DATA_MIGRATION_REQUIRED')
   return reasons
 }

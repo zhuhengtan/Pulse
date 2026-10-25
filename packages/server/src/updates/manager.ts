@@ -21,7 +21,7 @@ export class UpdateManager {
   private checking: Promise<void> | undefined
   private downloading: Promise<void> | undefined
   private downloadProgress: UpdateState['progress']
-  private verifiedFrontends = new Set<string>()
+  private verifiedFrontends = new Map<string, ComponentManifest['files']>()
   private registeredShell: string | undefined
   private shellRegistration: Promise<void> | undefined
   private moduleVersions: ReturnType<typeof backendModuleVersions> | undefined
@@ -174,14 +174,15 @@ export class UpdateManager {
     })
     return applied
   }
-  async verifyInstalled(item: InstalledComponent): Promise<void> {
+  async verifyInstalled(item: InstalledComponent): Promise<ComponentManifest> {
     if (resolve(item.directory) !== join(this.root, 'updates', 'components', releaseId(item.manifest))) throw new Error('UPDATE_SELECTION_INVALID')
     const manifest = signedValue(await readJson(join(item.directory, 'component.json'), undefined), componentSchema, this.keys()).value
     const { files: _files, ...metadata } = manifest
     if (JSON.stringify(metadata) !== JSON.stringify(item.manifest)) throw new Error('UPDATE_SELECTION_INVALID')
     await verifyFiles(item.directory, manifest)
+    return manifest
   }
-  async frontend(id?: string): Promise<{ directory: string; id: string } | undefined> {
+  async frontend(id?: string): Promise<{ directory: string; id: string; version: string; files: ComponentManifest['files'] } | undefined> {
     const state = await readState(this.root, this.options.dataDir)
     let item = state.active.frontend
     if (id) {
@@ -195,8 +196,9 @@ export class UpdateManager {
       item = { directory, manifest: metadata }
     }
     if (!item) return undefined
-    if (!this.verifiedFrontends.has(item.directory)) { await this.verifyInstalled(item); this.verifiedFrontends.add(item.directory) }
-    return { directory: item.directory, id: releaseId(item.manifest) }
+    let files = this.verifiedFrontends.get(item.directory)
+    if (!files) { files = (await this.verifyInstalled(item)).files; this.verifiedFrontends.set(item.directory, files) }
+    return { directory: item.directory, id: releaseId(item.manifest), version: item.manifest.version, files }
   }
   start(onPending: () => Promise<void>): void {
     if (this.options.development && !this.options.indexUrl) return
