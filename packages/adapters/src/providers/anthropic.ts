@@ -47,6 +47,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           if (data.usage && typeof data.usage === 'object') usage = { ...usage, ...data.usage }
         }
       }
+      if (stopReason === undefined) throw providerResponseError('PROVIDER_STREAM_INCOMPLETE')
       const content = blocks.filter(Boolean).map((block) => {
         if (block.type === 'tool_use' && typeof block.inputJson === 'string') {
           try { return { ...block, input: JSON.parse(block.inputJson) as unknown } }

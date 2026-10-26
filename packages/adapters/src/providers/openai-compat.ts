@@ -1,5 +1,5 @@
 import type { JsonValue, LLMRequestProjection, LLMResult } from '@hunterzhu/pulse-runtime'
-import { consumeProviderSse, normalizeOpenAIResponse, parseProviderJson, providerHttpErrorFromResponse, providerNetworkError } from './normalize.js'
+import { consumeProviderSse, normalizeOpenAIResponse, parseProviderJson, providerHttpErrorFromResponse, providerNetworkError, providerResponseError } from './normalize.js'
 import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
 import { adaptCanonicalRequest, DynamicCapabilityProbe, lowerProjectionToCanonical, parseOpenAISseEvents, resolveModelCapability, toOpenAIPayload } from './canonical/index.js'
 
@@ -61,7 +61,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         if (Array.isArray(delta?.tool_calls)) for (const call of delta.tool_calls) accumulateStreamToolCall(toolCalls, call)
         if (event.data.usage !== undefined) usage = event.data.usage
       }
-      return normalizeOpenAIResponse({ choices: [{ message: { content: content.join('') || null, ...(reasoningContent.length ? { reasoning_content: reasoningContent.join('') } : {}), ...(refusals.length ? { refusal: refusals.join('') } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => ({ id: call.id, function: { name: call.name, arguments: call.arguments } })) } : {}) }, finish_reason: finishReason ?? 'stop' }], ...(usage === undefined ? {} : { usage }) }, toolNameAliases, this.config.provider)
+      if (finishReason === undefined) throw providerResponseError('PROVIDER_STREAM_INCOMPLETE')
+      return normalizeOpenAIResponse({ choices: [{ message: { content: content.join('') || null, ...(reasoningContent.length ? { reasoning_content: reasoningContent.join('') } : {}), ...(refusals.length ? { refusal: refusals.join('') } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => ({ id: call.id, function: { name: call.name, arguments: call.arguments } })) } : {}) }, finish_reason: finishReason }], ...(usage === undefined ? {} : { usage }) }, toolNameAliases, this.config.provider)
     } catch (cause) {
       if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
       if (sentReasoning && this.probe.reasoningParameterRejected(cause)) {

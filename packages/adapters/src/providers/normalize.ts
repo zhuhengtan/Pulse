@@ -91,6 +91,7 @@ export async function consumeProviderSse(response: Response, onEvent?: (event: P
     dataLines = []
     const data = raw === '[DONE]' ? raw : (() => { try { return JSON.parse(raw) } catch { throw providerResponseError('PROVIDER_STREAM_INVALID_JSON') } })()
     const event = { ...(eventName === undefined ? {} : { event: eventName }), data }
+    if (eventName === 'error' || (data && typeof data === 'object' && (data.error || data.type === 'error'))) throw providerResponseError('PROVIDER_STREAM_ERROR')
     events.push(event)
     onEvent?.(event)
     eventName = undefined
@@ -109,14 +110,20 @@ export async function consumeProviderSse(response: Response, onEvent?: (event: P
       newline = buffer.indexOf('\n')
     }
   }
-  while (true) {
-    const chunk = await reader.read()
-    if (chunk.done) break
-    consumeLines(decoder.decode(chunk.value, { stream: true }))
+  let ended = false
+  try {
+    while (true) {
+      const chunk = await reader.read()
+      if (chunk.done) { ended = true; break }
+      consumeLines(decoder.decode(chunk.value, { stream: true }))
+    }
+    consumeLines(decoder.decode())
+    if (buffer.length > 0 || dataLines.length > 0) flush()
+    return events
+  } finally {
+    if (!ended) await reader.cancel?.().catch(() => undefined)
+    reader.releaseLock?.()
   }
-  consumeLines(decoder.decode())
-  if (buffer.length > 0 || dataLines.length > 0) flush()
-  return events
 }
 
 export function normalizeOpenAIResponse(response: any, toolNameAliases?: ReadonlyMap<string, string>, provider = 'openai'): LLMResult {

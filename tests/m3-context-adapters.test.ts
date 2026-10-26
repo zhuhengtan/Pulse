@@ -372,6 +372,22 @@ describe('M1-3 context, models and adapters', () => {
     vi.unstubAllGlobals()
   })
 
+  it.each(['openai', 'anthropic'] as const)('rejects %s stream errors and incomplete completions', async (provider) => {
+    const request = { blocks: [] } as any
+    const adapter = provider === 'openai'
+      ? new OpenAICompatibleAdapter('stream-errors', { provider })
+      : new AnthropicAdapter('stream-errors', { provider })
+    const partial = provider === 'openai'
+      ? 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+      : 'event: content_block_delta\ndata: {"index":0,"delta":{"type":"text_delta","text":"partial"}}\n\n'
+    try {
+      for (const ending of ['', 'event: error\ndata: {"error":{"type":"overloaded_error"}}\n\n']) {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(partial + ending, { headers: { 'content-type': 'text/event-stream' } })))
+        await expect(adapter.executeAttempt({ request, signal: new AbortController().signal, onObservation: () => undefined })).rejects.toMatchObject({ code: 'PROVIDER_RESPONSE_INVALID', retryable: true })
+      }
+    } finally { vi.unstubAllGlobals() }
+  })
+
   it('delivers streamed text before the response body closes', async () => {
     let controller!: ReadableStreamDefaultController<Uint8Array>
     const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value } })
