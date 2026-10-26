@@ -1,7 +1,7 @@
-import { DesktopSetupBoundary } from './DesktopSetup.js'
 import React from 'react'
 import { createRoot } from 'react-dom/client'
-import { PulseApp } from './PulseApp.js'
+import { QuestionDialog } from './QuestionDialog.js'
+const NormalPulseRoot = React.lazy(() => import('./NormalPulseRoot.js'))
 import { PulseDesignSystem } from './PulseDesignSystem.js'
 import { createBrowserRouter, RouterProvider } from 'react-router'
 import './style.css'
@@ -20,5 +20,5 @@ try {
 
 const root = document.getElementById('root')
 if (!root) throw new Error('PULSE_WEB_ROOT_NOT_FOUND')
-const router = createBrowserRouter([{ path: '*', element: <DesktopSetupBoundary><PulseApp /></DesktopSetupBoundary> }])
+const router = createBrowserRouter([{ path: '*', element: window.location.pathname === '/question' ? <QuestionDialog /> : <React.Suspense fallback={<p role="status">正在打开 Pulse…</p>}><NormalPulseRoot /></React.Suspense> }])
 createRoot(root).render(<React.StrictMode><PulseDesignSystem><RouterProvider router={router} /></PulseDesignSystem></React.StrictMode>)

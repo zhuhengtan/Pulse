@@ -50,7 +50,10 @@
       ],
       "category": "public.app-category.productivity",
       "icon": "build/icons/icon.icns",
-      "artifactName": "pulse-macos-${arch}.${ext}"
+      "artifactName": "pulse-macos-${arch}.${ext}",
+      "extendInfo": {
+        "NSUserNotificationAlertStyle": "alert"
+      }
     },
     "win": {
       "target": [

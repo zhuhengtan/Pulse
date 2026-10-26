@@ -1,19 +1,25 @@
-import { observeServiceStartup } from './background-service.mjs';
+import { createTrayIcon } from './tray-icon.mjs';
+import { shouldRevealMain } from './desktop-activation.mjs';
+import { QuestionWindows } from './question-windows.mjs';
+import { TaskNotifications, readNotificationLaunch, matchTaskNotice } from './task-notifications.mjs';
+import { isOwnedService, restoreOwnedService, cliShellCommand, cliWindowsScript, observeServiceStartup, serviceMonitorAction } from './background-service.mjs';
 import { selectedFrontend, verifySelectedFile } from './update-loader.mjs';
 import { controlUpdate } from './update-control.mjs';
 import { NativeBrowser } from './native-browser.mjs';
 import { DesktopInstallation } from './installation.mjs';
 import { deviceSessionPartition, restoreDeviceCookie, saveDeviceCookie } from './device-session.mjs';
-import { app, BrowserWindow, ipcMain, protocol, net, Menu, dialog, shell, session as electronSession } from 'electron';
+import { app, BrowserWindow, ipcMain, protocol, net, Menu, dialog, shell, session as electronSession, Tray, nativeImage, Notification } from 'electron';
 import { spawn } from 'node:child_process';
-import { readFile, mkdir, open, rm } from 'node:fs/promises';
+import { readFile, mkdir, open, rm, writeFile, rename } from 'node:fs/promises';
 import { join, resolve, dirname, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import WebSocket from 'ws';
 import { desktopDataDirectory, saveDesktopDataDirectory, assertDesktopDataReady, desktopServiceMessage } from './data-directory.mjs';
 import { desktopPageUrl, isDesktopPageUrl } from './dev-url.mjs';
+let notificationLaunch;
+app.on('ready', (_event, info) => { notificationLaunch = readNotificationLaunch(info); });
 const pageUrl = desktopPageUrl(app.isPackaged, process.env.PULSE_DESKTOP_DEV_URL);
 const appIcon = fileURLToPath(new URL('./assets/icon.png', import.meta.url));
 if (process.env.PULSE_DESKTOP_USER_DATA)
@@ -23,14 +29,18 @@ if (!app.requestSingleInstanceLock())
     app.quit();
 else {
     let directory;
-    let window, reader, installation, setupPending, backendInfo, cookie = '', apiSession, base = '', serviceError = '', ownedPid;
+    let window, reader, installation, setupPending, backendInfo, cookie = '', apiSession, base = '', serviceError = '', ownedPid, serviceStoppedByUser = false;
     const pendingReads = new Map(), pendingChat = new Map(), subscriptions = new Map(), nativeSockets = new Map();
     const send = (channel, value) => { if (window && !window.isDestroyed())
         window.webContents.send(channel, value); };
     const browser = new NativeBrowser({ window: () => window, notify: value => send('pulse:native-browser', value), protectedUrls: () => [pageUrl, ...(base ? [base] : []), 'http://127.0.0.1:7332'] });
-    let browserHost, browserRetry;
+    let browserHost, browserRetry, tray, notifications, questionWindows, trayBusy = false, lastTraySignature = '';
+    let showDesktop = () => {}, updateTray = () => {};
+    let appMenuReady = false, appPendingSignature = '', activationReady = false;
     let diagnostics, diagnosticLog;
     const diagnosticDirectory = () => join(app.getPath('userData'), 'logs');
+    const ownershipFile = () => join(app.getPath('userData'), `owned-service-${createHash('sha256').update(directory).digest('hex').slice(0, 24)}.json`);
+    const notificationFile = () => join(app.getPath('userData'), 'task-notifications.json');
     const browserRequests = new Map();
     function connectBrowserHost() {
         if (!base || app.isQuitting || browserHost?.readyState === WebSocket.OPEN || browserHost?.readyState === WebSocket.CONNECTING) return;
@@ -164,9 +174,19 @@ else {
         if (!info.ok) throw new Error('PULSE_SERVICE_AUTH_FAILED');
         const sessionInfo = await info.json();
         backendInfo = { connected: true, version: sessionInfo.serverVersion, pid: sessionInfo.serverPid, outdated: Boolean(installation.source && (sessionInfo.serverVersion !== installation.state.version || sessionInfo.runtimeId !== installation.state.runtimeId)) };
+        const descriptor = await readFile(join(directory, 'service.json'), 'utf8').then(JSON.parse).catch(() => undefined);
+        if (!ownedPid) ownedPid = restoreOwnedService(descriptor, await readFile(ownershipFile(), 'utf8').then(JSON.parse).catch(() => undefined), sessionInfo.serverPid, sessionInfo.serverInstanceId);
+        if (isOwnedService(descriptor, ownedPid, sessionInfo.serverPid) && descriptor.instanceId === sessionInfo.serverInstanceId) {
+            await mkdir(app.getPath('userData'), { recursive: true });
+            const temporary = ownershipFile() + '.tmp';
+            await writeFile(temporary, JSON.stringify({ instanceId: descriptor.instanceId, launchedPid: ownedPid, pid: descriptor.pid }), { mode: 0o600 });
+            await rename(temporary, ownershipFile());
+        }
         await ensureReader();
         void connectChat().catch(() => { });
         connectBrowserHost();
+        await notifications?.sync().catch(() => undefined);
+        updateTray();
     }
     let readerRuntime;
     async function ensureReader() {
@@ -186,6 +206,7 @@ else {
     function setupSnapshot() { return { ...installation.snapshot(), dataDirectory: directory, service: { ...backendInfo, connected: Boolean(base), error: serviceError } }; }
     async function prepareDesktop(full = false) {
         if (setupPending) return setupPending;
+        serviceStoppedByUser = false;
         setupPending = (async () => {
             try {
                 await installation.prepare({ full });
@@ -223,6 +244,48 @@ else {
         app.relaunch();
         app.quit();
     }
+    async function stopOwnedService() {
+        const descriptor = await readFile(join(directory, 'service.json'), 'utf8').then(JSON.parse).catch(() => undefined);
+        if (!isOwnedService(descriptor, ownedPid, backendInfo?.pid)) {
+            await dialog.showMessageBox({ type: 'info', message: '此后台由其他入口启动，托盘不会停止它。请使用原入口停止服务。' }); return false;
+        }
+        const result = await dialog.showMessageBox({ type: 'question', message: '停止此托盘启动的后台服务？', detail: '执行中的任务会中断，数据保留。', buttons: ['保留运行', '停止服务'], defaultId: 0, cancelId: 0 });
+        if (result.response !== 1) return false;
+        // Invalidate in-flight probes before signalling. Join any setup that
+        // already started so it cannot launch a replacement after this stop.
+        serviceStoppedByUser = true;
+        await setupPending;
+        // Recheck after the dialog: the user may have restarted the service elsewhere.
+        const current = await readFile(join(directory, 'service.json'), 'utf8').then(JSON.parse).catch(() => undefined);
+        if (!isOwnedService(current, ownedPid, backendInfo?.pid) || current.port !== descriptor.port) throw new Error('SERVICE_IDENTITY_CHANGED');
+        const response = await http('/api/session');
+        if (!response.ok || (await response.json()).serverPid !== current.pid) throw new Error('SERVICE_IDENTITY_CHANGED');
+        process.kill(current.pid, 'SIGTERM');
+        let stopped = false;
+        for (let attempt = 0; attempt < 200; attempt++) {
+            try { process.kill(current.pid, 0); } catch (error) { if (error.code === 'ESRCH') { stopped = true; break; } throw error; }
+            await new Promise(resolveWait => setTimeout(resolveWait, 50));
+        }
+        if (!stopped) throw new Error('SERVICE_STOP_PENDING');
+        await rm(ownershipFile(), { force: true });
+        base = ''; backendInfo = undefined; ownedPid = undefined; serviceError = '后台服务已停止';
+        chat?.close(); browserHost?.close(); updateTray(); return true;
+    }
+    async function openCli() {
+        const command = cliShellCommand(installation.node, installation.entry, { PULSE_HOME: installation.root, PULSE_DATA_DIR: directory, ...(installation.state.configPath ? { PULSE_CONFIG: installation.state.configPath } : {}) });
+        if (process.platform === 'darwin') {
+            const child = spawn('/usr/bin/osascript', ['-e', `tell application "Terminal" to do script ${JSON.stringify(command)}`, '-e', 'tell application "Terminal" to activate']);
+            child.on('error', () => showDesktop('/settings/desktop'));
+        } else {
+            // A script opened by the OS retains an interactive terminal and shared data/config.
+            const path = join(app.getPath('temp'), `pulse-cli-${process.pid}.${process.platform === 'win32' ? 'cmd' : 'sh'}`);
+            const { writeFile } = await import('node:fs/promises');
+            const script = process.platform === 'win32' ? cliWindowsScript(installation.node, installation.entry, { PULSE_HOME: installation.root, PULSE_DATA_DIR: directory, ...(installation.state.configPath ? { PULSE_CONFIG: installation.state.configPath } : {}) }) : `#!/bin/sh\n${command}\n`;
+            await writeFile(path, script, { mode: 0o700 });
+            if (process.platform === 'win32') await shell.openPath(path);
+            else { const child = spawn('x-terminal-emulator', ['-e', 'sh', path]); child.on('error', () => showDesktop('/settings/desktop')); }
+        }
+    }
     function trusted(event) { if (event.sender !== window?.webContents || event.senderFrame !== window?.webContents.mainFrame || !isDesktopPageUrl(event.senderFrame?.url ?? '', pageUrl))
         throw new Error('IPC_SENDER_INVALID'); }
     app.whenReady().then(async () => {
@@ -250,7 +313,8 @@ else {
             }
             const versioned = url.pathname.match(/^\/_pulse\/([a-zA-Z0-9.-]+)\/(assets\/.+)$/);
             const page = !url.pathname.startsWith('/assets/') && !versioned;
-            const requestedId = versioned?.[1];
+            // A scoped question window must use the frontend shipped with this shell.
+            const requestedId = url.pathname === '/question' ? 'bundled' : versioned?.[1];
             const bundledWeb = app.isPackaged ? join(process.resourcesPath, 'web') : fileURLToPath(new URL('../../web/dist', import.meta.url));
             let selected;
             if (requestedId !== 'bundled') {
@@ -369,12 +433,7 @@ else {
             socket.send(value); });
         ipcMain.handle('pulse:socket-close', (event, id) => { trusted(event); nativeSockets.get(id)?.close(); nativeSockets.delete(id); });
         ipcMain.handle('pulse:service', event => { trusted(event); return { connected: Boolean(base), error: serviceError }; });
-        ipcMain.handle('pulse:stop-service', async (event) => { trusted(event); const confirmation = await dialog.showMessageBox(window, { type: 'question', message: '停止后台服务？正在执行的任务会中断。', buttons: ['保留运行', '停止服务'], defaultId: 0, cancelId: 0 }); if (confirmation.response === 1) {
-            const descriptor = await readFile(join(directory, 'service.json'), 'utf8').then(JSON.parse);
-            process.kill(descriptor.pid, 'SIGTERM');
-            base = '';
-            chat?.close();
-        } });
+        ipcMain.handle('pulse:stop-service', async event => { trusted(event); await stopOwnedService(); });
         ipcMain.handle('pulse:subscribe', async (event, kind, runId, after) => {
             trusted(event);
             if (!['chat', 'work'].includes(kind) || !/^run-[a-zA-Z0-9-]+$/.test(runId) || !Number.isFinite(after) || subscriptions.size >= 16)
@@ -428,8 +487,8 @@ else {
         });
         ipcMain.handle('pulse:unsubscribe', (event, id) => { trusted(event); const sub = subscriptions.get(id); sub?.controller.abort(); subscriptions.delete(id); if (sub?.kind === 'chat' && chat?.readyState === WebSocket.OPEN)
             chat.send(JSON.stringify({ type: 'unsubscribe', runId: sub.runId })); });
-        function createWindow() {
-            window = new BrowserWindow({ width: pageUrl.startsWith('http:') ? 1440 : 1200, height: pageUrl.startsWith('http:') ? 950 : 850, minWidth: 390, minHeight: 600, title: pageUrl.startsWith('http:') ? 'Pulse · 开发预览' : 'Pulse', icon: appIcon, webPreferences: { preload: fileURLToPath(new URL('./preload.cjs', import.meta.url)), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+        function createWindow(show = true) {
+            window = new BrowserWindow({ show, width: pageUrl.startsWith('http:') ? 1440 : 1200, height: pageUrl.startsWith('http:') ? 950 : 850, minWidth: 390, minHeight: 600, title: pageUrl.startsWith('http:') ? 'Pulse · 开发预览' : 'Pulse', icon: appIcon, webPreferences: { preload: fileURLToPath(new URL('./preload.cjs', import.meta.url)), contextIsolation: true, nodeIntegration: false, sandbox: true } });
             window.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//.test(url))
                 void shell.openExternal(url); return { action: 'deny' }; });
             window.webContents.on('did-start-loading', () => browser.hideAll());
@@ -437,36 +496,114 @@ else {
             window.on('resize', () => { for (const group of browser.groups.values()) browser.applyLayout(group); });
             window.webContents.on('will-navigate', (event, url) => { if (!isDesktopPageUrl(url, pageUrl))
                 event.preventDefault(); });
+            window.on('close', event => { if (!app.isQuitting && tray) { event.preventDefault(); browser.hideAll(); window.hide(); } });
             window.on('closed', () => { browser.closeAll(); window = undefined; for (const socket of nativeSockets.values())
                 socket.close(); nativeSockets.clear(); for (const sub of subscriptions.values())
                 sub.controller.abort(); subscriptions.clear(); });
             void window.loadURL(pageUrl);
         }
-        Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Pulse', submenu: [{ label: '检查更新…', click: () => { if (window) void window.loadURL(pageUrl.startsWith('http:') ? new URL('/settings/updates', pageUrl).href : 'pulse://app/settings/updates'); } }, { label: '环境检查与修复…', click: () => { if (window) void window.loadURL(pageUrl.startsWith('http:') ? new URL('/settings/desktop', pageUrl).href : 'pulse://app/settings/desktop'); } }, { label: '数据目录…', click: () => void chooseDataDirectory() }, { label: '后台服务状态', click: () => void dialog.showMessageBox(window, { message: base ? '后台服务运行中' : desktopServiceMessage(serviceError), detail: `数据目录：${directory}${base ? `\n服务地址：${base}` : ''}` }) }, { label: '停止后台服务…', click: async () => { const result = await dialog.showMessageBox(window, { message: '停止后台服务会中断执行中的任务。', buttons: ['取消', '停止'], defaultId: 0, cancelId: 0 }); if (result.response === 1 && base) {
-                            const descriptor = JSON.parse(await readFile(join(directory, 'service.json'), 'utf8'));
-                            process.kill(descriptor.pid, 'SIGTERM');
-                            base = '';
-                        } } }, { type: 'separator' }, { role: 'quit' }] }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }]));
-        createWindow();
-        void prepareDesktop();
+        showDesktop = (path) => {
+            if (!window || window.isDestroyed()) createWindow();
+            if (path) void window.loadURL(pageUrl.startsWith('http:') ? new URL(path, pageUrl).href : `pulse://app${path}`);
+            if (window.isMinimized()) window.restore(); window.show(); window.focus();
+        };
+        const json = async (path, init) => { const response = await http(path, init); if (!response.ok) throw new Error(`API_${response.status}`); return response.json(); };
+        const openFullNotice = item => showDesktop(`${item.surface === 'chat' ? '/chat' : '/work/' + encodeURIComponent(item.conversationId)}?notification=${encodeURIComponent(item.groupId ?? item.id)}`);
+        // Bundle configuration permits buttons; the OS still decides their visibility.
+        const plist = process.platform === 'darwin' ? await readFile(join(dirname(process.execPath), '../Info.plist'), 'utf8').catch(() => '') : '';
+        const allowChoiceActions = process.platform === 'darwin' && /<key>NSUserNotificationAlertStyle<\/key>\s*<string>alert<\/string>/.test(plist);
+        questionWindows = new QuestionWindows({ BrowserWindow, ipcMain, request: json, answer: (item, answers) => notifications.answer(item, answers), openFull: openFullNotice, pageUrl, isPageUrl: isDesktopPageUrl, icon: appIcon, preload: fileURLToPath(new URL('./question-preload.cjs', import.meta.url)) });
+        notifications = new TaskNotifications({ Notification, request: json, allowChoiceActions, open: item => item.kind === 'ask' ? questionWindows.open(item) : openFullNotice(item),
+            load: () => readFile(notificationFile(), 'utf8').then(JSON.parse).catch(() => []),
+            save: async ids => { const { writeFile, rename } = await import('node:fs/promises'); const temp = notificationFile() + '.tmp'; await mkdir(app.getPath('userData'), { recursive: true }); await writeFile(temp, JSON.stringify(ids), { mode: 0o600 }); await rename(temp, notificationFile()); }, changed: () => updateTray() });
+        const runTrayAction = action => { if (trayBusy) return; trayBusy = true; updateTray(); void Promise.resolve().then(action).catch(error => dialog.showMessageBox({ type: 'error', message: '操作未完成', detail: error.message })).finally(() => { trayBusy = false; lastTraySignature = ''; updateTray(); }); };
+        updateTray = () => {
+            if (!tray || tray.isDestroyed()) return;
+            const status = setupPending ? '正在连接后台…' : base ? '后台运行中' : serviceError || '后台未启动';
+            const signature = JSON.stringify([status, trayBusy, ownedPid, window?.isVisible(), notifications.disabled, [...notifications.pending.keys()], notifications.recent.map(item => item.id)]);
+            if (signature === lastTraySignature) return;
+            lastTraySignature = signature;
+            tray.setToolTip(`Pulse · ${status}`);
+            const pendingSignature = JSON.stringify([...notifications.pending.keys()]);
+            if (appMenuReady && pendingSignature !== appPendingSignature) { appPendingSignature = pendingSignature; Menu.setApplicationMenu(buildAppMenu()); }
+            tray.setContextMenu(Menu.buildFromTemplate([
+                { label: `Pulse · ${status}`, enabled: false },
+                { label: '打开桌面端', click: () => showDesktop() },
+                { label: '打开 H5', enabled: Boolean(base), click: () => void shell.openExternal(base + '/chat') },
+                { label: '打开交互式 CLI', enabled: !trayBusy && Boolean(installation.entry && installation.state.phase === 'ready'), click: () => runTrayAction(openCli) },
+                { type: 'separator' },
+                { label: `待处理问题 / 审批（${notifications.pending.size}）`, submenu: [...notifications.pending.values()].slice(-20).map((item, index) => ({ label: `${index + 1}. ${item.kind === 'approval' ? '需要审批' : '需要回答'}`, click: () => notifications.open(item) })) },
+                { label: '最近结束的任务', submenu: notifications.recent.map((item, index) => ({ label: `任务 ${index + 1} · 查看结果`, click: () => notifications.open(item) })) },
+                { label: notifications.disabled ? '系统通知不可用 · 查看原因…' : '系统通知已连接（送达依系统设置）', enabled: notifications.disabled, click: () => void dialog.showMessageBox({ type: 'info', message: '系统未能投递通知，待办仍保留', detail: `系统返回：${notifications.deliveryError || '未提供原因'}\n请在有效签名的 Pulse 应用中确认通知设置。此操作不会更改系统权限。` }) },
+                { type: 'separator' },
+                { label: '启动 / 重新连接后台', enabled: !trayBusy && !base, click: () => runTrayAction(() => prepareDesktop()) },
+                { label: '停止本托盘启动的后台…', enabled: !trayBusy && Boolean(base && ownedPid), click: () => runTrayAction(stopOwnedService) },
+                { label: '隐藏桌面窗口', enabled: Boolean(window?.isVisible()), click: () => { browser.hideAll(); window?.hide(); } },
+                { type: 'separator' },
+                { label: '退出托盘（保留后台服务）', click: () => app.quit() },
+                { label: '停止后台并退出…', enabled: !trayBusy && Boolean(base && ownedPid), click: () => runTrayAction(async () => { if (await stopOwnedService()) app.quit(); }) },
+            ]));
+        };
+        try { const image = createTrayIcon(nativeImage, process.platform, appIcon, fileURLToPath(new URL('./assets/trayTemplate.png', import.meta.url))); tray = new Tray(image); tray.on('double-click', () => showDesktop()); updateTray(); }
+        catch (error) { console.error('Pulse tray unavailable:', error.message); }
+        function buildAppMenu() { return Menu.buildFromTemplate([{ label: 'Pulse', submenu: [
+            { label: '显示 Pulse', click: () => showDesktop() },
+            { id: 'pulse-pending', label: '待处理问题 / 审批', submenu: [...notifications.pending.values()].slice(-20).map((item, index) => ({ label: `${index + 1}. ${item.kind === 'approval' ? '需要审批' : '需要回答'}`, click: () => notifications.open(item) })) },
+            { label: '后台与通知菜单…', click: () => setTimeout(() => tray?.popUpContextMenu(), 0) },
+            { label: '检查更新…', click: () => showDesktop('/settings/updates') },
+            { label: '环境检查与修复…', click: () => showDesktop('/settings/desktop') },
+            { label: '查看后台启动诊断…', click: () => showDesktop('/settings/desktop?diagnostics=1') },
+            { label: '数据目录…', click: () => void chooseDataDirectory() },
+            { label: '打开 H5', click: () => { if (base) void shell.openExternal(base + '/chat'); } },
+            { type: 'separator' }, { label: '退出托盘（保留后台服务）', click: () => app.quit() },
+        ] }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }]); }
+        Menu.setApplicationMenu(buildAppMenu()); appMenuReady = true;
+        createWindow(!notificationLaunch && (!process.argv.includes('--background') || !tray));
+        void prepareDesktop().then(async () => {
+            updateTray();
+            if (notificationLaunch) {
+                const launch = notificationLaunch;
+                notificationLaunch = undefined;
+                const item = matchTaskNotice(notifications.pending, notifications.recent, launch.identifier);
+                const dismissed = launch.actionIdentifier === 'com.apple.UNNotificationDismissActionIdentifier';
+                if (!item || dismissed) { if (!dismissed) void dialog.showMessageBox({ type: 'info', message: '这个通知对应的问题已结束或不可用。请从待办查看当前问题。' }); }
+                else if (item.kind === 'ask' && launch.userText) { const accepted = await notifications.reply(item, launch.userText).catch(() => false); if (!accepted) notifications.open(item); }
+                else if (item.kind === 'ask' && /^\d+$/.test(launch.actionIdentifier ?? '')) { await notifications.choose(item, Number(launch.actionIdentifier)).catch(() => notifications.open(item)); }
+                else notifications.open(item);
+            }
+            activationReady = true;
+        });
         let monitorBusy = false;
         const serviceMonitor = setInterval(async () => {
-            if (monitorBusy || !base || setupPending) return;
+            const action = serviceMonitorAction({ stoppedByUser: serviceStoppedByUser, setupPending: Boolean(setupPending), base });
+            if (monitorBusy || action === 'wait') return;
             monitorBusy = true;
-            try { const response = await http('/api/session'); if (response.ok) { const info = await response.json(); if (backendInfo?.pid !== info.serverPid || backendInfo?.version !== info.serverVersion) await prepareDesktop(); } } catch {} finally { monitorBusy = false; }
+            try {
+              try {
+                if (action === 'reconnect') await prepareDesktop();
+                else {
+                    const response = await http('/api/session');
+                    if (!response.ok) throw new Error('PULSE_SERVICE_UNAVAILABLE');
+                    const info = await response.json();
+                    if (serviceStoppedByUser || setupPending || app.isQuitting) return;
+                    serviceError = '';
+                    if (backendInfo?.pid !== info.serverPid || backendInfo?.version !== info.serverVersion) await prepareDesktop();
+                }
+              } catch (error) {
+                if (serviceStoppedByUser || setupPending || app.isQuitting) return;
+                serviceError = error.message; await prepareDesktop();
+              }
+              try { if (base && !serviceStoppedByUser) await notifications.sync(); } catch { /* Older services or an unavailable inbox do not disconnect a healthy backend. */ }
+            } finally { monitorBusy = false; updateTray(); }
         }, 2000);
         serviceMonitor.unref(); app.once('before-quit', () => clearInterval(serviceMonitor));
-        app.on('activate', () => { if (!BrowserWindow.getAllWindows().length)
-            createWindow(); });
-        app.on('second-instance', () => { if (window) {
-            if (window.isMinimized())
-                window.restore();
-            window.focus();
-        }
-        else
-            createWindow(); });
-        app.on('window-all-closed', () => app.quit());
-        app.on('before-quit', () => { app.isQuitting = true; clearTimeout(browserRetry); browserHost?.close(); browser.closeAll(); clearTimeout(retry); chat?.close(); for (const sub of subscriptions.values())
+        const activateMain = () => {
+            if (shouldRevealMain({ ready: activationReady, notificationLaunch: Boolean(notificationLaunch), pendingQuestions: notifications.pending.size, questionWindows: questionWindows.entries.size })) showDesktop();
+        };
+        app.on('activate', activateMain);
+        app.on('second-instance', activateMain);
+        app.on('window-all-closed', () => { if (!tray) app.quit(); });
+        app.on('before-quit', () => { app.isQuitting = true; notifications?.close(); questionWindows?.close(); tray?.destroy(); clearTimeout(browserRetry); browserHost?.close(); browser.closeAll(); clearTimeout(retry); chat?.close(); for (const sub of subscriptions.values())
             sub.controller.abort(); if (reader?.connected) reader.disconnect(); reader?.kill('SIGTERM'); });
     }).catch(error => { diagnosticLog?.record('desktop-startup-error', { name: error.name, message: error.message }); console.error('Pulse desktop startup failed:', error.message); app.quit(); });
 }

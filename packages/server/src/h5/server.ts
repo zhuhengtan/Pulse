@@ -1,5 +1,7 @@
 import { assistantReferenceSchema } from '../assistant-chat-context.js'
 import { recoveryDecision, type RunRecoveryAuthorization } from '../run-recovery-preflight.js'
+import { TaskNoticeInbox, type TaskNotice } from './notifications.js'
+import { CliNotificationReader } from './cli-notifications.js'
 import { SkillManagement } from '../skill-management.js'
 import { withEnabledSkill } from '../skill-config.js'
 import { frontendResource } from '../updates/frontend.js'
@@ -179,6 +181,18 @@ export class H5Server {
   private readonly chatSockets = new WebSocketServer({ noServer: true, maxPayload: MAX_ATTACHMENT_REQUEST })
   private readonly chatSubscriptions = new Map<WebSocket, Map<string, number>>()
   private dataChanged: (() => void) | undefined
+  private readonly cliNotices: CliNotificationReader
+  private cliNoticeTimer: NodeJS.Timeout | undefined
+  private cliNoticeSync: Promise<void> | undefined
+  private readonly taskNotices = new TaskNoticeInbox(
+    () => this.host.conversationData.call<TaskNotice[] | undefined>('readState', 'task-notices:v1'),
+    items => this.host.conversationData.call('saveState', 'task-notices:v1', items),
+    async item => {
+      const snapshot = await this.snapshotRun(item.runId, this.runEventBuffers.get(item.runId) ?? [], this.activeRuns.has(item.runId) || this.assistantPendingRuns.has(item.runId))
+      return snapshot.state === 'running' && Boolean(snapshot.interactions?.some(group => group.groupId === item.groupId && group.items.length))
+    },
+  )
+  private readonly serverInstanceId = randomUUID()
   private readonly runSnapshots = new Map<string, WebRunSnapshot>()
   private readonly projectionWrites = new Map<string, Promise<unknown>>()
   private readonly projectionTimers = new Map<string, NodeJS.Timeout>()
@@ -198,6 +212,7 @@ export class H5Server {
     this.effectivePort = this.port
     this.hostAddress = options.host ?? '0.0.0.0'
     this.dataDir = resolve(options.dataDir)
+    this.cliNotices = new CliNotificationReader(this.host.conversationData)
     this.updates = new UpdateManager({ dataDir: this.dataDir, backendVersion: (require('../../package.json') as { version: string }).version, development: process.env.PULSE_MANAGED !== '1', ...(process.env.PULSE_RUNTIME_DIR ? { runtimeDirectory: process.env.PULSE_RUNTIME_DIR } : {}), ...options.updates })
     this.auth = new H5AuthStore(options.dataDir)
     this.projects = new H5ProjectCatalog(options.dataDir)
@@ -341,6 +356,8 @@ export class H5Server {
       server.on('error', reject)
     })
     this.server = server
+    this.cliNoticeTimer = setInterval(() => { void this.syncCliNotifications().catch(() => undefined) }, 2000)
+    this.cliNoticeTimer.unref()
     this.dataChanged = this.host.conversationData.onChange(revision => {
       for (const client of this.chatSockets.clients) this.sendChat(client, { type: 'changed', revision })
     })
@@ -355,7 +372,7 @@ export class H5Server {
     const pairing = this.auth.createPairingCode()
     const pairUrl = `http://${lanIp}:${this.effectivePort}/?code=${pairing.code}`
 
-    await writeFile(join(this.dataDir, 'service.json'), JSON.stringify({ protocol: 1, pid: process.pid, port: this.effectivePort, host: this.hostAddress, dataDir: this.dataDir, managed: process.env.PULSE_UPDATE_CHILD === '1', supervisorPid: process.env.PULSE_UPDATE_OWNER ? Number(process.env.PULSE_UPDATE_OWNER) : undefined, runtimeDirectory: process.env.PULSE_RUNTIME_DIR }), { mode: 0o600 })
+    await writeFile(join(this.dataDir, 'service.json'), JSON.stringify({ protocol: 1, instanceId: this.serverInstanceId, pid: process.pid, port: this.effectivePort, host: this.hostAddress, dataDir: this.dataDir, managed: process.env.PULSE_UPDATE_CHILD === '1', supervisorPid: process.env.PULSE_UPDATE_OWNER ? Number(process.env.PULSE_UPDATE_OWNER) : undefined, runtimeDirectory: process.env.PULSE_RUNTIME_DIR }), { mode: 0o600 })
     process.on('message', this.updateMessages)
     if (process.send && process.env.PULSE_UPDATE_CHILD === '1') {
       const reader = new ReaderClient(this.dataDir)
@@ -371,6 +388,8 @@ export class H5Server {
     this.updates.stop(); process.off('message', this.updateMessages)
     await this.filePreviews.close()
     this.stopping = true
+    clearInterval(this.cliNoticeTimer)
+    await this.cliNoticeSync?.catch(() => undefined)
     this.dataChanged?.(); this.dataChanged = undefined
     for (const timer of this.projectionTimers.values()) clearTimeout(timer)
     this.projectionTimers.clear()
@@ -384,6 +403,7 @@ export class H5Server {
     await this.assistantPump?.catch(() => undefined)
     await Promise.allSettled([...this.runConsumers])
     await Promise.allSettled([...this.runSnapshots].map(([runId, snapshot]) => this.host.conversationData.call('saveState', `run:${runId}`, snapshot)))
+    await this.taskNotices.list().catch(() => undefined)
     await this.assistantInbox.close()
     await this.workspaces.close()
     if (this.jarvisSyncTimer) clearInterval(this.jarvisSyncTimer)
@@ -596,6 +616,7 @@ export class H5Server {
       ? await startH5WorkWorker({ ...this.workWorker, runtimeOptions: this.host.getWorkWorkerOptions() }, { conversationId, text: '', resume: true, ...(authorization ? { recoveryAuthorization: authorization } : {}) })
       : await this.host.resumeRun(conversationId, authorization)
     this.attachRun(handle)
+    await this.cliNotices.takeover(handle.id)
     return handle
   }
 
@@ -1134,7 +1155,7 @@ export class H5Server {
     }
     if (pathname === '/api/session' && method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify({ ok: true, protocols, capabilities: { updates: true, versionedFrontend: true, reader: true }, maintenance: this.maintenance, serverVersion: (require('../../package.json') as { version: string }).version, serverPid: process.pid, runtimeId: process.env.PULSE_RUNTIME_ID, queueScope: createHash('sha256').update(resolve(this.dataDir)).digest('hex').slice(0, 32), deviceId: authedDevice?.id, localAdmin, canBrowseHostPaths, canRegisterProject, canUseTerminal: localAdmin, canEditConfig: localAdmin, canControlAutomation }))
+      res.end(JSON.stringify({ ok: true, protocols, capabilities: { updates: true, versionedFrontend: true, reader: true }, maintenance: this.maintenance, serverVersion: (require('../../package.json') as { version: string }).version, serverPid: process.pid, serverInstanceId: this.serverInstanceId, runtimeId: process.env.PULSE_RUNTIME_ID, queueScope: createHash('sha256').update(resolve(this.dataDir)).digest('hex').slice(0, 32), deviceId: authedDevice?.id, localAdmin, canBrowseHostPaths, canRegisterProject, canUseTerminal: localAdmin, canEditConfig: localAdmin, canControlAutomation }))
       return
     }
 
@@ -1718,6 +1739,12 @@ export class H5Server {
       return
     }
 
+    if (pathname === '/api/notifications' && method === 'GET') {
+      await this.syncCliNotifications()
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.taskNotices.list()))
+      return
+    }
+
     // 7. Conversations: GET /api/conversations, POST /api/conversations
     if (pathname === '/api/conversations' && method === 'GET') {
       const all = await this.host.listConversations()
@@ -2064,7 +2091,8 @@ export class H5Server {
             client.sent++
           }
         }
-        if (!this.activeRuns.has(runId) && !this.assistantPendingRuns.has(runId)) {
+        const cliActive = !this.activeRuns.has(runId) && (await this.cliNotices.snapshot(runId))?.snapshot.state === 'running'
+        if (!this.activeRuns.has(runId) && !this.assistantPendingRuns.has(runId) && !cliActive) {
           const conversationId = this.runConversations.get(runId)
           this.writeSse(res, { type: 'run_finished', runId, seq: Math.max(cursor, buffer.at(-1)?.seq ?? 0) + 1, ...(conversationId ? { conversationId } : {}) })
           try { res.end() } catch { /* already closed */ }
@@ -2144,11 +2172,16 @@ export class H5Server {
           res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, duplicate: true }))
           return
         }
-        if (!handle) { res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'RUN_NOT_ACTIVE' })); return }
-        try { await handle.replyBatch(groupId, answers) }
+        const cli = !handle ? await this.cliNotices.snapshot(runId) : undefined
+        if (!handle && !cli) { res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'RUN_NOT_ACTIVE' })); return }
+        if (cli && cli.conversationId !== conversationId) { res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'RUN_NOT_FOUND' })); return }
+        try {
+          if (handle) await handle.replyBatch(groupId, answers)
+          else await this.cliNotices.request({ requestId, runId, conversationId, method: 'reply', groupId, answers })
+        }
         catch (error) {
           const code = error instanceof Error ? error.message : 'REPLY_FAILED'
-          if (code.startsWith('ASK_RESPONSE_') || ['INTERACTION_GROUP_MISMATCH', 'EFFECT_NOT_OWNED', 'EFFECT_NOT_REPLYABLE'].includes(code)) {
+          if (code.startsWith('ASK_RESPONSE_') || ['INTERACTION_GROUP_MISMATCH', 'EFFECT_NOT_OWNED', 'EFFECT_NOT_REPLYABLE', 'RUN_NOT_ACTIVE', 'QUESTION_EXPIRED', 'REQUEST_ID_REUSED'].includes(code)) {
             res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: code }))
             return
           }
@@ -2172,6 +2205,13 @@ export class H5Server {
     if (runCancelMatch && method === 'POST') {
       const runId = runCancelMatch[1]
       const handle = runId ? this.activeRuns.get(runId) : undefined
+      if (!handle && runId) {
+        const cli = await this.cliNotices.snapshot(runId)
+        if (cli) {
+          await this.cliNotices.request({ requestId: randomUUID(), runId, conversationId: cli.conversationId, method: 'cancel' })
+          res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true })); return
+        }
+      }
       if (!handle) { res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'RUN_NOT_ACTIVE' })); return }
       await handle.cancel('USER_REQUESTED')
       res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -2182,6 +2222,37 @@ export class H5Server {
     // 404 for unknown endpoints
     res.writeHead(404, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: 'NOT_FOUND' }))
+  }
+
+  private syncCliNotifications(): Promise<void> {
+    if (this.stopping) return Promise.resolve()
+    if (this.cliNoticeSync) return this.cliNoticeSync
+    this.cliNoticeSync = (async () => {
+      for (const item of await this.cliNotices.sync()) {
+        const { snapshot, conversationId } = item
+        const runId = snapshot.runId
+        // A batch can have been read before a resume acquired the run. Recheck
+        // the durable handover and the live owner before applying old CLI data.
+        if (!await this.cliNotices.snapshot(runId) || this.activeRuns.has(runId)) continue
+        if (!this.runEventBuffers.has(runId)) this.runEventBuffers.set(runId, [])
+        this.runConversations.set(runId, conversationId)
+        if (snapshot.state === 'running') {
+          clearTimeout(this.bufferTimers.get(runId)); this.bufferTimers.delete(runId)
+          this.runSnapshots.set(runId, { ...this.runSnapshots.get(runId), ...snapshot })
+          this.pushEvent(runId, { type: 'interactions', runId, conversationId, seq: snapshot.seq, data: { interactions: (snapshot.interactions ?? []).map(publicInteraction) } })
+        } else if (snapshot.state === 'interrupted') {
+          // A late heartbeat can recover. Do not permanently complete this run
+          // or suppress its future pending notices after a temporary disconnect.
+          this.pushEvent(runId, { type: 'interactions', runId, conversationId, seq: snapshot.seq, data: { interactions: [] } })
+          this.runSnapshots.set(runId, { ...snapshot, interactions: [] })
+          await this.host.conversationData.call('saveState', `run:${runId}`, { ...snapshot, interactions: [] })
+        } else {
+          this.pushEvent(runId, { type: 'complete', runId, conversationId, seq: snapshot.seq, data: { status: snapshot.state === 'succeeded' || snapshot.state === 'cancelled' ? snapshot.state : 'failed' } })
+          this.finishStream(runId)
+        }
+      }
+    })().finally(() => { this.cliNoticeSync = undefined })
+    return this.cliNoticeSync
   }
 
   private consumeRun(runId: string, handle: RunHandle): Promise<void> {
@@ -2281,6 +2352,8 @@ export class H5Server {
     if (event.type === 'lanes') next.laneState = event.data
     if (event.type === 'complete') { next.complete = event; next.state = event.data.status; delete next.waiting; next.interactions = [] }
     this.runSnapshots.set(runId, next)
+    const noticeConversationId = event.conversationId ?? this.runConversations.get(runId)
+    if (noticeConversationId) void this.taskNotices.record({ ...event, conversationId: noticeConversationId }, noticeConversationId === this.assistantInbox.conversationId ? 'chat' : 'work').catch(() => console.error('Task notification could not be saved.'))
     if (event.type === 'interactions' || event.type === 'waiting' || event.type === 'complete') {
       const timer = this.projectionTimers.get(runId); if (timer) clearTimeout(timer); this.projectionTimers.delete(runId)
       const writing = this.host.conversationData.call('saveState', `run:${runId}`, next)
@@ -2377,6 +2450,10 @@ export class H5Server {
   }
 
   private async snapshotRun(runId: string, events: AssistantEvent[], active: boolean): Promise<WebRunSnapshot> {
+    if (!active) {
+      const cli = await this.cliNotices.snapshot(runId)
+      if (cli) return { ...cli.snapshot, interactions: cli.snapshot.interactions?.map(publicInteraction) ?? [] }
+    }
     await this.projectionWrites.get(runId)?.catch(() => undefined)
     const projected = this.runSnapshots.get(runId) ?? await this.host.conversationData.call<WebRunSnapshot | undefined>('readState', `run:${runId}`)
     if (projected) return { ...projected, ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}), ...(active ? { state: 'running' as const } : projected.state === 'running' ? { state: 'interrupted' as const } : {}) }

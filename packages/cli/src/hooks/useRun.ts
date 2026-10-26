@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { LocalHost, RunHandle } from '@hunterzhu/pulse-server';
+import { withCliNotifications } from '../utils/notification-bridge.js';
 import type { ApprovalRequest, AskRequest, DisplayMessage, LaneDisplay, ToolCallDisplay } from '../types.js';
 import { runningToolCalls, toolCallFromObservation } from '../utils/tool-view.js';
 
@@ -67,6 +68,10 @@ export function useRun({
 
   const consumeRun = useCallback(
     async (run: RunHandle) => {
+      run = await withCliNotifications(host, run, ids => setPendingInteractions(current => {
+        const next = current.filter(item => ids.has(item.request.effectId));
+        return next.length === current.length ? current : next;
+      }));
       runRef.current = run;
       const assistantMessage: DisplayMessage = {
         id: run.id,
@@ -349,7 +354,7 @@ export function useRun({
         }
       }
     },
-    [addAssistantMessage, enqueueInteraction]
+    [host, addAssistantMessage, enqueueInteraction]
   );
 
   const finishRun = useCallback(() => {

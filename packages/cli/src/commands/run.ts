@@ -1,6 +1,7 @@
 import { createLocalHost, type LocalHostOptions, type AssistantEvent, type RunHandle } from '@hunterzhu/pulse-server';
 import { consumeToolEvent } from '../utils/tool-view.js';
 import { bindRunSignals } from './signals.js';
+import { withCliNotifications } from '../utils/notification-bridge.js';
 
 function writeEvent(event: AssistantEvent, format: string, printed: Set<string>): void {
   if (format === 'jsonl') {
@@ -35,11 +36,11 @@ export async function runOneShot(
   try {
     await host.init();
     const conversation = await host.createConversation(options.cwd ? { cwd: options.cwd } : {});
-    const run = await host.sendMessage(conversation.id, {
+    const run = await withCliNotifications(host, await host.sendMessage(conversation.id, {
       text: task,
       ...(requirementPaths ? { requirementPaths } : {}),
       format: format === 'jsonl' ? 'jsonl' : 'text',
-    });
+    }));
     activeRun = run;
 
     let streamedText = false;

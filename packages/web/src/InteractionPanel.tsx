@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { PulseButton, PulseCheckbox, PulseTextArea } from './PulseControls.js'
 import { Icon } from './Icon.js'
 
@@ -17,13 +17,23 @@ const planExecutionQuestion = (input: Record<string, unknown>) => {
 }
 type Props = {
   interaction: PendingInteraction; context?: string | undefined; reviewNote: string; delegated: boolean
+  draftScope?: string | undefined
+  onDismiss?: (() => void) | undefined
+  notificationTarget?: string | undefined
   onOpenConversation?: (() => void) | undefined
   onOpenFile?: ((path: string) => void) | undefined
   submit: (answers: Array<{ effectId: string; value: Record<string, unknown> }>) => Promise<boolean>
 }
 
-export function InteractionPanel({ interaction, context, reviewNote, delegated, submit, onOpenConversation, onOpenFile }: Props) {
-  const key = `pulse-web-interaction:${interaction.runId}:${interaction.groupId}`
+export function InteractionPanel({ interaction, context, reviewNote, delegated, submit, onOpenConversation, onOpenFile, notificationTarget, onDismiss, draftScope }: Props) {
+  const key = `pulse-web-interaction:${interaction.runId}:${interaction.groupId}${draftScope ? `:${draftScope}` : ''}`
+  const panel = useRef<HTMLElement>(null)
+  useEffect(() => {
+    if (notificationTarget !== interaction.groupId) return
+    panel.current?.scrollIntoView?.({ block: 'nearest' })
+    const field = panel.current?.querySelector<HTMLElement>('textarea, input') ?? panel.current?.querySelector<HTMLElement>('button')
+    field?.focus()
+  }, [interaction.groupId, notificationTarget])
   const [answers, setAnswers] = useState<Record<string, Answer>>(() => {
     let restored: Record<string, Answer> = {}
     try { const saved = JSON.parse(localStorage.getItem(key) ?? '{}'); if (saved && typeof saved === 'object' && !Array.isArray(saved)) restored = saved } catch { /* Optional draft cache. */ }
@@ -88,7 +98,7 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
     const count = interaction.items.reduce((total, entry) => total + (typeof entry.input.operationCount === 'number' ? entry.input.operationCount : Array.isArray(entry.input.tools) ? entry.input.tools.length : 1), 0)
     const title = count > 1 ? `允许执行这 ${count} 项操作？` : tools[0]?.toolName === 'shell.exec' ? '允许执行此命令？' : tools[0]?.toolName?.startsWith('fs.') ? '允许访问这些文件？' : '允许执行此操作？'
     const decide = (approved: boolean) => void submitBatch(interaction.items.map(entry => ({ effectId: entry.effectId, value: approved ? { approved: true } : { approved: false, reason: '用户拒绝' } })))
-    return <section className="interaction-panel approval-panel" aria-label="待审批操作" aria-busy={sending}>
+    return <section ref={panel} className="interaction-panel approval-panel" aria-label="待审批操作" aria-busy={sending}>
       <div className="interaction-heading"><Icon name="shield" size={16}/><strong>{title}</strong></div>
       {contextLine}
       <div className="interaction-scroll">
@@ -112,8 +122,8 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
   const planPath = typeof input.planPath === 'string' ? input.planPath : prompt.match(/docs\/plans\/[^\s`，。；,;？?]+\.md/u)?.[0]
   const planStart = planPath ? prompt.indexOf(planPath) : -1
   const openPlan = planPath && onOpenFile ? <button type="button" className="question-plan-link" onClick={() => onOpenFile(planPath)}>{planPath}</button> : null
-  return <section className="interaction-panel ask-panel" aria-label="待回答问题" aria-busy={sending}>
-    <div className="interaction-heading"><Icon name="info" size={16}/><strong>需要你的回答</strong>{count > 1 && <span>第 {index + 1} / {count} 题</span>}<PulseButton className="icon-button question-close" aria-label="不作答并关闭" title="不作答并关闭" disabled={sending} onClick={() => void submitBatch(interaction.items.map(question => ({ effectId: question.effectId, value: { dismissed: true } })))}><Icon name="close" size={16}/></PulseButton></div>
+  return <section ref={panel} className="interaction-panel ask-panel" aria-label="待回答问题" aria-busy={sending}>
+    <div className="interaction-heading"><Icon name="info" size={16}/><strong>需要你的回答</strong>{count > 1 && <span>第 {index + 1} / {count} 题</span>}<PulseButton className="icon-button question-close" aria-label="不作答并关闭" title="不作答并关闭" disabled={sending} onClick={() => onDismiss ? onDismiss() : void submitBatch(interaction.items.map(question => ({ effectId: question.effectId, value: { dismissed: true } })))}><Icon name="close" size={16}/></PulseButton></div>
     {contextLine}
     <div className="question-scroll">
       <h3>{openPlan && planStart >= 0 ? <>{prompt.slice(0, planStart)}{openPlan}{prompt.slice(planStart + planPath!.length)}</> : prompt}</h3>{openPlan && planStart < 0 && <p>{openPlan}</p>}

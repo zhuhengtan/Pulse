@@ -1,6 +1,7 @@
 import { messagePayload, retryMessagePayload } from './message-payload.js'
 import { chatReferenceFromQuery, chatModePath } from './chat-reference.js'
 import type { RunRecoveryPreflight } from '@hunterzhu/pulse-server/protocol'
+import { TaskNotificationInbox } from './TaskNotifications.js'
 import { FrontendUpdateNotice } from './Updates.js'
 import { ProjectHoverCard } from './ProjectHoverCard.js'
 import { ProjectEditor } from './ProjectEditor.js'
@@ -62,6 +63,8 @@ const historyStorageKey = 'pulse-web-conversation'
 export function PulseApp({ transport = browserTransport }: { transport?: PulseWebTransport }) {
   const dialogs = usePulseDialogs()
   const { route, location, go, patchQuery, openPage, backToSource, backToSettings } = usePulseNavigation()
+  const notificationId = new URLSearchParams(location.search).get('notification')
+  const notificationTarget = notificationId && !notificationId.startsWith('complete:') ? notificationId : undefined
   const locationRef = useRef(location); locationRef.current = location
   const surfaceMode = route.page === 'work' ? 'work' : 'chat'
   const [settingsDirty, setSettingsDirty] = useState(false)
@@ -528,7 +531,9 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
 
   useEffect(() => {
     if (!paired) return
-    const search = route.query.toString()
+    const query = new URLSearchParams(route.query)
+    if (notificationId && (route.page === 'chat' || route.page === 'work')) query.set('notification', notificationId)
+    const search = query.toString()
     if (search !== new URLSearchParams(location.search).toString()) go(location.pathname + (search ? `?${search}` : ''), true, location.state)
   }, [paired, location.pathname, location.search, go])
 
@@ -1221,9 +1226,13 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     } catch (error) { setToast(error instanceof ApiError && error.status === 409 ? '对话仍有运行或待恢复任务，不能移动。' : '移动对话失败。') }
   }
 
-  const activeInteraction = surfaceMode === 'chat'
-    ? workInteractions[0] ?? [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'interaction' }> => item.kind === 'interaction')
-    : [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'interaction' }> => item.kind === 'interaction')
+  const interactionCandidates = [
+    ...(surfaceMode === 'chat' ? workInteractions : []),
+    ...[...status].reverse().filter((item): item is Extract<RunStatus, { kind: 'interaction' }> => item.kind === 'interaction'),
+  ].filter(item => item.items.length > 0)
+  const activeInteraction = notificationTarget
+    ? interactionCandidates.find(item => item.groupId === notificationTarget)
+    : interactionCandidates[0]
   const visibleConversations = useMemo(() => conversations
     .filter(item => `${item.title} ${item.cwd} ${projects.find(project => project.id === item.projectId)?.name ?? ''}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
     .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || (sidebarSort === 'created' ? b.createdAt.localeCompare(a.createdAt) : b.updatedAt.localeCompare(a.updatedAt))), [conversations, projects, query, sidebarSort])
@@ -1425,6 +1434,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         {!switchInHistory && modeSwitch}
         <div className="navbar-title"><span className={`status-dot ${paired ? '' : 'offline'}`} /><span className="title-text" title={surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}>{surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}</span></div>
         <div className="navbar-actions">
+          {paired && <TaskNotificationInbox transport={transport} open={go}/>}
           {running && <span className="running-pill"><i />{surfaceMode === 'chat' ? '正在回复' : '运行中'}</span>}
           {surfaceMode === 'work' ? <Dropdown open={moreOpen} onOpenChange={setMoreOpen} trigger={['click']} placement="bottomRight" menu={{ items: [transfer.exportItem], onClick: () => setMoreOpen(false) }}>
             <Tooltip title={moreOpen ? null : '更多'}><PulseButton className="navbar-tool" aria-label="更多" aria-haspopup="menu" aria-expanded={moreOpen}><Icon name="ellipsis" size={22}/></PulseButton></Tooltip>
@@ -1445,7 +1455,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       </section>
       {!atBottom && <PulseButton className="jump-bottom" onClick={() => { followBottom.current = true; setAtBottom(true); messagesEl.current?.scrollTo({ top: messagesEl.current.scrollHeight, behavior: 'smooth' }) }}>回到底部 ↓</PulseButton>}
       <ChatActionArea state={deriveChatState({ running, stopping, submitting, interaction: activeInteraction, stopped: status.some(item => item.kind === 'complete' && item.outcome === 'cancelled') })} stopError={stopError} onRetryStop={() => void stopRun()} className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${emptyConversation && !activeInteraction ? 'is-empty' : ''}`}>
-        {activeInteraction && <InteractionPanel key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={approvalPolicy === 'delegate'} onOpenConversation={activeInteraction.conversationId ? () => go(workUrl(activeInteraction.conversationId!)) : undefined} onOpenFile={path => { const conversationId = activeInteraction.conversationId ?? selected?.id; if (!conversationId) return; const query = new URLSearchParams({ workspace: 'preview', artifact: path, artifactRun: activeInteraction.runId }); go(`${workUrl(conversationId)}?${query}`) }} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} />}
+        {notificationTarget && !activeInteraction && <div role="status">{loading ? '正在查找通知对应的问题…' : '通知对应的问题已处理或暂不可用，请查看任务记录。'}<PulseButton onClick={() => patchQuery({ notification: undefined })}>查看其他待办</PulseButton></div>}
+        {activeInteraction && <InteractionPanel notificationTarget={notificationTarget} key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={approvalPolicy === 'delegate'} onOpenConversation={activeInteraction.conversationId ? () => go(workUrl(activeInteraction.conversationId!)) : undefined} onOpenFile={path => { const conversationId = activeInteraction.conversationId ?? selected?.id; if (!conversationId) return; const query = new URLSearchParams({ workspace: 'preview', artifact: path, artifactRun: activeInteraction.runId }); go(`${workUrl(conversationId)}?${query}`) }} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} />}
         <MessageQueuePanel key={`queue:${selectedId}`} queue={currentQueue} controller={messageQueue.controller} onError={setToast} />
         <RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || !serviceConnected || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} followupBehavior={messageQueue.behavior} onSend={async (payload, behavior) => await send(payload, behavior) === true} onStop={() => void stopRun()} toolbarExtra={composerApproval} />
         <div className={`composer-meta ${route.newWork ? 'new-chat-tools' : ''}`}>

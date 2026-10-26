@@ -2,6 +2,7 @@ import { createLocalHost, type LocalHostOptions, type AssistantEvent, type RunHa
 import { consumeToolEvent } from '../utils/tool-view.js';
 import { runInteractive } from './interactive.js';
 import { bindRunSignals } from './signals.js';
+import { withCliNotifications } from '../utils/notification-bridge.js';
 
 function writeEvent(event: AssistantEvent, format: string, printed: Set<string>): void {
   if (format === 'jsonl') {
@@ -40,9 +41,9 @@ export async function runResume(
 
   try {
     await host.init();
-    const run = task
+    const run = await withCliNotifications(host, task
       ? await host.sendMessage(conversationId, { text: task, continueTask: true, format: format === 'jsonl' ? 'jsonl' : 'text' })
-      : await host.resumeRun(conversationId);
+      : await host.resumeRun(conversationId));
     activeRun = run;
 
     let streamedText = false;
