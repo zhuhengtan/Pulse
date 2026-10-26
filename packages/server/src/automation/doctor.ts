@@ -1,8 +1,13 @@
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { DesktopBackend } from './desktop.js'
 import type { AutomationConfig } from './types.js'
+
+/** Resolve the native sibling bundle, never the outer Electron Pulse.app. */
+export function macosPermissionApplication(helperPath: string): string | undefined {
+  return ['Pulse.app', 'Pulse Desktop Helper.app'].map(name => resolve(dirname(helperPath), name)).find(path => statSync(path, { throwIfNoEntry: false })?.isDirectory())
+}
 
 export async function automationDoctor(config: AutomationConfig = {}): Promise<Record<string, unknown>> {
   const helperPath = config.computer?.helperPath ?? resolve(import.meta.dirname, `../../native/${process.platform}-${process.arch}/pulse-desktop-helper` + (process.platform === 'win32' ? '.exe' : ''))
@@ -25,7 +30,7 @@ export async function requestAutomationPermissions(config: AutomationConfig = {}
     if (process.platform !== 'darwin') return await backend.call('doctor', {})
     const permissions = await backend.call('requestPermissions', {})
     const report = { ...permissions, ...(await backend.call('doctor', {})) }
-    const applicationPath = resolve(dirname(helperPath), 'Pulse Desktop Helper.app')
-    return { ...report, manualAuthorizationRequired: !report.screenCapture || !report.accessibility, ...(existsSync(applicationPath) ? { applicationPath } : {}), ...(!report.screenCapture ? { guidance: '在系统设置 → 隐私与安全性 → 录屏与系统录音中点击“＋”，选择 Pulse Desktop Helper.app 并开启权限。系统可能不弹出申请窗口。' } : {}) }
+    const applicationPath = macosPermissionApplication(helperPath)
+    return { ...report, manualAuthorizationRequired: !report.screenCapture || !report.accessibility, ...(applicationPath ? { applicationPath } : {}), ...(!report.screenCapture ? { guidance: '在系统设置 → 隐私与安全性 → 录屏与系统录音中点击“＋”，按返回的 applicationPath 选择对应的 Pulse 应用并开启权限（新版文件为 Pulse.app；旧版可能为 Pulse Desktop Helper.app）。系统可能不弹出申请窗口。' } : {}) }
   } finally { await backend.close() }
 }

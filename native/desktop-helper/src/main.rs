@@ -7,6 +7,16 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 #[cfg(target_os = "macos")]
+fn macos_application(root: &std::path::Path) -> std::path::PathBuf {
+    // Always resolve beside this supervisor, never by the outer app's shared display name.
+    let current = root.join("Pulse.app");
+    if current.is_dir() { return current; }
+    // New supervisors can still read an older, intact native payload.
+    let legacy = root.join("Pulse Desktop Helper.app");
+    if legacy.is_dir() { legacy } else { current }
+}
+
+#[cfg(target_os = "macos")]
 fn macos(root: &std::path::Path) -> io::Result<()> {
     use std::net::Shutdown;
     use std::os::unix::fs::DirBuilderExt;
@@ -25,7 +35,7 @@ fn macos(root: &std::path::Path) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let mut launcher = Command::new("/usr/bin/open")
         .args(["-n", "-g", "-W", "-a"])
-        .arg(root.join("Pulse Desktop Helper.app"))
+        .arg(macos_application(root))
         .arg("--args").arg("--socket").arg(&socket)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn()?;
     let start = Instant::now();
@@ -82,5 +92,33 @@ fn main() -> io::Result<()> {
     let status = child.wait()?;
     if !status.success() { std::process::exit(status.code().unwrap_or(1)); }
     Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::macos_application;
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory { fn drop(&mut self) { std::fs::remove_dir_all(&self.0).ok(); } }
+    fn directory() -> Directory {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("pulse-bundle-path-{}-{}", std::process::id(), stamp));
+        std::fs::create_dir_all(&path).unwrap(); Directory(path)
+    }
+    #[test]
+    fn prefers_new_bundle_by_exact_native_directory() {
+        let root = directory();
+        for name in ["Pulse.app", "Pulse Desktop Helper.app"] { std::fs::create_dir(root.0.join(name)).unwrap(); }
+        assert_eq!(macos_application(&root.0), root.0.join("Pulse.app"));
+    }
+    #[test]
+    fn preserves_old_payload_path_without_creating_an_alias() {
+        let root = directory(); std::fs::create_dir(root.0.join("Pulse Desktop Helper.app")).unwrap();
+        assert_eq!(macos_application(&root.0), root.0.join("Pulse Desktop Helper.app"));
+        assert!(!root.0.join("Pulse.app").exists());
+    }
+    #[test]
+    fn missing_payload_points_to_the_new_exact_path() {
+        let root = directory(); assert_eq!(macos_application(&root.0), root.0.join("Pulse.app"));
     }
 }

@@ -60,13 +60,13 @@ pulse automation permissions
 
 构建需要 Rust；macOS 同时需要 Xcode Command Line Tools 的 Swift 编译器。只修改 Swift 且已有相同平台、架构的已校验 Rust 启动器时，可用 `node scripts/automation/build-desktop.mjs --swift-only` 仅重建 Swift 应用；修改启动器后必须完整构建。发行安装包应包含对应 `platform-arch` Helper 和校验清单，终端用户不需要 Rust。可用 `capabilities.computer.helperPath` 显式选择本机可信 Helper。
 
-macOS 权限窗口应显示 **Pulse Desktop Helper**，应用标识为 `com.hunterzhu.pulse.desktop`。若显示终端或 IDE 名称，应检查是否使用了旧版直接启动的 Helper，不要把宿主授权当作 Pulse 授权。正式发行可用 `PULSE_MACOS_SIGN_IDENTITY` 提供 Developer ID 签名；源码默认 ad-hoc 签名，重新编译或移动应用后可能需要重新授权。当前构建不等于已完成 Apple 公证。
+macOS 权限窗口应显示 **Pulse** 及现有 Pulse 图标，应用标识为 `com.hunterzhu.pulse.desktop`。若显示终端或 IDE 名称，应检查是否使用了旧版直接启动的 Helper，不要把宿主授权当作 Pulse 授权。正式发行可用 `PULSE_MACOS_SIGN_IDENTITY` 提供 Developer ID 签名；源码默认 ad-hoc 签名，重新编译或移动应用后可能需要重新授权。当前构建不等于已完成 Apple 公证。
 
-若屏幕录制没有弹出申请，不能据此认为已授权。`pulse automation permissions` 会返回真实状态、应用路径和手动授权指引：在系统设置 → 隐私与安全性 → 录屏与系统录音中点“＋”添加 `Pulse Desktop Helper.app` 并开启开关。辅助功能权限需单独确认。系统拒绝弹窗时不修改 TCC 数据库或自动重置其他应用权限。
+若屏幕录制没有弹出申请，不能据此认为已授权。`pulse automation permissions` 会返回真实状态、应用路径和手动授权指引：在系统设置 → 隐私与安全性 → 录屏与系统录音中点“＋”按返回的 applicationPath 添加新版内部 `Pulse.app`（旧运行时可能仍是 `Pulse Desktop Helper.app`） 并开启开关。辅助功能权限需单独确认。系统拒绝弹窗时不修改 TCC 数据库或自动重置其他应用权限。
 
 | 平台 | 实现与必要条件 |
 | --- | --- |
-| macOS 14+ | ScreenCaptureKit、Accessibility、CoreGraphics；独立 `Pulse Desktop Helper.app` 经 Launch Services 启动，权限授予 Pulse Desktop Helper。未授权时返回明确错误。 |
+| macOS 14+ | ScreenCaptureKit、Accessibility、CoreGraphics；独立的 native/Pulse.app 经精确路径从 Launch Services 启动，权限授予 Pulse。未授权时返回明确错误。 |
 | Windows 11 x64 | UI Automation、屏幕捕获和 SendInput；必须处于交互桌面。不自动提权，UAC 安全桌面及 UIPI 阻止的窗口不受支持。 |
 | Linux X11 | AT-SPI、GDK、X11/XTest；需要有效 DISPLAY 和图形桌面。 |
 | Linux Wayland | GNOME/KDE 的 RemoteDesktop、ScreenCast portal 与 PipeWire；首次连接需要本机用户在系统选择器中授权显示器和输入设备。 |
@@ -144,3 +144,13 @@ PULSE_DESKTOP_LIVE=1 pnpm exec vitest run tests/live/automation-desktop.test.ts
 未完成项：Windows/Linux（含 GNOME/KDE Wayland）及 Edge 实机环境当前不可用；没有推送源码触发本次版本的远程 CI，旧 SHA 的结果不能代替验收。OpenAI `gpt-4o-mini` 的最小合成图片请求返回 HTTP 401，现有凭据未通过认证；Anthropic 凭据未提供。macOS 只有 ad-hoc 签名，Gatekeeper 分发评估拒绝且未附公证票据，需要正式签名身份后继续验证。不同显示器/DPI、实体手机及生产账号仍需独立验收。
 
 浏览器 Live 测试使用独立浏览器和临时本机站点；桌面 Live 测试只操作专用临时窗口。普通 CI、协议测试及交叉编译不能代替目标系统、真实设备和生产环境验收。
+
+
+macOS 权限名称来自实际发起请求的应用 bundle，而非聊天窗口标题。自动化 Swift 应用现已生成 CFBundleName/CFBundleDisplayName=Pulse，并复制既有品牌 icon.icns；内部容器文件名同步为 Pulse.app，使系统文件显示名也是 Pulse；可执行文件和正式/开发 bundle ID 保持原值。启动器仅在新路径不存在时兼容旧版 Pulse Desktop Helper.app，不创建旧名别名，也不按显示名查找外层 Electron 应用。桌面 Electron 主应用沿用 productName=Pulse、appId=com.hunterzhu.pulse.desktop 和现有 icon.icns。
+
+旧的系统列表可能缓存“Pulse Desktop Helper”名称/旧图标；仅更新源码不会立即替换已运行的旧 helper。须用新构建应用再次运行后观察。保留 bundle ID 不保证 ad-hoc 重签或移动路径后自动继承许可，系统可能要求用户重新确认；不会自动清除 TCC、重置或开启录屏/辅助功能。正式主应用和 helper 当前共享历史 bundle ID，本轮为兼容已有配置保留；未来拆分需单独设计权限身份迁移。
+
+仅构建独立验收副本时可设置 PULSE_DESKTOP_OUTPUT_DIR；配合 --swift-only 须先复制一份校验正确的 supervisor 与 manifest，不影响默认发行输出目录。
+
+
+品牌回归需验证系统公开API的实际结果：`FileManager.displayName(atPath:)`必须为Pulse，`NSWorkspace.icon(forFile:)`必须能解析现有品牌图标。只检查Info.plist字段不足以证明系统显示正确。Helper与外层Electron都叫Pulse.app时，必须用supervisor同目录下的精确绝对路径启动；授权引导返回这一内部路径。旧系统权限条目不会因为源码更新就自动改名或授权，新版ad-hoc构建可能需要用户按系统流程重新授权；不自动清TCC、删除条目或修改权限。

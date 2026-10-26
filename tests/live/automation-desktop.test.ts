@@ -11,7 +11,7 @@ it.runIf(process.platform === 'darwin' && process.env.PULSE_DESKTOP_DOCTOR_LIVE 
   let pid:number|undefined
   try {
     const report=await backend.call('doctor');pid=report.pid
-    expect(report).toMatchObject({bundleIdentifier:'com.hunterzhu.pulse.desktop',permissionApplication:'Pulse Desktop Helper',parentPid:1,protocolVersion:1})
+    expect(report).toMatchObject({bundleIdentifier:'com.hunterzhu.pulse.desktop',permissionApplication:'Pulse',parentPid:1,protocolVersion:1})
   } finally { await backend.close() }
   await expect.poll(()=>{try {process.kill(pid!,0);return true} catch {return false}}).toBe(false)
 },30000)
@@ -24,7 +24,7 @@ it.runIf(process.platform === 'darwin' && process.env.PULSE_DESKTOP_LIVE === '1'
   let launcher:ReturnType<typeof spawn>|undefined
   try {
     const doctor=new DesktopBackend()
-    try { expect(await doctor.call('doctor')).toMatchObject({accessibility:true,screenCapture:true,permissionApplication:'Pulse Desktop Helper'}) } finally { await doctor.close() }
+    try { expect(await doctor.call('doctor')).toMatchObject({accessibility:true,screenCapture:true,permissionApplication:'Pulse'}) } finally { await doctor.close() }
     await mkdir(join(contents,'MacOS'),{recursive:true})
     await writeFile(join(contents,'Info.plist'),'<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.hunterzhu.pulse.desktop.acceptance</string><key>CFBundleName</key><string>Pulse Desktop Acceptance</string><key>CFBundleExecutable</key><string>fixture</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>')
     execFileSync('swiftc',['-module-cache-path',join(tmpdir(),'pulse-swift-cache'),resolve('tests/fixtures/desktop-acceptance.swift'),'-o',join(contents,'MacOS/fixture')],{timeout:30000})
