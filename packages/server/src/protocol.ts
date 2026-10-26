@@ -54,7 +54,11 @@ export interface WebAttachment {
   data?: string
 }
 
+/** Exact navigation references; never an instruction or permission grant. */
+export interface AssistantContextReference { projectId?: string; conversationId?: string }
+
 export interface WebMessage {
+  assistantContext?: AssistantContextReference
   sequence?: number
   bodyTruncated?: boolean
   bodyLength?: number

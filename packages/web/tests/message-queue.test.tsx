@@ -122,3 +122,8 @@ describe('durable frontend message queue', () => {
     await expect(controller.enqueue('conversation', 'chat', { text: 'preserve draft' })).rejects.toThrow('quota'); expect(f.sent).toHaveLength(0)
   })
 })
+
+it('keeps the original chat reference through offline retry and a restored queue',async()=>{
+ const f=fixture(),ref={projectId:'p1',conversationId:'work-a'};const payload={text:'继续这个',assistantContext:ref};let failed=true;const received:any[]=[];f.adapter.send=async(_q,entry)=>{received.push(structuredClone(entry.payload));if(failed){failed=false;throw Error('connection lost')}return{runId:'same-run'}}
+ await f.controller.enqueue('conversation','chat',payload);ref.conversationId='work-b';await f.controller.tick();f.controller.close();const restored=new MessageQueueController('service-one',f.store,f.adapter,()=>{});await restored.tick();expect(received).toHaveLength(2);expect(received.map(x=>x.assistantContext.conversationId)).toEqual(['work-a','work-a']);restored.close()
+})

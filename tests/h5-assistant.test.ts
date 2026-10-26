@@ -71,7 +71,7 @@ describe('assistant explicit tool routing', () => {
     expect(assistantChatAllowedToolNames(names, message, new Set(['work.list'])))
       .toEqual(['work.start'])
     expect(assistantChatAllowedToolNames(names, message, new Set(['work.list', 'work.start'])))
-      .toEqual(['fs.read', 'jarvis.context', 'work.status'])
+      .toEqual(['fs.read', 'jarvis.context', 'work.list', 'work.status'])
   })
 
   it('does not treat an explanation or a negated mention as a tool request', () => {

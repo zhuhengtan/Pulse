@@ -1,3 +1,4 @@
+import { assistantReferenceSchema } from '../assistant-chat-context.js'
 import { SkillManagement } from '../skill-management.js'
 import { withEnabledSkill } from '../skill-config.js'
 import { frontendResource } from '../updates/frontend.js'
@@ -298,7 +299,7 @@ export class H5Server {
     await this.auth.init()
     const assistantId = await this.assistantInbox.init(async () => (await this.host.createConversation({ title: 'Pulse 助理' })).id)
     for (const message of this.assistantInbox.transcript(true)) {
-      await this.host.appendAssistantUserMessage(assistantId, { id: `msg-${message.requestId}`, runId: message.runId, text: message.text, createdAt: message.createdAt, ...(message.attachments ? { attachments: message.attachments } : {}), ...(message.skills ? { skills: message.skills } : {}), ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}) })
+      await this.host.appendAssistantUserMessage(assistantId, { id: `msg-${message.requestId}`, runId: message.runId, text: message.text, createdAt: message.createdAt, ...(message.attachments ? { attachments: message.attachments } : {}), ...(message.skills ? { skills: message.skills } : {}), ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}), ...(message.assistantContext ? { assistantContext: message.assistantContext } : {}) })
     }
     const initialConversations = (await this.host.listConversations()).filter(conversation => conversation.id !== assistantId)
     await this.projects.migrate(initialConversations)
@@ -489,7 +490,7 @@ export class H5Server {
             createdAt: message.createdAt,
             ...(message.attachments ? { attachments: message.attachments } : {}),
             ...(message.skills ? { skills: message.skills } : {}),
-            ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}),
+            ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}), ...(message.assistantContext ? { assistantContext: message.assistantContext } : {}),
           })
           if (this.stopping) { await this.assistantInbox.update(message.runId, 'interrupted', 'Server stopped before launch'); return }
           const handle = await this.host.sendMessage(conversationId, {
@@ -500,7 +501,7 @@ export class H5Server {
             userMessageRecorded: true,
             ...(message.attachments ? { attachments: message.attachments } : {}),
             ...(message.skills ? { skills: message.skills } : {}),
-            ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}),
+            ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}), ...(message.assistantContext ? { assistantContext: message.assistantContext } : {}),
           })
           this.attachRun(handle, false)
           if (this.stopping) await (handle.shutdown ? handle.shutdown() : handle.cancel('SERVER_STOPPED'))
@@ -1207,6 +1208,9 @@ export class H5Server {
       const text = typeof body.text === 'string' ? body.text.trim() : ''
       const richContent = parseRichContent(body.richContent)
       const requestId = typeof body.requestId === 'string' ? body.requestId : ''
+      const parsedReference = assistantReferenceSchema.optional().safeParse(body.assistantContext)
+      if (!parsedReference.success) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'ASSISTANT_REFERENCE_INVALID' })); return }
+      const assistantContext = parsedReference.data
       const attachments = await this.saveAttachments(this.assistantInbox.conversationId, Array.isArray(body.attachments) ? body.attachments : [])
       const skills = Array.isArray(body.skills) ? body.skills.filter((s): s is string => typeof s === 'string') : undefined
       const mentionedFiles = Array.isArray(body.mentionedFiles) ? body.mentionedFiles.filter((f): f is string => typeof f === 'string') : undefined
@@ -1217,15 +1221,15 @@ export class H5Server {
         const conversationId = this.assistantInbox.conversationId
         const previous = (await this.host.getConversationMessages(conversationId)).find(message => message.id === `msg-${requestId}`)
         if (previous?.runId) {
-          if (previous.text !== text || JSON.stringify(previous.richContent ?? null) !== JSON.stringify(richContent ?? null) || JSON.stringify(previous.attachments ?? []) !== JSON.stringify(attachments) || JSON.stringify(previous.skills ?? []) !== JSON.stringify(skills ?? []) || JSON.stringify(previous.mentionedFiles ?? []) !== JSON.stringify(mentionedFiles ?? [])) throw new Error('REQUEST_ID_REUSED')
+          if (JSON.stringify(previous.assistantContext ?? null) !== JSON.stringify(assistantContext ?? null) || previous.text !== text || JSON.stringify(previous.richContent ?? null) !== JSON.stringify(richContent ?? null) || JSON.stringify(previous.attachments ?? []) !== JSON.stringify(attachments) || JSON.stringify(previous.skills ?? []) !== JSON.stringify(skills ?? []) || JSON.stringify(previous.mentionedFiles ?? []) !== JSON.stringify(mentionedFiles ?? [])) throw new Error('REQUEST_ID_REUSED')
           const receipt = this.assistantInbox.list().find(item => item.messageId === requestId)
           if (!(body.retry === true && receipt && ['failed', 'interrupted'].includes(receipt.state))) { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ conversationId, messageId: requestId, runId: receipt?.runId ?? previous.runId, state: receipt?.state ?? (this.activeRuns.has(previous.runId) ? 'replying' : 'completed'), duplicate: true })); return }
         }
         const conversation = await this.host.getConversation(conversationId)
         const active = conversation.summary.activeRunId ? this.activeRuns.get(conversation.summary.activeRunId) : undefined
         if (active && body.delivery === 'immediate') {
-          await active.submitHumanInput(text, undefined, { requestId, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}) })
-          await this.assistantInbox.acceptInput({ requestId, text, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}) }, active.id)
+          await active.submitHumanInput(text, undefined, { requestId, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}), ...(assistantContext ? { assistantContext } : {}) })
+          await this.assistantInbox.acceptInput({ requestId, text, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}), ...(assistantContext ? { assistantContext } : {}) }, active.id)
           res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ conversationId, messageId: requestId, runId: active.id, state: this.assistantInbox.list().find(item => item.messageId === requestId)?.state ?? 'replying' })); return
         }
         const existing = this.assistantInbox.list().find(item => item.messageId === requestId)
@@ -1233,13 +1237,13 @@ export class H5Server {
         if (!existing && (conversation.summary.activeRunId || this.assistantPendingRuns.size || this.assistantInbox.hasQueued())) throw new Error('CONVERSATION_BUSY')
       }
       const accepted = body.retry === true
-        ? await this.assistantInbox.retry(requestId, text, attachments.length ? attachments : undefined, skills, mentionedFiles, richContent)
+        ? await this.assistantInbox.retry(requestId, text, attachments.length ? attachments : undefined, skills, mentionedFiles, richContent, assistantContext)
         : await this.assistantInbox.enqueue({
             requestId,
             text,
             ...(attachments.length ? { attachments } : {}),
             ...(skills ? { skills } : {}),
-            ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}),
+            ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}), ...(assistantContext ? { assistantContext } : {}),
           })
       if (accepted.message.state === 'queued') {
         this.assistantPendingRuns.add(accepted.message.runId)

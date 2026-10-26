@@ -1,3 +1,5 @@
+import { messagePayload, retryMessagePayload } from './message-payload.js'
+import { chatReferenceFromQuery, chatModePath } from './chat-reference.js'
 import { FrontendUpdateNotice } from './Updates.js'
 import { ProjectHoverCard } from './ProjectHoverCard.js'
 import { ProjectEditor } from './ProjectEditor.js'
@@ -510,7 +512,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
 
   const switchMode = (mode: 'chat' | 'work') => {
     if (surfaceMode === mode) return
-    go(mode === 'chat' ? '/chat' : '/work')
+    go(mode === 'chat' ? chatModePath(route.conversationId, route.newWork ? route.query.get('project') ?? undefined : conversations.find(item => item.id === route.conversationId)?.projectId) : '/work')
   }
 
   useEffect(() => {
@@ -773,6 +775,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     const skills = payload && 'text' in payload ? payload.skills : undefined
     const mentionedFiles = payload && 'text' in payload ? payload.mentionedFiles : undefined
     const richContent = payload && 'text' in payload ? payload.richContent : undefined
+    const assistantContext = surfaceMode === 'chat' ? chatReferenceFromQuery(route.query) : undefined
+    const outgoing = messagePayload({ text, attachments, skills, mentionedFiles, richContent, assistantContext })
     const hasAttachments = Boolean(attachments?.length)
 
     const sendEpoch = routeEpoch.current
@@ -783,7 +787,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       if ((!text && !hasAttachments) || !paired || !serviceConnected || submitting) return false
       if (!messageQueue.controller) { setToast('本地队列尚未就绪，草稿已保留。'); return false }
       try {
-        await messageQueue.controller.enqueue(selected.id, surfaceMode, { text, attachments, skills, mentionedFiles, richContent }, selected.activeRunId)
+        await messageQueue.controller.enqueue(selected.id, surfaceMode, outgoing, selected.activeRunId)
         return true
       } catch { setToast('队列未能保存，草稿和附件已保留。'); return false }
     }
@@ -797,6 +801,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       const optimisticMessage: WebMessage = {
         id: optimisticId,
         role: 'user',
+        ...(assistantContext ? { assistantContext } : {}),
         text,
         requestId: id,
         deliveryState: 'queued',
@@ -814,10 +819,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
           jsonRequest('POST', {
             requestId: id,
             delivery: behavior === 'immediate' ? 'immediate' : 'whenIdle',
-            text,
-            ...(attachments?.length ? { attachments } : {}),
-            ...(skills?.length ? { skills } : {}),
-            ...(mentionedFiles?.length ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}),
+            ...outgoing,
           })
         )
         setMessages(current => current.map(message => {
@@ -834,7 +836,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       } catch (error) {
         if (behavior === 'queue' && error instanceof ApiError && error.status === 409 && error.detail === 'CONVERSATION_BUSY' && messageQueue.controller) {
           try {
-            await messageQueue.controller.enqueue(assistantConversation.id, 'chat', { text, attachments, skills, mentionedFiles, richContent }, undefined, id)
+            await messageQueue.controller.enqueue(assistantConversation.id, 'chat', outgoing, undefined, id)
             localMessages.current.set(assistantConversation.id, (localMessages.current.get(assistantConversation.id) ?? []).filter(message => message.id !== optimisticId))
             if (selectedIdRef.current === assistantConversation.id) setMessages(items => items.filter(message => message.id !== optimisticId))
             clearSubmittedDraft(id); return true
@@ -880,10 +882,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       }
       const response = await submitWorkMessage(
         transport, conversationId, {
-          text, requestId, delivery: behavior === 'immediate' ? 'immediate' : 'whenIdle',
-          ...(attachments?.length ? { attachments } : {}),
-          ...(skills?.length ? { skills } : {}),
-          ...(mentionedFiles?.length ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}),
+          ...outgoing, requestId, delivery: behavior === 'immediate' ? 'immediate' : 'whenIdle',
         }
       )
       patchLocalMessage(conversationId, pendingId, { deliveryState: 'replying', runId: response.runId })
@@ -897,7 +896,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     } catch (error) {
       if (behavior === 'queue' && error instanceof ApiError && error.status === 409 && error.detail === 'CONVERSATION_BUSY' && messageQueue.controller && conversationId) {
         try {
-          await messageQueue.controller.enqueue(conversationId, 'work', { text, attachments, skills, mentionedFiles, richContent }, undefined, requestId)
+          await messageQueue.controller.enqueue(conversationId, 'work', outgoing, undefined, requestId)
           localMessages.current.set(conversationId, (localMessages.current.get(conversationId) ?? []).filter(message => message.id !== pendingId))
           if (selectedIdRef.current === conversationId) setMessages(items => items.filter(message => message.id !== pendingId))
           clearSubmittedDraft(requestId); return true
@@ -921,17 +920,19 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   }
 
   const retryWorkMessage = async (message: WebMessage) => {
-    const conversationId = selectedId
+    const conversationId = selectedId, retryEpoch = routeEpoch.current
     if (!message.requestId || submitting || sendLock.current) return
-    if (!conversationId) { await send({ text: message.text, requestId: message.requestId, attachments: message.attachments, skills: message.skills, richContent: message.richContent, mentionedFiles: message.mentionedFiles }); return }
+    if (!conversationId) { await send({ ...messagePayload(message), requestId: message.requestId }); return }
     sendLock.current = true; setSubmitting(true)
     try {
-      const response = await submitWorkMessage(transport, conversationId, { requestId: message.requestId, delivery: submittedDelivery.current.get(message.requestId) === 'immediate' ? 'immediate' : 'whenIdle', text: message.text, ...(message.attachments ? { attachments: message.attachments } : {}), ...(message.skills ? { skills: message.skills } : {}), ...(message.mentionedFiles ? { richContent: message.richContent, mentionedFiles: message.mentionedFiles } : {}) })
+      const original = await retryMessagePayload(transport, conversationId, message)
+      if (selectedIdRef.current !== conversationId || routeEpoch.current !== retryEpoch) return
+      const response = await submitWorkMessage(transport, conversationId, { ...original, requestId: message.requestId, delivery: submittedDelivery.current.get(message.requestId) === 'immediate' ? 'immediate' : 'whenIdle' })
       patchLocalMessage(conversationId, message.id, { deliveryState: 'replying', runId: response.runId })
       if (selectedIdRef.current === conversationId) { setMessages(items => items.map(item => item.id === message.id ? { ...item, deliveryState: 'replying', runId: response.runId } : item)); setLoadError(''); startRun(response.runId, conversationId) }
       setConversations(items => items.map(item => item.id === conversationId ? { ...item, activeRunId: response.runId } : item))
       clearSubmittedDraft(message.requestId)
-    } catch { if (selectedIdRef.current === conversationId) setToast('仍无法发送；原消息和附件已保留。') }
+    } catch (error) { if (selectedIdRef.current === conversationId) setToast(error instanceof Error && error.message === 'ORIGINAL_MESSAGE_UNAVAILABLE' ? '无法读取完整原消息，未重新发送；原消息和附件已保留。' : '仍无法发送；原消息和附件已保留。') }
     finally { sendLock.current = false; setSubmitting(false) }
   }
 
@@ -942,7 +943,9 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     const isCurrent = () => selectedIdRef.current === conversationId && routeEpoch.current === retryEpoch
     sendLock.current = true; setSubmitting(true)
     try {
-      const receipt = await apiJson<{ conversationId: string; messageId: string; runId: string; state: WebAssistantMessageReceipt['state'] }>(transport, '/api/assistant/messages', jsonRequest('POST', { requestId: message.requestId, delivery: submittedDelivery.current.get(message.requestId) === 'immediate' ? 'immediate' : 'whenIdle', text: message.text, retry: true, attachments: message.attachments, skills: message.skills, richContent: message.richContent, mentionedFiles: message.mentionedFiles }))
+      const original = await retryMessagePayload(transport, conversationId, message)
+      if (!isCurrent()) return
+      const receipt = await apiJson<{ conversationId: string; messageId: string; runId: string; state: WebAssistantMessageReceipt['state'] }>(transport, '/api/assistant/messages', jsonRequest('POST', { ...original, requestId: message.requestId, delivery: submittedDelivery.current.get(message.requestId) === 'immediate' ? 'immediate' : 'whenIdle', retry: true }))
       const deliveryState = receipt.state === 'failed' ? 'failed' : receipt.state === 'interrupted' ? 'interrupted' : receipt.state === 'queued' ? 'queued' : receipt.state === 'replying' ? 'replying' : undefined
       const updateMessage = (item: WebMessage): WebMessage => {
         if (item.id !== message.id) return item
@@ -954,7 +957,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       setAssistantReceipts(items => [...items.filter(item => item.messageId !== message.requestId), { messageId: message.requestId!, runId: receipt.runId, state: receipt.state, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }])
       clearSubmittedDraft(message.requestId)
       if (isCurrent() && receipt.state === 'replying') startRun(receipt.runId, conversationId)
-    } catch { if (isCurrent()) setToast('仍无法发送；原消息和草稿已保留。') }
+    } catch (error) { if (isCurrent()) setToast(error instanceof Error && error.message === 'ORIGINAL_MESSAGE_UNAVAILABLE' ? '无法读取完整原消息，未重新发送；原消息和草稿已保留。' : '仍无法发送；原消息和草稿已保留。') }
     finally { sendLock.current = false; setSubmitting(false) }
   }
 
@@ -1405,6 +1408,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         </div>
 
       </header>
+      {surfaceMode === 'chat' && chatReferenceFromQuery(route.query) && <div className="chat-reference" role="status"><span>引用：{conversations.find(item => item.id === route.query.get('referenceConversation'))?.title ?? projects.find(item => item.id === route.query.get('project'))?.name ?? '当前项目/会话'}</span><PulseButton onClick={() => patchQuery({ referenceConversation: undefined, project: undefined })}>清除引用</PulseButton></div>}
       {!serviceConnected && window.pulseDesktop && <div className="alert" role="status"><span>后台服务未连接，仍可浏览本地记录。</span><PulseButton onClick={() => { void apiJson(transport, '/api/desktop/reconnect', jsonRequest('POST')).then(() => bootstrap()).catch(() => setToast('暂时无法连接后台服务')) }}>重新连接</PulseButton></div>}
       {loadError && <div className="alert" role="alert"><span>{loadError}</span><PulseButton onClick={() => { if (paired) setRouteRevision(value => value + 1); else void bootstrap() }}>重试</PulseButton></div>}
       <section ref={messagesEl} className={`messages ${emptyConversation ? 'is-empty' : ''}`} aria-live="polite" aria-label="聊天消息" onScroll={event => { const el = event.currentTarget; const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 96; followBottom.current = bottom; setAtBottom(bottom) }}>

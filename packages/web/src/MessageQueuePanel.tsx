@@ -50,7 +50,8 @@ export function MessageQueuePanel({ queue, controller, onError, transport = brow
   }
   const visible = expanded ? queue.entries : queue.entries.slice(0, 3)
   return <section className="message-queue" aria-label="待发消息队列">
-    <header><span>{queue.paused ? '队列已暂停' : '待发消息'} <span className="queue-count">{queue.entries.length}</span></span><PulseButton disabled={Boolean(pending)} onClick={() => void action('pause', () => controller.pause(queue.conversationId, !queue.paused))}>{queue.paused ? '继续' : '暂停'}</PulseButton></header>
+    <header><span>{queue.paused ? '待发消息已暂停' : '待发消息'} <span className="queue-count">{queue.entries.length}</span></span><PulseButton disabled={Boolean(pending)} onClick={() => void action('pause', () => controller.pause(queue.conversationId, !queue.paused))}>{queue.paused ? '继续发送' : '暂停发送'}</PulseButton></header>
+    {queue.paused && <p role="status">仅暂停待发消息，正在运行的任务不受影响。</p>}
     {(error || queue.error) && <p role="alert">{error || queue.error}</p>}
     <ol>{visible.map(entry => {
       const busy = entry.sending || Boolean(pending)
@@ -73,7 +74,7 @@ export function MessageQueuePanel({ queue, controller, onError, transport = brow
         {editing === entry.requestId && <div className="queue-edit">
           <RichComposer id={`queue-${entry.requestId}`} draft={draft} onChange={setDraft} transport={transport} projectId={projectId} surfaceMode={queue.surface} disabled={busy} submitLabel="保存待发消息" onSend={async (payload: ComposerPayload) => {
             let saved = false
-            await action(entry.requestId, () => controller.edit(queue.conversationId, entry.requestId, payload), () => { saved = true; setEditing(undefined) })
+            await action(entry.requestId, () => controller.edit(queue.conversationId, entry.requestId, { ...payload, ...(entry.payload.assistantContext ? { assistantContext: entry.payload.assistantContext } : {}) }), () => { saved = true; setEditing(undefined) })
             return saved
           }}/><PulseButton disabled={busy} onClick={() => setEditing(undefined)}>取消</PulseButton>
         </div>}

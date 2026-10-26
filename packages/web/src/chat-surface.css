@@ -147,3 +147,7 @@
 @media (prefers-reduced-motion:reduce) {
   .chat-surface *, .chat-surface *::before,.chat-surface *::after { transition:none!important; animation:none!important; scroll-behavior:auto!important; }
 }
+
+.chat-surface .chat-reference { display:flex; align-items:center; gap:8px; padding:4px 24px; min-width:0; max-width:848px; width:100%; color:var(--muted); font-size:12px; }
+.chat-surface .chat-reference > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.chat-surface .chat-reference > button { flex:none; }

@@ -1,3 +1,4 @@
+import type { AssistantContextReference } from '@hunterzhu/pulse-server/protocol'
 import { mentionLocation, parentMentionDirectory } from './fileMentions.js'
 import { AttachmentCards } from './AttachmentCards.js'
 import { parseRichContent, type RichContent } from '@hunterzhu/pulse-server/rich-content'
@@ -34,7 +35,7 @@ export interface ComposerDraft {
   revision: number
 }
 export const emptyComposerDraft = (): ComposerDraft => ({ markdown: '', attachments: [], processing: 0, revision: 0 })
-export type ComposerPayload = { text: string; richContent?: RichContent | undefined; attachments?: WebAttachment[] | undefined; skills?: string[] | undefined; mentionedFiles?: string[] | undefined }
+export type ComposerPayload = { text: string; assistantContext?: AssistantContextReference | undefined; richContent?: RichContent | undefined; attachments?: WebAttachment[] | undefined; skills?: string[] | undefined; mentionedFiles?: string[] | undefined }
 
 const fileSuggestionKey = new PluginKey('fileSuggestion')
 

@@ -34,7 +34,7 @@ export class ConversationDatabase {
         const messages = page.items.map(decorate), seen = new Set(messages.map(message => message.id));
         for (const item of inbox.messages)
             if (item.state !== 'completed' && !seen.has(`msg-${item.messageId}`))
-                messages.push({ id: `msg-${item.messageId}`, runId: item.runId, role: 'user', text: item.text, createdAt: item.createdAt, deliveryState: item.state, requestId: item.messageId, ...(item.attachments ? { attachments: item.attachments } : {}), ...(item.skills ? { skills: item.skills } : {}), ...(item.mentionedFiles ? { mentionedFiles: item.mentionedFiles } : {}), ...(item.richContent ? { richContent: item.richContent } : {}) });
+                messages.push({ id: `msg-${item.messageId}`, runId: item.runId, role: 'user', text: item.text, createdAt: item.createdAt, deliveryState: item.state, requestId: item.messageId, ...(item.attachments ? { attachments: item.attachments } : {}), ...(item.skills ? { skills: item.skills } : {}), ...(item.mentionedFiles ? { mentionedFiles: item.mentionedFiles } : {}), ...(item.richContent ? { richContent: item.richContent } : {}), ...(item.assistantContext ? { assistantContext: item.assistantContext } : {}) });
         const workInteractions = [], live = [];
         for (const work of this.list()) {
             if (work.id !== conversation.id && work.origin !== 'assistant' || work.archivedAt || !work.activeRunId)
@@ -122,6 +122,22 @@ export class ConversationDatabase {
             return [];
         return this.db.prepare('SELECT id,substr(text,1,500) AS preview FROM messages WHERE conversation=? AND instr(lower(text),lower(?))>0 ORDER BY seq DESC LIMIT ?').all(id, query.slice(0, 200), Math.min(100, Math.max(1, Number(limit) || 50)));
     }
+    searchPage(query, options = {}) {
+        if (typeof query !== 'string' || !query.trim() || query.length > 200) throw new Error('INVALID_SEARCH_QUERY');
+        const limit = Math.min(20, Math.max(1, Math.floor(Number(options.limit) || 10)));
+        const cursor = options.before === undefined ? Number.MAX_SAFE_INTEGER : Number(options.before);
+        if (!Number.isSafeInteger(cursor) || cursor < 1) throw new Error('INVALID_CURSOR');
+        if (options.conversationId) this.get(options.conversationId);
+        const clauses = ['m.seq < ?'], args = [cursor];
+        if (options.conversationId) { clauses.push('m.conversation = ?'); args.push(options.conversationId); }
+        if (options.projectId) { clauses.push("json_extract(c.body,'$.projectId') = ?"); args.push(options.projectId); }
+        if (!options.includeArchived) clauses.push("json_extract(c.body,'$.archivedAt') IS NULL");
+        clauses.push("(instr(lower(m.text),lower(?)) > 0 OR instr(lower(json_extract(c.body,'$.title')),lower(?)) > 0)"); args.push(query, query);
+        // Extract only public message metadata and a short excerpt, never attachment bodies.
+        const rows = this.db.prepare(`SELECT m.seq,m.conversation,m.id,json_extract(c.body,'$.title') AS title,json_extract(c.body,'$.projectId') AS projectId,json_extract(c.body,'$.archivedAt') AS archivedAt,json_extract(m.body,'$.role') AS role,json_extract(m.body,'$.createdAt') AS createdAt,json_extract(m.body,'$.runId') AS runId,substr(m.text,max(1,instr(lower(m.text),lower(?))-100),500) AS excerpt FROM messages m JOIN conversations c ON c.id=m.conversation WHERE ${clauses.join(' AND ')} ORDER BY m.seq DESC LIMIT ?`).all(query, ...args, limit + 1);
+        const selected = rows.slice(0, limit);
+        return { items: selected.map(row => ({ conversationId: row.conversation, messageId: row.id, sequence: Number(row.seq), title: row.title, projectId: row.projectId ?? undefined, archived: Boolean(row.archivedAt), role: row.role, createdAt: row.createdAt, runId: row.runId ?? undefined, excerpt: row.excerpt })), before: rows.length > limit ? String(selected.at(-1).seq) : null, revision: this.revision(), historical: true };
+    }
     replace(id, messages) { return this.transaction(() => { this.db.prepare('DELETE FROM messages WHERE conversation=?').run(id); const stmt = this.db.prepare('INSERT INTO messages(conversation,id,body,text) VALUES(?,?,?,?)'); for (const m of messages)
         stmt.run(id, m.id, JSON.stringify(m), m.text); return this.changed(id, 'reset', id); }); }
     readState(key) { const row = this.db.prepare('SELECT body FROM state WHERE key=?').get(key); return row ? JSON.parse(row.body) : undefined; }
@@ -129,5 +145,5 @@ export class ConversationDatabase {
     revision() { return Number(this.db.prepare('SELECT coalesce(max(seq),0) AS seq FROM changes').get().seq); }
     changes(after = 0) { const min = Number(this.db.prepare('SELECT coalesce(min(seq),0) AS seq FROM changes').get().seq); return { reset: after > 0 && after < min - 1, revision: this.revision(), items: this.db.prepare('SELECT seq,conversation,kind,item FROM changes WHERE seq>? ORDER BY seq LIMIT 10000').all(after) }; }
 }
-export const readMethods = new Set(['assistantView', 'list', 'get', 'messages', 'page', 'body', 'search', 'readState', 'revision', 'changes']);
+export const readMethods = new Set(['assistantView', 'list', 'get', 'messages', 'page', 'body', 'search', 'searchPage', 'readState', 'revision', 'changes']);
 export const writeMethods = new Set(['save', 'patch', 'remove', 'append', 'replace', 'saveState']);
