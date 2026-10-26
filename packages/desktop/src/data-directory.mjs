@@ -28,5 +28,6 @@ export async function assertDesktopDataReady(directory) {
 export function desktopServiceMessage(error) {
     if (error === 'DATA_MIGRATION_REQUIRED') return '所选目录仍是旧版数据，须停用该目录的旧服务并完成迁移后才能连接。也可以选择已经迁移的开发数据目录。';
     if (error === 'DATA_MIGRATION_IN_PROGRESS') return '所选目录正在迁移，请等待迁移完成后重新连接。';
+    if (/^PULSE_SERVICE_(?:START_ERROR|EXITED|START_FAILED)/.test(error ?? '')) return `后台启动失败（${error}）。请打开“查看启动诊断”检查运行环境和退出原因，再重试。`;
     return `后台服务未能连接（${error || 'PULSE_SERVICE_UNAVAILABLE'}）。请确认数据目录，或稍后重新连接。`;
 }

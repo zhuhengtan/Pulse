@@ -1,3 +1,4 @@
+import { DownloadProgressWriter, readDownloadProgress } from './progress.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { access, mkdir, readFile, rename, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
@@ -20,7 +21,6 @@ export class UpdateManager {
   private attempts = 0
   private checking: Promise<void> | undefined
   private downloading: Promise<void> | undefined
-  private downloadProgress: UpdateState['progress']
   private verifiedFrontends = new Map<string, ComponentManifest['files']>()
   private registeredShell: string | undefined
   private shellRegistration: Promise<void> | undefined
@@ -43,7 +43,7 @@ export class UpdateManager {
     const frontend = state.active.frontend
     const publicState = { frontend: frontend ? releaseId(frontend.manifest) : 'bundled', frontendVersion: frontend?.manifest.version ?? await bundledFrontendVersion(this.options.frontendDirectory), protocols: { http: 1, events: 1 } }
     if (!local) return publicState
-    return { ...state, ...publicState, progress: this.downloadProgress ?? state.progress,
+    return { ...state, ...publicState, progress: await readDownloadProgress(this.root, this.options.dataDir, state.downloadId, state.phase),
       lastBackend: state.lastBackend ? { version: state.lastBackend.manifest.version } : undefined,
       running: { backend: this.options.backendVersion, shell: this.options.shellVersion ?? state.shell?.version, runtimeDirectory: this.options.runtimeDirectory },
       modules: await (this.moduleVersions ??= backendModuleVersions()),
@@ -117,9 +117,11 @@ export class UpdateManager {
       if (state.phase === 'applying') throw new Error('UPDATE_BUSY')
       if (state.pending) throw new Error('UPDATE_ALREADY_SCHEDULED')
       if (retry) state.failed = []
-      const selection: Selection = {}; state.phase = 'downloading'
+      const selection: Selection = {}; state.phase = 'downloading'; state.downloadId = randomUUID()
+      const progress = new DownloadProgressWriter(this.root, this.options.dataDir, state.downloadId)
       await atomicJson(statePath(this.root, this.options.dataDir), state)
       try {
+        await progress.start()
         for (const metadata of this.select(state)) {
           const id = releaseId(metadata), destination = join(this.root, 'updates', 'components', id)
           const envelope = await readJson(join(this.root, 'updates', 'manifests', id + '.json'), undefined)
@@ -133,7 +135,8 @@ export class UpdateManager {
             const temp = join(this.root, 'updates', 'staging', randomUUID()), archive = temp + '.zip'
             await mkdir(temp, { recursive: true, mode: 0o700 })
             try {
-              await downloadArtifact(archive, manifest, received => { this.downloadProgress = { component: manifest.component, received, total: manifest.artifact.bytes } }, Boolean(this.options.development))
+              progress.update({ component: manifest.component, received: 0, total: manifest.artifact.bytes })
+              await downloadArtifact(archive, manifest, received => progress.update({ component: manifest.component, received, total: manifest.artifact.bytes }), Boolean(this.options.development))
               await extractArtifact(archive, temp, manifest)
               await atomicJson(join(temp, 'component.json'), verified.envelope)
               await mkdir(dirname(destination), { recursive: true }); await rename(temp, destination)
@@ -145,7 +148,7 @@ export class UpdateManager {
         else state.phase = state.staged ? 'ready' : 'idle'
         delete state.error
       } catch (error) { state.phase = 'failed'; state.error = error instanceof Error ? error.message : 'UPDATE_DOWNLOAD_FAILED' }
-      finally { this.downloadProgress = undefined }
+      finally { await progress.finish(); delete state.downloadId; delete state.progress }
     })
   }
   async requestApply(rollback = false): Promise<void> {

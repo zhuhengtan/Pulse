@@ -33,6 +33,7 @@ export type UpdateState = {
   schema: 1; autoDownload: boolean; sequence: number; checkedAt?: string; error?: string;
   phase: 'idle' | 'checking' | 'downloading' | 'ready' | 'waiting' | 'applying' | 'failed';
   progress?: { component: string; received: number; total: number };
+  downloadId?: string;
   shell?: { version: string; chromium: number };
   active: Selection; previous?: Selection; staged?: Selection; pending: boolean;
   lastBackend?: InstalledComponent;

@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createLocalHost, automationDoctor, requestAutomationPermissions, assertJarvisApiUrl, createBuiltinSkillCapabilityPack, createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
+import { installProcessDiagnostics, createLocalHost, automationDoctor, requestAutomationPermissions, assertJarvisApiUrl, createBuiltinSkillCapabilityPack, createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
 import { modelSelectionId, normalizeModelConfig, resolveModelReference } from '@hunterzhu/pulse-server'
 import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
@@ -590,6 +590,9 @@ async function readPipedStdin(): Promise<string> {
 }
 
 if (process.argv[1] && isSameModulePath(process.argv[1], fileURLToPath(import.meta.url))) {
+  if (process.env.PULSE_DESKTOP_DIAGNOSTICS === '1' && process.env.PULSE_LOG_DIR && process.argv[2] === 'h5' && ['start', 'daemon'].includes(process.argv[3] ?? '')) {
+    try { installProcessDiagnostics(process.env.PULSE_LOG_DIR) } catch { /* Startup remains available if local diagnostics are unavailable. */ }
+  }
   main()
     .then((code) => {
       process.exitCode = code

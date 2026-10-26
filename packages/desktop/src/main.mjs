@@ -1,3 +1,4 @@
+import { observeServiceStartup } from './background-service.mjs';
 import { selectedFrontend, verifySelectedFile } from './update-loader.mjs';
 import { controlUpdate } from './update-control.mjs';
 import { NativeBrowser } from './native-browser.mjs';
@@ -28,6 +29,8 @@ else {
         window.webContents.send(channel, value); };
     const browser = new NativeBrowser({ window: () => window, notify: value => send('pulse:native-browser', value), protectedUrls: () => [pageUrl, ...(base ? [base] : []), 'http://127.0.0.1:7332'] });
     let browserHost, browserRetry;
+    let diagnostics, diagnosticLog;
+    const diagnosticDirectory = () => join(app.getPath('userData'), 'logs');
     const browserRequests = new Map();
     function connectBrowserHost() {
         if (!base || app.isQuitting || browserHost?.readyState === WebSocket.OPEN || browserHost?.readyState === WebSocket.CONNECTING) return;
@@ -135,10 +138,13 @@ else {
         if (!base) {
             const entry = installation.entry;
             const runtime = installation.node;
-            const child = spawn(runtime, [entry, 'h5', 'start', '--port', '0', '--data-dir', directory], { detached: true, stdio: 'ignore', cwd: homedir(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PULSE_DATA_DIR: directory, PULSE_H5_HOST: '127.0.0.1', ...(installation.source ? { PULSE_HOME: installation.root, PULSE_CONFIG: installation.state.configPath, PULSE_RUNTIME_ID: installation.state.runtimeId, PULSE_MANAGED: '1', PULSE_RUNTIME_DIR: installation.state.runtimeDirectory, ...(installation.browserExecutable ? { PULSE_BROWSER_EXECUTABLE: installation.browserExecutable } : {}) } : {}) } });
+            const child = spawn(runtime, [entry, 'h5', 'start', '--port', '0', '--data-dir', directory], { detached: true, stdio: 'ignore', cwd: homedir(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PULSE_DATA_DIR: directory, PULSE_H5_HOST: '127.0.0.1', PULSE_DESKTOP_DIAGNOSTICS: '1', PULSE_LOG_DIR: diagnosticDirectory(), ...(installation.source ? { PULSE_HOME: installation.root, PULSE_CONFIG: installation.state.configPath, PULSE_RUNTIME_ID: installation.state.runtimeId, PULSE_MANAGED: '1', PULSE_RUNTIME_DIR: installation.state.runtimeDirectory, ...(installation.browserExecutable ? { PULSE_BROWSER_EXECUTABLE: installation.browserExecutable } : {}) } : {}) } });
             child.unref();
-            child.on('error', () => { });
+            diagnosticLog?.record('launch', { pid: child.pid, dataDirectory: directory });
+            const startupFailure = observeServiceStartup(child, diagnosticLog);
             for (let i = 0; i < 600; i++) {
+                const failure = startupFailure();
+                if (failure) throw new Error(failure);
                 const descriptor = await readFile(join(directory, 'service.json'), 'utf8').then(JSON.parse).catch(() => undefined);
                 if (descriptor?.protocol === 1 && (descriptor.pid === child.pid || descriptor.supervisorPid === child.pid)) {
                     base = `http://127.0.0.1:${descriptor.port}`;
@@ -188,6 +194,7 @@ else {
                 installation.step('server', '启动本机后台', backendInfo.outdated ? 'warning' : 'ready', backendInfo.outdated ? '当前后台仍在使用之前的版本，已有任务保持运行。可在此应用后台更新。' : '本机服务已连接');
                 installation.state.phase = 'ready';
             } catch (error) {
+                diagnosticLog?.record('prepare-error', { name: error.name, message: error.message });
                 base = ''; serviceError = error.message; installation.state.phase = 'error';
                 if (!installation.state.error) installation.step('server', '启动本机后台', 'error', desktopServiceMessage(serviceError));
             }
@@ -224,6 +231,10 @@ else {
         const root = resolve(process.env.PULSE_DESKTOP_INSTALL_ROOT ?? process.env.PULSE_HOME ?? join(homedir(), '.pulse'));
         const source = app.isPackaged ? join(process.resourcesPath, 'runtime') : process.env.PULSE_DESKTOP_RUNTIME_DIR;
         installation = new DesktopInstallation({ root, userData: app.getPath('userData'), source, dataDirectory: directory, packaged: app.isPackaged, node: process.execPath, entry: fileURLToPath(new URL('../../cli/dist/bin.js', import.meta.url)), shellVersion: app.getVersion(), chromium: Number(process.versions.chrome.split('.')[0]), shellHome: process.env.PULSE_DESKTOP_SHELL_HOME ?? (source && !app.isPackaged ? join(app.getPath('userData'), 'shell-profile') : homedir()) });
+        const diagnosticEntry = source ? join(source, 'app/node_modules/@hunterzhu/pulse-server/dist/diagnostics.js') : fileURLToPath(new URL('../../server/dist/diagnostics.js', import.meta.url));
+        diagnostics = await import(pathToFileURL(diagnosticEntry).href).catch(() => undefined);
+        try { if (diagnostics) diagnosticLog = new diagnostics.LocalDiagnosticLog(diagnosticDirectory(), 'desktop-launcher.log'); } catch { /* UI can still explain unavailable logs. */ }
+
         protocol.handle('pulse', async (request) => {
             const url = new URL(request.url);
             if (url.host !== 'app')
@@ -285,6 +296,7 @@ else {
                 try { const response = await http(path, init); if (response.status < 500 && response.status !== 404) return { status: response.status, body: await response.json() }; } catch {}
                 return controlUpdate(installation, app.getVersion(), Number(process.versions.chrome.split('.')[0]), path, init);
             }
+            if (path === '/api/desktop/diagnostics' && (init.method ?? 'GET') === 'GET') return { status: 200, body: diagnostics?.readLocalDiagnostics(diagnosticDirectory()) ?? { directory: diagnosticDirectory(), text: '当前运行包未提供诊断组件，请更新后重试。' } };
             if (path === '/api/desktop/setup' && (init.method ?? 'GET') === 'GET') return { status: 200, body: setupSnapshot() };
             if (path === '/api/desktop/setup/data-directory' && init.method === 'POST') { void chooseDataDirectory(); return { status: 202, body: setupSnapshot() }; }
             if (path === '/api/desktop/setup/repair' && init.method === 'POST') { void prepareDesktop(true); return { status: 202, body: setupSnapshot() }; }
@@ -309,6 +321,7 @@ else {
                     return { status: 200, body: { ok: true } };
                 }
                 catch (error) {
+                    diagnosticLog?.record('reconnect-error', { name: error.name, message: error.message });
                     serviceError = error.message;
                     return { status: 503, body: { error: serviceError } };
                 }
@@ -455,5 +468,5 @@ else {
         app.on('window-all-closed', () => app.quit());
         app.on('before-quit', () => { app.isQuitting = true; clearTimeout(browserRetry); browserHost?.close(); browser.closeAll(); clearTimeout(retry); chat?.close(); for (const sub of subscriptions.values())
             sub.controller.abort(); if (reader?.connected) reader.disconnect(); reader?.kill('SIGTERM'); });
-    }).catch(error => { console.error('Pulse desktop startup failed:', error.message); app.quit(); });
+    }).catch(error => { diagnosticLog?.record('desktop-startup-error', { name: error.name, message: error.message }); console.error('Pulse desktop startup failed:', error.message); app.quit(); });
 }

@@ -1,5 +1,6 @@
 import { messagePayload, retryMessagePayload } from './message-payload.js'
 import { chatReferenceFromQuery, chatModePath } from './chat-reference.js'
+import type { RunRecoveryPreflight } from '@hunterzhu/pulse-server/protocol'
 import { FrontendUpdateNotice } from './Updates.js'
 import { ProjectHoverCard } from './ProjectHoverCard.js'
 import { ProjectEditor } from './ProjectEditor.js'
@@ -37,6 +38,16 @@ import { PulseBrand } from './PulseBrand.js'
 import { ApprovalPolicySelect, useApprovalPolicy } from './ApprovalPolicyMenu.js'
 import { useBlocker } from 'react-router'
 import { usePulseNavigation, workUrl, parsePulseRoute } from './routing.js'
+const recoveryBlockerMessage = (reason?: string) => {
+  if (reason?.startsWith('RECOVERY_BUILD_MIGRATION_REQUIRED')) return '此任务需要确认旧、新构建后才能继续。请重新检查；旧后台可先升级，或使用 CLI 的精确构建确认入口。'
+  if (reason === 'RECOVERY_CONFIRMATION_STALE') return '构建或运行已变化，本次确认未使用。请重新检查并确认。'
+  if (reason?.startsWith('RECOVERY_POLICY_INCOMPATIBLE')) return '恢复被策略变化阻止。请检查当前配置；不会自动放宽原策略。'
+  if (reason === 'RECOVERY_SNAPSHOT_UNREADABLE') return '无法读取运行快照；请查看后台诊断并保留原数据，不要反复重试。'
+  if (reason === 'RECOVERY_FORMAT_CONFLICT') return '此运行存在多种快照格式；请先检查数据迁移来源，原数据保持不变。'
+  if (reason === 'RECOVERY_SNAPSHOT_MISSING') return '没有可恢复的运行快照；原对话和记录保留，可以结束本轮后开始新任务。'
+  if (reason === 'RUN_NOT_INTERRUPTED') return '任务状态已变化或仍在运行，请刷新后检查。'
+  return `当前无法恢复任务（${reason ?? 'RECOVERY_BLOCKED'}）；记录已保留，请检查后台诊断。`
+}
 const PreviewDock = lazy(() => import('./PreviewDock.js').then(module => ({ default: module.PreviewDock })))
 
 type RunStatus =
@@ -977,7 +988,20 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       if (action === 'end' && (!await dialogs.confirm('结束这轮任务？聊天和运行记录会保留，但不会继续执行。') || !isCurrent())) return
       if (isCurrent()) setToast('')
       if (action === 'resume') {
-        const result = await apiJson<{ runId: string }>(transport, `/api/conversations/${encodeURIComponent(conversation.id)}/runs/${encodeURIComponent(runId)}/resume`, jsonRequest('POST'))
+        let preflight: RunRecoveryPreflight | undefined
+        try { preflight = await apiJson<RunRecoveryPreflight>(transport, `/api/conversations/${encodeURIComponent(conversation.id)}/runs/${encodeURIComponent(runId)}/recovery`) }
+        catch (error) { if (!(error instanceof ApiError && error.status === 404)) throw error }
+        if (!isCurrent()) return
+        if (preflight && (preflight.runId !== runId || preflight.conversationId !== conversation.id)) { setToast('运行已变化，请重新检查后继续。'); return }
+        if (preflight?.status === 'blocked') { setToast(recoveryBlockerMessage(preflight.blockers[0])); return }
+        let recovery: { runId: string; from: string; to: string; confirmed: true } | undefined
+        if (preflight?.status === 'confirmation-required') {
+          if (!preflight.from || !preflight.to) { setToast('恢复预检信息不完整，请重新检查后台版本。'); return }
+          const accepted = await dialogs.confirm(<div><p>此任务由旧构建保存。请先审阅这次版本变化，再确认是否继续。工具和策略兼容检查仍会执行；本次确认只适用于这一个运行和这对构建。</p><p>运行：{runId}</p><p>旧构建：<code style={{ wordBreak: 'break-all' }}>{preflight.from}</code></p><p>新构建：<code style={{ wordBreak: 'break-all' }}>{preflight.to}</code></p></div>)
+          if (!accepted || !isCurrent()) return
+          recovery = { runId, from: preflight.from, to: preflight.to, confirmed: true }
+        }
+        const result = await apiJson<{ runId: string }>(transport, `/api/conversations/${encodeURIComponent(conversation.id)}/runs/${encodeURIComponent(runId)}/resume`, jsonRequest('POST', recovery ? { recovery } : undefined))
         const current = isCurrent()
         updateConversation(result.runId)
         if (current) {
@@ -1001,7 +1025,9 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         updateConversation()
         if (current) { setRecoveryRun(undefined); setToast(action === 'resume' ? '这轮任务没有可恢复的运行快照；原对话和记录已保留，可以发送新消息。' : '本轮已结束，原始记录已保留') }
       } else if (current) {
-        if (error instanceof ApiError && error.status === 409) setToast(error.detail ? transferError(error) : action === 'resume' ? '这轮任务状态已变化或仍被占用；请刷新对话状态后重试。' : '任务仍在运行，未结束本轮。')
+        if (error instanceof ApiError && error.detail?.startsWith('RECOVERY_')) setToast(recoveryBlockerMessage(error.detail))
+        else if (error instanceof ApiError && error.detail?.startsWith('TOOL_SCHEMA_INCOMPATIBLE')) setToast('任务使用的工具已变化，无法直接恢复。请检查工具版本，或保留记录后结束本轮。')
+        else if (error instanceof ApiError && error.status === 409) setToast(error.detail ? transferError(error) : action === 'resume' ? '这轮任务状态已变化或仍被占用；请刷新对话状态后重试。' : '任务仍在运行，未结束本轮。')
         else setToast(action === 'resume' ? '暂时无法继续任务；运行记录已保留，可以重试或结束这轮。' : '无法结束本轮任务，请检查连接后重试。')
       }
     } finally {

@@ -1,5 +1,7 @@
 import { boundedAssistantConversation, assistantReferenceSchema, assistantReferenceNotice } from './assistant-chat-context.js'
 import { registerAssistantHistoryTools } from './assistant-history.js'
+export { LocalDiagnosticLog, installProcessDiagnostics, readLocalDiagnostics } from './diagnostics.js'
+import { describeRunRecovery, type RunRecoveryAuthorization, type RunRecoveryPreflight } from './run-recovery-preflight.js'
 import { createSkillTools } from './skill-tools.js'
 import { loadRunSkills, saveRunSkills } from './skill-run-snapshot.js'
 import { enableSkillConfig } from './skill-config.js'
@@ -3738,14 +3740,30 @@ export class LocalHost {
       throw error
     }
   }
-  async resumeRun(conversationId: string): Promise<RunHandle> {
+  async preflightRunRecovery(conversationId: string, runId: string): Promise<RunRecoveryPreflight> {
+    const manifest = await this.readManifest(conversationId), to = currentRecoveryBuild();
+    if (manifest.activeRunId !== runId || this.active.has(runId)) return describeRunRecovery(conversationId, runId, to, undefined, undefined, ['RUN_NOT_INTERRUPTED']);
+    const directory = this.runDir(conversationId, runId);
+    const exists = async (name: string) => stat(join(directory, name)).then(() => true, () => false);
+    if (!await exists('runtime.json') && !await exists('runtime.sqlite')) return describeRunRecovery(conversationId, runId, to, undefined, undefined, ['RECOVERY_SNAPSHOT_MISSING']);
+    let snapshot: Awaited<ReturnType<import('@hunterzhu/pulse-runtime').RuntimePersistenceBackend['load']>>;
+    try { const backend = await this.persistenceFor(conversationId, runId); snapshot = await backend.load(); }
+    catch (error) { return describeRunRecovery(conversationId, runId, to, undefined, undefined, [error instanceof Error && error.message.startsWith('RUNTIME_PERSISTENCE_FORMAT_CONFLICT') ? 'RECOVERY_FORMAT_CONFLICT' : 'RECOVERY_SNAPSHOT_UNREADABLE']); }
+    if (!snapshot) return describeRunRecovery(conversationId, runId, to, undefined, undefined, ['RECOVERY_SNAPSHOT_MISSING']);
+    const previous = snapshot.compatibility?.fingerprints as { build: string; policy: string } | undefined;
+    const policy = recoveryPolicyFingerprint({ approvalMode: this.options.approvalMode ?? 'ask', allowNetwork: this.options.allowNetwork ?? false, networkHosts: this.options.networkHosts ?? [], contract: 2 });
+    return describeRunRecovery(conversationId, runId, to, previous, policy);
+  }
+  async resumeRun(conversationId: string, authorization?: RunRecoveryAuthorization): Promise<RunHandle> {
     const manifest = await this.readManifest(conversationId)
     const runId = manifest.activeRunId
     if (!runId) throw new Error('NO_ACTIVE_RUN')
+    if (authorization && authorization.runId !== runId) throw new Error('RECOVERY_CONFIRMATION_STALE')
     const existing = this.active.get(runId)
     if (existing) return this.makeRunHandle(conversationId, runId, existing.runtime, existing.session)
     if (this.options.skillConfigPath) await this.listSkills()
     let runOptions = snapshotHostOptions(this.options)
+    if (authorization) runOptions = { ...runOptions, recoveryBuildMigration: { from: authorization.from, to: authorization.to } }
     const runJarvisClient = this.jarvisClient
     await this.acquireConversationLock(conversationId, runId)
     let restored: Awaited<ReturnType<LocalHost['restoreRuntimeFor']>> | undefined

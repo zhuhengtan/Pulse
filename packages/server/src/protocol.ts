@@ -157,3 +157,5 @@ export interface HostPathListing {
   entries: HostPathEntry[]
   nextOffset: number | null
 }
+
+export type { RunRecoveryPreflight } from './run-recovery-preflight.js'

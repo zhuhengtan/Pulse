@@ -1,4 +1,5 @@
 import { assistantReferenceSchema } from '../assistant-chat-context.js'
+import { recoveryDecision, type RunRecoveryAuthorization } from '../run-recovery-preflight.js'
 import { SkillManagement } from '../skill-management.js'
 import { withEnabledSkill } from '../skill-config.js'
 import { frontendResource } from '../updates/frontend.js'
@@ -577,7 +578,7 @@ export class H5Server {
     await this.resumeConversationRun(conversationId)
   }
 
-  private async resumeConversationRun(conversationId: string): Promise<RunHandle> {
+  private async resumeConversationRun(conversationId: string, authorization?: RunRecoveryAuthorization): Promise<RunHandle> {
     const binding = await this.host.getTransferBinding(conversationId)
     if (binding) {
       const conversation = await this.host.getConversation(conversationId)
@@ -592,8 +593,8 @@ export class H5Server {
     }
     await this.host.prepareAutomation()
     const handle = this.workWorker
-      ? await startH5WorkWorker({ ...this.workWorker, runtimeOptions: this.host.getWorkWorkerOptions() }, { conversationId, text: '', resume: true })
-      : await this.host.resumeRun(conversationId)
+      ? await startH5WorkWorker({ ...this.workWorker, runtimeOptions: this.host.getWorkWorkerOptions() }, { conversationId, text: '', resume: true, ...(authorization ? { recoveryAuthorization: authorization } : {}) })
+      : await this.host.resumeRun(conversationId, authorization)
     this.attachRun(handle)
     return handle
   }
@@ -1884,6 +1885,11 @@ export class H5Server {
       return
     }
 
+    const recoveryPreflightMatch = pathname.match(/^\/api\/conversations\/([^/]+)\/runs\/([^/]+)\/recovery$/)
+    if (recoveryPreflightMatch && method === 'GET') {
+      const preflight = await this.host.preflightRunRecovery(recoveryPreflightMatch[1]!, recoveryPreflightMatch[2]!)
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(preflight)); return
+    }
     const resumeRunMatch = pathname.match(/^\/api\/conversations\/([^/]+)\/runs\/([^/]+)\/resume$/)
     if (resumeRunMatch && method === 'POST') {
       const [, conversationId, runId] = resumeRunMatch
@@ -1894,7 +1900,11 @@ export class H5Server {
         return
       }
       try {
-        const handle = await this.resumeConversationRun(conversationId)
+        const preflight = await this.host.preflightRunRecovery(conversationId, runId)
+        let authorization: RunRecoveryAuthorization | undefined
+        try { authorization = recoveryDecision(preflight, await this.parseJsonBody(req)) }
+        catch (error) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error instanceof Error ? error.message : 'RECOVERY_BLOCKED', recovery: preflight })); return }
+        const handle = await this.resumeConversationRun(conversationId, authorization)
         if (handle.id !== runId) {
           res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'RUN_CHANGED' }))
           return
@@ -1902,6 +1912,9 @@ export class H5Server {
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId }))
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
+        if (/^(?:RECOVERY_|TOOL_SCHEMA_INCOMPATIBLE)/.test(message)) {
+          res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message.split(':')[0], reasons: [message] })); return
+        }
         if (error instanceof BundleError) { res.writeHead(error.status, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error.code })); return }
         if (message === 'CONVERSATION_BUSY' || message === 'NO_ACTIVE_RUN') {
           res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message }))

@@ -54,7 +54,7 @@ export function usePulseDialogs() {
   const { modal } = App.useApp()
   return {
     alert: (content: string) => { modal.error({ title: '操作未完成', content, okText: '知道了' }) },
-    confirm: (content: string) => new Promise<boolean>(resolve => {
+    confirm: (content: ReactNode) => new Promise<boolean>(resolve => {
       modal.confirm({ title: '请确认', content, okText: '确认', cancelText: '取消', onOk: () => { resolve(true) }, onCancel: () => { resolve(false) } })
     }),
     prompt: (title: string, initialValue = '') => new Promise<string | null>(resolve => {

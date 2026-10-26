@@ -873,6 +873,7 @@ describe('H5Server End-to-End', () => {
       yield { schemaVersion: 1 as const, type: 'complete' as const, conversationId: conversation.id, runId, seq: 2, data: { status: 'succeeded' } }
     })()
     const handle = { id: runId, conversationId: conversation.id, events, outcome: async () => ({ status: 'succeeded' }), taskOutcome: async () => undefined } as unknown as RunHandle
+    host.preflightRunRecovery = async () => ({ conversationId: conversation.id, runId, status: 'ready', to: 'synthetic-current-build', blockers: [], toolCheck: 'on-resume' })
     host.resumeRun = async () => handle
     const server = new H5Server(host, { dataDir: dir, port: 0, host: '127.0.0.1' })
     const info = await server.start()

@@ -42,6 +42,16 @@ function SetupDetails({ status, welcome = false }: { status?: DesktopSetupStatus
 export function DesktopEnvironment({ transport, welcome = false, onContinue, onConfigureModels }: { transport: PulseWebTransport; welcome?: boolean; onContinue?: () => void; onConfigureModels?: () => void }) {
   const { status, error, setError, setStatus } = useDesktopSetup(transport, true)
   const [busy, setBusy] = useState(false)
+  const [diagnostics, setDiagnostics] = useState<{ directory: string; text: string }>()
+  const [diagnosing, setDiagnosing] = useState(false)
+  const [diagnosticError, setDiagnosticError] = useState('')
+  const showDiagnostics = async () => {
+    setDiagnosing(true); setDiagnosticError('')
+    try { setDiagnostics(await apiJson(transport, '/api/desktop/diagnostics')) }
+    catch { setDiagnosticError('暂时无法读取本地诊断，请稍后重试。') }
+    finally { setDiagnosing(false) }
+  }
+  useEffect(() => { if (window.pulseDesktop && new URLSearchParams(window.location.search).get('diagnostics') === '1') void showDiagnostics() }, [transport])
   const action = async (name: 'repair' | 'complete' | 'restart-service' | 'data-directory', next?: () => void) => {
     setBusy(true); setError('')
     try {
@@ -58,12 +68,14 @@ export function DesktopEnvironment({ transport, welcome = false, onContinue, onC
     {status?.development && <p className="desktop-setup-note">开发预览使用仓库运行环境，不会注册系统命令或修改终端配置。</p>}
     {status?.version && <p className="desktop-setup-version">运行版本：{status.version}</p>}
     <SetupDetails status={status} welcome={welcome}/>
-    {(error || status?.error) && <p role="alert" className="settings-error">{error || status?.error}</p>}
+    {(diagnosticError || error || status?.error) && <p role="alert" className="settings-error">{diagnosticError || error || status?.error}</p>}
     {status?.cli?.conflict && <p className="desktop-setup-note">已有其他 pulse 命令，已保留。桌面版命令可通过完整路径调用：<code>{status.cli.path}</code></p>}
     {status?.cli && !status.cli.conflict && <p className="desktop-setup-note">请打开一个新终端，运行 <code>pulse --version</code> 检查命令。已打开的终端需要重新打开。</p>}
     {status?.path?.ready === false && status.cli && <p className="desktop-setup-note">你也可以直接运行：<code>{status.cli.path} --version</code></p>}
     {!welcome && status?.configPath && <div className="desktop-setup-paths"><span>配置文件 <code>{status.configPath}</code></span><span>聊天数据 <code>{status.dataDirectory}</code></span></div>}
     {status?.phase === 'ready' && welcome && <div className="desktop-model-intro"><strong>接下来配置模型</strong><p>可在“模型与服务商”选择服务商和模型。API Key 使用对应的环境变量；也可以稍后配置，先进入 Pulse。</p></div>}
+    {window.pulseDesktop && <Button loading={diagnosing} onClick={() => void showDiagnostics()}>查看启动诊断</Button>}
+    {diagnostics && <details open><summary>本地启动诊断 · {diagnostics.directory}</summary><pre style={{ maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{diagnostics.text}</pre></details>}
     <div className="desktop-setup-actions"><Button disabled={busy || preparing} onClick={() => void action('repair')}>检查并修复</Button><Button disabled={busy || preparing} onClick={() => void action('data-directory')}>选择数据目录</Button>{status?.service?.outdated && <Button disabled={busy || preparing} onClick={() => void action('restart-service')}>应用后台更新</Button>}{status?.phase === 'ready' && (welcome ? <><Button disabled={busy} onClick={() => void action('complete', onContinue)}>稍后配置，进入 Pulse</Button><Button type="primary" disabled={busy} onClick={() => void action('complete', onConfigureModels)}>配置模型</Button></> : <Button type="primary" disabled={busy} onClick={onConfigureModels}>模型设置</Button>)}</div>
   </section>
 }
