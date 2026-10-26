@@ -426,6 +426,7 @@ pulse --read-only schedule daemon
 
 ## 仓库文档
 
+- [托盘后台、CLI/H5 任务通知与验收](./docs/desktop/background-notifications.md)：后台运行、通知回复、三入口范围、手机连接条件和未实测的平台边界。
 - [Runtime 架构设计](./pulse-runtime-architecture.md)：状态模型、调度、Effect、Context、隐私、持久化边界和验收契约。DSL 用法见上文示例与 `packages/runtime/src/dsl/`。
 - [Agent 任务质量评测](./evals/README.md)：固定的代码、研究和文件整理任务集，支持验证、隔离运行、机械产物评分与报告。dry run 只验证评测集，不构成真实任务质量基线。
 
