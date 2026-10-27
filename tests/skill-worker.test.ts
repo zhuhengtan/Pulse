@@ -3,12 +3,25 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createLocalHost, type LocalHostOptions } from '../packages/server/src/index.js'
+import { createLocalHost, type LocalHostOptions, type RunHandle } from '../packages/server/src/index.js'
 import { startH5WorkWorker } from '../packages/server/src/h5/work-worker.js'
 import { createBuiltinSkillCapabilityPack } from '../packages/server/src/builtin-skills.js'
 import { createSkillCapabilityPack } from '../packages/server/src/skill-pack.js'
 let root: string
-afterEach(async () => { vi.unstubAllEnvs(); if (root) await rm(root, { recursive: true, force: true }) })
+const workers = new Set<RunHandle>()
+let closeFixtureHost: (() => Promise<void>) | undefined
+afterEach(async () => {
+  // A timed-out assertion does not stop its CLI worker. Close only the workers
+  // owned by this fixture before removing a cwd that Windows may still lock.
+  try { await Promise.all([...workers].map(handle => handle.shutdown?.())) }
+  finally {
+    try { await closeFixtureHost?.() }
+    finally {
+      workers.clear(); closeFixtureHost = undefined; vi.unstubAllEnvs()
+      if (root) await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    }
+  }
+}, process.platform === 'win32' ? 30_000 : 10_000)
 it('creates a draft, installs it via the built-in creator, then materializes and executes it through real CLI workers', async () => {
   root = await mkdtemp(join(tmpdir(), 'pulse-skill-worker-')); vi.stubEnv('PULSE_HOME', root)
   const dataDir = join(root, 'data'), configPath = join(root, 'config.json')
@@ -16,11 +29,16 @@ it('creates a draft, installs it via the built-in creator, then materializes and
   await mkdir(join(root, 'draft'))
   const common: LocalHostOptions = { cwd: root, dataDir, skillConfigPath: configPath, taskController: false, approvalMode: 'auto', jarvis: { enabled: false }, capabilityPacks: [createBuiltinSkillCapabilityPack(), createSkillCapabilityPack()], enabledCapabilityPacks: ['builtin-skills'], capabilityConfig: { skills: [] }, mockAfterToolResponse: 'complete' }
   const host = createLocalHost(common)
+  let closing: Promise<void> | undefined
+  const closeHost = () => closing ??= host.close()
+  closeFixtureHost = closeHost
   const conversation = await host.createConversation()
   try {
     const run = async (text: string, mockToolCalls: LocalHostOptions['mockToolCalls']) => {
       host.applyLiveOptions({ ...common, mockToolCalls }); await host.listSkills()
       const handle = await startH5WorkWorker({ entry: fileURLToPath(new URL('../packages/cli/dist/bin.js', import.meta.url)), configPath, dataDir, cwd: root, approvalMode: 'auto', runtimeOptions: host.getWorkWorkerOptions() }, { conversationId: conversation.id, text })
+      workers.add(handle)
+      if (process.env.CI) console.info(`[skill-worker] ${text}`)
       for await (const _ of handle.events) { /* wait for the worker */ }
       expect(await handle.outcome()).toMatchObject({ status: 'succeeded' })
     }
@@ -37,5 +55,5 @@ it('creates a draft, installs it via the built-in creator, then materializes and
     expect(await readFile(join(root, 'skill-executed.txt'), 'utf8')).toBe('skill-worker-ok')
     const history = await host.getConversationMessages(conversation.id)
     expect(history.filter(item => item.role === 'assistant').length).toBeGreaterThanOrEqual(5)
-  } finally { await host.close() }
-}, 40_000)
+  } finally { await closeHost() }
+}, process.platform === 'win32' ? 240_000 : 40_000)

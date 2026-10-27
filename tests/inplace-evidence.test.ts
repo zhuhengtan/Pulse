@@ -100,4 +100,4 @@ it.each([false, true])('accepts Host-observed fixture repair but rejects externa
     const snapshot = JSON.parse(await readFile(join(root, 'data/conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8')).state.state
     expect(snapshot.results.some(([, result]: any) => (result.value ?? result.summary)?.fileChanges?.operation === 'in-place')).toBe(true)
   } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
-}, 30_000)
+}, process.platform === 'win32' ? 480_000 : 30_000)
