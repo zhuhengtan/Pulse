@@ -14,7 +14,7 @@ This file records Pulse release notes in English and is the source for `pulse --
 ### Fixed
 
 - Generate one concise final reply across clients while retaining the original audit report and verified delivery links; use factual fallbacks when budget or generation fails, without turning incomplete work into a success claim.
-- Fixed expanded long messages showing or copying stale final text after a revision; full-body identity checks reject late responses and also work on local-network HTTP pages.
+- Fixed expanded long messages showing or copying stale final text after a revision; full-body identity checks reject late responses and also work on local-network HTTP pages. Merge saved records with late text events to avoid transient duplicate replies in one run.
 - Preserve complete text, attachments, skills, project references, and conversation references when sending or replaying assistant messages; reject failed or incomplete provider streams instead of accepting truncated output.
 - Wait for active parallel effects to settle before ending a task, and preserve diagnostic scope, approved file evidence, and explicit stage replacement relationships.
 - Reduce desktop runtime size and verify final macOS installer signatures and runtime manifests; fix damaged-frontend recovery and native permission-app branding, while continuing to offer macOS installers for Apple Silicon only.

@@ -22,8 +22,8 @@ export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>
       "en": "Generate one concise final reply across clients while retaining the original audit report and verified delivery links; use factual fallbacks when budget or generation fails, without turning incomplete work into a success claim."
     },
     {
-      "zh": "修复已展开长消息在最终正文修订后仍显示或复制旧内容的问题，通过全文身份校验忽略晚到的旧响应，并兼容局域网 HTTP 页面。",
-      "en": "Fixed expanded long messages showing or copying stale final text after a revision; full-body identity checks reject late responses and also work on local-network HTTP pages."
+      "zh": "修复已展开长消息在最终正文修订后仍显示或复制旧内容的问题，通过全文身份校验忽略晚到的旧响应，并兼容局域网 HTTP 页面；合并本地保存记录与晚到文字事件，避免同一轮回复短暂重复显示。",
+      "en": "Fixed expanded long messages showing or copying stale final text after a revision; full-body identity checks reject late responses and also work on local-network HTTP pages. Merge saved records with late text events to avoid transient duplicate replies in one run."
     },
     {
       "zh": "助理发送与重发保留完整正文、附件、技能及项目和会话引用；服务端拒绝失败或不完整的模型流，避免将截断输出当作成功。",
