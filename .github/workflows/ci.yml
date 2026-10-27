@@ -96,7 +96,8 @@ jobs:
       - name: Run shared local and cloud checks
         # Windows runs serially because SRT owns machine-wide ACL state; each
         # real tool launch includes its cold permission setup and cleanup.
-        timeout-minutes: ${{ runner.os == 'Windows' && 150 || runner.os == 'macOS' && 30 || 15 }}
+        # Unix budgets include the full suite, archive/install and start/dev/debug.
+        timeout-minutes: ${{ runner.os == 'Windows' && 150 || 30 }}
         run: pnpm ci:local
       - name: Remove Windows shell sandbox
         if: always() && runner.os == 'Windows' && steps.windows-sandbox.outcome == 'success'
