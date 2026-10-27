@@ -1,5 +1,47 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.9.0": [
+    {
+      "zh": "桌面壳、后台和 Web/H5 支持独立版本与签名更新；设置中可查看版本、下载进度、兼容性、空闲应用和回退状态，前端刷新保留编辑草稿。",
+      "en": "Added independent versions and signed updates for the desktop shell, backend, and Web/H5; settings show versions, download progress, compatibility, idle application, and rollback status, while frontend refresh preserves composer drafts."
+    },
+    {
+      "zh": "新增技能市场与已安装技能管理，支持搜索、安装、比较上游修订和更新，并在每次运行中保留所需技能资源。",
+      "en": "Added a skill marketplace and installed-skill management with search, installation, upstream revision comparison, updates, and per-run skill resources."
+    },
+    {
+      "zh": "桌面和 CLI 统一通知任务完成、失败、提问与审批，支持通知设置和点击返回对应会话。",
+      "en": "Unified desktop and CLI notifications for task completion, failures, questions, and approvals, with notification settings and navigation back to the relevant conversation."
+    },
+    {
+      "zh": "新增任务恢复前置检查与本地启动诊断，帮助定位后台启动失败和无法恢复的运行。",
+      "en": "Added run-recovery preflight checks and local startup diagnostics to investigate backend startup failures and runs that cannot resume."
+    },
+    {
+      "zh": "任务结束时生成一份共用的简洁回复，保留原始审计报告和真实交付链接；额度不足或生成失败时使用事实兜底，未完成状态不会被改写为成功。",
+      "en": "Generate one concise final reply across clients while retaining the original audit report and verified delivery links; use factual fallbacks when budget or generation fails, without turning incomplete work into a success claim."
+    },
+    {
+      "zh": "修复已展开长消息在最终正文修订后仍显示或复制旧内容的问题，通过全文身份校验忽略晚到的旧响应，并兼容局域网 HTTP 页面。",
+      "en": "Fixed expanded long messages showing or copying stale final text after a revision; full-body identity checks reject late responses and also work on local-network HTTP pages."
+    },
+    {
+      "zh": "助理发送与重发保留完整正文、附件、技能及项目和会话引用；服务端拒绝失败或不完整的模型流，避免将截断输出当作成功。",
+      "en": "Preserve complete text, attachments, skills, project references, and conversation references when sending or replaying assistant messages; reject failed or incomplete provider streams instead of accepting truncated output."
+    },
+    {
+      "zh": "并行任务等待所有活动效果结算后再结束，改善诊断范围、已批准文件证据和阶段替代关系的保留。",
+      "en": "Wait for active parallel effects to settle before ending a task, and preserve diagnostic scope, approved file evidence, and explicit stage replacement relationships."
+    },
+    {
+      "zh": "缩减桌面运行包并校验最终 macOS 安装包的签名和运行文件清单，修复损坏前端的恢复与原生权限应用名称；macOS 安装包继续仅提供 Apple Silicon 版本。",
+      "en": "Reduce desktop runtime size and verify final macOS installer signatures and runtime manifests; fix damaged-frontend recovery and native permission-app branding, while continuing to offer macOS installers for Apple Silicon only."
+    },
+    {
+      "zh": "改善手机端会话详情和推理内容宽度，以及组件版本、软件更新和技能设置的展示。",
+      "en": "Improve mobile conversation details and reasoning width, plus component-version, software-update, and skill settings."
+    }
+  ],
   "0.8.0": [
     {
       "zh": "新增 Pulse 桌面客户端，支持本地会话存储、模型设置、设备管理与原生浏览器，并复用现有项目和会话数据。",

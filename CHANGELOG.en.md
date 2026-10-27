@@ -2,6 +2,24 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.9.0] - 2026-10-27
+
+### Added
+
+- Added independent versions and signed updates for the desktop shell, backend, and Web/H5; settings show versions, download progress, compatibility, idle application, and rollback status, while frontend refresh preserves composer drafts.
+- Added a skill marketplace and installed-skill management with search, installation, upstream revision comparison, updates, and per-run skill resources.
+- Unified desktop and CLI notifications for task completion, failures, questions, and approvals, with notification settings and navigation back to the relevant conversation.
+- Added run-recovery preflight checks and local startup diagnostics to investigate backend startup failures and runs that cannot resume.
+
+### Fixed
+
+- Generate one concise final reply across clients while retaining the original audit report and verified delivery links; use factual fallbacks when budget or generation fails, without turning incomplete work into a success claim.
+- Fixed expanded long messages showing or copying stale final text after a revision; full-body identity checks reject late responses and also work on local-network HTTP pages.
+- Preserve complete text, attachments, skills, project references, and conversation references when sending or replaying assistant messages; reject failed or incomplete provider streams instead of accepting truncated output.
+- Wait for active parallel effects to settle before ending a task, and preserve diagnostic scope, approved file evidence, and explicit stage replacement relationships.
+- Reduce desktop runtime size and verify final macOS installer signatures and runtime manifests; fix damaged-frontend recovery and native permission-app branding, while continuing to offer macOS installers for Apple Silicon only.
+- Improve mobile conversation details and reasoning width, plus component-version, software-update, and skill settings.
+
 ## [0.8.0] - 2026-10-24
 
 ### Added
