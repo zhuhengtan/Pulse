@@ -733,8 +733,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         setAssistantConversation({ ...assistantSummary, ...(active ? { activeRunId: active.runId } : {}), kind: 'assistant' })
         if (selectedIdRef.current === view.conversation.id) {
           setMessages(current => {
-            const streaming = current.filter(message => message.id.startsWith('stream-') && message.runId)
             const persisted = mergeMessages(view.conversation.id, view.messages.filter(message => message.role !== 'system'))
+            const streaming = current.filter(message => message.id.startsWith('stream-') && message.runId && !persisted.some(item => sameSavedReply(item, message.runId!, message.text)))
             return [...persisted.filter(message => message.role !== 'assistant' || message.id.startsWith('ask-') || message.id.startsWith('input-response-') || !streaming.some(item => item.runId === message.runId)), ...streaming]
           })
         }
@@ -1503,9 +1503,16 @@ function withoutActiveRun(conversation: WebConversation): WebConversation {
 function replaceRunMessage(messages: WebMessage[], runId: string, text: string): WebMessage[] {
   if (!text) return messages
   const id = `stream-${runId}`
+  // Local data notifications can expose the saved answer before its text event.
+  // Keep the canonical record and its body metadata instead of appending it twice.
+  if (messages.some(message => sameSavedReply(message, runId, text))) return messages.filter(message => message.id !== id)
   const existing = messages.findIndex(message => message.id === id)
   const message: WebMessage = { id, role: 'assistant', text, runId, createdAt: new Date().toISOString() }
   return existing < 0 ? [...messages, message] : messages.map((item, index) => index === existing ? message : item)
+}
+
+function sameSavedReply(message: WebMessage, runId: string, text: string): boolean {
+  return message.role === 'assistant' && message.id.startsWith('msg-') && message.runId === runId && message.text === text
 }
 
 function readableTool(name: string): string {

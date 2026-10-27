@@ -40,6 +40,20 @@ try {
     await host.init();
     await server.start();
     const inbox = await host.conversationData.call('readState', 'assistant-inbox');
+    // Exercise local-reader notifications arriving before the final socket text.
+    // Both transports carry one answer and must retain one rendered message.
+    const publish = server.publish.bind(server);
+    let reconciledReply = false;
+    server.publish = async (runId, event) => {
+        if (event.type !== 'text' || event.conversationId !== inbox.conversationId || reconciledReply) return publish(runId, event);
+        reconciledReply = true;
+        await desktop.evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) window.webContents.send('pulse:changed', Date.now()); });
+        await page.getByText(event.data, { exact: true }).waitFor({ timeout: 10000 });
+        await publish(runId, event);
+        await page.waitForFunction(id => window.__pulseTextRuns?.includes(id), runId, { timeout: 10000 });
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        if (await page.getByText(event.data, { exact: true }).count() !== 1) throw new Error('DUPLICATE_SAVED_AND_STREAMED_REPLY');
+    };
     await host.conversationData.call('replace', inbox.conversationId, Array.from({ length: 120 }, (_, i) => ({ id: `history-${i}`, role: i % 2 ? 'assistant' : 'user', text: `Local history ${i}`, createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(), displayVersion: 1 })));
     const work = await host.createConversation({ title: 'Large local work history', projectId: null });
     await host.conversationData.call('replace', work.id, Array.from({ length: 10000 }, (_, i) => ({ id: `work-${i}`, role: i % 2 ? 'assistant' : 'user', text: `Work history ${i}`, createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(), displayVersion: 1 })));
@@ -48,6 +62,11 @@ try {
     delete env.ELECTRON_RUN_AS_NODE;
     desktop = await _electron.launch({ executablePath: process.env.PULSE_DESKTOP_EXECUTABLE ?? electronPath, args: process.env.PULSE_DESKTOP_EXECUTABLE ? [] : [fileURLToPath(new URL('../../packages/desktop', import.meta.url))], env, timeout: 20000 });
     page = await desktop.firstWindow();
+    await page.waitForFunction(() => typeof window.pulseDesktop?.events === 'function', undefined, { timeout: 10000 });
+    await page.evaluate(() => {
+        window.__pulseTextRuns = [];
+        window.pulseDesktop.events(({ event }) => { if (event.type === 'text') window.__pulseTextRuns.push(event.runId); });
+    });
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.getByText('Local history 119', { exact: true }).waitFor({ timeout: 20000 });
@@ -57,6 +76,7 @@ try {
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await page.getByText('Desktop socket reply', { exact: true }).waitFor({ timeout: 10000 });
     await page.locator('.run-trace.outcome-succeeded').first().waitFor({ timeout: 10000 });
+    if (!reconciledReply) throw new Error('REPLY_RECONCILIATION_NOT_EXERCISED');
     await page.screenshot({ path: join(tmpdir(), 'pulse-desktop-chat.png') });
     await page.evaluate(id => { history.pushState(null, '', `/work/${id}`); dispatchEvent(new PopStateEvent('popstate')); }, work.id);
     await page.getByText('Work history 9999', { exact: true }).waitFor({ timeout: 10000 });
@@ -124,11 +144,12 @@ try {
     desktop = undefined;
     if (errors.length)
         throw new Error(errors.join('\n'));
-    console.log(JSON.stringify({ ok: true, localHistoryBypassesServer: true, chatWebSocket: true, workPostSse: true, workMessages: 10000, rapidSwitches: 30, switchP95Ms, maxLongTaskMs, virtualNodes, serviceSurvivesWindow: true, offlineHistoryAfterReload: true, screenshots: [join(tmpdir(), 'pulse-desktop-chat.png'), join(tmpdir(), 'pulse-desktop-work.png')] }));
+    console.log(JSON.stringify({ ok: true, localHistoryBypassesServer: true, chatWebSocket: true, savedReplyReconciled: true, workPostSse: true, workMessages: 10000, rapidSwitches: 30, switchP95Ms, maxLongTaskMs, virtualNodes, serviceSurvivesWindow: true, offlineHistoryAfterReload: true, screenshots: [join(tmpdir(), 'pulse-desktop-chat.png'), join(tmpdir(), 'pulse-desktop-work.png')] }));
 }
 catch (error) {
     if (diagnostics) {
         await mkdir(diagnostics, { recursive: true }).catch(() => {});
+        await writeFile(join(diagnostics, 'messages.json'), JSON.stringify({ rendered: await page?.locator('.message').evaluateAll(nodes => nodes.map(node => ({ text: node.innerText, visible: Boolean(node.getClientRects().length) }))), saved: await host.getConversationMessages((await host.conversationData.call('readState', 'assistant-inbox')).conversationId) }, null, 2)).catch(() => {});
         await page?.screenshot({ path: join(diagnostics, 'failure.png') }).catch(() => {});
         await stopTimeline().catch(() => {});
     }
