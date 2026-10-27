@@ -115,7 +115,8 @@ it.each(['chat', 'work'] as const)('%s retry clears an unchanged original draft 
     act(() => getEditor().commands.insertContent('待重试的原草稿'))
     fireEvent.click(view.getByRole('button', { name: '发送', exact: true }))
     const retry = await view.findByRole('button', { name: '发送失败，重新发送' })
-    expect(getEditor().getText()).toBe('待重试的原草稿')
+    // The failed-message control can render before TipTap applies the restored draft.
+    await waitFor(() => expect(getEditor().getText()).toBe('待重试的原草稿'))
     fireEvent.click(retry)
     fireEvent.click(await view.findByRole('button', { name: '确认', exact: true }))
     await waitFor(() => expect(getEditor().getText()).toBe(''))
