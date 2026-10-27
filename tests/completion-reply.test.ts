@@ -120,7 +120,8 @@ it('keeps all committed output links without treating read files, drafts or no-o
     effects.set(ref,{kind:'tool',input:{name},outcome:{status:'succeeded'}})
   }
   const runtime={state:{results,effects}} as any
-  expect(completionFilePaths(runtime,[...results.keys()],' /workspace'.trim())).toEqual(['/workspace/nested/one.txt','/workspace/two.txt','/workspace/moved.txt','/workspace/nested/out.json'])
+  const root = join(tmpdir(), 'pulse-delivery-root')
+  expect(completionFilePaths(runtime,[...results.keys()],root)).toEqual(['nested/one.txt','two.txt','moved.txt','nested/out.json'].map(path => join(root,path)))
 })
 it('keeps user follow-ups and plan feedback out of host recovery prompts', () => {
   const request = completionUserRequest('为什么后台会自己重启', ['请把超时改成 30 秒', 'Goal recovery 1: the original goal is not met. Keep every file already written. Fix only the failed check below.\nstage-internal-42: 修复后台 — blocked', 'PLAN_CONFIRMATION_PENDING: implementation stays unauthorized'])
