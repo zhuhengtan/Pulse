@@ -61,13 +61,19 @@ if (!process.argv.includes('--bundled')) {
         assert.equal(canvasRequire('@napi-rs/canvas').createCanvas(2, 2).toBuffer('image/png').toString('ascii', 1, 4), 'PNG');
         const pty = scope('server')('node-pty');
         const shell = process.platform === 'win32' ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32/cmd.exe') : '/bin/sh';
-        await new Promise((accept, reject) => {
-            const child = pty.spawn(shell, process.platform === 'win32' ? ['/d', '/c', 'echo PULSE_PTY_OK'] : ['-c', 'printf PULSE_PTY_OK'], { cwd: temporary, env });
+        let terminal;
+        try { await new Promise((accept, reject) => {
+            const child = terminal = pty.spawn(shell, process.platform === 'win32' ? ['/d', '/c', 'echo PULSE_PTY_OK'] : ['-c', 'printf PULSE_PTY_OK'], { cwd: temporary, env });
             let output = '';
             const timer = setTimeout(() => { child.kill(); reject(new Error('Packaged PTY timeout')); }, 10000);
             child.onData(text => { output += text; });
             child.onExit(({ exitCode }) => { clearTimeout(timer); try { assert.equal(exitCode, 0); assert.ok(output.includes('PULSE_PTY_OK')); accept(); } catch (error) { reject(error); } });
-        });
+        }); } finally {
+            // ConPTY's shell exit closes its output stream but leaves the
+            // connection worker alive until the terminal owner disposes it.
+            // Keep the enclosing child-process timeout as a natural-exit gate.
+            if (process.platform === 'win32') terminal?.kill();
+        }
         if (process.argv.includes('--native-helper')) {
             const { DesktopBackend } = await load('server', 'dist/automation/desktop.js'), desktop = new DesktopBackend();
             try { assert.equal((await desktop.call('hello', {})).protocolVersion, 1); }

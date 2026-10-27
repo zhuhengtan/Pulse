@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { createRequire } from 'node:module'
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { optimizeRuntime } from '../scripts/desktop/optimize-runtime.mjs'
@@ -26,6 +26,10 @@ it.each([['darwin', 'arm64'], ['win32', 'x64'], ['linux', 'x64']])('keeps only %
  for (const target of ['darwin-arm64', 'darwin-x64', 'win32-x64', 'win32-arm64', 'linux-x64']) {
   await file(root, `${pty}/prebuilds/${target}/pty.node`)
   await file(root, `${pty}/prebuilds/${target}/pty.pdb`)
+  if (target.startsWith('darwin-')) {
+   await file(root, `${pty}/prebuilds/${target}/spawn-helper`, 'native helper')
+   await chmod(join(root, `${pty}/prebuilds/${target}/spawn-helper`), 0o644)
+  }
   await file(root, `${server}/native/${target}/helper`)
   await file(root, `${server}/native/${target}/windows.ps1`)
   await file(root, `${server}/native/${target}/linux.py`)
@@ -38,7 +42,11 @@ it.each([['darwin', 'arm64'], ['win32', 'x64'], ['linux', 'x64']])('keeps only %
  for (const ext of ['sh', 'ps1']) await file(root, `install.${ext}`)
  await optimizeRuntime(root, platform, arch)
  expect(await readdir(join(root, pty, 'prebuilds'))).toEqual([`${platform}-${arch}`])
- expect(await readdir(join(root, pty, 'prebuilds', `${platform}-${arch}`))).toEqual(['pty.node'])
+ expect(await readdir(join(root, pty, 'prebuilds', `${platform}-${arch}`))).toEqual(platform === 'darwin' ? ['pty.node', 'spawn-helper'] : ['pty.node'])
+ if (platform === 'darwin') {
+  expect(await readFile(join(root, pty, 'prebuilds', `${platform}-${arch}`, 'spawn-helper'), 'utf8')).toBe('native helper')
+  if (process.platform !== 'win32') expect((await stat(join(root, pty, 'prebuilds', `${platform}-${arch}`, 'spawn-helper'))).mode & 0o777).toBe(0o755)
+ }
  expect(await readdir(join(root, server, 'native'))).toEqual([`${platform}-${arch}`])
  if (platform === 'win32') expect(await readdir(join(root, pty, 'third_party/conpty/1'))).toEqual([`win10-${arch}`])
  const native = JSON.parse(await readFile(join(root, server, 'native', `${platform}-${arch}`, 'manifest.json'), 'utf8'))

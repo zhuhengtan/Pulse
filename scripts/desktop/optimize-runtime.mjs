@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { lstat, readdir, readFile, readlink, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, readdir, readFile, readlink, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 
 const entries = async directory => readdir(directory, { withFileTypes: true }).catch(error => {
@@ -105,6 +105,14 @@ export async function optimizeRuntime(root, platform = process.platform, arch = 
         const { path, manifest } = node;
         if (manifest.name === 'node-pty') {
             await select(join(path, 'prebuilds'), `${platform}-${arch}`);
+            // node-pty 1.1.0 publishes its Darwin spawn-helper with mode 0644.
+            // Seal executable permissions into the bundle before hashing/signing,
+            // without relying on a prior H5 terminal launch to repair the file.
+            if (platform === 'darwin') for (const directory of ['build/Release', 'build/Debug', `prebuilds/${platform}-${arch}`]) {
+                const helper = join(path, directory, 'spawn-helper');
+                const info = await lstat(helper).catch(error => { if (error.code !== 'ENOENT') throw error; });
+                if (info?.isFile()) await chmod(helper, 0o755);
+            }
             if (platform !== 'win32') {
                 await remove(join(path, 'deps/winpty'));
                 await remove(join(path, 'third_party/conpty'));

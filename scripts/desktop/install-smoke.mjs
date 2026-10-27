@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { closeToTray, quitFromMenu } from './smoke-lifecycle.mjs';
 const require = createRequire(new URL('../../packages/server/package.json', import.meta.url));
 const { _electron } = createRequire(require.resolve('@playwright/mcp'))('playwright');
 const execute = promisify(execFile);
@@ -38,7 +39,9 @@ async function launch(label) {
 }
 async function closeWindow(label) {
     const current = desktop, instance = instances.find(item => item.app === current);
-    await step(`${label}:close-window`, () => current.evaluate(({ BrowserWindow }) => { setTimeout(() => { for (const window of BrowserWindow.getAllWindows()) window.close(); }, 0); }));
+    await step(`${label}:close-window-to-tray`, () => closeToTray(current));
+    assert.equal(instance.process.exitCode, null);
+    await step(`${label}:quit-from-menu`, () => quitFromMenu(current));
     const exit = await step(`${label}:native-exit`, () => instance.exited, 15000);
     assert.deepEqual(exit, { code: 0, signal: null });
     desktop = undefined;
