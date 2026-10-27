@@ -129,6 +129,7 @@ it('carries passed check evidence into a new verify stage using a real offline H
   const chat = (message: any) => new Response(JSON.stringify({ choices: [{ message: typeof message === 'string' ? { content: message } : message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } }), { headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
     const body = JSON.parse(String(init!.body)), blob = body.messages.findLast((m: any) => m.name === 'instruction')?.content ?? JSON.stringify(body.messages)
+    if (JSON.stringify(body.messages).includes("You write Pulse's final user-facing reply")) return chat('Local checks passed.')
     const refs = body.messages.filter((m: any) => m.name === 'results').flatMap((m: any) => JSON.parse(m.content)).map((r: any) => r.id)
     if (blob.includes('Pulse safety reviewer')) return chat('APPROVE')
     if (blob.includes('Create an executable plan')) return chat(JSON.stringify({ tasks: [

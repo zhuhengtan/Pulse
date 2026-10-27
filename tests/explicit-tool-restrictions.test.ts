@@ -38,6 +38,7 @@ it.each([['ask', 'command'], ['auto', 'command'], ['ask', 'window'], ['auto', 'w
  let turns=0
  vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{
   const {messages}=JSON.parse(String(init?.body)), text=currentRequestText(messages), refs=suppliedRequestResults(messages).map(r=>r.id)
+  if(text.includes("You write Pulse's final user-facing reply")) return Response.json({choices:[{message:{content:'The target is not yet established; no observation or command executed.'},finish_reason:'stop'}]})
   let response:any
   if(text.includes('Create an executable plan')) response={tasks:[{id:'answer',kind:'analyze',goal:'Explain the method restriction',check:'Explain allowed observations',criterionIds:['criterion-1','criterion-2'],dependsOn:[]}]}
   else if(text.includes('Verify ONLY the active')) response={status:'passed',evidenceRefs:refs,note:'Answered without executing commands'}

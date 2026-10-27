@@ -1,5 +1,6 @@
 import { boundedAssistantConversation, assistantReferenceSchema, assistantReferenceNotice } from './assistant-chat-context.js'
 import { registerAssistantHistoryTools } from './assistant-history.js'
+import { cachedCompletionReply, completionFilePaths, completionReplySystem, completionUserRequest, writeCompletionReport, type CompletionReplyInput } from './completion-reply.js'
 export { LocalDiagnosticLog, installProcessDiagnostics, readLocalDiagnostics } from './diagnostics.js'
 import { describeRunRecovery, type RunRecoveryAuthorization, type RunRecoveryPreflight } from './run-recovery-preflight.js'
 import { createSkillTools } from './skill-tools.js'
@@ -3118,6 +3119,49 @@ export class LocalHost {
             ? candidateText
             : continuationNotice ?? completionSummary ?? candidateText ?? directResult ?? failureText)
       if (terminalResults?.length && outcome.status !== 'succeeded') text = [text, ...terminalResults.map(r => `${detectResponseLanguage(goal) === 'zh-CN' ? '独立检查' : 'Independent check'} ${r.id}: ${r.status} — ${r.reason}`)].filter(Boolean).join('\n\n')
+      // Legacy controllers without a task record retain the authoritative root
+      // report; stage snapshots alone cannot reconstruct their acceptance facts.
+      if (stages.length > 0 && finalGlobal && taskRecordFromGlobal(finalGlobal)) {
+        // Preserve the complete audit before projecting one shared user reply.
+        // This does not change taskOutcome, evidence, or recovery checkpoints.
+        await writeCompletionReport(join(this.runDir(conversationId, runId), 'completion-report.json'), { schemaVersion: 1, text, taskOutcome: acceptance })
+        const record = finalGlobal ? taskRecordFromGlobal(finalGlobal) : undefined
+        const controller = projectedController ?? (finalGlobal ? controllerFromGlobal(finalGlobal) : undefined)
+        const tasks = controller?.tasks ?? []
+        const completionManifest = await this.readManifest(conversationId)
+        const files = completionFilePaths(runtime, tasks.flatMap(task => task.evidenceRefs), completionManifest.executionCwd ?? completionManifest.cwd)
+        const input: CompletionReplyInput = {
+          request: completionUserRequest(record?.objective ?? goal, controller?.updates ?? []),
+          status: outcome.status === 'cancelled' || outcome.status === 'failed' ? outcome.status : acceptance?.status ?? 'unverifiable',
+          completed: tasks.filter(task => task.status === 'passed').map(task => {
+            const body = task.candidateRef && (task.candidateAttempt === undefined || task.candidateAttempt === task.attempts) ? this.resultText(runtime, task.candidateRef) : undefined
+            return { id: task.id, ...(task.deliverableId ? { deliverableId: task.deliverableId } : {}), ...(task.candidateRef ? { resultRef: task.candidateRef } : {}), ...(task.supersedes?.length ? { supersedes: [...task.supersedes] } : {}), goal: task.goal, ...(body ? { text: body } : {}) }
+          }),
+          pending: [...tasks.filter(task => task.status !== 'passed').map(task => ({ description: task.goal, reason: task.note ?? '' })), ...(acceptance?.criteria.filter(item => item.status !== 'passed').map(item => ({ description: record?.acceptanceCriteria.find(c => c.id === item.criterionId)?.description ?? '未完成的要求', reason: item.rationale })) ?? [])],
+          checks: (terminalResults ?? controller?.acceptanceResults ?? []).map(item => ({ status: item.status, description: record?.acceptanceChecks?.find(c => c.id === item.id)?.description ?? '检查', reason: item.reason })),
+          files,
+          ...(outcome.error ? { error: outcome.error.message } : {}),
+          internalIds: [...tasks.map(task => task.id), ...(acceptance?.criteria.map(c => c.criterionId) ?? []), ...(acceptance?.evidenceRefs ?? []), ...tasks.flatMap(task => [...task.evidenceRefs, ...(task.contextRefs ?? [])])],
+        }
+        const options = activeEntry?.options ?? this.options
+        const generate = !activeEntry || activeEntry.capabilityController.signal.aborted || (options.provider?.provider ?? 'mock') === 'mock' || activeEntry.modelBudget?.schedulingView().finalAllowed === false ? undefined : async (instruction: string): Promise<LLMResult> => {
+          const provider = providerFromOptions(options)
+          const routing = createHostModelRouting({ activeModel: options.activeModel ?? provider.model.id, activeProviderCode: options.activeProviderCode ?? provider.adapter.id, activeProvider: options.provider ?? { provider: 'mock' }, ...(options.providerProfiles ? { providerProfiles: options.providerProfiles } : {}), ...(options.providerModels ? { providerModels: options.providerModels } : {}), ...(options.taskRouting ? { taskRouting: options.taskRouting } : {}), activeAdapter: provider.adapter })
+          const signal = AbortSignal.any([activeEntry.capabilityController.signal, AbortSignal.timeout(15_000)])
+          let attempted = false
+          const execute = createModelEffectExecutor({ router: routing.router, providers: routing.providers,
+            beforeProviderAttempt: async () => {
+              signal.throwIfAborted()
+              if (attempted) throw Object.assign(new Error('COMPLETION_REPLY_ALREADY_ATTEMPTED'), { retryable: false })
+              attempted = true
+              await activeEntry.modelBudget?.reserve('completion-summary')
+            },
+            afterProviderAttempt: (usage, receiptId) => activeEntry.modelBudget?.recordUsage(usage, receiptId) ?? Promise.resolve(),
+          })
+          return runLlmRequestAsRuntimeEffect({ models: routing.models, router: routing.router, execute, system: completionReplySystem, instruction, outputInstruction: 'Return only the final user-facing reply, without tools or internal audit details.', signal, task: 'reason', maxOutputTokens: provider.model.capabilities.maxOutputTokens ?? 4096, timeoutMs: 15_000 })
+        }
+        text = (await cachedCompletionReply(join(this.runDir(conversationId, runId), 'completion-reply.json'), input, generate)).text
+      }
       // A free-form human input runs as a detached child Agent. Its answer is
       // part of the same user-visible run, but it is not the root Outcome.
       // Persist each child answer before the root answer so a restored
@@ -3125,7 +3169,13 @@ export class LocalHost {
       for (const child of this.interactionResultTexts(runtime, session.agentId)) {
         await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'assistant', text: child.text, runId, createdAt: new Date().toISOString(), displayVersion: 1 })
       }
-      if (text !== undefined) await this.appendMessage(conversationId, { id: `msg-${randomUUID()}`, role: 'assistant', text, runId, createdAt: new Date().toISOString(), displayVersion: 1 })
+      if (text !== undefined) {
+        const id = stages.length ? `msg-final-${runId}` : `msg-${randomUUID()}`
+        const existing = stages.length ? await this.conversationData.call<StoredMessage>('body', conversationId, id).catch(error => { if (error instanceof Error && error.message === 'MESSAGE_NOT_FOUND') return undefined; throw error }) : undefined
+        // A persisted final message follows the reply selected for the current verdict. Same text is left in place; a contradictory one is revised and never copied back.
+        if (!existing) await this.appendMessage(conversationId, { id, role: 'assistant', text, runId, createdAt: new Date().toISOString(), displayVersion: 1 })
+        else if (existing.text !== text) await this.conversationData.call('revise', conversationId, { ...existing, text })
+      }
       const current = await this.readManifest(conversationId)
       const artifacts = [...runtime.state.results.values()].flatMap((result) => { const value = result.value; if (!value || typeof value !== 'object' || Array.isArray(value)) return []; const record = value as Record<string, JsonValue>; if (typeof record.path !== 'string' || typeof record.hash !== 'string' || typeof record.bytes !== 'number') return []; return [{ path: record.path, hash: record.hash, bytes: record.bytes, ...(typeof record.mediaType === 'string' ? { mediaType: record.mediaType } : {}), ...(typeof record.label === 'string' ? { label: record.label } : {}), runId }] as ArtifactSummary[] })
       current.artifacts = [...(current.artifacts ?? []).filter((item) => item.runId !== runId), ...artifacts]

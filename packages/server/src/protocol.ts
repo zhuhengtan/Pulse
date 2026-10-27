@@ -62,6 +62,8 @@ export interface WebMessage {
   sequence?: number
   bodyTruncated?: boolean
   bodyLength?: number
+  /** Identity of the complete text. A truncated preview does not carry this. */
+  bodyHash?: string
   id: string
   role: 'user' | 'assistant' | 'system'
   text: string

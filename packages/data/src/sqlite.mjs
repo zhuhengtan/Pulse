@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
+const contentHash = (text) => createHash('sha256').update(text).digest('hex');
 import { mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 export const schemaVersion = 1;
@@ -104,6 +106,20 @@ export class ConversationDatabase {
             return this.changed(id, 'message', body.id);
         });
     }
+    revise(id, body) {
+        if (!body || typeof body.id !== 'string' || typeof body.text !== 'string')
+            throw new Error('INVALID_MESSAGE');
+        return this.transaction(() => {
+            const row = this.db.prepare('SELECT body FROM messages WHERE conversation=? AND id=?').get(id, body.id);
+            if (!row)
+                throw new Error('MESSAGE_NOT_FOUND');
+            const json = JSON.stringify(body);
+            if (row.body === json)
+                return this.revision();
+            this.db.prepare('UPDATE messages SET body=?, text=? WHERE conversation=? AND id=?').run(json, body.text, id, body.id);
+            return this.changed(id, 'message', body.id);
+        });
+    }
     messages(id) { return this.db.prepare('SELECT body FROM messages WHERE conversation=? ORDER BY seq').all(id).map(row => JSON.parse(row.body)); }
     page(id, before, limit = 50) {
         limit = Math.max(1, Math.min(200, Math.floor(Number(limit) || 50)));
@@ -113,10 +129,10 @@ export class ConversationDatabase {
         const rows = this.db.prepare('SELECT seq,body FROM messages WHERE conversation=? AND seq<? ORDER BY seq DESC LIMIT ?').all(id, cursor, limit + 1);
         const more = rows.length > limit;
         const selected = rows.slice(0, limit).reverse();
-        return { items: selected.map(row => { const body = JSON.parse(row.body); return { ...body, text: body.text.slice(0, 8000), ...(body.text.length > 8000 ? { bodyTruncated: true, bodyLength: body.text.length } : {}), sequence: Number(row.seq) }; }), ...(more ? { before: String(selected[0].seq) } : {}), revision: this.revision() };
+        return { items: selected.map(row => { const body = JSON.parse(row.body); const full = typeof body.text === 'string' ? body.text : ''; return { ...body, bodyHash: contentHash(full), text: full.slice(0, 8000), ...(full.length > 8000 ? { bodyTruncated: true, bodyLength: full.length } : {}), sequence: Number(row.seq) }; }), ...(more ? { before: String(selected[0].seq) } : {}), revision: this.revision() };
     }
     body(id, messageId) { const row = this.db.prepare('SELECT body FROM messages WHERE conversation=? AND id=?').get(id, messageId); if (!row)
-        throw new Error('MESSAGE_NOT_FOUND'); return JSON.parse(row.body); }
+        throw new Error('MESSAGE_NOT_FOUND'); const body = JSON.parse(row.body); const full = typeof body.text === 'string' ? body.text : ''; return { ...body, bodyHash: contentHash(full) }; }
     search(id, query, limit = 50) {
         if (typeof query !== 'string' || !query.trim())
             return [];
@@ -146,4 +162,4 @@ export class ConversationDatabase {
     changes(after = 0) { const min = Number(this.db.prepare('SELECT coalesce(min(seq),0) AS seq FROM changes').get().seq); return { reset: after > 0 && after < min - 1, revision: this.revision(), items: this.db.prepare('SELECT seq,conversation,kind,item FROM changes WHERE seq>? ORDER BY seq LIMIT 10000').all(after) }; }
 }
 export const readMethods = new Set(['assistantView', 'list', 'get', 'messages', 'page', 'body', 'search', 'searchPage', 'readState', 'revision', 'changes']);
-export const writeMethods = new Set(['save', 'patch', 'remove', 'append', 'replace', 'saveState']);
+export const writeMethods = new Set(['save', 'patch', 'remove', 'append', 'revise', 'replace', 'saveState']);

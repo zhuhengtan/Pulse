@@ -468,6 +468,8 @@ describe('AI CLI scenarios end-to-end tests', () => {
     expect(resultEvent).toBeDefined()
     expect(resultEvent.status).toBe('succeeded')
     expect(resultEvent.taskOutcome?.status).toBe('accepted')
+    expect(resultEvent.text).toContain('项目用途：演示多阶段流程。')
+    expect(resultEvent.text).not.toMatch(/stage-1|stage-2|criterion-1|逐项验收/)
   })
 
   it('Scenario 10: Multi-stage task checkpointing and continuation across sessions', async () => {

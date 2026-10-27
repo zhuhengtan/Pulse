@@ -163,7 +163,7 @@ export class ModelAttemptBudget {
       throw fail(EXHAUSTED, 'Model call budget exhausted.')
     const policy = this.state.policy ?? {}
     const reserved = Math.min(policy.verificationReserve ?? 0, Math.max(0, this.limit - 1))
-    const protectedCalls = purpose === 'final-verification' ? 0 : purpose === 'verification' ? Math.min(1, reserved) : reserved
+    const protectedCalls = purpose === 'final-verification' || purpose === 'completion-summary' ? 0 : purpose === 'verification' ? Math.min(1, reserved) : reserved
     if (this.limit - this.used <= protectedCalls) throw fail(EXHAUSTED, 'Model calls reserved for verification; checkpoint retained.')
     if (policy.maxTokens !== undefined && (this.state.tokens ?? 0) >= policy.maxTokens) throw fail(EXHAUSTED, 'Model token budget exhausted.')
     for (const [currency, limit] of Object.entries(policy.maxCostByCurrency ?? {})) if ((this.state.costs?.[currency] ?? 0) >= limit) throw fail(EXHAUSTED, `Model cost budget exhausted (${currency}).`)

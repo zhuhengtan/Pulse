@@ -247,9 +247,10 @@ describe('whole-run provider attempt budget', () => {
     vi.stubEnv('PULSE_TEST_REVIEW_KEY', 'fixture-key')
     const root = await mkdtemp(join(tmpdir(), 'pulse-controller-denial-'))
     const goal = '检查运行时版本'
-    let primary = 0, reviews = 0
+    let primary = 0, reviews = 0, summaries = 0
     vi.stubGlobal('fetch', vi.fn(async (_url, options) => {
       const text = currentRequestText(JSON.parse(String(options.body)).messages)
+      if (text.includes("You write Pulse's final user-facing reply")) { summaries++; return response('任务未完成：操作未获批准，命令没有执行。') }
       if (text.includes('You are the Pulse safety reviewer')) { reviews++; return response('DENY') }
       primary++
       if (text.includes('Create an executable plan')) return response(JSON.stringify({ tasks: [{ id: 'check', goal, criterionIds: acceptanceCriteriaFromObjective(goal).map(item => item.id), dependsOn: [], check: 'Check node version' }] }))
@@ -261,7 +262,9 @@ describe('whole-run provider attempt budget', () => {
       const run = await host.sendMessage(conversation.id, { text: goal })
       await run.outcome()
       expect(primary).toBe(2); expect(reviews).toBe(1)
-      expect((await run.usage()).modelCalls).toBe(3)
+      expect(summaries).toBe(1)
+      expect((await run.usage()).modelCalls).toBe(4)
+      expect((await run.usage()).budget?.purposes['completion-summary']).toBe(1)
       expect((await run.taskOutcome())?.status).not.toBe('accepted')
       const runDirectory = join(root, 'data/conversations', conversation.id, 'runs', run.id)
       const snapshot = await hydrateRuntimeResultBodies(JSON.parse(await readFile(join(runDirectory, 'runtime.json'), 'utf8')), new FileRuntimeContentStore(join(runDirectory, 'runtime-results')))

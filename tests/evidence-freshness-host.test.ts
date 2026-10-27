@@ -54,6 +54,7 @@ it.each(['unchanged', 'before-stage', 'during-stage', 'during-final'])('verifies
   const chat = (message: any) => new Response(JSON.stringify({ choices: [{ message: typeof message === 'string' ? { content: message } : message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }] }), { headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
     const request = JSON.parse(String(init.body)), blob = currentRequestText(request.messages)
+    if (blob.includes("You write Pulse's final user-facing reply")) return chat('Greeting saved.')
     const results = request.messages.filter((m: any) => m.name === 'results').flatMap((m: any) => JSON.parse(m.content))
     if (blob.includes('Create an executable plan')) { plans++; return chat(JSON.stringify({ tasks: [{ id: 's', goal: 'Write greeting.txt', check: 'The file contains ready', dependsOn: [], criterionIds: ids }] })) }
     if (blob.includes('Verify ONLY the active taskController stage')) {
@@ -97,6 +98,7 @@ it.each([
   const tool = (name: string, input: object) => chat({ content: '', tool_calls: [{ id: `call-${stage}-${turns[stage]}`, function: { name, arguments: JSON.stringify(input) } }] })
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
     const request = JSON.parse(String(init.body)), blob = currentRequestText(request.messages)
+    if (blob.includes("You write Pulse's final user-facing reply")) return chat('Greeting saved.')
     const results = request.messages.filter((m: any) => m.name === 'results').flatMap((m: any) => JSON.parse(m.content))
     if (blob.includes('Create an executable plan')) return chat(JSON.stringify({ tasks: [
       { id: 'baseline', kind: 'verify', goal: 'Run existing baseline test', check: 'Baseline test exits zero', dependsOn: [], criterionIds: ids },

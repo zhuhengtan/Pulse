@@ -19,6 +19,7 @@ it.each([false, true])('persists frozen Host checks despite an optimistic model 
   const chat = (message: any) => new Response(JSON.stringify({ choices: [{ message: typeof message === 'string' ? { content: message } : message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } }), { headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
     calls++
+    if (String(init?.body).includes("You write Pulse's final user-facing reply")) return chat('任务未完成，固定检查失败。')
     const { messages } = JSON.parse(String(init?.body)), text = currentRequestText(messages), refs = suppliedRequestResults(messages).filter(r => !r.value?.checks).map(r => r.id)
     if (text.includes('Create an executable plan')) return chat(JSON.stringify({ tasks: [{ id: 'check', kind: 'verify', goal: '检查现有测试日志', check: '日志存在并读回', criterionIds: ids, dependsOn: [] }] }))
     if (text.includes('Verify ONLY the active')) return chat(JSON.stringify({ status: 'passed', evidenceRefs: refs, note: 'Self-tests are green' }))

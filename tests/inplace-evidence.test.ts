@@ -67,6 +67,7 @@ it.each([false, true])('accepts Host-observed fixture repair but rejects externa
   let finalReviews = 0
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
     const request = JSON.parse(String(init.body)), text = currentRequestText(request.messages), results = suppliedRequestResults(request.messages)
+    if (text.includes("You write Pulse's final user-facing reply")) return chat('The explicit fixture was repaired and its test passed.')
     if (text.includes('Create an executable plan')) return chat(JSON.stringify({ tasks: [{ id: 'repair', kind: 'edit', goal: 'Create, repair and verify fixture.json', check: 'Fixture fixed; named Node test passes', criterionIds: ids, dependsOn: [] }] }))
     if (text.includes('Verify ONLY the active taskController stage')) return chat(JSON.stringify({ status: 'passed', evidenceRefs: results.map((result: any) => result.id), note: 'Explicit fixture write and behavioral check passed' }))
     if (text.includes('Independently verify every ORIGINAL')) {

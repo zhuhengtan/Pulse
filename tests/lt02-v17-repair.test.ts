@@ -57,12 +57,13 @@ it('still accepts a nonempty summary and compacts only its selected prefix', () 
   expect('rejection' in validateStep(state, root.id, output)).toBe(false)
 })
 
-it.each([false, true])('reports a denied operation and actual failed assertions with no additional model call (cold=%s)', async cold => {
+it.each([false, true])('reports a denied operation and actual failed assertions without retrying execution (cold=%s)', async cold => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-denied-terminal-'))
   await writeFile(join(dir, 'probe.mjs'), "import {writeFileSync} from 'node:fs';writeFileSync('executed.txt','unsafe')")
   const goal = '验证恢复脚本并汇总结果', ids = acceptanceCriteriaFromObjective(goal).map(c => c.id)
-  let calls = 0, checks = 0
+  let calls = 0, checks = 0, summaries = 0
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+    if (String(init?.body).includes("You write Pulse's final user-facing reply")) { summaries++; return chat('任务尚未完成。') }
     calls++
     const body = JSON.parse(String(init?.body)), text = currentRequestText(body.messages)
     if (text.includes('Create an executable plan')) return chat({ tasks: [{ id: 'done', kind: 'analyze', goal: '解释当前恢复设计', check: '给出说明', criterionIds: ids, dependsOn: [] }, { id: 's', kind: 'verify', goal, check: '脚本检查通过', criterionIds: ids, dependsOn: ['done'] }] })
@@ -105,14 +106,16 @@ it.each([false, true])('reports a denied operation and actual failed assertions 
     expect(task?.status).toBe('incomplete'); expect(task?.criteria.every(c => c.status === 'not_met')).toBe(true)
     expect(calls).toBe(4); expect(checks).toBe(1)
     await expect(readFile(join(dir, 'executed.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
-    expect((await run.usage()).modelCalls).toBe(4)
+    expect(summaries).toBe(1)
+    expect((await run.usage()).modelCalls).toBe(4 + summaries)
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
 }, 20000)
 
 it('keeps settled failed verdicts when a later kernel failure bypasses the report', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-saved-verdict-')), goal = '解释恢复方案', ids = acceptanceCriteriaFromObjective(goal).map(c => c.id)
-  let calls = 0, work = 0, checks = 0
+  let calls = 0, work = 0, checks = 0, summaries = 0
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+    if (String(init?.body).includes("You write Pulse's final user-facing reply")) { summaries++; return chat('任务尚未完成。') }
     calls++
     const body = JSON.parse(String(init?.body)), text = currentRequestText(body.messages), refs = suppliedRequestResults(body.messages).map(r => r.id)
     if (text.includes('Create an executable plan')) return chat({ tasks: [{ id: 's', kind: 'analyze', goal, check: '给出说明', criterionIds: ids, dependsOn: [] }] })
@@ -135,7 +138,7 @@ it('keeps settled failed verdicts when a later kernel failure bypasses the repor
     const pending = await run.pendingInteractions(); await run.reply(pending[0]!.items[0]!.effectId, { text: 'Continue' })
     const outcome = await run.outcome()
     expect(outcome).toMatchObject({ status: 'failed', error: { code: 'TEST_KERNEL_STOP' } })
-    expect(outcome.text).toContain('still-failed'); expect(outcome.text).toContain('独立检查 frozen: failed')
+    expect(outcome.text).toContain('still-failed'); expect(outcome.text).toContain('Actual failure persists')
     expect((await run.taskOutcome())?.criteria.every(c => c.status === 'not_met')).toBe(true)
     expect(checks).toBe(1); expect(calls).toBe(4)
     const base = join(dir, 'data/conversations', c.id, 'runs', run.id)

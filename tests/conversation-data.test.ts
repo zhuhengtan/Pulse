@@ -1,3 +1,4 @@
+import { mkdtempSync, rmSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -44,6 +45,37 @@ describe('shared conversation data', () => {
             await a.close();
             await b.close();
             await rm(directory, { recursive: true, force: true });
+        }
+    });
+    it('revises one stored final message without inserting another row', () => {
+        const directory = mkdtempSync(join(tmpdir(), 'pulse-data-revise-'));
+        const database = new ConversationDatabase(directory);
+        try {
+            database.save({ id: 'revise-me', updatedAt: '2026-01-01', title: 'Revise' });
+            database.append('revise-me', { id: 'msg-final-run', role: 'assistant', text: '后台停止问题已修复。', createdAt: '2026-01-01' });
+            expect(() => database.append('revise-me', { id: 'msg-final-run', role: 'assistant', text: '环境不可用', createdAt: '2026-01-01' })).toThrow('MESSAGE_ID_REUSED');
+            database.revise('revise-me', { id: 'msg-final-run', role: 'assistant', text: '环境不可用', createdAt: '2026-01-01' });
+            expect(database.body('revise-me', 'msg-final-run').text).toBe('环境不可用');
+            expect(database.messages('revise-me')).toHaveLength(1);
+            const prefix = '配置报告正文。'.repeat(1500);
+            const oldTail = `${prefix}最终端口8080`;
+            const newTail = `${prefix}最终端口9000`;
+            database.append('revise-me', { id: 'msg-final-long', role: 'assistant', text: oldTail, createdAt: '2026-01-01' });
+            const listed = database.page('revise-me').items.find((item) => item.id === 'msg-final-long');
+            database.revise('revise-me', { id: 'msg-final-long', role: 'assistant', text: newTail, createdAt: '2026-01-01' });
+            const revisedPage = database.page('revise-me').items.find((item) => item.id === 'msg-final-long');
+            if (!listed?.bodyHash || !revisedPage?.bodyHash) throw new Error('page item is missing its full-text identity');
+            expect(listed.bodyHash).toMatch(/^[a-f0-9]{64}$/);
+            expect(revisedPage.bodyHash).not.toBe(listed.bodyHash);
+            expect(database.body('revise-me', 'msg-final-long').bodyHash).toBe(revisedPage.bodyHash);
+            expect(revisedPage.text).toBe(newTail.slice(0, 8000));
+            expect(revisedPage.bodyLength).toBe(newTail.length);
+            expect(database.messages('revise-me')).toHaveLength(2);
+            expect(database.body('revise-me', 'msg-final-run').text).toBe('环境不可用');
+        }
+        finally {
+            database.close();
+            rmSync(directory, { recursive: true, force: true });
         }
     });
 });

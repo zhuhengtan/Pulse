@@ -79,11 +79,12 @@ it('accounts local approvals and spends reserved calls on verification, with ind
   } finally { await host.close(); await rm(dir, { recursive: true, force: true }) }
 }, process.platform === 'win32' ? 180_000 : 60_000)
 
-it('runs frozen independent checks after abnormal termination without extra model requests or fabricated refs', async () => {
+it('runs frozen independent checks after abnormal termination without retrying execution or fabricating refs', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-terminal-assertion-'))
   const goal = '验证当前项目', ids = acceptanceCriteriaFromObjective(goal).map(c => c.id)
-  let calls = 0, independent = 0, requestsAtCheck = 0
-  vi.stubGlobal('fetch', vi.fn(async () => {
+  let calls = 0, independent = 0, requestsAtCheck = 0, summaries = 0
+  vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+    if (String(init?.body).includes("You write Pulse's final user-facing reply")) { summaries++; return chat('任务未完成，独立检查发现实际缺陷。') }
     if (++calls === 1) return chat({ tasks: [{ id: 's', kind: 'verify', goal, check: '行为正确', criterionIds: ids, dependsOn: [] }] })
     return tool('trusted_crash', {})
   }))
@@ -92,10 +93,13 @@ it('runs frozen independent checks after abnormal termination without extra mode
     const c = await host.createConversation(), run = await host.sendMessage(c.id, { text: goal }), outcome = await run.outcome()
     expect(outcome.status).toBe('failed')
     expect(independent).toBe(1); expect(calls).toBe(requestsAtCheck)
-    expect(outcome.text).toContain('独立检查 offline: failed')
-    expect(outcome.text).toContain('首个阻塞: s')
+    expect(summaries).toBe(1)
+    expect(outcome.text).toContain('actual defect')
+    expect(outcome.text).not.toContain('首个阻塞: s')
     expect((await run.taskOutcome())?.criteria.every(c => c.status === 'not_met')).toBe(true)
     const base = join(dir, 'data/conversations', c.id, 'runs', run.id)
+    expect(JSON.parse(await readFile(join(base, 'completion-report.json'), 'utf8')).text).toContain('独立检查 offline: failed')
+    expect((await run.usage()).modelCalls).toBe(calls + summaries)
     const terminal = JSON.parse(await readFile(join(base, 'terminal-acceptance.json'), 'utf8'))
     expect(terminal).toMatchObject({ source: 'host-terminal-execution', results: [{ id: 'offline', status: 'failed' }] })
     expect(terminal.results[0].ref).toBeUndefined()
@@ -107,9 +111,10 @@ it.each([false, true])('keeps manual approval across cold restore and executes o
   const dir = await mkdtemp(join(tmpdir(), 'pulse-manual-review-'))
   await writeFile(join(dir, 'probe.mjs'), "import {writeFileSync} from 'node:fs'; writeFileSync('executed.txt','once')")
   const goal = '验证 probe.mjs 的执行结果', ids = acceptanceCriteriaFromObjective(goal).map(c => c.id)
-  let primary = 0, work = 0
+  let primary = 0, work = 0, summaries = 0
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     expect(String(url)).toContain('fixture.invalid') // no cloud safety reviewer or unconfigured Ollama
+    if (String(init?.body).includes("You write Pulse's final user-facing reply")) { summaries++; return chat(approved ? '脚本已执行，检查通过。' : '任务未完成，脚本执行未获批准。') }
     primary++
     const { messages } = JSON.parse(String(init?.body)), text = currentRequestText(messages), refs = suppliedRequestResults(messages).map(r => r.id)
     if (text.includes('Create an executable plan')) return chat({ tasks: [{ id: 's', kind: 'verify', goal, check: '脚本完成', criterionIds: ids, dependsOn: [] }] })
@@ -136,6 +141,7 @@ it.each([false, true])('keeps manual approval across cold restore and executes o
     expect(primary).toBe(2)
     await run.reply(pending[0]!.items[0]!.effectId, { approved, reason: approved ? 'Explicitly authorized exact operation' : 'Do not execute' })
     await run.outcome()
+    expect(summaries).toBe(1)
     if (approved) {
       expect(await readFile(join(dir, 'executed.txt'), 'utf8')).toBe('once')
       expect((await run.taskOutcome())?.status).toBe('accepted')
@@ -188,8 +194,9 @@ it.each(['default-deny', 'manual-deny', 'manual-approve'] as const)('preserves l
 it('scopes terminal independent failure without failing unrelated criteria', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pulse-terminal-assertion-'))
   const goal = '验证当前项目。保留用户文档', ids = acceptanceCriteriaFromObjective(goal).map(c => c.id)
-  let calls = 0, independent = 0, requestsAtCheck = 0
-  vi.stubGlobal('fetch', vi.fn(async () => {
+  let calls = 0, independent = 0, requestsAtCheck = 0, summaries = 0
+  vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+    if (String(init?.body).includes("You write Pulse's final user-facing reply")) { summaries++; return chat('任务未完成，独立检查发现实际缺陷。') }
     if (++calls === 1) return chat({ tasks: [{ id: 's', kind: 'verify', goal, check: '行为正确', criterionIds: ids, dependsOn: [] }] })
     return tool('trusted_crash', {})
   }))
@@ -198,10 +205,13 @@ it('scopes terminal independent failure without failing unrelated criteria', asy
     const c = await host.createConversation(), run = await host.sendMessage(c.id, { text: goal }), outcome = await run.outcome()
     expect(outcome.status).toBe('failed')
     expect(independent).toBe(1); expect(calls).toBe(requestsAtCheck)
-    expect(outcome.text).toContain('独立检查 offline: failed')
-    expect(outcome.text).toContain('首个阻塞: s')
+    expect(summaries).toBe(1)
+    expect(outcome.text).toContain('actual defect')
+    expect(outcome.text).not.toContain('首个阻塞: s')
     expect((await run.taskOutcome())?.criteria.map(c => c.status)).toEqual(['not_met', 'unverifiable'])
     const base = join(dir, 'data/conversations', c.id, 'runs', run.id)
+    expect(JSON.parse(await readFile(join(base, 'completion-report.json'), 'utf8')).text).toContain('独立检查 offline: failed')
+    expect((await run.usage()).modelCalls).toBe(calls + summaries)
     const terminal = JSON.parse(await readFile(join(base, 'terminal-acceptance.json'), 'utf8'))
     expect(terminal).toMatchObject({ source: 'host-terminal-execution', results: [{ id: 'offline', status: 'failed' }] })
     expect(terminal.results[0].ref).toBeUndefined()

@@ -17,6 +17,10 @@ export const plannedTaskSchema = z.object({
   criterionIds: z.array(z.string()).min(1),
   dependsOn: z.array(z.string()).max(8),
   settledDependencies: z.array(z.string()).max(8).optional(),
+  /** Stable identity shared by successive versions of one deliverable. */
+  deliverableId: z.string().min(1).max(64).optional(),
+  /** Stage ids this stage explicitly replaces. Dependencies are not this list. */
+  supersedes: z.array(z.string().min(1).max(64)).max(8).optional(),
   check: z.string().min(1).max(500),
 })
 export const planSchema = z.object({ tasks: z.array(plannedTaskSchema).min(1).max(8) })
@@ -187,6 +191,33 @@ export function validatePlan(tasks: PlannedTask[], criterionIds: string[], origi
   }
   tasks.forEach((task) => walk(task.id))
   if (tasks.some(t => t.settledDependencies?.some(id => !t.dependsOn.includes(id)))) throw new Error('TASK_PLAN_INVALID_SETTLED_DEPENDENCY')
+  const replaced = new Map<string, string>()
+  const replacementEdges = new Map<string, string[]>()
+  for (const task of tasks) {
+    const targets = task.supersedes ?? []
+    if (!targets.length) continue
+    replacementEdges.set(task.id, targets)
+    for (const target of targets) {
+      if (target === task.id) throw new Error(`TASK_PLAN_SELF_SUPERSESSION: ${task.id}`)
+      const prior = byId.get(target)
+      if (!prior) throw new Error(`TASK_PLAN_UNKNOWN_SUPERSESSION: ${task.id}; ${target}`)
+      if (!task.deliverableId || task.deliverableId !== prior.deliverableId) throw new Error(`TASK_PLAN_SUPERSESSION_IDENTITY: ${task.id}`)
+      const claimer = replaced.get(target)
+      if (claimer) throw new Error(`TASK_PLAN_AMBIGUOUS_SUPERSESSION: ${target}`)
+      replaced.set(target, task.id)
+    }
+  }
+  const visited = new Set<string>()
+  const stacked = new Set<string>()
+  const walkReplacement = (id: string): void => {
+    if (stacked.has(id)) throw new Error(`TASK_PLAN_SUPERSESSION_CYCLE: ${id}`)
+    if (visited.has(id)) return
+    stacked.add(id)
+    for (const target of replacementEdges.get(id) ?? []) walkReplacement(target)
+    stacked.delete(id)
+    visited.add(id)
+  }
+  for (const id of replacementEdges.keys()) walkReplacement(id)
   if (originalContract !== undefined) {
     // Plans are written before repository investigation. A calculated decimal
     // must not silently become a new business oracle. Defer derived constants
@@ -221,8 +252,25 @@ export function dependencySatisfied(task: PlannedTask, dependency: ControlledTas
   return !isCascadeBlocked(dependency, tasks) || dependency.dependsOn.every(id => tasks.find(t => t.id === id)?.status === 'passed')
 }
 
-/** Coalesce a validated DAG in topological order without losing checks or criteria. */
-export function fitPlanToBudget(tasks: PlannedTask[], limit: number): PlannedTask[] {
+function declaredDeliverableId(task: PlannedTask): string | undefined {
+  return task.deliverableId ? task.deliverableId : undefined
+}
+
+/** A replacement merge is legal only when every member has the same explicit identity.
+ * A missing identity is its own delivery, not a match for the one declared id in the group. */
+function replacementBlocksMixedIdentity(group: readonly PlannedTask[], universe: readonly PlannedTask[]): boolean {
+  const ids = new Set(group.map(item => item.id))
+  const touches = group.some(item => (item.supersedes ?? []).length > 0) || universe.some(item => !ids.has(item.id) && (item.supersedes ?? []).some(id => ids.has(id)))
+  if (!touches) return false
+  const identities = group.map(declaredDeliverableId)
+  const expected = identities[0]
+  return !expected || identities.some(id => id !== expected)
+}
+
+/** Coalesce a validated DAG in topological order without losing checks or criteria.
+ * Stages outside the fitted set keep their ids, so a merge must not absorb a
+ * delivery those stages still replace. */
+export function fitPlanToBudget(tasks: PlannedTask[], limit: number, anchored: readonly PlannedTask[] = []): PlannedTask[] {
   const maximum = Math.max(1, Math.min(8, Math.floor((limit - 4) / 5)))
   if (tasks.length <= maximum) return tasks
   const ordered: PlannedTask[] = [], seen = new Set<string>()
@@ -239,11 +287,18 @@ export function fitPlanToBudget(tasks: PlannedTask[], limit: number): PlannedTas
     const merged = [...groups[i]!, ...groups[i + 1]!]
     const ids = new Set(merged.map(t => t.id))
     if (merged.some(t => (t as ControlledTask).retainedArtifactVerification || t.settledDependencies?.some(id => ids.has(id)))) { i++; continue }
+    if (anchored.some(item => (item.supersedes ?? []).some(id => ids.has(id) && id !== merged[0]!.id)) || replacementBlocksMixedIdentity(merged, [...anchored, ...tasks])) { i++; continue }
     if (merged.map(item => item.goal).join('; ').length <= 700 && merged.map(item => item.check).join('; ').length <= 500 && new Set(merged.flatMap(item => item.criterionIds)).size <= 32) groups.splice(i, 2, merged)
     else i++
   }
   const owners = new Map(groups.flatMap(group => group.map(task => [task.id, group[0]!.id] as const)))
-  return groups.map(group => ({ ...((group[0] as ControlledTask).retainedArtifactVerification ? { retainedArtifactVerification: true } : {}), id: group[0]!.id, ...(group.some(t => t.kind) ? { kind: group.some(t => t.kind === 'edit') ? 'edit' as const : group[0]!.kind } : {}), goal: group.map(item => item.goal).join('; '), check: group.map(item => item.check).join('; '), criterionIds: [...new Set(group.flatMap(item => item.criterionIds))], dependsOn: [...new Set(group.flatMap(item => item.dependsOn).map(id => owners.get(id) ?? id))].filter(id => id !== group[0]!.id), ...(group.some(t => t.settledDependencies?.length) ? { settledDependencies: [...new Set(group.flatMap(t => t.settledDependencies ?? []).map(id => owners.get(id) ?? id))].filter(id => id !== group[0]!.id && group.every(t => t.dependsOn.filter(d => (owners.get(d) ?? d) === id).every(d => t.settledDependencies?.includes(d)))) } : {}) }))
+  return groups.map(group => {
+    const identities = group.map(declaredDeliverableId)
+    const identity = identities[0]
+    const uniformIdentity = Boolean(identity) && identities.every(id => id === identity)
+    const supersedes = [...new Set(group.flatMap(item => item.supersedes ?? []).map(id => owners.get(id) ?? id))].filter(id => id !== group[0]!.id)
+    return { ...((group[0] as ControlledTask).retainedArtifactVerification ? { retainedArtifactVerification: true } : {}), id: group[0]!.id, ...(group.some(t => t.kind) ? { kind: group.some(t => t.kind === 'edit') ? 'edit' as const : group[0]!.kind } : {}), goal: group.map(item => item.goal).join('; '), check: group.map(item => item.check).join('; '), criterionIds: [...new Set(group.flatMap(item => item.criterionIds))], dependsOn: [...new Set(group.flatMap(item => item.dependsOn).map(id => owners.get(id) ?? id))].filter(id => id !== group[0]!.id), ...(group.some(t => t.settledDependencies?.length) ? { settledDependencies: [...new Set(group.flatMap(t => t.settledDependencies ?? []).map(id => owners.get(id) ?? id))].filter(id => id !== group[0]!.id && group.every(t => t.dependsOn.filter(d => (owners.get(d) ?? d) === id).every(d => t.settledDependencies?.includes(d)))) } : {}), ...(uniformIdentity ? { deliverableId: identity, ...(supersedes.length ? { supersedes } : {}) } : {}) }
+  })
 }
 const TOOL_RUNNER = /\b(?:node|npm|pnpm|yarn|bun|pytest|cargo|vitest|jest|make|python3?|pip3?|ruby|gradle|mvn|dotnet|gcc|clang|tsc|eslint|ruff)\b|\bgo\s+test\b/i
 const WORKSPACE_FILE = /(?:^|[\s`'"(])(?:\.{1,2}\/|[\w.-]+\/)[\w.-]+\.[A-Za-z][A-Za-z0-9]{0,7}\b|\b(?!node\.js\b)[\w.-]+\.(?:js|jsx|ts|tsx|mjs|cjs|py|go|rs|java|md|json|ya?ml|toml|css|html|vue|svelte|sh|sql|cpp|hpp|cs|rb|php|swift|kt|txt|lock|c|h)\b/i
@@ -324,12 +379,13 @@ export function mergePreparatoryStages(tasks: PlannedTask[], options: { preserve
     const combined = [prep, ...users], ids = new Set(combined.map(t => t.id))
     if (result.some(t => t.settledDependencies?.some(id => ids.has(id)))) continue
     const goal = combined.map(t => t.goal).join('; '), check = combined.map(t => t.check).join('; ')
-    if (goal.length > 700 || check.length > 500 || new Set(combined.flatMap(t => t.criterionIds)).size > 32 || prep.dependsOn.some(id => ids.has(id))) continue
+    if (goal.length > 700 || check.length > 500 || new Set(combined.flatMap(t => t.criterionIds)).size > 32 || prep.dependsOn.some(id => ids.has(id)) || replacementBlocksMixedIdentity(combined, result)) continue
     const owner = users[0]!
     owner.goal = goal; owner.check = check
     owner.criterionIds = [...new Set(combined.flatMap(t => t.criterionIds))]
     owner.dependsOn = [...prep.dependsOn]
-    result = result.filter(t => t.id === owner.id || !ids.has(t.id)).map(t => ({ ...t, dependsOn: [...new Set(t.dependsOn.map(id => ids.has(id) ? owner.id : id))] }))
+    if (prep.deliverableId && prep.deliverableId === owner.deliverableId) owner.supersedes = [...new Set([...(owner.supersedes ?? []), ...(prep.supersedes ?? [])])].filter(id => id !== owner.id)
+    result = result.filter(t => t.id === owner.id || !ids.has(t.id)).map(t => ({ ...t, dependsOn: [...new Set(t.dependsOn.map(id => ids.has(id) ? owner.id : id))], ...(t.supersedes ? { supersedes: [...new Set(t.supersedes.map(id => ids.has(id) ? owner.id : id))].filter(id => id !== t.id) } : {}) }))
   }
   return result
 }
@@ -348,9 +404,10 @@ export function mergeRoutineVerificationStages(tasks: PlannedTask[]): PlannedTas
     const ids = new Set([owner.id, verify.id])
     if (result.some(t => t.settledDependencies?.some(id => ids.has(id)))) continue
     const goal = `${owner.goal}; ${verify.goal}`, check = `${owner.check}; ${verify.check}`
-    if (goal.length > 700 || check.length > 500) continue
+    if (goal.length > 700 || check.length > 500 || replacementBlocksMixedIdentity([owner, verify], result)) continue
     owner.goal = goal; owner.check = check
-    result = result.filter(t => t.id !== verify.id).map(t => ({ ...t, dependsOn: [...new Set(t.dependsOn.map(id => id === verify.id ? owner.id : id))] }))
+    if (verify.deliverableId && verify.deliverableId === owner.deliverableId) owner.supersedes = [...new Set([...(owner.supersedes ?? []), ...(verify.supersedes ?? [])])].filter(id => id !== owner.id)
+    result = result.filter(t => t.id !== verify.id).map(t => ({ ...t, dependsOn: [...new Set(t.dependsOn.map(id => id === verify.id ? owner.id : id))], ...(t.supersedes ? { supersedes: [...new Set(t.supersedes.map(id => id === verify.id ? owner.id : id))].filter(id => id !== t.id) } : {}) }))
   }
   return result
 }
@@ -365,9 +422,9 @@ export function omitRedundantFinalReviews(tasks: PlannedTask[]): PlannedTask[] {
     if (task.kind !== 'verify' || TOOL_RUNNER.test(text) || WORKSPACE_FILE.test(text)) continue
     if (/运行|执行|复跑|测试|询问|批准|审批|摘要|报告|\b(?:run|execute|rerun|test|ask|approve|approval|summary|report)\b/i.test(text)) continue
     if (!/最终|整体|全面|\b(?:final|overall|entire)\b/i.test(text) || !/全部交付物|原始.{0,20}(?:标准|要求)|(?:所有|全部).{0,20}(?:标准|要求)|\b(?:criteria|requirements)\b/i.test(text)) continue
-    if (retained.some(other => other.dependsOn.includes(task.id))) continue
+    if (retained.some(other => other.dependsOn.includes(task.id) || other.supersedes?.includes(task.id))) continue
     const covered = new Set(retained.filter(other => other.id !== task.id).flatMap(other => other.criterionIds))
-    if (task.criterionIds.length > 0 && task.criterionIds.every(id => covered.has(id))) retained = retained.filter(other => other.id !== task.id)
+    if (task.criterionIds.length > 0 && task.criterionIds.every(id => covered.has(id))) retained = retained.filter(other => other.id !== task.id).map(other => other.supersedes?.includes(task.id) ? { ...other, supersedes: other.supersedes.filter(id => id !== task.id) } : other)
   }
   return retained
 }

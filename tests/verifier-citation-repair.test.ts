@@ -15,6 +15,7 @@ it.each([true, false])('allows one citation-only correction and rejects repeated
   const chat = (message: any) => new Response(JSON.stringify({ choices: [{ message: typeof message === 'string' ? { content: message } : message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }] }), { headers: { 'content-type': 'application/json' } })
   vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
     const request = JSON.parse(String(init.body)), text = currentRequestText(request.messages)
+    if (text.includes("You write Pulse's final user-facing reply")) return chat('Saved.')
     const refs = suppliedRequestResults(request.messages).map((r: any) => r.id)
     if (text.includes('Create an executable plan')) return chat(JSON.stringify({ tasks: [{ id: 'create', kind: 'edit', goal: objective, check: 'File saved', dependsOn: [], criterionIds: ids }] }))
     if (text.includes('Verify ONLY the active taskController stage')) {

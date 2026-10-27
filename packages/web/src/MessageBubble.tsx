@@ -7,10 +7,14 @@ import { Icon } from './Icon.js'
 import { Markdown } from './Markdown.js'
 import { copyText } from './clipboard.js'
 import { useMessageActions } from './useMessageActions.js'
+import { contentHash } from './content-hash.js'
 import { apiJson, browserTransport, type WebMessage, type PulseWebTransport } from './transport.js'
 // Reuse ICU formatters across the visible message window and route switches.
 const messageTime = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 const messageTimeTitle = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false })
+type BodyIdentity = { conversationId: string; id: string; bodyHash?: string; text: string; bodyLength?: number; bodyTruncated: boolean }
+const bodyVersion = (identity: BodyIdentity) => identity.bodyHash ? `${identity.conversationId}\0${identity.id}\0${identity.bodyHash}` : `${identity.conversationId}\0${identity.id}\0${identity.text}\0${identity.bodyLength ?? ''}\0${identity.bodyTruncated ? 1 : 0}`
+const sameBody = (left: BodyIdentity, right: BodyIdentity) => bodyVersion(left) === bodyVersion(right)
 
 export const MessageBubble = memo(function MessageBubble({ message, mode, retry, imageApi, onOpenWork, onFileClick, onDiffClick, transport = browserTransport, conversationId }: {
   message: WebMessage
@@ -23,20 +27,60 @@ export const MessageBubble = memo(function MessageBubble({ message, mode, retry,
   onFileClick?: ((path: string, runId?: string) => void) | undefined
   onDiffClick?: ((path: string) => void) | undefined
 }) {
-  const [fullText, setFullText] = useState<string>()
+  const identity: BodyIdentity = { conversationId: conversationId ?? '', id: message.id, ...(message.bodyHash ? { bodyHash: message.bodyHash } : {}), text: message.text, ...(message.bodyLength === undefined ? {} : { bodyLength: message.bodyLength }), bodyTruncated: message.bodyTruncated === true }
+  const version = bodyVersion(identity)
+  const versionRef = useRef(identity)
+  versionRef.current = identity
+  const requestSerial = useRef(0)
+  const [shownVersion, setShownVersion] = useState(version)
+  const [expandedText, setExpandedText] = useState<string>()
   const [bodyLoading, setBodyLoading] = useState(false)
   const [bodyError, setBodyError] = useState('')
-  const text = fullText ?? message.text
+  const wantsFull = useRef(false)
+  const staleVersion = shownVersion !== version
+  if (staleVersion) { setShownVersion(version); setExpandedText(undefined) }
+  const text = !staleVersion && expandedText !== undefined ? expandedText : message.text
   const scopedImageApi = useCallback((source: string) => imageApi?.(source, message.runId), [imageApi, message.runId])
   const scopedFileClick = useCallback((path: string) => onFileClick?.(path, message.runId), [onFileClick, message.runId])
+  const readMatchingBody = useCallback(async (requested: BodyIdentity) => {
+    const body = await apiJson<WebMessage>(transport, `/api/data/conversations/${encodeURIComponent(requested.conversationId)}/body?id=${encodeURIComponent(requested.id)}`)
+    if (!sameBody(requested, versionRef.current)) return undefined
+    const full = typeof body.text === 'string' ? body.text : ''
+    const current = versionRef.current
+    if (current.bodyHash) {
+      const digest = await contentHash(full)
+      const live = versionRef.current
+      if (!sameBody(requested, live) || digest !== live.bodyHash || (body.bodyHash !== undefined && body.bodyHash !== live.bodyHash)) return undefined
+    }
+    return full
+  }, [transport])
   const loadBody = async () => {
     if (bodyLoading) return
+    wantsFull.current = true
+    const requested = versionRef.current
+    const serial = ++requestSerial.current
     setBodyLoading(true); setBodyError('')
-    try { const body = await apiJson<WebMessage>(transport, `/api/data/conversations/${encodeURIComponent(messageConversationId())}/body?id=${encodeURIComponent(message.id)}`); setFullText(body.text) }
-    catch { setBodyError('正文暂时无法加载，请重试。') }
-    finally { setBodyLoading(false) }
+    try {
+      const full = await readMatchingBody(requested)
+      if (serial !== requestSerial.current) return
+      if (full === undefined) { setBodyError('正文暂时无法加载，请重试。'); return }
+      setExpandedText(full)
+    } catch { if (serial === requestSerial.current) setBodyError('正文暂时无法加载，请重试。') }
+    finally { if (serial === requestSerial.current) setBodyLoading(false) }
   }
-  const messageConversationId = () => conversationId ?? ''
+  useEffect(() => {
+    if (!wantsFull.current || expandedText !== undefined || !message.bodyTruncated) return
+    const requested = versionRef.current
+    const serial = ++requestSerial.current
+    let cancelled = false
+    setBodyLoading(true); setBodyError('')
+    void readMatchingBody(requested).then(full => {
+      if (cancelled || serial !== requestSerial.current) return
+      if (full === undefined) { setBodyError('正文暂时无法加载，请重试。'); return }
+      setExpandedText(full)
+    }).catch(() => { if (!cancelled && serial === requestSerial.current) setBodyError('正文暂时无法加载，请重试。') }).finally(() => { if (!cancelled && serial === requestSerial.current) setBodyLoading(false) })
+    return () => { cancelled = true }
+  }, [version, expandedText, message.bodyTruncated, readMatchingBody])
   const dialogs = usePulseDialogs()
   const retryInFlight = useRef(false)
   const confirmRetry = async () => {
@@ -57,7 +101,12 @@ export const MessageBubble = memo(function MessageBubble({ message, mode, retry,
     if (copyInFlight.current) return
     copyInFlight.current = true
     setCopying(true)
-    try { const content = message.bodyTruncated && fullText === undefined ? (await apiJson<WebMessage>(transport, `/api/data/conversations/${encodeURIComponent(messageConversationId())}/body?id=${encodeURIComponent(message.id)}`)).text : text; await copyText(content); if (mounted.current) setFeedback('已复制') }
+    try {
+      const requested = versionRef.current
+      const content = message.bodyTruncated && (staleVersion || expandedText === undefined) ? await readMatchingBody(requested) : text
+      if (content === undefined || !sameBody(requested, versionRef.current)) throw new Error('stale body')
+      await copyText(content); if (mounted.current) setFeedback('已复制')
+    }
     catch { if (mounted.current) setFeedback('复制失败，请重试或手动选择文字') }
     finally {
       copyInFlight.current = false
@@ -84,7 +133,7 @@ export const MessageBubble = memo(function MessageBubble({ message, mode, retry,
       {hasContent && <div className={`bubble ${actions.menuOpen ? 'has-message-menu' : ''}`} {...actions.gesture}>
         {message.role === 'user' && <AttachmentCards items={message.attachments ?? []} onPreview={setPreviewImage}/>}
         {message.text.trim() && (message.role === 'user' ? <RichMessage content={message.richContent} fallback={text} onFileClick={onFileClick ? scopedFileClick : undefined} onDiffClick={onDiffClick}/> : <Markdown text={text} imageApi={imageApi ? scopedImageApi : undefined} transport={transport} onFileClick={onFileClick ? scopedFileClick : undefined} onDiffClick={onDiffClick} />)}
-        {message.bodyTruncated && fullText === undefined && <div><PulseButton onClick={() => void loadBody()} disabled={bodyLoading}>{bodyLoading ? '加载中…' : '展开完整消息'}</PulseButton>{bodyError && <span role="alert">{bodyError}</span>}</div>}
+        {message.bodyTruncated && expandedText === undefined && <div><PulseButton onClick={() => void loadBody()} disabled={bodyLoading}>{bodyLoading ? '加载中…' : '展开完整消息'}</PulseButton>{bodyError && <span role="alert">{bodyError}</span>}</div>}
         {message.role !== 'user' && <AttachmentCards items={message.attachments ?? []} onPreview={setPreviewImage}/>}
 
         {actions.menuOpen && <Popover trigger="click" visible onVisibleChange={actions.setMenuOpen} destroyOnHide placement={message.role === 'user' ? 'top-end' : 'top-start'} className="message-mobile-popover" content={<div>{validTime && <time className="message-menu-time" dateTime={sentAt.toISOString()} title={timeTitle}>{timeLabel}</time>}<div role="menu" aria-label="消息操作"><PulseButton type="button" role="menuitem" disabled={copying} onClick={() => void copy()}><Icon name="copy"/><span>复制</span></PulseButton></div></div>}>
