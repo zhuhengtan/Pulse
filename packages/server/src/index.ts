@@ -1756,7 +1756,7 @@ export class LocalHost {
     const temporary = join(this.dataDir, `skills-index.${randomUUID()}.tmp`)
     try {
       await writeFile(temporary, JSON.stringify({ schemaVersion: 1, skills }), { mode: 0o600 })
-      await rename(temporary, join(this.dataDir, 'skills-index.json'))
+      await replaceStateFile(temporary, join(this.dataDir, 'skills-index.json'))
     } finally { await rm(temporary, { force: true }) }
     return skills
   }
