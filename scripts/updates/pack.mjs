@@ -69,7 +69,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const name = `pulse-shell-${version}-${process.platform}-${process.arch}.manifest.json`;
     await writeFile(join(destination, name), JSON.stringify(signEnvelope(manifest, privateKey, keyId)));
     reference = { component, version, platform: process.platform, arch: process.arch, url: new URL(name, baseUrl).href, sha256: await sha256(join(destination, name)) };
-  } else reference = await packComponent({ component, source: process.argv[3] ?? join(repo, component === 'frontend' ? 'packages/web/dist' : 'artifacts/desktop-runtime/pulse'), destination, version, platform: component === 'backend' ? process.platform : 'any', arch: component === 'backend' ? process.arch : 'any', baseUrl, keyId, privateKey, notes });
+  } else {
+    const backend = JSON.parse(await readFile(join(repo, 'packages/cli/package.json'))).version;
+    reference = await packComponent({ component, source: process.argv[3] ?? join(repo, component === 'frontend' ? 'packages/web/dist' : 'artifacts/desktop-runtime/pulse'), destination, version, platform: component === 'backend' ? process.platform : 'any', arch: component === 'backend' ? process.arch : 'any', baseUrl, keyId, privateKey, backend, notes });
+  }
   await writeFile(join(destination, `${component}-${reference.platform}-${reference.arch}.ref.json`), JSON.stringify(reference));
   console.log(`Created signed ${component} update ${version} (${reference.platform}/${reference.arch}).`);
 }

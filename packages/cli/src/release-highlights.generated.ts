@@ -1,5 +1,35 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.10.0": [
+    {
+      "zh": "在桌面和本机 Web 中新增模型厂商接入向导，支持主流官方厂商、SiliconFlow、OpenRouter 及自定义 OpenAI 兼容接口，分别管理站点、账号和套餐。",
+      "en": "Added a provider connection wizard on desktop and local Web, supporting major official providers, SiliconFlow, OpenRouter, and custom OpenAI-compatible endpoints with separate sites, accounts, and plans."
+    },
+    {
+      "zh": "自动获取并导入全部对话模型，提供搜索、分页、能力筛选和单模型连接验证；刷新目录保留人工修改及已有模型引用。",
+      "en": "Discover and import all conversation models, with search, pagination, capability filters, and single-model connection checks; directory refresh preserves manual edits and existing model references."
+    },
+    {
+      "zh": "支持本机 Ollama 免密接入、官方 Ollama Cloud 和远程自托管 Ollama，读取原生模型目录并排除可识别的向量模型。",
+      "en": "Support key-free local Ollama, official Ollama Cloud, and remote self-hosted Ollama, using native model discovery and filtering recognizable embedding models."
+    },
+    {
+      "zh": "API Key 可通过本机独立凭据文件管理，配置仅保存引用；CLI、聊天、任务路由、预回复和现有审批模型共用凭据解析，继续兼容环境变量。",
+      "en": "Manage API keys in a separate local credential file while storing only references in configuration; CLI, chat, task routing, instant replies, and existing approval models share credential resolution and retain environment-variable compatibility."
+    },
+    {
+      "zh": "保留 MiniMax、Gemini、OpenRouter 和 Anthropic 连续工具调用所需的推理内容与协议签名，正确处理流式片段，并按厂商和模型能力发送参数。",
+      "en": "Preserve reasoning content and protocol signatures required for consecutive tool calls on MiniMax, Gemini, OpenRouter, and Anthropic; assemble streamed fragments correctly and send parameters according to provider and model capabilities."
+    },
+    {
+      "zh": "将远程 Ollama 和本机转发的云模型排除在纯本地模型及本机审批复核之外；连接探测的兼容重试计入三次请求上限，并避免思考内容耗尽 Ollama 探测额度。",
+      "en": "Exclude remote Ollama and locally relayed cloud models from local-only model routing and local approval review; count compatibility retries toward the three-request probe limit and prevent reasoning from exhausting Ollama probe budgets."
+    },
+    {
+      "zh": "前端更新包声明匹配的最低后台版本，防止新的模型接入界面连接不具备对应接口的旧后台。",
+      "en": "Declare the matching minimum backend version in frontend update packages so the new provider connection interface cannot be applied over a backend without the required endpoints."
+    }
+  ],
   "0.9.0": [
     {
       "zh": "桌面壳、后台和 Web/H5 支持独立版本与签名更新；设置中可查看版本、下载进度、兼容性、空闲应用和回退状态，前端刷新保留编辑草稿。",

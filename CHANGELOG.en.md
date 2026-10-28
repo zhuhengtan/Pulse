@@ -2,6 +2,21 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.10.0] - 2026-10-28
+
+### Added
+
+- Added a provider connection wizard on desktop and local Web, supporting major official providers, SiliconFlow, OpenRouter, and custom OpenAI-compatible endpoints with separate sites, accounts, and plans.
+- Discover and import all conversation models, with search, pagination, capability filters, and single-model connection checks; directory refresh preserves manual edits and existing model references.
+- Support key-free local Ollama, official Ollama Cloud, and remote self-hosted Ollama, using native model discovery and filtering recognizable embedding models.
+- Manage API keys in a separate local credential file while storing only references in configuration; CLI, chat, task routing, instant replies, and existing approval models share credential resolution and retain environment-variable compatibility.
+
+### Fixed
+
+- Preserve reasoning content and protocol signatures required for consecutive tool calls on MiniMax, Gemini, OpenRouter, and Anthropic; assemble streamed fragments correctly and send parameters according to provider and model capabilities.
+- Exclude remote Ollama and locally relayed cloud models from local-only model routing and local approval review; count compatibility retries toward the three-request probe limit and prevent reasoning from exhausting Ollama probe budgets.
+- Declare the matching minimum backend version in frontend update packages so the new provider connection interface cannot be applied over a backend without the required endpoints.
+
 ## [0.9.0] - 2026-10-27
 
 ### Added
