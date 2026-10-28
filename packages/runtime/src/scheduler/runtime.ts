@@ -2792,14 +2792,14 @@ export class PulseRuntime {
 
   private scheduleRetry(effect: EffectRecord, error?: RuntimeError, forcedDelayMs?: number): boolean {
     if (effect.cancelRequested || (!forcedDelayMs && !effect.retryPolicy)) return false
-    if (forcedDelayMs === undefined && error?.retryable === false) return false
+    if (forcedDelayMs === undefined && (error?.retryable === false || effect.retryPolicy?.retryableCodes && (!error?.code || !effect.retryPolicy.retryableCodes.includes(error.code)))) return false
     if (forcedDelayMs === undefined && effect.retryPolicy) {
       if (effect.attemptNo >= effect.retryPolicy.maxAttempts) return false
       if (effect.sideEffectState === 'unknown') return false
       if (effect.sideEffectState === 'applied' && effect.duplicateExecutionPolicy !== 'allow') return false
     }
     const policy = effect.retryPolicy
-    const baseDelay = forcedDelayMs ?? Math.min(policy!.maxBackoffMs, policy!.initialBackoffMs * (2 ** Math.max(0, effect.attemptNo - 1)))
+    const baseDelay = forcedDelayMs ?? Math.min(policy!.maxBackoffMs, policy!.initialBackoffMs * ((policy!.backoffMultiplier ?? 2) ** Math.max(0, effect.attemptNo - 1)))
     const jitter = forcedDelayMs === undefined && policy?.jitter ? Math.floor(baseDelay / 2) : 0
     const delayMs = baseDelay + jitter
     const previousAttemptId = effect.attemptId

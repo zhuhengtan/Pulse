@@ -136,6 +136,20 @@ export interface LaneRecord {
   historyPressure?: HistoryPressure
 }
 
+/** Optional fields preserve existing retry and routing behavior when absent. */
+export interface EffectRetryPolicy {
+  maxAttempts: number
+  initialBackoffMs: number
+  maxBackoffMs: number
+  jitter: boolean
+  /** Defaults to 2; a multiplier of 3 gives the bounded 1s, 3s schedule. */
+  backoffMultiplier?: number
+  /** Only these exact error codes may retry, and retryable=false still wins. */
+  retryableCodes?: string[]
+  /** LLM-only: retain the first routed model instead of advancing candidates. */
+  sameModel?: boolean
+}
+
 export interface EffectRecord {
   id: EffectId
   agentId: AgentId
@@ -161,7 +175,7 @@ export interface EffectRecord {
   idempotencyKey?: string
   sideEffectPolicy?: SideEffectPolicy
   toolVersion?: string
-  retryPolicy?: { maxAttempts: number; initialBackoffMs: number; maxBackoffMs: number; jitter: boolean }
+  retryPolicy?: EffectRetryPolicy
   duplicateExecutionPolicy?: 'allow' | 'forbid'
   maxUnknownAttempts?: number
   retryAt?: number
@@ -333,7 +347,7 @@ export interface EffectSubmission {
   idempotencyKey?: string
   sideEffectPolicy?: SideEffectPolicy
   toolVersion?: string
-  retryPolicy?: { maxAttempts: number; initialBackoffMs: number; maxBackoffMs: number; jitter: boolean }
+  retryPolicy?: EffectRetryPolicy
   duplicateExecutionPolicy?: 'allow' | 'forbid'
   maxUnknownAttempts?: number
   toolCallId?: string

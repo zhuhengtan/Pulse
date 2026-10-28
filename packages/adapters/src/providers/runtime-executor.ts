@@ -117,9 +117,9 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
     const routeDiagnostics = config.router.diagnostics(task, projection.privacy, routeRequirements, estimateProjectionTokens(projection) + (typeof routeRequirements.maxOutputTokens === 'number' ? routeRequirements.maxOutputTokens : 0))
     const candidates = config.router.routeProjection(task, projection, routeRequirements)
     const attemptNo = Math.max(1, effect.attemptNo)
-    const candidate = candidates[attemptNo - 1]
+    const candidate = candidates[effect.retryPolicy?.sameModel ? 0 : attemptNo - 1]
     const maxAttempts = effect.retryPolicy?.maxAttempts ?? candidates.length
-    const canFallback = candidate !== undefined && attemptNo < Math.max(0, maxAttempts) && candidates[attemptNo] !== undefined
+    const canFallback = candidate !== undefined && attemptNo < Math.max(0, maxAttempts) && (effect.retryPolicy?.sameModel === true || candidates[attemptNo] !== undefined)
     if (candidate === undefined) return { value: null, status: 'failed', executionState: 'failed', privacy: projection.privacy, error: { code: candidates.length === 0 ? 'NO_ELIGIBLE_MODEL' : 'MODEL_ATTEMPT_LIMIT_REACHED', message: candidates.length === 0 ? 'No model candidate satisfies the task, privacy, capability, and context requirements.' : 'No additional routed model candidate is available for this Effect.' }, metadata: { routes: routeDiagnostics as unknown as JsonValue, attempts: [] } }
     const result = await fallback.execute(effect.id, [candidate], async (attempt) => {
       failedForSchema = false
@@ -170,7 +170,7 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
         const budget = config.modelBudget?.()
         const blocks = budget ? [...hydrated.blocks, { kind: 'policy' as const, content: `Host model-call ledger: limit=${budget.limit}, used=${budget.used} (including this request), remaining=${Math.max(0, budget.limit - budget.used)}. This is shared by planning, tools' approval reviews, retries, compaction and final verification. Reserve at least two requests for verification. Produce an incremental usable deliverable now; do not spend the remaining allowance on discovery or start another run.` }] : hydrated.blocks
         const budgeted = budget ? { ...hydrated, blocks, projectionHash: contentHash(blocks) } : hydrated
-        const output = assignRuntimeToolCallIds(validateAdapterResult(await provider.executeAttempt({ request: budgeted, signal, model: attempt.candidate.id, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation, ...(onReasoning === undefined ? {} : { onReasoning }), ...(config.beforeProviderAttempt === undefined ? {} : { beforeRetryAttempt: async () => {
+        const output = assignRuntimeToolCallIds(validateAdapterResult(await provider.executeAttempt({ request: budgeted, signal, model: attempt.candidate.id, ...(dynamicRequirements.reasoningEffort === 'low' ? { reasoningEffort: 'low' as const } : {}), ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation, ...(onReasoning === undefined ? {} : { onReasoning }), ...(config.beforeProviderAttempt === undefined ? {} : { beforeRetryAttempt: async () => {
           await config.beforeProviderAttempt!(purpose)
           providerAttempts++
           if (!streamAttempt.emitted) return

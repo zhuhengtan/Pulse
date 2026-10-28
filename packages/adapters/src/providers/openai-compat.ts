@@ -17,14 +17,14 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
     this.baseURL = baseURL
   }
-  async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; onReasoning?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number; beforeRetryAttempt?: () => Promise<void> }): Promise<LLMResult> {
+  async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; onReasoning?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number; reasoningEffort?: 'low'; beforeRetryAttempt?: () => Promise<void> }): Promise<LLMResult> {
     const streaming = params.onObservation !== undefined
     const { canonical, toolNameAliases } = lowerProjectionToCanonical({
       request: params.request,
       model: params.model ?? this.config.defaultModel,
       outputSchema: params.outputSchema,
       maxOutputTokens: params.maxOutputTokens ?? this.config.maxOutputTokens,
-      reasoningEffort: this.config.reasoningEffort,
+      reasoningEffort: params.reasoningEffort ?? this.config.reasoningEffort,
       toolChoice: this.config.toolChoice,
       stream: streaming,
     })

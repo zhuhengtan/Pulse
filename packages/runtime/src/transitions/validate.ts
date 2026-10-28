@@ -107,6 +107,9 @@ function validateEffectSubmission(submission: unknown): string | undefined {
     if (!value.retryPolicy || typeof value.retryPolicy !== 'object' || Array.isArray(value.retryPolicy)) return 'INVALID_EFFECT_RETRY_POLICY'
     const retry = value.retryPolicy as Record<string, unknown>
     if (!Number.isInteger(retry.maxAttempts) || (retry.maxAttempts as number) < 1 || typeof retry.jitter !== 'boolean' || typeof retry.initialBackoffMs !== 'number' || !Number.isFinite(retry.initialBackoffMs) || retry.initialBackoffMs < 0 || typeof retry.maxBackoffMs !== 'number' || !Number.isFinite(retry.maxBackoffMs) || retry.maxBackoffMs < retry.initialBackoffMs) return 'INVALID_EFFECT_RETRY_POLICY'
+    if (retry.backoffMultiplier !== undefined && (typeof retry.backoffMultiplier !== 'number' || !Number.isFinite(retry.backoffMultiplier) || retry.backoffMultiplier < 1 || retry.backoffMultiplier > 10)) return 'INVALID_EFFECT_RETRY_POLICY'
+    if (retry.sameModel !== undefined && (typeof retry.sameModel !== 'boolean' || value.kind !== 'llm')) return 'INVALID_EFFECT_RETRY_POLICY'
+    if (retry.retryableCodes !== undefined && (!Array.isArray(retry.retryableCodes) || retry.retryableCodes.length > 128 || retry.retryableCodes.some(code => typeof code !== 'string' || !/^[A-Z0-9_]+$/.test(code)))) return 'INVALID_EFFECT_RETRY_POLICY'
   }
   if (value.locks !== undefined) {
     if (!Array.isArray(value.locks) || value.locks.some((lock) => !lock || typeof lock !== 'object' || Array.isArray(lock) || !nonEmptyString((lock as Record<string, unknown>).resource) || !['shared', 'exclusive'].includes(String((lock as Record<string, unknown>).mode)))) return 'INVALID_EFFECT_LOCK'
