@@ -18,7 +18,8 @@ for (const { platform } of desktopAssets) if (!html.includes(`data-download="${p
 if (!html.includes('PolyForm Noncommercial') || !html.includes('<noscript>')) throw new Error('SITE_REQUIRED_INFORMATION_MISSING');
 const manifest = JSON.parse(await readFile(resolve(root, 'downloads.json'), 'utf8'));
 if (manifest.version !== null) {
-  const normalized = desktopDownloadManifest({ tag_name: `v${manifest.version}`, html_url: manifest.releaseUrl, assets: [...manifest.assets.map(asset => ({ ...asset, state: 'uploaded', browser_download_url: asset.url })), { name: 'pulse-desktop-SHA256SUMS.txt', state: 'uploaded', size: 1 }] });
+  const tag = manifest.releaseUrl.split('/').at(-1);
+  const normalized = desktopDownloadManifest({ tag_name: tag, html_url: manifest.releaseUrl, assets: [...manifest.assets.map(asset => ({ ...asset, state: 'uploaded', browser_download_url: asset.url })), { name: 'pulse-desktop-SHA256SUMS.txt', state: 'uploaded', size: 1 }] });
   if (JSON.stringify(normalized) !== JSON.stringify(manifest)) throw new Error('SITE_DOWNLOAD_MANIFEST_INVALID');
 }
 console.log('Product site: local assets, anchors, license and download manifest verified.');

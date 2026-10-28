@@ -5,7 +5,7 @@ import { createReadStream } from 'node:fs';
 import { createPrivateKey } from 'node:crypto';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { packComponent, signEnvelope } from './pack.mjs';
 import { UpdateManager } from '../../packages/server/dist/updates/manager.js';
@@ -30,12 +30,23 @@ const manager = new UpdateManager({ root, dataDir, backendVersion: baseVersion, 
 const shellVersion = JSON.parse(await readFile(new URL('../../packages/desktop/package.json', import.meta.url), 'utf8')).version;
 await manager.settings(false);
 await manager.registerShell(shellVersion, 120);
-let logs = '';
+let logs = '', report;
 const service = spawn(join(base, process.platform === 'win32' ? 'node.exe' : 'node'), [join(base, 'app/node_modules/@hunterzhu/pulse-cli/dist/bin.js'), 'h5', 'start', '--port', '0', '--data-dir', dataDir, '--mock-response', 'update-acceptance', '--no-jarvis'], { env: { ...process.env, PULSE_HOME: root, PULSE_DATA_DIR: dataDir, PULSE_CONFIG: join(root, 'config.json'), PULSE_MANAGED: '1', PULSE_RUNTIME_DIR: base }, stdio: ['ignore', 'pipe', 'pipe'] });
 // The CLI prints temporary pairing URLs to stdout. Never copy them into reports.
 service.stdout.resume(); service.stderr.on('data', chunk => { logs = (logs + chunk).slice(-20000); });
 const stopped = new Promise(resolve => service.once('exit', resolve));
 async function until(work, predicate, timeout = 120000) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { try { const value = await work(); if (predicate(value)) return value; } catch {} await new Promise(resolve => setTimeout(resolve, 200)); } throw new Error('BACKEND_UPDATE_ACCEPTANCE_TIMEOUT'); }
+async function fixtureRecord(name) { return readFile(join(dataDir, name), 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return undefined; throw error; }); }
+function validPid(pid) { assert.ok(Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid, 'Fixture PID must be valid'); }
+function terminate(pid) { try { process.kill(pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
+async function waitForExit(pid, label) {
+  const deadline = Date.now() + 25000;
+  for (;;) {
+    try { process.kill(pid, 0); } catch (error) { if (error.code === 'ESRCH') return; throw error; }
+    if (Date.now() >= deadline) throw new Error(`BACKEND_UPDATE_${label}_STILL_ALIVE`);
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+}
 try {
   const descriptor = await until(() => readFile(join(dataDir, 'service.json'), 'utf8').then(JSON.parse), item => item.managed && item.port > 0);
   const origin = `http://127.0.0.1:${descriptor.port}`;
@@ -76,7 +87,25 @@ try {
     results.push({ attempted: version, running: after.serverVersion, rolledBack: at === 1 });
     await rm(candidate, { recursive: true, force: true });
   }
-  const report = { ok: true, shellClosed: true, realBundledNodeAndServer: true, writerRestarted: true, samePort: true, deviceAuthorizationPreserved: true, conversationPreserved: true, results };
-  const artifacts = fileURLToPath(new URL('../../artifacts/update-acceptance/', import.meta.url)); await mkdir(artifacts, { recursive: true }); await writeFile(join(artifacts, 'backend.json'), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report));
+  report = { ok: true, shellClosed: true, realBundledNodeAndServer: true, writerRestarted: true, samePort: true, deviceAuthorizationPreserved: true, conversationPreserved: true, results };
 } catch (error) { process.stderr.write(logs); throw error; }
-finally { service.kill('SIGTERM'); const timer = setTimeout(() => service.kill('SIGKILL'), 25000); await stopped; clearTimeout(timer); feed.closeAllConnections(); await new Promise(resolve => feed.close(resolve)); await rm(temp, { recursive: true, force: true }); }
+finally {
+  // Windows termination does not gracefully stop a managed parent's children.
+  // Limit cleanup to the backend owned by this spawned supervisor and private root.
+  const current = await fixtureRecord('service.json'), writer = await fixtureRecord('.writer.lock');
+  if (current) {
+    validPid(current.pid);
+    assert.equal(resolve(current.dataDir), resolve(dataDir), 'Cleanup must use the fixture data root');
+    assert.ok(current.pid === service.pid || current.supervisorPid === service.pid, 'Cleanup backend must belong to the fixture supervisor');
+  }
+  if (writer) validPid(writer.pid);
+  service.kill('SIGTERM'); const timer = setTimeout(() => service.kill('SIGKILL'), 25000); await stopped; clearTimeout(timer);
+  if (current && current.pid !== service.pid) {
+    terminate(current.pid);
+    await waitForExit(current.pid, 'SERVICE');
+  }
+  if (writer) await waitForExit(writer.pid, 'WRITER');
+  feed.closeAllConnections(); await new Promise(resolve => feed.close(resolve));
+  await rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+}
+const artifacts = fileURLToPath(new URL('../../artifacts/update-acceptance/', import.meta.url)); await mkdir(artifacts, { recursive: true }); await writeFile(join(artifacts, 'backend.json'), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report));

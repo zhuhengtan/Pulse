@@ -2,12 +2,20 @@ name: Component release
 on:
   push:
     tags: ['shell-v*', 'backend-v*', 'frontend-v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing component tag to build and publish without moving it
+        required: true
+        type: string
+env:
+  COMPONENT_RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 permissions:
   contents: write
   actions: read
   id-token: write
 concurrency:
-  group: component-release-${{ github.ref }}
+  group: component-release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 jobs:
   verify:
@@ -15,20 +23,23 @@ jobs:
     outputs:
       component: ${{ steps.component.outputs.value }}
     steps:
+      - name: Validate component tag
+        run: node -e 'if(!/^(shell|backend|frontend)-v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(process.env.COMPONENT_RELEASE_TAG))throw Error("COMPONENT_TAG_REQUIRED")'
       - uses: actions/checkout@v4
+        with: { ref: 'refs/tags/${{ env.COMPONENT_RELEASE_TAG }}' }
       - uses: actions/setup-node@v4
         with: { node-version: 24 }
       - run: node scripts/updates/require-ci.mjs
         env: { GITHUB_TOKEN: '${{ github.token }}' }
       - id: component
         shell: bash
-        run: echo "value=${GITHUB_REF_NAME%%-v*}" >> "$GITHUB_OUTPUT"
+        run: echo "value=${COMPONENT_RELEASE_TAG%%-v*}" >> "$GITHUB_OUTPUT"
   shell:
     needs: verify
     if: needs.verify.outputs.component == 'shell'
     uses: ./.github/workflows/desktop.yml
     with:
-      ref: ${{ github.ref }}
+      ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
   build:
     needs: [verify, shell]
     if: always() && needs.verify.result == 'success' && (needs.shell.result == 'success' || needs.shell.result == 'skipped')
@@ -42,6 +53,7 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@v4
+        with: { ref: 'refs/tags/${{ env.COMPONENT_RELEASE_TAG }}' }
       - uses: pnpm/action-setup@v4
         with: { version: 12.4.2 }
       - uses: actions/setup-node@v4
@@ -78,17 +90,33 @@ jobs:
       - name: Package component
         shell: bash
         run: |
+          pack() { GITHUB_REF_NAME="$COMPONENT_RELEASE_TAG" node scripts/updates/pack.mjs "$@"; }
           if [ "$COMPONENT" = frontend ]; then
-            if [ "$RUNNER_OS" = Linux ]; then node scripts/updates/pack.mjs frontend; fi
+            if [ "$RUNNER_OS" = Linux ]; then pack frontend; fi
           elif [ "$COMPONENT" = backend ]; then
-            node scripts/updates/pack.mjs backend
+            pack backend
           elif [ "$RUNNER_OS" = macOS ]; then
-            node scripts/updates/pack.mjs shell artifacts/desktop/pulse-macos-arm64.dmg
+            pack shell artifacts/desktop/pulse-macos-arm64.dmg
           elif [ "$RUNNER_OS" = Windows ]; then
-            node scripts/updates/pack.mjs shell artifacts/desktop/pulse-windows-x64.exe
+            pack shell artifacts/desktop/pulse-windows-x64.exe
           else
-            node scripts/updates/pack.mjs shell artifacts/desktop/pulse-linux-x86_64.AppImage
+            pack shell artifacts/desktop/pulse-linux-x86_64.AppImage
           fi
+      - name: Load maintained backend acceptance harness for immutable-tag recovery
+        if: env.COMPONENT == 'backend' && github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-controller
+          sparse-checkout: scripts/updates/backend-smoke.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Use maintained acceptance harness without changing release packages
+        if: env.COMPONENT == 'backend' && github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          cp .release-controller/scripts/updates/backend-smoke.mjs scripts/updates/backend-smoke.mjs
+          git diff --exit-code -- packages
       - name: Verify real backend update and startup-failure rollback
         if: env.COMPONENT == 'backend'
         run: node scripts/updates/backend-smoke.mjs
@@ -116,12 +144,14 @@ jobs:
         with: { name: 'component-${{ matrix.os }}', path: artifacts/updates, if-no-files-found: error }
   publish:
     needs: [verify, build]
+    if: always() && needs.verify.result == 'success' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
       COMPONENT: ${{ needs.verify.outputs.component }}
     steps:
       - uses: actions/checkout@v4
+        with: { ref: 'refs/tags/${{ env.COMPONENT_RELEASE_TAG }}' }
       - uses: actions/download-artifact@v4
         with: { pattern: 'component-*', path: artifacts/updates, merge-multiple: true }
       - uses: actions/download-artifact@v4
@@ -149,13 +179,13 @@ jobs:
       - name: Publish complete component release
         shell: bash
         run: |
-          gh release create "$GITHUB_REF_NAME" artifacts/updates/* --verify-tag --draft --generate-notes --latest=false
+          gh release create "$COMPONENT_RELEASE_TAG" artifacts/updates/* --verify-tag --draft --generate-notes --latest=false
           if [ "$COMPONENT" = shell ]; then
             node scripts/release/verify-desktop-assets.mjs
-            gh release upload "$GITHUB_REF_NAME" artifacts/desktop/*.dmg artifacts/desktop/*.zip artifacts/desktop/*.exe artifacts/desktop/*.AppImage artifacts/desktop/*.deb artifacts/desktop/pulse-desktop-SHA256SUMS.txt
+            gh release upload "$COMPONENT_RELEASE_TAG" artifacts/desktop/*.dmg artifacts/desktop/*.zip artifacts/desktop/*.exe artifacts/desktop/*.AppImage artifacts/desktop/*.deb artifacts/desktop/pulse-desktop-SHA256SUMS.txt
           fi
           if [ "$COMPONENT" = shell ]; then
-            gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+            gh release edit "$COMPONENT_RELEASE_TAG" --draft=false --latest
           else
-            gh release edit "$GITHUB_REF_NAME" --draft=false --latest=false
+            gh release edit "$COMPONENT_RELEASE_TAG" --draft=false --latest=false
           fi
