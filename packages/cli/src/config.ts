@@ -92,6 +92,8 @@ export interface PulseCliConfig {
   autoCompactPercent?: number
   /** Explicit network destinations; workspace configuration cannot grant these. */
   networkHosts?: string[]
+  /** Host-owned search service; never accepted from workspace config. */
+  webSearch?: import('@hunterzhu/pulse-server').WebSearchConfig
   allowNetwork?: boolean
   jarvis?: PulseCliJarvisConfig
   frontModel?: {
@@ -265,16 +267,20 @@ export async function loadPulseConfig(cwd: string, explicitPath?: string, trustW
   const homePath = defaultPulseConfigPath()
   const envPath = expandHome(process.env.PULSE_CONFIG)
   const layers: Array<{ value: PulseCliConfig; trust: 'workspace' | 'user'; source: string }> = []
-  for (const [path, trust] of [
-    [workspacePath, trustWorkspace ? 'user' : 'workspace'],
-    [homePath, 'user'],
-    [envPath, 'user'],
-    [explicitPath, 'user'],
+  for (const [path, trust, workspaceLayer] of [
+    [workspacePath, trustWorkspace ? 'user' : 'workspace', true],
+    [homePath, 'user', false],
+    [envPath, 'user', false],
+    [explicitPath, 'user', false],
   ] as const) {
     if (!path) continue
     try {
       const parsed = asConfig(JSON.parse(await readFile(path, 'utf8')))
-      if (parsed) layers.push({ value: parsed, trust, source: path })
+      if (parsed) {
+        // Search endpoints and credentials are host-owned even when other workspace fields are trusted.
+        if (workspaceLayer) delete parsed.webSearch
+        layers.push({ value: parsed, trust, source: path })
+      }
     } catch { /* absent or invalid config is reported by doctor */ }
   }
   return { value: mergePulseConfigs(layers), ...(layers.at(-1) === undefined ? {} : { source: layers.at(-1)!.source }) }

@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { installProcessDiagnostics, createLocalHost, automationDoctor, requestAutomationPermissions, assertJarvisApiUrl, createBuiltinSkillCapabilityPack, createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
-import { modelSelectionId, normalizeModelConfig, resolveModelReference, resolveProviderApiKey } from '@hunterzhu/pulse-server'
+import { modelSelectionId, normalizeModelConfig, resolveModelReference, resolveProviderApiKey, resolveWebSearchOptions } from '@hunterzhu/pulse-server'
 import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
 import { runOneShot } from './commands/run.js'
@@ -228,6 +228,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const maxRuntimeMs = option(parsed.options, 'max-runtime-ms') ?? process.env.PULSE_MAX_RUNTIME_MS
   const autoCompactPercent = option(parsed.options, 'auto-compact-percent') ?? process.env.PULSE_AUTO_COMPACT_PERCENT
   const resolvedKeys = Object.fromEntries(await Promise.all(Object.entries(effectiveProviders).map(async ([id, source]) => [id, await resolveProviderApiKey(source, credentialConfigPath)] as const)))
+  const webSearch = await resolveWebSearchOptions(config.webSearch, credentialConfigPath)
   const apiKey = resolvedKeys[providerName]
   const parsePositiveInteger = (value: string | undefined): number | undefined => {
     if (value === undefined) return undefined
@@ -465,6 +466,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(configuredAutoCompactPercent === undefined ? {} : { autoCompactPercent: Math.min(90, configuredAutoCompactPercent) }),
     ...(allowNetwork === undefined ? {} : { allowNetwork }),
     ...(config.networkHosts === undefined ? {} : { networkHosts: config.networkHosts }),
+    ...(webSearch ? { webSearch } : {}),
     jarvis,
     ...(config.frontModel ? { frontModel: (() => {
       const selected = typeof config.frontModel?.model === 'string' ? resolveModelReference(catalog, config.frontModel.model) : undefined

@@ -1,3 +1,5 @@
+import { webSearchDraft } from '../web-search-config.js'
+import { resolveWebSearchOptions, searchWeb } from '../web-search.js'
 import { assistantReferenceSchema } from '../assistant-chat-context.js'
 import { recoveryDecision, type RunRecoveryAuthorization } from '../run-recovery-preflight.js'
 import { TaskNoticeInbox, type TaskNotice } from './notifications.js'
@@ -260,7 +262,8 @@ export class H5Server {
 
   private async validateConfigCandidate(config: Record<string, unknown>): Promise<{ text: string; options: LocalHostOptions }> {
     if (!this.configuration) throw new Error('CONFIGURATION_UNAVAILABLE')
-    const normalizedConfig = normalizeModelConfig(config)
+    const search = webSearchDraft(config.webSearch)
+    const normalizedConfig: Record<string, unknown> = normalizeModelConfig({ ...config, ...(search.config ? { webSearch: search.config } : {}) })
     for (const source of Object.values(normalizedConfig.providers ?? {}) as Array<Record<string, unknown>>) {
       if ('apiKey' in source) throw new Error('PROVIDER_INLINE_KEY_FORBIDDEN')
     }
@@ -1473,6 +1476,27 @@ export class H5Server {
       return
     }
 
+    if (pathname === '/api/config/web-search/test' && method === 'POST') {
+      if (!localAdmin || !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: localAdmin ? 'SAME_ORIGIN_REQUIRED' : 'LOCAL_ADMIN_REQUIRED' })); return }
+      const controller = new AbortController()
+      const cancel = () => { if (!res.writableEnded) controller.abort() }
+      res.once('close', cancel)
+      try {
+        const body = await this.parseJsonBody(req)
+        if (!body.config || typeof body.config !== 'object' || Array.isArray(body.config)) throw new Error('WEB_SEARCH_CONFIG_INVALID')
+        const draft = body.config as Record<string, unknown>
+        if (draft.allowNetwork !== true) throw new Error('WEB_SEARCH_NETWORK_DISABLED')
+        const { config, token } = webSearchDraft(draft.webSearch)
+        const options = await resolveWebSearchOptions(config, this.configuration?.path ?? join(this.dataDir, 'config.json'))
+        const result = await searchWeb(typeof body.query === 'string' ? body.query : 'Pulse', 5, controller.signal, options ? { ...options, ...(token !== undefined ? { apiKey: token } : {}) } : undefined)
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
+      } catch (error) {
+        const message = error instanceof Error && /^(WEB_SEARCH_|SEARCH_PROVIDER_|PROVIDER_CREDENTIAL_)/.test(error.message) ? error.message : 'WEB_SEARCH_TEST_FAILED'
+        res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ error: message }))
+      } finally { res.off('close', cancel) }
+      return
+    }
+
     if (pathname === '/api/config/validate' && method === 'POST') {
       if (!localAdmin || !requireSameOrigin()) { res.writeHead(localAdmin ? 403 : 403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: localAdmin ? 'SAME_ORIGIN_REQUIRED' : 'LOCAL_ADMIN_REQUIRED' })); return }
       const body = await this.parseJsonBody(req)
@@ -1500,15 +1524,30 @@ export class H5Server {
           const raw = await this.configText()
           if (configVersion(raw) !== body.version) throw new Error('CONFIG_VERSION_CONFLICT')
           const candidate = preserveConfigSecrets(this.parseConfig(raw), body.config as Record<string, unknown>)
-          const prepared = await this.validateConfigCandidate(candidate)
-          if (configVersion(await this.configText()) !== body.version) throw new Error('CONFIG_VERSION_CONFLICT')
-          await this.replaceConfig(prepared.text)
-          // Unchanged config fields must not erase a launch-time safety override.
-          const runtimeOptions = candidate.approvalMode === this.parseConfig(raw).approvalMode
-            ? { ...prepared.options, approvalMode: this.host.getAutomationOptions().approvalMode }
-            : prepared.options
-          const applied = this.host.applyLiveOptions(runtimeOptions)
-          return { path: this.configuration!.path, version: configVersion(prepared.text), applied: applied.applied, restartRequired: applied.restartRequired, config: maskConfigSecrets(JSON.parse(prepared.text) as Record<string, unknown>) }
+          const search = webSearchDraft(candidate.webSearch)
+          // Validate before writing a credential. Transient tokens never enter a temporary config or backup.
+          let prepared = await this.validateConfigCandidate(candidate)
+          let createdCredential: string | undefined
+          let persisted = false
+          const credentials = new ProviderCredentialStore(this.configuration!.path)
+          try {
+            if (search.config) {
+              if (search.token) {
+                createdCredential = await credentials.add(search.token)
+                candidate.webSearch = { ...search.config, credentialRef: createdCredential }
+                prepared = await this.validateConfigCandidate(candidate)
+              }
+            }
+            if (configVersion(await this.configText()) !== body.version) throw new Error('CONFIG_VERSION_CONFLICT')
+            await this.replaceConfig(prepared.text)
+            persisted = true
+            // Unchanged config fields must not erase a launch-time safety override.
+            const runtimeOptions = candidate.approvalMode === this.parseConfig(raw).approvalMode
+              ? { ...prepared.options, approvalMode: this.host.getAutomationOptions().approvalMode }
+              : prepared.options
+            const applied = this.host.applyLiveOptions(runtimeOptions)
+            return { path: this.configuration!.path, version: configVersion(prepared.text), applied: applied.applied, restartRequired: applied.restartRequired, config: maskConfigSecrets(JSON.parse(prepared.text) as Record<string, unknown>) }
+          } finally { if (createdCredential && !persisted) await credentials.remove(createdCredential) }
         })
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ ok: true, ...result }))
       } catch (error) {

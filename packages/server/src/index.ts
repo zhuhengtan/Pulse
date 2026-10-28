@@ -49,13 +49,16 @@ import { ExactPatchEditor, checkNewJavaScript, editingError, PLAN_BYTES, PlanWri
 import { ModelAttemptBudget } from './model-budget.js'
 import { approvalScriptContext, isNecessaryVerification } from './verification-policy.js'
 import { acceptanceFailure, assessAcceptanceValue, validateAcceptanceChecks, type AcceptanceCheck, type AcceptanceResult } from './task-controller/acceptance.js'
-import { fetchText, readPublicPage, parseSearchResults } from './web.js'
+import { fetchText } from './web.js'
+import { createWebSearchTool, type WebSearchOptions } from './web-search.js'
+export { parseWebSearchConfig, resolveWebSearchOptions } from './web-search.js'
+export type { WebSearchConfig, WebSearchOptions } from './web-search.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { appendFile, copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
-import { conversationDirectory, publicUrl, safeShellEnv, searchWorkspace, within } from './security.js'
+import { conversationDirectory, safeShellEnv, searchWorkspace, within } from './security.js'
 import { summarizeSearchResult } from './search-summary.js'
 import {
   FileRuntimePersistenceBackend,
@@ -169,6 +172,7 @@ export interface LocalHostOptions {
   approvalMode?: ApprovalMode
   allowNetwork?: boolean
   networkHosts?: string[]
+  webSearch?: WebSearchOptions
   maxRuntimeMs?: number
   /** Maximum model/tool turns allowed for one ReAct run. */
   maxTurns?: number
@@ -432,7 +436,7 @@ const json = (value: unknown): JsonValue => {
   return String(value)
 }
 
-function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: ApprovalMode, allowNetwork = false, isApprovedToolCall: (toolCallId: string) => boolean = () => false, networkHosts?: string[], draftOwner = 'legacy', runData?: string, checkVersion: 2 | 3 | 4 = 2, copyReceipts = false, candidateScripts = false): void {
+function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: ApprovalMode, allowNetwork = false, isApprovedToolCall: (toolCallId: string) => boolean = () => false, networkHosts?: string[], draftOwner = 'legacy', runData?: string, checkVersion: 2 | 3 | 4 = 2, copyReceipts = false, candidateScripts = false, webSearch?: WebSearchOptions): void {
   const fsTool = new FilesystemTool(root)
   registry.register(defineTool({
     name: 'fs.list', description: 'List files in the workspace. ENOENT means the path does not exist; an empty entry list means the directory exists and has no entries.', tags: ['files', 'read'], input: z.object({ path: z.string().default('.') }), output: z.object({ path: z.string(), entries: z.array(z.string()) }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ path }) => { const safePath = path ?? '.'; return { path: safePath, entries: await fsTool.list(safePath) } }, summarize: (output) => ({ path: output.path ?? '.', entries: output.entries.slice(0, 100) }),
@@ -501,9 +505,7 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
     registry.register(defineTool({
       name: 'web.fetch', description: 'Read a public HTTP(S) page in bounded text windows. If nextOffset is not null, call again with that offset to read the remainder. Never repeat the same offset for more text.', tags: ['web', 'research'], input: z.object({ url: z.string().url().max(2000), offset: z.number().int().min(0).max(1_000_000).default(0) }), output: z.object({ url: z.string(), title: z.string(), text: z.string(), offset: z.number(), totalChars: z.number(), nextOffset: z.number().nullable(), truncated: z.boolean(), sourceTruncated: z.boolean(), fetchedAt: z.string() }), sideEffectPolicy: 'read', retrySafety: 'read_only', permissions: { networkHosts: networkHosts ?? ['*'] }, execute: async ({ url, offset }, context) => fetchText(url, context.signal, networkHosts, offset), summarize: (output) => output,
     }))
-    registry.register(defineTool({
-      name: 'web.search', description: 'Search public web pages using the configured DuckDuckGo HTML endpoint.', tags: ['web', 'research'], input: z.object({ query: z.string().min(1).max(500), limit: z.number().int().positive().max(10).default(5) }), output: z.object({ query: z.string(), results: z.array(z.object({ title: z.string(), url: z.string(), snippet: z.string() })), fetchedAt: z.string() }), sideEffectPolicy: 'read', retrySafety: 'read_only', permissions: { networkHosts: ['html.duckduckgo.com'] }, execute: async ({ query, limit }, context) => { const endpoint = publicUrl(process.env.PULSE_SEARCH_URL ?? 'https://html.duckduckgo.com/html/'); endpoint.searchParams.set('q', query); const page = await readPublicPage(endpoint.toString(), context.signal, ['html.duckduckgo.com']); return { query, results: parseSearchResults(page.source, limit ?? 5, networkHosts), fetchedAt: new Date().toISOString() } }, summarize: (output) => ({ query: output.query, results: output.results, fetchedAt: output.fetchedAt }),
-    }))
+    registry.register(createWebSearchTool(webSearch))
   }
 }
 
@@ -1637,6 +1639,7 @@ function snapshotHostOptions(source: LocalHostOptions): LocalHostOptions {
     ...(source.skillConfigPath ? { skillConfigPath: source.skillConfigPath } : {}),
     ...(source.capabilityConfig ? { capabilityConfig: structuredClone(source.capabilityConfig) } : {}),
     ...(source.networkHosts ? { networkHosts: [...source.networkHosts] } : {}),
+    ...(source.webSearch ? { webSearch: { ...source.webSearch } } : {}),
     ...(source.assistantModel ? { assistantModel: source.assistantModel } : {}),
     ...(source.frontModel ? { frontModel: { ...source.frontModel } } : {}),
     ...(source.approvalReview ? { approvalReview: { ...source.approvalReview } } : {}),
@@ -2504,12 +2507,12 @@ export class LocalHost {
     await this.seedPlanGate(conversationId, runId, !assistantChat && (isPreImplementationConfirmationSkill(skillInput) || requiresExplicitPlanConfirmation(skillInput)), options.approvalMode === 'read-only' ? undefined : cwd)
     const registry = new ToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) })
     if (assistantChat) {
-      registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId), !assistantChat && options.taskController !== false ? 4 : 3, !assistantChat && options.taskController !== false, !assistantChat && options.taskController !== false)
+      registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId), !assistantChat && options.taskController !== false ? 4 : 3, !assistantChat && options.taskController !== false, !assistantChat && options.taskController !== false, options.webSearch)
       const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
       this.registerAssistantJarvisTools(registry, getSession, cwd, userIntent)
       this.registerAssistantWorkTools(registry)
     } else {
-      registerBuiltIns(registry, cwd, options.approvalMode ?? 'ask', options.allowNetwork === true, (toolCallId) => this.approvedToolCalls.get(runId)?.has(toolCallId) === true, options.networkHosts, runId, this.runDir(conversationId, runId), !assistantChat && options.taskController !== false ? 4 : 3, !assistantChat && options.taskController !== false, !assistantChat && options.taskController !== false)
+      registerBuiltIns(registry, cwd, options.approvalMode ?? 'ask', options.allowNetwork === true, (toolCallId) => this.approvedToolCalls.get(runId)?.has(toolCallId) === true, options.networkHosts, runId, this.runDir(conversationId, runId), !assistantChat && options.taskController !== false ? 4 : 3, !assistantChat && options.taskController !== false, !assistantChat && options.taskController !== false, options.webSearch)
       const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
       this.registerAssistantJarvisTools(registry, getSession, cwd, userIntent)
     }
@@ -2898,12 +2901,12 @@ export class LocalHost {
     await this.seedPlanGate(conversationId, runId, needsPreImplementationConfirmation, options.approvalMode === 'read-only' ? undefined : cwd)
     const registry = new ToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) })
     if (assistantChat) {
-      registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(String(savedInput.controllerVersion)) ? savedInput.controllerVersion === '55' ? 4 : 3 : 2, (savedInput.controllerVersion === '49' || savedInput.controllerVersion === '50' || savedInput.controllerVersion === '51' || savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55')), savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55'))
+      registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(String(savedInput.controllerVersion)) ? savedInput.controllerVersion === '55' ? 4 : 3 : 2, (savedInput.controllerVersion === '49' || savedInput.controllerVersion === '50' || savedInput.controllerVersion === '51' || savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55')), savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55'), options.webSearch)
       const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
       this.registerAssistantJarvisTools(registry, getSession, cwd, userIntent)
       this.registerAssistantWorkTools(registry)
     } else {
-      registerBuiltIns(registry, cwd, options.approvalMode ?? 'ask', options.allowNetwork === true, (toolCallId) => this.approvedToolCalls.get(runId)?.has(toolCallId) === true, options.networkHosts, runId, this.runDir(conversationId, runId), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(String(savedInput.controllerVersion)) ? savedInput.controllerVersion === '55' ? 4 : 3 : 2, (savedInput.controllerVersion === '49' || savedInput.controllerVersion === '50' || savedInput.controllerVersion === '51' || savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55')), savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55'))
+      registerBuiltIns(registry, cwd, options.approvalMode ?? 'ask', options.allowNetwork === true, (toolCallId) => this.approvedToolCalls.get(runId)?.has(toolCallId) === true, options.networkHosts, runId, this.runDir(conversationId, runId), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(String(savedInput.controllerVersion)) ? savedInput.controllerVersion === '55' ? 4 : 3 : 2, (savedInput.controllerVersion === '49' || savedInput.controllerVersion === '50' || savedInput.controllerVersion === '51' || savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55')), savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55'), options.webSearch)
       if (this.jarvisClient) {
         const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
         this.registerAssistantJarvisTools(registry, getSession, cwd, userIntent)
@@ -4168,7 +4171,7 @@ export class LocalHost {
     const errors: string[] = []
     try { await this.init() } catch (error) { errors.push(error instanceof Error ? error.message : String(error)) }
     try { errors.push(...(await checkShellSandbox()).errors.map((message) => `SHELL_SANDBOX: ${message}`)) } catch { errors.push('SHELL_SANDBOX: dependency probe failed') }
-    const registry = new ToolRegistry({ allowNetwork: this.options.allowNetwork === true }); registerBuiltIns(registry, this.root, this.options.approvalMode ?? 'ask', this.options.allowNetwork === true)
+    const registry = new ToolRegistry({ allowNetwork: this.options.allowNetwork === true }); registerBuiltIns(registry, this.root, this.options.approvalMode ?? 'ask', this.options.allowNetwork === true, undefined, this.options.networkHosts, undefined, undefined, undefined, undefined, undefined, this.options.webSearch)
     let live: { ok: boolean; message: string } | undefined
     if (options.live) {
       const provider = providerFromOptions(this.options)

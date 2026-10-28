@@ -107,6 +107,28 @@ Provider and model fields:
 
 Create scheduled tasks with `pulse schedule add --every 1h --name "Project check" "task description"`; manage them with `list`, `pause <id>`, `resume <id>`, and `remove`. `pulse schedule daemon` polls continuously; `run-once` runs only currently due tasks. Scheduled tasks permit only `read-only` or explicitly configured `auto` approval, and records are saved in `scheduled-tasks.json` under the data directory. This is a foreground Worker; configuring the operating system to start it on login is a separate deployment task.
 
+## Web search
+
+Under **Settings → Network**, enable network access and select DuckDuckGo, SearXNG, or a custom JSON service. `webSearch` is host-owned configuration; workspace files cannot override it. Localhost, LAN and public service URLs are supported. Testing uses the draft without saving; saved changes apply to subsequent runs, while active runs keep their captured configuration. Failures never switch providers automatically.
+
+```json
+{
+  "allowNetwork": true,
+  "networkHosts": ["docs.searxng.org"],
+  "webSearch": {
+    "provider": "searxng",
+    "baseURL": "http://127.0.0.1:8888",
+    "timeoutMs": 12000
+  }
+}
+```
+
+Providers are `duckduckgo`, `searxng`, and `custom`. SearXNG accepts an instance URL or `/search` endpoint and requires `json` in `search.formats`; it still needs upstream Internet access. Custom services accept POST JSON `{"query":"keywords","limit":5}` and return `{"results":[{"title":"Title","url":"https://example.com/","snippet":"Summary"}]}`. An empty array means no results.
+
+Optional Bearer Tokens entered in settings are transient draft values. Saving writes them to the existing separate credential store, with only a `credentialRef` in config and backups. Manual configuration may use `apiKeyEnv` instead. Do not put tokens in config files or URLs. Timeout defaults to 12000 ms (allowed: 100–120000 ms). The model-facing tool remains `web.search({query, limit})`, with 5 results by default and a maximum of 10.
+
+Configured search endpoints receive an explicit service grant and cannot redirect. They do not relax private-address or host restrictions for ordinary `web.fetch`. Public search-result links are checked against the page host policy when fetched. Removing `webSearch` restores the legacy DuckDuckGo and `PULSE_SEARCH_URL` behavior; explicit configuration takes precedence over that variable.
+
 ## System prompts and automatic rule discovery
 
 Pulse uses a modular system-prompt foundation (informed by Claude Code, OpenAI Codex CLI, and ZCode). It combines engineering investigation principles, evidence-based verification practices, concise engineering delivery conventions, custom prompts, project rules, user rules, and adaptive language instructions.

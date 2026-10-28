@@ -113,6 +113,28 @@ Provider 字段说明：
 
 定时任务通过 `pulse schedule add --every 1h --name "项目巡检" "任务内容"` 创建，`list`、`pause <id>`、`resume <id>`、`remove <id>` 管理。`pulse schedule daemon` 常驻轮询，`run-once` 只运行已到期任务。计划任务只允许 `read-only` 或明确配置的 `auto` 审批模式；执行记录保存在数据目录的 `scheduled-tasks.json` 中。它是前台 worker，操作系统登录启动服务尚需由部署环境单独配置。
 
+## 网页搜索
+
+在“设置 → 网络”开启“允许网络访问”，再选择 DuckDuckGo、SearXNG 或自定义 JSON 服务。可填写本机、局域网或公网服务地址，设置可选 Bearer Token 和超时时间。“测试搜索”使用当前草稿，不保存或切换生效配置；保存后用于后续运行，进行中的运行继续使用原配置。失败不会自动切换搜索来源。
+
+```json
+{
+  "allowNetwork": true,
+  "networkHosts": ["docs.searxng.org"],
+  "webSearch": {
+    "provider": "searxng",
+    "baseURL": "http://127.0.0.1:8888",
+    "timeoutMs": 12000
+  }
+}
+```
+
+`webSearch` 仅接受用户级配置。`provider` 为 `duckduckgo`、`searxng` 或 `custom`。SearXNG 填实例地址（也可直接填 `/search` 地址），需要在其 `settings.yml` 的 `search.formats` 中启用 `json`；它仍需联网连接上游搜索引擎。`custom` 填完整 POST 接口地址，接收 `{"query":"关键词","limit":5}`，返回 `{"results":[{"title":"标题","url":"https://example.com/","snippet":"摘要"}]}`；无结果返回空数组。
+
+界面输入的令牌只作为草稿发送，保存时转入配置文件同目录的独立凭据存储，配置与备份仅保留 `credentialRef`。手工配置可使用 `apiKeyEnv` 指定环境变量；不要在配置文件或 URL 中填写令牌。超时默认 12000 毫秒，可设为 100–120000 毫秒。模型继续使用 `web.search({query, limit})`，默认 5 条，最多 10 条。
+
+配置的搜索地址仅授权该搜索服务，禁止重定向；不会放宽普通 `web.fetch` 的内网限制或 `networkHosts`。搜索结果可以显示公网链接，读取该网页时再检查主机权限。删除 `webSearch` 后恢复原 DuckDuckGo 与 `PULSE_SEARCH_URL` 行为；显式 `webSearch` 优先于环境变量。
+
 ## 系统提示词与规则自动发现
 
 Pulse 采用模块化系统提示词基座（参考 Claude Code、OpenAI Codex CLI 与 ZCode），由工程调查铁律、基于证据的闭环验证铁律、零废话工程交付规范、自定义提示词、项目规则、用户规则与自适应语言指令组合而成。
