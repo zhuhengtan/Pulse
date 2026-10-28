@@ -174,7 +174,7 @@ jobs:
           npm install --global npm@11.15.0
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm native:prepare
-          chmod +x packages/server/native/*/pulse-desktop-helper packages/server/native/darwin-*/Pulse\ Desktop\ Helper.app/Contents/MacOS/PulseDesktopHelper
+          chmod +x packages/server/native/*/pulse-desktop-helper packages/server/native/darwin-*/Pulse.app/Contents/MacOS/PulseDesktopHelper
           pnpm release:npm-publish
       - name: Publish complete component release
         shell: bash
