@@ -8,10 +8,12 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   private readonly baseURL: string
   private readonly probe = new DynamicCapabilityProbe()
   constructor(readonly id: string, private readonly config: ProviderPresetConfig) {
-    let baseURL = config.baseURL ?? (config.provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : 'https://api.openai.com/v1')
-    if (config.provider === 'ollama') {
+    if (config.provider === 'ollama-remote' && !config.baseURL) throw new Error('PROVIDER_ENDPOINT_REQUIRED')
+    let baseURL = config.baseURL ?? (config.provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : config.provider === 'ollama-cloud' ? 'https://ollama.com/v1' : 'https://api.openai.com/v1')
+    if (['ollama', 'ollama-cloud', 'ollama-remote'].includes(config.provider)) {
       const url = new URL(baseURL)
-      if (url.pathname === '/' && !url.search && !url.hash) baseURL = baseURL.replace(/\/$/, '') + '/v1'
+      url.pathname = url.pathname.replace(/\/+$/, '').replace(/\/(?:api|v1)$/, '') + '/v1'
+      baseURL = url.href.replace(/\/$/, '')
     }
     this.baseURL = baseURL
   }
@@ -27,7 +29,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       stream: streaming,
     })
 
-    const capability = resolveModelCapability(canonical.model, this.config.provider)
+    const capability = resolveModelCapability(canonical.model, this.config.provider, this.config.capabilityProfile ?? (this.config.remote && this.config.provider === 'ollama' ? { structuredOutput: 'unsupported' } : undefined))
     const { request: adapted } = adaptCanonicalRequest(canonical, capability, this.probe, toolNameAliases)
     const sentReasoning = Boolean(adapted.reasoning?.effort)
     const body = toOpenAIPayload(adapted, capability, this.config.provider)
@@ -50,10 +52,19 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       const toolCalls = new Map<number, StreamToolCall>()
       let finishReason: string | undefined
       let usage: any
+      const reasoningDetails = new Map<string, Record<string, unknown>>()
       for (const event of events) {
         if (event.data === '[DONE]' || !event.data || typeof event.data !== 'object') continue
         const choice = event.data.choices?.[0]
         const delta = choice?.delta
+        if (Array.isArray(delta?.reasoning_details)) for (const part of delta.reasoning_details) {
+          if (!part || typeof part !== 'object' || Array.isArray(part)) continue
+          const key = typeof part.index === 'number' ? `index:${part.index}` : `${part.type}:${part.id ?? ''}`
+          const prior = reasoningDetails.get(key) ?? {}
+          const next = { ...prior, ...part }
+          for (const field of ['text', 'data', 'signature']) if (typeof prior[field] === 'string' && typeof part[field] === 'string') next[field] = prior[field] + part[field]
+          reasoningDetails.set(key, next)
+        }
         if (typeof delta?.content === 'string') { content.push(delta.content) }
         if (typeof delta?.reasoning_content === 'string') reasoningContent.push(delta.reasoning_content)
         if (typeof delta?.refusal === 'string') { refusals.push(delta.refusal) }
@@ -62,7 +73,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         if (event.data.usage !== undefined) usage = event.data.usage
       }
       if (finishReason === undefined) throw providerResponseError('PROVIDER_STREAM_INCOMPLETE')
-      return normalizeOpenAIResponse({ choices: [{ message: { content: content.join('') || null, ...(reasoningContent.length ? { reasoning_content: reasoningContent.join('') } : {}), ...(refusals.length ? { refusal: refusals.join('') } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => ({ id: call.id, function: { name: call.name, arguments: call.arguments } })) } : {}) }, finish_reason: finishReason }], ...(usage === undefined ? {} : { usage }) }, toolNameAliases, this.config.provider)
+      return normalizeOpenAIResponse({ choices: [{ message: { content: content.join('') || null, ...(reasoningContent.length ? { reasoning_content: reasoningContent.join('') } : {}), ...(reasoningDetails.size ? { reasoning_details: [...reasoningDetails.values()] } : {}), ...(refusals.length ? { refusal: refusals.join('') } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => ({ id: call.id, ...(call.extra_content ? { extra_content: call.extra_content } : {}), function: { name: call.name, arguments: call.arguments } })) } : {}) }, finish_reason: finishReason }], ...(usage === undefined ? {} : { usage }) }, toolNameAliases, this.config.provider)
     } catch (cause) {
       if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
       if (sentReasoning && this.probe.reasoningParameterRejected(cause)) {
@@ -82,7 +93,7 @@ export function toOpenAIMessages(request: LLMRequestProjection, provider = 'open
   return Array.isArray(payload.messages) ? payload.messages as Array<Record<string, unknown>> : []
 }
 
-interface StreamToolCall { id?: string; name: string; arguments: string }
+interface StreamToolCall { id?: string; name: string; arguments: string; extra_content?: unknown }
 
 function nextToolIndex(toolCalls: Map<number, StreamToolCall>): number {
   let next = 0
@@ -101,7 +112,7 @@ function jsonTextComplete(value: string): boolean {
  * call and only distinguish it by `id`. Concatenating those argument
  * fragments produces invalid JSON (`{"a":1}{"b":2}`).
  */
-function accumulateStreamToolCall(toolCalls: Map<number, StreamToolCall>, call: { index?: unknown; id?: unknown; function?: { name?: unknown; arguments?: unknown } }): void {
+function accumulateStreamToolCall(toolCalls: Map<number, StreamToolCall>, call: { index?: unknown; id?: unknown; extra_content?: unknown; function?: { name?: unknown; arguments?: unknown } }): void {
   const id = typeof call.id === 'string' && call.id.length > 0 ? call.id : undefined
   const name = typeof call.function?.name === 'string' ? call.function.name : ''
   const args = typeof call.function?.arguments === 'string' ? call.function.arguments : ''
@@ -122,6 +133,7 @@ function accumulateStreamToolCall(toolCalls: Map<number, StreamToolCall>, call: 
   }
   const current = toolCalls.get(index) ?? { name: '', arguments: '' }
   if (id !== undefined) current.id = id
+  if (call.extra_content !== undefined) current.extra_content = call.extra_content
   if (name.length > 0) current.name += name
   if (args.length > 0) current.arguments += args
   toolCalls.set(index, current)

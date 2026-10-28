@@ -15,6 +15,11 @@ import { createServer, IncomingMessage, type Server, ServerResponse } from 'node
 import { createReadStream } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { normalizeModelConfig, parseModelSelectionId } from '../model-config.js'
+import { providerPresets } from '../providers/catalog.js'
+import { ProviderCredentialStore } from '../providers/credentials.js'
+import { ProviderOnboarding, mergeDiscoveredModels, normalizeDiscoveredModel, providerErrorCode } from '../providers/onboarding.js'
+import type { ModelDefinition } from '../model-config.js'
+import type { ProviderConnectionInput } from '../providers/types.js'
 import { execFile } from 'node:child_process'
 import { access, chmod, copyFile, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { extname, basename, dirname, join, relative, resolve, sep } from 'node:path'
@@ -94,6 +99,9 @@ async function ensurePtyHelperExecutable(): Promise<void> {
 function configVersion(raw: string): string { return createHash('sha256').update(raw).digest('hex') }
 function maskConfigSecrets(config: Record<string, unknown>): Record<string, unknown> {
   const copy = structuredClone(config)
+  if (copy.providers && typeof copy.providers === 'object') for (const source of Object.values(copy.providers)) {
+    if (source && typeof source === 'object' && 'apiKey' in source) (source as Record<string, unknown>).apiKey = KEEP_SECRET
+  }
   const jarvis = copy.jarvis && typeof copy.jarvis === 'object' && !Array.isArray(copy.jarvis) ? copy.jarvis as Record<string, unknown> : undefined
   if (jarvis && typeof jarvis.token === 'string' && jarvis.token) jarvis.token = KEEP_SECRET
   const capabilities = copy.capabilities && typeof copy.capabilities === 'object' && !Array.isArray(copy.capabilities) ? copy.capabilities as Record<string, unknown> : undefined
@@ -152,6 +160,7 @@ export class H5Server {
   private readonly workspaces: H5WorkspaceManager
   private readonly assistantInbox: AssistantConversationStore
   private readonly configuration: H5ServerOptions['configuration']
+  private providerOnboarding: ProviderOnboarding | undefined
   private readonly workWorker: H5ServerOptions['workWorker']
   private readonly inhibitor = new SleepInhibitor()
   private server: Server | undefined = undefined
@@ -252,6 +261,9 @@ export class H5Server {
   private async validateConfigCandidate(config: Record<string, unknown>): Promise<{ text: string; options: LocalHostOptions }> {
     if (!this.configuration) throw new Error('CONFIGURATION_UNAVAILABLE')
     const normalizedConfig = normalizeModelConfig(config)
+    for (const source of Object.values(normalizedConfig.providers ?? {}) as Array<Record<string, unknown>>) {
+      if ('apiKey' in source) throw new Error('PROVIDER_INLINE_KEY_FORBIDDEN')
+    }
     const text = `${JSON.stringify(normalizedConfig, null, 2)}\n`
     const temporary = `${this.configuration.path}.${randomUUID()}.validate.tmp`
     await mkdir(dirname(this.configuration.path), { recursive: true })
@@ -277,7 +289,8 @@ export class H5Server {
         await chmod(backup, 0o600)
       }
       await rename(temporary, path)
-      await chmod(path, 0o600)
+      // The temporary file already has 0600 permissions. No fallible operation
+      // after this commit may make callers roll back its referenced credentials.
     } finally { await rm(temporary, { force: true }).catch(() => undefined) }
   }
 
@@ -1369,6 +1382,73 @@ export class H5Server {
         res.end(JSON.stringify({ ok }))
         return
       }
+    }
+
+    if (pathname === '/api/provider-presets' && method === 'GET') {
+      if (!localAdmin) { res.writeHead(403).end(); return }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ presets: providerPresets }))
+      return
+    }
+    if (['/api/providers/discover', '/api/providers/probe', '/api/providers/connect'].includes(pathname) && method === 'POST') {
+      if (!localAdmin || !requireSameOrigin()) { res.writeHead(403).end(); return }
+      if (!this.configuration) { res.writeHead(501).end(); return }
+      const onboarding = this.providerOnboarding ??= new ProviderOnboarding(this.configuration.path)
+      const body = await this.parseJsonBody(req)
+      const input = body as unknown as ProviderConnectionInput
+      try {
+        const config = normalizeModelConfig(this.parseConfig(await this.configText()))
+        if (pathname.endsWith('/discover')) {
+          const result = await onboarding.discover(input, config)
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
+        } else if (pathname.endsWith('/probe')) {
+          const result = await onboarding.probe(input, config)
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
+        } else {
+          const result = await this.withConfigWriteLock(async () => {
+            const raw = await this.configText()
+            if (typeof body.version !== 'string' || configVersion(raw) !== body.version) throw new Error('CONFIG_VERSION_CONFLICT')
+            const current: Record<string, any> = normalizeModelConfig(this.parseConfig(raw))
+            const connection = await onboarding.connection(input, current)
+            if (!Array.isArray(body.models) || body.models.length === 0 || body.models.length > 10000) throw new Error('PROVIDER_MODELS_REQUIRED')
+            const models = body.models.map(normalizeDiscoveredModel)
+            if (models.some(item => !item || ['__proto__', 'prototype', 'constructor'].includes(item.modelCode))) throw new Error('PROVIDER_MODEL_INVALID')
+            const providerId = input.providerId ?? `${input.presetId}-${randomUUID().slice(0, 8)}`
+            const previous = current.providers?.[providerId]
+            const provider = { ...previous, ...connection.provider, models: mergeDiscoveredModels(previous?.models ?? {}, models as NonNullable<typeof models[number]>[], input.modelCode ? onboarding.verification(connection.provider, connection.apiKey, input.modelCode) : undefined) }
+            if (body.setDefault === true) {
+              const selected = Object.entries(provider.models as Record<string, ModelDefinition>).find(([, value]) => value.modelCode === input.modelCode)
+              if (!selected || selected[1].tools === 'unsupported') throw new Error('PROVIDER_AGENT_MODEL_REQUIRED')
+              current.activeModel = `${providerId}/${selected[0]}`
+            }
+            const credentials = new ProviderCredentialStore(this.configuration!.path)
+            let newRef: string | undefined
+            let installed = false
+            try {
+              if (input.apiKey !== undefined && connection.apiKey) { newRef = await credentials.add(connection.apiKey); provider.credentialRef = newRef; delete provider.apiKeyEnv }
+              if (newRef || previous && (previous.baseURL !== provider.baseURL || previous.provider !== provider.provider)) for (const model of Object.values(provider.models as Record<string, ModelDefinition>)) delete model.verification
+              if (input.modelCode) {
+                const verified = onboarding.verification(connection.provider, connection.apiKey, input.modelCode)
+                const selected = Object.values(provider.models as Record<string, ModelDefinition>).find(model => model.modelCode === input.modelCode)
+                if (verified && selected) selected.verification = { ...verified, checkedAt: new Date().toISOString() }
+              }
+              current.providers = { ...current.providers, [providerId]: provider }
+              const prepared = await this.validateConfigCandidate(current)
+              if (configVersion(await this.configText()) !== body.version) throw new Error('CONFIG_VERSION_CONFLICT')
+              await this.replaceConfig(prepared.text)
+              installed = true
+              // Keep launch-time approval overrides, just like ordinary configuration saves.
+              const runtimeOptions = current.approvalMode === this.parseConfig(raw).approvalMode ? { ...prepared.options, approvalMode: this.host.getAutomationOptions().approvalMode } : prepared.options
+              const applied = this.host.applyLiveOptions(runtimeOptions)
+              return { ok: true, providerId, path: this.configuration!.path, version: configVersion(prepared.text), config: maskConfigSecrets(JSON.parse(prepared.text)), applied: applied.applied, restartRequired: applied.restartRequired }
+            } finally { if (newRef && !installed) await credentials.remove(newRef) }
+          })
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
+        }
+      } catch (error) {
+        const code = providerErrorCode(error)
+        res.writeHead(code === 'CONFIG_VERSION_CONFLICT' ? 409 : 400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ error: code }))
+      }
+      return
     }
 
     if (pathname === '/api/config' && method === 'GET') {

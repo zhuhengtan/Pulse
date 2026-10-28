@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { installProcessDiagnostics, createLocalHost, automationDoctor, requestAutomationPermissions, assertJarvisApiUrl, createBuiltinSkillCapabilityPack, createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
-import { modelSelectionId, normalizeModelConfig, resolveModelReference } from '@hunterzhu/pulse-server'
+import { modelSelectionId, normalizeModelConfig, resolveModelReference, resolveProviderApiKey } from '@hunterzhu/pulse-server'
 import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
 import { runOneShot } from './commands/run.js'
@@ -177,9 +177,9 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   if (explicitConfig === undefined && process.env.PULSE_CONFIG === undefined) {
     await ensurePulseUserConfig()
   }
-  const loaded = (
-    await loadPulseConfig(requestedCwd ?? process.cwd(), explicitConfig, parsed.options['trust-workspace'] === true)
-  ).value
+  const loadedConfig = await loadPulseConfig(requestedCwd ?? process.cwd(), explicitConfig, parsed.options['trust-workspace'] === true)
+  const loaded = loadedConfig.value
+  const credentialConfigPath = resolve(explicitConfig ?? expandHome(process.env.PULSE_CONFIG) ?? loadedConfig.source ?? defaultPulseConfigPath())
   // A missing user config still has to answer usage errors and list sessions.
   const config: PulseCliConfig = normalizeModelConfig(loaded.activeModel || loaded.models || loaded.providers ? loaded : { ...defaultPulseConfig, ...loaded })
 
@@ -213,6 +213,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const configuredModelEntry = selections.find(item => item.id === activeModelName)
   if (!configuredModelEntry) throw new Error(`UNKNOWN_MODEL_DISPLAY_NAME:${requestedModel}`)
   const modelSelection = configuredModelEntry.model
+  if (modelSelection.tools === 'unsupported') throw new Error('MODEL_AGENT_TOOLS_UNSUPPORTED')
   const providerName = configuredModelEntry.providerId
   const profile = effectiveProviders[providerName]
   if (!profile) throw new Error(`MODEL_PROVIDER_NOT_FOUND:${providerName}`)
@@ -226,8 +227,8 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const maxModelCalls = option(parsed.options, 'max-model-calls') ?? process.env.PULSE_MAX_MODEL_CALLS
   const maxRuntimeMs = option(parsed.options, 'max-runtime-ms') ?? process.env.PULSE_MAX_RUNTIME_MS
   const autoCompactPercent = option(parsed.options, 'auto-compact-percent') ?? process.env.PULSE_AUTO_COMPACT_PERCENT
-  const apiKeyEnv = profile.apiKeyEnv ?? (profile.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
-  const apiKey = process.env[apiKeyEnv]
+  const resolvedKeys = Object.fromEntries(await Promise.all(Object.entries(effectiveProviders).map(async ([id, source]) => [id, await resolveProviderApiKey(source, credentialConfigPath)] as const)))
+  const apiKey = resolvedKeys[providerName]
   const parsePositiveInteger = (value: string | undefined): number | undefined => {
     if (value === undefined) return undefined
     const parsed = Number(value)
@@ -244,6 +245,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const provider = {
     provider: profile.provider,
     defaultModel: model,
+    ...(modelSelection.remote === true ? { remote: true } : {}),
     ...(baseURL === undefined ? {} : { baseURL }),
     ...(apiKey === undefined ? {} : { apiKey }),
     ...(configuredContextTokens === undefined ? {} : { maxContextTokens: configuredContextTokens }),
@@ -254,8 +256,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const providerProfiles = Object.fromEntries(Object.entries(effectiveProviders).flatMap(([name, item]: [string, PulseCliProviderProfile]) => {
     if (!item.provider) throw new Error(`PROVIDER_PROTOCOL_REQUIRED:${name}`)
     const adapterProvider = item.provider
-    const itemKeyEnv = item.apiKeyEnv ?? (adapterProvider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
-    const itemKey = process.env[itemKeyEnv]
+    const itemKey = resolvedKeys[name]
     return [[name, {
       provider: adapterProvider,
       ...(item.baseURL === undefined ? {} : { baseURL: item.baseURL }),
@@ -270,7 +271,10 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const providerModels: NonNullable<LocalHostOptions['providerModels']> = Object.fromEntries(selections.map(({ id, providerId, model }) => [id, {
       provider: providerId,
       model: model.modelCode,
+      ...(model.remote === true ? { remote: true } : {}),
       ...(model.imageInput === undefined ? {} : { imageInput: model.imageInput }),
+      ...(model.tools === undefined ? {} : { tools: model.tools }),
+      ...(model.structuredOutput === undefined ? {} : { structuredOutput: model.structuredOutput }),
       ...(model.maxContextTokens === undefined ? {} : { maxContextTokens: model.maxContextTokens }),
       ...(model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens }),
       ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
@@ -285,6 +289,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   if (!providerModels[assistantModelName]) throw new Error(`UNKNOWN_ASSISTANT_MODEL:${assistantModelName}`)
   const taskRouting = config.taskRouting && Object.fromEntries(Object.entries(config.taskRouting).map(([task, route]) => [task, Array.isArray(route) ? route.map(item => resolveModelReference(catalog, item)) : route])) as PulseCliConfig['taskRouting']
   for (const [task, models] of Object.entries(taskRouting ?? {})) {
+    if (Array.isArray(models) && models.some(model => selections.find(item => item.id === model)?.model.tools === 'unsupported')) throw new Error('MODEL_AGENT_TOOLS_UNSUPPORTED')
     if (!Array.isArray(models) || models.length === 0 || models.some((model) => typeof model !== 'string' || !providerModels[model])) {
       throw new Error(`INVALID_TASK_MODEL_ROUTE:${task}`)
     }
@@ -465,15 +470,14 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
       const selected = typeof config.frontModel?.model === 'string' ? resolveModelReference(catalog, config.frontModel.model) : undefined
       const entry = selections.find(item => item.id === selected)
       const source = entry && effectiveProviders[entry.providerId]
-      const keyEnv = source?.apiKeyEnv ?? (source?.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
-      return { ...config.frontModel, ...(entry && source ? { provider: source.provider, model: entry.model.modelCode, ...(source.baseURL ? { baseURL: source.baseURL } : {}), ...(process.env[keyEnv] ? { apiKey: process.env[keyEnv] } : {}) } : {}) }
+      return { ...config.frontModel, ...(entry && source ? { provider: source.provider, model: entry.model.modelCode, ...(source.baseURL ? { baseURL: source.baseURL } : {}), ...(entry && resolvedKeys[entry.providerId] ? { apiKey: resolvedKeys[entry.providerId]! } : {}) } : {}) }
     })() } : {}),
     ...(config.approvalReview?.model ? { approvalReview: (() => {
       const selected = resolveModelReference(catalog, config.approvalReview!.model!)
       const entry = selections.find(item => item.id === selected)
       const source = entry && effectiveProviders[entry.providerId]
-      if (!entry || !source || (source.provider !== 'ollama' && source.provider !== 'deepseek')) throw new Error('APPROVAL_REVIEW_PROVIDER_UNSUPPORTED')
-      return { provider: source.provider, model: entry.model.modelCode, baseURL: source.baseURL ?? (source.provider === 'ollama' ? 'http://127.0.0.1:11434' : 'https://api.deepseek.com'), ...(source.provider === 'deepseek' ? { apiKeyEnv: source.apiKeyEnv ?? 'DEEPSEEK_API_KEY' } : {}), timeoutMs: Math.max(30_000, Math.min(60_000, config.approvalReview!.timeoutMs ?? 30_000)) }
+      if (!entry || !source || (source.provider !== 'ollama' && source.provider !== 'deepseek') || source.provider === 'ollama' && (entry.model.remote === true || /(?:-cloud|:cloud)$/.test(entry.model.modelCode))) throw new Error('APPROVAL_REVIEW_PROVIDER_UNSUPPORTED')
+      return { provider: source.provider, model: entry.model.modelCode, baseURL: source.baseURL ?? (source.provider === 'ollama' ? 'http://127.0.0.1:11434' : 'https://api.deepseek.com'), ...(source.provider === 'deepseek' ? { apiKeyEnv: source.apiKeyEnv ?? 'DEEPSEEK_API_KEY', ...(resolvedKeys[entry.providerId] ? { apiKey: resolvedKeys[entry.providerId]! } : {}) } : {}), timeoutMs: Math.max(30_000, Math.min(60_000, config.approvalReview!.timeoutMs ?? 30_000)) }
     })() } : {}),
   }
 }

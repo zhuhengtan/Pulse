@@ -1,0 +1,24 @@
+.provider-wizard fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.provider-wizard .field-grid { margin: 16px 0; }
+.provider-preset-grid section { margin: 14px 0; }
+.provider-preset-grid h3 { margin: 0 0 8px; font-size: 13px; opacity: .7; }
+.provider-preset-grid section > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.provider-preset-grid .pulse-button { min-height: 36px; height: auto; padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+.provider-preset-grid .selected { background: var(--soft); border-color: var(--blue); }
+.provider-manual, .provider-model-toolbar { display: flex; gap: 8px; margin: 16px 0 10px; }
+.provider-manual .pulse-button { flex: none; white-space: nowrap; }
+.provider-model-toolbar .pulse-select { min-width: 160px; }
+.provider-model-list { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.provider-model-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: 8px 12px; gap: 3px 10px; border-bottom: 1px solid var(--line); }
+.provider-model-list li:last-child { border-bottom: 0; }
+.provider-model-list code { grid-column: 1; overflow-wrap: anywhere; font-size: 11px; opacity: .65; }
+.provider-model-list small { grid-column: 2; grid-row: 1 / 3; align-self: center; opacity: .7; }
+.provider-pagination { display: flex; align-items: center; gap: 6px; margin: 8px 0 16px; }
+.provider-pagination > span { margin-right: auto; opacity: .7; }
+.provider-probe { padding: 8px 12px; margin: 12px 0; background: var(--soft); border-radius: 8px; }
+.provider-probe p { display: flex; gap: 12px; margin: 6px 0; }
+.provider-probe [data-status=passed] span { color: #21864b; }
+.provider-probe [data-status=failed] span { color: #bc4b40; }
+.provider-wizard-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 22px; border-top: 1px solid var(--line); padding: 14px 0 0; position: sticky; bottom: 0; background: var(--panel); z-index: 1; }
+.provider-wizard-actions > span { margin-right: auto; opacity: .65; }
+@media (max-width: 600px) { .provider-model-toolbar { flex-direction: column; } .provider-model-list li { grid-template-columns: minmax(0, 1fr); } .provider-model-list small { grid-column: 1; grid-row: auto; } }

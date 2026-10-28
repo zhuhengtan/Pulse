@@ -1,8 +1,12 @@
+import type { ModelDefinition } from '@hunterzhu/pulse-server'
 import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 
 export interface PulseCliProviderProfile {
+  presetId?: string
+  connectionVariant?: string
+  credentialRef?: string
   /** Adapter/protocol id. The map key is the user-facing provider code. */
   provider: string
   name?: string
@@ -17,7 +21,7 @@ export interface PulseCliProviderProfile {
   models?: Record<string, Omit<PulseCliModel, 'provider'>>
 }
 
-export interface PulseCliModel {
+export interface PulseCliModel extends ModelDefinition {
   /** Legacy flat-config field; nested models inherit their provider from the parent. */
   provider?: string
   /** Exact model identifier sent to the provider. */

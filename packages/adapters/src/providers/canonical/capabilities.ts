@@ -124,6 +124,14 @@ class CapabilityRegistry {
       return { ...DEEPSEEK_PROFILE, provider: normProvider, id: `deepseek:${normModel || 'default'}` }
     }
 
+    // A compatible transport does not imply strict JSON or reasoning parameter support.
+    if (['ollama', 'ollama-cloud', 'ollama-remote'].includes(normProvider)) {
+      return { ...DEFAULT_COMPATIBLE_PROFILE, provider: normProvider, id: `${normProvider}:${normModel || 'default'}`, structuredOutput: normProvider === 'ollama-cloud' || /(?:-cloud|:cloud)$/.test(normModel) ? 'unsupported' : 'native_strict', reasoning: 'effort_param' }
+    }
+    if (['minimax', 'zhipu', 'gemini', 'bailian', 'volcengine', 'moonshot', 'siliconflow', 'openrouter'].includes(normProvider)) {
+      return { ...DEFAULT_COMPATIBLE_PROFILE, provider: normProvider, id: `${normProvider}:${normModel || 'default'}`, structuredOutput: normProvider === 'gemini' ? 'native_strict' : ['zhipu', 'bailian', 'moonshot'].includes(normProvider) ? 'json_object_only' : 'unsupported', reasoning: normProvider === 'minimax' && /m3/i.test(normModel) ? 'effort_param' : 'unsupported' }
+    }
+
     if (normProvider === 'openai' || normProvider === 'openai-compatible') {
       if (isOpenAIReasoningModel(normModel)) {
         return { ...OPENAI_REASONING_PROFILE, provider: normProvider, id: `${normProvider}:${normModel}` }
@@ -157,9 +165,9 @@ export function resolveModelCapability(model?: string, provider?: string, overri
   return capabilityRegistry.resolve(model, provider, override)
 }
 
-/** o1/o3 and their suffixed ids. `o10` and `gpt-4o` do not match. */
+/** Reasoning model families use completion-token budgets, including their dated aliases. */
 function isOpenAIReasoningModel(model: string): boolean {
-  return /^o[13](?:$|[-_.])/.test(model)
+  return /^(?:o[134]|gpt-[56](?:\.\d+)?)(?:$|[-_.])/.test(model)
 }
 
 function profileMatches(provider: string, model: string, pattern: string): boolean {

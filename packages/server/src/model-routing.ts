@@ -8,7 +8,7 @@ export interface HostModelRouteOptions {
   activeProviderCode?: string
   activeProvider: ProviderPresetConfig
   providerProfiles?: Record<string, ProviderPresetConfig>
-  providerModels?: Record<string, { provider: string; model: string; maxContextTokens?: number; maxOutputTokens?: number; imageInput?: 'supported' | 'unsupported' | 'unknown'
+  providerModels?: Record<string, { provider: string; model: string; remote?: boolean; tools?: 'supported' | 'unsupported' | 'unknown'; structuredOutput?: 'supported' | 'unsupported' | 'unknown'; maxContextTokens?: number; maxOutputTokens?: number; imageInput?: 'supported' | 'unsupported' | 'unknown'
   reasoningEffort?: 'low' | 'medium' | 'high' }>
   taskRouting?: Partial<Record<HostModelTask, string[]>>
   /** Reuse the active provider instance (notably the scripted Mock adapter). */
@@ -22,8 +22,10 @@ export interface HostModelRouting {
   candidates: ModelCandidate[]
 }
 
-function localProvider(provider: string): boolean {
-  return provider === 'mock' || provider === 'ollama'
+export function isLocalModelProvider(profile: ProviderPresetConfig, model = profile.defaultModel): boolean {
+  if (profile.provider === 'mock') return true
+  if (profile.provider !== 'ollama' || profile.remote || /(?:-cloud|:cloud)$/.test(model ?? '')) return false
+  try { return ['localhost', '127.0.0.1', '[::1]'].includes(new URL(profile.baseURL ?? 'http://127.0.0.1:11434').hostname) } catch { return false }
 }
 
 /** Build deterministic per-task candidate lists from the user's named model catalog. */
@@ -64,12 +66,12 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
       priority: isActive ? 100 : 10,
       capabilities: {
         imageInput: selection.imageInput === 'supported',
-        toolCalling: true,
+        toolCalling: selection.tools !== 'unsupported',
         structuredOutput: true,
         reasoning: requestedReasoning === 'none' ? 'low' : requestedReasoning,
         maxContextTokens,
         maxOutputTokens,
-        local: localProvider(profile.provider),
+        local: selection.remote !== true && isLocalModelProvider(profile, selection.model),
       },
     })
     modelCodeById.set(displayName, selection.model)
@@ -83,13 +85,24 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
   // Runtime routes using the user's stable display name, so translate at the
   // provider boundary while preserving cancellation and streaming callbacks.
   for (const [providerCode, adapter] of providers) {
+    const modelAdapters = new Map<string, ProviderAdapter>()
     const translated: ProviderAdapter = {
       id: providerCode,
       name: adapter.name,
-      executeAttempt: (params) => adapter.executeAttempt({
-        ...params,
-        ...(params.model === undefined ? {} : { model: modelCodeById.get(params.model) ?? params.model }),
-      }),
+      executeAttempt: (params) => {
+        const selection = params.model ? providerModels[params.model] : undefined
+        let selectedAdapter = adapter
+        if (selection?.structuredOutput === 'unsupported' || selection?.remote) {
+          selectedAdapter = modelAdapters.get(params.model!) ?? createProviderAdapter({ ...profiles[providerCode]!, ...(selection.remote ? { remote: true } : {}), ...(selection.structuredOutput === 'unsupported' ? { capabilityProfile: { structuredOutput: 'unsupported' as const } } : {}) })
+          modelAdapters.set(params.model!, selectedAdapter)
+        }
+        let request = params.request
+        if (selection?.tools === 'unsupported') {
+          const { providerHistory: _history, ...contextSpec } = request.contextSpec
+          request = { ...request, contextSpec, blocks: request.blocks.filter(block => block.kind !== 'tools' && block.kind !== 'provider_history') }
+        }
+        return selectedAdapter.executeAttempt({ ...params, request, ...(params.model === undefined ? {} : { model: modelCodeById.get(params.model) ?? params.model }) })
+      },
     }
     providers.set(providerCode, translated)
   }

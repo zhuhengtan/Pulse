@@ -85,6 +85,8 @@ function extractCanonicalMessages(request: LLMRequestProjection): CanonicalMessa
             role: 'assistant',
             content: item.content ?? null,
             ...(item.reasoningContent !== undefined ? { reasoningContent: item.reasoningContent } : {}),
+            ...(item.continuationProvider !== undefined ? { continuationProvider: item.continuationProvider } : {}),
+            ...(item.providerMetadata !== undefined ? { providerMetadata: item.providerMetadata } : {}),
             ...(item.toolCalls === undefined
               ? {}
               : {

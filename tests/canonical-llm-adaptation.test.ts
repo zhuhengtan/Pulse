@@ -123,10 +123,10 @@ describe('Canonical LLM Adaptation Layer', () => {
       expect(profile.reasoning).toBe('effort_param')
     })
 
-    it('sends reasoning_effort for OpenAI models that are not o1 or o3', () => {
+    it('uses completion-token budgets for modern GPT reasoning models and keeps unknown families generic', () => {
       const gpt = resolveModelCapability('gpt-5.6', 'openai')
       expect(gpt.reasoning).toBe('effort_param')
-      expect(gpt.constraints.maxTokensParamName).toBe('max_tokens')
+      expect(gpt.constraints.maxTokensParamName).toBe('max_completion_tokens')
       const o10 = resolveModelCapability('o10', 'openai')
       expect(o10.constraints.maxTokensParamName).toBe('max_tokens')
     })

@@ -39,6 +39,8 @@ export class AnthropicAdapter implements ProviderAdapter {
           const index = Number(data.index ?? 0)
           const block = blocks[index] ?? {}
           if (data.delta.type === 'text_delta' && typeof data.delta.text === 'string') { block.type = 'text'; block.text = `${typeof block.text === 'string' ? block.text : ''}${data.delta.text}` }
+          if (data.delta.type === 'thinking_delta' && typeof data.delta.thinking === 'string') { block.type = 'thinking'; block.thinking = `${typeof block.thinking === 'string' ? block.thinking : ''}${data.delta.thinking}` }
+          if (data.delta.type === 'signature_delta' && typeof data.delta.signature === 'string') block.signature = `${typeof block.signature === 'string' ? block.signature : ''}${data.delta.signature}`
           if (data.delta.type === 'input_json_delta' && typeof data.delta.partial_json === 'string') block.inputJson = `${typeof block.inputJson === 'string' ? block.inputJson : ''}${data.delta.partial_json}`
           blocks[index] = block
         }

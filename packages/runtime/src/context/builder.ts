@@ -74,8 +74,9 @@ function buildProviderHistory(state: RuntimeState, history: LaneRecord['context'
       ? output.providerContinuation as Record<string, JsonValue>
       : undefined
     const reasoning = continuation?.reasoningContent
+    const continuationFields = typeof continuation?.provider === 'string' ? { continuationProvider: continuation.provider, ...(typeof reasoning === 'string' ? { reasoningContent: reasoning } : {}), ...(continuation.metadata !== undefined ? { providerMetadata: continuation.metadata } : {}) } : {}
     if (calls.length === 0) {
-      messages.push({ role: 'assistant', content: output.text || null, ...(continuation?.provider === 'deepseek' && typeof reasoning === 'string' ? { reasoningContent: reasoning } : {}) })
+      messages.push({ role: 'assistant', content: output.text || null, ...continuationFields })
       continue
     }
     const correlated: Array<{ id: string; name: string; arguments: string; result: JsonValue; resultRef: ResultRef }> = []
@@ -103,7 +104,7 @@ function buildProviderHistory(state: RuntimeState, history: LaneRecord['context'
       messages.push({ role: 'user', content: 'Runtime recovery notice: a previous tool-call batch is incomplete in retained history. No missing or partial call is being represented as executed. Continue from the completed evidence supplied below; do not replay completed operations.' })
       break
     }
-    messages.push({ role: 'assistant', content: output.text || null, ...(continuation?.provider === 'deepseek' && typeof reasoning === 'string' ? { reasoningContent: reasoning } : {}), toolCalls: correlated.map(({ id, name, arguments: args }) => ({ id, name, arguments: args })) })
+    messages.push({ role: 'assistant', content: output.text || null, ...continuationFields, toolCalls: correlated.map(({ id, name, arguments: args }) => ({ id, name, arguments: args })) })
     for (const item of correlated) messages.push({ role: 'tool', toolCallId: item.id, name: item.name, content: JSON.stringify(item.result), resultRef: item.resultRef })
   }
   return messages
@@ -178,7 +179,7 @@ export class ContextBuilder {
       return { seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), instruction: record.instruction, resultRefs: record.resultRefs,
         ...(record.resultSelection === undefined ? {} : { resultSelection: record.resultSelection }), ...(record.result === undefined ? {} : { result: record.result }),
         ...(record.findings === undefined ? {} : { findings: record.findings }),
-        output: input.includeLaneHistory && output ? visibleModelOutput(output) : record.output,
+        output: output ? visibleModelOutput(output) : record.output,
         ...(input.includeLaneHistory ? { evidence: record.resultRefs.filter(ref => historyRefs.includes(ref) && !emitted.has(ref) && !!emitted.add(ref)).map(ref => ({ ref, ...historyResult(ref) })) } : {}),
         privacy: record.privacy, ...(record.privacyTaints === undefined ? {} : { privacyTaints: record.privacyTaints as unknown as JsonValue }) }
     }) }

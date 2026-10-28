@@ -322,7 +322,9 @@ Pulse 的用户级运行目录统一放在同一个 `.pulse` 目录下：
 
 Windows 会把 `~` 解析为 `%USERPROFILE%`。可以用 `PULSE_HOME` 移动整个目录，用 `PULSE_DATA_DIR` 或 `PULSE_LOG_DIR` 单独覆盖数据和日志目录；命令行的 `--data-dir` 优先级更高。旧版本使用的 `~/.local/share/pulse` 会在首次启动时自动迁移到 `~/.pulse/data`。
 
-配置文件只保存 Provider 和运行策略，API Key 通过环境变量读取，不会写入配置或会话数据。安装 `@hunterzhu/pulse-cli` 时会在用户主目录自动创建 `.pulse/config.json` 示例配置（Windows 使用 `%USERPROFILE%\.pulse`，macOS/Linux 使用 `~/.pulse`），已有配置不会被覆盖。初始激活模型是本地 `mock`，也附有 OpenAI 和 DeepSeek 的模型映射示例。
+桌面客户端和本机 Web 可在「设置 → 模型与服务商 → 添加服务商」选择厂商、填写 Key，自动导入全部对话模型并验证连接。支持主流官方厂商、SiliconFlow、OpenRouter 及自定义 OpenAI 兼容接口；站点和编程套餐分别配置。详见[模型厂商接入](docs/model-providers.md)。
+
+配置文件只保存 Provider、凭据引用和运行策略。向导填写的 API Key 保存在本机独立受权限保护的凭据文件中，现有环境变量方式继续可用；Key 不写入配置 JSON 或会话数据。安装 `@hunterzhu/pulse-cli` 时会在用户主目录自动创建 `.pulse/config.json` 示例配置（Windows 使用 `%USERPROFILE%\.pulse`，macOS/Linux 使用 `~/.pulse`），已有配置不会被覆盖。初始激活模型是本地 `mock`，也附有 OpenAI 和 DeepSeek 的模型映射示例。
 
 ### 常用命令
 

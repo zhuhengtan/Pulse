@@ -32,6 +32,8 @@ export interface CanonicalMessage {
   toolCallId?: string
   toolCalls?: CanonicalToolCall[]
   reasoningContent?: string
+  continuationProvider?: string
+  providerMetadata?: JsonValue
 }
 
 export interface CanonicalToolDefinition {

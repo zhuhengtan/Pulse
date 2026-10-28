@@ -22,8 +22,15 @@ export function toOpenAIPayload(
         },
       }))
     }
-    if (provider === 'deepseek' && msg.reasoningContent !== undefined) {
-      base.reasoning_content = msg.reasoningContent
+    // Continuation data belongs to the originating service, never a fallback provider.
+    if (msg.continuationProvider === provider || !msg.continuationProvider && provider === 'deepseek') {
+      if (msg.reasoningContent !== undefined) base.reasoning_content = msg.reasoningContent
+      const metadata = msg.providerMetadata && typeof msg.providerMetadata === 'object' && !Array.isArray(msg.providerMetadata) ? msg.providerMetadata as Record<string, any> : undefined
+      if (typeof metadata?.originalContent === 'string' && provider === 'minimax') base.content = metadata.originalContent
+      if (Array.isArray(metadata?.reasoning_details)) base.reasoning_details = metadata.reasoning_details
+      if (Array.isArray(base.tool_calls) && metadata?.toolExtras && typeof metadata.toolExtras === 'object') {
+        for (const call of base.tool_calls as Array<Record<string, any>>) if (metadata.toolExtras[call.id]) call.extra_content = metadata.toolExtras[call.id]
+      }
     }
     return base
   })

@@ -223,7 +223,7 @@ export interface LLMResult {
   refusal?: string
   toolCalls: Array<{ toolCallId: string; providerToolCallId?: string; providerToolName?: string; providerToolArguments?: string; name: string; input: unknown }>
   /** Provider continuation data needed to resume a multi-round tool dialogue. Never render as user-facing text. */
-  providerContinuation?: { provider: string; reasoningContent?: string }
+  providerContinuation?: { provider: string; reasoningContent?: string; metadata?: JsonValue }
   finishReason: 'stop' | 'tool_calls' | 'length' | 'error' | 'refusal'
   usage?: ModelUsage
   privacy?: PrivacyLabel

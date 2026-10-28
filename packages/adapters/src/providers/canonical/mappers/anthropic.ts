@@ -1,6 +1,8 @@
 import type { CanonicalContentPart, CanonicalLLMRequest, CanonicalStreamEvent, ModelCapabilityProfile } from '../types.js'
 
 type AnthropicContentBlock =
+  | { type: 'thinking'; thinking: string; signature: string }
+  | { type: 'redacted_thinking'; data: string }
   | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string } }
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
@@ -34,6 +36,15 @@ export function toAnthropicPayload(
 
     if (msg.role === 'assistant') {
       const blocks: AnthropicContentBlock[] = []
+      if (msg.continuationProvider === 'anthropic' && msg.providerMetadata && typeof msg.providerMetadata === 'object' && !Array.isArray(msg.providerMetadata)) {
+        const thinking = msg.providerMetadata.thinkingBlocks
+        if (Array.isArray(thinking)) for (const item of thinking) {
+          if (item && typeof item === 'object' && !Array.isArray(item)) {
+            if (item.type === 'thinking' && typeof item.thinking === 'string' && typeof item.signature === 'string') blocks.push({ type: 'thinking', thinking: item.thinking, signature: item.signature })
+            if (item.type === 'redacted_thinking' && typeof item.data === 'string') blocks.push({ type: 'redacted_thinking', data: item.data })
+          }
+        }
+      }
       const text = textFromContent(msg.content)
       if (text !== undefined) blocks.push({ type: 'text', text })
       for (const call of msg.toolCalls ?? []) {

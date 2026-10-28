@@ -459,7 +459,7 @@ export interface ConversationMessage {
 
 export type ProviderHistoryMessage =
   | { role: 'user'; content: string }
-  | { role: 'assistant'; content: string | null; reasoningContent?: string; toolCalls?: Array<{ id: string; name: string; arguments: string }> }
+  | { role: 'assistant'; content: string | null; continuationProvider?: string; reasoningContent?: string; providerMetadata?: JsonValue; toolCalls?: Array<{ id: string; name: string; arguments: string }> }
   | { role: 'tool'; toolCallId: string; name: string; content: string; resultRef: ResultRef }
 
 export interface LLMRequestProjection {

@@ -1,4 +1,9 @@
 export interface ModelDefinition {
+  remote?: boolean
+  tools?: 'supported' | 'unsupported' | 'unknown'
+  structuredOutput?: 'supported' | 'unsupported' | 'unknown'
+  discovery?: import('./providers/types.js').DiscoveredModel
+  verification?: import('./providers/types.js').ProviderProbe & { checkedAt: string }
   displayName?: string
   modelCode: string
   maxContextTokens?: number
@@ -9,6 +14,9 @@ export interface ModelDefinition {
 }
 
 export interface ProviderDefinition {
+  presetId?: string
+  connectionVariant?: string
+  credentialRef?: string
   provider: string
   name?: string
   baseURL?: string

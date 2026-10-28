@@ -100,7 +100,7 @@ import { legacyPulseDataPath, pulseDataPath, pulseLogPath } from './paths.js'
 import { detectResponseLanguage, responseLanguageInstruction } from './language.js'
 import { buildSystemPrompt, loadProjectInstructions, JARVIS_MEMORY_GUIDANCE, type BuildSystemPromptOptions, type DiscoveredInstructions } from './prompt.js'
 import { continueTaskRecord, isInterruptedTaskContinuation, isExecutionSummaryFollowup, isExplicitNewTask, isTaskContinuation, acceptanceCriteriaFromObjective, hasTaskProgress, maxTaskReplans, taskRecordFromGlobal, taskRecordJson, type TaskOutcome, type TaskRecord, type TaskCriterionAssessment } from './task.js'
-import { createHostModelRouting, type HostModelTask } from './model-routing.js'
+import { createHostModelRouting, isLocalModelProvider, type HostModelTask } from './model-routing.js'
 import { modelSelectionId, normalizeModelConfig, parseModelSelectionId, resolveModelReference, resolveModelSelection } from './model-config.js'
 import { CapabilityPackRegistry, type ActiveCapabilityPacks, type CapabilityPack } from './capabilities.js'
 import { JarvisClient, jarvisResultForRun, type JarvisContextPackage, type PulseJarvisConfig } from './jarvis/index.js'
@@ -115,6 +115,7 @@ export { assertJarvisApiUrl, JarvisClient, jarvisResultForRun, type CandidateMem
 export { ScheduledTaskStore, ScheduledTaskWorker, MIN_SCHEDULED_TASK_INTERVAL_MS, MAX_SCHEDULED_TASK_INTERVAL_MS, type ScheduledTask, type CreateScheduledTaskInput, type ScheduledTaskExecutor, type ScheduledTaskWorkerRunSummary } from './scheduled-tasks.js'
 export { maxTaskReplans, type TaskAttempt, type TaskCriterionAssessment, type TaskOutcome, type TaskRecord, type TaskRecordStatus } from './task.js'
 export { modelSelectionId, normalizeModelConfig, parseModelSelectionId, resolveModelReference, resolveModelSelection, type ModelConfig, type ModelDefinition, type ProviderDefinition } from './model-config.js'
+export { ProviderCredentialStore, resolveProviderApiKey } from './providers/credentials.js'
 export { H5Server, DEFAULT_H5_PORT, type H5ServerOptions } from './h5/server.js'
 export { H5_WORKER_PROTOCOL_VERSION, startH5WorkWorker, runH5WorkWorker, type H5WorkWorkerLaunchOptions } from './h5/work-worker.js'
 export { H5AuthStore, type H5DeviceRecord, type PairingCodeInfo } from './h5/auth.js'
@@ -137,7 +138,7 @@ export interface LocalHostOptions {
   provider?: ProviderPresetConfig
   /** Named provider profiles used by the interactive `/model` selector. */
   providerProfiles?: Record<string, ProviderPresetConfig>
-  providerModels?: Record<string, { provider: string; model: string; maxContextTokens?: number; maxOutputTokens?: number; imageInput?: 'supported' | 'unsupported' | 'unknown'
+  providerModels?: Record<string, { provider: string; model: string; remote?: boolean; tools?: 'supported' | 'unsupported' | 'unknown'; structuredOutput?: 'supported' | 'unsupported' | 'unknown'; maxContextTokens?: number; maxOutputTokens?: number; imageInput?: 'supported' | 'unsupported' | 'unknown'
   reasoningEffort?: 'low' | 'medium' | 'high' }>
   modelPricing?: Record<string, { currency: string; inputPerMillion: number; outputPerMillion: number; version: string }>
   /** Ordered model display names per task; later entries are bounded fallbacks. */
@@ -1195,7 +1196,7 @@ function providerFromOptions(options: LocalHostOptions): { adapter: ProviderAdap
       }
     }
   }
-  const local = config.provider === 'mock' || config.provider === 'ollama'
+  const local = isLocalModelProvider(config)
   const reasoning = config.reasoningEffort === 'none' ? 'low' : config.reasoningEffort ?? 'medium'
   return { adapter, model: { id: config.defaultModel ?? `${config.provider}-default`, providerId: adapter.id, tasks: ['reason', 'plan', 'merge', 'verify'], priority: 10, capabilities: { toolCalling: true, structuredOutput: true, reasoning, maxContextTokens: config.maxContextTokens ?? 32_000, maxOutputTokens: config.maxOutputTokens ?? 4_096, local }, adapter } }
 }
@@ -2286,7 +2287,9 @@ export class LocalHost {
     if (!normalized) return
     const selection = this.options.providerModels?.[normalized]
     if (selection) {
+      if (selection.tools === 'unsupported') throw new Error('MODEL_AGENT_TOOLS_UNSUPPORTED')
       this.setProvider(selection.provider, selection.model)
+      if (this.options.provider) { if (selection.remote) this.options.provider.remote = true; else delete this.options.provider.remote }
       this.activeModelName = normalized
       return
     }

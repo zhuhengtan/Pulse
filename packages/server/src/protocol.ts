@@ -161,3 +161,4 @@ export interface HostPathListing {
 }
 
 export type { RunRecoveryPreflight } from './run-recovery-preflight.js'
+export type { ProviderPreset, ProviderVariant, DiscoveredModel, ProviderDiscovery, ProviderProbe, ProviderConnectionInput, ProbeCheck } from './providers/types.js'

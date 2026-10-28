@@ -134,6 +134,8 @@ export function normalizeOpenAIResponse(response: any, toolNameAliases?: Readonl
   const nativeToolCalls = choice.finish_reason === 'length' || message.tool_calls === undefined ? [] : normalizeOpenAIToolCalls(message.tool_calls, toolNameAliases)
   const refusal = message.refusal == null ? undefined : requiredProviderString(message.refusal, 'OpenAI refusal')
   let text = providerText(message.content, 'OpenAI message content')
+  const originalContent = provider === 'minimax' && /<think>[\s\S]*?<\/think>/.test(text) ? text : undefined
+  if (originalContent !== undefined) text = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
   let finishReason = normalizeOpenAIFinishReason(choice.finish_reason, refusal, nativeToolCalls.length > 0)
   let toolCalls = nativeToolCalls
   if (provider === 'deepseek' && (finishReason === 'stop' || nativeToolCalls.length > 0)) {
@@ -159,8 +161,14 @@ export function normalizeOpenAIResponse(response: any, toolNameAliases?: Readonl
   const promptDetails = rawUsage?.prompt_tokens_details === undefined ? undefined : providerRecord(rawUsage.prompt_tokens_details, 'OpenAI prompt token details')
   const usage = normalizeUsage(rawUsage === undefined ? undefined : { ...rawUsage, cached_tokens: rawUsage.cached_tokens ?? promptDetails?.cached_tokens ?? rawUsage.cache_read_input_tokens, reasoning_tokens: rawUsage.completion_tokens_details?.reasoning_tokens ?? rawUsage.reasoning_tokens }, { input: 'prompt_tokens', output: 'completion_tokens', cached: 'cached_tokens', reasoning: 'reasoning_tokens' }, 'OpenAI')
   const reasoningContent = typeof message.reasoning_content === 'string' ? message.reasoning_content : undefined
+  const toolExtras = Object.fromEntries((Array.isArray(message.tool_calls) ? message.tool_calls : []).flatMap((call: any) => {
+    const signature = call.extra_content?.google?.thought_signature
+    return typeof call.id === 'string' && typeof signature === 'string' && signature.length <= 131072 ? [[call.id, { google: { thought_signature: signature } }]] : []
+  }))
+  const metadata = { ...(originalContent !== undefined ? { originalContent } : {}), ...(Array.isArray(message.reasoning_details) && JSON.stringify(message.reasoning_details).length <= 262144 ? { reasoning_details: message.reasoning_details } : {}), ...(Object.keys(toolExtras).length ? { toolExtras } : {}) }
+  const continuation = reasoningContent !== undefined || Object.keys(metadata).length ? { provider, ...(reasoningContent !== undefined ? { reasoningContent } : {}), ...(Object.keys(metadata).length ? { metadata } : {}) } : undefined
   const measuredUsage = usage === undefined ? undefined : { ...usage, visibleOutputChars: text.length }
-  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason, ...(measuredUsage === undefined ? {} : { usage: measuredUsage }), ...(provider !== 'deepseek' || reasoningContent === undefined ? {} : { providerContinuation: { provider, reasoningContent } }) }
+  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason, ...(measuredUsage === undefined ? {} : { usage: measuredUsage }), ...(continuation ? { providerContinuation: continuation } : {}) }
 }
 
 /** DeepSeek V4/V4.1 may emit DSML tool markup in content instead of tool_calls. One or more U+FF5C bars are accepted. */
@@ -391,9 +399,10 @@ export function normalizeAnthropicResponse(response: any, aliases: ReadonlyMap<s
   const refusalBlock = blocks.find((block: any) => block.type === 'refusal' && typeof block.text === 'string')
   const refusal = refusalBlock?.text as string | undefined
   const finishReason = normalizeAnthropicFinishReason(root.stop_reason, refusal, toolCalls.length > 0)
+  const thinkingBlocks = blocks.filter((block: any) => block.type === 'thinking' && typeof block.thinking === 'string' && typeof block.signature === 'string' || block.type === 'redacted_thinking' && typeof block.data === 'string')
   const usage = normalizeUsage(root.usage, { input: 'input_tokens', output: 'output_tokens', cached: 'cache_read_input_tokens' }, 'Anthropic')
   const measuredUsage = usage === undefined ? undefined : { ...usage, visibleOutputChars: text.length }
-  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason, ...(measuredUsage === undefined ? {} : { usage: measuredUsage }) }
+  return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason, ...(measuredUsage === undefined ? {} : { usage: measuredUsage }), ...(thinkingBlocks.length ? { providerContinuation: { provider: 'anthropic', metadata: { thinkingBlocks } } } : {}) }
 }
 function providerRecord(value: unknown, label: string): Record<string, any> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw providerResponseError(`${label} must be an object`)
