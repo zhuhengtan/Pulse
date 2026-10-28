@@ -7,7 +7,7 @@ import { FilesystemTool } from '@hunterzhu/pulse-adapters'
 import type { PulseRuntime } from '@hunterzhu/pulse-runtime'
 
 /** Host-side I/O, outside pure Runtime steps. Earlier edits remain historical evidence. */
-export async function staleFileEvidence(root: string, refs: string[], runtime: PulseRuntime, checkRefs?: ReadonlySet<string>, snapshotRefs: readonly string[] = [], originalText = ''): Promise<string[]> {
+export async function staleFileEvidence(root: string, refs: string[], runtime: PulseRuntime, checkRefs?: ReadonlySet<string>, snapshotRefs: readonly string[] = [], originalText = '', currentChecksRefreshSnapshots = false): Promise<string[]> {
   const paths = new Map<string, { hash: string; refs: string[]; order: number }>()
   // Passed sibling stages can legitimately update a file inspected by a shared
   // preparatory dependency. Their receipts refresh file versions only; they do
@@ -54,10 +54,46 @@ export async function staleFileEvidence(root: string, refs: string[], runtime: P
     if (receipt.command === 'node' && (receipt.args?.[0] === '--check' || nodeTest(receipt)) && [...checks.values()].some(check => check.order > order && check.passed && check.receipt.stable && !check.receipt.definitionChanged && nodeTest(check.receipt) && Object.keys(receipt.files).every(path => typeof check.receipt.files?.[path] === 'string'))) continue
     const sorted = (value: Record<string, unknown>) => JSON.stringify(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
     try {
-      const current = await captureCheck(root, resolve(root, receipt.cwd), receipt.command, receipt.args, false, receipt.schemaVersion === 3 ? 3 : receipt.schemaVersion === 2 ? 2 : 1, receipt.scope)
+      const current = await captureCheck(root, resolve(root, receipt.cwd), receipt.command, receipt.args, false, receipt.schemaVersion === 4 ? 4 : receipt.schemaVersion === 3 ? 3 : receipt.schemaVersion === 2 ? 2 : 1, receipt.scope)
       if (sorted(current.files) !== sorted(receipt.files) || sorted(current.definitions) !== sorted(receipt.definitions ?? {}) || sorted(current.environment) !== sorted(receipt.environment ?? {})) stale.push(ref)
+      else if (currentChecksRefreshSnapshots && value.code === 0 && !value.timedOut && !value.aborted && !value.truncated && receipt.unresolvedInputs !== true) {
+        // A passing check refreshes only document artifacts it actually resolved
+        // and hashed. Import-closure sources keep their earlier fs.read version,
+        // and a failed or unbound check cannot turn that snapshot into a pass.
+        const reads = Array.isArray(receipt.readInputs) ? receipt.readInputs : []
+        for (const path of reads) {
+          if (typeof path !== 'string' || !isDocumentArtifact(path)) continue
+          const hash = receipt.files[path]
+          if (typeof hash !== 'string') continue
+          const key = resolve(root, path), previous = paths.get(key)
+          if (previous && previous.order < order) paths.set(key, { hash, order, refs: previous.refs })
+        }
+      }
     } catch { stale.push(ref) }
   }
   for (const [path, snapshot] of paths) if (await files.hash(path).catch(() => undefined) !== snapshot.hash) stale.push(...snapshot.refs)
   return [...new Set(stale)]
+}
+
+export const isDocumentArtifact = (path: string): boolean => /\.(?:pptx|docx|xlsx|pdf|png|jpe?g|webp|svg)$/i.test(path)
+
+/** Actual statically resolved reads, rather than a script name or an argv claim. */
+export function mismatchedArtifactChecks(root: string, refs: string[], runtime: PulseRuntime, targets: readonly string[]): string[] {
+  const expected = new Set(targets.filter(isDocumentArtifact).map(path => resolve(root, path)))
+  return refs.filter(ref => {
+    const result = runtime.state.results.get(ref), value = result?.value
+    const effect = result?.producer?.kind === 'effect' ? runtime.state.effects.get(result.producer.id) : undefined
+    if (effect?.kind !== 'tool' || effect.outcome?.status !== 'succeeded' || !value || typeof value !== 'object' || Array.isArray(value) || value.code !== 0) return false
+    const receipt = value.checkReceipt
+    if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) || receipt.schemaVersion !== 4) return false
+    const reads = Array.isArray(receipt.readInputs) ? receipt.readInputs.filter((p): p is string => typeof p === 'string' && isDocumentArtifact(p)) : []
+    // A resolved source-only check attests to source, not a document. An
+    // unresolved read cannot prove a document target even when argv names none.
+    const declared = new Set((Array.isArray(receipt.args) ? receipt.args : []).filter((p): p is string => typeof p === 'string' && isDocumentArtifact(p)).map(p => resolve(root, String(receipt.cwd ?? '.'), p)))
+    const targets = expected.size ? expected : declared
+    const files = receipt.files && typeof receipt.files === 'object' && !Array.isArray(receipt.files) ? receipt.files : {}
+    if (receipt.unresolvedInputs === true && (expected.size > 0 || declared.size > 0)) return true
+    if (reads.length === 0) return false
+    return !reads.some(path => targets.has(resolve(root, path)) && (!declared.size || declared.has(resolve(root, path))) && typeof files[path] === 'string')
+  })
 }

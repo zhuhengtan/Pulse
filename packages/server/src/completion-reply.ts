@@ -6,9 +6,12 @@ import { replaceStateFile } from './atomic-file.js'
 import { detectResponseLanguage } from './language.js'
 import { copyChanges } from './task-controller/copy-evidence.js'
 import { inPlaceChanges } from './task-controller/inplace-evidence.js'
+import { FilesystemTool } from '@hunterzhu/pulse-adapters'
+import { isDocumentArtifact } from './task-controller/evidence-current.js'
 
 /** Presentation only. None of these fields can alter the settled task verdict. */
 export interface CompletionReplyInput {
+  presentationVersion?: 2
   request: string
   status: 'accepted' | 'incomplete' | 'unverifiable' | 'failed' | 'cancelled'
   /** `supersedes` lists delivery ids or result refs this text replaces.
@@ -19,6 +22,30 @@ export interface CompletionReplyInput {
   files: string[]
   error?: string
   internalIds: string[]
+}
+
+/** Registered outputs, rehashed before linking. A check can refresh a registered path; an unread template is not a delivery. */
+export async function currentCompletionArtifacts(runtime: PulseRuntime, refs: string[], root: string): Promise<Array<{ path: string; hash: string }>> {
+  const outputs = new Map<string, string>()
+  for (const ref of [...new Set(refs)].sort((a, b) => Number(a.match(/(\d+)$/)?.[1] ?? 0) - Number(b.match(/(\d+)$/)?.[1] ?? 0))) {
+    const result = runtime.state.results.get(ref), value = result?.value
+    const effect = result?.producer?.kind === 'effect' ? runtime.state.effects.get(result.producer.id) : undefined
+    if (result?.privacy !== 'public' || result.privacyTaints?.length || effect?.kind !== 'tool' || effect.outcome?.status !== 'succeeded' || !value || typeof value !== 'object' || Array.isArray(value)) continue
+    const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input : {}
+    if (input.name === 'artifact.record' && typeof value.path === 'string' && typeof value.hash === 'string') outputs.set(resolve(root, value.path), value.hash)
+    const receipt = value.checkReceipt
+    if (value.code !== 0 || value.aborted || value.timedOut || value.truncated || !receipt || typeof receipt !== 'object' || Array.isArray(receipt) || receipt.stable !== true || receipt.definitionChanged !== false || receipt.unresolvedInputs === true) continue
+    const files = receipt.files
+    if (!files || typeof files !== 'object' || Array.isArray(files)) continue
+    for (const path of Array.isArray(receipt.readInputs) ? receipt.readInputs : []) {
+      if (typeof path !== 'string' || !isDocumentArtifact(path) || typeof files[path] !== 'string') continue
+      const key = resolve(root, path)
+      if (outputs.has(key)) outputs.set(key, files[path] as string)
+    }
+  }
+  const files = new FilesystemTool(root), current: Array<{ path: string; hash: string }> = []
+  for (const [path, hash] of outputs) if (await files.hash(path).catch(() => undefined) === hash) current.push({ path, hash })
+  return current.sort((a, b) => Number(isDocumentArtifact(b.path)) - Number(isDocumentArtifact(a.path)))
 }
 
 /** Use committed receipts, not the bounded handoff index or read previews. */
@@ -76,6 +103,7 @@ function publicText(value: string, input: CompletionReplyInput): string {
     .replace(/\s+/g, ' ').replace(/^[\s:;—-]+|[\s:;—-]+$/g, '').trim()
 }
 function requestedText(input: CompletionReplyInput): boolean {
+  if (input.presentationVersion === 2 && input.files.some(isDocumentArtifact) && !/(?:输出|撰写|给出|提供).{0,12}(?:正文|报告|解释|分析|文案|代码)|\b(?:explain|report|review|verbatim)\b/i.test(input.request)) return false
   if (/(?:回复|答复|报告|文案|文章|诗|解释|审查|评审|分析|调研|对比|比较|起草|介绍|建议|提交(?:信息|说明)|代码片段|SQL|commit message|introduction|review|report|explain|research|compare|poem|essay)/i.test(input.request)) return true
   return !input.files.length && !/修复|修改|实现|重构|部署|安装|验证|检查|执行|运行|\b(?:fix|edit|implement|refactor|deploy|install|repair|write|create|verify|check|execute|run|test)\b/i.test(input.request)
 }
@@ -97,12 +125,23 @@ function deliveryReferences(input: CompletionReplyInput): string[] {
 /** Used offline, on cancellation, and when the optional presentation call fails. */
 export function fallbackCompletionReply(input: CompletionReplyInput): string {
   const zh = detectResponseLanguage(input.request) === 'zh-CN'
-  const reasons = [...input.pending.map(item => item.reason), ...input.checks.filter(item => item.status !== 'passed').map(item => item.reason), input.error ?? ''].map(value => publicText(value, input)).filter(Boolean)
-  const reason = [...new Set(reasons)].join(zh ? '；' : '; ').slice(0, 1500)
-  const pending = [...new Set(input.pending.map(item => publicText(item.description, input)).filter(Boolean))].slice(0, 2).join(zh ? '、' : '; ')
+  const reasonText = (value: string): string => {
+    if (input.presentationVersion === 2) {
+      if (/REASONING_OUTPUT_EXHAUSTED/.test(value)) return zh ? '模型连续未产出可执行结果，已保留完成项。' : 'The model repeatedly produced no executable result; completed work was retained.'
+      if (/PROVIDER_NETWORK_ERROR/.test(value)) return zh ? '模型连接中断，自动重试未恢复。' : 'The model connection failed after bounded retries.'
+      if (/EVIDENCE_CHANGED|VERIFICATION_TARGET_MISMATCH/.test(value)) return zh ? '当前产物的验收证据仍需更新。' : 'Verification of the current artifact still needs updating.'
+      if (/Verifier did not cite valid successful tool evidence/.test(value)) return zh ? '验收证据不足，尚不能确认完成。' : 'Verification evidence is insufficient to confirm completion.'
+    }
+    return publicText(value, input)
+  }
+  const reasons = [...input.pending.map(item => item.reason), ...input.checks.filter(item => item.status !== 'passed').map(item => item.reason), input.error ?? ''].map(reasonText).filter(Boolean)
+  const distinct = [...new Set(reasons)].filter((reason, i, all) => !all.some((other, j) => j !== i && other.length > reason.length && other.includes(reason)))
+  const reason = distinct.join(zh ? '；' : '; ').slice(0, input.presentationVersion === 2 ? 500 : 1500)
+  const pendingText = [...new Set(input.pending.map(item => publicText(item.description, input)).filter(Boolean))].slice(0, 2).join(zh ? '、' : '; ')
+  const pending = input.presentationVersion === 2 ? pendingText.slice(0, 200) : pendingText
   const bodies = renderedDeliveries(input)
   const notice = input.status === 'accepted'
-    ? bodies.length ? '' : zh ? '已完成这项任务。' : 'The task is complete.'
+    ? bodies.length ? '' : input.presentationVersion === 2 && input.files.some(isDocumentArtifact) ? (zh ? `已完成 ${input.files.find(isDocumentArtifact)!.split(/[\\/]/).at(-1)}。` : `Completed ${input.files.find(isDocumentArtifact)!.split(/[\\/]/).at(-1)}.`) : zh ? '已完成这项任务。' : 'The task is complete.'
     : input.status === 'cancelled'
       ? zh ? '任务已取消，已有结果已保留。' : 'The task was cancelled; existing results were retained.'
       : zh ? `任务尚未完成${pending ? `，待完成或核实：${pending}` : ''}。${reason ? `原因：${reason}` : ''}` : `The task is not complete${pending ? `; pending or unverified: ${pending}` : ''}.${reason ? ` ${reason}` : ''}`

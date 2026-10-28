@@ -1,0 +1,13 @@
+{
+  "source": "2026-10-28 production work conversations; sanitized behavioral facts only",
+  "olderDeck": { "path": "senior-basics.pptx", "slides": 12 },
+  "currentDeck": { "path": "introduction.pptx", "slides": 27 },
+  "failures": [
+    "old artifact registration blocked a fresh successful check after regeneration",
+    "a later edit invalidated an earlier Python integration check without a targeted rerun",
+    "a read-only inventory was blocked by a check assigned to its successor",
+    "check_fit.py without argv inspected the older 12-slide deck",
+    "16384 reasoning tokens produced no executable action",
+    "one retryable ECONNRESET stopped the work after completed writes"
+  ]
+}

@@ -41,6 +41,8 @@ export interface ControlledTask extends PlannedTask {
   contextRefs?: string[]
   approvalContextRefs?: string[]
   citationRepairs?: number
+  reasoningRecoveries?: number
+  freshnessRecoveries?: number
   reviewFallbackUsed?: boolean
   lastInvestigationBatch?: string
   ownerLaneId?: string
@@ -91,6 +93,7 @@ const controlledTaskSchema = plannedTaskSchema.extend({
   retainedArtifactVerification: z.boolean().optional(),
   correctionKind: z.enum(['edit', 'verify', 'report']).optional(),
   investigationRounds: z.number().int().min(0).default(0), directedInvestigations: z.number().int().min(0).default(0), progressReviewed: z.boolean().default(false), lastInvestigationBatch: z.string().optional(),
+  reasoningRecoveries: z.number().int().min(0).max(2).optional(), freshnessRecoveries: z.number().int().min(0).max(2).optional(),
   reviewFallbackUsed: z.boolean().optional(), citationRepairs: z.number().int().min(0).max(1).optional(),
   modelCalls: z.number().int().min(0).default(0),
   ownerLaneId: z.string().optional(), delivery: deliverySchema.optional(),

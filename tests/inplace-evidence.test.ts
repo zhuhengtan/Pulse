@@ -95,9 +95,12 @@ it.each([false, true])('accepts Host-observed fixture repair but rejects externa
     const outcome = await run.outcome()
     expect(outcome, outcome.text).toMatchObject({ status: 'succeeded' })
     expect(await run.taskOutcome(), outcome.text).toMatchObject({ status: external ? 'incomplete' : 'accepted' })
-    expect(turns).toBe(3)
+    // External changes trigger bounded verification recovery; the three actual
+    // mutations/check commands must still execute just once.
+    expect(turns).toBe(external ? 5 : 3)
     expect(finalReviews).toBe(1)
     const snapshot = JSON.parse(await readFile(join(root, 'data/conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8')).state.state
+    expect(snapshot.effects.filter(([, effect]: any) => effect.kind === 'tool' && effect.input.name === 'shell.exec' && effect.outcome?.status === 'succeeded')).toHaveLength(2)
     expect(snapshot.results.some(([, result]: any) => (result.value ?? result.summary)?.fileChanges?.operation === 'in-place')).toBe(true)
   } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
 }, process.platform === 'win32' ? 480_000 : 30_000)

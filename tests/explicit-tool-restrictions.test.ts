@@ -1,3 +1,5 @@
+import { z } from 'zod'
+import { defineTool } from '@hunterzhu/pulse-tool-sdk'
 import { expect, it, afterEach, vi } from 'vitest'
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -36,6 +38,7 @@ afterEach(()=>vi.unstubAllGlobals())
 it.each([['ask', 'command'], ['auto', 'command'], ['ask', 'window'], ['auto', 'window']] as const)('rejects an invalid method before approval or execution and lets the model correct it (%s, %s)',async (approvalMode, target)=>{
  const root=await mkdtemp(join(tmpdir(),'pulse-restriction-'))
  let turns=0
+ const corrections:string[]=[]
  vi.stubGlobal('fetch',vi.fn(async(_url,init)=>{
   const {messages}=JSON.parse(String(init?.body)), text=currentRequestText(messages), refs=suppliedRequestResults(messages).map(r=>r.id)
   if(text.includes("You write Pulse's final user-facing reply")) return Response.json({choices:[{message:{content:'The target is not yet established; no observation or command executed.'},finish_reason:'stop'}]})
@@ -44,10 +47,11 @@ it.each([['ask', 'command'], ['auto', 'command'], ['ask', 'window'], ['auto', 'w
   else if(text.includes('Verify ONLY the active')) response={status:'passed',evidenceRefs:refs,note:'Answered without executing commands'}
   else if(text.includes('Independently verify every ORIGINAL')) response={criteria:['criterion-1','criterion-2'].map(criterionId=>({criterionId,status:'passed',evidenceRefs:refs,rationale:'No command executed'}))}
   else if(turns++===0) return Response.json({choices:[{message:{content:'',tool_calls:[{id:'bad-command',function:target === 'window' ? {name:'computer_observe',arguments:JSON.stringify({sessionId:'00000000-0000-4000-8000-000000000001'})} : {name:'shell_exec',arguments:JSON.stringify({command:'node',args:['-e','throw Error("MUST_NOT_EXECUTE")']})}}]},finish_reason:'tool_calls'}]})
-  else { expect(text).toContain(target === 'window' ? 'Missing windowId' : 'USER_TOOL_RESTRICTION');response='The target is not yet established; no observation or command executed.' }
+  else { corrections.push(text);response='The target is not yet established; no observation or command executed.' }
   return Response.json({choices:[{message:{content:typeof response==='string'?response:JSON.stringify(response)},finish_reason:'stop'}]})
  }))
- const host=createLocalHost({cwd:root,dataDir:join(root,'data'),provider:{provider:'openai-compatible',baseURL:'http://127.0.0.1:12345/v1',defaultModel:'fixture'},approvalMode,taskController:true,maxModelCalls:12,jarvis:{enabled:false}})
+ const capability = { manifest: { id: 'computer', version: '1', kind: 'integration' as const, title: 'Computer fixture', description: 'Validation-only observer; execution is forbidden in this test.' }, activate: async () => ({ tools: [defineTool({ name: 'computer.observe', description: 'Observe an explicit window', input: z.object({ sessionId: z.string(), windowId: z.string().optional() }), output: z.any(), sideEffectPolicy: 'read', execute: () => { throw new Error('MUST_NOT_EXECUTE') } })] }) }
+ const host=createLocalHost({capabilityPacks: target === 'window' ? [capability] : [], enabledCapabilityPacks: target === 'window' ? ['computer'] : [], cwd:root,dataDir:join(root,'data'),provider:{provider:'openai-compatible',baseURL:'http://127.0.0.1:12345/v1',defaultModel:'fixture'},approvalMode,taskController:true,maxModelCalls:12,jarvis:{enabled:false}})
  try{
   const c=await host.createConversation(),run=await host.sendMessage(c.id,{text:target === 'window' ? 'Observe the Editor window and report controls. Do not change focus.' : 'Explain the permitted observation method. Do not run commands.'})
   await run.outcome()
@@ -56,5 +60,6 @@ it.each([['ask', 'command'], ['auto', 'command'], ['ask', 'window'], ['auto', 'w
   expect(effects.filter(e=>e.kind==='human')).toHaveLength(0)
   expect(effects.filter(e=>e.kind==='tool')).toHaveLength(0)
   expect(turns).toBe(2)
+  expect(corrections[0]).toContain(target === 'window' ? 'Missing windowId' : 'USER_TOOL_RESTRICTION')
  }finally{await host.close();await rm(root,{recursive:true,force:true})}
 })

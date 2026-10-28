@@ -1,3 +1,4 @@
+import { pythonCheckInputs } from './python-check-inputs.js'
 import { promises as fs } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
@@ -7,7 +8,7 @@ import { FilesystemTool } from '@hunterzhu/pulse-adapters'
 import { candidateScriptCoverage, type CandidateScriptCoverage } from './task-controller/candidate-script-coverage.js'
 
 export interface CheckReceipt {
-  schemaVersion: 1 | 2 | 3
+  schemaVersion: 1 | 2 | 3 | 4
   scope?: { mode: 'explicit' | 'project'; inputs: string[]; coverage: 'declared-inputs' | 'unknown-dynamic' | 'conservative' }
   command: string
   args: string[]
@@ -17,6 +18,8 @@ export interface CheckReceipt {
   environment: { platform: string; node: string }
   stable: boolean
   definitionChanged: boolean
+  readInputs?: string[]
+  unresolvedInputs?: boolean
   candidateScriptCoverage?: CandidateScriptCoverage[]
 }
 const baseName = (token: string) => token.replace(/^.*[/\\]/, '').toLowerCase().replace(/\.(?:exe|cmd|bat|ps1)$/, '')
@@ -314,7 +317,7 @@ export async function assertCheckEdit(root: string, store: string, path: string,
 }
 
 /** Named checks include their local import closure. Project scripts use a conservative source tree. */
-export async function captureCheck(root: string, cwd: string, command: string, args: string[], allDefinitions = false, version: 1 | 2 | 3 = 2, savedScope?: CheckReceipt['scope']): Promise<CheckReceipt> {
+export async function captureCheck(root: string, cwd: string, command: string, args: string[], allDefinitions = false, version: 1 | 2 | 3 | 4 = 2, savedScope?: CheckReceipt['scope']): Promise<CheckReceipt> {
   root = await fs.realpath(root)
   cwd = await fs.realpath(cwd)
   const files = new FilesystemTool(root), versions: Record<string, string> = {}, definitions: Record<string, string> = {}
@@ -329,7 +332,7 @@ export async function captureCheck(root: string, cwd: string, command: string, a
   }
   // unittest accepts dotted module selectors rather than file operands.
   // Resolve only whole local modules; method selectors/flags remain conservative.
-  if (version === 3 && !savedScope && /(?:^|[/\\])python3?$/.test(command) && args[0] === '-m' && args[1] === 'unittest') {
+  if (version >= 3 && !savedScope && /(?:^|[/\\])python3?$/.test(command) && args[0] === '-m' && args[1] === 'unittest') {
     for (const arg of args.slice(2)) if (/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(arg)) {
       const path = resolve(cwd, arg.replaceAll('.', '/') + '.py')
       if ((await fs.stat(path).catch(() => undefined))?.isFile()) directInputs.push(path)
@@ -345,7 +348,7 @@ export async function captureCheck(root: string, cwd: string, command: string, a
     // run data. A broad filesystem walk otherwise freezes old Runtime snapshots.
     let inventory: string | undefined
     try {
-      if (version === 3) {
+      if (version >= 3) {
         const top = (await promisify(execFile)('git', ['rev-parse', '--show-toplevel'], { cwd, timeout: 10_000 })).stdout.trim()
         if (relative(root, top).startsWith('..')) throw Object.assign(new Error('parent repository is not a git repository for this workspace'), { stderr: 'not a git repository' })
       }
@@ -373,6 +376,8 @@ export async function captureCheck(root: string, cwd: string, command: string, a
     }
   }
   for (const name of ['package.json', 'pnpm-lock.yaml', 'package-lock.json', 'tsconfig.json']) pending.push(join(cwd, name))
+  const readInputs = new Set<string>()
+  let unresolvedInputs = false
   let bytes = 0
   while (pending.length) {
     const path = pending.pop()!, key = relative(root, path).replaceAll('\\', '/')
@@ -385,6 +390,18 @@ export async function captureCheck(root: string, cwd: string, command: string, a
     try { const read = await files.readLimited(path, 1_000_000); if (read.truncated) throw Object.assign(new Error('Check input exceeds per-file manifest bound.'), { code: 'CHECK_SCOPE_TOO_LARGE' }); text = read.content } catch (e) { if ((e as { code?: string }).code === 'ENOENT') continue; throw e }
     bytes += Buffer.byteLength(text)
     if (bytes > 64 * 1024 * 1024) throw Object.assign(new Error('Check manifest exceeds byte budget.'), { code: 'CHECK_SCOPE_TOO_LARGE' })
+    if (version >= 4 && path.endsWith('.py') && /(?:^|[/\\])python3?$/.test(command)) {
+      const scriptIndex = args.findIndex(arg => /\.py$/.test(arg))
+      const entry = scriptIndex >= 0 && relative(root, resolve(cwd, args[scriptIndex]!)).replaceAll('\\', '/') === key
+      const inputs = await pythonCheckInputs(command, text, scriptIndex >= 0 ? args.slice(scriptIndex) : [path], entry)
+      unresolvedInputs ||= inputs.unknown
+      for (const input of inputs.paths) {
+        const target = resolve(cwd, input), rel = relative(root, target).replaceAll('\\', '/')
+        if (rel === '..' || rel.startsWith('../')) { unresolvedInputs = true; continue }
+        readInputs.add(rel)
+        if (!versions[rel]) pending.push(target)
+      }
+    }
     versions[key] = hash(text)
     if (/(?:test|spec|check|verify|lint)/i.test(key)) definitions[key] = versions[key]!
     if (/(?:^|[/\\])package\.json$/.test(key)) {
@@ -392,7 +409,7 @@ export async function captureCheck(root: string, cwd: string, command: string, a
       const script = args.filter(arg => !arg.startsWith('-')); const selected = script[0] === 'run' ? script[1] : script[0]
       for (const [name, scriptCommand] of Object.entries(body.scripts ?? {})) if (allDefinitions || /^(?:npm|pnpm|yarn|bun)$/.test(command) && name === selected) definitions[`${key}#scripts:${name}`] = hash(scriptCommand)
     }
-    if (version === 3 && path.endsWith('.py')) for (const match of text.matchAll(/^\s*(?:from\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+import|import\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*))/gm)) {
+    if (version >= 3 && path.endsWith('.py')) for (const match of text.matchAll(/^\s*(?:from\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+import|import\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*))/gm)) {
       const module = (match[1] ?? match[2]!).replaceAll('.', '/')
       for (const candidate of [resolve(cwd, module + '.py'), resolve(root, module + '.py'), resolve(cwd, module, '__init__.py')]) {
         if ((await fs.stat(candidate).catch(() => undefined))?.isFile()) { pending.push(candidate); break }
@@ -405,7 +422,7 @@ export async function captureCheck(root: string, cwd: string, command: string, a
       }
     }
   }
-  return { schemaVersion: version, ...(version >= 2 ? { scope } : {}), command, args, cwd: relative(root, cwd) || '.', files: versions, definitions, environment: { platform: process.platform, node: process.version }, stable: true, definitionChanged: false }
+  return { schemaVersion: version, ...(version >= 4 ? { readInputs: [...readInputs].sort(), unresolvedInputs } : {}), ...(version >= 2 ? { scope } : {}), command, args, cwd: relative(root, cwd) || '.', files: versions, definitions, environment: { platform: process.platform, node: process.version }, stable: true, definitionChanged: false }
 }
 
 /** First observed check definition is frozen in Host data, never in the agent workspace. */
@@ -463,7 +480,7 @@ export async function finishCheck(root: string, before: CheckReceipt, store?: st
   return before
 }
 
-export async function freezeCheckDefinitions(root: string, store: string, allowTestAdditions = false, allowCandidateChanges = true, version: 2 | 3 = 2): Promise<void> {
+export async function freezeCheckDefinitions(root: string, store: string, allowTestAdditions = false, allowCandidateChanges = true, version: 2 | 3 | 4 = 2): Promise<void> {
   try { await fs.access(join(store, 'original.json')); return } catch { /* New run. */ }
   const receipt = await captureCheck(root, root, 'node', ['--test'], true, version)
   await fs.mkdir(store, { recursive: true })

@@ -78,8 +78,17 @@ it.each(['unchanged', 'before-stage', 'during-stage', 'during-final'])('verifies
     expect(await run.taskOutcome()).toMatchObject({ status: change === 'unchanged' ? 'accepted' : 'incomplete' })
     const state = JSON.parse(await readFile(join(cwd, 'data/conversations', conversation.id, 'runs', run.id, 'task-controller.json'), 'utf8'))
     if (change !== 'unchanged') expect(state.tasks[0].note).toContain('EVIDENCE_CHANGED')
-    expect(plans).toBe(1); expect(work).toBe(2)
-    expect(stageReviews).toBe(change === 'before-stage' ? 0 : 1)
+    expect(plans).toBe(1)
+    if (change === 'unchanged') { expect(work).toBe(2); expect(stageReviews).toBe(1) }
+    else {
+      // New runs recheck only the changed evidence, at most twice. Repeated
+      // external mutation still cannot pass or authorize replaying the edit.
+      expect(state.tasks[0].freshnessRecoveries).toBe(2)
+      expect(work).toBeGreaterThan(2); expect(work).toBeLessThanOrEqual(6)
+      expect(stageReviews).toBe(change === 'before-stage' ? 0 : 1)
+      const snapshot = JSON.parse(await readFile(join(cwd, 'data/conversations', conversation.id, 'runs', run.id, 'runtime.json'), 'utf8'))
+      expect(snapshot.state.state.effects.filter(([, e]: any) => e.kind === 'tool' && e.input.name === 'fs.write')).toHaveLength(1)
+    }
     expect(await readFile(join(cwd, 'greeting.txt'), 'utf8')).toBe(change === 'unchanged' ? 'ready' : `external change ${change === 'before-stage' ? 'before stage' : change === 'during-stage' ? 'during stage' : 'during final'} verifier`)
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
 })
