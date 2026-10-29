@@ -1,4 +1,4 @@
-import type { ModelDefinition } from '@hunterzhu/pulse-server'
+import { overlayBuiltinPlugins, readMergedHostConfig, type ModelDefinition } from '@hunterzhu/pulse-server'
 import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -93,6 +93,7 @@ export interface PulseCliConfig {
   /** Explicit network destinations; workspace configuration cannot grant these. */
   networkHosts?: string[]
   /** Host-owned search service; never accepted from workspace config. */
+  builtinPlugins?: import('@hunterzhu/pulse-server').BuiltinPluginsConfig
   webSearch?: import('@hunterzhu/pulse-server').WebSearchConfig
   allowNetwork?: boolean
   jarvis?: PulseCliJarvisConfig
@@ -252,17 +253,23 @@ export function mergePulseConfigs(layers: Array<{ value: PulseCliConfig; trust: 
         ...(previous?.models === undefined && profile.models === undefined ? {} : { models: { ...previous?.models, ...profile.models } }),
       }
     }
+    const builtinPlugins = overlayBuiltinPlugins(merged.builtinPlugins, value.builtinPlugins)
     merged = {
       ...merged,
       ...value,
       ...(merged.providers === undefined && value.providers === undefined ? {} : { providers }),
       ...(merged.models === undefined && value.models === undefined ? {} : { models: { ...merged.models, ...value.models } }),
+      ...(builtinPlugins ? { builtinPlugins } : {}),
     }
   }
   return merged
 }
 
-export async function loadPulseConfig(cwd: string, explicitPath?: string, trustWorkspace = false): Promise<{ value: PulseCliConfig; source?: string }> {
+export async function loadPulseConfig(cwd: string, explicitPath?: string, trustWorkspace = false, scope: 'all' | 'host' = 'all'): Promise<{ value: PulseCliConfig; source?: string }> {
+  if (scope === 'host') {
+    const read = readMergedHostConfig(explicitPath)
+    return { value: read.config as PulseCliConfig, ...(read.source ? { source: read.source } : {}) }
+  }
   const workspacePath = join(cwd, '.pulse', 'config.json')
   const homePath = defaultPulseConfigPath()
   const envPath = expandHome(process.env.PULSE_CONFIG)
@@ -278,7 +285,7 @@ export async function loadPulseConfig(cwd: string, explicitPath?: string, trustW
       const parsed = asConfig(JSON.parse(await readFile(path, 'utf8')))
       if (parsed) {
         // Search endpoints and credentials are host-owned even when other workspace fields are trusted.
-        if (workspaceLayer) delete parsed.webSearch
+        if (workspaceLayer) { delete parsed.webSearch; delete parsed.builtinPlugins }
         layers.push({ value: parsed, trust, source: path })
       }
     } catch { /* absent or invalid config is reported by doctor */ }

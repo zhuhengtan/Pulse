@@ -35,7 +35,7 @@ describe('provider presets and discovery', () => {
     expect(resolveProviderVariant('volcengine', 'coding').variant.baseURL).not.toEqual(resolveProviderVariant('volcengine', 'api').variant.baseURL)
   })
   it.each([
-    { id: 'text-embedding-3-small' }, { id: 'vendor/reranker' }, { id: 'picture', architecture: { output_modalities: ['image'] } }, { id: 'voice', sub_type: 'speech-to-text' },
+    { id: 'text-embedding-3-small' }, { id: 'vendor/reranker' }, { id: 'voice', sub_type: 'speech-to-text' },
   ])('excludes non-conversation models: %j', item => { expect(normalizeDiscoveredModel(item)).toBeUndefined() })
   it('keeps unknown abilities unknown and imports authoritative capability metadata', () => {
     expect(normalizeDiscoveredModel({ id: 'plain' })).toMatchObject({ tools: 'unknown', structuredOutput: 'unknown', imageInput: 'unknown' })

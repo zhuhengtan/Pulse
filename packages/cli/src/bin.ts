@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { installProcessDiagnostics, createLocalHost, automationDoctor, requestAutomationPermissions, assertJarvisApiUrl, createBuiltinSkillCapabilityPack, createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
-import { modelSelectionId, normalizeModelConfig, resolveModelReference, resolveProviderApiKey, resolveWebSearchOptions } from '@hunterzhu/pulse-server'
+import { modelSelectionId, normalizeModelConfig, resolveModelReference, resolveProviderApiKey, resolveWebSearchOptions, parseBuiltinPlugins } from '@hunterzhu/pulse-server'
 import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
 import { runOneShot } from './commands/run.js'
@@ -213,6 +213,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const configuredModelEntry = selections.find(item => item.id === activeModelName)
   if (!configuredModelEntry) throw new Error(`UNKNOWN_MODEL_DISPLAY_NAME:${requestedModel}`)
   const modelSelection = configuredModelEntry.model
+  if (modelSelection.purposes && !modelSelection.purposes.includes('chat')) throw new Error('MODEL_CHAT_PURPOSE_REQUIRED')
   if (modelSelection.tools === 'unsupported') throw new Error('MODEL_AGENT_TOOLS_UNSUPPORTED')
   const providerName = configuredModelEntry.providerId
   const profile = effectiveProviders[providerName]
@@ -228,6 +229,10 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const maxRuntimeMs = option(parsed.options, 'max-runtime-ms') ?? process.env.PULSE_MAX_RUNTIME_MS
   const autoCompactPercent = option(parsed.options, 'auto-compact-percent') ?? process.env.PULSE_AUTO_COMPACT_PERCENT
   const resolvedKeys = Object.fromEntries(await Promise.all(Object.entries(effectiveProviders).map(async ([id, source]) => [id, await resolveProviderApiKey(source, credentialConfigPath)] as const)))
+  // Model references used by host plugins must never inherit workspace endpoint
+  // or credential fields, including the fallback used if the host file disappears.
+  const pluginHostConfig = normalizeModelConfig((await loadPulseConfig(requestedCwd ?? process.cwd(), explicitConfig, false, 'host')).value)
+  const builtinPlugins = parseBuiltinPlugins(pluginHostConfig.builtinPlugins, pluginHostConfig)
   const webSearch = await resolveWebSearchOptions(config.webSearch, credentialConfigPath)
   const apiKey = resolvedKeys[providerName]
   const parsePositiveInteger = (value: string | undefined): number | undefined => {
@@ -269,7 +274,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     }]]
   }))
   for (const selection of selections) if (selection.model.imageInput !== undefined && !['supported','unsupported','unknown'].includes(selection.model.imageInput)) throw new Error(`INVALID_MODEL_IMAGE_INPUT:${selection.id}`)
-  const providerModels: NonNullable<LocalHostOptions['providerModels']> = Object.fromEntries(selections.map(({ id, providerId, model }) => [id, {
+  const providerModels: NonNullable<LocalHostOptions['providerModels']> = Object.fromEntries(selections.filter(({ model }) => !model.purposes || model.purposes.includes('chat')).map(({ id, providerId, model }) => [id, {
       provider: providerId,
       model: model.modelCode,
       ...(model.remote === true ? { remote: true } : {}),
@@ -466,6 +471,9 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(configuredAutoCompactPercent === undefined ? {} : { autoCompactPercent: Math.min(90, configuredAutoCompactPercent) }),
     ...(allowNetwork === undefined ? {} : { allowNetwork }),
     ...(config.networkHosts === undefined ? {} : { networkHosts: config.networkHosts }),
+    builtinPluginConfigPath: resolve(explicitConfig ?? expandHome(process.env.PULSE_CONFIG) ?? defaultPulseConfigPath()),
+    ...(parsed.options['no-network'] === true ? { builtinPluginNetworkOverride: false } : parsed.options['allow-network'] === true || process.env.PULSE_ALLOW_NETWORK === '1' ? { builtinPluginNetworkOverride: true } : {}),
+    builtinPluginConfig: { allowNetwork: pluginHostConfig.allowNetwork, builtinPlugins, providers: pluginHostConfig.providers, webSearch: pluginHostConfig.webSearch },
     ...(webSearch ? { webSearch } : {}),
     jarvis,
     ...(config.frontModel ? { frontModel: (() => {

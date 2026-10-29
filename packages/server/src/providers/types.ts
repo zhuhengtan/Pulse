@@ -1,5 +1,6 @@
 export type CapabilityStatus = 'supported' | 'unsupported' | 'unknown'
 export interface DiscoveredModel {
+  purposes?: import('../model-config.js').ModelDefinition['purposes']
   modelCode: string
   displayName: string
   maxContextTokens?: number

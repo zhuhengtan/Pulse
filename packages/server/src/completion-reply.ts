@@ -32,7 +32,7 @@ export async function currentCompletionArtifacts(runtime: PulseRuntime, refs: st
     const effect = result?.producer?.kind === 'effect' ? runtime.state.effects.get(result.producer.id) : undefined
     if (result?.privacy !== 'public' || result.privacyTaints?.length || effect?.kind !== 'tool' || effect.outcome?.status !== 'succeeded' || !value || typeof value !== 'object' || Array.isArray(value)) continue
     const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input : {}
-    if (input.name === 'artifact.record' && typeof value.path === 'string' && typeof value.hash === 'string') outputs.set(resolve(root, value.path), value.hash)
+    if (['artifact.record', 'image.generate', 'video.generate', 'audio.generate'].includes(String(input.name)) && typeof value.path === 'string' && typeof value.hash === 'string') outputs.set(resolve(root, value.path), value.hash)
     const receipt = value.checkReceipt
     if (value.code !== 0 || value.aborted || value.timedOut || value.truncated || !receipt || typeof receipt !== 'object' || Array.isArray(receipt) || receipt.stable !== true || receipt.definitionChanged !== false || receipt.unresolvedInputs === true) continue
     const files = receipt.files
@@ -63,7 +63,7 @@ export function completionFilePaths(runtime: PulseRuntime, refs: string[], root:
       continue
     }
     if (body.changed === false) continue
-    if (!['fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.move', 'plan.write', 'fs.stage'].includes(String(input.name))) continue
+    if (!['fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.move', 'plan.write', 'fs.stage', 'image.generate', 'video.generate', 'audio.generate'].includes(String(input.name))) continue
     if (input.name === 'fs.stage' && body.committed !== true) continue
     const path = body.path ?? body.target ?? body.destination
     if (typeof path === 'string') paths.push(resolve(root, path))

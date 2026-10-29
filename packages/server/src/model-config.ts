@@ -1,4 +1,6 @@
 export interface ModelDefinition {
+  /** Missing means legacy chat model; input vision is a separate capability. */
+  purposes?: Array<'chat' | 'image' | 'video' | 'speech' | 'music' | 'sound'> | undefined
   remote?: boolean
   tools?: 'supported' | 'unsupported' | 'unknown'
   structuredOutput?: 'supported' | 'unsupported' | 'unknown'
@@ -45,6 +47,9 @@ export function parseModelSelectionId(value: string): { providerId: string; mode
 /** Normalize legacy flat model entries and inline feature models without mutating the caller's config. */
 export function normalizeModelConfig<T extends Record<string, any>>(input: T): T {
   const config: ModelConfig = structuredClone(input)
+  for (const provider of Object.values(config.providers ?? {}) as any[]) for (const model of Object.values(provider.models ?? {}) as any[]) {
+    if (model.purposes !== undefined && (!Array.isArray(model.purposes) || !model.purposes.length || model.purposes.some((p: unknown) => !['chat','image','video','speech','music','sound'].includes(String(p))))) throw new Error('MODEL_PURPOSE_INVALID')
+  }
   const providers: Record<string, any> = config.providers ?? (config.providers = {})
   const aliases = new Map<string, string[]>()
   const addAlias = (alias: unknown, id: string) => {

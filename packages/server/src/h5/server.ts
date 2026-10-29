@@ -1,3 +1,5 @@
+import { pluginDraft, parseBuiltinPlugins, connections, pluginEnabled, readHostSurface, type PluginId } from '../builtin-plugins/config.js'
+import { safeError } from '../builtin-plugins/http.js'
 import { webSearchDraft } from '../web-search-config.js'
 import { resolveWebSearchOptions, searchWeb } from '../web-search.js'
 import { assistantReferenceSchema } from '../assistant-chat-context.js'
@@ -187,6 +189,7 @@ export class H5Server {
   private updateRequests = 0
   private updateTransition = false
   private updateMessages = (message: unknown) => { if ((message as { type?: string })?.type === 'update-resume') { this.maintenance = false; this.updateTransition = false; void this.pumpAssistantInbox() } }
+  private stopPluginRecovery: (() => void) | undefined
   private stopping = false
   private jarvisSyncTimer: NodeJS.Timeout | undefined
   private readonly chatSockets = new WebSocketServer({ noServer: true, maxPayload: MAX_ATTACHMENT_REQUEST })
@@ -230,6 +233,7 @@ export class H5Server {
     this.workspaces = new H5WorkspaceManager(options.dataDir)
     this.assistantInbox = new AssistantConversationStore(options.dataDir, this.host.conversationData)
     this.configuration = options.configuration
+    if (options.configuration) this.host.setBuiltinPluginConfigPath(resolve(options.configuration.path))
     this.workWorker = options.workWorker
     this.host.setAssistantWorkTools({
       start: (projectId, task) => this.startWorkFromAssistant(projectId, task),
@@ -263,7 +267,9 @@ export class H5Server {
   private async validateConfigCandidate(config: Record<string, unknown>): Promise<{ text: string; options: LocalHostOptions }> {
     if (!this.configuration) throw new Error('CONFIGURATION_UNAVAILABLE')
     const search = webSearchDraft(config.webSearch)
-    const normalizedConfig: Record<string, unknown> = normalizeModelConfig({ ...config, ...(search.config ? { webSearch: search.config } : {}) })
+    const plugins = pluginDraft(config.builtinPlugins)
+    const normalizedConfig: Record<string, unknown> = normalizeModelConfig({ ...config, ...(plugins.config ? { builtinPlugins: plugins.config } : {}), ...(search.config ? { webSearch: search.config } : {}) })
+    parseBuiltinPlugins(normalizedConfig.builtinPlugins, normalizedConfig)
     for (const source of Object.values(normalizedConfig.providers ?? {}) as Array<Record<string, unknown>>) {
       if ('apiKey' in source) throw new Error('PROVIDER_INLINE_KEY_FORBIDDEN')
     }
@@ -274,7 +280,7 @@ export class H5Server {
       await writeFile(temporary, text, { flag: 'wx', mode: 0o600 })
       await chmod(temporary, 0o600)
       const options = await this.configuration.prepare(temporary)
-      return { text, options: { ...options, skillConfigPath: resolve(this.configuration.path) } }
+      return { text, options: { ...options, skillConfigPath: resolve(this.configuration.path), builtinPluginConfigPath: resolve(this.configuration.path) } }
     } finally { await rm(temporary, { force: true }).catch(() => undefined) }
   }
 
@@ -297,6 +303,7 @@ export class H5Server {
     } finally { await rm(temporary, { force: true }).catch(() => undefined) }
   }
 
+  private hostSurface() { return readHostSurface(this.configuration?.path, this.host.launchNetworkOverride()) }
   private configSources(): Record<string, unknown> {
     const vars = ['PULSE_CONFIG', 'PULSE_DATA_DIR', 'PULSE_MODEL', 'PULSE_APPROVAL_MODE', 'PULSE_MAX_TURNS', 'PULSE_MAX_MODEL_CALLS', 'PULSE_MAX_RUNTIME_MS', 'PULSE_AUTO_COMPACT_PERCENT', 'PULSE_ALLOW_NETWORK', 'PULSE_JARVIS_ENABLED', 'PULSE_JARVIS_API_URL', 'PULSE_FRONT_MODEL']
     return Object.fromEntries(vars.filter(name => process.env[name] !== undefined).map(name => [name, { source: 'environment', active: true }]))
@@ -329,6 +336,7 @@ export class H5Server {
     await this.acquireService()
     try {
     await this.auth.init()
+    this.stopPluginRecovery = await this.host.builtinPluginJobs.recoverPending()
     const assistantId = await this.assistantInbox.init(async () => (await this.host.createConversation({ title: 'Pulse 助理' })).id)
     for (const message of this.assistantInbox.transcript(true)) {
       await this.host.appendAssistantUserMessage(assistantId, { id: `msg-${message.requestId}`, runId: message.runId, text: message.text, createdAt: message.createdAt, ...(message.attachments ? { attachments: message.attachments } : {}), ...(message.skills ? { skills: message.skills } : {}), ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}), ...(message.assistantContext ? { assistantContext: message.assistantContext } : {}) })
@@ -401,6 +409,7 @@ export class H5Server {
   }
 
   async stop(): Promise<void> {
+    this.stopPluginRecovery?.(); this.stopPluginRecovery = undefined
     this.updates.stop(); process.off('message', this.updateMessages)
     await this.filePreviews.close()
     this.stopping = true
@@ -1420,7 +1429,7 @@ export class H5Server {
             const provider = { ...previous, ...connection.provider, models: mergeDiscoveredModels(previous?.models ?? {}, models as NonNullable<typeof models[number]>[], input.modelCode ? onboarding.verification(connection.provider, connection.apiKey, input.modelCode) : undefined) }
             if (body.setDefault === true) {
               const selected = Object.entries(provider.models as Record<string, ModelDefinition>).find(([, value]) => value.modelCode === input.modelCode)
-              if (!selected || selected[1].tools === 'unsupported') throw new Error('PROVIDER_AGENT_MODEL_REQUIRED')
+              if (!selected || selected[1].tools === 'unsupported' || selected[1].purposes && !selected[1].purposes.includes('chat')) throw new Error('PROVIDER_AGENT_MODEL_REQUIRED')
               current.activeModel = `${providerId}/${selected[0]}`
             }
             const credentials = new ProviderCredentialStore(this.configuration!.path)
@@ -1472,7 +1481,7 @@ export class H5Server {
       const profile = providerId && parsed.providers && typeof parsed.providers === 'object' ? (parsed.providers as Record<string, unknown>)[providerId] : undefined
       const profileRecord = profile && typeof profile === 'object' && !Array.isArray(profile) ? profile as Record<string, unknown> : undefined
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify({ path: this.configuration.path, version: configVersion(raw), config: maskConfigSecrets(parsed), sources: this.configSources(), environment: Object.fromEntries([...envNames].map(name => [name, Boolean(process.env[name])])), active: { model: this.host.getModel(), provider: this.host.getProvider(), assistant: { id: modelId, model: typeof modelRecord?.modelCode === 'string' ? modelRecord.modelCode : this.host.getModel(), name: typeof modelRecord?.displayName === 'string' ? modelRecord.displayName : modelId, provider: typeof profileRecord?.name === 'string' ? profileRecord.name : typeof profileRecord?.provider === 'string' ? profileRecord.provider : providerId } }, backupAvailable: await access(`${this.configuration.path}.bak`).then(() => true, () => false) }))
+      res.end(JSON.stringify({ path: this.configuration.path, version: configVersion(raw), config: maskConfigSecrets(parsed), host: this.hostSurface(), sources: this.configSources(), launchNetwork: { override: this.host.launchNetworkOverride() ?? null }, environment: Object.fromEntries([...envNames].map(name => [name, Boolean(process.env[name])])), active: { model: this.host.getModel(), provider: this.host.getProvider(), assistant: { id: modelId, model: typeof modelRecord?.modelCode === 'string' ? modelRecord.modelCode : this.host.getModel(), name: typeof modelRecord?.displayName === 'string' ? modelRecord.displayName : modelId, provider: typeof profileRecord?.name === 'string' ? profileRecord.name : typeof profileRecord?.provider === 'string' ? profileRecord.provider : providerId } }, backupAvailable: await access(`${this.configuration.path}.bak`).then(() => true, () => false) }))
       return
     }
 
@@ -1485,15 +1494,43 @@ export class H5Server {
         const body = await this.parseJsonBody(req)
         if (!body.config || typeof body.config !== 'object' || Array.isArray(body.config)) throw new Error('WEB_SEARCH_CONFIG_INVALID')
         const draft = body.config as Record<string, unknown>
-        if (draft.allowNetwork !== true) throw new Error('WEB_SEARCH_NETWORK_DISABLED')
+        const networkOverride = this.host.launchNetworkOverride()
+        if ((networkOverride === undefined ? draft.allowNetwork !== true : networkOverride !== true)) throw new Error('WEB_SEARCH_NETWORK_DISABLED')
+        if (this.host.builtinPluginJobs.config().builtinPlugins?.web_search?.enabled === false || (draft.builtinPlugins as any)?.web_search?.enabled === false) throw new Error('PLUGIN_DISABLED')
         const { config, token } = webSearchDraft(draft.webSearch)
         const options = await resolveWebSearchOptions(config, this.configuration?.path ?? join(this.dataDir, 'config.json'))
         const result = await searchWeb(typeof body.query === 'string' ? body.query : 'Pulse', 5, controller.signal, options ? { ...options, ...(token !== undefined ? { apiKey: token } : {}) } : undefined)
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
       } catch (error) {
-        const message = error instanceof Error && /^(WEB_SEARCH_|SEARCH_PROVIDER_|PROVIDER_CREDENTIAL_)/.test(error.message) ? error.message : 'WEB_SEARCH_TEST_FAILED'
+        const message = error instanceof Error && /^(PLUGIN_|WEB_SEARCH_|SEARCH_PROVIDER_|PROVIDER_CREDENTIAL_)/.test(error.message) ? error.message : 'WEB_SEARCH_TEST_FAILED'
         res.writeHead(400, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ error: message }))
       } finally { res.off('close', cancel) }
+      return
+    }
+
+    if (pathname === '/api/builtin-plugins/jobs' && method === 'GET') {
+      if (!localAdmin) { res.writeHead(403).end(); return }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ jobs: await this.host.builtinPluginJobs.publicJobs() })); return
+    }
+    const pluginArtifact = pathname.match(/^\/api\/builtin-plugins\/jobs\/([a-f0-9]{64})\/artifact$/)
+    if (pluginArtifact && method === 'GET') {
+      if (!localAdmin) { res.writeHead(403).end(); return }
+      const job = await this.host.builtinPluginJobs.read(pluginArtifact[1]!)
+      if (!job?.output) { res.writeHead(404).end(); return }
+      sendPreviewBytes(res, await readPreviewFile(job.root, job.output.path, job.output.hash), url.searchParams.get('download') === '1', req.headers.range); return
+    }
+    const pluginTest = pathname.match(/^\/api\/config\/builtin-plugins\/(image|video|speech|music|sound)\/test$/)
+    if (pluginTest && method === 'POST') {
+      if (!localAdmin || !requireSameOrigin()) { res.writeHead(403).end(); return }
+      const controller = new AbortController(); const abort = () => { if (!res.writableEnded) controller.abort() }; res.once('close', abort)
+      try {
+        const body = await this.parseJsonBody(req)
+        if (typeof body.prompt !== 'string' || !body.prompt.trim() || body.prompt.length > 20000) throw new Error('PLUGIN_INPUT_INVALID')
+        const testRoot = join(this.dataDir, 'media-tests'); await mkdir(testRoot, { recursive: true })
+        const result = await this.host.builtinPluginJobs.generate(testRoot, 'settings-test-' + randomUUID(), randomUUID(), pluginTest[1] as any, { prompt: body.prompt }, controller.signal, () => {})
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ ...result, previewURL: '/api/builtin-plugins/jobs/' + result.jobId + '/artifact' }))
+      } catch (error) { if (!res.destroyed) res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: safeError(error) })) }
+      finally { res.off('close', abort) }
       return
     }
 
@@ -1520,17 +1557,28 @@ export class H5Server {
       const body = await this.parseJsonBody(req)
       if (!this.configuration || typeof body.version !== 'string' || !body.config || typeof body.config !== 'object' || Array.isArray(body.config)) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'CONFIG_SAVE_INVALID' })); return }
       try {
-        const result = await this.withConfigWriteLock(async () => {
+        const result = await this.withConfigWriteLock(() => this.host.builtinPluginJobs.lock(async () => {
           const raw = await this.configText()
           if (configVersion(raw) !== body.version) throw new Error('CONFIG_VERSION_CONFLICT')
           const candidate = preserveConfigSecrets(this.parseConfig(raw), body.config as Record<string, unknown>)
           const search = webSearchDraft(candidate.webSearch)
           // Validate before writing a credential. Transient tokens never enter a temporary config or backup.
           let prepared = await this.validateConfigCandidate(candidate)
+          const createdCredentials: string[] = []
           let createdCredential: string | undefined
           let persisted = false
           const credentials = new ProviderCredentialStore(this.configuration!.path)
           try {
+            const draftPlugins = pluginDraft(candidate.builtinPlugins)
+            if (draftPlugins.config) {
+              for (const { kind, connection } of connections(draftPlugins.config)) {
+                const token = draftPlugins.tokens.get(kind)
+                if (token) { const ref = await credentials.add(token); createdCredentials.push(ref); connection.credentialRef = ref }
+              }
+              candidate.builtinPlugins = draftPlugins.config
+              prepared = await this.validateConfigCandidate(candidate)
+            }
+            const cancelJobs = await this.host.builtinPluginJobs.disabling(this.parseConfig(raw), JSON.parse(prepared.text), body.pluginDisableDecisions as Partial<Record<PluginId, 'cancel' | 'finish'>> | undefined)
             if (search.config) {
               if (search.token) {
                 createdCredential = await credentials.add(search.token)
@@ -1541,18 +1589,19 @@ export class H5Server {
             if (configVersion(await this.configText()) !== body.version) throw new Error('CONFIG_VERSION_CONFLICT')
             await this.replaceConfig(prepared.text)
             persisted = true
+            const cancellationWarnings = await this.host.builtinPluginJobs.cancel(cancelJobs)
             // Unchanged config fields must not erase a launch-time safety override.
             const runtimeOptions = candidate.approvalMode === this.parseConfig(raw).approvalMode
               ? { ...prepared.options, approvalMode: this.host.getAutomationOptions().approvalMode }
               : prepared.options
             const applied = this.host.applyLiveOptions(runtimeOptions)
-            return { path: this.configuration!.path, version: configVersion(prepared.text), applied: applied.applied, restartRequired: applied.restartRequired, config: maskConfigSecrets(JSON.parse(prepared.text) as Record<string, unknown>) }
-          } finally { if (createdCredential && !persisted) await credentials.remove(createdCredential) }
-        })
+            return { path: this.configuration!.path, version: configVersion(prepared.text), applied: applied.applied, restartRequired: applied.restartRequired, cancellationWarnings, config: maskConfigSecrets(JSON.parse(prepared.text) as Record<string, unknown>), host: this.hostSurface() }
+          } finally { if (!persisted) { if (createdCredential) await credentials.remove(createdCredential); for (const ref of createdCredentials) await credentials.remove(ref) } }
+        }))
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ ok: true, ...result }))
       } catch (error) {
         const message = error instanceof Error ? error.message.slice(0, 240) : 'CONFIG_INVALID'
-        res.writeHead(message === 'CONFIG_VERSION_CONFLICT' ? 409 : 400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message }))
+        res.writeHead(['CONFIG_VERSION_CONFLICT', 'PLUGIN_ACTIVE_JOBS'].includes(message) ? 409 : 400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message }))
       }
       return
     }
@@ -1562,20 +1611,22 @@ export class H5Server {
       const body = await this.parseJsonBody(req)
       if (!this.configuration || typeof body.version !== 'string') { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'CONFIG_RESTORE_INVALID' })); return }
       try {
-        const result = await this.withConfigWriteLock(async () => {
+        const result = await this.withConfigWriteLock(() => this.host.builtinPluginJobs.lock(async () => {
           const raw = await this.configText()
           if (configVersion(raw) !== body.version) throw new Error('CONFIG_VERSION_CONFLICT')
           const candidate = this.parseConfig(await readFile(`${this.configuration!.path}.bak`, 'utf8'))
           const prepared = await this.validateConfigCandidate(candidate)
           if (configVersion(await this.configText()) !== body.version) throw new Error('CONFIG_VERSION_CONFLICT')
+          const cancelled = await this.host.builtinPluginJobs.disabling(this.parseConfig(raw), JSON.parse(prepared.text), body.pluginDisableDecisions as any)
           await this.replaceConfig(prepared.text)
+          const cancellationWarnings = await this.host.builtinPluginJobs.cancel(cancelled)
           const applied = this.host.applyLiveOptions(prepared.options)
-          return { path: this.configuration!.path, version: configVersion(prepared.text), applied: applied.applied, restartRequired: applied.restartRequired, config: maskConfigSecrets(JSON.parse(prepared.text) as Record<string, unknown>) }
-        })
+          return { path: this.configuration!.path, version: configVersion(prepared.text), applied: applied.applied, restartRequired: applied.restartRequired, cancellationWarnings, config: maskConfigSecrets(JSON.parse(prepared.text) as Record<string, unknown>), host: this.hostSurface() }
+        }))
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ ok: true, ...result }))
       } catch (error) {
         const message = error instanceof Error ? error.message.slice(0, 240) : 'CONFIG_RESTORE_FAILED'
-        res.writeHead(message === 'CONFIG_VERSION_CONFLICT' ? 409 : 400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message }))
+        res.writeHead(['CONFIG_VERSION_CONFLICT', 'PLUGIN_ACTIVE_JOBS'].includes(message) ? 409 : 400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message }))
       }
       return
     }
@@ -1652,7 +1703,7 @@ export class H5Server {
         if (!project) { res.writeHead(404).end(); return }
         const path = url.searchParams.get('path') ?? ''
         const value = await readPreviewFile(project.cwd, path)
-        if (projectPreview[2] === 'file-raw') sendPreviewBytes(res, value, url.searchParams.get('download') === '1')
+        if (projectPreview[2] === 'file-raw') sendPreviewBytes(res, value, url.searchParams.get('download') === '1', req.headers.range)
         else res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.filePreviews.ticket(project.cwd, path)))
       } catch { res.writeHead(404).end() }
       return
@@ -1911,7 +1962,7 @@ export class H5Server {
         if (artifactsMatch[2] === 'raw' || artifactsMatch[2] === 'preview-ticket') {
           if (artifactsMatch[2] === 'preview-ticket' && !requireSameOrigin()) { res.writeHead(403).end(); return }
           const value = await this.host.artifactFile(conversationId, url.searchParams.get('path') ?? '', url.searchParams.get('runId') ?? '')
-          if (artifactsMatch[2] === 'raw') sendPreviewBytes(res, value, url.searchParams.get('download') === '1')
+          if (artifactsMatch[2] === 'raw') sendPreviewBytes(res, value, url.searchParams.get('download') === '1', req.headers.range)
           else res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.filePreviews.ticket(value.root, value.path, value.hash)))
           return
         }

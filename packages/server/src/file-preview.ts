@@ -6,6 +6,7 @@ import { within } from './security.js'
 
 export const MAX_FILE_BYTES = 128 * 1024 * 1024
 const types: Record<string, string> = { '.md': 'text/markdown', '.txt': 'text/plain', '.log': 'text/plain', '.json': 'application/json', '.html': 'text/html', '.htm': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.mjs': 'text/javascript', '.ts': 'text/plain', '.tsx': 'text/plain', '.jsx': 'text/plain', '.xml': 'text/xml', '.csv': 'text/csv', '.yaml': 'text/plain', '.yml': 'text/plain', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.ico': 'image/x-icon', '.pdf': 'application/pdf', '.woff': 'font/woff', '.woff2': 'font/woff2' }
+Object.assign(types, { '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.flac': 'audio/flac', '.m4a': 'audio/mp4' })
 export function fileMediaType(path: string): string { return types[extname(path).toLowerCase()] ?? 'application/octet-stream' }
 
 const webResource = /\.(?:js|mjs|css|map|png|jpe?g|gif|webp|avif|svg|ico|woff2?)$/i
@@ -44,13 +45,22 @@ export async function readPreviewFile(root: string, path: string, expectedHash?:
   } finally { await handle.close() }
 }
 
-export function sendPreviewBytes(res: ServerResponse, value: { bytes: Buffer; mediaType: string; path: string }, download = false) {
+export function sendPreviewBytes(res: ServerResponse, value: { bytes: Buffer; mediaType: string; path: string }, download = false, range?: string) {
   const filename = value.path.split(/[\\/]/).at(-1) ?? 'file'
-  res.writeHead(200, { 'Content-Type': value.mediaType, 'Content-Length': value.bytes.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
+  let start = 0, end = value.bytes.length - 1, partial = false
+  if (range && /^(?:audio|video)\//.test(value.mediaType)) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range)
+    if (!match || !match[1] && !match[2]) { res.writeHead(416, { 'Content-Range': 'bytes */' + value.bytes.length }).end(); return }
+    start = match[1] ? Number(match[1]) : Math.max(0, value.bytes.length - Number(match[2]))
+    end = match[1] && match[2] ? Math.min(end, Number(match[2])) : end
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= value.bytes.length) { res.writeHead(416, { 'Content-Range': 'bytes */' + value.bytes.length }).end(); return }
+    partial = true
+  }
+  res.writeHead(partial ? 206 : 200, { 'Content-Type': value.mediaType, 'Content-Length': end - start + 1, 'Accept-Ranges': 'bytes', ...(partial ? { 'Content-Range': 'bytes ' + start + '-' + end + '/' + value.bytes.length } : {}), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
     // Even when opened directly, HTML/SVG cannot acquire the Pulse origin.
     'Content-Security-Policy': "sandbox allow-scripts; default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'none'; frame-src 'none'; form-action 'none'",
     'Content-Disposition': `${download ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(filename).replace(/['()*]/g, c => '%' + c.charCodeAt(0).toString(16))}`,
-  }).end(value.bytes)
+  }).end(value.bytes.subarray(start, end + 1))
 }
 
 /** Separate loopback origin for browser-use; H5 exposes the same ticket in a sandbox. */

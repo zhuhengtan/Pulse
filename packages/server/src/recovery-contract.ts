@@ -45,8 +45,9 @@ export function recoveryPolicyFingerprint(policy: unknown): string {
   return digest([policy, source('verification-policy'), source('plan-confirmation'), source('security')])
 }
 export function recoveryFingerprints(registry: ToolRegistry, policy: unknown, relocation?: { source: string; target: string }): RecoveryFingerprints {
+  const stable = registry as ToolRegistry & { catalog?: () => ReturnType<ToolRegistry['list']> }
   return { build: currentRecoveryBuild(),
-    tools: Object.fromEntries(registry.list().map(tool => {
+    tools: Object.fromEntries((stable.catalog?.() ?? registry.list()).map(tool => {
       const permissions = structuredClone(tool.permissions ?? {})
       // Compare the same workspace permission across machines without broadening the registry's actual roots.
       if (relocation && permissions.workspaceRoots) permissions.workspaceRoots = permissions.workspaceRoots.map(root => root === relocation.target ? relocation.source : root)

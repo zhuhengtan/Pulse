@@ -20,18 +20,33 @@ export function normalizeDiscoveredModel(raw: unknown): DiscoveredModel | undefi
   if (typeof id !== 'string' || !id.trim() || id.length > 250 || /[\x00-\x1f]/.test(id)) return undefined
   const architecture = object(item.architecture), caps = object(item.capabilities)
   const modalities = architecture.output_modalities ?? item.output_modalities
-  if (Array.isArray(modalities) && !modalities.includes('text')) return undefined
   const type = String(item.sub_type ?? item.type ?? item.task ?? '').toLowerCase()
-  if (/embedding|rerank|image|audio|video|speech|transcri|tts/.test(type) && !/chat|text-generation/.test(type)) return undefined
-  if (/embed|rerank/i.test(id) || !(Array.isArray(modalities) && modalities.includes('text')) && /whisper|tts|dall-e|gpt-image|imagen|veo-|sora-|audio|speech|transcri/i.test(id)) return undefined
+  if (/embedding|rerank|transcri|speech-to-text/.test(type) || /embed|rerank|whisper/i.test(id)) return undefined
+  const allowed = ['chat', 'image', 'video', 'speech', 'music', 'sound']
+  let purposes: NonNullable<ModelDefinition['purposes']> = Array.isArray(item.purposes) ? item.purposes.filter((p: unknown) => typeof p === 'string' && allowed.includes(p)) : []
+  if (!purposes.length && Array.isArray(modalities)) {
+    if (modalities.includes('text')) purposes.push('chat')
+    if (modalities.includes('image')) purposes.push('image')
+    if (modalities.includes('video')) purposes.push('video')
+    if (modalities.includes('audio')) purposes.push('speech')
+  }
+  if (!purposes.length) {
+    // Official model families identify catalog purpose, never successful verification.
+    if (/sound|sfx/i.test(type + ' ' + id)) purposes = ['sound']
+    else if (/music|lyria/i.test(type + ' ' + id)) purposes = ['music']
+    else if (/tts|speech|^eleven_/i.test(type + ' ' + id)) purposes = ['speech']
+    else if (/video|veo-|sora-|seedance|hailuo|MiniMax-H3/i.test(type + ' ' + id)) purposes = ['video']
+    else if (/image|dall-e|imagen|seedream/i.test(type + ' ' + id)) purposes = ['image']
+    else purposes = ['chat']
+  }
   const context = positive(item.context_length ?? item.context_window ?? item.maxContextTokens)
   const output = positive(object(item.top_provider).max_completion_tokens ?? item.max_output_tokens ?? item.maxOutputTokens)
   const params = item.supported_parameters
   const inputModalities = architecture.input_modalities ?? item.input_modalities
   const imageInput = Array.isArray(inputModalities) ? inputModalities.includes('image') ? 'supported' : 'unsupported' : capability(item.imageInput ?? object(caps.vision).supported)
-  return { modelCode: id.trim(), displayName: String(item.name ?? item.display_name ?? item.displayName ?? id).slice(0, 250), imageInput,
+  return { purposes, modelCode: id.trim(), displayName: String(item.name ?? item.display_name ?? item.displayName ?? id).slice(0, 250), imageInput,
     ...(item.remote === true ? { remote: true } : {}),
-    tools: Array.isArray(params) ? params.includes('tools') ? 'supported' : 'unsupported' : capability(item.tools ?? object(caps.tool_use).supported),
+    tools: !purposes.includes('chat') ? 'unsupported' : Array.isArray(params) ? params.includes('tools') ? 'supported' : 'unsupported' : capability(item.tools ?? object(caps.tool_use).supported),
     structuredOutput: Array.isArray(params) ? params.includes('response_format') || params.includes('structured_outputs') ? 'supported' : 'unsupported' : capability(item.structuredOutput),
     ...(context ? { maxContextTokens: context } : {}), ...(output ? { maxOutputTokens: output } : {}) }
 }
@@ -111,6 +126,7 @@ export class ProviderOnboarding {
     if (!modelCode || modelCode.length > 250 || /[\x00-\x1f]/.test(modelCode)) throw new Error('PROVIDER_MODEL_REQUIRED')
     const result: ProviderProbe = { modelCode, chat: { status: 'skipped' }, tools: { status: 'skipped' }, structuredOutput: { status: 'skipped' } }
     const savedModel = Object.values(object(config.providers?.[input.providerId ?? '']).models ?? {}).find((item: any) => item.modelCode === modelCode) as ModelDefinition | undefined
+    if (savedModel?.purposes && !savedModel.purposes.includes('chat')) throw new Error('PROVIDER_MEDIA_MODEL_USE_PLUGIN_TEST')
     const profile = { provider: provider.provider, baseURL: provider.baseURL!, apiKey, defaultModel: modelCode, maxOutputTokens: 1024, ...(['ollama', 'ollama-cloud', 'ollama-remote'].includes(provider.provider) ? { reasoningEffort: 'none' as const } : {}), ...(input.remote === true || savedModel?.remote === true ? { remote: true } : {}), ...(input.structuredOutput === 'unsupported' || savedModel?.structuredOutput === 'unsupported' ? { capabilityProfile: { structuredOutput: 'unsupported' as const } } : {}) }
     const makeRequest = (instruction: string, history?: ProviderHistoryMessage[], tools = false): LLMRequestProjection => ({
       contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'provider-probe', instruction, privacy: 'public', privacyRefs: [], ...(history ? { providerHistory: history } : {}) },
@@ -165,7 +181,7 @@ export function mergeDiscoveredModels(existing: Record<string, ModelDefinition>,
     const prior = priorId ? merged[priorId] : undefined
     const id = priorId ?? model.modelCode
     const next: ModelDefinition = { ...model, ...prior, discovery: model, ...(verification?.modelCode === model.modelCode ? { verification: { ...verification, checkedAt: new Date().toISOString() } } : {}) }
-    if (prior?.discovery) for (const key of ['displayName', 'maxContextTokens', 'maxOutputTokens', 'imageInput', 'tools', 'structuredOutput'] as const) {
+    if (prior?.discovery) for (const key of ['displayName', 'purposes', 'maxContextTokens', 'maxOutputTokens', 'imageInput', 'tools', 'structuredOutput'] as const) {
       if (prior[key] === prior.discovery[key]) {
         if (model[key] === undefined) delete next[key]
         else Object.assign(next, { [key]: model[key] })

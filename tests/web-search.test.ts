@@ -192,7 +192,7 @@ describe('configuration and settings API', () => {
     const disabled = await fetch(base + '/api/config/web-search/test', { ...request, body: JSON.stringify({ config: { ...config, allowNetwork: false } }) })
     expect(await disabled.json()).toMatchObject({ error: 'WEB_SEARCH_NETWORK_DISABLED' })
   })
-  it.each([true, false])('calls the real search service from a host run (assistant=%s), retaining the run configuration', async assistantChat => {
+  it.each([true, false])('calls the real search service from a host run (assistant=%s), using live configuration for the next tool call', async assistantChat => {
     const { root } = await workspace()
     let firstCalls = 0, secondCalls = 0
     const first = await http((_req, res) => { firstCalls++; json(res, { results: [row] }) })
@@ -204,10 +204,10 @@ describe('configuration and settings API', () => {
     host.applyLiveOptions({ ...options, webSearch: { provider: 'custom', baseURL: second.url } })
     for await (const _event of run.events) { /* drive actual runtime and HTTP tools */ }
     expect((await run.outcome()).status).toBe('succeeded')
-    expect(firstCalls).toBe(1); expect(secondCalls).toBe(0)
+    expect(firstCalls).toBe(0); expect(secondCalls).toBe(1)
     const next = await host.sendMessage(conversation.id, { text: 'Search again.', assistantChat })
     for await (const _event of next.events) { /* drive */ }
-    expect((await next.outcome()).status).toBe('succeeded'); expect(secondCalls).toBe(1)
+    expect((await next.outcome()).status).toBe('succeeded'); expect(secondCalls).toBe(2)
   })
   it('does not expose search tools with network disabled', async () => {
     const { root } = await workspace(); let calls = 0

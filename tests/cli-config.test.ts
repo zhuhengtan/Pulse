@@ -1,8 +1,8 @@
-import { access, readFile, writeFile, mkdtemp, rm, stat } from 'node:fs/promises'
+import { access, readFile, writeFile, mkdtemp, rm, stat, mkdir } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, sanitizeWorkspaceConfig } from '../packages/cli/src/config.js'
+import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, mergePulseConfigs, sanitizeWorkspaceConfig } from '../packages/cli/src/config.js'
 import { hostOptions, parse } from '../packages/cli/src/bin.js'
 import { runSetup } from '../packages/cli/src/commands/setup.js'
 import { createHostModelRouting } from '../packages/server/src/model-routing.js'
@@ -14,6 +14,26 @@ afterEach(async () => {
 })
 
 describe('ensurePulseUserConfig', () => {
+  it('does not inherit workspace provider addresses or credentials into host plugin references', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-plugin-host-'))
+    temporaryDirectories.push(directory)
+    const previousHome = process.env.PULSE_HOME
+    process.env.PULSE_HOME = directory
+    try {
+      const workspace = join(directory, 'project'), path = join(directory, 'config.json')
+      await mkdir(join(workspace, '.pulse'), { recursive: true })
+      await writeFile(join(workspace, '.pulse/config.json'), JSON.stringify({ providers: { cloud: { provider: 'openai', baseURL: 'http://localhost:8999/untrusted', apiKeyEnv: 'UNTRUSTED_PLUGIN_KEY' } } }))
+      await writeFile(path, JSON.stringify({
+        providers: { mock: { provider: 'mock', models: { mock: { modelCode: 'mock' } } }, cloud: { provider: 'openai', models: { image: { modelCode: 'fixture-image', purposes: ['image'] } } } },
+        activeModel: 'mock/mock', allowNetwork: true,
+        builtinPlugins: { image_gen: { enabled: true, connection: { source: 'model', adapter: 'openai', modelRef: 'cloud/image' } } },
+      }))
+      const options = await hostOptions(parse(['--config', path, '--cwd', workspace, '--trust-workspace']))
+      expect(options.builtinPluginConfig?.providers.cloud).not.toHaveProperty('baseURL')
+      expect(options.builtinPluginConfig?.providers.cloud).not.toHaveProperty('apiKeyEnv')
+      expect(options.builtinPluginConfigPath).toBe(path)
+    } finally { if (previousHome === undefined) delete process.env.PULSE_HOME; else process.env.PULSE_HOME = previousHome }
+  })
   it('applies explicit cost limits to the routed active model without changing other catalog entries', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-cost-limits-'))
     temporaryDirectories.push(directory)
@@ -26,6 +46,24 @@ describe('ensurePulseUserConfig', () => {
     const routing = createHostModelRouting({ activeModel: options.activeModel!, activeProviderCode: options.activeProviderCode!, activeProvider: options.provider!, providerProfiles: options.providerProfiles!, providerModels: options.providerModels! })
     expect(routing.candidates.find((c) => c.id === 'local/active')?.capabilities).toMatchObject({ maxContextTokens: 32000, maxOutputTokens: 4096, reasoning: 'low' })
     expect(routing.candidates.find((c) => c.id === 'local/other')?.capabilities).toMatchObject({ maxOutputTokens: 32000, reasoning: 'high' })
+  })
+  it('overlays one explicit plugin without disabling another inherited plugin', () => {
+    const merged = mergePulseConfigs([
+      { trust: 'user', value: { builtinPlugins: { image_gen: { enabled: true, connection: { source: 'standalone', adapter: 'custom', baseURL: 'http://127.0.0.1:9', model: 'inherited-model', credentialRef: 'credential-11111111-1111-4111-8111-111111111111', apiKeyEnv: 'IMAGE_KEY' } }, video_gen: { enabled: true, connection: { source: 'standalone', adapter: 'custom', baseURL: 'http://127.0.0.1:10', model: 'inherited-video' } }, audio_gen: { enabled: true, modes: { speech: { source: 'standalone', adapter: 'custom', baseURL: 'http://127.0.0.1:11', model: 'inherited-speech' }, music: { source: 'standalone', adapter: 'custom', baseURL: 'http://127.0.0.1:11', model: 'inherited-music', apiKeyEnv: 'MUSIC_KEY' } } } } } },
+      { trust: 'user', value: { builtinPlugins: { image_gen: { enabled: false } } } },
+    ])
+    expect(merged.builtinPlugins?.image_gen).toMatchObject({ enabled: false, connection: { baseURL: 'http://127.0.0.1:9', model: 'inherited-model', credentialRef: 'credential-11111111-1111-4111-8111-111111111111', apiKeyEnv: 'IMAGE_KEY' } })
+    expect(merged.builtinPlugins?.video_gen).toMatchObject({ enabled: true, connection: { model: 'inherited-video' } })
+    expect(merged.builtinPlugins?.audio_gen).toMatchObject({ enabled: true, modes: { speech: { model: 'inherited-speech' }, music: { model: 'inherited-music', apiKeyEnv: 'MUSIC_KEY' } } })
+    const replaced = mergePulseConfigs([
+      { trust: 'user', value: merged },
+      { trust: 'user', value: { builtinPlugins: { image_gen: { enabled: true, connection: { source: 'standalone', adapter: 'custom', baseURL: 'http://127.0.0.1:9', model: 'cleared-image' } }, audio_gen: { enabled: true, modes: { speech: { source: 'standalone', adapter: 'custom', baseURL: 'http://127.0.0.1:11', model: 'kept-speech' } } } } } },
+    ])
+    expect(replaced.builtinPlugins?.image_gen?.connection).not.toHaveProperty('credentialRef')
+    expect(replaced.builtinPlugins?.image_gen?.connection).toMatchObject({ model: 'cleared-image' })
+    expect(replaced.builtinPlugins?.audio_gen?.modes).not.toHaveProperty('music')
+    expect(replaced.builtinPlugins?.audio_gen?.modes?.speech).toMatchObject({ model: 'kept-speech' })
+    expect(replaced.builtinPlugins?.video_gen).toMatchObject({ enabled: true, connection: { model: 'inherited-video' } })
   })
   it('uses PULSE_HOME for the user configuration root', () => {
     const previous = process.env.PULSE_HOME

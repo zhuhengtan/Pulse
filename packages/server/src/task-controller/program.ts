@@ -1037,7 +1037,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
       ...(['43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(programVersion) ? { maxHumanTurnResets: 1 as const, evidenceReadWindowBytes: 3000 } : {}),
       ...(['44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(programVersion) ? { recoverMixedAskCalls: true } : {}), ...(programVersion === '47' ? { recoverAskInputErrors: true } : {}), scopeToolCallsToEffect: true, maxTurns: 6, maxToolsPerTurn: 2,
       resetTurnsOnEntry: ctx => ['46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(programVersion) ? `${stateOf(ctx).planFeedbackRevisions ?? 0}:${stateOf(ctx).planReviewRepairs ?? 0}` : stateOf(ctx).planReviewRepairs,
-      ...(options.approvalMode === 'ask' ? { toolApproval: { prompt: 'Approve only the displayed plan repair or read; implementation remains blocked.' } } : {}),
+      ...(options.approvalMode === 'ask' ? { toolApproval: { requiresApproval: calls => Array.isArray(calls) && calls.some((call: any) => !['image.generate', 'video.generate', 'audio.generate'].includes(call.toolName)), prompt: 'Approve only the displayed plan repair or read; implementation remains blocked.' } } : {}),
       validateQuestion: (name, input) => name === 'ask.choice' && planConfirmationOptions(input) ? 'Execution confirmation is host-owned and unavailable until the full plan review is ready.' : undefined,
       onFinish: (_ref, ctx) => finishPlanRepair(ctx), onMaxTurns: finishPlanRepair,
       onError: error => ({ fail: error }),
@@ -1060,7 +1060,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
       manualApprovalFallback: modernRecovery,
       onManualApprovalDenied: (reason, ctx) => workerCompletion(ctx, undefined, 'blocked', `APPROVAL_DENIED: ${reason}`),
       toolAllow: ['39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(programVersion) ? stageToolAllow : options.toolNames, ...(['44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(programVersion) ? { recoverMixedAskCalls: true } : {}), ...(programVersion === '47' ? { recoverAskInputErrors: true } : {}), scopeToolCallsToEffect: true, blockReadOnlyTools: stageNeedsFileEdit, maxTurns: stageTurnLimit, maxTruncationRetries: 2, ...(automaticRecovery ? { reasoningRecovery } : {}), maxToolsPerTurn: 4,
-      ...(options.approvalMode === 'ask' ? { toolApproval: { prompt: 'Approve these calls only for the current stage.' } } : {}),
+      ...(options.approvalMode === 'ask' ? { toolApproval: { requiresApproval: calls => Array.isArray(calls) && calls.some((call: any) => !['image.generate', 'video.generate', 'audio.generate'].includes(call.toolName)), prompt: 'Approve these calls only for the current stage.' } } : {}),
       onFinish: (ref, ctx) => {
         return workerCompletion(ctx, ref)
       },
@@ -1130,7 +1130,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
       onManualApprovalDenied: (reason, ctx) => stageFailure(ctx, 'APPROVAL_DENIED', reason),
       toolAllow: stageToolAllow, ...(['44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(programVersion) ? { recoverMixedAskCalls: true } : {}), ...(programVersion === '47' ? { recoverAskInputErrors: true } : {}), scopeToolCallsToEffect: true, blockReadOnlyTools: stageNeedsFileEdit, preserveReadContinuations: isolatedCandidates, maxTurns: controllerStageTurnLimit, maxTruncationRetries: 2, ...(automaticRecovery ? { reasoningRecovery } : {}), maxToolsPerTurn: 4,
       ...(!parallelStages ? { serialTools: options.toolNames.filter((name) => !['fs.read', 'fs.list', 'fs.search', 'web.fetch', 'web.search'].includes(name)), stopAfterFirstSerialTool: true } : {}),
-      ...(options.approvalMode === 'ask' ? { toolApproval: { prompt: 'Approve these calls only for the current stage.' } } : {}),
+      ...(options.approvalMode === 'ask' ? { toolApproval: { requiresApproval: calls => Array.isArray(calls) && calls.some((call: any) => !['image.generate', 'video.generate', 'audio.generate'].includes(call.toolName)), prompt: 'Approve these calls only for the current stage.' } } : {}),
       onMaxTurns: (ctx) => {
         const state = stateOf(ctx, options.readOnlyToolNames ?? [])
         const task = state.tasks.find((item) => item.id === state.activeId)!

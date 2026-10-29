@@ -1,3 +1,8 @@
+import { BuiltinPluginJobs } from './builtin-plugins/jobs.js'
+import { PluginToolRegistry, registerPluginTools, generationTools, pluginToolIds, refreshPluginProjection, createHostToolInputValidator } from './builtin-plugins/tools.js'
+import type { PluginHostConfig } from './builtin-plugins/config.js'
+export { overlayBuiltinPlugins, parseBuiltinPlugins, readMergedHostConfig } from './builtin-plugins/config.js'
+export type { BuiltinPluginsConfig, PluginHostConfig } from './builtin-plugins/config.js'
 import { boundedAssistantConversation, assistantReferenceSchema, assistantReferenceNotice } from './assistant-chat-context.js'
 import { registerAssistantHistoryTools } from './assistant-history.js'
 import { cachedCompletionReply, completionFilePaths, currentCompletionArtifacts, completionReplySystem, completionUserRequest, writeCompletionReport, type CompletionReplyInput } from './completion-reply.js'
@@ -16,7 +21,6 @@ import { assertExplicitToolRestriction, assertWindowObservationScope } from './t
 import { automationApprovalEvidence } from './automation/approval-evidence.js'
 import { parseRichContent, type RichContent } from './rich-content.js'
 import { outcomeDiagnostics } from './task-controller/diagnostics.js'
-import { createToolInputValidator } from '@hunterzhu/pulse-tool-sdk'
 import { capabilityStatusTool } from './capability-status.js'
 import { readPreviewFile, fileMediaType } from './file-preview.js'
 import { createFollowupModel } from './followup.js'
@@ -50,7 +54,7 @@ import { ModelAttemptBudget } from './model-budget.js'
 import { approvalScriptContext, isNecessaryVerification } from './verification-policy.js'
 import { acceptanceFailure, assessAcceptanceValue, validateAcceptanceChecks, type AcceptanceCheck, type AcceptanceResult } from './task-controller/acceptance.js'
 import { fetchText } from './web.js'
-import { createWebSearchTool, type WebSearchOptions } from './web-search.js'
+import { type WebSearchOptions } from './web-search.js'
 export { parseWebSearchConfig, resolveWebSearchOptions } from './web-search.js'
 export type { WebSearchConfig, WebSearchOptions } from './web-search.js'
 import { createHash, randomUUID } from 'node:crypto'
@@ -172,6 +176,9 @@ export interface LocalHostOptions {
   approvalMode?: ApprovalMode
   allowNetwork?: boolean
   networkHosts?: string[]
+  builtinPluginNetworkOverride?: boolean
+  builtinPluginConfigPath?: string
+  builtinPluginConfig?: PluginHostConfig
   webSearch?: WebSearchOptions
   maxRuntimeMs?: number
   /** Maximum model/tool turns allowed for one ReAct run. */
@@ -505,7 +512,7 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
     registry.register(defineTool({
       name: 'web.fetch', description: 'Read a public HTTP(S) page in bounded text windows. If nextOffset is not null, call again with that offset to read the remainder. Never repeat the same offset for more text.', tags: ['web', 'research'], input: z.object({ url: z.string().url().max(2000), offset: z.number().int().min(0).max(1_000_000).default(0) }), output: z.object({ url: z.string(), title: z.string(), text: z.string(), offset: z.number(), totalChars: z.number(), nextOffset: z.number().nullable(), truncated: z.boolean(), sourceTruncated: z.boolean(), fetchedAt: z.string() }), sideEffectPolicy: 'read', retrySafety: 'read_only', permissions: { networkHosts: networkHosts ?? ['*'] }, execute: async ({ url, offset }, context) => fetchText(url, context.signal, networkHosts, offset), summarize: (output) => output,
     }))
-    registry.register(createWebSearchTool(webSearch))
+    // Search and media plugins are registered by the Host with live enablement.
   }
 }
 
@@ -769,7 +776,7 @@ ${feedback}\nDo not expose private chain-of-thought.`
       instruction: 'Summarize the older conversation and tool history into durable facts, decisions, constraints, and unresolved work. Preserve information needed to continue the current task.',
       keepRecentRounds: 4,
     },
-    ...(approvalMode === 'ask' ? { toolApproval: { prompt: () => 'Reply with approved=true to continue or approved=false to deny.' } } : {}),
+    ...(approvalMode === 'ask' ? { toolApproval: { requiresApproval: calls => Array.isArray(calls) && calls.some((call: any) => !generationTools.includes(call.toolName)), prompt: () => 'Reply with approved=true to continue or approved=false to deny.' } } : {}),
     ...(version === '1' ? {} : {
       onFinish: (resultRef, ctx) => {
         const existing = taskRecordFromGlobal(ctx.global as unknown as JsonValue)
@@ -889,6 +896,7 @@ ${responseLanguageInstruction(detectResponseLanguage(text))}`
 }
 
 const assistantToolAllowList = [
+  'image.generate', 'video.generate', 'audio.generate',
   'capability.status', 'skills.read',
   'fs.list', 'fs.read', 'fs.search', 'web.fetch', 'web.search', 'attachment.read', 'attachment.list',
   'jarvis.context', 'jarvis.search', 'jarvis.get', 'jarvis.record', 'jarvis.remember', 'jarvis.candidates', 'jarvis.status',
@@ -959,7 +967,7 @@ export function assistantChatRequiredToolNames(toolNames: readonly string[], tex
 
 const assistantRepeatableReadTools = new Set(['work.list', 'work.status', 'conversation.search', 'conversation.read', 'fs.list', 'fs.read', 'fs.search', 'web.search', 'web.fetch', 'attachment.read', 'attachment.list'])
 /** Cross-conversation history stays out of this set so ask mode can require confirmation. */
-export const assistantAutoApprovedTools = new Set(['fs.list', 'fs.read', 'fs.search', 'web.search', 'web.fetch', 'jarvis.search', 'jarvis.context', 'jarvis.get', 'jarvis.status', 'jarvis.candidates', 'work.list', 'work.status', 'capability.status'])
+export const assistantAutoApprovedTools = new Set([...generationTools, 'fs.list', 'fs.read', 'fs.search', 'web.search', 'web.fetch', 'jarvis.search', 'jarvis.context', 'jarvis.get', 'jarvis.status', 'jarvis.candidates', 'work.list', 'work.status', 'capability.status'])
 
 export function assistantChatAllowedToolNames(toolNames: string[], text: string, calledTools: ReadonlySet<string>, repeatableReads = true, attachmentRequested = false, delegatedWork = false, scopedNegation = false): string[] {
   const required = assistantChatRequiredToolNames(toolNames, text, delegatedWork, scopedNegation).map(name => attachmentRequested && name === 'fs.read' ? 'attachment.read' : name)
@@ -1508,7 +1516,7 @@ function withEvidenceFreshness(execute: EffectExecutor, current: () => PulseRunt
 }
 
 function taskToolInputValidator(registry: ToolRegistry, request: string, windowScope = false, readWindowLimit?: number) {
-  const validate = createToolInputValidator(registry)
+  const validate = createHostToolInputValidator(registry)
   return (name: string, input: JsonValue) => {
     assertReadWindowInput(name, input, readWindowLimit)
     if (windowScope) assertWindowObservationScope(request, name, input)
@@ -1547,7 +1555,7 @@ function approvedToolExecutor(registry: ToolRegistry, provider: ReturnType<typeo
     let execution: EffectExecution
     try {
       if (name === 'shell.exec') validateShellInvocation(String(args.command ?? ''), Array.isArray(args.args) ? args.args as string[] : [])
-      if (approvalMode === 'auto' && !isApproved(effect.toolCallId ?? '') && (policy === 'write' || policy === 'external') && !(await aiApproveToolCall(provider, effect, signal, runLlm, userIntent, workspaceRoot, onUsage, reviewer?.timeoutMs, generalActions, guiEvidence))) throw Object.assign(new Error(`AI_APPROVAL_DENIED:${name}`), { code: 'AI_APPROVAL_DENIED', retryable: false })
+      if (!generationTools.includes(name) && approvalMode === 'auto' && !isApproved(effect.toolCallId ?? '') && (policy === 'write' || policy === 'external') && !(await aiApproveToolCall(provider, effect, signal, runLlm, userIntent, workspaceRoot, onUsage, reviewer?.timeoutMs, generalActions, guiEvidence))) throw Object.assign(new Error(`AI_APPROVAL_DENIED:${name}`), { code: 'AI_APPROVAL_DENIED', retryable: false })
       execution = await execute(effect, signal, observe)
     } catch (cause) {
       execution = { value: null, status: 'failed', executionState: 'failed', sideEffectState: 'none', error: { ...runtimeErrorFromCause(cause), ...((cause as { code?: string })?.code === 'AI_APPROVAL_UNAVAILABLE' || reviewer?.manualOnRejection === true && ['AI_APPROVAL_DENIED', 'AI_APPROVAL_INVALID_RESPONSE', 'AI_APPROVAL_OUTPUT_TRUNCATED'].includes((cause as { code?: string })?.code ?? '') ? { details: { manualApproval: true, reviewCode: (cause as { code?: string })?.code ?? 'AI_APPROVAL_UNAVAILABLE', toolName: name, input: args, originalEffectId: effect.id, toolCallId: `manual:${effect.id}` } } : {}) } }
@@ -1639,6 +1647,7 @@ function snapshotHostOptions(source: LocalHostOptions): LocalHostOptions {
     ...(source.skillConfigPath ? { skillConfigPath: source.skillConfigPath } : {}),
     ...(source.capabilityConfig ? { capabilityConfig: structuredClone(source.capabilityConfig) } : {}),
     ...(source.networkHosts ? { networkHosts: [...source.networkHosts] } : {}),
+    ...(source.builtinPluginConfig ? { builtinPluginConfig: structuredClone(source.builtinPluginConfig) } : {}),
     ...(source.webSearch ? { webSearch: { ...source.webSearch } } : {}),
     ...(source.assistantModel ? { assistantModel: source.assistantModel } : {}),
     ...(source.frontModel ? { frontModel: { ...source.frontModel } } : {}),
@@ -1689,6 +1698,7 @@ export class LocalHost {
   private readonly surfaceConversations = new Map<string, ConversationMessage[]>()
   private readonly active = new Map<string, { runtime: PulseRuntime; registry: ToolRegistry; session: PulseSession; conversationId: string; runId: string; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; options: LocalHostOptions; modelPricing?: LocalHostOptions['modelPricing']; jarvis?: JarvisRun; modelBudget?: ModelAttemptBudget | undefined; finish?: () => Promise<Outcome & { text?: string }> }>()
   private readonly conversationLocks = new Map<string, Awaited<ReturnType<typeof open>>>()
+  readonly builtinPluginJobs: BuiltinPluginJobs
   private assistantJarvisSession: Promise<string | undefined> | undefined
   private assistantWorkTools: AssistantWorkToolHandlers | undefined
   private jarvisRecovery: Promise<void> | undefined
@@ -1700,6 +1710,7 @@ export class LocalHost {
     this.conversationData = new ConversationData(this.dataDir)
     this.logDir = resolve(options.logDir ?? process.env.PULSE_LOG_DIR ?? pulseLogPath())
     this.options = options
+    this.builtinPluginJobs = new BuiltinPluginJobs(this.dataDir, () => ({ ...this.options.builtinPluginConfig, allowNetwork: this.options.allowNetwork, webSearch: this.options.webSearch ?? this.options.builtinPluginConfig?.webSearch }), () => this.options.builtinPluginConfigPath, () => this.options.builtinPluginNetworkOverride)
     this.automation = new AutomationSessionManager(this.dataDir, options.automation, options.allowNetwork === true, undefined, options.networkHosts)
     this.automationBroker = new AutomationBroker(this.automation, this.dataDir)
     this.automationClient = options.automationEndpoint ? new RemoteAutomationClient(options.automationEndpoint) : new LocalAutomationClient(this.automation)
@@ -1708,6 +1719,7 @@ export class LocalHost {
     this.jarvisClient = options.jarvisClient ?? (options.jarvis?.enabled ? new JarvisClient(options.jarvis) : undefined)
     this.jarvisSync = this.jarvisClient ? new JarvisSyncQueue(this.dataDir, this.jarvisClient) : undefined
   }
+  setBuiltinPluginConfigPath(path: string): void { this.options.builtinPluginConfigPath = path }
   async prepareAutomation(): Promise<void> { if (!this.options.automationEndpoint && this.getAutomationOptions().enabled.length) { await this.automation.init(); await this.automationBroker.start() } }
   async automationDoctor(): Promise<Record<string, unknown>> { return automationDoctor(this.options.automation) }
   async requestAutomationPermissions(): Promise<unknown> { return requestAutomationPermissions(this.options.automation) }
@@ -2329,6 +2341,8 @@ export class LocalHost {
   getModel(): string | undefined { return this.activeModelName ?? this.options.provider?.defaultModel }
   getWorkingDirectory(): string { return this.root }
   getDataDirectory(): string { return this.dataDir }
+  /** Launch-time --no-network / --allow-network / PULSE_ALLOW_NETWORK. Undefined follows the host config. */
+  launchNetworkOverride(): boolean | undefined { return this.options.builtinPluginNetworkOverride }
   /** Apply a validated user config to future Runs while active Run objects retain their captured Runtime and capabilities. */
   applyLiveOptions(options: LocalHostOptions): { applied: boolean; restartRequired: string[] } {
     const nextRoot = resolve(options.cwd ?? process.cwd())
@@ -2337,8 +2351,16 @@ export class LocalHost {
       ...(nextRoot === this.root ? [] : ['cwd']),
       ...(nextDataDir === this.dataDir ? [] : ['dataDir']),
     ]
-    this.options = { ...options, cwd: this.root, dataDir: this.dataDir }
-    this.automation.configure(options.automation ?? {}, options.allowNetwork === true, options.networkHosts)
+    const override = this.options.builtinPluginNetworkOverride !== undefined ? this.options.builtinPluginNetworkOverride : options.builtinPluginNetworkOverride
+    const allowNetwork = override !== undefined ? override : options.allowNetwork
+    this.options = {
+      ...options,
+      cwd: this.root,
+      dataDir: this.dataDir,
+      ...(allowNetwork === undefined ? {} : { allowNetwork }),
+      ...(override === undefined ? {} : { builtinPluginNetworkOverride: override }),
+    }
+    this.automation.configure(options.automation ?? {}, this.options.allowNetwork === true, options.networkHosts)
     this.activeProviderName = options.activeProviderCode ?? options.provider?.provider
     this.activeModelName = options.activeModel ?? options.provider?.defaultModel
     this.jarvisClient = options.jarvisClient ?? (options.jarvis?.enabled ? new JarvisClient(options.jarvis) : undefined)
@@ -2354,6 +2376,11 @@ export class LocalHost {
   applyWorkerOptions(options: Omit<LocalHostOptions, 'capabilityPacks' | 'jarvisClient'>): void {
     const { capabilityPacks } = this.options
     if (options.automationEndpoint) this.automationClient = new RemoteAutomationClient(options.automationEndpoint)
+    // The parent snapshot is this process's network restriction. A worker CLI
+    // that did not receive --no-network must not reopen what the parent closed.
+    if (options.builtinPluginNetworkOverride === undefined) delete this.options.builtinPluginNetworkOverride
+    else this.options.builtinPluginNetworkOverride = options.builtinPluginNetworkOverride
+    if (options.allowNetwork !== undefined) this.options.allowNetwork = options.allowNetwork
     // This is the complete parent snapshot. Absent optional settings must not
     // inherit a front/review model or credentials from the child's CLI config.
     this.applyLiveOptions({ ...options, ...(capabilityPacks ? { capabilityPacks } : {}) })
@@ -2505,7 +2532,8 @@ export class LocalHost {
   private async appendMessage(id: string, message: StoredMessage): Promise<void> { await this.conversationData.call('append', id, message) }
   private async runtimeFor(conversationId: string, runId: string, cwd: string, userIntent = '', skillInput = '', options: LocalHostOptions = this.options, assistantChat = false, jarvisSessionId?: string, modelBudget?: ModelAttemptBudget): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; modelBudget?: ModelAttemptBudget | undefined }> {
     await this.seedPlanGate(conversationId, runId, !assistantChat && (isPreImplementationConfirmationSkill(skillInput) || requiresExplicitPlanConfirmation(skillInput)), options.approvalMode === 'read-only' ? undefined : cwd)
-    const registry = new ToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) })
+    const registry = new PluginToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) }, this.builtinPluginJobs)
+    registerPluginTools(registry, this.builtinPluginJobs, cwd, runId, this.options.builtinPluginConfigPath, conversationId)
     if (assistantChat) {
       registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId), !assistantChat && options.taskController !== false ? 4 : 3, !assistantChat && options.taskController !== false, !assistantChat && options.taskController !== false, options.webSearch)
       const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
@@ -2552,7 +2580,7 @@ export class LocalHost {
     const planReviewer = () => configuredPlanReviewer(options, modelBudget, () => runtimeRef, provider.model.capabilities, { models, router, providers })
     const runPlanReview = (system: string, instruction: string, signal: AbortSignal) => runPlanReviewRequest({ ...(planReviewer() ?? { models, router, execute: executeModelEffect }), system, instruction, signal, maxOutputTokens: provider.model.capabilities.maxOutputTokens ?? 4096 }, true, provider.model.capabilities.maxContextTokens, true, receipt => this.recordPlanReviewAttempt(conversationId, runId, receipt), true)
     if (this.planGates.get(runId)?.required) registry.register(defineTool({ name: 'plan.review', description: 'Re-read and independently review the ENTIRE saved docs/plans document. Returns a hash-bound review of dependencies, prerequisites, state, scope and validation. Review failure preserves the plan and never authorizes implementation.', tags: ['files', 'read', 'plan'], input: z.object({ path: z.string() }), output: z.object({ path: z.string(), hash: z.string(), planReview: z.unknown() }), sideEffectPolicy: 'read', defaultTimeoutMs: writeToolTimeoutMs, execute: async ({ path }, context) => { const planReview = await this.reviewSavedPlan(conversationId, runId, cwd, path, context.signal, runPlanReview); return { path, hash: planReview.hash, planReview } } }))
-    const toolVersions = Object.fromEntries(registry.list().map((tool) => [tool.name, tool.version]))
+    const toolVersions = Object.fromEntries(registry.catalog().map((tool) => [tool.name, tool.version]))
     const executeModelEffect = createModelEffectExecutor({ router, providers, beforeProviderAttempt: async purpose => { assertRunCanContinue(runtimeRef); await modelBudget?.reserve(purpose) }, afterProviderAttempt: (usage, receiptId) => modelBudget?.recordUsage(usage, receiptId) ?? Promise.resolve(), modelBudget: () => ({ limit: modelBudget?.limit ?? 256, used: modelBudget?.used ?? 0 }), resolveImage: (ref, agentId, privacy) => {
       const image = runtimeRef?.state.artifacts.get(ref)
       if (!image || (image.agentId !== undefined && image.agentId !== agentId) || privacyRank(effectivePrivacy(image.privacy, image.privacyTaints)) > privacyRank(privacy)) throw new Error('IMAGE_ARTIFACT_NOT_VISIBLE')
@@ -2564,7 +2592,7 @@ export class LocalHost {
       const agent = runtimeRef?.state.agents.get(request.agentId)
       const global = agent?.globalVersions.get(agent.latestGlobalVersion)
       return { conversation: (await this.getConversationMessages(conversationId)).slice(-16).map(message => ({ role: message.role, text: message.text, ...(message.attachments ? { attachments: message.attachments } : {}) })), goal: agent?.goal, task: global && asRecord(global)?.taskRecord, controller: global && asRecord(global)?.taskController }
-    }, run: (system, instruction, signal) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens: Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096), task: 'reason' }) }) } }), effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId), !assistantChat && options.taskController !== false, () => this.readManifest(conversationId).then(manifest => (manifest.artifacts ?? []).map(artifact => artifact.path)))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, userIntent, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: options.approvalReview.provider, timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined, undefined, !assistantChat, automationApprovalEvidence(runtimeRef, effect), record?.objective ?? skillInput)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    }, run: (system, instruction, signal) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens: Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096), task: 'reason' }) }) } }), effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness((e, s, o) => executeModelEffect(refreshPluginProjection(e, registry), s, o), () => runtimeRef, cwd, this.runDir(conversationId, runId), !assistantChat && options.taskController !== false, () => this.readManifest(conversationId).then(manifest => (manifest.artifacts ?? []).map(artifact => artifact.path)))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, userIntent, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: options.approvalReview.provider, timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined, undefined, !assistantChat, automationApprovalEvidence(runtimeRef, effect), record?.objective ?? skillInput)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     runtimeRef = runtime
     const budget = historyBudget(provider.model.capabilities)
     runtime.state.historySoftTokens = budget.historySoftTokens
@@ -2899,7 +2927,8 @@ export class LocalHost {
     this.surfaceConversations.set(runId, conversation)
     const needsPreImplementationConfirmation = !assistantChat && (isPreImplementationConfirmationSkill(typeof savedInput.goal === 'string' ? savedInput.goal : '') || requiresExplicitPlanConfirmation(typeof savedInput.goal === 'string' ? savedInput.goal : ''))
     await this.seedPlanGate(conversationId, runId, needsPreImplementationConfirmation, options.approvalMode === 'read-only' ? undefined : cwd)
-    const registry = new ToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) })
+    const registry = new PluginToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) }, this.builtinPluginJobs)
+    registerPluginTools(registry, this.builtinPluginJobs, cwd, runId, this.options.builtinPluginConfigPath, conversationId)
     if (assistantChat) {
       registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(String(savedInput.controllerVersion)) ? savedInput.controllerVersion === '55' ? 4 : 3 : 2, (savedInput.controllerVersion === '49' || savedInput.controllerVersion === '50' || savedInput.controllerVersion === '51' || savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55')), savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55'), options.webSearch)
       const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
@@ -2948,7 +2977,7 @@ export class LocalHost {
     const planReviewer = () => [5, 6, 7, 8].includes(Number(savedInput.planReviewVersion)) ? configuredPlanReviewer(options, modelBudget, () => runtimeRef, provider.model.capabilities, { models, router, providers }) : undefined
     const runPlanReview = (system: string, instruction: string, signal: AbortSignal) => runPlanReviewRequest({ ...(planReviewer() ?? { models, router, execute: executeModelEffect }), system, instruction, signal, maxOutputTokens: [2, 3, 4, 5, 6, 7, 8].includes(Number(savedInput.planReviewVersion)) ? provider.model.capabilities.maxOutputTokens ?? 4096 : Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096) }, [2, 3, 4, 5, 6, 7, 8].includes(Number(savedInput.planReviewVersion)), [3, 4, 5, 6, 7, 8].includes(Number(savedInput.planReviewVersion)) ? provider.model.capabilities.maxContextTokens : undefined, [4, 5, 6, 7, 8].includes(Number(savedInput.planReviewVersion)), [4, 5, 6, 7, 8].includes(Number(savedInput.planReviewVersion)) ? receipt => this.recordPlanReviewAttempt(conversationId, runId, receipt) : undefined, [6, 7, 8].includes(Number(savedInput.planReviewVersion)))
     if (this.planGates.get(runId)?.required) registry.register(defineTool({ name: 'plan.review', description: 'Re-read and independently review the ENTIRE saved docs/plans document. Returns a hash-bound review of dependencies, prerequisites, state, scope and validation. Review failure preserves the plan and never authorizes implementation.', tags: ['files', 'read', 'plan'], input: z.object({ path: z.string() }), output: z.object({ path: z.string(), hash: z.string(), planReview: z.unknown() }), sideEffectPolicy: 'read', defaultTimeoutMs: [3, 4, 5, 6, 7, 8].includes(Number(savedInput.planReviewVersion)) ? writeToolTimeoutMs : 30_000, execute: async ({ path }, context) => { const planReview = await this.reviewSavedPlan(conversationId, runId, cwd, path, context.signal, runPlanReview); return { path, hash: planReview.hash, planReview } } }))
-    const toolNames = isStatusOnlyTurn(userIntent) ? [] : registry.list().map((tool) => tool.name)
+    const toolNames = isStatusOnlyTurn(userIntent) ? [] : [...new Set([...registry.list().map((tool) => tool.name), ...Object.keys(pluginToolIds)])]
     const readOnlyToolNames = registry.list().filter((tool) => tool.sideEffectPolicy === 'read' && !tool.name.startsWith('task.')).map((tool) => tool.name)
     // Preserve the opt-in lane shape only when restoring an older persisted run.
     const legacyParallelRead = savedInput.executionMode === 'parallel-read' && !isStatusOnlyTurn(userIntent) && readOnlyToolNames.length > 0
@@ -2958,12 +2987,12 @@ export class LocalHost {
     const savedMaxTurns = typeof savedInput.maxTurns === 'number' && Number.isInteger(savedInput.maxTurns) && savedInput.maxTurns > 0 ? savedInput.maxTurns : options.maxTurns ?? 32
     const workerProgram = buildReadonlyWorkerProgram(prompt, readOnlyToolNames, 3)
     const program = buildProgram(toolNames, prompt, conversation, false, options.maxTurns ?? 32, legacyParallelRead ? '4' : '3', legacyParallelRead)(options.approvalMode ?? 'ask')
-    const version2Program = buildProgram(registry.list().map((tool) => tool.name), prompt, conversation, false, options.maxTurns ?? 32, '2')(options.approvalMode ?? 'ask')
-    const legacyProgram = buildProgram(registry.list().map((tool) => tool.name), prompt, conversation, false, options.maxTurns ?? 32, '1')(options.approvalMode ?? 'ask')
+    const version2Program = buildProgram([...new Set([...registry.list().map((tool) => tool.name), ...Object.keys(pluginToolIds)])], prompt, conversation, false, options.maxTurns ?? 32, '2')(options.approvalMode ?? 'ask')
+    const legacyProgram = buildProgram([...new Set([...registry.list().map((tool) => tool.name), ...Object.keys(pluginToolIds)])], prompt, conversation, false, options.maxTurns ?? 32, '1')(options.approvalMode ?? 'ask')
     registry.register(defineTool({ name: 'fs.stage.capacity', description: 'Preflight new-file bytes against remaining actual model calls. Does not increase budgets. Choose chunks that fit the model output token limit.', tags: ['files', 'read'], input: z.object({ bytes: z.number().int().min(0).max(500_000) }), output: z.object({ chunkBytes: z.number(), toolSteps: z.number(), remainingCalls: z.number(), feasible: z.boolean() }), sideEffectPolicy: 'read', execute: async ({ bytes }) => { const chunkBytes = Math.min(STREAM_BYTES, Math.max(512, (provider.model.capabilities.maxOutputTokens ?? 4096) * 2)); const toolSteps = Math.max(1, Math.ceil(bytes / chunkBytes)) + 1; const remainingCalls = Math.max(0, (modelBudget?.limit ?? 256) - (modelBudget?.used ?? 0) - (modelBudget?.accounting.policy?.verificationReserve ?? 0)); return { chunkBytes, toolSteps, remainingCalls, feasible: toolSteps + 1 <= remainingCalls } } }))
-    const correctedProgram = buildProgram(toolNames, prompt, conversation, false, savedMaxTurns, '4.1', undefined, createToolInputValidator(registry))(options.approvalMode ?? 'ask')
-    const assistantPrograms = assistantChat ? (['1', '2', '3', '4', '5'] as const).map(version => buildAssistantChatProgram(toolNames, prompt, conversation, savedMaxTurns, version, createToolInputValidator(registry), assistantReference)(options.approvalMode ?? 'ask')) : []
-    const toolVersions = Object.fromEntries(registry.list().map((tool) => [tool.name, tool.version]))
+    const correctedProgram = buildProgram(toolNames, prompt, conversation, false, savedMaxTurns, '4.1', undefined, createHostToolInputValidator(registry))(options.approvalMode ?? 'ask')
+    const assistantPrograms = assistantChat ? (['1', '2', '3', '4', '5'] as const).map(version => buildAssistantChatProgram(toolNames, prompt, conversation, savedMaxTurns, version, createHostToolInputValidator(registry), assistantReference)(options.approvalMode ?? 'ask')) : []
+    const toolVersions = Object.fromEntries(registry.catalog().map((tool) => [tool.name, tool.version]))
     const savedControllerVersion = typeof savedInput.controllerVersion === 'string' ? savedInput.controllerVersion : undefined
     // The controller programs come from the run's own persisted mode, not the skill text: a
     // pre-fix /grill-and-plan run persisted taskController=true and still needs its historical
@@ -2985,13 +3014,13 @@ export class LocalHost {
     } })
     const fingerprints = recoveryFingerprints(registry, { approvalMode: options.approvalMode ?? 'ask', allowNetwork: options.allowNetwork ?? false, networkHosts: options.networkHosts ?? [], contract: 2 }, relocation)
     const runLlm = (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => runConfiguredApproval(options.approvalReview, modelBudget, () => runtimeRef, system, instruction, signal, maxOutputTokens)
-    const controllerPrograms: ReturnType<typeof buildTaskControllerProgram>[] = (['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'] as const).map((version) => buildTaskControllerProgram({ validateToolInput: (version === '28' || version === '29' || version === '30' || version === '31' || version === '32' || version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55'))) ? taskToolInputValidator(registry, userIntent, version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55')), ['41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(version) ? 3000 : undefined) : createToolInputValidator(registry), modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(savedReuse ? { resumePlan: savedReuse.controller, reusableIds: savedReuse.reusableIds } : {}), ...(['40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(version) && savedReuse ? { continuationCheckpoint: savedReuse } : {}), version, system: prompt, toolNames, ...(['39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(version) ? { readOnlyToolNames } : {}), conversation, approvalMode: options.approvalMode ?? 'ask', maxTurns: (version === '10' || version === '11' || version === '12' || version === '13' || version === '14' || version === '15' || version === '16' || version === '17' || version === '18' || version === '19' || version === '20' || version === '21' || version === '22' || version === '23' || version === '24' || version === '25' || version === '26' || version === '27' || version === '28' || version === '29' || version === '30' || version === '31' || version === '32' || version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55'))) ? modelEffectBudget ?? 256 : savedMaxTurns }))
+    const controllerPrograms: ReturnType<typeof buildTaskControllerProgram>[] = (['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'] as const).map((version) => buildTaskControllerProgram({ validateToolInput: (version === '28' || version === '29' || version === '30' || version === '31' || version === '32' || version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55'))) ? taskToolInputValidator(registry, userIntent, version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55')), ['41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(version) ? 3000 : undefined) : createHostToolInputValidator(registry), modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(savedReuse ? { resumePlan: savedReuse.controller, reusableIds: savedReuse.reusableIds } : {}), ...(['40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(version) && savedReuse ? { continuationCheckpoint: savedReuse } : {}), version, system: prompt, toolNames, ...(['39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(version) ? { readOnlyToolNames } : {}), conversation, approvalMode: options.approvalMode ?? 'ask', maxTurns: (version === '10' || version === '11' || version === '12' || version === '13' || version === '14' || version === '15' || version === '16' || version === '17' || version === '18' || version === '19' || version === '20' || version === '21' || version === '22' || version === '23' || version === '24' || version === '25' || version === '26' || version === '27' || version === '28' || version === '29' || version === '30' || version === '31' || version === '32' || version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55'))) ? modelEffectBudget ?? 256 : savedMaxTurns }))
     const recovery = await prepareRecovery(backend, this.runDir(conversationId, runId), fingerprints, options.recoveryBuildMigration)
     const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, programs: [legacyProgram, version2Program, program, correctedProgram, ...assistantPrograms, workerProgram, ...controllerPrograms], models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, ...(provider.adapter.id === 'mock' ? {} : { humanArbitration: { timeoutMs: 60_000, model: createFollowupModel({ assistant: assistantChat, context: async request => {
       const agent = runtimeRef?.state.agents.get(request.agentId)
       const global = agent?.globalVersions.get(agent.latestGlobalVersion)
       return { conversation: (await this.getConversationMessages(conversationId)).slice(-16).map(message => ({ role: message.role, text: message.text, ...(message.attachments ? { attachments: message.attachments } : {}) })), goal: agent?.goal, task: global && asRecord(global)?.taskRecord, controller: global && asRecord(global)?.taskController }
-    }, run: (system, instruction, signal) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens: Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096), task: 'reason' }) }) } }), effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness(executeModelEffect, () => runtimeRef, cwd, this.runDir(conversationId, runId), (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55'), () => this.readManifest(conversationId).then(manifest => (manifest.artifacts ?? []).map(artifact => artifact.path)))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, reviewContext, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: options.approvalReview.provider, timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined, relocation, ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(String(savedInput.controllerVersion)), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(String(savedInput.controllerVersion)) ? automationApprovalEvidence(runtimeRef, effect) : undefined, ['28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(String(savedInput.controllerVersion)) ? record?.objective ?? userIntent : undefined)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    }, run: (system, instruction, signal) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens: Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096), task: 'reason' }) }) } }), effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness((e, s, o) => executeModelEffect(refreshPluginProjection(e, registry), s, o), () => runtimeRef, cwd, this.runDir(conversationId, runId), (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55'), () => this.readManifest(conversationId).then(manifest => (manifest.artifacts ?? []).map(artifact => artifact.path)))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, reviewContext, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: options.approvalReview.provider, timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined, relocation, ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(String(savedInput.controllerVersion)), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(String(savedInput.controllerVersion)) ? automationApprovalEvidence(runtimeRef, effect) : undefined, ['28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'].includes(String(savedInput.controllerVersion)) ? record?.objective ?? userIntent : undefined)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     runtimeRef = runtime
     if (!assistantChat || savedInput.assistantChatVersion === '4' || savedInput.assistantChatVersion === '5') modelBudget = await ModelAttemptBudget.open(join(this.runDir(conversationId, runId), 'model-budget.json'), modelEffectBudget ?? Math.max(4, Math.min(256, Math.floor(options.maxModelCalls ?? 256))), legacyModelCalls(runtime), options.modelBudgetPolicy)
     if (recovery.journal) { await runtime.persist(backend); await finishRecovery(recovery.journal) }
@@ -3767,13 +3796,13 @@ export class LocalHost {
       const runPrompt = this.withCapabilityInstructions(systemPrompt, capabilities.instructions)
       // Explicit status-only turns must not resume the previous operation.
       const statusOnly = isStatusOnlyTurn(goal)
-      const toolNames = statusOnly ? [] : registry.list().map((tool) => tool.name)
+      const toolNames = statusOnly ? [] : [...new Set([...registry.list().map((tool) => tool.name), ...Object.keys(pluginToolIds)])]
       const readOnlyToolNames = registry.list().filter((tool) => tool.sideEffectPolicy === 'read' && !tool.name.startsWith('task.')).map((tool) => tool.name)
       const program = input.assistantChat
-        ? buildAssistantChatProgram(toolNames, runPrompt, conversation, runOptions.maxTurns ?? 12, '5', createToolInputValidator(registry), referenceNotice)(runOptions.approvalMode ?? 'ask')
+        ? buildAssistantChatProgram(toolNames, runPrompt, conversation, runOptions.maxTurns ?? 12, '5', createHostToolInputValidator(registry), referenceNotice)(runOptions.approvalMode ?? 'ask')
         : controlled
           ? buildTaskControllerProgram({ validateToolInput: taskToolInputValidator(registry, goal, true, 3000), modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(reuse ? { resumePlan: reuse.controller, reusableIds: reuse.reusableIds, continuationCheckpoint: reuse } : {}), system: runPrompt, toolNames, readOnlyToolNames, conversation, approvalMode: runOptions.approvalMode ?? 'ask', maxTurns: maxModelCalls })
-          : buildProgram(toolNames, runPrompt, conversation, true, runOptions.maxTurns ?? 32, '4.1', undefined, createToolInputValidator(registry))(runOptions.approvalMode ?? 'ask')
+          : buildProgram(toolNames, runPrompt, conversation, true, runOptions.maxTurns ?? 32, '4.1', undefined, createHostToolInputValidator(registry))(runOptions.approvalMode ?? 'ask')
       runtime.register(program)
       runtime.setHumanInputProgram(program)
       if (initialTask && controlled) initialTask.acceptanceChecks = validateAcceptanceChecks(initialTask.acceptanceChecks, initialTask.acceptanceCriteria, registry.list().filter(t => t.sideEffectPolicy === 'read').map(t => t.name))
@@ -3890,9 +3919,9 @@ export class LocalHost {
       restored = activated
       const { runtime, registry, capabilities, capabilityController, modelBudget } = activated
       const runPrompt = this.withCapabilityInstructions(systemPrompt, capabilities.instructions)
-      const restoredToolNames = registry.list().map((tool) => tool.name)
+      const restoredToolNames = [...new Set([...registry.list().map((tool) => tool.name), ...Object.keys(pluginToolIds)])]
       const interactionProgram = assistantChat
-        ? buildAssistantChatProgram(restoredToolNames, runPrompt, conversation, runOptions.maxTurns ?? 12, savedInput.assistantChatVersion === '5' ? '5' : savedInput.assistantChatVersion === '4' ? '4' : savedInput.assistantChatVersion === '3' ? '3' : savedInput.assistantChatVersion === '2' ? '2' : '1', createToolInputValidator(registry), resumeReference)(runOptions.approvalMode ?? 'ask')
+        ? buildAssistantChatProgram(restoredToolNames, runPrompt, conversation, runOptions.maxTurns ?? 12, savedInput.assistantChatVersion === '5' ? '5' : savedInput.assistantChatVersion === '4' ? '4' : savedInput.assistantChatVersion === '3' ? '3' : savedInput.assistantChatVersion === '2' ? '2' : '1', createHostToolInputValidator(registry), resumeReference)(runOptions.approvalMode ?? 'ask')
         : buildProgram(restoredToolNames, runPrompt, conversation, true, runOptions.maxTurns ?? 32)(runOptions.approvalMode ?? 'ask')
       runtime.setHumanInputProgram(interactionProgram)
       const agent = [...runtime.state.agents.values()].find((candidate) => candidate.parentAgentId === undefined)
@@ -4171,7 +4200,7 @@ export class LocalHost {
     const errors: string[] = []
     try { await this.init() } catch (error) { errors.push(error instanceof Error ? error.message : String(error)) }
     try { errors.push(...(await checkShellSandbox()).errors.map((message) => `SHELL_SANDBOX: ${message}`)) } catch { errors.push('SHELL_SANDBOX: dependency probe failed') }
-    const registry = new ToolRegistry({ allowNetwork: this.options.allowNetwork === true }); registerBuiltIns(registry, this.root, this.options.approvalMode ?? 'ask', this.options.allowNetwork === true, undefined, this.options.networkHosts, undefined, undefined, undefined, undefined, undefined, this.options.webSearch)
+    const registry = new PluginToolRegistry({ allowNetwork: this.options.allowNetwork === true }, this.builtinPluginJobs); registerPluginTools(registry, this.builtinPluginJobs, this.root, 'doctor', this.options.builtinPluginConfigPath); registerBuiltIns(registry, this.root, this.options.approvalMode ?? 'ask', this.options.allowNetwork === true, undefined, this.options.networkHosts, undefined, undefined, undefined, undefined, undefined, this.options.webSearch)
     let live: { ok: boolean; message: string } | undefined
     if (options.live) {
       const provider = providerFromOptions(this.options)
