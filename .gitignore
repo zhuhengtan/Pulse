@@ -19,3 +19,6 @@ artifacts/desktop/
 artifacts/desktop-runtime/
 artifacts/desktop-connection-fix/
 artifacts/*
+output/
+.pulse-*
+.kilo
