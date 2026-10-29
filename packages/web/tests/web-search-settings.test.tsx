@@ -74,7 +74,7 @@ describe('web search settings', () => {
       }
       return f.transport.request(path, init)
     } }
-    render(<PulseDesignSystem><SettingsPage transport={transport} canEditConfig category="network" onCategoryChange={() => {}} onClose={() => {}} /></PulseDesignSystem>)
+    render(<PulseDesignSystem><SettingsPage transport={transport} canEditConfig category="builtin-plugins" onCategoryChange={() => {}} onClose={() => {}} /></PulseDesignSystem>)
     fireEvent.mouseDown(await screen.findByRole('combobox', { name: '搜索来源' }))
     fireEvent.click(await screen.findByText('自定义 JSON 服务'))
     fireEvent.change(screen.getByLabelText('搜索服务地址'), { target: { value: 'http://localhost:8080/search' } })

@@ -24,7 +24,7 @@ export function webSearchError(code?: string): string {
   return '无法连接搜索服务，请检查地址和服务运行状态。'
 }
 
-export function WebSearchSettings({ config, onChange, transport }: { config: Config; onChange: (next: Config) => void; transport: PulseWebTransport }) {
+export function WebSearchSettings({ config, onChange, transport, embedded = false }: { config: Config; onChange: (next: Config) => void; transport: PulseWebTransport; embedded?: boolean }) {
   const search = config.webSearch && typeof config.webSearch === 'object' && !Array.isArray(config.webSearch) ? config.webSearch as Config : undefined
   const [query, setQuery] = useState('Pulse')
   const [result, setResult] = useState<SearchResult>()
@@ -46,8 +46,8 @@ export function WebSearchSettings({ config, onChange, transport }: { config: Con
       if (generation.current === current) setError(controller.signal.aborted ? '已取消测试搜索。' : webSearchError(failure instanceof ApiError ? failure.detail : undefined))
     } finally { if (generation.current === current) setBusy(false) }
   }
-  return <section className="editor-section">
-    <h2>网页搜索</h2>
+  return <section className={embedded ? 'config-entity' : 'editor-section'}>
+    {!embedded && <h2>网页搜索</h2>}
     <p>供助理和任务中的网页搜索工具使用。测试使用当前草稿，不保存配置。</p>
     <label className="field-control"><span>搜索来源</span><PulseSelect aria-label="搜索来源" value={typeof search?.provider === 'string' ? search.provider : 'legacy'} onChange={provider => {
       if (provider === 'legacy') { const next = { ...config }; delete next.webSearch; onChange(next) }

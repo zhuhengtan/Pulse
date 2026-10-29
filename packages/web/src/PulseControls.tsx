@@ -54,6 +54,9 @@ export function usePulseDialogs() {
   const { modal } = App.useApp()
   return {
     alert: (content: string) => { modal.error({ title: '操作未完成', content, okText: '知道了' }) },
+    pluginDisable: (count: number) => new Promise<'cancel' | 'finish' | undefined>(resolve => {
+      const dialog = modal.confirm({ title: '关闭插件', content: '有 ' + count + ' 个在途生成请求。是否停止？远端任务可能无法取消或仍产生费用。', footer: <div className="json-actions"><Button onClick={() => { dialog.destroy(); resolve(undefined) }}>取消关闭</Button><Button onClick={() => { dialog.destroy(); resolve('finish') }}>不停止，等待已有请求完成</Button><Button danger onClick={() => { dialog.destroy(); resolve('cancel') }}>停止并尽力取消</Button></div>, onCancel: () => resolve(undefined) })
+    }),
     confirm: (content: ReactNode) => new Promise<boolean>(resolve => {
       modal.confirm({ title: '请确认', content, okText: '确认', cancelText: '取消', onOk: () => { resolve(true) }, onCancel: () => { resolve(false) } })
     }),
