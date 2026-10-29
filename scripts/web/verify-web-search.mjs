@@ -12,7 +12,7 @@ const root = fileURLToPath(new URL('../../', import.meta.url))
 const temp = await mkdtemp(join(tmpdir(), 'pulse-web-search-ui-'))
 process.env.PULSE_HOME = temp
 process.env.PULSE_BOOTSTRAP_RUNTIME = temp
-const out = join(root, 'output/web-search-acceptance')
+const out = join(root, 'output/web-search-acceptance-' + Date.now())
 const { createLocalHost, H5Server } = await import(join(root, 'packages/server/dist/index.js'))
 const { searchWeb } = await import(join(root, 'packages/server/dist/web-search.js'))
 const { fetchText, readPublicPage } = await import(join(root, 'packages/server/dist/web.js'))
@@ -55,7 +55,7 @@ try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } })
   await context.addCookies([{ name: cookie.slice(0, split), value: cookie.slice(split + 1), url: base }])
   const page = await context.newPage(); page.on('pageerror', error => errors.push(error.message))
-  await page.goto(base + '/settings/network')
+  await page.goto(base + '/settings/builtin-plugins')
   await page.getByRole('combobox', { name: '搜索来源' }).click()
   await page.getByText('自定义 JSON 服务', { exact: true }).click()
   await page.getByLabel('搜索服务地址', { exact: true }).fill(searchURL)

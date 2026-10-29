@@ -109,7 +109,9 @@ Create scheduled tasks with `pulse schedule add --every 1h --name "Project check
 
 ## Web search
 
-Under **Settings → Network**, enable network access and select DuckDuckGo, SearXNG, or a custom JSON service. `webSearch` is host-owned configuration; workspace files cannot override it. Localhost, LAN and public service URLs are supported. Testing uses the draft without saving; saved changes apply to subsequent runs, while active runs keep their captured configuration. Failures never switch providers automatically.
+See [Built-in plugins](builtin-plugins.md) for image, video and audio connections, local workflows and the custom media protocol.
+
+Under **Settings → Network**, enable network access, then open **Settings → Built-in plugins** to enable web search and select DuckDuckGo, SearXNG, or a custom JSON service. `webSearch` is host-owned configuration; workspace files cannot override it. Localhost, LAN and public service URLs are supported. Testing uses the draft without saving; saved changes apply on the next tool call, while already submitted requests keep their original configuration. Failures never switch providers automatically.
 
 ```json
 {
