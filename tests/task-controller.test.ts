@@ -302,10 +302,10 @@ describe('Host task controller', () => {
     expect(reviews).toBe(2)
   })
 
-  it('uses v55 for new controllers while retaining earlier program versions for restoration', () => {
+  it('uses v56 for new controllers while retaining earlier program versions for restoration', () => {
     expect(buildTaskControllerProgram({ system: 'test', version: '17', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('17')
-    expect(buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('55')
-    for (const version of ['42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54'] as const) expect(buildTaskControllerProgram({ system: 'test', version, toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe(version)
+    expect(buildTaskControllerProgram({ system: 'test', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('56')
+    for (const version of ['42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55'] as const) expect(buildTaskControllerProgram({ system: 'test', version, toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe(version)
     expect(buildTaskControllerProgram({ system: 'test', version: '9', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('9')
     expect(buildTaskControllerProgram({ system: 'test', version: '8', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('8')
     expect(buildTaskControllerProgram({ system: 'test', version: '7', toolNames: [], approvalMode: 'auto', maxTurns: 8 }).version).toBe('7')

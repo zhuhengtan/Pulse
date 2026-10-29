@@ -22,6 +22,19 @@ export interface CheckReceipt {
   unresolvedInputs?: boolean
   candidateScriptCoverage?: CandidateScriptCoverage[]
 }
+
+/** Product changes include maintaining their repository regressions. Explicit
+ * caller baselines and preservation requests retain the strict append-only policy.
+ * This is derived from the user's request, never a planner-proposed task.
+ */
+export function repositoryTestChangesAllowed(intent: string): boolean {
+  if (/(?:不(?:要)?|禁止|不得|不能|不可|仅|只).{0,24}(?:改|动|重写|删除|移除).{0,20}(?:测试|断言)|(?:保留|保持|保护|原封不动).{0,24}(?:测试|断言)|(?:测试|断言).{0,20}(?:不(?:能|可|准|要)?|禁止|不得).{0,12}(?:改|动|重写|删除|移除)|(?:preserve|keep|retain).{0,30}(?:tests?|assertions?)|(?:baseline|placeholder|frozen|caller-owned)|(?:do not|don't|never|must not|without).{0,35}(?:modify|change|remove|rewrite).{0,20}(?:tests?|assertions?)/i.test(intent)) return false
+  return /(?:合并|新增|实现|重构|迁移|调整|修改|修复|删除|移除|merge|combine|implement|refactor|migrate|fix|remove)/i.test(intent)
+    && /(?:页面|界面|功能|导航|菜单|组件|pages?|screens?|feature|navigation|components?)/i.test(intent)
+}
+async function repositoryTestsMutable(store: string): Promise<boolean> {
+  return fs.readFile(join(store, 'repository-test-policy.json'), 'utf8').then(text => JSON.parse(text).mutable === true).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return false; throw error })
+}
 const baseName = (token: string) => token.replace(/^.*[/\\]/, '').toLowerCase().replace(/\.(?:exe|cmd|bat|ps1)$/, '')
 const RUNNING_SCRIPT = /^(?:test|tests|check|checks|verify|validate|lint|typecheck)(?:[.\-_:][^/\\]*)?$/i
 const TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]sx?$/
@@ -308,6 +321,7 @@ export async function assertCheckEdit(root: string, store: string, path: string,
   try { original = portableKeys(JSON.parse(await fs.readFile(join(store, 'original.json'), 'utf8'))) }
   catch (error) { if ((error as { code?: string }).code === 'ENOENT') return; throw error }
   if (original[key] === undefined || hash(proposed) === original[key]) return
+  if (await repositoryTestsMutable(store)) return
   let sources: Record<string, string> = {}
   try { sources = portableKeys(JSON.parse(await fs.readFile(join(store, 'test-sources.json'), 'utf8'))) }
   catch (error) { if ((error as { code?: string }).code !== 'ENOENT') throw error }
@@ -451,7 +465,11 @@ export async function finishCheck(root: string, before: CheckReceipt, store?: st
     let candidatePolicy: boolean | undefined
     try { candidatePolicy = JSON.parse(await fs.readFile(join(store, 'candidate-test-policy.json'), 'utf8')).mutable === true }
     catch (error) { if ((error as { code?: string }).code !== 'ENOENT') throw error }
+    const mutableRepositoryTests = await repositoryTestsMutable(store)
     const changed = async (path: string, expected: string): Promise<boolean> => {
+      // Current source/test hashes must still be stable throughout this check.
+      // Only the run-start baseline comparison is waived for product-owned tests.
+      if (mutableRepositoryTests && testFile(path)) return false
       const candidate = originalSnapshot && /\.(?:[cm]?[jt]sx?|py|sh)$/.test(path) && before.definitions[path] !== undefined && originalDefinitions[path] === undefined
       if (candidate && candidatePolicy === false) return true
       if (before.definitions[path] === expected) return false
@@ -480,10 +498,11 @@ export async function finishCheck(root: string, before: CheckReceipt, store?: st
   return before
 }
 
-export async function freezeCheckDefinitions(root: string, store: string, allowTestAdditions = false, allowCandidateChanges = true, version: 2 | 3 | 4 = 2): Promise<void> {
+export async function freezeCheckDefinitions(root: string, store: string, allowTestAdditions = false, allowCandidateChanges = true, version: 2 | 3 | 4 = 2, mutableRepositoryTests = false): Promise<void> {
   try { await fs.access(join(store, 'original.json')); return } catch { /* New run. */ }
   const receipt = await captureCheck(root, root, 'node', ['--test'], true, version)
   await fs.mkdir(store, { recursive: true })
+  await fs.writeFile(join(store, 'repository-test-policy.json'), JSON.stringify({ mutable: mutableRepositoryTests }), { flag: 'wx', mode: 0o600 }).catch(error => { if (error.code !== 'EEXIST') throw error })
   await fs.writeFile(join(store, 'candidate-test-policy.json'), JSON.stringify({ mutable: allowCandidateChanges }), { flag: 'wx', mode: 0o600 }).catch(error => { if (error.code !== 'EEXIST') throw error })
   if (allowTestAdditions) {
     const files = new FilesystemTool(root), sources: Record<string, string> = {}

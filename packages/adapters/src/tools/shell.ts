@@ -8,6 +8,7 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { SandboxManager, checkWindowsDependenciesAsync, resolveSrtWin, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import { resolveWindowsPackageManager } from './windows-package-manager.js'
+import { resolveHostPackageManager } from './host-package-manager.js'
 import { windowsShellEnvironment } from './windows-shell-environment.js'
 import { carveWindowsReadDenies, windowsReadDenyRoots, windowsToolchainWriteDenies } from './windows-read-policy.js'
 import { initializeShellSandbox } from './sandbox-initialization.js'
@@ -506,6 +507,12 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     if (process.platform === 'win32') {
       const resolved = await resolveWindowsPackageManager(command, nodeExecutable, pnpmHome)
       if (resolved) { executable = resolved.executable; executableArgs = [...resolved.prefixArgs, ...args] }
+    } else {
+      const resolved = await resolveHostPackageManager(command, nodeExecutable)
+      if (resolved) {
+        executable = resolved.executable; executableArgs = [...resolved.prefixArgs, ...args]
+        toolchainRoots.push(resolved.readRoot)
+      }
     }
     const invocationId = randomUUID()
     const gitApproval = await approvedGitMetadata(cwd, command, executable, args, baseEnv, String(executionEnv[pathKey] ?? ''))

@@ -40,7 +40,7 @@ describe('fourth-round real trajectory regressions (offline)', () => {
     agentId = runtime.createAgent({ goal: 'Write greet.mjs', program, initialGlobal: { taskRecord: { schemaVersion: 1, runId: 'fixture', objective: 'Write greet.mjs', acceptanceCriteria: [{ id: 'c', description: 'Greeting file saved' }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] } } }).agentId
     expect(await runtime.start(agentId).outcome()).toMatchObject({ status: 'succeeded' })
     expect(plans).toBe(1); expect(writes).toBe(1); expect(work).toBe(2)
-    expect(reviews).toBe(mode === 'schema' ? 2 : 1)
+    expect(reviews).toBe(2)
     const agent = runtime.state.agents.get(agentId)!, global = agent.globalVersions.get(agent.latestGlobalVersion) as any
     expect(global.taskController.tasks[0].status).toBe('blocked')
     expect(global.taskController.tasks[0].evidenceRefs.length).toBeGreaterThan(0)
