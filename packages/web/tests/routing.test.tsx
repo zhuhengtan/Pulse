@@ -195,7 +195,7 @@ describe('explicit URL navigation', () => {
     expect(view.calls.some(call => call.method === 'PUT')).toBe(false)
   })
 
-  it('opens component versions and navigates to software updates without a missing route', async () => {
+  it('opens legacy component versions directly in the merged software update page', async () => {
     const fixture = routingFixture(), request = fixture.transport.request
     fixture.transport.request = async (path, init) => path === '/api/updates'
       ? Response.json({ frontend: 'bundled', running: { backend: '0.8.0' }, modules: [{ title: 'Data', name: '@hunterzhu/pulse-data', version: '0.8.0' }] })
@@ -203,8 +203,8 @@ describe('explicit URL navigation', () => {
     const view = show('/settings/versions', fixture)
     await screen.findByText('@hunterzhu/pulse-data')
     expect(screen.queryByText('页面不存在')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '前往软件更新' }))
-    await waitFor(() => expect(address(view.router)).toBe('/settings/updates'))
+    expect(screen.queryByRole('button', { name: '前往软件更新' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '组件版本' })).toBeNull()
     await screen.findByRole('button', { name: '检查更新', exact: true })
   })
 

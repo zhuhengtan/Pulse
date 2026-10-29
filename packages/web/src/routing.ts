@@ -1,7 +1,7 @@
 import { useCallback, useRef } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 
-export const settingsCategories = ['appearance', 'updates', 'versions', 'desktop', 'devices', 'messages', 'models', 'routing', 'front', 'approval', 'jarvis', 'tools', 'mcp', 'builtin-plugins', 'network', 'instructions', 'runtime', 'archive', 'advanced'] as const
+export const settingsCategories = ['appearance', 'updates', 'desktop', 'devices', 'messages', 'models', 'routing', 'front', 'approval', 'jarvis', 'tools', 'mcp', 'builtin-plugins', 'network', 'instructions', 'runtime', 'archive', 'advanced'] as const
 export const workspaceTabs = ['files', 'git', 'preview', 'terminal', 'automation'] as const
 export type WorkspaceTab = typeof workspaceTabs[number]
 export type QueryPatch = Record<string, string | number | boolean | undefined>
@@ -23,7 +23,8 @@ export function parsePulseRoute(pathname: string, search = ''): PulseRoute {
   else if (pathname === '/archive') route.page = 'archive'
   else if (pathname === '/settings') route.page = 'settings'
   else if (pathname.startsWith('/settings/')) {
-    const category = pathname.slice('/settings/'.length)
+    const legacyCategory = pathname.slice('/settings/'.length)
+    const category = legacyCategory === 'versions' ? 'updates' : legacyCategory
     if (settingsCategories.includes(category as typeof settingsCategories[number])) { route.page = 'settings'; route.category = category }
   } else if (pathname === '/work') route.page = 'work'
   else if (pathname === '/work/new') { route.page = 'work'; route.newWork = true }

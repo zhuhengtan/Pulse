@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { ComponentVersions } from '../src/ComponentVersions.js'
+import { UpdateSettings } from '../src/Updates.js'
 import { SettingsPage } from '../src/SettingsPage.js'
 import { PulseDesignSystem } from '../src/PulseDesignSystem.js'
 import type { PulseWebTransport } from '../src/transport.js'
@@ -22,7 +22,7 @@ function fixture() {
     subscribe: () => () => {}, request: vi.fn(async (path) => {
       calls.push(path)
       if (path === '/api/config') return Response.json({ path: '/config.json', version: 'config', config: {}, sources: {}, environment: {}, backupAvailable: false })
-      if (path === '/api/updates/check') return Response.json({ ...status, checkedAt: '2026-10-25T12:00:00Z' }, { status: 202 })
+      if (path.startsWith('/api/updates/')) return Response.json({ ...status, checkedAt: '2026-10-25T12:00:00Z' }, { status: 202 })
       if (path === '/api/updates') return Response.json(status)
       return Response.json({ error: 'NOT_FOUND' }, { status: 404 })
     }),
@@ -30,9 +30,9 @@ function fixture() {
   return { transport, calls }
 }
 describe('Pulse component versions', () => {
-  it('has a dedicated settings page with independent module versions, staged versions and update navigation', async () => {
+  it('shows versions and update actions in one settings page', async () => {
     const { transport, calls } = fixture(), navigate = vi.fn()
-    render(<PulseDesignSystem><SettingsPage transport={transport} canEditConfig category="versions" onCategoryChange={navigate} onClose={() => {}}/></PulseDesignSystem>)
+    render(<PulseDesignSystem><SettingsPage transport={transport} canEditConfig category="updates" onCategoryChange={navigate} onClose={() => {}}/></PulseDesignSystem>)
     const frontend = await screen.findByRole('article', { name: 'Web / H5 界面' })
     expect(await within(frontend).findByText('0.8.1')).toBeTruthy()
     expect(within(frontend).getByText('0.9.0')).toBeTruthy()
@@ -40,21 +40,37 @@ describe('Pulse component versions', () => {
     expect(within(frontend).getByText(/后台 ≥ 0.9.0/)).toBeTruthy()
     expect(screen.getByText('0.7.9')).toBeTruthy()
     expect(screen.queryByRole('button', { name: '保存全部' })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '检查 Pulse 更新' }))
+    fireEvent.click(screen.getByRole('button', { name: '检查更新' }))
     await screen.findByText(/发布信息检查时间/)
-    fireEvent.click(screen.getByRole('button', { name: '前往软件更新' }))
-    expect(navigate).toHaveBeenCalledWith('updates')
+    expect(screen.queryByRole('button', { name: '前往软件更新' })).toBeNull()
+    expect(calls.filter(path => path === '/api/updates/check')).toHaveLength(1)
     expect(calls.some(path => path.startsWith('/api/skill-marketplace'))).toBe(false)
   })
   it('distinguishes the open page version from the selected frontend', async () => {
     const meta = document.createElement('meta'); meta.name = 'pulse-frontend-version'; meta.content = '0.8.0'; document.head.append(meta)
-    render(<PulseDesignSystem><ComponentVersions transport={fixture().transport} canManage onOpenUpdates={() => {}}/></PulseDesignSystem>)
+    render(<PulseDesignSystem><UpdateSettings transport={fixture().transport} canManage/></PulseDesignSystem>)
     await screen.findByText('0.8.0（刷新后使用当前版本）')
   })
   it('does not expose module inventory or update mutations to a paired device', async () => {
-    render(<PulseDesignSystem><ComponentVersions transport={fixture().transport} canManage={false} onOpenUpdates={() => {}}/></PulseDesignSystem>)
+    render(<PulseDesignSystem><UpdateSettings transport={fixture().transport} canManage={false}/></PulseDesignSystem>)
     await screen.findByText('完整组件版本和更新由本机管理员查看。')
+    expect(screen.getByText('0.8.1')).toBeTruthy()
+    expect(screen.getByText('后台版本')).toBeTruthy()
     expect(screen.queryByText('@hunterzhu/pulse-data')).toBeNull()
-    expect(screen.queryByRole('button', { name: '检查 Pulse 更新' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '检查更新' })).toBeNull()
+  })
+  it('retains download, idle apply, rollback and automatic update controls in the merged page', async () => {
+    const { transport, calls } = fixture()
+    render(<PulseDesignSystem><UpdateSettings transport={transport} canManage /></PulseDesignSystem>)
+    await screen.findByRole('article', { name: 'Web / H5 界面' })
+    for (const [name, endpoint] of [['下载更新', 'download'], ['空闲时应用', 'apply'], ['回退到上一版本', 'rollback']] as const) {
+      fireEvent.click(screen.getByRole('button', { name }))
+      await screen.findByText(/发布信息检查时间/)
+      expect(calls.filter(path => path === '/api/updates/' + endpoint)).toHaveLength(1)
+    }
+    fireEvent.click(screen.getByRole('switch'))
+    await screen.findByText(/发布信息检查时间/)
+    expect(calls.filter(path => path === '/api/updates/settings')).toHaveLength(1)
+    expect(transport.request).toHaveBeenCalledWith('/api/updates/settings', expect.objectContaining({ body: JSON.stringify({ autoDownload: false }) }))
   })
 })
