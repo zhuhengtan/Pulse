@@ -161,7 +161,8 @@ async function scenario(sequence: any[], onWait: (r: any) => Promise<void>) {
   } finally { await host.close() }
 }
 const call = (name: string, input: unknown) => ({ content: '', tool_calls: [{ id: 'offline-call', function: { name, arguments: JSON.stringify(input) } }] })
-const plan = call('plan_write', { path: 'docs/plans/feature.md', content: '# Plan\nImplement a greeting.' })
+const planBody = '# Plan\nImplement a greeting.'
+const plan = call('plan_write', { path: 'docs/plans/feature.md', content: planBody })
 const confirm = call('ask_choice', { prompt: '计划已预览，是否执行？', options: finalOptions })
 const implement = call('fs_write', { path: 'feature.txt', content: 'implementation' })
 describe('concrete plan authorization', () => {
@@ -192,7 +193,7 @@ describe('concrete plan authorization', () => {
   })
   it('allows the identical final question for a newly saved plan version, requiring a second approval', async () => {
     let questions = 0
-    const result = await scenario([plan, confirm, call('fs_apply_patch', { path: 'docs/plans/feature.md', find: 'a greeting', replace: 'a revised greeting' }), confirm, implement], async ({ run, item }) => {
+    const result = await scenario([plan, confirm, call('fs_apply_patch', { path: 'docs/plans/feature.md', find: 'a greeting', replace: 'a revised greeting', expectedHash: createHash('sha256').update(planBody).digest('hex') }), confirm, implement], async ({ run, item }) => {
       questions++; await run.reply(item.effectId, { value: 'execute' })
     })
     expect(questions, JSON.stringify({calls:result.calls,outcome:result.outcome})).toBe(2)

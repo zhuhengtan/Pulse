@@ -47,8 +47,13 @@ function asRecord(value: unknown, label: string): Record<string, unknown> {
 
 function asError(error: unknown): Error { return error instanceof Error ? error : new Error(String(error)) }
 
-function defaultMcpEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const safeKeys = new Set(['PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT'])
+export function defaultMcpEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const safeKeys = new Set([
+    'PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT',
+    'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
+    'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR',
+    'USER', 'LOGNAME', 'SHELL',
+  ])
   return Object.fromEntries(Object.entries(source).filter(([key, value]) =>
     safeKeys.has(key.toUpperCase()) && value !== undefined && !/(API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|AUTHORIZATION|BEARER|CREDENTIAL|COOKIE)/i.test(key) && key !== 'NODE_OPTIONS',
   ))

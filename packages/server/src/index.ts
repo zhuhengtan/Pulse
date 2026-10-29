@@ -1,6 +1,6 @@
 import { approvalReuseIdentity, hasApprovalGrant } from './approval-reuse.js'
 import { verificationFingerprint, reusableVerification } from './task-controller/verification-reuse.js'
-import { shellProcesses, closeShellProcesses, summarizeShellProcess } from './shell-processes.js'
+import { shellProcesses, closeShellProcesses, summarizeShellProcess, blockAcceptanceIfShellBusy } from './shell-processes.js'
 import { BuiltinPluginJobs } from './builtin-plugins/jobs.js'
 import { PluginToolRegistry, registerPluginTools, generationTools, pluginToolIds, refreshPluginProjection, createHostToolInputValidator } from './builtin-plugins/tools.js'
 import type { PluginHostConfig } from './builtin-plugins/config.js'
@@ -52,7 +52,11 @@ import { interruptedController, interruptedSummary } from './task-controller/ter
 import { buildTaskControllerProgram } from './task-controller/program.js'
 import { buildContextGraph, expandFromReachedPoint, type ContextSurface, type SurfaceTask } from './task-controller/context-page.js'
 import { controllerFromGlobal, isPreConfirmationInspectionCommand, stageRequiresFileChange } from './task-controller/state.js'
-import { ExactPatchEditor, checkNewJavaScript, editingError, PLAN_BYTES, PlanWriter, stageInput, StagedEditor, STREAM_BYTES } from './editing.js'
+import { ExactPatchEditor, LaneReadTracker, checkNewJavaScript, editingError, PLAN_BYTES, PlanWriter, pulsePath, stageInput, StagedEditor, STREAM_BYTES } from './editing.js'
+import { FileSnapshotManager, dispositionForEffect, effectOwnsWalRecord, type RollbackJournal } from './file-snapshots.js'
+import { fileWriteContext } from './file-write-context.js'
+import { hasVisibleFullRead, latestVisibleReadHash } from './file-read-evidence.js'
+import { readBoundedImage } from './image-bytes.js'
 import { ModelAttemptBudget } from './model-budget.js'
 import { approvalScriptContext, isNecessaryVerification } from './verification-policy.js'
 import { acceptanceFailure, assessAcceptanceValue, validateAcceptanceChecks, type AcceptanceCheck, type AcceptanceResult } from './task-controller/acceptance.js'
@@ -65,7 +69,7 @@ import { readFileSync } from 'node:fs'
 import { appendFile, copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
-import { conversationDirectory, safeShellEnv, searchWorkspace, within } from './security.js'
+import { conversationDirectory, globWorkspace, safeShellEnv, searchWorkspace, within } from './security.js'
 import { summarizeSearchResult } from './search-summary.js'
 import {
   FileRuntimePersistenceBackend,
@@ -118,7 +122,7 @@ import { JarvisRun } from './jarvis/run.js'
 import { JarvisSyncQueue } from './jarvis/sync.js'
 import { processFrontModel, heuristicFastAck, type FrontModelConfig, type FrontModelBrief, type FrontModelContextItem, type FrontModelResult } from './front-model.js'
 export { processFrontModel, heuristicFastAck, sanitizeFrontModelResult, type FrontModelConfig, type FrontModelBrief, type FrontModelResult } from './front-model.js'
-export { CapabilityPackRegistry, createMcpCapabilityPack, createPdfCapabilityPack, createSpreadsheetCapabilityPack, referenceCapabilityPackCatalog, type ActiveCapabilityPacks, type CapabilityPack, type CapabilityPackManifest } from './capabilities.js'
+export { CapabilityPackRegistry, createMcpCapabilityPack, createPdfCapabilityPack, createSpreadsheetCapabilityPack, createDocxCapabilityPack, referenceCapabilityPackCatalog, type ActiveCapabilityPacks, type CapabilityPack, type CapabilityPackManifest } from './capabilities.js'
 export { createSkillCapabilityPack, defaultSkillRoot, type SkillCapabilityPackOptions } from './skill-pack.js'
 export { createBuiltinSkillCapabilityPack, listBuiltinSkills, readBuiltinSkill, isBuiltinSkill, builtinSkillContents, type BuiltinSkill } from './builtin-skills.js'
 export { assertJarvisApiUrl, JarvisClient, jarvisResultForRun, type CandidateMemoryInput, type CloseSessionInput, type JarvisContextPackage, type JarvisMemoryRecord, type JarvisSession, type PulseJarvisConfig } from './jarvis/index.js'
@@ -449,8 +453,28 @@ const json = (value: unknown): JsonValue => {
 
 const processRegistries = new WeakMap<ToolRegistry, ReturnType<typeof shellProcesses>>()
 
-function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: ApprovalMode, allowNetwork = false, isApprovedToolCall: (toolCallId: string) => boolean = () => false, networkHosts?: string[], draftOwner = 'legacy', runData?: string, checkVersion: 2 | 3 | 4 = 2, copyReceipts = false, candidateScripts = false, webSearch?: WebSearchOptions, longCommands = false): void {
+interface BuiltInSurface {
+  version?: 1 | 2
+  getRuntime?: () => PulseRuntime | undefined
+  visionAvailable?: boolean
+  snapshots?: FileSnapshotManager
+  conversationId?: string
+}
+
+function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: ApprovalMode, allowNetwork = false, isApprovedToolCall: (toolCallId: string) => boolean = () => false, networkHosts?: string[], draftOwner = 'legacy', runData?: string, checkVersion: 2 | 3 | 4 = 2, copyReceipts = false, candidateScripts = false, webSearch?: WebSearchOptions, longCommands = false, surface: BuiltInSurface = {}): void {
   const fsTool = new FilesystemTool(root)
+  const fileSurfaceVersion = surface.version === 2 ? 2 : 1
+  const laneReadTracker = new LaneReadTracker()
+  const patchMatching = fileSurfaceVersion === 2 ? 'normalized' as const : 'exact' as const
+  const readBaseline = (path: string, expectedHash: string | undefined, context: { laneId: string; agentId: string }): string | undefined => {
+    if (expectedHash !== undefined) return expectedHash
+    if (fileSurfaceVersion !== 2) return laneReadTracker.getLatestReadHash(context.laneId, resolve(root, path))
+    const runtime = surface.getRuntime?.()
+    if (!runtime) throw editingError('FILE_READ_BASELINE_REQUIRED', 'fs.apply_patch needs a visible fs.read ResultRef for this file. Read it again after the latest edit; the current file hash is not a baseline.')
+    const hash = latestVisibleReadHash(runtime, root, context.laneId, context.agentId, path)
+    if (!hash) throw editingError('FILE_READ_BASELINE_REQUIRED', 'fs.apply_patch needs a visible fs.read ResultRef for this file. Read it again after the latest edit; the current file hash is not a baseline.')
+    return hash
+  }
   registry.register(defineTool({
     name: 'fs.list', description: 'List files in the workspace. ENOENT means the path does not exist; an empty entry list means the directory exists and has no entries.', tags: ['files', 'read'], input: z.object({ path: z.string().default('.') }), output: z.object({ path: z.string(), entries: z.array(z.string()) }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ path }) => { const safePath = path ?? '.'; return { path: safePath, entries: await fsTool.list(safePath) } }, summarize: (output) => ({ path: output.path ?? '.', entries: output.entries.slice(0, 100) }),
   }))
@@ -481,22 +505,70 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
     name: 'ask.input', description: 'Ask the human to provide free-form text before continuing.' + dismissalHelp, tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000), placeholder: z.string().max(500).optional(), defaultValue: z.string().max(2_000).optional() }), output: z.union([z.object({ text: z.string() }), dismissedAsk]), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
   }))
   registry.register(defineTool({
-    name: 'fs.read', description: 'Read a UTF-8 workspace file with its full-file hash in windows of up to 3000 bytes. Use startLine (one-based, scanning at most 16 MiB) to read near a search line number; offset is bytes, never a line number. If nextOffset is not null, pass it as offset to continue; do not assume the first window is the complete file. ENOENT means the file does not exist: do not repeat the read; create it with fs.write when the body is at most 16384 bytes, or stream a larger new file with fs.stage.', tags: ['files', 'read'], input: z.object({ path: z.string(), maxBytes: z.number().int().positive().max(200_000).describe('Effective maximum 3000 bytes. Larger legacy requests are clamped to 3000, never a larger window.').optional(), offset: z.number().int().min(0).default(0), startLine: z.number().int().positive().optional() }), output: z.object({ path: z.string(), content: z.string(), truncated: z.boolean(), offset: z.number(), nextOffset: z.number().nullable(), hash: z.string() }), sideEffectPolicy: 'read', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'shared' }], permissions: { workspaceRoots: [root] }, execute: async ({ path, maxBytes, offset, startLine }, context) => { if (startLine !== undefined && offset !== 0) throw editingError('INVALID_READ_RANGE', 'Use startLine or offset, not both.'); const hash = await fsTool.hash(path, context.signal); const readOffset = startLine === undefined ? offset : await fsTool.offsetForLine(path, startLine, context.signal); const result = await fsTool.readRange(path, Math.min(maxBytes ?? 3000, 3000), readOffset, context.signal); if (hash !== await fsTool.hash(path, context.signal)) throw editingError('FILE_BASELINE_CONFLICT', 'File changed while reading; read this window again.'); return { path, ...result, hash } }, summarize: (output) => output,
+    name: 'fs.read', description: 'Read a UTF-8 workspace file with its full-file hash in windows of up to 3000 bytes. Use startLine (one-based, scanning at most 16 MiB) to read near a search line number; offset is bytes, never a line number. If nextOffset is not null, pass it as offset to continue; do not assume the first window is the complete file. ENOENT means the file does not exist: do not repeat the read; create it with fs.write when the body is at most 16384 bytes, or stream a larger new file with fs.stage.', tags: ['files', 'read'], input: z.object({ path: z.string(), maxBytes: z.number().int().positive().max(200_000).describe('Effective maximum 3000 bytes. Larger legacy requests are clamped to 3000, never a larger window.').optional(), offset: z.number().int().min(0).default(0), startLine: z.number().int().positive().optional() }), output: z.object({ path: z.string(), content: z.string(), truncated: z.boolean(), offset: z.number(), nextOffset: z.number().nullable(), hash: z.string() }), sideEffectPolicy: 'read', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'shared' }], permissions: { workspaceRoots: [root] }, execute: async ({ path, maxBytes, offset, startLine }, context) => { if (startLine !== undefined && offset !== undefined && offset !== 0) throw editingError('INVALID_READ_RANGE', 'Use startLine or offset, not both.'); const hash = await fsTool.hash(path, context.signal); const effectiveOffset = offset ?? 0; const readOffset = startLine === undefined ? effectiveOffset : await fsTool.offsetForLine(path, startLine, context.signal); const result = await fsTool.readRange(path, Math.min(maxBytes ?? 3000, 3000), readOffset, context.signal); if (hash !== await fsTool.hash(path, context.signal)) throw editingError('FILE_BASELINE_CONFLICT', 'File changed while reading; read this window again.'); if (fileSurfaceVersion !== 2) laneReadTracker.recordRead(context.laneId, resolve(root, path), hash, readOffset, Buffer.byteLength(result.content, 'utf8'), result.nextOffset); return { path, ...result, hash } }, summarize: (output) => output,
   }))
   registry.register(defineTool({
-    name: 'fs.search', description: 'Search text files in the workspace. Returns bounded matches plus statistics so callers can tell an empty workspace from a truncated search that stopped at a depth, visit, or result limit.', tags: ['files', 'search'], input: z.object({ query: z.string().min(1), path: z.string().default('.') }), output: z.object({ matches: z.array(z.object({ path: z.string(), line: z.number(), text: z.string() })), truncated: z.boolean(), reason: z.enum(['depth', 'visited', 'results']).nullable(), visited: z.number(), matched: z.number() }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ query, path }, context) => await searchWorkspace(root, query, path, context.signal), summarize: (output) => summarizeSearchResult(output),
+    name: 'fs.search', description: 'Search text files in the workspace. Returns bounded matches plus statistics so callers can tell an empty workspace from a truncated search that stopped at a depth, visit, or result limit.', tags: ['files', 'search'], input: z.object({ query: z.string().min(1), path: z.string().default('.'), include: z.string().optional(), exclude: z.string().optional(), contextLines: z.number().int().min(0).max(10).optional() }), output: z.object({ matches: z.array(z.object({ path: z.string(), line: z.number(), text: z.string(), context: z.object({ before: z.array(z.string()), after: z.array(z.string()) }).optional() })), truncated: z.boolean(), reason: z.enum(['depth', 'visited', 'results']).nullable(), visited: z.number(), matched: z.number() }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ query, path, include, exclude, contextLines }, context) => await searchWorkspace(root, query, { directory: path, ...(include !== undefined ? { include } : {}), ...(exclude !== undefined ? { exclude } : {}), ...(contextLines !== undefined ? { contextLines } : {}), signal: context.signal }), summarize: (output) => json(summarizeSearchResult(output)),
   }))
+  if (fileSurfaceVersion === 2) {
+  registry.register(defineTool({
+    name: 'fs.glob', description: 'Match workspace file paths using glob wildcards (e.g. "**/*.ts" or "src/*.json"). Returns bounded file entries and metadata.', tags: ['files', 'search'], input: z.object({ pattern: z.string().min(1), path: z.string().default('.'), limit: z.number().int().positive().max(1000).default(200).optional(), includeHidden: z.boolean().default(false).optional() }), output: z.object({ matches: z.array(z.object({ path: z.string(), size: z.number(), mtimeMs: z.number(), isDirectory: z.boolean() })), truncated: z.boolean(), total: z.number() }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] },
+    execute: async ({ pattern, path, limit, includeHidden }, context) => await globWorkspace(root, pattern, { ...(path !== undefined ? { path } : {}), ...(limit !== undefined ? { limit } : {}), ...(includeHidden !== undefined ? { includeHidden } : {}), signal: context.signal }),
+    summarize: (output) => ({ total: output.total, truncated: output.truncated, matches: output.matches.slice(0, 50).map(m => m.path) }),
+  }))
+  registry.register(defineTool({
+    name: 'fs.view_image', description: 'Read a PNG or JPEG image from the workspace for visual observation. Checks the vision route, file size, signature, and pixel bounds before returning image bytes.', tags: ['files', 'read', 'vision'], input: z.object({ path: z.string().min(1) }), output: z.object({ path: z.string(), mediaType: z.enum(['image/png', 'image/jpeg']), bytes: z.number(), hash: z.string(), pulseImage: z.object({ mediaType: z.enum(['image/png', 'image/jpeg']), data: z.string() }).optional() }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] },
+    execute: async ({ path }, context) => {
+      if (surface.visionAvailable !== true) throw editingError('VISION_MODEL_UNAVAILABLE', 'No vision-capable model is configured. The image was not read.')
+      const abs = await within(root, path)
+      const image = await readBoundedImage(abs, context.signal)
+      const hash = createHash('sha256').update(image.bytes).digest('hex')
+      return { path, mediaType: image.mediaType, bytes: image.bytes.length, hash, pulseImage: { mediaType: image.mediaType, data: image.bytes.toString('base64') } }
+    },
+    summarize: (output) => ({ path: output.path, mediaType: output.mediaType, bytes: output.bytes, hash: output.hash }),
+  }))
+  }
   registry.register(defineTool({
     name: 'fs.write', description: 'Create a new UTF-8 file of at most 16384 bytes. Existing files cannot be rewritten; use fs.apply_patch or fs.apply_patches. Stream a larger new file with fs.stage begin, append, and commit.', tags: ['files', 'write'], input: z.object({ path: z.string(), content: z.string().max(STREAM_BYTES), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }), output: z.object({ path: z.string(), bytes: z.number(), hash: z.string() }), sideEffectPolicy: 'write', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: writeToolTimeoutMs, permissions: { workspaceRoots: [root] }, execute: async ({ path, content, expectedHash }, context) => { if (approvalMode === 'read-only') throw new Error('WRITE_DISABLED_READ_ONLY'); if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:fs.write'); if (expectedHash !== undefined) throw editingError('EXISTING_FILE_NEEDS_PATCH', 'Existing files cannot be rewritten. Use fs.apply_patch or fs.apply_patches for a local change.'); if (Buffer.byteLength(content) > STREAM_BYTES) throw editingError('CREATE_TOO_LARGE', 'Stream a new file with fs.stage: begin, append at most 16384 bytes, then commit.'); await checkNewJavaScript(path, content, context.signal); try { return { path, ...(await fsTool.writeIfUnchanged(path, content, null, context.signal)) } } catch (error) { if ((error as { code?: string }).code !== 'FILE_BASELINE_CONFLICT') throw error; throw Object.assign(editingError('EXISTING_FILE_NEEDS_PATCH', 'The target already exists; no content was written. Read its relevant window with fs.read, preserve existing code/tests, then use fs.apply_patch or fs.apply_patches. Do not retry fs.write or inspect it with shell.'), { details: { path, suggestedRead: { tool: 'fs.read', input: { path } }, nextTools: ['fs.apply_patch', 'fs.apply_patches'] } }) } }, summarize: (output) => output,
   }))
+  if (fileSurfaceVersion === 2) registry.register(defineTool({
+    name: 'fs.overwrite', description: 'Atomically overwrite an existing UTF-8 workspace file (up to 16384 bytes). Requires visible fs.read results that cover the current file from offset 0 through nextOffset null under the same hash. A lost in-memory map is not evidence. For new files use fs.write; for local changes use fs.apply_patch; for streaming large files use fs.stage.', tags: ['files', 'write'],
+    input: z.object({ path: z.string(), content: z.string().max(STREAM_BYTES), expectedHash: z.string().regex(/^[a-f0-9]{64}$/) }),
+    output: z.object({ path: z.string(), bytes: z.number(), hash: z.string(), beforeHash: z.string() }),
+    sideEffectPolicy: 'write', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: writeToolTimeoutMs, permissions: { workspaceRoots: [root] },
+    execute: async ({ path, content, expectedHash }, context) => {
+      if (approvalMode === 'read-only') throw new Error('WRITE_DISABLED_READ_ONLY');
+      if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:fs.overwrite');
+      if (pulsePath(path)) throw editingError('INVALID_DRAFT_TARGET', 'Draft targets cannot modify Pulse configuration or draft storage.');
+      if (Buffer.byteLength(content) > STREAM_BYTES) throw editingError('CREATE_TOO_LARGE', 'Stream a new file with fs.stage: begin, append at most 16384 bytes, then commit.');
+      const runtime = surface.getRuntime?.()
+      const covered = runtime ? hasVisibleFullRead(runtime, root, context.laneId, context.agentId, path, expectedHash) : false
+      if (!covered) {
+        throw Object.assign(editingError('FULL_FILE_READ_REQUIRED_FOR_OVERWRITE', 'fs.overwrite requires visible fs.read results covering the file from offset 0 through nextOffset null under the same hash. Read the remaining windows with fs.read or use fs.apply_patch for a local change.'), {
+          details: { path, expectedHash, requirement: 'contiguous-read-covering-entire-file' }
+        });
+      }
+      if (runData) await assertCheckEdit(root, join(runData, 'check-definitions'), path, content);
+      await checkNewJavaScript(path, content, context.signal);
+      const saved = await fsTool.writeIfUnchanged(path, content, expectedHash, context.signal);
+      return { path, ...saved, beforeHash: expectedHash };
+    },
+    summarize: (output) => output,
+  }))
   registry.register(defineTool({
-    name: 'fs.apply_patch', description: 'Preferred existing-file edit: replace one exact fragment, at most 8192 UTF-8 bytes each for find/replace. Include expectedHash from fs.read. An exact already-applied post-image returns changed=false, alreadyApplied=true and performs no write. Other conflicts return currentHash and a suggested bounded read; verify existing behavior or rebase from that actual window, never blindly repeat the old patch.', tags: ['files', 'write', 'patch'], input: z.object({ path: z.string(), find: z.string().min(1).max(8192), replace: z.string().max(8192), all: z.boolean().default(false), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }), output: z.object({ path: z.string(), replacements: z.number(), bytes: z.number(), hash: z.string(), beforeHash: z.string(), changed: z.boolean(), alreadyApplied: z.boolean().optional() }), sideEffectPolicy: 'write', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: writeToolTimeoutMs, permissions: { workspaceRoots: [root] }, execute: async ({ path, find, replace, all, expectedHash }, context) => { if (approvalMode === 'read-only') throw new Error('WRITE_DISABLED_READ_ONLY'); if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:fs.apply_patch'); return new ExactPatchEditor(fsTool, runData ? (path, content) => assertCheckEdit(root, join(runData, 'check-definitions'), path, content) : undefined).execute({ path, patches: [{ find, replace }], all, expectedHash }, context.signal) }, summarize: (output) => json(output),
+    name: 'fs.apply_patch', description: 'Preferred existing-file edit: replace one exact fragment, at most 8192 UTF-8 bytes each for find/replace. Include expectedHash from fs.read. An exact already-applied post-image returns changed=false, alreadyApplied=true and performs no write. Other conflicts return currentHash and a suggested bounded read; verify existing behavior or rebase from that actual window, never blindly repeat the old patch.', tags: ['files', 'write', 'patch'], input: z.object({ path: z.string(), find: z.string().min(1).max(8192), replace: z.string().max(8192), all: z.boolean().default(false), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }), output: z.object({ path: z.string(), replacements: z.number(), bytes: z.number(), hash: z.string(), beforeHash: z.string(), changed: z.boolean(), alreadyApplied: z.boolean().optional() }), sideEffectPolicy: 'write', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: writeToolTimeoutMs, permissions: { workspaceRoots: [root] }, execute: async ({ path, find, replace, all, expectedHash }, context) => {
+      if (approvalMode === 'read-only') throw new Error('WRITE_DISABLED_READ_ONLY');
+      if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:fs.apply_patch');
+      const effectiveExpectedHash = readBaseline(path, expectedHash, context);
+      return new ExactPatchEditor(fsTool, runData ? (path, content) => assertCheckEdit(root, join(runData, 'check-definitions'), path, content) : undefined, patchMatching).execute({ path, patches: [{ find, replace }], all, expectedHash: effectiveExpectedHash }, context.signal);
+    }, summarize: (output) => json(output),
   }))
   registry.register(defineTool({
     name: 'fs.apply_patches', description: 'Atomically apply 2-16 non-overlapping exact-fragment patches to one existing file from the same baseline, like one merge. Every find fragment must occur exactly once. Supply the same expectedHash from that baseline; overlapping fragments or a stale hash write nothing. A cryptographically proven prior post-image returns changed=false and alreadyApplied=true; other conflicts include currentHash and suggestedRead for targeted recovery.', tags: ['files', 'write', 'patch'], input: z.object({ path: z.string(), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), patches: z.array(z.object({ find: z.string().min(1).max(8192), replace: z.string().max(8192) })).min(2).max(16) }), output: z.object({ path: z.string(), replacements: z.number(), bytes: z.number(), hash: z.string(), beforeHash: z.string(), changed: z.boolean(), alreadyApplied: z.boolean().optional() }), sideEffectPolicy: 'write', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: writeToolTimeoutMs, permissions: { workspaceRoots: [root] }, execute: async ({ path, expectedHash, patches }, context) => {
       if (approvalMode === 'read-only') throw new Error('WRITE_DISABLED_READ_ONLY')
       if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:fs.apply_patches')
-      return new ExactPatchEditor(fsTool, runData ? (path, content) => assertCheckEdit(root, join(runData, 'check-definitions'), path, content) : undefined).execute({ path, patches, expectedHash }, context.signal)
+      const effectiveExpectedHash = readBaseline(path, expectedHash, context)
+      return new ExactPatchEditor(fsTool, runData ? (path, content) => assertCheckEdit(root, join(runData, 'check-definitions'), path, content) : undefined, patchMatching).execute({ path, patches, expectedHash: effectiveExpectedHash }, context.signal)
     }, summarize: (output) => json(output),
   }))
   registry.register(defineTool({
@@ -554,6 +626,32 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
     }))
     // Search and media plugins are registered by the Host with live enablement.
   }
+  if (surface.snapshots) {
+    fsTool.setFileJournal({
+      begin: async (info) => {
+        const ctx = fileWriteContext.getStore()
+        if (!ctx || ctx.replay || pulsePath(info.path)) return
+        await surface.snapshots!.beginJournal({ ...ctx, path: info.path, before: info.before, next: info.next })
+      },
+      landed: async () => {
+        const ctx = fileWriteContext.getStore()
+        if (!ctx || ctx.replay) return
+        await surface.snapshots!.markLanded(ctx)
+      },
+      move: async (info) => {
+        const ctx = fileWriteContext.getStore()
+        if (!ctx || ctx.replay || pulsePath(info.source) || pulsePath(info.destination)) return
+        await surface.snapshots!.beginMove({ ...ctx, source: info.source, destination: info.destination, before: info.before })
+      },
+    })
+    for (const manifest of registry.list()) {
+      if (manifest.sideEffectPolicy !== 'write') continue
+      const definition = registry.get(manifest.name)
+      if (!definition) continue
+      const execute = definition.execute
+      definition.execute = (input, context) => fileWriteContext.run({ effectId: context.effectId, runId: draftOwner, laneId: context.laneId, agentId: context.agentId, conversationId: surface.conversationId ?? '' }, () => execute(input, context))
+    }
+  }
 }
 
 function registerCapabilityTools(registry: ToolRegistry, capabilities: ActiveCapabilityPacks, mode: ApprovalMode): void {
@@ -572,13 +670,13 @@ function registerCapabilityTools(registry: ToolRegistry, capabilities: ActiveCap
 function boundedUtf8(value: string, maxBytes: number): string {
   const bytes = Buffer.from(value, 'utf8')
   if (bytes.byteLength <= maxBytes) return value
-  let end = maxBytes
-  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--
-  if (end < maxBytes) {
-    const lead = bytes[end]!
-    const width = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4
-    if (end + width <= maxBytes) end = maxBytes
-  }
+  let end = Math.min(maxBytes, bytes.length)
+  while (end > 0 && (bytes[end - 1]! & 0xc0) === 0x80) end--
+  if (end === 0) return ''
+  const lead = bytes[end - 1]!
+  const needed = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1
+  if (needed > 1 && end - 1 + needed <= bytes.length && end - 1 + needed <= maxBytes) end = end - 1 + needed
+  else if (needed > 1) end -= 1
   return bytes.subarray(0, end).toString('utf8')
 }
 
@@ -1005,9 +1103,9 @@ export function assistantChatRequiredToolNames(toolNames: readonly string[], tex
   return toolNames.filter(name => required.has(name))
 }
 
-const assistantRepeatableReadTools = new Set(['work.list', 'work.status', 'conversation.search', 'conversation.read', 'fs.list', 'fs.read', 'fs.search', 'web.search', 'web.fetch', 'attachment.read', 'attachment.list'])
+const assistantRepeatableReadTools = new Set(['work.list', 'work.status', 'conversation.search', 'conversation.read', 'fs.list', 'fs.read', 'fs.search', 'fs.glob', 'fs.view_image', 'web.search', 'web.fetch', 'attachment.read', 'attachment.list'])
 /** Cross-conversation history stays out of this set so ask mode can require confirmation. */
-export const assistantAutoApprovedTools = new Set([...generationTools, 'fs.list', 'fs.read', 'fs.search', 'web.search', 'web.fetch', 'jarvis.search', 'jarvis.context', 'jarvis.get', 'jarvis.status', 'jarvis.candidates', 'work.list', 'work.status', 'capability.status'])
+export const assistantAutoApprovedTools = new Set([...generationTools, 'fs.list', 'fs.read', 'fs.search', 'fs.glob', 'fs.view_image', 'web.search', 'web.fetch', 'jarvis.search', 'jarvis.context', 'jarvis.get', 'jarvis.status', 'jarvis.candidates', 'work.list', 'work.status', 'capability.status'])
 
 export function assistantChatAllowedToolNames(toolNames: string[], text: string, calledTools: ReadonlySet<string>, repeatableReads = true, attachmentRequested = false, delegatedWork = false, scopedNegation = false): string[] {
   const required = assistantChatRequiredToolNames(toolNames, text, delegatedWork, scopedNegation).map(name => attachmentRequested && name === 'fs.read' ? 'attachment.read' : name)
@@ -1548,9 +1646,8 @@ function withEvidenceFreshness(execute: EffectExecutor, current: () => PulseRunt
       const staleRefs = await staleFileEvidence(cwd, refs, current()!, stageCheckRefs, snapshots, [record?.objective, ...(record?.acceptanceCriteria.map(c=>c.description)??[])].join('\n'), modern)
       return staleRefs.length ? { value: null, status: 'failed', executionState: 'failed', error: { code: 'EVIDENCE_CHANGED', message: 'Current file snapshots or frozen check definitions no longer match the verification evidence. Review the affected evidence before accepting this stage.', retryable: false, details: { staleRefs } } } : undefined
     }
-    if (current()!.state.lanes.get(effect.ownerLaneId)?.resume.programVersion === '57') {
-      try { await shellProcesses(runDirectory).assertIdle() } catch (cause) { return { value: null, status: 'failed', executionState: 'failed', error: runtimeErrorFromCause(cause) } }
-    }
+    const programVersion = current()?.state.lanes.get(effect.ownerLaneId)?.resume.programVersion
+    try { await blockAcceptanceIfShellBusy(programVersion, runDirectory) } catch (cause) { return { value: null, status: 'failed', executionState: 'failed', error: runtimeErrorFromCause(cause) } }
     const before = await failure(); if (before) return before
     const fingerprint = verificationFingerprint(effect, current()!)
     const reused = fingerprint ? reusableVerification(current()!, fingerprint) : undefined
@@ -1719,11 +1816,22 @@ export class LocalHost {
   readonly conversationData: ConversationData
   private readonly persistenceCache = new Map<string, Promise<import('@hunterzhu/pulse-runtime').RuntimePersistenceBackend>>()
   private readonly runBackends = new Set<import('@hunterzhu/pulse-runtime').RuntimePersistenceBackend>()
-  private async persistenceFor(conversationId: string, runId: string, kind = this.options.persistenceBackend) {
+  private readonly runWorkspaces = new Map<string, string>()
+  private async persistenceFor(conversationId: string, runId: string, kind = this.options.persistenceBackend, cwd?: string) {
+    if (cwd) this.runWorkspaces.set(`${conversationId}\n${runId}`, cwd)
     const key = `${conversationId}:${runId}:${kind ?? ''}`
     let pending = this.persistenceCache.get(key)
     if (!pending) {
-      pending = runPersistence(this.runDir(conversationId, runId), kind).then(backend => { this.runBackends.add(backend); return backend }).catch(error => { this.persistenceCache.delete(key); throw error })
+      pending = runPersistence(this.runDir(conversationId, runId), kind).then(backend => {
+        this.runBackends.add(backend)
+        const save = backend.save.bind(backend)
+        backend.save = async (snapshot, expectedDigest) => {
+          await save(snapshot, expectedDigest)
+          const workspace = this.runWorkspaces.get(`${conversationId}\n${runId}`)
+          if (workspace) await this.settlePersistedFileEffects(workspace, snapshot, conversationId, runId)
+        }
+        return backend
+      }).catch(error => { this.persistenceCache.delete(key); throw error })
       this.persistenceCache.set(key, pending)
       if (this.persistenceCache.size > 32) for (const [oldKey, old] of this.persistenceCache) {
         if (oldKey === key || this.active.has(oldKey.split(':')[1]!)) continue
@@ -2588,20 +2696,25 @@ export class LocalHost {
   }
   private async appendMessage(id: string, message: StoredMessage): Promise<void> { await this.conversationData.call('append', id, message) }
   private async runtimeFor(conversationId: string, runId: string, cwd: string, userIntent = '', skillInput = '', options: LocalHostOptions = this.options, assistantChat = false, jarvisSessionId?: string, modelBudget?: ModelAttemptBudget): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; modelBudget?: ModelAttemptBudget | undefined }> {
+    const persistedSurface = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').catch(() => '{}')) as { fileSurfaceVersion?: unknown }
+    const fileSurfaceVersion: 1 | 2 = persistedSurface.fileSurfaceVersion === 2 ? 2 : 1
+    const fileSnapshots = new FileSnapshotManager(cwd, new FilesystemTool(cwd))
+    const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(id => options.providerModels?.[id]?.imageInput === 'supported')
+    let runtimeRef: PulseRuntime | undefined
+    const builtInSurface: BuiltInSurface = { version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId }
     await this.seedPlanGate(conversationId, runId, !assistantChat && (isPreImplementationConfirmationSkill(skillInput) || requiresExplicitPlanConfirmation(skillInput)), options.approvalMode === 'read-only' ? undefined : cwd)
     const registry = new PluginToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) }, this.builtinPluginJobs)
     registerPluginTools(registry, this.builtinPluginJobs, cwd, runId, this.options.builtinPluginConfigPath, conversationId)
     if (assistantChat) {
-      registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId), !assistantChat && options.taskController !== false ? 4 : 3, !assistantChat && options.taskController !== false, !assistantChat && options.taskController !== false, options.webSearch, !assistantChat && options.taskController !== false && options.taskControllerPolicy === 'continuous')
+      registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId), !assistantChat && options.taskController !== false ? 4 : 3, !assistantChat && options.taskController !== false, !assistantChat && options.taskController !== false, options.webSearch, !assistantChat && options.taskController !== false && options.taskControllerPolicy === 'continuous', builtInSurface)
       const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
       this.registerAssistantJarvisTools(registry, getSession, cwd, userIntent)
       this.registerAssistantWorkTools(registry)
     } else {
-      registerBuiltIns(registry, cwd, options.approvalMode ?? 'ask', options.allowNetwork === true, (toolCallId) => this.approvedToolCalls.get(runId)?.has(toolCallId) === true, options.networkHosts, runId, this.runDir(conversationId, runId), !assistantChat && options.taskController !== false ? 4 : 3, !assistantChat && options.taskController !== false, !assistantChat && options.taskController !== false, options.webSearch, !assistantChat && options.taskController !== false && options.taskControllerPolicy === 'continuous')
+      registerBuiltIns(registry, cwd, options.approvalMode ?? 'ask', options.allowNetwork === true, (toolCallId) => this.approvedToolCalls.get(runId)?.has(toolCallId) === true, options.networkHosts, runId, this.runDir(conversationId, runId), !assistantChat && options.taskController !== false ? 4 : 3, !assistantChat && options.taskController !== false, !assistantChat && options.taskController !== false, options.webSearch, !assistantChat && options.taskController !== false && options.taskControllerPolicy === 'continuous', builtInSurface)
       const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
       this.registerAssistantJarvisTools(registry, getSession, cwd, userIntent)
     }
-    const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(id => options.providerModels?.[id]?.imageInput === 'supported')
     const attachmentStore = new AttachmentStore(this.dataDir, conversationId)
     registry.register(attachmentStore.tool(Object.values(options.providerModels ?? {}).some(model => model.imageInput === 'supported')))
     registry.register(attachmentStore.listTool())
@@ -2628,9 +2741,8 @@ export class LocalHost {
     const provider = providerFromOptions(options)
     const routing = createHostModelRouting({ activeModel: options.activeModel ?? provider.model.id, activeProviderCode: options.activeProviderCode ?? provider.adapter.id, activeProvider: options.provider ?? { provider: 'mock', defaultModel: provider.model.id }, ...(options.providerProfiles === undefined ? {} : { providerProfiles: options.providerProfiles }), ...(options.providerModels === undefined ? {} : { providerModels: options.providerModels }), ...(options.taskRouting === undefined ? {} : { taskRouting: options.taskRouting }), activeAdapter: provider.adapter })
     const { models, router, providers } = routing
-    const backend = await this.persistenceFor(conversationId, runId, options.persistenceBackend)
+    const backend = await this.persistenceFor(conversationId, runId, options.persistenceBackend, cwd)
     if (!assistantChat) { await freezeCheckDefinitions(cwd, join(this.runDir(conversationId, runId), 'check-definitions'), testAdditionsRequested(userIntent), candidateTestChangesAllowed(userIntent), 4, !options.acceptanceChecks?.length && repositoryTestChangesAllowed(userIntent)); await freezeConstraintBaseline(cwd, this.runDir(conversationId, runId)) }
-    let runtimeRef: PulseRuntime | undefined
     if (!assistantChat) this.registerTaskInspection(registry, () => runtimeRef!, conversationId, runId, cwd, true)
 
     registry.register(defineTool({ name: 'fs.stage.capacity', description: 'Preflight new-file bytes against remaining actual model calls. Does not increase budgets. Choose chunks that fit the model output token limit.', tags: ['files', 'read'], input: z.object({ bytes: z.number().int().min(0).max(500_000) }), output: z.object({ chunkBytes: z.number(), toolSteps: z.number(), remainingCalls: z.number(), feasible: z.boolean() }), sideEffectPolicy: 'read', execute: async ({ bytes }) => { const chunkBytes = Math.min(STREAM_BYTES, Math.max(512, (provider.model.capabilities.maxOutputTokens ?? 4096) * 2)); const toolSteps = Math.max(1, Math.ceil(bytes / chunkBytes)) + 1; const remainingCalls = Math.max(0, (modelBudget?.limit ?? 256) - (modelBudget?.used ?? 0) - (modelBudget?.accounting.policy?.verificationReserve ?? 0)); return { chunkBytes, toolSteps, remainingCalls, feasible: toolSteps + 1 <= remainingCalls } } }))
@@ -2654,6 +2766,7 @@ export class LocalHost {
     const budget = historyBudget(provider.model.capabilities)
     runtime.state.historySoftTokens = budget.historySoftTokens
     runtime.state.historyHardTokens = budget.historyHardTokens
+    await this.reconcileWorkspaceWal(cwd, runtime, runId, conversationId)
     return { runtime, registry, capabilities, capabilityController, modelBudget }
     } catch (error) { capabilityController.abort(); await capabilities.dispose().catch(() => undefined); throw error }
   }
@@ -2986,19 +3099,23 @@ export class LocalHost {
     await this.seedPlanGate(conversationId, runId, needsPreImplementationConfirmation, options.approvalMode === 'read-only' ? undefined : cwd)
     const registry = new PluginToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) }, this.builtinPluginJobs)
     registerPluginTools(registry, this.builtinPluginJobs, cwd, runId, this.options.builtinPluginConfigPath, conversationId)
+    const fileSurfaceVersion: 1 | 2 = savedInput.fileSurfaceVersion === 2 ? 2 : 1
+    const fileSnapshots = new FileSnapshotManager(cwd, new FilesystemTool(cwd))
+    const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(id => options.providerModels?.[id]?.imageInput === 'supported')
+    let runtimeRef: PulseRuntime | undefined
+    const builtInSurface: BuiltInSurface = { version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId }
     if (assistantChat) {
-      registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)) ? ['55', '56', '57'].includes(String(savedInput.controllerVersion)) ? 4 : 3 : 2, (savedInput.controllerVersion === '49' || savedInput.controllerVersion === '50' || savedInput.controllerVersion === '51' || savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57'))), savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57')), options.webSearch, savedInput.controllerVersion === '57')
+      registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)) ? ['55', '56', '57'].includes(String(savedInput.controllerVersion)) ? 4 : 3 : 2, (savedInput.controllerVersion === '49' || savedInput.controllerVersion === '50' || savedInput.controllerVersion === '51' || savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57'))), savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57')), options.webSearch, savedInput.controllerVersion === '57', builtInSurface)
       const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
       this.registerAssistantJarvisTools(registry, getSession, cwd, userIntent)
       this.registerAssistantWorkTools(registry)
     } else {
-      registerBuiltIns(registry, cwd, options.approvalMode ?? 'ask', options.allowNetwork === true, (toolCallId) => this.approvedToolCalls.get(runId)?.has(toolCallId) === true, options.networkHosts, runId, this.runDir(conversationId, runId), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)) ? ['55', '56', '57'].includes(String(savedInput.controllerVersion)) ? 4 : 3 : 2, (savedInput.controllerVersion === '49' || savedInput.controllerVersion === '50' || savedInput.controllerVersion === '51' || savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57'))), savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57')), options.webSearch, savedInput.controllerVersion === '57')
+      registerBuiltIns(registry, cwd, options.approvalMode ?? 'ask', options.allowNetwork === true, (toolCallId) => this.approvedToolCalls.get(runId)?.has(toolCallId) === true, options.networkHosts, runId, this.runDir(conversationId, runId), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)) ? ['55', '56', '57'].includes(String(savedInput.controllerVersion)) ? 4 : 3 : 2, (savedInput.controllerVersion === '49' || savedInput.controllerVersion === '50' || savedInput.controllerVersion === '51' || savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57'))), savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57')), options.webSearch, savedInput.controllerVersion === '57', builtInSurface)
       if (this.jarvisClient) {
         const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
         this.registerAssistantJarvisTools(registry, getSession, cwd, userIntent)
       }
     }
-    const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(id => options.providerModels?.[id]?.imageInput === 'supported')
     const attachmentStore = new AttachmentStore(this.dataDir, conversationId)
     registry.register(attachmentStore.tool(Object.values(options.providerModels ?? {}).some(model => model.imageInput === 'supported')))
     registry.register(attachmentStore.listTool())
@@ -3024,12 +3141,11 @@ export class LocalHost {
     const provider = providerFromOptions(options)
     const routing = createHostModelRouting({ activeModel: options.activeModel ?? provider.model.id, activeProviderCode: options.activeProviderCode ?? provider.adapter.id, activeProvider: options.provider ?? { provider: 'mock', defaultModel: provider.model.id }, ...(options.providerProfiles === undefined ? {} : { providerProfiles: options.providerProfiles }), ...(options.providerModels === undefined ? {} : { providerModels: options.providerModels }), ...(options.taskRouting === undefined ? {} : { taskRouting: options.taskRouting }), activeAdapter: provider.adapter })
     const { models, router, providers } = routing
-    const backend = await this.persistenceFor(conversationId, runId, options.persistenceBackend)
+    const backend = await this.persistenceFor(conversationId, runId, options.persistenceBackend, cwd)
     if (!assistantChat) { await freezeCheckDefinitions(cwd, join(this.runDir(conversationId, runId), 'check-definitions'), testAdditionsRequested(userIntent), candidateTestChangesAllowed(userIntent), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)) ? ['55', '56', '57'].includes(String(savedInput.controllerVersion)) ? 4 : 3 : 2, (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57') && !options.acceptanceChecks?.length && repositoryTestChangesAllowed(userIntent)); await freezeConstraintBaseline(cwd, this.runDir(conversationId, runId)) }
     const basePrompt = systemPrompt ?? await this.resolveSystemPrompt(cwd, undefined, conversation)
     const prompt = this.withCapabilityInstructions(basePrompt, capabilities.instructions)
     const reviewContext = safetyReviewContext(cwd, userIntent, conversation)
-    let runtimeRef: PulseRuntime | undefined
     if (!assistantChat) this.registerTaskInspection(registry, () => runtimeRef!, conversationId, runId, cwd, savedInput.deliveryProtocol === 1 || ['14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)))
     const planReviewer = () => [5, 6, 7, 8].includes(Number(savedInput.planReviewVersion)) ? configuredPlanReviewer(options, modelBudget, () => runtimeRef, provider.model.capabilities, { models, router, providers }) : undefined
     const runPlanReview = (system: string, instruction: string, signal: AbortSignal) => runPlanReviewRequest({ ...(planReviewer() ?? { models, router, execute: executeModelEffect }), system, instruction, signal, maxOutputTokens: [2, 3, 4, 5, 6, 7, 8].includes(Number(savedInput.planReviewVersion)) ? provider.model.capabilities.maxOutputTokens ?? 4096 : Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096) }, [2, 3, 4, 5, 6, 7, 8].includes(Number(savedInput.planReviewVersion)), [3, 4, 5, 6, 7, 8].includes(Number(savedInput.planReviewVersion)) ? provider.model.capabilities.maxContextTokens : undefined, [4, 5, 6, 7, 8].includes(Number(savedInput.planReviewVersion)), [4, 5, 6, 7, 8].includes(Number(savedInput.planReviewVersion)) ? receipt => this.recordPlanReviewAttempt(conversationId, runId, receipt) : undefined, [6, 7, 8].includes(Number(savedInput.planReviewVersion)))
@@ -3084,6 +3200,7 @@ export class LocalHost {
     const budget = historyBudget(provider.model.capabilities)
     runtime.state.historySoftTokens = budget.historySoftTokens
     runtime.state.historyHardTokens = budget.historyHardTokens
+    await this.reconcileWorkspaceWal(cwd, runtime, runId, conversationId)
     return { runtime, registry, capabilities, capabilityController, modelBudget }
     } catch (error) { capabilityController.abort(); await capabilities.dispose().catch(() => undefined); throw error }
   }
@@ -3418,7 +3535,7 @@ export class LocalHost {
         // These built-ins only read: public-network/redirect checks and artifact
         // path validation still run in their handlers. Reviewer availability
         // must not turn ordinary research or artifact display into a write gate.
-        const safeReads = new Set(['fs.list', 'fs.read', 'fs.search', 'task.diagnose', 'task.audit', 'shell.output', 'fs.stage.capacity', 'task.decisions', 'task.evidence', 'task.conversation', 'task.history', 'task.recall', 'task.surface', 'artifact.record', 'web.search', 'web.fetch', 'capability.status', 'automation.status', 'browser.observe', 'browser.tabs', 'browser.downloads'])
+        const safeReads = new Set(['fs.list', 'fs.read', 'fs.search', 'fs.glob', 'fs.view_image', 'task.diagnose', 'task.audit', 'shell.output', 'fs.stage.capacity', 'task.decisions', 'task.evidence', 'task.conversation', 'task.history', 'task.recall', 'task.surface', 'artifact.record', 'web.search', 'web.fetch', 'capability.status', 'automation.status', 'browser.observe', 'browser.tabs', 'browser.downloads'])
         const reviewVersion = await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').then(text => JSON.parse(text).planReviewVersion).catch(() => undefined)
         if ([6, 7, 8].includes(Number(reviewVersion)) && activeEntry?.registry.get('plan.review')?.manifest.sideEffectPolicy === 'read') safeReads.add('plan.review')
         const reviewedCalls: typeof calls = []
@@ -3791,7 +3908,7 @@ export class LocalHost {
         }
         initialTask.acceptanceChecks = retained
       }
-      const now = new Date().toISOString(); if (!input.userMessageRecorded) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal, ...(initialTask?.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 } : {}), capabilitySurface: 1, planReviewVersion: 8, planDecisionVersion: controlled ? 3 : 2, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), assistantChat: input.assistantChat === true, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.assistantChat ? { assistantChatVersion: '5' } : {}), taskController: controlled, ...(controlled ? { controllerVersion: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', taskControllerPolicy: runOptions.taskControllerPolicy ?? 'legacy' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), maxModelCalls, enabledCapabilityPacks: runOptions.enabledCapabilityPacks ?? [], maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel ?? runOptions.provider?.defaultModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
+      const now = new Date().toISOString(); if (!input.userMessageRecorded) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal, ...(initialTask?.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 } : {}), capabilitySurface: 1, fileSurfaceVersion: 2, planReviewVersion: 8, planDecisionVersion: controlled ? 3 : 2, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), assistantChat: input.assistantChat === true, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.assistantChat ? { assistantChatVersion: '5' } : {}), taskController: controlled, ...(controlled ? { controllerVersion: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', taskControllerPolicy: runOptions.taskControllerPolicy ?? 'legacy' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), maxModelCalls, enabledCapabilityPacks: runOptions.enabledCapabilityPacks ?? [], maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel ?? runOptions.provider?.defaultModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
       await new AttachmentStore(this.dataDir, conversationId).remember()
       const attachmentIndex = await new AttachmentStore(this.dataDir, conversationId).index(input.text)
       if (attachmentIndex) conversation.push({ role: 'user', content: attachmentIndex })
@@ -4275,6 +4392,58 @@ export class LocalHost {
       } finally { clearTimeout(timer) }
     }
     return { ok: errors.length === 0 && (live?.ok ?? true), cwd: this.root, dataDir: this.dataDir, node: process.version, tools: registry.list().map((tool) => tool.name), provider: this.options.provider?.provider ?? 'mock', errors, ...(live === undefined ? {} : { live }) }
+  }
+  private async settlePersistedFileEffects(cwd: string, snapshot: { state?: { state?: { effects?: unknown[] } } }, conversationId: string, runId: string): Promise<void> {
+    const effects = snapshot.state?.state?.effects
+    if (!Array.isArray(effects)) return
+    const owners: Array<{ conversationId: string; runId: string; effectId: string; laneId?: string; agentId?: string }> = []
+    for (const entry of effects) {
+      if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !entry[1] || typeof entry[1] !== 'object') continue
+      const effect = entry[1] as { executionState?: string; sideEffectState?: string; outcome?: { status?: string; resultRef?: string }; input?: unknown; agentId?: string; ownerLaneId?: string }
+      if (dispositionForEffect(effect) !== 'confirmed' || typeof effect.outcome?.resultRef !== 'string' || effect.outcome.resultRef.length === 0) continue
+      const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, unknown> : undefined
+      const name = typeof input?.name === 'string' ? input.name : ''
+      if (!['fs.write', 'fs.overwrite', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'fs.move', 'plan.write'].includes(name)) continue
+      owners.push({ conversationId, runId, effectId: entry[0], ...(typeof effect.ownerLaneId === 'string' ? { laneId: effect.ownerLaneId } : {}), ...(typeof effect.agentId === 'string' ? { agentId: effect.agentId } : {}) })
+    }
+    await new FileSnapshotManager(cwd, new FilesystemTool(cwd)).settleConfirmed(owners)
+  }
+
+  async reconcileWorkspaceWal(cwd: string, runtime: PulseRuntime | undefined, runId: string, conversationId?: string): Promise<{ cleaned: string[]; restored: string[] }> {
+    const manager = new FileSnapshotManager(cwd, new FilesystemTool(cwd))
+    return manager.reconcilePendingWal(undefined, async (record) => {
+      if (record.conversationId && conversationId && record.conversationId === conversationId && record.runId === runId) {
+        const effect = runtime?.state.effects.get(record.effectId)
+        if (!effect || !effectOwnsWalRecord(effect, record)) return 'unknown'
+        return dispositionForEffect(effect)
+      }
+      if (!record.conversationId || !record.runId || (record.runId === runId && record.conversationId !== conversationId)) return 'unknown'
+      try {
+        const snapshot = await (await runPersistence(this.runDir(record.conversationId, record.runId))).load()
+        if (!snapshot) return 'unknown'
+        const persisted = snapshot.state as { state?: { effects?: unknown[] } } | undefined
+        const effects = persisted?.state?.effects
+        const found = effects?.find((entry) => Array.isArray(entry) && entry[0] === record.effectId)
+        if (!Array.isArray(found)) return 'unknown'
+        const effect = found[1] as { executionState?: string; sideEffectState?: string; outcome?: { status?: string }; input?: unknown; agentId?: string; ownerLaneId?: string }
+        if (!effectOwnsWalRecord(effect, record)) return 'unknown'
+        return dispositionForEffect(effect)
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === 'ENOENT' || (error as Error).message === 'INVALID_CONVERSATION_ID') return 'unknown'
+        throw Object.assign(new Error('WAL_RECOVERY_STATE_UNAVAILABLE'), { code: 'WAL_RECOVERY_STATE_UNAVAILABLE', cause: error })
+      }
+    })
+  }
+
+  async rollbackFiles(input: { confirm: boolean; targets: Array<{ path: string; expectedPostHash: string }>; conversationId?: string; runId?: string }): Promise<RollbackJournal> {
+    if (input.confirm !== true) throw Object.assign(new Error('ROLLBACK_CONFIRMATION_REQUIRED'), { code: 'ROLLBACK_CONFIRMATION_REQUIRED', retryable: false })
+    if ((this.options.approvalMode ?? 'ask') === 'read-only') throw Object.assign(new Error('WRITE_DISABLED_READ_ONLY'), { code: 'WRITE_DISABLED_READ_ONLY', retryable: false })
+    const manager = new FileSnapshotManager(this.root, new FilesystemTool(this.root))
+    const bound = await manager.modificationScope(input.targets)
+    if ((input.conversationId !== undefined || input.runId !== undefined) && (input.conversationId !== bound.conversationId || input.runId !== bound.runId)) throw Object.assign(new Error('ROLLBACK_SCOPE_MISMATCH'), { code: 'ROLLBACK_SCOPE_MISMATCH', retryable: false })
+    await shellProcesses(this.runDir(bound.conversationId, bound.runId)).assertIdle()
+    return fileWriteContext.run({ effectId: 'host-rollback', runId: bound.runId, laneId: 'host', agentId: 'host', conversationId: bound.conversationId, replay: true }, () => manager.rollback(randomUUID(), bound.runId, input.targets))
   }
 }
 

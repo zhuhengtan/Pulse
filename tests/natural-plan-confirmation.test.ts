@@ -1,5 +1,6 @@
 import { consistentPlanReview } from './helpers/plan-review-provider.js'
 import { afterEach, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -57,9 +58,9 @@ it.each([
     if (blob.includes('Verify ONLY the active taskController stage')) { stage++; return chat(JSON.stringify({ status: 'passed', evidenceRefs: refs, note: 'Saved file verified' })) }
     if (blob.includes('Independently verify every ORIGINAL')) return chat(JSON.stringify({ criteria: ids.map(id => ({ criterionId: id, status: 'passed', evidenceRefs: refs, rationale: 'Plan approval preceded implementation' })) }))
     const turn = ++turns[stage]!
-    if (stage === 0 && turn === 1 && atomic) return tool('fs_apply_patches', { path: 'docs/plans/feature.md', patches: [{ find: 'Plan v1', replace: 'Plan v2' }, { find: 'preserve existing', replace: 'preserve all existing' }] })
+    if (stage === 0 && turn === 1 && atomic) return tool('fs_apply_patches', { path: 'docs/plans/feature.md', expectedHash: createHash('sha256').update(plan).digest('hex'), patches: [{ find: 'Plan v1', replace: 'Plan v2' }, { find: 'preserve existing', replace: 'preserve all existing' }] })
     if (stage === 0 && turn === 1) return tool('plan_write', { path: 'docs/plans/feature.md', content: plan })
-    if (stage === 0 && turn === 2 && revise) return tool('fs_apply_patch', { path: 'docs/plans/feature.md', find: 'preserve existing', replace: 'preserve all existing' })
+    if (stage === 0 && turn === 2 && revise) return tool('fs_apply_patch', { path: 'docs/plans/feature.md', find: 'preserve existing', replace: 'preserve all existing', expectedHash: createHash('sha256').update(plan).digest('hex') })
     if (stage === 1 && turn === 1) return tool('fs_write', { path: 'greet.mjs', content: "export const greet = 'hello'\n" })
     return chat('Done.')
   }))

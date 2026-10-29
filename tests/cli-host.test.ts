@@ -439,7 +439,7 @@ describe('local CLI application host', () => {
     const directory = await mkdtemp(join(tmpdir(), 'pulse-cli-patch-'))
     try {
       await writeFile(join(directory, 'note.txt'), 'before\n')
-      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', mockToolCalls: [{ name: 'fs.apply_patch', input: { path: 'note.txt', find: 'before', replace: 'after' } }], mockAfterToolResponse: 'patched' })
+      const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), approvalMode: 'auto', mockToolCalls: [{ name: 'fs.apply_patch', input: { path: 'note.txt', find: 'before', replace: 'after', expectedHash: createHash('sha256').update('before\n').digest('hex') } }], mockAfterToolResponse: 'patched' })
       const conversation = await host.createConversation()
       const run = await host.sendMessage(conversation.id, { text: 'patch the note' })
       for await (const _event of run.events) { /* drain */ }

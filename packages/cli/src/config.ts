@@ -80,6 +80,7 @@ export interface PulseCliConfig {
   taskRouting?: Partial<Record<PulseModelTask, string[]>>
   capabilities?: PulseCliCapabilities
   approvalMode?: 'read-only' | 'ask' | 'auto'
+  /** Task controller execution mode: 'legacy' (v56 DAG/stages, default) or 'continuous' (v57 continuous execution slices). */
   taskControllerPolicy?: 'legacy' | 'continuous'
   maxTurns?: number
   /** Provider attempts allowed across one controlled work task; defaults to 256. */
@@ -148,6 +149,7 @@ export const defaultPulseConfig: PulseCliConfig = {
   },
   activeModel: 'mock/mock',
   approvalMode: 'ask',
+  taskControllerPolicy: 'legacy',
   maxTurns: 32,
   maxModelCalls: 256,
   autoCompactPercent: 90,

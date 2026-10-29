@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, writeFile, readFile, cp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -100,7 +101,7 @@ it('runs a corrected new test script through the actual sandboxed Host before ac
       { name: 'fs_write', args: { path: 'package.json', content: '{"private":true,"scripts":{"test":"node --test test/"}}\n' } },
       { name: 'fs_write', args: { path: 'test/fixture.test.js', content: "require('node:test')('feature value', () => require('node:assert/strict').equal(require('../feature.js').value, 2))\n" } },
     ] : work === 2 || work === 4 ? [{ name: 'shell_exec', args: { command: 'npm', args: ['test'] } }]
-      : work === 3 ? [{ name: 'fs_apply_patch', args: { path: 'package.json', find: 'node --test test/', replace: 'node --test test/*.test.js' } }] : []
+      : work === 3 ? [{ name: 'fs_apply_patch', args: { path: 'package.json', find: 'node --test test/', replace: 'node --test test/*.test.js', expectedHash: createHash('sha256').update('{"private":true,"scripts":{"test":"node --test test/"}}\n').digest('hex') } }] : []
     return calls.length ? reply({ content: '', tool_calls: calls.map((call, index) => ({ id: `fixture-${work}-${index}`, function: { name: call.name, arguments: JSON.stringify(call.args) } })) }) : reply('Fixture implementation verified.')
   }))
   const host = createLocalHost({ cwd, dataDir: join(cwd, '.host-data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, approvalMode: 'auto', taskController: true, jarvis: { enabled: false }, maxModelCalls: 32 })

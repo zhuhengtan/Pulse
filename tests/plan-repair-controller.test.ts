@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -35,7 +36,7 @@ it.each(['repair', 'stuck', 'early-business'] as const)('repairs a rejected whol
       repairs++
       if (mode === 'stuck') return reply('The prerequisite is still unresolved; implementation has not started.')
       if (mode === 'early-business' && repairs === 1) return tool('fs_write', { path: 'feature.txt', content: 'UNAUTHORIZED' })
-      if (repairs === (mode === 'early-business' ? 2 : 1)) return tool('fs_apply_patch', { path: 'docs/plans/feature.md', find: 'The status is both visible and hidden.', replace: 'The status stays visible; implementation starts after explicit confirmation.' })
+      if (repairs === (mode === 'early-business' ? 2 : 1)) return tool('fs_apply_patch', { path: 'docs/plans/feature.md', find: 'The status is both visible and hidden.', replace: 'The status stays visible; implementation starts after explicit confirmation.', expectedHash: createHash('sha256').update(bad).digest('hex') })
       return reply('The complete saved plan now has a ready review. Await host confirmation.')
     }
     if (text.includes('Verify ONLY the active taskController stage')) return reply(JSON.stringify({ status: 'passed', evidenceRefs: suppliedRequestResults(request.messages).map(r => r.id), note: 'Saved plan receipt is present; the independent whole-plan review remains authoritative.' }))

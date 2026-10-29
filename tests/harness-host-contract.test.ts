@@ -1,5 +1,6 @@
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 import { afterEach, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -15,8 +16,10 @@ afterEach(() => { vi.unstubAllGlobals(); vi.mocked(runShell).mockClear() })
 it.each(['old-check', 'rerun', 'unrelated', 'weakened'])('Host binds successful checks to the current artifact: %s', async scenario => {
   const root = await mkdtemp(join(tmpdir(), 'pulse-host-contract-'))
   const objective = 'Verify feature.mjs with the original feature.test.mjs.'
-  await writeFile(join(root, 'feature.mjs'), 'export const feature = 1\n')
-  await writeFile(join(root, 'feature.test.mjs'), "import './feature.mjs'\n")
+  const source = 'export const feature = 1\n', check = "import './feature.mjs'\n"
+  const sourceHash = createHash('sha256').update(source).digest('hex'), checkHash = createHash('sha256').update(check).digest('hex')
+  await writeFile(join(root, 'feature.mjs'), source)
+  await writeFile(join(root, 'feature.test.mjs'), check)
   const criteria = acceptanceCriteriaFromObjective(objective)
   let calls = 0, work = 0, verifications = 0, plans = 0
   const chat = (content: unknown) => new Response(JSON.stringify({ choices: [{ message: typeof content === 'string' ? { content } : content, finish_reason: typeof content === 'string' ? 'stop' : 'tool_calls' }] }), { headers: { 'content-type': 'application/json' } })
@@ -33,8 +36,8 @@ it.each(['old-check', 'rerun', 'unrelated', 'weakened'])('Host binds successful 
     if (work === 1) return tool('shell_exec', { command: 'node', args: ['--test', 'feature.test.mjs'] })
     if (work === 2) {
       if (scenario === 'unrelated') return tool('fs_write', { path: 'unrelated.md', content: 'notes' })
-      if (scenario === 'weakened') return tool('fs_apply_patch', { path: 'feature.test.mjs', find: "import './feature.mjs'", replace: 'process.exit(0)' })
-      return tool('fs_apply_patch', { path: 'feature.mjs', find: 'feature = 1', replace: 'feature = 2' })
+      if (scenario === 'weakened') return tool('fs_apply_patch', { path: 'feature.test.mjs', find: "import './feature.mjs'", replace: 'process.exit(0)', expectedHash: checkHash })
+      return tool('fs_apply_patch', { path: 'feature.mjs', find: 'feature = 1', replace: 'feature = 2', expectedHash: sourceHash })
     }
     if (work === 3 && (scenario === 'rerun' || scenario === 'weakened')) return tool('shell_exec', { command: 'node', args: ['--test', 'feature.test.mjs'] })
     return chat('Check completed.')

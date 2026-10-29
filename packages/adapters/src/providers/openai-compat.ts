@@ -29,7 +29,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       stream: streaming,
     })
 
-    const capability = resolveModelCapability(canonical.model, this.config.provider, this.config.capabilityProfile ?? (this.config.remote && this.config.provider === 'ollama' ? { structuredOutput: 'unsupported' } : undefined))
+    const capability = resolveModelCapability(canonical.model, this.config.provider, this.config.capabilityProfile ?? (this.config.remote && this.config.provider === 'ollama' ? { structuredOutput: 'unsupported' } : undefined), this.baseURL)
     const { request: adapted } = adaptCanonicalRequest(canonical, capability, this.probe, toolNameAliases)
     const sentReasoning = Boolean(adapted.reasoning?.effort)
     const body = toOpenAIPayload(adapted, capability, this.config.provider)

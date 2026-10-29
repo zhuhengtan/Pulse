@@ -32,8 +32,44 @@ export const MAX_DSL_INSTRUCTION_BYTES = 2_048
 /** Keep large tool results from crowding out the actual task and conversation. */
 export const MAX_INLINE_RESULT_BYTES = 4_096
 
-function utf8Prefix(value: string, maxBytes: number): string {
-  return Buffer.from(value, 'utf8').subarray(0, maxBytes).toString('utf8')
+function clipValidUtf8(buf: Buffer): Buffer {
+  let end = buf.length
+  while (end > 0 && (buf[end - 1]! & 0xc0) === 0x80) end--
+  if (end === 0) return buf.subarray(0, 0)
+  const leadIndex = end - 1
+  const lead = buf[leadIndex]!
+  const needed = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1
+  if (needed === 1) return buf.subarray(0, end)
+  if (leadIndex + needed <= buf.length) return buf.subarray(0, leadIndex + needed)
+  return buf.subarray(0, leadIndex)
+}
+
+function clipValidUtf8FromStart(buf: Buffer): Buffer {
+  let start = 0
+  while (start < buf.length && (buf[start]! & 0xc0) === 0x80) start++
+  return clipValidUtf8(buf.subarray(start))
+}
+
+function truncationMarker(omittedBytes: number): Buffer {
+  return Buffer.from(`\n...[truncated ${omittedBytes} bytes]...\n`, 'utf8')
+}
+
+export function utf8HeadTail(value: string, maxBytes = MAX_INLINE_RESULT_BYTES): string {
+  const buf = Buffer.from(value, 'utf8')
+  if (buf.length <= maxBytes) return value
+  const worst = truncationMarker(buf.length)
+  if (worst.length >= maxBytes) return clipValidUtf8(worst.subarray(0, maxBytes)).toString('utf8')
+  let head = clipValidUtf8(buf.subarray(0, Math.floor((maxBytes - worst.length) * 0.6)))
+  let tail = clipValidUtf8FromStart(buf.subarray(buf.length - Math.max(0, maxBytes - worst.length - head.length)))
+  if (head.length + tail.length > buf.length) tail = clipValidUtf8FromStart(buf.subarray(head.length))
+  let marker = truncationMarker(buf.length - head.length - tail.length)
+  while (head.length + marker.length + tail.length > maxBytes && (head.length > 0 || tail.length > 0)) {
+    if (head.length >= tail.length && head.length > 0) head = clipValidUtf8(head.subarray(0, head.length - 1))
+    else tail = clipValidUtf8FromStart(tail.subarray(1))
+    marker = truncationMarker(Math.max(0, buf.length - head.length - tail.length))
+  }
+  if (head.length + marker.length + tail.length > maxBytes) return clipValidUtf8(marker.subarray(0, maxBytes)).toString('utf8')
+  return Buffer.concat([head, marker, tail]).toString('utf8')
 }
 
 function projectResultValue(result: { value?: JsonValue; summary?: JsonValue }): { value: JsonValue; summarized: boolean; originalBytes?: number } {
@@ -45,7 +81,7 @@ function projectResultValue(result: { value?: JsonValue; summary?: JsonValue }):
     value: {
       truncated: true,
       originalBytes,
-      preview: utf8Prefix(JSON.stringify(value), MAX_INLINE_RESULT_BYTES),
+      preview: utf8HeadTail(JSON.stringify(value), MAX_INLINE_RESULT_BYTES),
       note: 'The full result is retained by the runtime. Use this preview. Do not re-run the producing tool.',
     },
     summarized: true,

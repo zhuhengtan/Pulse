@@ -5,6 +5,7 @@ import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import ExcelJS from 'exceljs'
 import { z } from 'zod'
 import { ToolError, type ToolDefinition, type ToolManifest } from '@hunterzhu/pulse-tool-sdk'
+import { extractDocxText } from './docx.js'
 
 const MAX_INPUT_BYTES = 20 * 1024 * 1024
 const MAX_PDF_PAGES = 2_000
@@ -31,8 +32,21 @@ const xlsxInput = z.object({
   maxColumns: z.number().int().positive().max(50).default(20),
 }).strict()
 
+const docxInput = z.object({
+  path: z.string().min(1).max(1_024),
+  maxChars: z.number().int().positive().max(MAX_OUTPUT_CHARS).default(20_000),
+}).strict()
+
 type PdfInput = z.infer<typeof pdfInput>
 type XlsxInput = z.infer<typeof xlsxInput>
+type DocxInput = z.infer<typeof docxInput>
+
+export interface DocxReadOutput {
+  path: string
+  text: string
+  chars: number
+  truncated: boolean
+}
 
 export interface PdfReadOutput {
   path: string
@@ -291,6 +305,19 @@ export async function inspectXlsx(root: string, input: XlsxInput, signal: AbortS
   }
 }
 
+export async function readDocx(root: string, input: DocxInput, signal: AbortSignal): Promise<DocxReadOutput> {
+  const { data } = await readWorkspaceFile(root, input.path, signal)
+  const fullText = await extractDocxText(Buffer.from(data), signal)
+  const truncated = fullText.length > input.maxChars
+  const text = truncated ? fullText.slice(0, input.maxChars) : fullText
+  return {
+    path: input.path,
+    text,
+    chars: text.length,
+    truncated,
+  }
+}
+
 function manifest(name: string, description: string, inputSchema: Record<string, unknown>, outputSchema: Record<string, unknown>): ToolManifest {
   return { name, version: '1.0.0', description, tags: ['documents', 'read'], inputSchema, outputSchema, concurrencyClass: 'tool', locks: [], supportsAbortSignal: true, sideEffectPolicy: 'read', retrySafety: 'read_only', defaultTimeoutMs: 60_000, maxResultSummaryBytes: 4_096 }
 }
@@ -303,7 +330,15 @@ const xlsxManifest = manifest('document.xlsx.inspect', 'List workbook metadata a
   { type: 'object', required: ['path'], properties: { path: { type: 'string' }, sheet: { type: 'string' }, startRow: { type: 'integer', minimum: 1 }, maxRows: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, maxColumns: { type: 'integer', minimum: 1, maximum: 50, default: 20 } }, additionalProperties: false },
   { type: 'object', required: ['path', 'sheetCount', 'worksheets', 'truncated'], properties: { path: { type: 'string' }, creator: { type: 'string' }, title: { type: 'string' }, subject: { type: 'string' }, sheetCount: { type: 'integer' }, worksheets: { type: 'array', items: { type: 'object', required: ['id', 'name', 'state', 'rowCount', 'columnCount'], properties: { id: { type: 'integer' }, name: { type: 'string' }, state: { type: 'string' }, rowCount: { type: 'integer' }, columnCount: { type: 'integer' }, preview: { type: 'array', items: { type: 'object', required: ['row', 'cells'], properties: { row: { type: 'integer' }, cells: { type: 'array', items: { anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }, { type: 'null' }] } } }, additionalProperties: false } } }, additionalProperties: false } }, truncated: { type: 'boolean' } }, additionalProperties: false })
 
-export function createDocumentTools(workspaceRoot: string): [ToolDefinition<PdfInput, PdfReadOutput>, ToolDefinition<XlsxInput, XlsxInspectOutput>] {
+const docxManifest = manifest('document.docx.read', 'Extract bounded text from a Word DOCX document in the workspace.',
+  { type: 'object', required: ['path'], properties: { path: { type: 'string' }, maxChars: { type: 'integer', minimum: 1, maximum: MAX_OUTPUT_CHARS, default: 20_000 } }, additionalProperties: false },
+  { type: 'object', required: ['path', 'text', 'chars', 'truncated'], properties: { path: { type: 'string' }, text: { type: 'string' }, chars: { type: 'integer' }, truncated: { type: 'boolean' } }, additionalProperties: false })
+
+export function createDocumentTools(workspaceRoot: string): [
+  ToolDefinition<PdfInput, PdfReadOutput>,
+  ToolDefinition<XlsxInput, XlsxInspectOutput>,
+  ToolDefinition<DocxInput, DocxReadOutput>,
+] {
   const root = resolve(workspaceRoot)
   return [
     {
@@ -317,6 +352,12 @@ export function createDocumentTools(workspaceRoot: string): [ToolDefinition<PdfI
       validateInput: (input) => xlsxInput.parse(input),
       execute: (input, context) => inspectXlsx(root, input, context.signal),
       summarize: (output) => ({ path: output.path, sheetCount: output.sheetCount, worksheets: output.worksheets.map(({ name, rowCount, columnCount, state }) => ({ name, rowCount, columnCount, state })), truncated: output.truncated }),
+    },
+    {
+      manifest: { ...docxManifest, locks: [{ resource: `workspace:${root}`, mode: 'shared' }], permissions: { workspaceRoots: [root] } },
+      validateInput: (input) => docxInput.parse(input),
+      execute: (input, context) => readDocx(root, input, context.signal),
+      summarize: (output) => ({ path: output.path, chars: output.chars, truncated: output.truncated, textPreview: output.text.slice(0, 1_000) }),
     },
   ]
 }

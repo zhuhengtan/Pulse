@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { installProcessDiagnostics, createLocalHost, automationDoctor, requestAutomationPermissions, assertJarvisApiUrl, createBuiltinSkillCapabilityPack, createMcpCapabilityPack, createPdfCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
+import { installProcessDiagnostics, createLocalHost, automationDoctor, requestAutomationPermissions, assertJarvisApiUrl, createBuiltinSkillCapabilityPack, createMcpCapabilityPack, createPdfCapabilityPack, createDocxCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
 import { modelSelectionId, normalizeModelConfig, resolveModelReference, resolveProviderApiKey, resolveWebSearchOptions, parseBuiltinPlugins } from '@hunterzhu/pulse-server'
 import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
@@ -36,7 +36,11 @@ Usage:
   pulse run <task> [options]              run one task
   pulse sessions [options]                list saved conversations
   pulse resume <conversation-id> [task]    continue or recover a conversation
-  pulse drafts <conversation-id> <run-id> <draft-id> [--revision <hash> --confirm-owner]\n                                          preview or explicitly migrate an ownerless draft\n  pulse doctor [options]                  check local configuration
+  pulse drafts <conversation-id> <run-id> <draft-id> [--revision <hash> --confirm-owner]
+                                          preview or explicitly migrate an ownerless draft
+  pulse files rollback --confirm <path>:<sha256> [<path>:<sha256> ...] [--conversation <id> --run <id>]
+                                          restore journaled file bytes; shell side effects are not rollbackable
+  pulse doctor [options]                  check local configuration
   pulse h5 [start|qr|devices|revoke|install|status|stop|uninstall]
                                           mobile web assistant and launchd daemon
   pulse update [status|check|download|apply|rollback|enable|auto-download on|off]
@@ -112,6 +116,7 @@ const knownBooleanFlags = new Set([
   'version',
   'force',
   'confirm-owner',
+  'confirm',
   'jarvis',
   'no-jarvis',
   'jarvis-allow-remote',
@@ -158,7 +163,7 @@ export function parse(argv: string[]): Parsed {
       options[key] = true
       continue
     }
-  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp', 'h5', 'update', 'automation', 'drafts'].includes(arg)) {
+  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp', 'h5', 'update', 'automation', 'drafts', 'files'].includes(arg)) {
       command = arg
     } else {
       positionals.push(arg)
@@ -366,7 +371,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const enabledCapabilityPacks = ['builtin-skills', ...configuredCapabilityPacks.filter((id) => id !== 'builtin-skills')]
   const skillNames = capabilitySettings.skills ?? []
   if (!Array.isArray(skillNames) || skillNames.some((name) => typeof name !== 'string')) throw new Error('INVALID_SKILL_SELECTION')
-  const capabilityPacks = [createBuiltinSkillCapabilityPack(), createPdfCapabilityPack(), createSpreadsheetCapabilityPack(), createSkillCapabilityPack({ trustedRoots: skillRoots.map((root) => resolve(expandHome(root) ?? root)) })]
+  const capabilityPacks = [createBuiltinSkillCapabilityPack(), createPdfCapabilityPack(), createSpreadsheetCapabilityPack(), createDocxCapabilityPack(), createSkillCapabilityPack({ trustedRoots: skillRoots.map((root) => resolve(expandHome(root) ?? root)) })]
   for (const [id, server] of Object.entries(capabilitySettings.mcpServers ?? {})) {
     if ((id === 'browser' && capabilitySettings.browser) || (id === 'computer' && capabilitySettings.computer)) throw new Error(`AUTOMATION_CAPABILITY_CONFLICT:${id}`)
     if (!server || typeof server.command !== 'string' || server.command.trim().length === 0 || (server.args !== undefined && (!Array.isArray(server.args) || server.args.some((arg) => typeof arg !== 'string')))) throw new Error(`INVALID_MCP_SERVER_CONFIG:${id}`)
@@ -531,6 +536,26 @@ export async function main(): Promise<number> {
 
   if (parsed.command === 'doctor') {
     return runDoctor(options, parsed.options.live === true, option(parsed.options, 'format') ?? 'text')
+  }
+
+  if (parsed.command === 'files') {
+    if (parsed.positionals[0] !== 'rollback') throw new Error('Usage: pulse files rollback --confirm <path>:<sha256> [...]')
+    if (parsed.options.confirm !== true) throw new Error('ROLLBACK_CONFIRMATION_REQUIRED')
+    const targets = parsed.positionals.slice(1).map((item) => {
+      const split = item.lastIndexOf(':')
+      const path = split > 0 ? item.slice(0, split) : ''
+      const expectedPostHash = split > 0 ? item.slice(split + 1) : ''
+      if (!path || !/^[a-f0-9]{64}$/.test(expectedPostHash)) throw new Error('ROLLBACK_TARGET_INVALID')
+      return { path, expectedPostHash }
+    })
+    if (targets.length === 0) throw new Error('ROLLBACK_TARGET_REQUIRED')
+    const host = createLocalHost(options)
+    try {
+      const conversationId = option(parsed.options, 'conversation')
+      const runId = option(parsed.options, 'run')
+      process.stdout.write(JSON.stringify(await host.rollbackFiles({ confirm: true, targets, ...(conversationId ? { conversationId } : {}), ...(runId ? { runId } : {}) }), null, 2) + '\n')
+      return 0
+    } finally { await host.close() }
   }
 
   if (parsed.command === 'drafts') {

@@ -9,7 +9,7 @@ import { currentRequestText, suppliedRequestResults } from './helpers/provider-r
 
 afterEach(() => vi.unstubAllGlobals())
 
-it.each([false, true])('validates interrupted artifacts against the execution workspace after host restart (external change=%s)', async changed => {
+it.each([[false, false], [true, false], [true, true]])('validates interrupted artifacts against the execution workspace after host restart (external change=%s, legacy surface=%s)', async (changed, legacy) => {
   const root = await mkdtemp(join(tmpdir(), 'pulse-resume-execution-'))
   const cwd = join(root, 'project'), execution = join(root, 'execution'), dataDir = join(root, 'data')
   await mkdir(cwd); await mkdir(execution)
@@ -45,6 +45,13 @@ it.each([false, true])('validates interrupted artifacts against the execution wo
     const checkpoint = JSON.parse(await readFile(join(runDir(first.id), 'checkpoint.json'), 'utf8'))
     expect(checkpoint.facts).toEqual(expect.arrayContaining([expect.objectContaining({ result: expect.objectContaining({ path: 'generated.txt', content: 'retained output' }) })]))
     expect(await readFile(join(cwd, 'generated.txt'), 'utf8').catch(() => null)).toBeNull()
+    if (legacy) {
+      const inputPath = join(runDir(first.id), 'input.json')
+      const input = JSON.parse(await readFile(inputPath, 'utf8'))
+      delete input.fileSurfaceVersion
+      await writeFile(inputPath, JSON.stringify(input))
+      await rm(join(execution, '.pulse', 'file-snapshots'), { recursive: true, force: true })
+    }
     if (changed) await writeFile(join(execution, 'generated.txt'), 'caller changed output')
     await host.close(); host = createLocalHost(options); resumed = true; work = 0
     const next = await host.sendMessage(c.id, { text: '刚才任务中断了。检查已有产物，继续剩余工作；不要重新写入或运行生成器。' })

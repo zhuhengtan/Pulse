@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -32,7 +33,7 @@ it('repairs a needs_work citation from a historical run, then executes only the 
     if (text.includes('Independently verify every ORIGINAL')) return chat(JSON.stringify({ criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: refs, rationale: 'Current file saved.' }] }))
     work++
     if (work === 1) return call('fs_write', { path: 'greeting.txt', content: 'hello' })
-    if (work === 3) return call('fs_apply_patch', { path: 'greeting.txt', find: 'hello', replace: 'hello world' })
+    if (work === 3) return call('fs_apply_patch', { path: 'greeting.txt', find: 'hello', replace: 'hello world', expectedHash: createHash('sha256').update('hello').digest('hex') })
     return chat('Saved.')
   }))
   const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, taskController: true, jarvis: { enabled: false }, approvalMode: 'auto', maxModelCalls: 24 })

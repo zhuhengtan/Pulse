@@ -136,7 +136,11 @@ export const referenceCapabilityPackCatalog: readonly CapabilityPackManifest[] =
   { id: 'computer', version: '1', kind: 'integration', title: 'Computer', description: 'Optional native desktop observation and input with explicit system permissions.' },
   { id: 'pdf', version: '1', kind: 'integration', title: 'PDF', description: 'Optional PDF.js-based document extraction adapter.' },
   { id: 'spreadsheet', version: '1', kind: 'integration', title: 'Spreadsheets', description: 'Optional ExcelJS-based spreadsheet read/write adapter.' },
+  { id: 'docx', version: '1', kind: 'integration', title: 'DOCX reader', description: 'Bounded DOCX document text extraction adapter.' },
 ]
+
+/** These document operations are not implemented. Enabling a pack must not pretend they exist. */
+export const unimplementedDocumentCapabilities = ['pptx.read', 'pdf.page.render', 'docx.write', 'xlsx.write', 'pptx.write'] as const
 
 /** Read-only PDF extraction capability, installed by the host and enabled explicitly. */
 export function createPdfCapabilityPack(): CapabilityPack {
@@ -158,6 +162,18 @@ export function createSpreadsheetCapabilityPack(): CapabilityPack {
       const tool = createDocumentTools(workspaceRoot).find((item) => item.manifest.name === 'document.xlsx.inspect')
       if (!tool) throw new Error('SPREADSHEET_TOOL_UNAVAILABLE')
       return { tools: [{ ...tool, manifest: { ...tool.manifest, name: 'spreadsheet.inspect' } }] }
+    },
+  }
+}
+
+/** Read-only Word DOCX document text extraction capability. */
+export function createDocxCapabilityPack(): CapabilityPack {
+  return {
+    manifest: { id: 'docx', version: '1', kind: 'integration', title: 'DOCX reader', description: 'Bounded DOCX document text extraction inside the active workspace.' },
+    async activate({ workspaceRoot }) {
+      const tool = createDocumentTools(workspaceRoot).find((item) => item.manifest.name === 'document.docx.read')
+      if (!tool) throw new Error('DOCX_TOOL_UNAVAILABLE')
+      return { tools: [{ ...tool, manifest: { ...tool.manifest, name: 'docx.read' } }] }
     },
   }
 }

@@ -6,6 +6,11 @@ import { pipeline } from 'node:stream/promises'
 
 export interface FilesystemWriteResult { hash: string; bytes: number }
 export interface FilesystemReadResult { content: string; truncated: boolean }
+export interface FileWriteJournal {
+  begin(info: { path: string; absolute: string; before: Buffer | null; next: Uint8Array | null }): Promise<void>
+  landed(): Promise<void>
+  move?(info: { source: string; destination: string; before: Buffer }): Promise<void>
+}
 
 function filesystemError(code: string, retryable = false, cause?: unknown): Error & { code: string; retryable: boolean; cause?: unknown } {
   return Object.assign(new Error(code), { code, retryable, ...(cause === undefined ? {} : { cause }) })
@@ -26,7 +31,9 @@ function pidAlive(pid: number): boolean {
 }
 
 export class FilesystemTool {
+  private journal: FileWriteJournal | undefined
   constructor(readonly root: string, private readonly lockTimeoutMs = 30_000) {}
+  setFileJournal(journal: FileWriteJournal | undefined): void { this.journal = journal }
   private safe(path: string): string {
     const root = resolve(this.root)
     const target = resolve(root, path)
@@ -132,7 +139,12 @@ export class FilesystemTool {
     if (destinationExists) throw filesystemError('MOVE_DESTINATION_EXISTS')
     const currentHash = await this.hash(source, signal)
     if (expectedHash !== undefined && currentHash !== expectedHash) throw filesystemError('FILE_BASELINE_CONFLICT')
-    await this.withLock(sourceTarget, async () => { await rename(sourceTarget, destinationTarget) })
+    await this.withLock(sourceTarget, async () => {
+      const bytes = await readFile(sourceTarget)
+      await this.journal?.move?.({ source, destination, before: bytes })
+      await rename(sourceTarget, destinationTarget)
+      await this.journal?.landed()
+    })
     return { hash: currentHash, bytes: sourceEntry.size }
   }
   async hash(path: string, signal?: AbortSignal): Promise<string> {
@@ -142,6 +154,9 @@ export class FilesystemTool {
     return digest.digest('hex')
   }
   async writeIfUnchanged(path: string, content: string, expectedHash: string | null, signal?: AbortSignal): Promise<FilesystemWriteResult> {
+    return this.writeBytesIfUnchanged(path, Buffer.from(content, 'utf8'), expectedHash, signal)
+  }
+  async writeBytesIfUnchanged(path: string, content: Uint8Array, expectedHash: string | null, signal?: AbortSignal): Promise<FilesystemWriteResult> {
     if (signal?.aborted) throw filesystemError('ABORTED')
     if (expectedHash !== null && !/^[a-f0-9]{64}$/.test(expectedHash)) throw filesystemError('INVALID_FILE_BASELINE_HASH')
     const target = await this.writable(path)
@@ -152,12 +167,13 @@ export class FilesystemTool {
       if (current === undefined && expectedHash !== null) throw filesystemError('FILE_BASELINE_MISSING')
       const currentHash = current === undefined ? null : createHash('sha256').update(current).digest('hex')
       if (currentHash !== expectedHash) throw filesystemError('FILE_BASELINE_CONFLICT')
-      const bytes = Buffer.byteLength(content, 'utf8')
+      await this.journal?.begin({ path, absolute: target, before: current ?? null, next: content })
+      const bytes = content.byteLength
       const temporary = `${target}.tmp-${process.pid}-${process.hrtime.bigint().toString()}`
       let handle: Awaited<ReturnType<typeof open>> | undefined
       try {
         handle = await open(temporary, 'wx', 0o600)
-        await handle.writeFile(content, 'utf8')
+        await handle.writeFile(content)
         if (current !== undefined) await handle.chmod((await lstat(target)).mode & 0o777)
         await handle.sync()
         await handle.close()
@@ -165,11 +181,31 @@ export class FilesystemTool {
         if (signal?.aborted) throw filesystemError('ABORTED')
         if (expectedHash === null) await link(temporary, target)
         else await rename(temporary, target)
+        await this.journal?.landed()
       } finally {
         if (handle) await handle.close().catch(() => undefined)
         await rm(temporary, { force: true }).catch(() => undefined)
       }
       return { hash: createHash('sha256').update(content).digest('hex'), bytes }
+    })
+  }
+
+  async removeIfUnchanged(path: string, expectedHash: string, signal?: AbortSignal): Promise<{ beforeHash: string }> {
+    if (signal?.aborted) throw filesystemError('ABORTED')
+    if (!/^[a-f0-9]{64}$/.test(expectedHash)) throw filesystemError('INVALID_FILE_BASELINE_HASH')
+    const target = await this.existing(path)
+    return this.withLock(target, async () => {
+      if (signal?.aborted) throw filesystemError('ABORTED')
+      const current = await readFile(target).catch((cause) => {
+        if ((cause as NodeJS.ErrnoException).code === 'ENOENT') throw filesystemError('FILE_BASELINE_MISSING')
+        throw filesystemCause(cause)
+      })
+      const currentHash = createHash('sha256').update(current).digest('hex')
+      if (currentHash !== expectedHash) throw filesystemError('FILE_BASELINE_CONFLICT')
+      await this.journal?.begin({ path, absolute: target, before: current, next: null })
+      await rm(target, { force: true })
+      await this.journal?.landed()
+      return { beforeHash: currentHash }
     })
   }
 

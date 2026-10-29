@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -33,7 +34,7 @@ it('extends a new candidate test across refactor stages without rebasing the cal
     if (text.includes('Independently verify every ORIGINAL')) return chat(JSON.stringify({ criteria: ids.map(id => ({ criterionId: id, status: 'passed', evidenceRefs: results.map((r: any) => r.id), rationale: 'All tests passed without changing the original baseline' })) }))
     const turn = ++turns[stage]!
     if (stage === 0 && turn === 1) return tool('fs_write', { path: 'candidate.test.mjs', content: first })
-    if (stage === 1 && turn === 1) return tool('fs_apply_patch', { path: 'candidate.test.mjs', find: first, replace: second })
+    if (stage === 1 && turn === 1) return tool('fs_apply_patch', { path: 'candidate.test.mjs', find: first, replace: second, expectedHash: createHash('sha256').update(first).digest('hex') })
     if (stage < 2 && turn === 2) return tool('shell_exec', { command: 'node', args: ['--test', 'candidate.test.mjs'] })
     if (stage === 2 && turn === 1) return tool('shell_exec', { command: 'node', args: ['--test'] })
     return chat('Stage done.')

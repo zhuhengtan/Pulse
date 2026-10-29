@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -136,7 +137,7 @@ it('rechecks a patched plan, revokes its earlier approval, and blocks a new cont
     }
     turns++
     if (turns === 1) return tool('plan_write', { path: 'docs/plans/feature.md', content: plan })
-    if (turns === 3) return tool('fs_apply_patch', { path: 'docs/plans/feature.md', find: 'The card stays visible.', replace: changed })
+    if (turns === 3) return tool('fs_apply_patch', { path: 'docs/plans/feature.md', find: 'The card stays visible.', replace: changed, expectedHash: createHash('sha256').update(plan).digest('hex') })
     if (turns === 5) return tool('fs_write', { path: 'feature.txt', content: 'must not be written' })
     if (turns >= 6) return reply({ content: 'The revised plan is blocked by contradictory card behavior. Plan saved; implementation has not run.' })
     return tool('ask_choice', { prompt: '执行？', options: [{ label: '暂不执行', value: 'hold' }, { label: '执行', value: 'execute' }] })

@@ -37,6 +37,7 @@ export function toOpenAIPayload(
 
   const body: Record<string, unknown> = {
     ...(canonical.model ? { model: canonical.model } : {}),
+    ...(capability.promptCache === 'openai_prompt_cache_key' && canonical.model ? { prompt_cache_key: `pulse:${canonical.model}` } : {}),
     messages,
   }
 

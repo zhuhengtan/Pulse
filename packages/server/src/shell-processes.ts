@@ -20,6 +20,17 @@ interface LiveProcess { record: ProcessReceipt; controller: AbortController; don
 const managers = new Map<string, ShellProcesses>()
 const failure = (code: string) => Object.assign(new Error(code), { code, retryable: false })
 
+/** Only the persisted continuous program blocks acceptance on a live or unknown shell. */
+export function shellAcceptanceGate(programVersion: string | undefined): boolean {
+  return programVersion === '57'
+}
+
+export async function blockAcceptanceIfShellBusy(programVersion: string | undefined, runDirectory: string | undefined): Promise<void> {
+  if (!shellAcceptanceGate(programVersion)) return
+  if (!runDirectory) throw failure('SHELL_PROCESS_STATE_UNKNOWN')
+  await shellProcesses(runDirectory).assertIdle()
+}
+
 /** Keep cursors and status visible even when the original command receipt is large. */
 export function summarizeShellProcess(value: unknown): Record<string, unknown> {
   const record = value as Record<string, any>

@@ -1,10 +1,11 @@
-import type { ModelCapabilityProfile } from './types.js'
+import type { ModelCapabilityProfile, PromptCacheCapability } from './types.js'
 
 export const DEFAULT_OPENAI_PROFILE: ModelCapabilityProfile = {
   id: 'openai-default',
   provider: 'openai',
   structuredOutput: 'native_strict',
   reasoning: 'effort_param',
+  promptCache: 'openai_prompt_cache_key',
   constraints: {
     disallowTemperatureWithReasoning: false,
     maxTokensParamName: 'max_tokens',
@@ -18,6 +19,7 @@ export const OPENAI_REASONING_PROFILE: ModelCapabilityProfile = {
   provider: 'openai',
   structuredOutput: 'native_strict',
   reasoning: 'effort_param',
+  promptCache: 'openai_prompt_cache_key',
   constraints: {
     disallowTemperatureWithReasoning: true,
     defaultTemperatureWithReasoning: 1.0,
@@ -32,6 +34,7 @@ export const ANTHROPIC_THINKING_PROFILE: ModelCapabilityProfile = {
   provider: 'anthropic',
   structuredOutput: 'native_loose',
   reasoning: 'budget_tokens',
+  promptCache: 'anthropic_ephemeral',
   constraints: {
     disallowTemperatureWithReasoning: true,
     defaultTemperatureWithReasoning: 1.0,
@@ -46,6 +49,7 @@ export const DEFAULT_ANTHROPIC_PROFILE: ModelCapabilityProfile = {
   provider: 'anthropic',
   structuredOutput: 'native_loose',
   reasoning: 'unsupported',
+  promptCache: 'anthropic_ephemeral',
   constraints: {
     disallowTemperatureWithReasoning: false,
     maxTokensParamName: 'max_tokens',
@@ -59,6 +63,7 @@ export const DEEPSEEK_PROFILE: ModelCapabilityProfile = {
   provider: 'deepseek',
   structuredOutput: 'json_object_only',
   reasoning: 'effort_param',
+  promptCache: 'none',
   constraints: {
     disallowTemperatureWithReasoning: false,
     maxTokensParamName: 'max_tokens',
@@ -72,6 +77,7 @@ export const DEFAULT_COMPATIBLE_PROFILE: ModelCapabilityProfile = {
   provider: 'openai-compatible',
   structuredOutput: 'native_strict',
   reasoning: 'effort_param',
+  promptCache: 'none',
   constraints: {
     disallowTemperatureWithReasoning: false,
     maxTokensParamName: 'max_tokens',
@@ -133,10 +139,9 @@ class CapabilityRegistry {
     }
 
     if (normProvider === 'openai' || normProvider === 'openai-compatible') {
-      if (isOpenAIReasoningModel(normModel)) {
-        return { ...OPENAI_REASONING_PROFILE, provider: normProvider, id: `${normProvider}:${normModel}` }
-      }
-      return { ...DEFAULT_OPENAI_PROFILE, provider: normProvider, id: `${normProvider}:${normModel || 'default'}` }
+      const base = isOpenAIReasoningModel(normModel) ? OPENAI_REASONING_PROFILE : DEFAULT_OPENAI_PROFILE
+      const profile = { ...base, provider: normProvider, id: `${normProvider}:${normModel || 'default'}` }
+      return normProvider === 'openai-compatible' ? { ...profile, promptCache: 'none' } : profile
     }
 
     return { ...DEFAULT_COMPATIBLE_PROFILE, provider: normProvider, id: `${normProvider}:${normModel || 'default'}` }
@@ -161,8 +166,25 @@ class CapabilityRegistry {
 
 export const capabilityRegistry = new CapabilityRegistry()
 
-export function resolveModelCapability(model?: string, provider?: string, override?: Partial<ModelCapabilityProfile>): ModelCapabilityProfile {
-  return capabilityRegistry.resolve(model, provider, override)
+export function resolveModelCapability(model?: string, provider?: string, override?: Partial<ModelCapabilityProfile>, baseURL?: string): ModelCapabilityProfile {
+  const profile = capabilityRegistry.resolve(model, provider, override)
+  const promptCache = promptCacheForTransport(profile, { provider, baseURL, explicit: override?.promptCache })
+  return promptCache === profile.promptCache ? profile : { ...profile, promptCache }
+}
+
+/** Official hosts keep their profile cache. A compatible name or any other host does not. An explicit capabilityProfile.promptCache still wins. */
+export function promptCacheForTransport(profile: ModelCapabilityProfile, input: { provider?: string | undefined; baseURL?: string | undefined; explicit?: PromptCacheCapability | undefined }): PromptCacheCapability {
+  if (input.explicit) return input.explicit
+  const provider = (input.provider ?? profile.provider).toLowerCase()
+  const profileCache = profile.promptCache ?? 'none'
+  if (provider === 'openai-compatible') return 'none'
+  if (input.baseURL === undefined) return profileCache
+  let host = ''
+  try { host = new URL(input.baseURL).hostname.toLowerCase() } catch { return 'none' }
+  if (provider === 'openai' && host === 'api.openai.com') return profileCache
+  if (provider === 'anthropic' && host === 'api.anthropic.com') return profileCache
+  if (provider === 'openai' || provider === 'anthropic') return 'none'
+  return profileCache
 }
 
 /** Reasoning model families use completion-token budgets, including their dated aliases. */

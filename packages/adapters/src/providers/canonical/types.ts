@@ -82,6 +82,7 @@ export type CanonicalStreamEvent =
 
 export type StructuredOutputCapability = 'native_strict' | 'native_loose' | 'json_object_only' | 'unsupported'
 export type ReasoningCapability = 'effort_param' | 'budget_tokens' | 'prompt_mode' | 'unsupported'
+export type PromptCacheCapability = 'none' | 'anthropic_ephemeral' | 'openai_prompt_cache_key'
 
 export interface ModelCapabilityConstraints {
   disallowTemperatureWithReasoning?: boolean
@@ -96,6 +97,7 @@ export interface ModelCapabilityProfile {
   provider: string
   structuredOutput: StructuredOutputCapability
   reasoning: ReasoningCapability
+  promptCache?: PromptCacheCapability
   constraints: ModelCapabilityConstraints
 }
 

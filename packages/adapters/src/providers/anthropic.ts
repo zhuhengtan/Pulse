@@ -18,7 +18,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const streaming = params.onObservation !== undefined
     const maxTokens = params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096
     const lowered = lowerProjectionToCanonical({ ...params, model: params.model ?? this.config.defaultModel, maxOutputTokens: maxTokens, toolChoice: this.config.toolChoice, stream: streaming })
-    const body = { ...toAnthropicPayload(lowered.canonical, resolveModelCapability(lowered.canonical.model, 'anthropic')), ...anthropicThinking(params.reasoningEffort ?? this.config.reasoningEffort, maxTokens) }
+    const body = { ...toAnthropicPayload(lowered.canonical, resolveModelCapability(lowered.canonical.model, 'anthropic', this.config.capabilityProfile, this.config.baseURL)), ...anthropicThinking(params.reasoningEffort ?? this.config.reasoningEffort, maxTokens) }
     try {
       const response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
       if (!response.ok) throw await providerHttpErrorFromResponse(response)

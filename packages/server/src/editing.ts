@@ -36,7 +36,7 @@ export const stageInput = z.object({
   expectedBytes: z.number().int().min(0).max(MAX_DRAFT_BYTES).optional(),
 })
 const draftSchema = z.object({ version: z.literal(1), path: z.string(), baseline: hash.nullable(), content: z.string(), committed: z.boolean(), owner: z.string().optional() })
-const pulsePath = (path: string): boolean => path.replaceAll('\\', '/').split('/').includes('.pulse')
+export const pulsePath = (path: string): boolean => path.replaceAll('\\', '/').split('/').includes('.pulse')
 const draftReceipt = (id: string, serialized: string, draft: z.infer<typeof draftSchema>) => {
   const bytes = Buffer.from(draft.content)
   let offset = Math.max(0, bytes.length - 1024)
@@ -201,10 +201,144 @@ export class PlanWriter {
   }
 }
 
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+interface FragmentMatch {
+  start: number
+  end: number
+  replace: string
+}
+
+function findFragmentMatches(source: string, find: string, replace: string): { matches: FragmentMatch[]; level: number } {
+  // Level 0: Exact byte substring
+  const level0Matches: FragmentMatch[] = []
+  let pos = source.indexOf(find)
+  while (pos >= 0) {
+    level0Matches.push({ start: pos, end: pos + find.length, replace })
+    pos = source.indexOf(find, pos + find.length)
+  }
+  if (level0Matches.length > 0) {
+    return { matches: level0Matches, level: 0 }
+  }
+
+  // Level 1: CRLF / LF line ending normalization
+  const l1Lines = find.split(/\r?\n/)
+  if (l1Lines.length > 1 || find.includes('\n')) {
+    const l1Pat = l1Lines.map(l => escapeRegex(l)).join('\\r?\\n')
+    const l1Regex = new RegExp(l1Pat, 'g')
+    const l1Matches: FragmentMatch[] = []
+    let m: RegExpExecArray | null
+    while ((m = l1Regex.exec(source)) !== null) {
+      let adaptedReplace = replace
+      if (m[0].includes('\r\n') && !replace.includes('\r\n')) {
+        adaptedReplace = replace.replace(/\n/g, '\r\n')
+      }
+      l1Matches.push({ start: m.index, end: m.index + m[0].length, replace: adaptedReplace })
+      if (m[0].length === 0) l1Regex.lastIndex++
+    }
+    if (l1Matches.length > 0) {
+      return { matches: l1Matches, level: 1 }
+    }
+  }
+
+  // Level 2: Ignore trailing line whitespace (trimEnd)
+  const l2Lines = find.split(/\r?\n/)
+  const l2Pat = l2Lines.map((line, idx) => {
+    const isLast = idx === l2Lines.length - 1
+    const trimmed = line.replace(/[ \t]+$/, '')
+    if (!isLast) return escapeRegex(trimmed) + '[ \\t]*\\r?\\n'
+    // A find that ends in a newline already consumed that newline on the previous segment.
+    // The last line must not swallow the following line's indentation.
+    if (trimmed.length === 0) return ''
+    return escapeRegex(trimmed) + '[ \\t]*(?=\\r?\\n|$)'
+  }).join('')
+  if (l2Pat.length === 0) return { matches: [], level: -1 }
+  const l2Regex = new RegExp(l2Pat, 'g')
+  const l2Matches: FragmentMatch[] = []
+  let m2: RegExpExecArray | null
+  while ((m2 = l2Regex.exec(source)) !== null) {
+    let adaptedReplace = replace
+    if (m2[0].includes('\r\n') && !replace.includes('\r\n')) {
+      adaptedReplace = replace.replace(/\n/g, '\r\n')
+    }
+    l2Matches.push({ start: m2.index, end: m2.index + m2[0].length, replace: adaptedReplace })
+    if (m2[0].length === 0) l2Regex.lastIndex++
+  }
+  if (l2Matches.length > 0) {
+    return { matches: l2Matches, level: 2 }
+  }
+
+  return { matches: [], level: -1 }
+}
+
+export interface ReadInterval {
+  start: number
+  end: number
+}
+
+export interface FileReadRecord {
+  hash: string
+  intervals: ReadInterval[]
+  reachedEnd: boolean
+  totalBytes?: number
+}
+
+export class LaneReadTracker {
+  private readonly reads = new Map<string, Map<string, FileReadRecord>>()
+
+  recordRead(laneId: string, canonicalPath: string, hash: string, offset: number, bytesRead: number, nextOffset: number | null): void {
+    let laneMap = this.reads.get(laneId)
+    if (!laneMap) {
+      laneMap = new Map()
+      this.reads.set(laneId, laneMap)
+    }
+    let record = laneMap.get(canonicalPath)
+    if (!record || record.hash !== hash) {
+      record = { hash, intervals: [], reachedEnd: false }
+      laneMap.set(canonicalPath, record)
+    }
+    const end = offset + bytesRead
+    record.intervals.push({ start: offset, end })
+    if (nextOffset === null) {
+      record.reachedEnd = true
+      record.totalBytes = end
+    }
+  }
+
+  getLatestReadHash(laneId: string, canonicalPath: string): string | undefined {
+    return this.reads.get(laneId)?.get(canonicalPath)?.hash
+  }
+
+  hasFullReadCoverage(laneId: string, canonicalPath: string, expectedHash: string): boolean {
+    const record = this.reads.get(laneId)?.get(canonicalPath)
+    if (!record || record.hash !== expectedHash || !record.reachedEnd) {
+      return false
+    }
+    const targetEnd = record.totalBytes ?? 0
+    if (targetEnd === 0 && record.intervals.length === 0) {
+      return true
+    }
+    const sorted = [...record.intervals].sort((a, b) => a.start - b.start)
+    let coveredUpTo = 0
+    for (const interval of sorted) {
+      if (interval.start > coveredUpTo) {
+        return false
+      }
+      if (interval.end > coveredUpTo) {
+        coveredUpTo = interval.end
+      }
+    }
+    return coveredUpTo >= targetEnd
+  }
+}
+
 export interface ExactFragment { find: string; replace: string }
-/** Exact compare-and-swap editing. Recovery observes the file; it never rebases a write. */
+export type PatchMatching = 'exact' | 'normalized'
+/** Compare-and-swap editing. Old snapshots stay on exact indexOf. Normalized matching is an explicit new surface. */
 export class ExactPatchEditor {
-  constructor(private readonly files: FilesystemTool, private readonly validate?: (path: string, content: string) => Promise<void>) {}
+  constructor(private readonly files: FilesystemTool, private readonly validate?: (path: string, content: string) => Promise<void>, private readonly matching: PatchMatching = 'exact') {}
   async execute(input: { path: string; patches: ExactFragment[]; expectedHash?: string | undefined; all?: boolean | undefined }, signal?: AbortSignal) {
     const { path, patches, expectedHash, all = false } = input
     if (!patches.length || patches.length > 16 || all && patches.length !== 1 || patches.some(p => !p.find)) throw editingError('INVALID_PATCH_INPUT', 'Supply 1-16 nonempty exact fragments; all is only valid for a single fragment.')
@@ -235,10 +369,10 @@ export class ExactPatchEditor {
     // cannot be reversed without a trustworthy baseline).
     if (expectedHash && expectedHash !== beforeHash && patches.every(p => p.replace.length > 0)) {
       const reversed = patches.map(p => ({ find: p.replace, replace: p.find }))
-      const inverse = exactEdits(source.content, reversed, all)
+      const inverse = exactEdits(source.content, reversed, all, this.matching)
       if (inverse) {
         const baseline = applyExactEdits(source.content, inverse)
-        const forward = exactEdits(baseline, patches, all)
+        const forward = exactEdits(baseline, patches, all, this.matching)
         if (digest(baseline) === expectedHash && forward && applyExactEdits(baseline, forward) === source.content) {
           if (await this.files.hash(path, signal) !== beforeHash) { source = await this.files.readLimited(path, 500_000, signal); if (source.truncated) throw editingError('FILE_TOO_LARGE', 'File changed beyond the patch size limit.'); beforeHash = digest(source.content); conflict('FILE_BASELINE_CONFLICT') }
           return { path, replacements: 0, bytes: Buffer.byteLength(source.content), hash: beforeHash, beforeHash, changed: false, alreadyApplied: true }
@@ -247,17 +381,24 @@ export class ExactPatchEditor {
     }
     if (expectedHash !== undefined && expectedHash !== beforeHash) conflict('FILE_BASELINE_CONFLICT')
     if (expectedHash === undefined && patches.some(p => p.find !== p.replace && p.replace.includes(p.find) && source.content.includes(p.replace))) conflict('PATCH_CONTEXT_AMBIGUOUS')
+    const allEdits: FragmentMatch[] = []
     for (const p of patches) {
-      const start = source.content.indexOf(p.find)
-      if (start < 0) conflict('PATCH_CONTEXT_NOT_FOUND')
-      if (!all && source.content.indexOf(p.find, start + 1) >= 0) conflict('PATCH_CONTEXT_AMBIGUOUS')
-      const count = all ? source.content.split(p.find).length - 1 : 1
+      const { matches } = locateFragment(source.content, p.find, p.replace, this.matching)
+      if (matches.length === 0) conflict('PATCH_CONTEXT_NOT_FOUND')
+      if (!all && matches.length >= 2) conflict('PATCH_CONTEXT_AMBIGUOUS')
+      const count = all ? matches.length : 1
       if (all && count * Math.max(Buffer.byteLength(p.find), Buffer.byteLength(p.replace)) > EDIT_BYTES) throw editingError('PATCH_TOO_BROAD', 'Split into smaller, unique-context patches.')
+      if (all) {
+        allEdits.push(...matches)
+      } else {
+        allEdits.push(matches[0]!)
+      }
     }
-    const edits = exactEdits(source.content, patches, all)
-    if (!edits) conflict('PATCH_RANGES_OVERLAP')
-    const content = applyExactEdits(source.content, edits!)
-    if (content === source.content) return { path, replacements: edits!.length, bytes: Buffer.byteLength(content), hash: beforeHash, beforeHash, changed: false }
+    allEdits.sort((a, b) => a.start - b.start)
+    if (allEdits.some((e, i) => i > 0 && allEdits[i - 1]!.end > e.start)) conflict('PATCH_RANGES_OVERLAP')
+
+    const content = applyExactEdits(source.content, allEdits)
+    if (content === source.content) return { path, replacements: allEdits.length, bytes: Buffer.byteLength(content), hash: beforeHash, beforeHash, changed: false }
     await this.validate?.(path, content)
     let saved
     try { saved = await this.files.writeIfUnchanged(path, content, expectedHash ?? beforeHash, signal) }
@@ -267,19 +408,32 @@ export class ExactPatchEditor {
       if ((error as { code?: string }).code === 'FILE_BASELINE_CONFLICT') { source = await this.files.readLimited(path, 500_000, signal); if (source.truncated) throw editingError('FILE_TOO_LARGE', 'File changed beyond the patch size limit.'); beforeHash = digest(source.content); conflict('FILE_BASELINE_CONFLICT') }
       throw error
     }
-    return { path, replacements: edits!.length, ...saved, beforeHash, changed: true }
+    return { path, replacements: allEdits.length, ...saved, beforeHash, changed: true }
   }
 }
 interface ExactEdit { start: number; end: number; replace: string }
-function exactEdits(source: string, patches: ExactFragment[], all: boolean): ExactEdit[] | undefined {
+function locateFragment(source: string, find: string, replace: string, matching: PatchMatching): { matches: FragmentMatch[]; level: number } {
+  if (matching === 'exact') {
+    const matches: FragmentMatch[] = []
+    let pos = source.indexOf(find)
+    while (pos >= 0) {
+      matches.push({ start: pos, end: pos + find.length, replace })
+      pos = source.indexOf(find, pos + Math.max(find.length, 1))
+    }
+    return { matches, level: matches.length > 0 ? 0 : -1 }
+  }
+  return findFragmentMatches(source, find, replace)
+}
+function exactEdits(source: string, patches: ExactFragment[], all: boolean, matching: PatchMatching): ExactEdit[] | undefined {
   const edits: ExactEdit[] = []
   for (const { find, replace } of patches) {
     if (!find) return undefined
-    const start = source.indexOf(find)
-    if (start < 0) return undefined
-    if (!all && source.indexOf(find, start + 1) >= 0) return undefined
-    let index = start
-    do { edits.push({ start: index, end: index + find.length, replace }); if (all && edits.length * Math.max(Buffer.byteLength(find), Buffer.byteLength(replace)) > EDIT_BYTES) return undefined; index = all ? source.indexOf(find, index + find.length) : -1 } while (index >= 0)
+    const { matches } = locateFragment(source, find, replace, matching)
+    if (matches.length === 0) return undefined
+    if (!all && matches.length >= 2) return undefined
+    if (all && matches.length * Math.max(Buffer.byteLength(find), Buffer.byteLength(replace)) > EDIT_BYTES) return undefined
+    if (all) edits.push(...matches)
+    else edits.push(matches[0]!)
   }
   edits.sort((a, b) => a.start - b.start)
   return edits.some((e, i) => i > 0 && edits[i - 1]!.end > e.start) ? undefined : edits

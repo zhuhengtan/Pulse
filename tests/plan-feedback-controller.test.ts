@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -24,6 +25,10 @@ it.each(['normal', 'cold', 'limit', 'stale-review', 'external-plan-change'] as c
   const cold = mode === 'cold'
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-plan-feedback-'))
   const objective = '先把方案写到 docs/plans/feature.md，确认后再实现 feature.txt。'
+  const planText = '# Plan\nUse fixed windows. Implement feature.txt only after explicit approval.\n'
+  const revisedPlan = planText.replace('fixed', 'sliding')
+  const savedHash = createHash('sha256').update(planText).digest('hex')
+  const revisedHash = createHash('sha256').update(revisedPlan).digest('hex')
   const originalIds = acceptanceCriteriaFromObjective(objective).map(c => c.id)
   let plans = 0, repairs = 0, work = 0, reviews = 0, requests = 0
   const reply = (message: any) => Response.json({ choices: [{ message: typeof message === 'string' ? { content: message } : message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }] })
@@ -48,8 +53,8 @@ it.each(['normal', 'cold', 'limit', 'stale-review', 'external-plan-change'] as c
       repairs++
       if (mode === 'stale-review') return reply('The old plan review was ready, so proceed without reviewing feedback.')
       if (repairs === 1) return tool('fs_write', { path: 'feature.txt', content: 'UNAUTHORIZED' })
-      if (repairs === 2) return tool('fs_apply_patch', { path: 'docs/plans/feature.md', find: 'fixed', replace: 'sliding' })
-      if (mode === 'limit' && repairs === 4) return tool('fs_apply_patch', { path: 'docs/plans/feature.md', find: 'sliding', replace: 'sliding clarified' })
+      if (repairs === 2) return tool('fs_apply_patch', { path: 'docs/plans/feature.md', find: 'fixed', replace: 'sliding', expectedHash: savedHash })
+      if (mode === 'limit' && repairs === 4) return tool('fs_apply_patch', { path: 'docs/plans/feature.md', find: 'sliding', replace: 'sliding clarified', expectedHash: revisedHash })
       return reply('Revised plan has a ready review; await a new Host approval.')
     }
     const refs = suppliedRequestResults(request.messages).map(r => r.id)
@@ -58,7 +63,7 @@ it.each(['normal', 'cold', 'limit', 'stale-review', 'external-plan-change'] as c
       return reply(JSON.stringify({ status: 'passed', evidenceRefs: refs, note: 'Actual saved receipt supplied' }))
     }
     if (text.includes('Independently verify every ORIGINAL')) return reply(JSON.stringify({ criteria: ids.map(criterionId => ({ criterionId, status: 'passed', evidenceRefs: refs, rationale: 'Saved sliding feature and approved revised plan' })) }))
-    if (++work === 1) return tool('plan_write', { path: 'docs/plans/feature.md', content: '# Plan\nUse fixed windows. Implement feature.txt only after explicit approval.\n' })
+    if (++work === 1) return tool('plan_write', { path: 'docs/plans/feature.md', content: planText })
     if (plans > 1 && work === 2) return tool('fs_write', { path: 'feature.txt', content: 'sliding' })
     return reply('The current stage is complete.')
   }))

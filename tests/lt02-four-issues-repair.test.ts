@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import { mkdtemp, mkdir, readFile, rm, writeFile, symlink } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { PulseRuntime, type JsonValue } from '@hunterzhu/pulse-runtime'
 import { createLocalHost } from '@hunterzhu/pulse-server'
@@ -24,20 +24,33 @@ it('grants only host installation dependency directories, never workspace or hom
 })
 
 it('loads shared installed aliases in the actual sandbox while denying sibling sources, credentials and writes', async () => {
-  const base = await mkdtemp(join(tmpdir(), 'pulse-dependency-boundary-')), cwd = join(base, 'workspace')
-  await mkdir(cwd); await writeFile(join(base, 'private-config.json'), 'PRIVATE SENTINEL')
+  const base = await mkdtemp(join(tmpdir(), 'pulse-dependency-boundary-')), cwd = join(base, 'workspace'), privateHome = join(base, 'private-home')
+  await mkdir(cwd); await mkdir(privateHome)
+  const hostSource = join(privateHome, 'shell.ts')
+  await writeFile(hostSource, 'PRIVATE HOST SOURCE')
+  await writeFile(join(base, 'private-config.json'), 'PRIVATE SENTINEL')
   await symlink(resolve('packages/adapters/node_modules'), join(cwd, 'node_modules'))
   const forbiddenWrite = join(resolve('packages/adapters/node_modules'), `pulse-denied-${Date.now()}.txt`)
   const forbiddenOverwrite = `${forbiddenWrite}.existing`
+  const previousHome = process.env.HOME, previousProfile = process.env.USERPROFILE
+  process.env.HOME = privateHome
+  process.env.USERPROFILE = privateHome
+  if (homedir() !== privateHome) throw new Error('HOME_FIXTURE_NOT_VISIBLE')
   try {
     await writeFile(forbiddenOverwrite, 'original', { flag: 'wx' })
-    const script = `import assert from 'node:assert/strict';import{readFileSync,writeFileSync}from'node:fs';await import('@anthropic-ai/sandbox-runtime');assert.throws(()=>readFileSync(${JSON.stringify(resolve('packages/adapters/src/tools/shell.ts'))}), 'host source read');assert.throws(()=>readFileSync(${JSON.stringify(join(base, 'private-config.json'))}), 'sibling credential read');assert.throws(()=>writeFileSync(${JSON.stringify(forbiddenWrite)},'must not write',{flag:'wx'}), 'dependency creation');assert.throws(()=>writeFileSync(${JSON.stringify(forbiddenOverwrite)},'must not overwrite'), 'dependency overwrite');console.log('DEPENDENCY_READ_ONLY_OK')`
+    const script = `import assert from 'node:assert/strict';import{readFileSync,writeFileSync}from'node:fs';await import('@anthropic-ai/sandbox-runtime');assert.throws(()=>readFileSync(${JSON.stringify(hostSource)}), 'host source read');assert.throws(()=>readFileSync(${JSON.stringify(join(base, 'private-config.json'))}), 'sibling credential read');assert.throws(()=>writeFileSync(${JSON.stringify(forbiddenWrite)},'must not write',{flag:'wx'}), 'dependency creation');assert.throws(()=>writeFileSync(${JSON.stringify(forbiddenOverwrite)},'must not overwrite'), 'dependency overwrite');console.log('DEPENDENCY_READ_ONLY_OK')`
     await writeFile(join(cwd, 'probe.mjs'), script)
     const result = await runShell('node', ['probe.mjs'], { cwd, env: { PATH: process.env.PATH }, timeoutMs: 30000 })
     expect(result.code, result.stderr + result.stdout).toBe(0)
     expect(result.stdout).toContain('DEPENDENCY_READ_ONLY_OK')
     expect(await readFile(forbiddenOverwrite, 'utf8')).toBe('original')
-  } finally { await rm(forbiddenWrite, { force: true }); await rm(forbiddenOverwrite, { force: true }); await rm(base, { recursive: true, force: true }) }
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    if (previousProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = previousProfile
+    await rm(forbiddenWrite, { force: true }); await rm(forbiddenOverwrite, { force: true }); await rm(base, { recursive: true, force: true })
+  }
 }, process.platform === 'win32' ? 180_000 : 40_000)
 
 it('keeps no-progress accounting across work, changed durations, verification retries and cold state restore', () => {

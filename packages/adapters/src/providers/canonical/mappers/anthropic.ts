@@ -10,8 +10,9 @@ type AnthropicContentBlock =
 
 export function toAnthropicPayload(
   canonical: CanonicalLLMRequest,
-  _capability: ModelCapabilityProfile,
+  capability: ModelCapabilityProfile,
 ): Record<string, unknown> {
+  const isAnthropicCache = capability.promptCache === 'anthropic_ephemeral'
   const systemParts: string[] = []
   const messages: Array<{ role: 'user' | 'assistant'; content: AnthropicContentBlock[] }> = []
 
@@ -65,7 +66,9 @@ export function toAnthropicPayload(
     ...(canonical.model ? { model: canonical.model } : {}),
     max_tokens: maxTokens,
     ...(canonical.temperature !== undefined ? { temperature: canonical.temperature } : {}),
-    ...(system.length > 0 ? { system } : {}),
+    ...(system.length > 0
+      ? { system: isAnthropicCache ? [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }] : system }
+      : {}),
     messages,
   }
 
@@ -79,10 +82,11 @@ export function toAnthropicPayload(
 
   // Tools
   if (canonical.tools && canonical.tools.length > 0) {
-    body.tools = canonical.tools.map((t) => ({
+    body.tools = canonical.tools.map((t, index) => ({
       name: t.name,
       ...(t.description ? { description: t.description } : {}),
       input_schema: t.parameters,
+      ...(isAnthropicCache && index === canonical.tools!.length - 1 ? { cache_control: { type: 'ephemeral' } } : {}),
     }))
     const toolChoice = canonical.toolChoice === undefined ? undefined : mapAnthropicToolChoice(canonical.toolChoice)
     if (toolChoice !== undefined) body.tool_choice = toolChoice

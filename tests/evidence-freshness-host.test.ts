@@ -1,5 +1,6 @@
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 import { afterEach, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -118,7 +119,7 @@ it.each([
     if (blob.includes('Independently verify every ORIGINAL')) return chat(JSON.stringify({ criteria: ids.map(id => ({ criterionId: id, status: 'passed', evidenceRefs: results.map((r: any) => r.id), rationale: 'New tests executed' })) }))
     const turn = ++turns[stage]!
     if (stage === 0 && turn === 1 || stage === 2 && turn === 1) return tool('shell_exec', { command: 'node', args: ['--test', 'feature.test.mjs'] })
-    if (stage === 1 && turn === 1) return tool('fs_apply_patch', { path: 'feature.test.mjs', find: original, replace: original + "\ntest('new regression', () => assert.equal(2, 2))\n" })
+    if (stage === 1 && turn === 1) return tool('fs_apply_patch', { path: 'feature.test.mjs', find: original, replace: original + "\ntest('new regression', () => assert.equal(2, 2))\n", expectedHash: createHash('sha256').update(original).digest('hex') })
     if (stage === 1 && turn === 2) return tool('shell_exec', { command: 'node', args: ['--check', 'feature.test.mjs'] })
     return chat('Stage done.')
   }))

@@ -72,7 +72,7 @@ function committedFileEdit(ctx: Context, ref: string): boolean {
     const receipt = ctx.results.read(ref)
     return !!receipt && typeof receipt === 'object' && !Array.isArray(receipt) && receipt.committed === true
   }
-  return meta.toolName !== undefined && ['fs.write', 'fs.apply_patch', 'fs.apply_patches', 'plan.write'].includes(meta.toolName)
+  return meta.toolName !== undefined && ['fs.write', 'fs.overwrite', 'fs.apply_patch', 'fs.apply_patches', 'plan.write'].includes(meta.toolName)
 }
 function committedOutputPaths(ctx: Context, ref: string): string[] {
   if (!committedFileEdit(ctx, ref)) return []
@@ -459,7 +459,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
     }
   }
   const stageNeedsFileEdit = (ctx: Context): boolean => {
-    const fileEditTools = new Set(['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.stage', 'plan.write', ...(['49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(programVersion) ? ['fs.move', 'shell.exec'] : [])])
+    const fileEditTools = new Set(['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.overwrite', 'fs.stage', 'plan.write', ...(['49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(programVersion) ? ['fs.move', 'shell.exec'] : [])])
     if (continuousExecution || !options.toolNames.some((name) => fileEditTools.has(name))) return false
     const state = stateOf(ctx, options.readOnlyToolNames ?? [])
     const task = state.tasks.find((item) => item.id === (workerTaskId(ctx) ?? state.activeId))
@@ -1047,7 +1047,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
       task: 'reason',
       instruction: 'Repair only the saved docs/plans document against its independent whole-plan review. Implementation remains forbidden. Read the plan and necessary existing evidence, correct unsupported claims and inconsistencies, then patch the plan and obtain its automatic whole-document review (or use plan.review). Preserve the original request, protected files and all existing checks. Never invent user decisions, weaken validation, or edit business/test files. Ask a focused clarification only for a genuine unresolved user decision. Do not offer execution: the host requests hash-bound confirmation only after a ready review. If a prerequisite really cannot be resolved, report it truthfully. A plan write or a model claim alone does not mean the review passed.',
       inputs: ctx => { const state = stateOf(ctx), plan = savedPlan(ctx, state); return { conversation: [...currentInputs(ctx), { role: 'user', content: JSON.stringify({ repairOnly: plan, repairRound: state.planReviewRepairs, implementationAuthorized: false }) }], results: [...new Set([...(plan ? [plan.ref] : []), ...knownReads(ctx), ...(['46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(programVersion) ? state.planFeedbackRefs ?? [] : [])])], toolDiscovery: { limit: options.toolNames.length } } },
-      toolAllow: options.toolNames.filter(name => ['fs.read', 'fs.list', 'fs.search', 'fs.apply_patch', 'fs.apply_patches', 'plan.write', 'plan.review', 'ask.input', 'ask.choice'].includes(name)),
+      toolAllow: options.toolNames.filter(name => ['fs.read', 'fs.list', 'fs.search', 'fs.glob', 'fs.view_image', 'fs.apply_patch', 'fs.apply_patches', 'plan.write', 'plan.review', 'ask.input', 'ask.choice'].includes(name)),
       validateToolInput: (name, input) => {
         options.validateToolInput?.(name, input)
         if (['fs.apply_patch', 'fs.apply_patches', 'plan.write', 'plan.review'].includes(name)) {
@@ -1150,7 +1150,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
       manualApprovalFallback: modernRecovery,
       onManualApprovalDenied: (reason, ctx) => stageFailure(ctx, 'APPROVAL_DENIED', reason),
       toolAllow: stageToolAllow, ...(['44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(programVersion) ? { recoverMixedAskCalls: true } : {}), ...(programVersion === '47' ? { recoverAskInputErrors: true } : {}), scopeToolCallsToEffect: true, ...(continuousExecution ? { continuousExecution: true, requirements: { maxOutputTokens: options.outputReserveTokens ?? 4096 } } : {}), blockReadOnlyTools: stageNeedsFileEdit, preserveReadContinuations: isolatedCandidates, maxTurns: controllerStageTurnLimit, maxTruncationRetries: 2, ...(automaticRecovery ? { reasoningRecovery } : {}), maxToolsPerTurn: 4,
-      ...(!parallelStages ? { serialTools: options.toolNames.filter((name) => !['fs.read', 'fs.list', 'fs.search', 'web.fetch', 'web.search'].includes(name)), stopAfterFirstSerialTool: true } : {}),
+      ...(!parallelStages ? { serialTools: options.toolNames.filter((name) => !['fs.read', 'fs.list', 'fs.search', 'fs.glob', 'fs.view_image', 'web.fetch', 'web.search'].includes(name)), stopAfterFirstSerialTool: true } : {}),
       ...(options.approvalMode === 'ask' ? { toolApproval: { requiresApproval: calls => Array.isArray(calls) && calls.some((call: any) => !['image.generate', 'video.generate', 'audio.generate'].includes(call.toolName)), prompt: 'Approve these calls only for the current stage.' } } : {}),
       onMaxTurns: (ctx) => {
         const state = stateOf(ctx, options.readOnlyToolNames ?? [])
@@ -1242,7 +1242,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
       onSuccess: (result, ctx) => {
         const state = stateOf(ctx, options.readOnlyToolNames ?? [])
         const task = state.tasks.find((item) => item.id === state.activeId)!
-        const fileEditTools = new Set(['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.stage', 'plan.write', ...(['49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(programVersion) ? ['fs.move', 'shell.exec'] : [])])
+        const fileEditTools = new Set(['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.overwrite', 'fs.stage', 'plan.write', ...(['49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(programVersion) ? ['fs.move', 'shell.exec'] : [])])
         const hostChecks = boundedTransitions ? namedHostChecks(taskRecordFromGlobal(ctx.global as JsonValue), task) : []
         const hostFailure = stageCheckFailure(ctx, task, hostChecks)
         const edited = hasStageEdit(ctx, task) || boundedTransitions && existingContractEvidence(ctx, task, hostChecks)
@@ -1677,7 +1677,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
         const skipped = state.tasks.filter((item) => isCascadeBlocked(item, state.tasks) && rootBlockedDependency(item, state.tasks)?.id === task.id)
         const skippedLine = skipped.length === 0 ? '' : zh ? `\n这些后续阶段没有开始：${skipped.map((item) => item.goal).join('；')}` : `\nThese later stages did not start: ${skipped.map((item) => item.goal).join('; ')}`
         const deliverable = refusalReport || modernController && /^\s*(?:读取|阅读|调查|定位|read\b|inspect\b|investigate\b)/i.test(task.goal) ? undefined : candidateText(ctx, isolatedCandidates && task.candidateAttempt !== task.attempts ? undefined : task.candidateRef)
-        const paths = [...new Set(task.evidenceRefs.flatMap(ref => { const meta = ctx.results.meta(ref); if (!meta?.toolName || !['fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'plan.write'].includes(meta.toolName) || !committedFileEdit(ctx, ref)) return []; const body = ctx.results.read(ref); return body && typeof body === 'object' && !Array.isArray(body) && typeof (body.path ?? body.target) === 'string' ? [String(body.path ?? body.target)] : [] }))]
+        const paths = [...new Set(task.evidenceRefs.flatMap(ref => { const meta = ctx.results.meta(ref); if (!meta?.toolName || !['fs.write', 'fs.overwrite', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'plan.write'].includes(meta.toolName) || !committedFileEdit(ctx, ref)) return []; const body = ctx.results.read(ref); return body && typeof body === 'object' && !Array.isArray(body) && typeof (body.path ?? body.target) === 'string' ? [String(body.path ?? body.target)] : [] }))]
         const artifacts = paths.length ? `\n${zh ? '已交付文件' : 'Delivered files'}: ${paths.join(', ')}` : ''
         const body = refusalReport && task.status === 'passed' ? (zh ? '阶段检查已通过；整体验收仍未通过。' : 'Stage check passed; overall acceptance remains incomplete.') : deliverable ? `${task.note ?? task.status}\n\n交付内容：\n${deliverable}` : task.note ?? task.status
         return `${task.status === 'passed' ? '✓' : '•'} ${task.goal}\n${body}${artifacts}${skippedLine}`

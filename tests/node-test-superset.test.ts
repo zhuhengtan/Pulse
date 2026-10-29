@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -39,7 +40,7 @@ it.each([true, false])('requires the later passing suite to include every earlie
       ['fs_write', { path: 'b.test.mjs', content: "import test from 'node:test'\nimport assert from 'node:assert/strict'\ntest('other', () => assert.equal(2 + 2, 4))\n" }],
     ])
     if (work === 2) return tools([['shell_exec', { command: 'node', args: ['--test', 'a.test.mjs'] }]])
-    if (work === 3) return tools([['fs_apply_patch', { path: 'feature.mjs', find: 'value = 1', replace: 'value = 2' }]])
+    if (work === 3) return tools([['fs_apply_patch', { path: 'feature.mjs', find: 'value = 1', replace: 'value = 2', expectedHash: createHash('sha256').update('export const value = 1\n').digest('hex') }]])
     if (work === 4) return tools([['shell_exec', { command: 'node', args: covers ? ['--test', 'a.test.mjs', 'b.test.mjs'] : ['--test', 'b.test.mjs'] }]])
     return chat('Completed with the latest actual test result.')
   }))

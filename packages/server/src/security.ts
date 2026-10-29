@@ -8,6 +8,99 @@ const SEARCH_MAX_DEPTH = 8
 const SEARCH_MAX_VISITED = 2_000
 const SEARCH_MAX_RESULTS = 100
 const SEARCH_MAX_FILE_BYTES = 1_000_000
+export const DEFAULT_IGNORED_DIRS = new Set(['.git', 'node_modules', '.pulse', 'dist', 'build', 'target', '.venv'])
+
+export interface IgnoreRule {
+  pattern: RegExp
+  negated: boolean
+  dirOnly: boolean
+  /** Path prefix relative to the workspace, including a trailing slash. Empty means the workspace root. */
+  base?: string
+}
+
+export function globToRegExp(glob: string): RegExp {
+  const normalized = glob.replace(/\\/g, '/')
+  const anchored = normalized.startsWith('/')
+  const raw = anchored ? normalized.slice(1) : normalized
+  const hasSlash = raw.includes('/')
+
+  let reStr = ''
+  let i = 0
+  while (i < raw.length) {
+    const c = raw[i]
+    if (!c) break
+    if (c === '*') {
+      if (raw[i + 1] === '*') {
+        if (raw[i + 2] === '/') {
+          reStr += '(?:.+/)?'
+          i += 3
+          continue
+        } else {
+          reStr += '.*'
+          i += 2
+          continue
+        }
+      } else {
+        reStr += '[^/]*'
+        i++
+        continue
+      }
+    } else if (c === '?') {
+      reStr += '[^/]'
+      i++
+      continue
+    } else if (c === '.') {
+      reStr += '\\.'
+      i++
+      continue
+    } else if ('+|^$()[]{}!\\'.includes(c)) {
+      reStr += '\\' + c
+      i++
+      continue
+    } else {
+      reStr += c
+      i++
+      continue
+    }
+  }
+
+  if (!anchored && !hasSlash) {
+    return new RegExp(`(?:^|/)${reStr}(?:/|$)`)
+  }
+  return new RegExp(`^${reStr}(?:/|$)`)
+}
+
+export function parseGitignore(content: string): IgnoreRule[] {
+  const rules: IgnoreRule[] = []
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    let pat = line
+    const negated = pat.startsWith('!')
+    if (negated) pat = pat.slice(1).trim()
+    const dirOnly = pat.endsWith('/')
+    if (dirOnly) pat = pat.slice(0, -1)
+    if (!pat) continue
+    rules.push({ pattern: globToRegExp(pat), negated, dirOnly })
+  }
+  return rules
+}
+
+export function isPathIgnored(relPath: string, isDir: boolean, rules: IgnoreRule[]): boolean {
+  const normalized = relPath.replace(/\\/g, '/').replace(/^\.\//, '')
+  let ignored = false
+  for (const rule of rules) {
+    if (rule.dirOnly && !isDir) continue
+    const base = rule.base ?? ''
+    let local = normalized
+    if (base) {
+      if (!normalized.startsWith(base)) continue
+      local = normalized.slice(base.length)
+    }
+    if (rule.pattern.test(local) || (isDir && rule.pattern.test(`${local}/`))) ignored = !rule.negated
+  }
+  return ignored
+}
 
 export function isConversationId(id: string): boolean {
   return CONVERSATION_ID.test(id)
@@ -129,6 +222,7 @@ export type SearchMatch = {
   path: string
   line: number
   text: string
+  context?: { before: string[]; after: string[] } | undefined
 }
 
 export type SearchTruncationReason = 'depth' | 'visited' | 'results'
@@ -145,6 +239,14 @@ export interface WorkspaceSearchResult {
   matched: number
 }
 
+export interface SearchWorkspaceOptions {
+  directory?: string | undefined
+  include?: string | undefined
+  exclude?: string | undefined
+  contextLines?: number | undefined
+  signal?: AbortSignal | undefined
+}
+
 interface SearchCounters {
   count: number
 }
@@ -156,6 +258,29 @@ interface SearchProgress {
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new Error('SEARCH_ABORTED')
+}
+
+async function directoryIgnoreRules(root: string, directory: string): Promise<IgnoreRule[]> {
+  const base = directory === '.' ? '' : `${directory.replace(/\\/g, '/').replace(/\/$/, '')}/`
+  const content = await readFile(join(root, directory === '.' ? '.gitignore' : join(directory, '.gitignore')), 'utf8').catch(() => undefined)
+  if (!content) return []
+  return parseGitignore(content).map((rule) => ({ ...rule, base }))
+}
+
+async function inheritedIgnoreRules(root: string, directory: string): Promise<IgnoreRule[]> {
+  const parts = directory === '.' ? [] : directory.replace(/\\/g, '/').split('/').filter(Boolean)
+  const chain: IgnoreRule[] = [...await directoryIgnoreRules(root, '.')]
+  let current = '.'
+  for (const part of parts) {
+    current = current === '.' ? part : `${current}/${part}`
+    chain.push(...await directoryIgnoreRules(root, current))
+  }
+  return chain
+}
+
+function rulesForDirectory(root: string, directory: string, inherited: IgnoreRule[]): Promise<IgnoreRule[]> {
+  if (inherited.length > 0 || directory === '.') return directoryIgnoreRules(root, directory).then((own) => inherited.concat(own))
+  return inheritedIgnoreRules(root, directory)
 }
 
 function markTruncated(progress: SearchProgress, reason: SearchTruncationReason): void {
@@ -180,6 +305,10 @@ async function collectMatches(
   matched: SearchCounters,
   progress: SearchProgress,
   signal: AbortSignal | undefined,
+  includeRegex?: RegExp,
+  excludeRegex?: RegExp,
+  contextLines?: number,
+  ignoreRules: IgnoreRule[] = [],
 ): Promise<SearchMatch[]> {
   throwIfAborted(signal)
   if (depth > SEARCH_MAX_DEPTH) {
@@ -211,13 +340,21 @@ async function collectMatches(
         break
       }
       if (line.toLocaleLowerCase().includes(needle)) {
-        result.push({ path: directory, line: index + 1, text: line.slice(0, 500) })
+        const item: SearchMatch = { path: directory, line: index + 1, text: line.slice(0, 500) }
+        if (contextLines && contextLines > 0) {
+          item.context = {
+            before: lines.slice(Math.max(0, index - contextLines), index),
+            after: lines.slice(index + 1, Math.min(lines.length, index + 1 + contextLines)),
+          }
+        }
+        result.push(item)
         matched.count++
       }
     }
     return result
   }
   if (!baseStat.isDirectory()) return []
+  const rules = await rulesForDirectory(root, directory, ignoreRules)
   const entries = await readdir(base, { withFileTypes: true })
   throwIfAborted(signal)
   const result: SearchMatch[] = []
@@ -230,15 +367,18 @@ async function collectMatches(
       markTruncated(progress, 'visited')
       break
     }
-    if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+    if (entry.name.startsWith('.') || entry.name === 'node_modules' || DEFAULT_IGNORED_DIRS.has(entry.name)) continue
+    const relativePath = directory === '.' ? entry.name : join(directory, entry.name).replace(/\\/g, '/')
+    if (isPathIgnored(relativePath, entry.isDirectory(), rules)) continue
     visited.count++
-    const relativePath = directory === '.' ? entry.name : join(directory, entry.name)
     if (entry.isSymbolicLink()) continue
     if (entry.isDirectory()) {
-      result.push(...await collectMatches(root, query, relativePath, depth + 1, visited, matched, progress, signal))
+      result.push(...await collectMatches(root, query, relativePath, depth + 1, visited, matched, progress, signal, includeRegex, excludeRegex, contextLines, rules))
       continue
     }
     if (!entry.isFile()) continue
+    if (includeRegex && !includeRegex.test(relativePath)) continue
+    if (excludeRegex && excludeRegex.test(relativePath)) continue
     const filePath = await within(root, relativePath).catch(() => undefined)
     if (!filePath) continue
     const entryStat = await lstat(filePath).catch(() => undefined)
@@ -252,7 +392,14 @@ async function collectMatches(
         break
       }
       if (line.toLocaleLowerCase().includes(needle)) {
-        result.push({ path: relativePath, line: index + 1, text: line.slice(0, 500) })
+        const item: SearchMatch = { path: relativePath, line: index + 1, text: line.slice(0, 500) }
+        if (contextLines && contextLines > 0) {
+          item.context = {
+            before: lines.slice(Math.max(0, index - contextLines), index),
+            after: lines.slice(index + 1, Math.min(lines.length, index + 1 + contextLines)),
+          }
+        }
+        result.push(item)
         matched.count++
       }
     }
@@ -275,19 +422,126 @@ export async function searchFiles(
   signal?: AbortSignal,
 ): Promise<SearchMatch[]> {
   const progress: SearchProgress = { truncated: false, reason: null }
-  return collectMatches(root, query, directory, depth, visited, matched, progress, signal)
+  return collectMatches(root, query, directory, depth, visited, matched, progress, signal, undefined, undefined, undefined, [])
 }
 
 /**
  * Workspace search with statistics. Consumers can tell an empty workspace from
  * a truncated result and see why the traversal stopped.
  */
-export async function searchWorkspace(root: string, query: string, directory = '.', signal?: AbortSignal): Promise<WorkspaceSearchResult> {
+export async function searchWorkspace(
+  root: string,
+  query: string,
+  optionsOrDir: string | SearchWorkspaceOptions = '.',
+  legacySignal?: AbortSignal,
+): Promise<WorkspaceSearchResult> {
+  const options: SearchWorkspaceOptions = typeof optionsOrDir === 'string' ? { directory: optionsOrDir, signal: legacySignal } : optionsOrDir
+  const directory = options.directory ?? '.'
+  const signal = options.signal ?? legacySignal
   const visited: SearchCounters = { count: 0 }
   const matched: SearchCounters = { count: 0 }
   const progress: SearchProgress = { truncated: false, reason: null }
-  const matches = await collectMatches(root, query, directory, 0, visited, matched, progress, signal)
+  const includeRegex = options.include ? globToRegExp(options.include) : undefined
+  const excludeRegex = options.exclude ? globToRegExp(options.exclude) : undefined
+  const matches = await collectMatches(root, query, directory, 0, visited, matched, progress, signal, includeRegex, excludeRegex, options.contextLines, [])
   return { matches, truncated: progress.truncated, reason: progress.reason, visited: visited.count, matched: matched.count }
+}
+
+export interface GlobMatch {
+  path: string
+  size: number
+  mtimeMs: number
+  isDirectory: boolean
+}
+
+export interface WorkspaceGlobResult {
+  matches: GlobMatch[]
+  truncated: boolean
+  total: number
+}
+
+export interface GlobWorkspaceOptions {
+  path?: string | undefined
+  limit?: number | undefined
+  includeHidden?: boolean | undefined
+  signal?: AbortSignal | undefined
+}
+
+export async function globWorkspace(
+  root: string,
+  pattern: string,
+  optionsOrDir: string | GlobWorkspaceOptions = '.',
+  legacySignal?: AbortSignal,
+): Promise<WorkspaceGlobResult> {
+  const options: GlobWorkspaceOptions = typeof optionsOrDir === 'string' ? { path: optionsOrDir, signal: legacySignal } : optionsOrDir
+  const startDir = options.path ?? '.'
+  const limit = Math.min(Math.max(options.limit ?? 200, 1), 1000)
+  const signal = options.signal ?? legacySignal
+  const includeHidden = options.includeHidden ?? false
+
+  throwIfAborted(signal)
+  await within(root, startDir)
+  const regex = globToRegExp(pattern)
+
+  const matches: GlobMatch[] = []
+  let truncated = false
+  let visitedCount = 0
+
+  async function walk(currentDir: string, depth: number, inherited: IgnoreRule[]): Promise<void> {
+    throwIfAborted(signal)
+    if (depth > 16 || visitedCount >= 5000) {
+      truncated = true
+      return
+    }
+    const currentAbs = await within(root, currentDir)
+    const rules = await rulesForDirectory(root, currentDir, inherited)
+    const entries = await readdir(currentAbs, { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      throwIfAborted(signal)
+      if (matches.length >= limit) {
+        truncated = true
+        return
+      }
+      visitedCount++
+      const relFromRoot = currentDir === '.' ? entry.name : join(currentDir, entry.name).replace(/\\/g, '/')
+      const isDir = entry.isDirectory()
+
+      if (!includeHidden && (entry.name.startsWith('.') || DEFAULT_IGNORED_DIRS.has(entry.name))) {
+        continue
+      }
+      if (DEFAULT_IGNORED_DIRS.has(entry.name)) {
+        continue
+      }
+      if (isPathIgnored(relFromRoot, isDir, rules)) {
+        continue
+      }
+      if (entry.isSymbolicLink()) {
+        continue
+      }
+
+      if (regex.test(relFromRoot)) {
+        const fullPath = await within(root, relFromRoot).catch(() => undefined)
+        if (fullPath) {
+          const s = await lstat(fullPath).catch(() => undefined)
+          if (s && !s.isSymbolicLink()) {
+            matches.push({
+              path: relFromRoot,
+              size: s.size,
+              mtimeMs: s.mtimeMs,
+              isDirectory: isDir,
+            })
+          }
+        }
+      }
+
+      if (isDir) {
+        await walk(relFromRoot, depth + 1, rules)
+      }
+    }
+  }
+
+  await walk(startDir, 0, [])
+  return { matches, truncated, total: matches.length }
 }
 
 export function safeShellEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
