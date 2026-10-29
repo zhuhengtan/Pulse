@@ -6,7 +6,7 @@ export function canReadShellArchive(runtime: PulseRuntime, laneId: string, id: u
   if (!lane || typeof id !== 'string') return false
   for (const effect of runtime.state.effects.values()) {
     const input = effect.input
-    if (!input || typeof input !== 'object' || Array.isArray(input) || input.name !== 'shell.exec' || !effect.outcome?.resultRef) continue
+    if (!input || typeof input !== 'object' || Array.isArray(input) || !['shell.exec', 'shell.poll'].includes(String(input.name)) || !effect.outcome?.resultRef) continue
     const result = runtime.state.results.get(effect.outcome.resultRef)
     if (!result || result.privacy !== 'public' || result.privacyTaints?.length || lane.visibleResultRefs && !lane.visibleResultRefs.has(result.id)) continue
     const value = result.value

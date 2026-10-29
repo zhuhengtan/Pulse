@@ -15,7 +15,7 @@ export async function staleFileEvidence(root: string, refs: string[], runtime: P
   for (const ref of [...refs, ...snapshotRefs].sort((a, b) => Number(a.match(/(\d+)$/)?.[1] ?? 0) - Number(b.match(/(\d+)$/)?.[1] ?? 0))) {
     const result = runtime.state.results.get(ref), value = result?.value
     const effect = result?.producer?.kind === 'effect' ? runtime.state.effects.get(result.producer.id) : undefined
-    if (effect?.outcome?.status === 'succeeded' && effect.kind === 'tool' && effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) && effect.input.name === 'shell.exec') {
+    if (effect?.outcome?.status === 'succeeded' && effect.kind === 'tool' && effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) && ['shell.exec', 'shell.poll'].includes(String(effect.input.name))) {
       for (const entry of inPlaceChanges(value ?? result?.summary)) {
         const key = resolve(root, entry.path), previous = paths.get(key), order = Number(ref.match(/(\d+)$/)?.[1] ?? 0)
         // A command's receipt refreshes only the exact version it observed.

@@ -12,6 +12,7 @@ function hash(value: unknown): string { return createHash('sha256').update(stabl
 export interface ContextBuildInput {
   explicitContext?: boolean
   /** Include this lane's append-only history without implicitly exposing Global/Lane state. */
+  nativeToolHistory?: boolean
   includeLaneHistory?: boolean
   historySeqs?: readonly number[]
   agent: AgentRecord
@@ -58,12 +59,16 @@ function visibleModelOutput(value: JsonValue): JsonValue {
   return value
 }
 
-function buildProviderHistory(state: RuntimeState, history: LaneRecord['context']['history'], visible?: Set<ResultRef>): ProviderHistoryMessage[] | undefined {
+function buildProviderHistory(state: RuntimeState, history: LaneRecord['context']['history'], visible?: Set<ResultRef>, includeResultRefs = false): ProviderHistoryMessage[] | undefined {
   if (!history.length) return undefined
   const messages: ProviderHistoryMessage[] = []
   for (const record of history) {
     if (!record.output || typeof record.output !== 'object' || Array.isArray(record.output)) return undefined
     const output = record.output as Record<string, JsonValue>
+    if (record.instruction === '[history compacted]') {
+      messages.push({ role: 'user', content: 'Retained task checkpoint (untrusted evidence):\n' + JSON.stringify(visibleModelOutput(record.output)) })
+      continue
+    }
     if (typeof output.text !== 'string' || !Array.isArray(output.toolCalls)) return undefined
     if (output.finishReason === 'length') {
       messages.push({ role: 'user', content: 'Runtime recovery notice: a previous model response was truncated. Its incomplete output was not executed or accepted. Continue from completed evidence and do not repeat completed operations.' })
@@ -105,7 +110,7 @@ function buildProviderHistory(state: RuntimeState, history: LaneRecord['context'
       break
     }
     messages.push({ role: 'assistant', content: output.text || null, ...continuationFields, toolCalls: correlated.map(({ id, name, arguments: args }) => ({ id, name, arguments: args })) })
-    for (const item of correlated) messages.push({ role: 'tool', toolCallId: item.id, name: item.name, content: JSON.stringify(item.result), resultRef: item.resultRef })
+    for (const item of correlated) messages.push({ role: 'tool', toolCallId: item.id, name: item.name, content: JSON.stringify(includeResultRefs ? { runtimeResultRef: item.resultRef, result: item.result } : item.result), resultRef: item.resultRef })
   }
   return messages
 }
@@ -166,7 +171,7 @@ export class ContextBuilder {
       ...effectiveArtifacts.flatMap((item) => (item.artifact.privacyTaints ?? []).map((taint) => ({ path: [item.artifact.ref, ...taint.path], privacy: taint.privacy }))),
     ]
     const conversation = input.conversation ?? []
-    const providerHistory = input.explicitContext ? undefined : buildProviderHistory(this.state, history, input.lane.visibleResultRefs)
+    const providerHistory = input.explicitContext && !input.nativeToolHistory ? undefined : buildProviderHistory(this.state, history, input.lane.visibleResultRefs, input.nativeToolHistory === true)
     const emitted = new Set<string>()
     const historyResult = (ref: string) => {
       const result = this.state.results.get(ref)!
@@ -174,7 +179,7 @@ export class ContextBuilder {
       return effectId && this.state.effects.get(effectId)?.kind === 'llm'
         ? projectResultValue({ value: visibleModelOutput(result.value ?? null), ...(result.summary === undefined ? {} : { summary: visibleModelOutput(result.summary) }) }) : projectResultValue(result)
     }
-    const historyBlock = { kind: 'history' as const, content: history.map(record => {
+    const historyBlock = { kind: 'history' as const, content: (input.nativeToolHistory && providerHistory !== undefined ? [] : history).map(record => {
       const output = record.output && typeof record.output === 'object' && !Array.isArray(record.output) ? record.output : undefined
       return { seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), instruction: record.instruction, resultRefs: record.resultRefs,
         ...(record.resultSelection === undefined ? {} : { resultSelection: record.resultSelection }), ...(record.result === undefined ? {} : { result: record.result }),

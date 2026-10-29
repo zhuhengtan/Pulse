@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { desktopPageUrl } from '../../packages/desktop/src/dev-url.mjs';
 import { assertDesktopDataReady } from '../../packages/desktop/src/data-directory.mjs';
-import { stopDevelopmentBackend } from './restart-backend.mjs';
+import { stopDevelopmentBackend, verifyDevelopmentBackend } from './restart-backend.mjs';
+import { selectDevelopmentBackendPort, selectDevelopmentFrontend } from './development-endpoints.mjs';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const exists = path => access(path).then(() => true, () => false);
@@ -39,11 +40,18 @@ async function sessionDescriptor(data) {
     try { return JSON.parse(await readFile(join(data, 'service.json'), 'utf8')); }
     catch (error) { if (error.code === 'ENOENT') return undefined; throw new Error('无法读取开发后台 service.json，请先检查该文件；脚本不会覆盖它。'); }
 }
-async function backend(data, requestedPort, env, logs) {
+async function runningBackend(data) {
     const saved = await sessionDescriptor(data);
     if (saved && alive(saved.pid)) {
-        if (saved.protocol !== 1 || !Number.isInteger(saved.port) || saved.port < 1 || saved.port > 65535 || saved.port === 7332 || typeof saved.dataDir !== 'string' || await realpath(saved.dataDir) !== await realpath(data)) throw new Error('开发后台描述与当前数据目录不匹配，已保留原进程。');
+        if (saved.protocol !== 1 || !Number.isInteger(saved.port) || saved.port < 1 || saved.port > 65535 || saved.port === 7332 || typeof saved.dataDir !== 'string' || await realpath(saved.dataDir) !== await realpath(data)) throw new Error('开发后台身份或数据目录不匹配，已保留原进程。');
         if (!await listening(saved.port)) throw new Error('开发后台进程仍存在，但端口未就绪。请检查后台状态；脚本不会自动终止任务。');
+        await verifyDevelopmentBackend(data, saved);
+        return saved;
+    }
+}
+async function backend(data, requestedPort, env, logs) {
+    const saved = await runningBackend(data);
+    if (saved) {
         console.log(`复用开发后台：http://127.0.0.1:${saved.port}（PID ${saved.pid}）`);
         console.log('后端代码若有更新，可运行 ./restart-dev.sh 重启开发后台；运行中任务会被中断。');
         return saved.port;
@@ -79,7 +87,8 @@ async function main() {
 --web-only  只启动后台和网页，浏览器访问输出的地址。
 --no-build  跳过编译，复用已有 dist（首次启动不要使用）。
 --restart  构建成功后校验并重启开发后台，保留数据及原端口，复用匹配的 Vite 和窗口；运行中任务会中断。
-环境变量：PULSE_DEV_DIR（默认 .pulse-dev）、PULSE_WEB_DEV_PORT（默认 7333）、PULSE_DESKTOP_DEV_URL（默认 http://127.0.0.1:5174/work/new）。
+默认自动复用已核验的后台和匹配前端；默认端口被占用时自动选择空闲端口，保留原数据和已有进程。
+环境变量：PULSE_DEV_DIR（默认 .pulse-dev）、PULSE_WEB_DEV_PORT（默认从 7333 选择）、PULSE_DESKTOP_DEV_URL（默认从 http://127.0.0.1:5174/work/new 选择；显式指定端口时不自动更换）。
 新后台会在退出窗口/脚本后继续运行，可从 Electron 菜单停止。仅本脚本新启动的前端会随窗口/脚本退出停止。`); return;
     }
     if (args.includes('--web-only') && electronArgs.length) throw new Error('--web-only 不能同时传入 Electron 参数。');
@@ -87,7 +96,7 @@ async function main() {
     if (major < 22 || major === 22 && minor < 13) throw new Error('需要 Node.js >=22.13。');
     const port = Number(process.env.PULSE_WEB_DEV_PORT ?? 7333);
     if (!Number.isInteger(port) || port < 1 || port > 65535 || port === 7332) throw new Error('开发端口须为 1–65535 的整数；7332 保留给正式服务。');
-    const url = desktopPageUrl(false, process.env.PULSE_DESKTOP_DEV_URL ?? 'http://127.0.0.1:5174/work/new');
+    let url = desktopPageUrl(false, process.env.PULSE_DESKTOP_DEV_URL ?? 'http://127.0.0.1:5174/work/new');
     if (new URL(url).port === String(port)) throw new Error('前端与后台端口不能相同。');
     const dev = resolve(repo, process.env.PULSE_DEV_DIR ?? '.pulse-dev'), data = join(dev, 'h5', 'data'), logs = join(dev, 'logs');
     const env = { ...process.env, PULSE_DATA_DIR: data, PULSE_DESKTOP_DATA_DIR: data, PULSE_DESKTOP_USER_DATA: join(dev, 'electron'), PULSE_H5_HOST: '127.0.0.1', PULSE_DESKTOP_DEV_URL: url };
@@ -123,7 +132,13 @@ async function main() {
         try { ready = await exists(desktopRequire('electron')); } catch { /* --ignore-scripts omits the Electron binary. */ }
         if (!ready) { console.log('首次准备 Electron…'); await run(process.execPath, [desktopRequire.resolve('electron/install.js')], env); }
     }
-    const restartPort = args.includes('--restart') ? await stopDevelopmentBackend({ data, repo, url, port }) : port;
+    const saved = await runningBackend(data);
+    const selectedPort = saved?.port ?? await selectDevelopmentBackendPort(port, process.env.PULSE_WEB_DEV_PORT !== undefined);
+    const selectedUrl = await selectDevelopmentFrontend({ repo, url, backend: `http://127.0.0.1:${selectedPort}`, explicit: process.env.PULSE_DESKTOP_DEV_URL !== undefined });
+    if (selectedPort !== port && !saved) console.log(`默认后台端口 ${port} 已占用，自动使用 ${selectedPort}，已有进程保持运行。`);
+    if (selectedUrl !== url) console.log(`默认前端地址不可复用，自动使用 ${selectedUrl}，已有前端保持运行。`);
+    url = selectedUrl; env.PULSE_DESKTOP_DEV_URL = url;
+    const restartPort = args.includes('--restart') ? await stopDevelopmentBackend({ data, repo, url, port: selectedPort }) : selectedPort;
     const actualPort = await backend(data, restartPort, env, logs);
     env.PULSE_H5_TARGET = `http://127.0.0.1:${actualPort}`;
     console.log(`网页预览：${url}\n前端修改自动刷新；新启动后台的日志：${join(logs, 'backend.log')}`);

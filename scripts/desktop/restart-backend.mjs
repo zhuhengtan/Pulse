@@ -11,6 +11,20 @@ const alive = pid => {
 const canonical = path => realpath(path).catch(error => { if (error.code === 'ENOENT') return resolve(path); throw error; });
 const request = (url, init = {}) => fetch(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(3000) });
 
+/** A live PID and a TCP listener alone do not prove ownership of the data. */
+export async function verifyDevelopmentBackend(data, saved) {
+    const origin = `http://127.0.0.1:${saved.port}`;
+    const local = await request(origin + '/api/session/local', { method: 'POST', headers: { Origin: origin } });
+    const cookie = local.headers.get('set-cookie')?.split(';')[0];
+    if (!local.ok || !cookie) throw new Error('无法核验开发后台身份，未停止任何进程。');
+    const response = await request(origin + '/api/session', { headers: { Cookie: cookie } });
+    const info = await response.json();
+    // The caller checks canonical directory equality; the server hashes the
+    // original descriptor path, which may be a symlink to that directory.
+    const scope = createHash('sha256').update(resolve(saved.dataDir ?? data)).digest('hex').slice(0, 32);
+    if (!response.ok || !info.localAdmin || info.serverPid !== saved.pid || info.queueScope !== scope) throw new Error('开发后台身份核验失败，未停止任何进程。');
+}
+
 /** Restart only a verified development backend. Never signal a PID based on a stale file alone. */
 export async function stopDevelopmentBackend({ data, repo, url, port }) {
     const directory = await canonical(data);
@@ -36,14 +50,7 @@ export async function stopDevelopmentBackend({ data, repo, url, port }) {
         if (!frontend.ok || typeof info?.workspace !== 'string' || await canonical(info.workspace) !== await canonical(repo) || info.backend !== origin) throw new Error('已有前端不属于当前仓库或连接了其他后台，未停止任何进程。');
     }
     if (!running) { console.log('开发后台未运行，将直接启动。'); return actualPort; }
-    // Keep the short-lived local cookie in memory; never print or persist it.
-    const local = await request(origin + '/api/session/local', { method: 'POST', headers: { Origin: origin } });
-    const cookie = local.headers.get('set-cookie')?.split(';')[0];
-    if (!local.ok || !cookie) throw new Error('无法核验开发后台身份，未停止任何进程。');
-    const response = await request(origin + '/api/session', { headers: { Cookie: cookie } });
-    const info = await response.json();
-    const scope = createHash('sha256').update(resolve(saved.dataDir)).digest('hex').slice(0, 32);
-    if (!response.ok || !info.localAdmin || info.serverPid !== saved.pid || info.queueScope !== scope) throw new Error('开发后台身份核验失败，未停止任何进程。');
+    await verifyDevelopmentBackend(data, saved);
     const current = JSON.parse(await readFile(join(data, 'service.json'), 'utf8'));
     if (current.pid !== saved.pid || current.port !== saved.port || current.dataDir !== saved.dataDir) throw new Error('开发后台在重启前发生变化，请重试；未停止任何进程。');
     console.log(`正在停止开发后台（PID ${saved.pid}，端口 ${actualPort}）；运行中任务会中断，聊天记录和配置保留。`);

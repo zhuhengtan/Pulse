@@ -28,6 +28,9 @@ export type PlannedTask = z.infer<typeof plannedTaskSchema>
 export interface ControlledTask extends PlannedTask {
   status: 'pending' | 'running' | 'verifying' | 'passed' | 'blocked'
   attempts: number
+  executionSlices?: number
+  nextAction?: string
+  stopReason?: string
   evidenceRefs: string[]
   candidateRef?: string
   candidateAttempt?: number
@@ -87,6 +90,7 @@ export function initialController(maxTurns: number): TaskControllerState {
 const controlledTaskSchema = plannedTaskSchema.extend({
   status: z.enum(['pending', 'running', 'verifying', 'passed', 'blocked']),
   attempts: z.number().int().min(0).max(maxStageAttempts), evidenceRefs: z.array(z.string()),
+  executionSlices: z.number().int().min(0).optional(), nextAction: z.string().optional(), stopReason: z.string().optional(),
   contextRefs: z.array(z.string()).max(128).optional(),
   approvalContextRefs: z.array(z.string()).max(128).optional(),
   candidateRef: z.string().optional(), candidateAttempt: z.number().int().min(1).max(maxStageAttempts).optional(), note: z.string().optional(),

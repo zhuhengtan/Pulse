@@ -55,6 +55,12 @@ it.runIf(process.env.PULSE_LOCAL_DEV_LIVE === '1')('starts the root launcher, re
   await expect(exec(process.execPath, [join(repo, 'scripts/desktop/start-local.mjs'), '--no-build'], { env: { ...env, PULSE_WEB_DEV_PORT: '7332' }, timeout: 15000 })).rejects.toThrow()
   await page.screenshot({ path: join(tmpdir(), 'pulse-oneclick-development.png') })
   await page.evaluate(() => window.close())
+  // Closing a window can leave the tray alive; explicitly exiting the launcher
+  // must stop its frontend. The detached backend must survive both actions.
+  await expect.poll(async () => page.isClosed() || await page.evaluate(() => document.visibilityState === 'hidden').catch(() => page.isClosed()), { timeout: 5000 }).toBe(true)
+  expect(code).toBeUndefined()
+  process.kill(backendPid!, 0)
+  child.kill('SIGTERM')
   await expect.poll(() => code, { timeout: 15000 }).toBe(0)
   process.kill(backendPid!, 0)
   await expect.poll(() => fetch(`${url}/@vite/client`).then(() => true, () => false), { timeout: 10000 }).toBe(false)

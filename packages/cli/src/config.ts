@@ -80,6 +80,7 @@ export interface PulseCliConfig {
   taskRouting?: Partial<Record<PulseModelTask, string[]>>
   capabilities?: PulseCliCapabilities
   approvalMode?: 'read-only' | 'ask' | 'auto'
+  taskControllerPolicy?: 'legacy' | 'continuous'
   maxTurns?: number
   /** Provider attempts allowed across one controlled work task; defaults to 256. */
   maxModelCalls?: number

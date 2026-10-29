@@ -1,5 +1,9 @@
 # Host task controller
 
+For the opt-in v57 policy, compatibility rules and offline validation, see
+[Continuous task controller](continuous-controller-v57.md). The default remains
+legacy v56; the version 19 sections below describe historical policy.
+
 The Host owns task policy; the Runtime owns execution, cancellation, scheduling,
 and atomic persistence. `packages/server/src/task-controller/` implements the
 policy as version 19 of `pulse.assistant`, using the existing Runtime DSL. It

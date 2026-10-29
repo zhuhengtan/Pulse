@@ -14,6 +14,7 @@ export function assertWindowObservationScope(request: string, name: string, inpu
 
 /** Only direct prohibitions in the caller-owned request. Never scan tool/file evidence. */
 export function assertExplicitToolRestriction(request: string, name: string, input: JsonValue): void {
+  if (name === 'shell.start') name = 'shell.exec'
   // Quoted/code examples are data; this deliberately does not interpret them as policy.
   const text = request.replace(/```[\s\S]*?```|“[^”]*”|「[^」]*」|"[^"\n]*"/g, '').replace(/`([^`]+)`/g, '$1')
   const clauses = text.split(/[。！？;；\n]/).flatMap(s => {

@@ -57,6 +57,7 @@ Options:
   --max-output-tokens <n>   maximum generated tokens (default 4096)
   --reasoning-effort <x>    low, medium, or high
   --max-turns <n>           maximum ReAct model/tool turns (default 32)
+  --task-controller-policy <legacy|continuous>  opt-in continuous task execution
   --max-model-calls <n>     maximum model attempts per work task (default 256)
   --auto-compact-percent <n> compact automatically at this percent of the context window (1-90, default 90)
   --accept-build-migration <old:new> authorize one reviewed recovery build pair\n  --requirements-doc <path> explicitly attach a workspace requirements document\n  --format <text|jsonl>     output format
@@ -225,6 +226,8 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const maxOutputTokens = option(parsed.options, 'max-output-tokens') ?? process.env.PULSE_MAX_OUTPUT_TOKENS
   const reasoningEffort = option(parsed.options, 'reasoning-effort') ?? process.env.PULSE_REASONING_EFFORT
   const maxTurns = option(parsed.options, 'max-turns') ?? process.env.PULSE_MAX_TURNS
+  const taskControllerPolicy = option(parsed.options, 'task-controller-policy') ?? config.taskControllerPolicy ?? 'legacy'
+  if (!['legacy', 'continuous'].includes(taskControllerPolicy)) throw new Error('INVALID_TASK_CONTROLLER_POLICY')
   const maxModelCalls = option(parsed.options, 'max-model-calls') ?? process.env.PULSE_MAX_MODEL_CALLS
   const maxRuntimeMs = option(parsed.options, 'max-runtime-ms') ?? process.env.PULSE_MAX_RUNTIME_MS
   const autoCompactPercent = option(parsed.options, 'auto-compact-percent') ?? process.env.PULSE_AUTO_COMPACT_PERCENT
@@ -437,6 +440,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   }
 
   return {
+    taskControllerPolicy: taskControllerPolicy as 'legacy' | 'continuous',
     ...(explicitTaskController === undefined ? {} : { taskController: explicitTaskController }),
     ...(cwd === undefined ? {} : { cwd }),
     ...(dataDir === undefined ? {} : { dataDir }),

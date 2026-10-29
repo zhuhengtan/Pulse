@@ -435,7 +435,7 @@ export function validateShellInvocation(command: string, args: string[] = []): v
   encodeSandboxCommand(command, args)
 }
 
-export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number } = {}): Promise<ShellResult> {
+export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void } = {}): Promise<ShellResult> {
   const max = options.maxOutputBytes ?? 256 * 1024
   if (!Number.isFinite(max) || max < 0) return Promise.reject(shellError('INVALID_SHELL_OUTPUT_LIMIT'))
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0)) return Promise.reject(shellError('INVALID_SHELL_TIMEOUT'))
@@ -558,6 +558,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       if (!killTimer) killTimer = setTimeout(() => { if (!closed) signalProcessGroup('SIGKILL') }, 250)
     }
     const append = (target: 'stdout' | 'stderr', chunk: Buffer): void => {
+      options.onOutput?.(target, chunk)
       archive.append(target, chunk)
       outputBytes[target] += chunk.byteLength
       if (outputBytes[target] > max) truncated = true
