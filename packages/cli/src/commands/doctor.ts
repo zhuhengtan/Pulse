@@ -23,6 +23,7 @@ export async function runDoctor(
     process.stdout.write(`数据目录:   ${chalk.hex(theme.dim)(result.dataDir)}\n`);
     process.stdout.write(`Node 版本:  ${result.node}\n`);
     process.stdout.write(`Provider:   ${chalk.hex(theme.primary)(result.provider)}\n`);
+    if (result.apiMode) process.stdout.write(`API 格式:   ${result.apiMode}\n`);
     process.stdout.write(`可用工具:   ${result.tools.map((t) => chalk.hex(theme.tool)(t)).join(', ')}\n`);
 
     if (result.live) {

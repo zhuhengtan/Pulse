@@ -2234,6 +2234,32 @@ export class H5Server {
       return
     }
 
+    // Agent processes belong to a run, not the manually controlled terminal service.
+    // Forward live controls to the worker holding the native capability. Disk-only
+    // readers deliberately report uncertain processes as unknown after a restart.
+    const processMatch = pathname.match(/^\/api\/runs\/([^/]+)\/processes(?:\/([a-f0-9]{64})(\/cancel)?)?$/)
+    if (processMatch && ((method === 'GET' && !processMatch[3]) || (method === 'POST' && processMatch[3]))) {
+      const runId = processMatch[1]!, processId = processMatch[2]
+      await this.awaitWorkStart(runId)
+      const conversationId = this.runConversations.get(runId) ?? await this.host.findConversationByRunId(runId)
+      if (!conversationId) { res.writeHead(404).end(); return }
+      const offset = Number(url.searchParams.get('offset') ?? 0)
+      if (!Number.isSafeInteger(offset) || offset < 0) { res.writeHead(400).end(JSON.stringify({ error: 'SHELL_OUTPUT_RANGE_INVALID' })); return }
+      const active = this.activeRuns.get(runId)
+      try {
+        const value = !processId
+          ? { items: active?.processes ? await active.processes() : await this.host.listRunProcesses(conversationId, runId) }
+          : method === 'POST'
+            ? active?.cancelProcess ? await active.cancelProcess(processId) : await this.host.cancelRunProcess(conversationId, runId, processId)
+            : active?.pollProcess ? await active.pollProcess(processId, offset) : await this.host.readRunProcess(conversationId, runId, processId, offset)
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(value))
+      } catch (cause) {
+        const code = String((cause as { code?: string }).code ?? (cause as Error).message)
+        res.writeHead(code === 'ENOENT' || code === 'RUN_NOT_FOUND' ? 404 : 409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: code }))
+      }
+      return
+    }
+
     const runStateMatch = pathname.match(/^\/api\/runs\/([^/]+)\/state$/)
     if (runStateMatch && method === 'GET') {
       const runId = runStateMatch[1]

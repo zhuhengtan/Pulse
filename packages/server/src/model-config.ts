@@ -20,6 +20,7 @@ export interface ProviderDefinition {
   connectionVariant?: string
   credentialRef?: string
   provider: string
+  apiMode?: 'chat-completions' | 'responses'
   name?: string
   baseURL?: string
   apiKeyEnv?: string
@@ -47,6 +48,10 @@ export function parseModelSelectionId(value: string): { providerId: string; mode
 /** Normalize legacy flat model entries and inline feature models without mutating the caller's config. */
 export function normalizeModelConfig<T extends Record<string, any>>(input: T): T {
   const config: ModelConfig = structuredClone(input)
+  for (const provider of Object.values(config.providers ?? {}) as any[]) {
+    if (provider.apiMode !== undefined && !['chat-completions', 'responses'].includes(provider.apiMode)) throw new Error('PROVIDER_API_MODE_INVALID')
+    if (provider.apiMode === 'responses' && !['openai', 'openai-compatible'].includes(provider.provider)) throw new Error('PROVIDER_RESPONSES_UNSUPPORTED')
+  }
   for (const provider of Object.values(config.providers ?? {}) as any[]) for (const model of Object.values(provider.models ?? {}) as any[]) {
     if (model.purposes !== undefined && (!Array.isArray(model.purposes) || !model.purposes.length || model.purposes.some((p: unknown) => !['chat','image','video','speech','music','sound'].includes(String(p))))) throw new Error('MODEL_PURPOSE_INVALID')
   }

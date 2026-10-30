@@ -2,7 +2,7 @@ import { access, readFile, writeFile, mkdtemp, rm, stat, mkdir } from 'node:fs/p
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, mergePulseConfigs, sanitizeWorkspaceConfig } from '../packages/cli/src/config.js'
+import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig, mergePulseConfigs, sanitizeWorkspaceConfig } from '../packages/cli/src/config.js'
 import { hostOptions, parse } from '../packages/cli/src/bin.js'
 import { runSetup } from '../packages/cli/src/commands/setup.js'
 import { createHostModelRouting } from '../packages/server/src/model-routing.js'
@@ -255,6 +255,63 @@ describe('ensurePulseUserConfig', () => {
     } finally {
       if (previousHome === undefined) delete process.env.PULSE_HOME
       else process.env.PULSE_HOME = previousHome
+    }
+  })
+
+  it('strips workspace apiMode with and without trust while host Responses remains', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulse-cli-api-mode-'))
+    temporaryDirectories.push(root)
+    const workspace = join(root, 'workspace'), hostPath = join(root, 'host.json'), home = join(root, 'home')
+    await mkdir(join(workspace, '.pulse'), { recursive: true })
+    await mkdir(home, { recursive: true })
+    await writeFile(join(workspace, '.pulse/config.json'), JSON.stringify({ providers: {
+      only: { provider: 'openai-compatible', apiMode: 'responses', baseURL: 'http://127.0.0.1:9/v1', models: { m: { modelCode: 'only-model' } } },
+      shared: { provider: 'openai-compatible', apiMode: 'responses', baseURL: 'http://127.0.0.1:8/v1' },
+    } }))
+    await writeFile(hostPath, JSON.stringify({
+      providers: {
+        shared: { provider: 'openai-compatible', baseURL: 'http://127.0.0.1:8/v1', models: { model: { modelCode: 'shared-model' } } },
+        explicit: { provider: 'openai-compatible', apiMode: 'responses', baseURL: 'http://127.0.0.1:7/v1', models: { model: { modelCode: 'explicit-model' } } },
+      },
+      activeModel: 'shared/model', jarvis: { enabled: false },
+    }))
+    const keys = ['PULSE_HOME', 'PULSE_CONFIG', 'PULSE_DATA_DIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME'] as const
+    const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]))
+    process.env.PULSE_HOME = home
+    delete process.env.PULSE_CONFIG
+    process.env.PULSE_DATA_DIR = join(home, 'data')
+    process.env.HOME = home
+    process.env.USERPROFILE = home
+    process.env.APPDATA = join(home, 'AppData')
+    process.env.LOCALAPPDATA = join(home, 'LocalAppData')
+    process.env.XDG_CONFIG_HOME = join(home, 'xdg-config')
+    process.env.XDG_DATA_HOME = join(home, 'xdg-data')
+    try {
+      for (const trust of [false, true]) {
+        const loaded = await loadPulseConfig(workspace, hostPath, trust)
+        expect(loaded.value.providers?.only).toMatchObject({ provider: 'openai-compatible' })
+        expect(loaded.value.providers?.only?.apiMode).toBeUndefined()
+        expect(loaded.value.providers?.shared?.apiMode).toBeUndefined()
+        expect(loaded.value.providers?.explicit?.apiMode).toBe('responses')
+        if (trust) expect(loaded.value.providers?.only?.baseURL).toBe('http://127.0.0.1:9/v1')
+        else expect(loaded.value.providers?.only).not.toHaveProperty('baseURL')
+        const args = ['--config', hostPath, '--cwd', workspace, ...(trust ? ['--trust-workspace'] : [])]
+        const explicit = await hostOptions(parse([...args, '--model', 'explicit/model']))
+        expect(explicit.provider?.apiMode).toBe('responses')
+        expect(explicit.providerProfiles?.only?.apiMode).toBeUndefined()
+        expect(explicit.providerProfiles?.shared?.apiMode).toBeUndefined()
+        expect(explicit.providerProfiles?.explicit?.apiMode).toBe('responses')
+        expect((await hostOptions(parse([...args, '--model', 'shared/model']))).provider?.apiMode).toBeUndefined()
+        const only = await hostOptions(parse([...args, '--model', 'only/m']))
+        expect(only.provider?.apiMode).toBeUndefined()
+        expect(only.provider?.provider).toBe('openai-compatible')
+      }
+    } finally {
+      for (const key of keys) {
+        const value = previous[key]
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
     }
   })
 })

@@ -11,14 +11,14 @@ export const H5_WORKER_PROTOCOL_VERSION = 1 as const
 type WorkerPayload = { recoveryAuthorization?: RunRecoveryAuthorization; requestId?: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[] }
 type WorkerStart = Omit<WorkerPayload, 'requestId'> & { messageRequestId?: string } & { schemaVersion: 1; type: 'start'; requestId: string; conversationId: string; text: string; resume: boolean }
 type WorkerConfigure = { schemaVersion: 1; type: 'configure'; runtimeOptions: WorkWorkerRuntimeOptions }
-type WorkerRpc = { schemaVersion: 1; type: 'rpc'; requestId: string; method: 'cancel' | 'reply' | 'replyBatch' | 'pendingInteractions' | 'reviewApproval' | 'submitHumanInput'; args: unknown[] }
+type WorkerRpc = { schemaVersion: 1; type: 'rpc'; requestId: string; method: 'cancel' | 'reply' | 'replyBatch' | 'pendingInteractions' | 'reviewApproval' | 'submitHumanInput' | 'processes' | 'pollProcess' | 'cancelProcess'; args: unknown[] }
 type WorkerShutdown = { schemaVersion: 1; type: 'shutdown' }
 type ParentMessage = WorkerConfigure | WorkerStart | WorkerRpc | WorkerShutdown
 
 type WorkerReady = { schemaVersion: 1; type: 'ready' } | { schemaVersion: 1; type: 'configured' }
 type WorkerStarted = { schemaVersion: 1; type: 'started'; requestId: string; runId: string; conversationId: string }
 type WorkerEvent = { schemaVersion: 1; type: 'event'; event: AssistantEvent }
-type WorkerRpcResult = { schemaVersion: 1; type: 'rpcResult'; requestId: string; ok: true; value?: unknown } | { schemaVersion: 1; type: 'rpcResult'; requestId: string; ok: false; error: string }
+type WorkerRpcResult = { schemaVersion: 1; type: 'rpcResult'; requestId: string; ok: true; value?: unknown } | { schemaVersion: 1; type: 'rpcResult'; requestId: string; ok: false; error: string; code?: string }
 type WorkerSettled = { schemaVersion: 1; type: 'settled'; outcome: Outcome & { text?: string }; usage: RunUsage; taskOutcome?: TaskOutcome }
 type WorkerFatal = { schemaVersion: 1; type: 'fatal'; message: string }
 type WorkerMessage = WorkerReady | WorkerStarted | WorkerEvent | WorkerRpcResult | WorkerSettled | WorkerFatal
@@ -160,6 +160,9 @@ class RemoteWorkRun {
       usage: async () => (await this.settled).usage,
       taskOutcome: async () => (await this.settled).taskOutcome,
       cancel: async reason => { await this.rpc('cancel', [reason]) },
+      processes: async () => await this.rpc('processes', []) as Awaited<ReturnType<NonNullable<RunHandle['processes']>>>,
+      pollProcess: async (id, offset) => await this.rpc('pollProcess', [id, offset ?? 0]) as Awaited<ReturnType<NonNullable<RunHandle['pollProcess']>>>,
+      cancelProcess: async id => await this.rpc('cancelProcess', [id]) as Awaited<ReturnType<NonNullable<RunHandle['cancelProcess']>>>,
       reply: async (effectId, value) => { await this.rpc('reply', [effectId, value]) },
       replyBatch: async (groupId, answers) => { await this.rpc('replyBatch', [groupId, answers]) },
       pendingInteractions: async () => await this.rpc('pendingInteractions', []) as Awaited<ReturnType<RunHandle['pendingInteractions']>>,
@@ -224,7 +227,7 @@ class RemoteWorkRun {
       if (!pending) return
       this.pendingRpc.delete(raw.requestId)
       clearTimeout(pending.timer)
-      raw.ok ? pending.resolve(raw.value) : pending.reject(new Error(raw.error))
+      raw.ok ? pending.resolve(raw.value) : pending.reject(Object.assign(new Error(raw.error), typeof raw.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(raw.code) ? { code: raw.code } : {}))
     } else if (raw.type === 'settled') {
       this.settledValue = raw
       this.events.close()
@@ -340,6 +343,9 @@ export async function runH5WorkWorker(host: LocalHost, conversationId: string): 
         let value: unknown
         switch (request.method) {
           case 'cancel': await handle.cancel(typeof request.args[0] === 'string' ? request.args[0] : undefined); break
+          case 'processes': if (!handle.processes) throw new Error('WORKER_PROCESS_CONTROLS_UNAVAILABLE'); value = await handle.processes(); break
+          case 'pollProcess': if (!handle.pollProcess) throw new Error('WORKER_PROCESS_CONTROLS_UNAVAILABLE'); value = await handle.pollProcess(String(request.args[0] ?? ''), Number(request.args[1] ?? 0)); break
+          case 'cancelProcess': if (!handle.cancelProcess) throw new Error('WORKER_PROCESS_CONTROLS_UNAVAILABLE'); value = await handle.cancelProcess(String(request.args[0] ?? '')); break
           case 'reply': await handle.reply(String(request.args[0] ?? ''), request.args[1] as JsonValue); break
           case 'replyBatch': await handle.replyBatch(String(request.args[0] ?? ''), request.args[1] as Array<{ effectId: string; value: JsonValue }>); break
           case 'pendingInteractions': value = await handle.pendingInteractions(); break
@@ -349,7 +355,8 @@ export async function runH5WorkWorker(host: LocalHost, conversationId: string): 
         }
         await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'rpcResult', requestId: request.requestId, ok: true, ...(value === undefined ? {} : { value }) })
       } catch (error) {
-        await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'rpcResult', requestId: request.requestId, ok: false, error: errorText(error).slice(0, 400) }).catch(() => undefined)
+        const code = (error as { code?: unknown })?.code
+        await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'rpcResult', requestId: request.requestId, ok: false, error: errorText(error).slice(0, 400), ...(typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(code) ? { code } : {}) }).catch(() => undefined)
       }
     })()
   })

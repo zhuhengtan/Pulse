@@ -53,6 +53,7 @@ const SettingsPage = lazy(() => import('./SettingsPage.js').then(module => ({ de
 const ArchivePage = lazy(() => import('./ArchivePage.js').then(module => ({ default: module.ArchivePage })))
 const pageLoading = <main className="empty" role="status">正在打开页面…</main>
 const PreviewDock = lazy(() => import('./PreviewDock.js').then(module => ({ default: module.PreviewDock })))
+const RunProcessPanel = lazy(() => import('./RunProcessPanel.js').then(module => ({ default: module.RunProcessPanel })))
 
 type RunStatus =
   | { kind: 'status'; label: string }
@@ -94,6 +95,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const [messages, setMessages] = useState<WebMessage[]>([])
   const messagesRef = useRef(messages); messagesRef.current = messages
   const [selectedId, setSelectedId] = useState<string>()
+  const [processRunId, setProcessRunId] = useState<string>()
+  useEffect(() => setProcessRunId(undefined), [selectedId, surfaceMode, route.page])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [serviceConnected, setServiceConnected] = useState(true)
@@ -1373,6 +1376,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   if (route.page === 'missing') return <main className="empty"><h1>页面不存在</h1><PulseButton onClick={() => go('/chat', true)}>返回聊天</PulseButton></main>
 
   const activeRunId = selected?.activeRunId
+  const latestProcessRunId = activeRunId ?? [...messages].reverse().find(message => message.runId)?.runId
   const completeItem = [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'complete' }> => item.kind === 'complete')
   const interactionItem = [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'interaction' }> => item.kind === 'interaction')
   const latestTool = [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'tool' }> => item.kind === 'tool')
@@ -1446,7 +1450,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         <div className="navbar-actions">
           {paired && <TaskNotificationInbox transport={transport} open={go}/>}
           {!(mobileLayout && surfaceMode === 'work') && <CompactRunStatus label={phaseLabel} />}
-          {surfaceMode === 'work' ? <Dropdown open={moreOpen} onOpenChange={setMoreOpen} trigger={['click']} placement="bottomRight" menu={{ items: [transfer.exportItem], onClick: () => setMoreOpen(false) }}>
+          {surfaceMode === 'work' ? <Dropdown open={moreOpen} onOpenChange={setMoreOpen} trigger={['click']} placement="bottomRight" menu={{ items: [...(latestProcessRunId ? [{ key: 'run-processes', label: '任务进程' }] : []), transfer.exportItem], onClick: ({ key }) => { setMoreOpen(false); if (key === 'run-processes') setProcessRunId(latestProcessRunId) } }}>
             <Tooltip title={moreOpen ? null : '更多'}><PulseButton className="navbar-tool" aria-label="更多" aria-haspopup="menu" aria-expanded={moreOpen}><Icon name="ellipsis" size={22}/></PulseButton></Tooltip>
           </Dropdown> : <Tooltip title="设置"><PulseButton className="navbar-tool" aria-label="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings" size={21}/></PulseButton></Tooltip>}
           {mobileLayout ? detailsButton : <Popover open={detailsOpen} onOpenChange={setDetailsOpen} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}>{detailsButton}</Popover>}
@@ -1476,6 +1480,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     </ChatSurface>
     {workbenchOpen && <Suspense fallback={<div className="workbench-loading" role="status">正在打开标签页…</div>}><PreviewDock key={selectedId ?? selectedProjectId ?? 'unassigned'} scope={selectedId ?? selectedProjectId ?? 'unassigned'} conversationId={selectedId} projectId={selected?.projectId ?? selectedProjectId} project={projects.find(project => project.id === (selected?.projectId ?? selectedProjectId))} transport={transport} localAdmin={sessionCapabilities.localAdmin} canUseTerminal={sessionCapabilities.canUseTerminal} position={route.query} onNavigate={patchQuery} onClose={() => patchQuery({ workspace: undefined, artifact: undefined, artifactRun: undefined, file: undefined, automation: undefined, diff: undefined, staged: undefined, previewHidden: '1' })} /></Suspense>}
     {surfaceMode === 'work' && transfer.dialog}
+    {surfaceMode === 'work' && processRunId && <Suspense fallback={null}><RunProcessPanel key={processRunId} transport={transport} runId={processRunId} onClose={() => setProcessRunId(undefined)} /></Suspense>}
     <FrontendUpdateNotice transport={transport} enabled={paired} refresh={refreshFrontend} />
     {toast && <PulseToast text={toast} />}
   </main>

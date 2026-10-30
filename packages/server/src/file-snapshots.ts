@@ -101,9 +101,8 @@ export class FileSnapshotManager {
 
   /** Stable store name for one conversation, run, and effect. Lane and agent stay in the name so equal numbers do not overwrite. */
   private storeFile(dir: string, owner: { conversationId?: string; runId: string; effectId: string; laneId?: string; agentId?: string }): string {
-    const raw = [owner.conversationId ?? '', owner.runId, owner.effectId, owner.laneId ?? '', owner.agentId ?? ''].join('/')
-    const visible = raw.replaceAll('/', '__')
-    const name = /^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$/.test(visible) ? visible : createHash('sha256').update(raw).digest('hex')
+    const raw = JSON.stringify([owner.conversationId ?? '', owner.runId, owner.effectId, owner.laneId ?? '', owner.agentId ?? ''])
+    const name = `owner-v2-${createHash('sha256').update(raw).digest('hex')}`
     const target = resolve(dir, `${name}.json`)
     const rel = relative(dir, target)
     if (rel.startsWith('..') || isAbsolute(rel)) throw walError('WAL_PATH_ESCAPE')
@@ -157,7 +156,7 @@ export class FileSnapshotManager {
   }
 
   private async writeRecord(record: WalRecord): Promise<void> {
-    const existing = (await this.loadStored(this.walDir)).find((item) => this.matchesOwner(item.record, record, true))
+    const existing = (await this.loadOwners(this.walDir, [record], true))[0]
     await this.atomicBytes(existing?.file ?? this.storeFile(this.walDir, record), Buffer.from(JSON.stringify(record), 'utf8'))
   }
 
@@ -195,11 +194,19 @@ export class FileSnapshotManager {
     })
   }
 
+  /** Pending records are the source of truth; durable history is the post-settlement watermark. */
+  async pendingOwners(): Promise<Array<{ conversationId?: string; runId: string; effectId: string; laneId: string; agentId?: string }>> {
+    return (await this.loadStored(this.walDir)).map(({ record }) => ({
+      runId: record.runId, effectId: record.effectId, laneId: record.laneId,
+      ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }),
+      ...(record.agentId === undefined ? {} : { agentId: record.agentId }),
+    }))
+  }
+
   /** Move persisted successful writes for these owners out of the pending log. Bytes stay as they are. */
   async settleConfirmed(owners: ReadonlyArray<{ conversationId: string; runId: string; effectId: string; laneId?: string; agentId?: string }>): Promise<void> {
     if (owners.length === 0 || !await this.containedDirectory(this.walDir)) return
-    for (const stored of await this.loadStored(this.walDir)) {
-      if (!owners.some((owner) => this.matchesOwner(stored.record, owner))) continue
+    for (const stored of await this.loadOwners(this.walDir, owners)) {
       await this.retainHistory(stored.record)
       await this.removeStoreFile(stored.file)
     }
@@ -207,8 +214,7 @@ export class FileSnapshotManager {
 
   async markLanded(owner: { conversationId: string; runId: string; effectId: string; laneId?: string; agentId?: string }): Promise<void> {
     if (!await this.containedDirectory(this.walDir)) return
-    for (const stored of await this.loadStored(this.walDir)) {
-      if (!this.matchesOwner(stored.record, owner, true)) continue
+    for (const stored of await this.loadOwners(this.walDir, [owner], true)) {
       stored.record.status = 'landed'
       await this.atomicBytes(stored.file, Buffer.from(JSON.stringify(stored.record), 'utf8'))
     }
@@ -297,7 +303,7 @@ export class FileSnapshotManager {
   /** Keep a verified preimage after crash recovery no longer needs the WAL record. */
   private async retainHistory(record: WalRecord): Promise<void> {
     await this.ensureDirs()
-    if ((await this.loadStored(this.historyDir)).some((item) => this.matchesOwner(item.record, record))) return
+    if ((await this.loadOwners(this.historyDir, [record])).length > 0) return
     const file = this.storeFile(this.historyDir, record)
     const existing = await lstat(file).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error })
     if (existing?.isSymbolicLink()) throw walError('WAL_PATH_ESCAPE')
@@ -332,6 +338,42 @@ export class FileSnapshotManager {
     if (!info) return
     if (info.isSymbolicLink() || !info.isFile()) throw walError('WAL_PATH_ESCAPE')
     await rm(file)
+  }
+
+  /** The owner-named WAL/history files are a rebuildable durable index and settlement watermark.
+   * History is written and synced before removing pending WAL. Never trust the name without the record.
+   * Old arbitrary filenames are scanned conservatively; partial legacy owners also use a full scan.
+   */
+  private async loadOwners(dir: string, owners: ReadonlyArray<{ conversationId?: string; runId: string; effectId: string; laneId?: string; agentId?: string }>, allowMissingConversation = false): Promise<Array<{ record: WalRecord; file: string }>> {
+    if (!await this.containedDirectory(dir)) return []
+    if (owners.some(owner => !owner.laneId || !owner.agentId)) {
+      return (await this.loadStored(dir)).filter(item => owners.some(owner => this.matchesOwner(item.record, owner, allowMissingConversation)))
+    }
+    const records = new Map<string, { record: WalRecord; file: string }>()
+    for (const owner of owners) {
+      const file = this.storeFile(dir, owner)
+      const record = await this.readStoredFile(file)
+      if (!record) continue
+      if (!this.matchesOwner(record, owner, allowMissingConversation)) throw walError('WAL_OWNER_INDEX_CONFLICT')
+      records.set(file, { record, file })
+    }
+    // Reading the directory discovers unknown old records; no stale cache can hide a legacy writer.
+    for (const name of await readdir(dir)) {
+      if (!name.endsWith('.json') || /^owner-v2-[a-f0-9]{64}\.json$/.test(name)) continue
+      const file = join(dir, name)
+      const record = await this.readStoredFile(file)
+      if (record && owners.some(owner => this.matchesOwner(record, owner, allowMissingConversation))) records.set(file, { record, file })
+    }
+    return [...records.values()]
+  }
+
+  private async readStoredFile(file: string): Promise<WalRecord | undefined> {
+    const info = await lstat(file).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error })
+    if (!info) return undefined
+    if (info.isSymbolicLink() || !info.isFile()) throw walError('WAL_PATH_ESCAPE')
+    const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error })
+    if (!handle) return undefined
+    try { return this.parseRecord(await handle.readFile({ encoding: 'utf8' })) } finally { await handle.close().catch(() => undefined) }
   }
 
   private async loadStored(dir: string): Promise<Array<{ record: WalRecord; file: string }>> {

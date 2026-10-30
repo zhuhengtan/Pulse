@@ -52,7 +52,7 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
     if (!adapter) {
       adapter = selection.provider === activeCode && options.activeAdapter
         ? options.activeAdapter
-        : createProviderAdapter(profile)
+        : createProviderAdapter({ ...profile, continuationNamespace: selection.provider })
       providers.set(selection.provider, adapter)
     }
     const isActive = displayName === options.activeModel && selection.provider === activeCode
@@ -93,7 +93,7 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
         const selection = params.model ? providerModels[params.model] : undefined
         let selectedAdapter = adapter
         if (selection?.structuredOutput === 'unsupported' || selection?.remote) {
-          selectedAdapter = modelAdapters.get(params.model!) ?? createProviderAdapter({ ...profiles[providerCode]!, ...(selection.remote ? { remote: true } : {}), ...(selection.structuredOutput === 'unsupported' ? { capabilityProfile: { structuredOutput: 'unsupported' as const } } : {}) })
+          selectedAdapter = modelAdapters.get(params.model!) ?? createProviderAdapter({ ...profiles[providerCode]!, continuationNamespace: providerCode, ...(selection.remote ? { remote: true } : {}), ...(selection.structuredOutput === 'unsupported' ? { capabilityProfile: { ...profiles[providerCode]?.capabilityProfile, structuredOutput: 'unsupported' as const } } : {}) })
           modelAdapters.set(params.model!, selectedAdapter)
         }
         let request = params.request

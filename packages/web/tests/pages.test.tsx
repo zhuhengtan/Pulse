@@ -63,6 +63,28 @@ describe('page navigation and recovery', () => {
     expect(screen.getByRole('button', { name: '保存全部' })).not.toHaveProperty('disabled', true)
   })
 
+  it('keeps the explicit Responses choice in the provider draft and clears it when switching to a native vendor', async () => {
+    const fixture = settingsFixture()
+    render(<PulseDesignSystem><SettingsPage transport={fixture.transport} canEditConfig onClose={() => {}}/></PulseDesignSystem>)
+    fireEvent.click(screen.getByRole('button', { name: '模型与服务商', exact: true }))
+    fireEvent.click(await screen.findByRole('button', { name: '编辑服务商 示例服务商' }))
+    const mode = screen.getByRole('combobox', { name: /^API 格式/ })
+    fireEvent.mouseDown(mode)
+    fireEvent.click(await screen.findByText('Responses', { selector: '.ant-select-item-option-content' }))
+    fireEvent.click(screen.getByRole('button', { name: '完成编辑' }))
+    await waitFor(() => expect(screen.queryByRole('combobox', { name: /^API 格式/ })).toBeNull())
+    expect(screen.getByText('sample · openai-compatible · Responses')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '编辑服务商 示例服务商' }))
+    expect(screen.getByRole('combobox', { name: /^API 格式/ }).closest('.ant-select')?.textContent).toContain('Responses')
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: /^协议类型/ }))
+    fireEvent.click(await screen.findByText('anthropic', { selector: '.ant-select-item-option-content' }))
+    expect(screen.queryByRole('combobox', { name: /^API 格式/ })).toBeNull()
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: /^协议类型/ }))
+    fireEvent.click(await screen.findByText('openai-compatible', { selector: '.ant-select-item-option-content' }))
+    expect(screen.getByRole('combobox', { name: /^API 格式/ }).closest('.ant-select')?.textContent).toContain('Chat Completions')
+    expect(fixture.writes).toEqual([])
+  })
+
   it('opens a newly added model even beyond the current page and clears list filters', async () => {
     const fixture = settingsFixture()
     fixture.config.providers.sample.models = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [i ? `existing-${i}` : 'chat', { displayName: `Existing ${i}`, modelCode: `code-${i}` }])) as typeof fixture.config.providers.sample.models

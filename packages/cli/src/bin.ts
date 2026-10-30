@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -259,6 +260,9 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const configuredAutoCompactPercent = parsePositiveInteger(autoCompactPercent) ?? config.autoCompactPercent
   const provider = {
     provider: profile.provider,
+    ...(profile.apiMode === undefined ? {} : { apiMode: profile.apiMode }),
+    continuationNamespace: providerName,
+    continuationConfigVersion: createHash('sha256').update(JSON.stringify(profile)).digest('hex'),
     defaultModel: model,
     ...(modelSelection.remote === true ? { remote: true } : {}),
     ...(baseURL === undefined ? {} : { baseURL }),
@@ -274,6 +278,9 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     const itemKey = resolvedKeys[name]
     return [[name, {
       provider: adapterProvider,
+      ...(item.apiMode === undefined ? {} : { apiMode: item.apiMode }),
+      continuationNamespace: name,
+      continuationConfigVersion: createHash('sha256').update(JSON.stringify(item)).digest('hex'),
       ...(item.baseURL === undefined ? {} : { baseURL: item.baseURL }),
       ...(itemKey === undefined ? {} : { apiKey: itemKey }),
       ...(item.maxContextTokens === undefined ? {} : { maxContextTokens: item.maxContextTokens }),

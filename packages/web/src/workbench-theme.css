@@ -94,3 +94,8 @@
  .shell:has(.navbar.surface-work) .workbench-loading,.shell:has(.navbar.surface-work) .workbench-panel:not(.terminal-dock) { top:calc(44px + var(--pulse-safe-top,env(safe-area-inset-top,0px))) !important; }
  .shell:has(.navbar.surface-work .navbar-status .run-phase) .workbench-loading,.shell:has(.navbar.surface-work .navbar-status .run-phase) .workbench-panel:not(.terminal-dock),.shell:has(.navbar.surface-work .status-dot.offline) .workbench-loading,.shell:has(.navbar.surface-work .status-dot.offline) .workbench-panel:not(.terminal-dock) { top:calc(76px + var(--pulse-safe-top,env(safe-area-inset-top,0px))) !important; }
 }
+.run-process-list { display: grid; gap: 4px; margin-block: 20px; }
+.run-process-list button { width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; padding: 10px 12px; border-color: transparent; }
+.run-process-list button[aria-pressed="true"] { background: var(--pulse-hover, rgba(127,127,127,.12)); }
+.run-process-list button span { display: block; font-size: 12px; opacity: .7; margin-top: 4px; }
+.run-process-output { background: #171b23; color: #e7eaf0; border-radius: 12px; padding: 16px; min-height: 200px; max-height: 50dvh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: 16px; }

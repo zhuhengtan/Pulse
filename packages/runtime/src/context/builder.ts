@@ -89,7 +89,8 @@ function projectResultValue(result: { value?: JsonValue; summary?: JsonValue }):
   }
 }
 
-function visibleModelOutput(value: JsonValue): JsonValue {
+/** General history/recall excludes service-private continuation and reasoning. */
+export function visibleModelOutput(value: JsonValue): JsonValue {
   if (Array.isArray(value)) return value.map(visibleModelOutput)
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([key]) => !['providerContinuation', 'reasoningContent', 'reasoning_content'].includes(key)).map(([key, item]) => [key, visibleModelOutput(item)]))
   return value
@@ -209,12 +210,13 @@ export class ContextBuilder {
     const conversation = input.conversation ?? []
     const providerHistory = input.explicitContext && !input.nativeToolHistory ? undefined : buildProviderHistory(this.state, history, input.lane.visibleResultRefs, input.nativeToolHistory === true)
     const emitted = new Set<string>()
-    const historyResult = (ref: string) => {
-      const result = this.state.results.get(ref)!
+    const projectOrdinaryResult = (result: { effectId?: string; producer?: { kind: string; id: string }; value?: JsonValue; summary?: JsonValue }) => {
       const effectId = result.effectId ?? (result.producer?.kind === 'effect' ? result.producer.id : undefined)
       return effectId && this.state.effects.get(effectId)?.kind === 'llm'
-        ? projectResultValue({ value: visibleModelOutput(result.value ?? null), ...(result.summary === undefined ? {} : { summary: visibleModelOutput(result.summary) }) }) : projectResultValue(result)
+        ? projectResultValue({ value: visibleModelOutput(result.value ?? null), ...(result.summary === undefined ? {} : { summary: visibleModelOutput(result.summary) }) })
+        : projectResultValue(result)
     }
+    const historyResult = (ref: string) => projectOrdinaryResult(this.state.results.get(ref)!)
     const historyBlock = { kind: 'history' as const, content: (input.nativeToolHistory && providerHistory !== undefined ? [] : history).map(record => {
       const output = record.output && typeof record.output === 'object' && !Array.isArray(record.output) ? record.output : undefined
       return { seq: record.seq, ...(record.effectId === undefined ? {} : { effectId: record.effectId }), instruction: record.instruction, resultRefs: record.resultRefs,
@@ -237,7 +239,7 @@ export class ContextBuilder {
     const remainingResults = results.filter((result) => !correlatedRefs.has(result.id) && (!emitted.has(result.id) || input.resultRefs?.includes(result.id)))
     const blocks = [...prefixBlocks, ...(input.includeLaneHistory && conversation.length ? [{ kind: 'conversation' as const, content: structuredClone(conversation) as unknown as JsonValue }] : []), ...(providerHistory === undefined ? [] : [{ kind: 'provider_history' as const, content: providerHistory as unknown as JsonValue }]), { kind: 'lane' as const, content: input.explicitContext ? {} : input.lane.context.state }, { kind: 'events' as const, content: input.eventIds ?? [] }, { kind: 'results' as const, content: remainingResults.map((result) => {
       if (emitted.has(result.id)) return { id: result.id, fromHistory: true }
-      const projected = projectResultValue(result)
+      const projected = projectOrdinaryResult(result)
       return { id: result.id, value: projected.value, ...(projected.summarized ? { summarized: true, ...(projected.originalBytes === undefined ? {} : { originalBytes: projected.originalBytes }) } : {}), ...(result.privacyTaints === undefined ? {} : { privacyTaints: result.privacyTaints.map((taint) => ({ path: [...taint.path], privacy: taint.privacy }) as unknown as JsonValue) }) }
     }) }, { kind: 'artifacts' as const, content: artifacts.map((artifact) => ({ ref: artifact.ref, mediaType: artifact.mediaType, sizeBytes: artifact.sizeBytes, contentHash: artifact.contentHash })) }, { kind: 'instruction' as const, content: input.instruction }]
     const images = artifacts.filter(artifact => artifact.mediaType === 'image/png' || artifact.mediaType === 'image/jpeg').slice(-2).map(artifact => ({ ref: artifact.ref, mediaType: artifact.mediaType as 'image/png' | 'image/jpeg' }))

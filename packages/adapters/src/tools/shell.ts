@@ -16,6 +16,17 @@ import { installationDependencyRoots, workspaceUsesInstallationDependencies } fr
 import { verifiedWindowsSrt } from './windows-srt-path.js'
 
 export interface ShellResult { code: number | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean; aborted: boolean; outputArchive?: ReturnType<ShellOutput['finish']> }
+/** Host-only injection, after sandbox wrapping and the final executable check. */
+export interface ShellChild {
+  readonly pid?: number | undefined
+  readonly stdin?: { end(): unknown } | null
+  readonly stdout?: { on(event: 'data', listener: (chunk: Buffer) => void): unknown } | null
+  readonly stderr?: { on(event: 'data', listener: (chunk: Buffer) => void): unknown } | null
+  once(event: 'error', listener: (error: Error) => void): unknown
+  once(event: 'close', listener: (code: number | null) => void): unknown
+  kill(signal?: NodeJS.Signals): boolean
+}
+export type ShellSpawn = (sandboxArgv: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => ShellChild
 
 export interface ShellIdentity { executable: string; prefixArgs: string[]; path: string; fingerprint: string; trusted: boolean }
 /** Resolve the same host wrappers and search path used by runShell, without
@@ -492,7 +503,7 @@ export function validateShellInvocation(command: string, args: string[] = []): v
   encodeSandboxCommand(command, args)
 }
 
-export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; expectedIdentity?: ShellIdentity | undefined; beforeLaunch?: () => Promise<ShellIdentity | undefined>; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void } = {}): Promise<ShellResult> {
+export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; expectedIdentity?: ShellIdentity | undefined; beforeLaunch?: () => Promise<ShellIdentity | undefined>; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void; spawnProcess?: ShellSpawn } = {}): Promise<ShellResult> {
   const max = options.maxOutputBytes ?? 256 * 1024
   if (!Number.isFinite(max) || max < 0) return Promise.reject(shellError('INVALID_SHELL_OUTPUT_LIMIT'))
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0)) return Promise.reject(shellError('INVALID_SHELL_TIMEOUT'))
@@ -607,7 +618,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       }
     }
     const policy = await sandboxConfig(cwd, options.allowedDomains ?? [], toolchainRoots, scratch, dependencyRoots, gitApproval.roots)
-    let child: ReturnType<typeof spawn> | undefined
+    let child: ShellChild | undefined
     const archive = new ShellOutput(max, options.outputDirectory, options.maxArchiveBytes, options.outputDirectory !== undefined)
     const outputBytes = { stdout: 0, stderr: 0 }
     let truncated = false
@@ -671,9 +682,10 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         const fresh = await resolveShellIdentity(command, args, cwd, baseEnv)
         if (fresh.fingerprint !== launchIdentity.fingerprint || fresh.executable !== executable || JSON.stringify(fresh.prefixArgs) !== JSON.stringify(options.expectedIdentity?.prefixArgs ?? fresh.prefixArgs)) throw shellError('EXEC_POLICY_PROGRAM_CHANGED')
       }
-      child = spawn(sandboxArgv[0]!, sandboxArgv.slice(1), {
+      const launchOptions = { cwd, env: { ...baseEnv, ...shellEnvironment(descriptor.env), ...executionEnv } }
+      child = options.spawnProcess ? options.spawnProcess(sandboxArgv, launchOptions) : spawn(sandboxArgv[0]!, sandboxArgv.slice(1), {
         cwd,
-        env: { ...baseEnv, ...shellEnvironment(descriptor.env), ...executionEnv },
+        env: launchOptions.env,
         shell: false,
         detached: process.platform !== 'win32',
         windowsHide: true,
@@ -694,7 +706,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     }
 
     // This API has no stdin payload; deliver EOF to readers inside the sandbox.
-    child.stdin?.end()
+    child!.stdin?.end()
 
     return await new Promise<ShellResult>((resolve, reject) => {
       const cleanup = (): void => {

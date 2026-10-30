@@ -133,7 +133,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
     ])
     expect(textRes.code).toBe(0)
     expect(textRes.stdout).toContain('Hello, end-to-end tester!')
-    expect(textRes.stdout).toContain('[succeeded]')
+    expect(textRes.stdout).toContain('[任务验收通过]')
 
     // 2. JSONL format one-shot run
     const jsonlRes = await runCli([
@@ -291,7 +291,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
     ])
     expect(resumeRes.code).toBe(0)
     expect(resumeRes.stdout).toContain('Resumed answer processed.')
-    expect(resumeRes.stdout).toContain('[succeeded]')
+    expect(resumeRes.stdout).toContain('[任务验收通过]')
 
     // 4. Resume without id fails with RESUME_REQUIRES_ID
     const noIdRes = await runCli(['resume', '--data-dir', dataDir, '--cwd', directory])
@@ -366,7 +366,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
     })
     expect(pipedOnlyRes.code).toBe(0)
     expect(pipedOnlyRes.stdout).toContain('Task executed completely from stdin pipe!')
-    expect(pipedOnlyRes.stdout).toContain('[succeeded]')
+    expect(pipedOnlyRes.stdout).toContain('[任务验收通过]')
 
     // 2. Positional task combined with stdin content
     const combinedRes = await runCli([
@@ -384,7 +384,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
     })
     expect(combinedRes.code).toBe(0)
     expect(combinedRes.stdout).toContain('Refactored with extra piped context!')
-    expect(combinedRes.stdout).toContain('[succeeded]')
+    expect(combinedRes.stdout).toContain('[任务验收通过]')
   })
 
   it('Scenario 8: Staged multi-chunk file operations provide durable writing', async () => {
@@ -557,7 +557,7 @@ describe('AI CLI scenarios end-to-end tests', () => {
     ])
     expect(compactRun.code).toBe(0)
     expect(compactRun.stdout).toContain('已生成紧凑摘要')
-    expect(compactRun.stdout).toContain('[succeeded]')
+    expect(compactRun.stdout).toContain('[任务验收通过]')
   })
 
   it('Scenario 12: Complex long task with cascade blocker and stage failure isolation', async () => {

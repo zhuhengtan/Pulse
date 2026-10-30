@@ -9,6 +9,8 @@ export interface PulseCliProviderProfile {
   credentialRef?: string
   /** Adapter/protocol id. The map key is the user-facing provider code. */
   provider: string
+  /** Explicit OpenAI-family transport; omitted preserves Chat Completions. */
+  apiMode?: 'chat-completions' | 'responses'
   name?: string
   baseURL?: string
   apiKeyEnv?: string
@@ -298,7 +300,18 @@ export async function loadPulseConfig(cwd: string, explicitPath?: string, trustW
       if (!parsed) throw new Error('CONFIG_OBJECT_REQUIRED')
       if (parsed) {
         // Search endpoints and credentials are host-owned even when other workspace fields are trusted.
-        if (workspaceLayer) { delete parsed.webSearch; delete parsed.builtinPlugins; if (parsed.execPolicy !== undefined) parsed.execPolicy = workspaceExecPolicy(parsed.execPolicy) }
+        // Provider protocol stays host-owned. Trusted workspace fields may remain, but apiMode never does.
+        if (workspaceLayer) {
+          delete parsed.webSearch
+          delete parsed.builtinPlugins
+          if (parsed.execPolicy !== undefined) parsed.execPolicy = workspaceExecPolicy(parsed.execPolicy)
+          if (parsed.providers) parsed.providers = Object.fromEntries(Object.entries(parsed.providers).map(([id, profile]) => {
+            if (profile.apiMode === undefined) return [id, profile]
+            const next = { ...profile }
+            delete next.apiMode
+            return [id, next]
+          }))
+        }
         layers.push({ value: parsed, trust, source: path })
       }
     } catch (cause) { if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause }

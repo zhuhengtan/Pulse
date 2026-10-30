@@ -1,3 +1,6 @@
+import { agentPtySpawn, assertAgentPtyAvailable } from './agent-pty.js'
+import { visibleModelOutput } from '@hunterzhu/pulse-runtime'
+import { adaptiveReadBytes, MAX_READ_BYTES, READ_SUMMARY_BYTES } from './adaptive-read.js'
 import type { EffectRecord } from '@hunterzhu/pulse-runtime'
 import { ExecPolicyHost } from './exec-policy-host.js'
 import { parseExecPolicy, type ExecPolicyConfig } from './exec-policy.js'
@@ -5,7 +8,8 @@ export { parseExecPolicy, evaluateExecPolicy, mergeExecPolicies, workspaceExecPo
 export type { ExecPolicyConfig, ExecPrefixRule } from './exec-policy.js'
 import { approvalReuseIdentity, hasApprovalGrant } from './approval-reuse.js'
 import { verificationFingerprint, reusableVerification } from './task-controller/verification-reuse.js'
-import { shellProcesses, closeShellProcesses, summarizeShellProcess, blockAcceptanceIfShellBusy } from './shell-processes.js'
+import { shellProcesses, closeShellProcesses, summarizeShellProcess, blockAcceptanceIfShellBusy, type ProcessReceipt } from './shell-processes.js'
+import { captureProviderApiModes, restoreProviderApiModes } from './run-provider-modes.js'
 import { publicShellProcessPreview } from './run-presentation.js'
 import { BuiltinPluginJobs } from './builtin-plugins/jobs.js'
 import { PluginToolRegistry, registerPluginTools, generationTools, pluginToolIds, refreshPluginProjection, createHostToolInputValidator } from './builtin-plugins/tools.js'
@@ -284,6 +288,10 @@ export interface RunHandle {
   /** Business acceptance is separate from the Runtime's execution outcome. */
   taskOutcome(): Promise<TaskOutcome | undefined>
   cancel(reason?: string): Promise<void>
+  /** Agent process controls only. No raw PID, manual terminal, or stdin authority. */
+  processes?(): Promise<ProcessReceipt[]>
+  pollProcess?(id: string, offset?: number): Promise<Awaited<ReturnType<ReturnType<typeof shellProcesses>['readForUser']>>>
+  cancelProcess?(id: string): Promise<ProcessReceipt>
   reply(effectId: string, value: JsonValue): Promise<void>
   replyBatch(groupId: string, answers: Array<{ effectId: string; value: JsonValue }>): Promise<void>
   pendingInteractions(): Promise<Array<{ groupId: string; kind: 'ask' | 'approval'; items: Array<{ effectId: string; input: Record<string, JsonValue> }> }>>
@@ -466,7 +474,8 @@ const journaledFilesystems = new WeakMap<ToolRegistry, FilesystemTool>()
 const officeWriteTools = new Set(['pdf.page.render', 'docx.write', 'spreadsheet.xlsx.write', 'pptx.write'])
 
 interface BuiltInSurface {
-  version?: 1 | 2
+  shellVersion?: 1
+  version?: 1 | 2 | 3
   getRuntime?: () => PulseRuntime | undefined
   visionAvailable?: boolean
   snapshots?: FileSnapshotManager
@@ -476,12 +485,12 @@ interface BuiltInSurface {
 
 function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: ApprovalMode, allowNetwork = false, isApprovedToolCall: (toolCallId: string) => boolean = () => false, networkHosts?: string[], draftOwner = 'legacy', runData?: string, checkVersion: 2 | 3 | 4 = 2, copyReceipts = false, candidateScripts = false, webSearch?: WebSearchOptions, longCommands = false, surface: BuiltInSurface = {}): void {
   const fsTool = new FilesystemTool(root)
-  const fileSurfaceVersion = surface.version === 2 ? 2 : 1
+  const fileSurfaceVersion = surface.version ?? 1
   const laneReadTracker = new LaneReadTracker()
-  const patchMatching = fileSurfaceVersion === 2 ? 'normalized' as const : 'exact' as const
+  const patchMatching = fileSurfaceVersion >= 2 ? 'normalized' as const : 'exact' as const
   const readBaseline = (path: string, expectedHash: string | undefined, context: { laneId: string; agentId: string }): string | undefined => {
     if (expectedHash !== undefined) return expectedHash
-    if (fileSurfaceVersion !== 2) return laneReadTracker.getLatestReadHash(context.laneId, resolve(root, path))
+    if (fileSurfaceVersion < 2) return laneReadTracker.getLatestReadHash(context.laneId, resolve(root, path))
     const runtime = surface.getRuntime?.()
     if (!runtime) throw editingError('FILE_READ_BASELINE_REQUIRED', 'fs.apply_patch needs a visible fs.read ResultRef for this file. Read it again after the latest edit; the current file hash is not a baseline.')
     const hash = latestVisibleReadHash(runtime, root, context.laneId, context.agentId, path)
@@ -518,12 +527,12 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
     name: 'ask.input', description: 'Ask the human to provide free-form text before continuing.' + dismissalHelp, tags: ['ask', 'human', 'interaction'], input: z.object({ ...decisionFields, prompt: z.string().min(1).max(2_000), placeholder: z.string().max(500).optional(), defaultValue: z.string().max(2_000).optional() }), output: z.union([z.object({ text: z.string() }), dismissedAsk]), concurrencyClass: 'none', sideEffectPolicy: 'none', retrySafety: 'read_only', execute: async () => { throw new Error('ASK_TOOL_HANDLED_BY_RUNTIME') }, summarize: (output) => output,
   }))
   registry.register(defineTool({
-    name: 'fs.read', description: 'Read a UTF-8 workspace file with its full-file hash in windows of up to 3000 bytes. Use startLine (one-based, scanning at most 16 MiB) to read near a search line number; offset is bytes, never a line number. If nextOffset is not null, pass it as offset to continue; do not assume the first window is the complete file. ENOENT means the file does not exist: do not repeat the read; create it with fs.write when the body is at most 16384 bytes, or stream a larger new file with fs.stage.', tags: ['files', 'read'], input: z.object({ path: z.string(), maxBytes: z.number().int().positive().max(200_000).describe('Effective maximum 3000 bytes. Larger legacy requests are clamped to 3000, never a larger window.').optional(), offset: z.number().int().min(0).default(0), startLine: z.number().int().positive().optional() }), output: z.object({ path: z.string(), content: z.string(), truncated: z.boolean(), offset: z.number(), nextOffset: z.number().nullable(), hash: z.string() }), sideEffectPolicy: 'read', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'shared' }], permissions: { workspaceRoots: [root] }, execute: async ({ path, maxBytes, offset, startLine }, context) => { if (startLine !== undefined && offset !== undefined && offset !== 0) throw editingError('INVALID_READ_RANGE', 'Use startLine or offset, not both.'); const hash = await fsTool.hash(path, context.signal); const effectiveOffset = offset ?? 0; const readOffset = startLine === undefined ? effectiveOffset : await fsTool.offsetForLine(path, startLine, context.signal); const result = await fsTool.readRange(path, Math.min(maxBytes ?? 3000, 3000), readOffset, context.signal); if (hash !== await fsTool.hash(path, context.signal)) throw editingError('FILE_BASELINE_CONFLICT', 'File changed while reading; read this window again.'); if (fileSurfaceVersion !== 2) laneReadTracker.recordRead(context.laneId, resolve(root, path), hash, readOffset, Buffer.byteLength(result.content, 'utf8'), result.nextOffset); return { path, ...result, hash } }, summarize: (output) => output,
+    name: 'fs.read', ...(fileSurfaceVersion === 3 ? { maxResultSummaryBytes: READ_SUMMARY_BYTES } : {}), description: fileSurfaceVersion === 3 ? 'Read a UTF-8 workspace file with its full-file hash in adaptive windows of 3072–32768 bytes, bounded by trusted remaining context. maxBytes can request a smaller window; larger requests are clamped. Use startLine (one-based, scanning at most 16 MiB) or byte offset, never both. Follow nextOffset until null; the first window may be incomplete. Every page hashes the whole file before and after reading. ENOENT means the file does not exist; do not repeat the read.' : 'Read a UTF-8 workspace file with its full-file hash in windows of up to 3000 bytes. Use startLine (one-based, scanning at most 16 MiB) to read near a search line number; offset is bytes, never a line number. If nextOffset is not null, pass it as offset to continue; do not assume the first window is the complete file. ENOENT means the file does not exist: do not repeat the read; create it with fs.write when the body is at most 16384 bytes, or stream a larger new file with fs.stage.', tags: ['files', 'read'], input: z.object({ path: z.string(), maxBytes: z.number().int().positive().max(200_000).describe(fileSurfaceVersion === 3 ? 'Optional smaller window; host clamps to the remaining context budget and at most 32768 bytes.' : 'Effective maximum 3000 bytes. Larger legacy requests are clamped to 3000, never a larger window.').optional(), offset: z.number().int().min(0).default(0), startLine: z.number().int().positive().optional() }), output: z.object({ path: z.string(), content: z.string(), truncated: z.boolean(), offset: z.number(), nextOffset: z.number().nullable(), hash: z.string() }), sideEffectPolicy: 'read', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'shared' }], permissions: { workspaceRoots: [root] }, execute: async ({ path, maxBytes, offset, startLine }, context) => { if (startLine !== undefined && offset !== undefined && offset !== 0) throw editingError('INVALID_READ_RANGE', 'Use startLine or offset, not both.'); const hash = await fsTool.hash(path, context.signal); const effectiveOffset = offset ?? 0; const readOffset = startLine === undefined ? effectiveOffset : await fsTool.offsetForLine(path, startLine, context.signal); const result = await fsTool.readRange(path, fileSurfaceVersion === 3 ? adaptiveReadBytes(surface.getRuntime?.(), context.laneId, maxBytes) : Math.min(maxBytes ?? 3000, 3000), readOffset, context.signal); if (hash !== await fsTool.hash(path, context.signal)) throw editingError('FILE_BASELINE_CONFLICT', 'File changed while reading; read this window again.'); if (fileSurfaceVersion < 2) laneReadTracker.recordRead(context.laneId, resolve(root, path), hash, readOffset, Buffer.byteLength(result.content, 'utf8'), result.nextOffset); return { path, ...result, hash } }, summarize: (output) => output,
   }))
   registry.register(defineTool({
     name: 'fs.search', description: 'Search text files in the workspace. Returns bounded matches plus statistics so callers can tell an empty workspace from a truncated search that stopped at a depth, visit, or result limit.', tags: ['files', 'search'], input: z.object({ query: z.string().min(1), path: z.string().default('.'), include: z.string().optional(), exclude: z.string().optional(), contextLines: z.number().int().min(0).max(10).optional() }), output: z.object({ matches: z.array(z.object({ path: z.string(), line: z.number(), text: z.string(), context: z.object({ before: z.array(z.string()), after: z.array(z.string()) }).optional() })), truncated: z.boolean(), reason: z.enum(['depth', 'visited', 'results']).nullable(), visited: z.number(), matched: z.number() }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ query, path, include, exclude, contextLines }, context) => await searchWorkspace(root, query, { directory: path, ...(include !== undefined ? { include } : {}), ...(exclude !== undefined ? { exclude } : {}), ...(contextLines !== undefined ? { contextLines } : {}), signal: context.signal }), summarize: (output) => json(summarizeSearchResult(output)),
   }))
-  if (fileSurfaceVersion === 2) {
+  if (fileSurfaceVersion >= 2) {
   registry.register(defineTool({
     name: 'fs.glob', description: 'Match workspace file paths using glob wildcards (e.g. "**/*.ts" or "src/*.json"). Returns bounded file entries and metadata.', tags: ['files', 'search'], input: z.object({ pattern: z.string().min(1), path: z.string().default('.'), limit: z.number().int().positive().max(1000).default(200).optional(), includeHidden: z.boolean().default(false).optional() }), output: z.object({ matches: z.array(z.object({ path: z.string(), size: z.number(), mtimeMs: z.number(), isDirectory: z.boolean() })), truncated: z.boolean(), total: z.number() }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] },
     execute: async ({ pattern, path, limit, includeHidden }, context) => await globWorkspace(root, pattern, { ...(path !== undefined ? { path } : {}), ...(limit !== undefined ? { limit } : {}), ...(includeHidden !== undefined ? { includeHidden } : {}), signal: context.signal }),
@@ -544,7 +553,7 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
   registry.register(defineTool({
     name: 'fs.write', description: 'Create a new UTF-8 file of at most 16384 bytes. Existing files cannot be rewritten; use fs.apply_patch or fs.apply_patches. Stream a larger new file with fs.stage begin, append, and commit.', tags: ['files', 'write'], input: z.object({ path: z.string(), content: z.string().max(STREAM_BYTES), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }), output: z.object({ path: z.string(), bytes: z.number(), hash: z.string() }), sideEffectPolicy: 'write', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: writeToolTimeoutMs, permissions: { workspaceRoots: [root] }, execute: async ({ path, content, expectedHash }, context) => { if (approvalMode === 'read-only') throw new Error('WRITE_DISABLED_READ_ONLY'); if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:fs.write'); if (expectedHash !== undefined) throw editingError('EXISTING_FILE_NEEDS_PATCH', 'Existing files cannot be rewritten. Use fs.apply_patch or fs.apply_patches for a local change.'); if (Buffer.byteLength(content) > STREAM_BYTES) throw editingError('CREATE_TOO_LARGE', 'Stream a new file with fs.stage: begin, append at most 16384 bytes, then commit.'); await checkNewJavaScript(path, content, context.signal); try { return { path, ...(await fsTool.writeIfUnchanged(path, content, null, context.signal)) } } catch (error) { if ((error as { code?: string }).code !== 'FILE_BASELINE_CONFLICT') throw error; throw Object.assign(editingError('EXISTING_FILE_NEEDS_PATCH', 'The target already exists; no content was written. Read its relevant window with fs.read, preserve existing code/tests, then use fs.apply_patch or fs.apply_patches. Do not retry fs.write or inspect it with shell.'), { details: { path, suggestedRead: { tool: 'fs.read', input: { path } }, nextTools: ['fs.apply_patch', 'fs.apply_patches'] } }) } }, summarize: (output) => output,
   }))
-  if (fileSurfaceVersion === 2) registry.register(defineTool({
+  if (fileSurfaceVersion >= 2) registry.register(defineTool({
     name: 'fs.overwrite', description: 'Atomically overwrite an existing UTF-8 workspace file (up to 16384 bytes). Requires visible fs.read results that cover the current file from offset 0 through nextOffset null under the same hash. A lost in-memory map is not evidence. For new files use fs.write; for local changes use fs.apply_patch; for streaming large files use fs.stage.', tags: ['files', 'write'],
     input: z.object({ path: z.string(), content: z.string().max(STREAM_BYTES), expectedHash: z.string().regex(/^[a-f0-9]{64}$/) }),
     output: z.object({ path: z.string(), bytes: z.number(), hash: z.string(), beforeHash: z.string() }),
@@ -590,40 +599,63 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
   registry.register(defineTool({
     name: 'artifact.record', description: 'Record a workspace file (text, image, PDF or other binary, up to 128 MiB) as a user-visible artifact.', tags: ['artifact', 'files', 'read'], input: z.object({ path: z.string(), mediaType: z.string().optional(), label: z.string().max(200).optional() }), output: z.object({ path: z.string(), mediaType: z.string(), label: z.string(), bytes: z.number(), hash: z.string() }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ path, mediaType, label }) => { const read = await readPreviewFile(root, path); const recordedPath = relative(await realpath(root), read.absolutePath).split(sep).join('/'); return { path: recordedPath, mediaType: mediaType ?? fileMediaType(path), label: label ?? path, bytes: read.size, hash: read.hash } }, summarize: (output) => output,
   }))
-  const executeShell = async ({ command, args, cwd, timeoutMs }: import('./shell-processes.js').ShellCommand, context: import('@hunterzhu/pulse-tool-sdk').ToolContext, onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void) => { if (approvalMode === 'read-only') throw new Error('SHELL_DISABLED_READ_ONLY'); await surface.execPolicy?.authorize({ command, args, cwd, timeoutMs }, context.toolCallId); if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:shell.exec'); let archiveBytes = 0; if (runData) for (const entry of await readdir(join(runData, 'shell-output')).catch(error => { if (error.code === 'ENOENT') return []; throw error })) archiveBytes += (await stat(join(runData, 'shell-output', entry))).size; const options = { cwd: await within(root, cwd ?? '.'), expectedIdentity: surface.execPolicy?.identity(context.toolCallId), beforeLaunch: async () => { const prior = surface.execPolicy?.identity(context.toolCallId); const allowed = await surface.execPolicy?.authorize({ command, args, cwd, timeoutMs }, context.toolCallId); if (prior && !allowed) throw Object.assign(new Error('EXEC_POLICY_APPROVAL_CHANGED'), { code: 'EXEC_POLICY_APPROVAL_CHANGED' }); return surface.execPolicy?.identity(context.toolCallId) }, signal: context.signal, ...(onOutput ? { onOutput } : {}), env: safeShellEnv(), allowedDomains: allowNetwork ? networkHosts ?? [] : [], maxOutputBytes: 64 * 1024, ...(runData ? { outputDirectory: join(runData, 'shell-output'), maxArchiveBytes: Math.min(16 * 1024 * 1024, Math.max(0, Math.floor((64 * 1024 * 1024 - archiveBytes) / 2))) } : {}), ...(timeoutMs === undefined ? { timeoutMs: 30_000 } : { timeoutMs }) }; const receipt = isCheck(command, args ?? []) ? await captureCheck(root, options.cwd, command, args ?? [], false, checkVersion) : undefined; const copy = copyReceipts ? await captureCopy(root, options.cwd, command, args ?? []) : undefined; const inPlace = copyReceipts ? await captureInPlace(root, options.cwd, command, args ?? []) : undefined; const result = await runShell(command, args, options); const fileChanges = await finishCopy(root, copy, result) ?? await finishInPlace(root, inPlace, result); return { ...result, ...(fileChanges ? { fileChanges } : {}), ...(receipt ? { checkReceipt: await finishCheck(root, receipt, runData ? join(runData, 'check-definitions') : undefined, candidateScripts) } : {}) } }
+  const executeShell = async ({ command, args, cwd, timeoutMs, pty }: import('./shell-processes.js').ShellCommand, context: import('@hunterzhu/pulse-tool-sdk').ToolContext, onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void, onInputReady?: (write: (data: string) => void) => void) => { if (approvalMode === 'read-only') throw new Error('SHELL_DISABLED_READ_ONLY'); await surface.execPolicy?.authorize({ command, args, cwd, timeoutMs }, context.toolCallId); if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:shell.exec'); let archiveBytes = 0; if (runData) for (const entry of await readdir(join(runData, 'shell-output')).catch(error => { if (error.code === 'ENOENT') return []; throw error })) archiveBytes += (await stat(join(runData, 'shell-output', entry))).size; if (pty && !onInputReady) throw new Error('SHELL_PTY_OWNER_REQUIRED'); const spawnProcess = pty ? agentPtySpawn(write => onInputReady!(write)) : undefined; const options = { ...(spawnProcess ? { spawnProcess } : {}), cwd: await within(root, cwd ?? '.'), expectedIdentity: surface.execPolicy?.identity(context.toolCallId), beforeLaunch: async () => { const prior = surface.execPolicy?.identity(context.toolCallId); const allowed = await surface.execPolicy?.authorize({ command, args, cwd, timeoutMs }, context.toolCallId); if (prior && !allowed) throw Object.assign(new Error('EXEC_POLICY_APPROVAL_CHANGED'), { code: 'EXEC_POLICY_APPROVAL_CHANGED' }); return surface.execPolicy?.identity(context.toolCallId) }, signal: context.signal, ...(onOutput ? { onOutput } : {}), env: safeShellEnv(), allowedDomains: allowNetwork ? networkHosts ?? [] : [], maxOutputBytes: 64 * 1024, ...(runData ? { outputDirectory: join(runData, 'shell-output'), maxArchiveBytes: Math.min(16 * 1024 * 1024, Math.max(0, Math.floor((64 * 1024 * 1024 - archiveBytes) / 2))) } : {}), ...(timeoutMs === undefined ? { timeoutMs: 30_000 } : { timeoutMs }) }; const receipt = isCheck(command, args ?? []) ? await captureCheck(root, options.cwd, command, args ?? [], false, checkVersion) : undefined; const copy = copyReceipts ? await captureCopy(root, options.cwd, command, args ?? []) : undefined; const inPlace = copyReceipts ? await captureInPlace(root, options.cwd, command, args ?? []) : undefined; const result = await runShell(command, args, options); const fileChanges = await finishCopy(root, copy, result) ?? await finishInPlace(root, inPlace, result); return { ...result, ...(fileChanges ? { fileChanges } : {}), ...(receipt ? { checkReceipt: await finishCheck(root, receipt, runData ? join(runData, 'check-definitions') : undefined, candidateScripts) } : {}) } }
   registry.register(defineTool({
     name: 'shell.exec', description: 'Run an authorized local command with argv arguments. cwd defaults to the workspace; relative paths and absolute paths inside the workspace are allowed.', tags: ['shell', 'system'], input: z.object({ command: z.string().min(1), args: z.array(z.string()).default([]), cwd: z.string().default('.'), timeoutMs: z.number().int().positive().max(300_000).optional() }), output: z.object({ code: z.number().nullable(), stdout: z.string(), stderr: z.string(), truncated: z.boolean(), timedOut: z.boolean(), aborted: z.boolean(), outputArchive: z.unknown().optional(), checkReceipt: z.unknown().optional(), fileChanges: z.unknown().optional() }), sideEffectPolicy: 'external', resolveResources: () => [{ resource: 'workspace', mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: shellToolTimeoutMs, resolveTimeoutMs: ({ timeoutMs }) => process.platform === 'win32' ? shellToolTimeoutMs : (timeoutMs ?? 30_000) + 120_000, permissions: { workspaceRoots: [root] }, execute: (input, context) => executeShell(input, context), summarize: (output) => ({ code: output.code, stdout: output.stdout.length > 2000 ? output.stdout.slice(0, 1000) + '\n[... read original output with shell.output ...]\n' + output.stdout.slice(-1000) : output.stdout, stderr: output.stderr.length > 2000 ? output.stderr.slice(0, 1000) + '\n[... read original output with shell.output ...]\n' + output.stderr.slice(-1000) : output.stderr, truncated: output.truncated, ...(output.fileChanges ? { fileChanges: json(output.fileChanges) } : {}), ...(output.outputArchive ? { outputArchive: json(output.outputArchive) } : {}) }),
   }))
-  if (longCommands && runData) {
+  if ((longCommands || surface.shellVersion === 1) && runData) {
     const processes = shellProcesses(runData)
     processRegistries.set(registry, processes)
     const processOutput = z.object({ processId: z.string(), agentId: z.string(), laneId: z.string(), status: z.enum(['running', 'exited', 'unknown']), command: z.unknown(), result: z.unknown().optional(), error: z.string().optional(), code: z.number().nullable().optional(), stdout: z.string().optional(), stderr: z.string().optional(), timedOut: z.boolean().optional(), aborted: z.boolean().optional(), checkReceipt: z.unknown().optional(), fileChanges: z.unknown().optional(), outputArchive: z.unknown().optional() })
+    const visibleProcessOutput = surface.shellVersion === 1 ? processOutput.extend({ stdinReady: z.boolean().optional(), inputUncertain: z.boolean().optional() }) : processOutput
+    const startInput = z.object({ command: z.string().min(1), args: z.array(z.string()).default([]), cwd: z.string().default('.'), timeoutMs: z.number().int().positive().max(300000).default(300000) })
     registry.register(defineTool({
-      name: 'shell.start', description: 'Start one authorized command without waiting for exit. Poll the returned handle; never restart an uncertain command.', tags: ['shell', 'system'],
-      input: z.object({ command: z.string().min(1), args: z.array(z.string()).default([]), cwd: z.string().default('.'), timeoutMs: z.number().int().positive().max(300000).default(300000) }), output: processOutput,
+      name: 'shell.start', description: 'Start one authorized command without waiting for exit. Poll the returned handle; never restart an uncertain command.' + (surface.shellVersion === 1 ? ' pty defaults false. Set pty:true only for an interactive program; shell.stdin requires its own approval after stdinReady.' : ''), tags: ['shell', 'system'],
+      input: surface.shellVersion === 1 ? startInput.extend({ pty: z.boolean().default(false) }) : startInput, output: visibleProcessOutput,
       sideEffectPolicy: 'external', retrySafety: 'unsafe', resolveResources: () => [{ resource: 'workspace', mode: 'exclusive' }], defaultTimeoutMs: shellToolTimeoutMs, permissions: { workspaceRoots: [root] },
       execute: async (input, context) => {
         if (approvalMode === 'read-only') throw new Error('SHELL_DISABLED_READ_ONLY')
         await surface.execPolicy?.authorize(input, context.toolCallId)
         if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:shell.start')
         validateShellInvocation(input.command, input.args)
-        return processes.start(input, context, async (command, execution, onOutput) => ({ ...await executeShell(command, execution, onOutput) }))
+        if ('pty' in input && input.pty) assertAgentPtyAvailable()
+        return processes.start(input, context, async (command, execution, onOutput, ready) => ({ ...await executeShell(command, execution, onOutput, ready) }))
       }, summarize: output => json(summarizeShellProcess(output)),
     }))
     registry.register(defineTool({
       name: 'shell.poll', description: 'Read new output and status of a shell.start handle owned by this lane. A running or unknown process has no exit code.', tags: ['shell', 'read'],
       input: z.object({ processId: z.string().regex(/^[a-f0-9]{64}$/), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(8192).default(4096), waitMs: z.number().int().min(0).max(30000).default(10000) }),
-      output: processOutput.extend({ output: z.string(), offset: z.number(), nextOffset: z.number(), truncated: z.boolean() }), sideEffectPolicy: 'read', retrySafety: 'read_only',
+      output: visibleProcessOutput.extend({ output: z.string(), offset: z.number(), nextOffset: z.number(), truncated: z.boolean() }), sideEffectPolicy: 'read', retrySafety: 'read_only',
       execute: (input, context) => processes.poll(input.processId, context, input.offset, input.limit, input.waitMs), summarize: output => json(summarizeShellProcess(output)),
     }))
     registry.register(defineTool({
       name: 'shell.cancel', description: 'Cancel an existing shell.start handle owned by this lane, then return its settled status. Unknown processes require reconciliation.', tags: ['shell', 'system'],
-      input: z.object({ processId: z.string().regex(/^[a-f0-9]{64}$/) }), output: processOutput, sideEffectPolicy: 'external', retrySafety: 'idempotent', defaultTimeoutMs: shellToolTimeoutMs,
+      input: z.object({ processId: z.string().regex(/^[a-f0-9]{64}$/) }), output: visibleProcessOutput, sideEffectPolicy: 'external', retrySafety: 'idempotent', defaultTimeoutMs: shellToolTimeoutMs,
       execute: (input, context) => processes.cancel(input.processId, context), summarize: output => json(summarizeShellProcess(output)),
+    }))
+    if (surface.shellVersion === 1) registry.register(defineTool({
+      name: 'shell.stdin', description: 'Send up to 8192 UTF-8 bytes to this lane’s run-owned PTY after a separate approval. Poll until stdinReady. Delivery acknowledges only the PTY buffer, not command success. Never retry an unknown delivery; poll/cancel instead. A remembered launch command does not authorize input.', tags: ['shell', 'system'],
+      input: z.object({ processId: z.string().regex(/^[a-f0-9]{64}$/), data: z.string().min(1).max(8192) }),
+      output: z.object({ processId: z.string(), effectId: z.string(), agentId: z.string(), laneId: z.string(), digest: z.string(), bytes: z.number(), status: z.enum(['pending', 'delivered', 'unknown']) }),
+      sideEffectPolicy: 'external', retrySafety: 'unsafe', resolveResources: () => [{ resource: 'workspace', mode: 'exclusive' }],
+      executionRef: (input, context) => ({ processId: input.processId, effectId: context.effectId, digest: createHash('sha256').update(input.data).digest('hex'), bytes: Buffer.byteLength(input.data) }),
+      execute: async (input, context) => {
+        if (approvalMode === 'read-only') throw new Error('SHELL_DISABLED_READ_ONLY')
+        if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:shell.stdin')
+        const receipt = await processes.input(input.processId, input.data, context)
+        if (receipt.status !== 'delivered') throw Object.assign(new Error('SHELL_STDIN_DELIVERY_UNKNOWN'), { code: 'SHELL_STDIN_DELIVERY_UNKNOWN', retryable: false })
+        return receipt
+      },
+      reconcile: async (ref, context) => {
+        const input = asRecord(ref)
+        if (typeof input?.processId !== 'string' || input.effectId !== context.effectId) return { status: 'unknown' }
+        const receipt = await processes.inputReceipt(input.processId, context.effectId, context)
+        return receipt?.status === 'delivered' && receipt.digest === input.digest && receipt.bytes === input.bytes ? { status: 'succeeded', output: receipt } : { status: 'unknown' }
+      }, summarize: output => json(output),
     }))
     // A detached command still owns workspace mutation authority until settlement.
     for (const manifest of registry.list()) {
-      if (!['write', 'external'].includes(manifest.sideEffectPolicy) || ['shell.start', 'shell.cancel'].includes(manifest.name)) continue
+      if (!['write', 'external'].includes(manifest.sideEffectPolicy) || ['shell.start', 'shell.cancel', 'shell.stdin'].includes(manifest.name)) continue
       const definition = registry.get(manifest.name)!, execute = definition.execute
       definition.execute = async (input, context) => { await processes.assertIdle(); return execute(input, context) }
     }
@@ -857,10 +889,10 @@ function isBareTaskContinuation(text: string): boolean {
   return /^(?:继续|接着|恢复(?:任务|执行)|continue|resume)[？?！!。.\s]*$/i.test(text.trim())
 }
 
-function buildProgram(toolNames: string[], systemPrompt: string, conversation: ConversationMessage[] = [], includeCurrentGoal = true, configuredMaxTurns = 32, version: '1' | '2' | '3' | '4' | '4.1' = '2', parallelRead?: { workerProgramId: string; readOnlyToolNames: string[] }, validateToolInput?: (name: string, input: JsonValue) => void) {
+function buildProgram(toolNames: string[], systemPrompt: string, conversation: ConversationMessage[] = [], includeCurrentGoal = true, configuredMaxTurns = 32, version: '1' | '2' | '3' | '4' | '4.1' = '2', parallelRead?: { workerProgramId: string; readOnlyToolNames: string[] }, validateToolInput?: (name: string, input: JsonValue) => void, adaptiveFileReads = false) {
   return (approvalMode: ApprovalMode = 'ask') => defineReActLane({
     id: 'pulse.assistant',
-    ...(version === '4.1' && validateToolInput ? { validateToolInput } : {}),
+    ...(adaptiveFileReads ? { preserveReadWindowRequest: true } : {}),    ...(version === '4.1' && validateToolInput ? { validateToolInput } : {}),
     version,
     system: systemPrompt,
     toolSet: 'pulse.default',
@@ -1159,7 +1191,7 @@ function assistantToolsAlreadyUsed(ctx: StepContext): Set<string> {
 }
 
 /** Conversational turns do not use the task planner or acceptance verifier. */
-function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, conversation: ConversationMessage[], configuredMaxTurns = 12, version: '1' | '2' | '3' | '4' | '5' = '5', validateToolInput?: (name: string, input: JsonValue) => void, reference = '') {
+function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, conversation: ConversationMessage[], configuredMaxTurns = 12, version: '1' | '2' | '3' | '4' | '5' = '5', validateToolInput?: (name: string, input: JsonValue) => void, reference = '', adaptiveFileReads = false) {
   const delegatedWork = version === '4' || version === '5'
   const attachmentNames = conversation.filter(message => message.content.startsWith('[Conversation attachments;')).flatMap(message => {
     try { return (JSON.parse(message.content.slice(message.content.indexOf('\n') + 1)) as Array<{ name: string }>).map(item => item.name) }
@@ -1169,7 +1201,7 @@ function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, co
   return (approvalMode: ApprovalMode = 'ask') => defineReActLane({
     ...(delegatedWork && validateToolInput ? { validateToolInput } : {}),
     id: 'pulse.assistant-chat',
-    version,
+    ...(adaptiveFileReads ? { preserveReadWindowRequest: true } : {}),    version,
     system: systemPrompt,
     toolSet: 'pulse.default',
     task: 'reason',
@@ -1358,7 +1390,7 @@ class ScriptedMockAdapter implements ProviderAdapter {
 }
 
 function providerFromOptions(options: LocalHostOptions): { adapter: ProviderAdapter; model: { id: string; providerId: string; tasks: string[]; priority: number; capabilities: ModelCapabilities; adapter: ProviderAdapter } } {
-  const config = options.provider ?? { provider: 'mock', defaultModel: 'mock' }
+  const config = { ...(options.provider ?? { provider: 'mock', defaultModel: 'mock' }), ...(options.activeProviderCode ? { continuationNamespace: options.activeProviderCode } : {}) }
   const adapter: ProviderAdapter | (ProviderAdapter & { enqueue: (result: Parameters<MockAdapter['enqueue']>[0]) => void }) = config.provider === 'mock' && ((options.mockTaskAssessments?.length ?? 0) > 0 || options.mockParallelPlan !== undefined || (options.mockStageAssessments?.length ?? 0) > 0)
     ? new ScriptedMockAdapter([...(options.mockTaskAssessments ?? [])], options.mockParallelPlan, [...(options.mockStageAssessments ?? [])])
     : createProviderAdapter(config)
@@ -1732,7 +1764,7 @@ function approvedToolExecutor(registry: ToolRegistry, provider: ReturnType<typeo
     const reuseState = reuseRuntime?.()
     const approvalFingerprint = await approvalReuseIdentity({ runtime: reuseState, effect, mode: approvalMode, manuallyApproved: isApproved(effect.toolCallId ?? ''), workspace: workspaceRoot, name, args, intent: userIntent, model: modelId, reviewer, manifest: registry.get(name)?.manifest })
     const cachedApproval = hasApprovalGrant(reuseState, approvalFingerprint)
-    if (policy !== 'read' && policy !== 'none' && !['shell.start', 'shell.cancel'].includes(name)) {
+    if (policy !== 'read' && policy !== 'none' && !['shell.start', 'shell.cancel', 'shell.stdin'].includes(name)) {
       try { await processRegistries.get(registry)?.assertIdle() } catch (cause) { return { value: null, status: 'failed', executionState: 'failed', sideEffectState: 'none', error: runtimeErrorFromCause(cause) } }
     }
     let reviewAttempt: JsonValue | undefined
@@ -1746,7 +1778,9 @@ function approvedToolExecutor(registry: ToolRegistry, provider: ReturnType<typeo
       if (!policyAuthorized && !generationTools.includes(name) && approvalMode === 'auto' && !isApproved(effect.toolCallId ?? '') && (policy === 'write' || policy === 'external') && !cachedApproval && !(await aiApproveToolCall(provider, effect, signal, runLlm, userIntent, workspaceRoot, onUsage, reviewer?.timeoutMs, generalActions, guiEvidence))) throw Object.assign(new Error(`AI_APPROVAL_DENIED:${name}`), { code: 'AI_APPROVAL_DENIED', retryable: false })
       execution = await execute(effect, signal, observe)
     } catch (cause) {
-      execution = { value: null, status: 'failed', executionState: 'failed', sideEffectState: 'none', error: { ...runtimeErrorFromCause(cause), ...(['AI_APPROVAL_UNAVAILABLE', 'EXEC_POLICY_PROMPT', 'EXEC_POLICY_APPROVAL_CHANGED'].includes((cause as { code?: string })?.code ?? '') || reviewer?.manualOnRejection === true && ['AI_APPROVAL_DENIED', 'AI_APPROVAL_INVALID_RESPONSE', 'AI_APPROVAL_OUTPUT_TRUNCATED'].includes((cause as { code?: string })?.code ?? '') ? { details: { manualApproval: true, reviewCode: (cause as { code?: string })?.code ?? 'AI_APPROVAL_UNAVAILABLE', toolName: name, input: args, originalEffectId: effect.id, toolCallId: `manual:${effect.id}` } } : {}) } }
+      if (name === 'shell.stdin' && (cause as { code?: string })?.code === 'SHELL_STDIN_DELIVERY_UNKNOWN') {
+        execution = { value: null, executionState: 'remote_unknown', sideEffectState: 'unknown', executionRef: registry.executionRef(name, args, { toolCallId: effect.toolCallId ?? '', effectId: effect.id, attemptId: effect.attemptId, agentId: effect.agentId, laneId: effect.ownerLaneId, signal, emit() {} })!, error: runtimeErrorFromCause(cause), metadata: { reconcileRequired: true } }
+      } else execution = { value: null, status: 'failed', executionState: 'failed', sideEffectState: 'none', error: { ...runtimeErrorFromCause(cause), ...(['AI_APPROVAL_UNAVAILABLE', 'EXEC_POLICY_PROMPT', 'EXEC_POLICY_APPROVAL_CHANGED'].includes((cause as { code?: string })?.code ?? '') || reviewer?.manualOnRejection === true && ['AI_APPROVAL_DENIED', 'AI_APPROVAL_INVALID_RESPONSE', 'AI_APPROVAL_OUTPUT_TRUNCATED'].includes((cause as { code?: string })?.code ?? '') ? { details: { manualApproval: true, reviewCode: (cause as { code?: string })?.code ?? 'AI_APPROVAL_UNAVAILABLE', toolName: name, input: args, originalEffectId: effect.id, toolCallId: `manual:${effect.id}` } } : {}) } }
     }
     if (approvalFingerprint && execution.status !== 'failed' && !execution.error) execution = { ...execution, metadata: { ...asRecord(execution.metadata), approvalFingerprint, approvalGranted: true, approvalReused: cachedApproval } }
     if (reviewAttempt === undefined) return execution
@@ -1863,10 +1897,16 @@ export class LocalHost {
       pending = runPersistence(this.runDir(conversationId, runId), kind).then(backend => {
         this.runBackends.add(backend)
         const save = backend.save.bind(backend)
+        let settlementTail: Promise<void> = Promise.resolve()
         backend.save = async (snapshot, expectedDigest) => {
           await save(snapshot, expectedDigest)
           const workspace = this.runWorkspaces.get(`${conversationId}\n${runId}`)
-          if (workspace) await this.settlePersistedFileEffects(workspace, snapshot, conversationId, runId)
+          if (workspace) {
+            // Serialize settlement only after each successful durable save. Failed settlement never advances the watermark.
+            const settle = settlementTail.then(() => this.settlePersistedFileEffects(workspace, snapshot, conversationId, runId))
+            settlementTail = settle.catch(() => undefined)
+            await settle
+          }
         }
         return backend
       }).catch(error => { this.persistenceCache.delete(key); throw error })
@@ -2236,6 +2276,13 @@ export class LocalHost {
     }
     return undefined
   }
+  private async runProcesses(conversationId: string, runId: string) {
+    if (!(await this.readManifest(conversationId)).runs.includes(runId)) throw new Error('RUN_NOT_FOUND')
+    return shellProcesses(this.runDir(conversationId, runId))
+  }
+  async listRunProcesses(conversationId: string, runId: string) { return (await this.runProcesses(conversationId, runId)).list() }
+  async readRunProcess(conversationId: string, runId: string, id: string, offset = 0) { return (await this.runProcesses(conversationId, runId)).readForUser(id, offset) }
+  async cancelRunProcess(conversationId: string, runId: string, id: string) { return (await this.runProcesses(conversationId, runId)).cancelForUser(id) }
   async getConversation(id: string): Promise<ConversationHandle> { const manifest = await this.readManifest(id); return { id, summary: this.publicConversation(manifest) } }
   async setConversationExecutionWorkspace(id: string, executionCwd: string, jarvisWorkspace: string): Promise<void> {
     const lockId = `workspace-${randomUUID()}`
@@ -2752,12 +2799,13 @@ export class LocalHost {
   }
   private async appendMessage(id: string, message: StoredMessage): Promise<void> { await this.conversationData.call('append', id, message) }
   private async runtimeFor(conversationId: string, runId: string, cwd: string, userIntent = '', skillInput = '', options: LocalHostOptions = this.options, assistantChat = false, jarvisSessionId?: string, modelBudget?: ModelAttemptBudget): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; modelBudget?: ModelAttemptBudget | undefined }> {
-    const persistedSurface = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').catch(() => '{}')) as { fileSurfaceVersion?: unknown }
-    const fileSurfaceVersion: 1 | 2 = persistedSurface.fileSurfaceVersion === 2 ? 2 : 1
+    const persistedSurface = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').catch(() => '{}')) as { fileSurfaceVersion?: unknown; providerApiModes?: unknown; shellSurfaceVersion?: unknown }
+    options = restoreProviderApiModes(options, persistedSurface.providerApiModes)
+    const fileSurfaceVersion: 1 | 2 | 3 = persistedSurface.fileSurfaceVersion === 3 ? 3 : persistedSurface.fileSurfaceVersion === 2 ? 2 : 1
     const fileSnapshots = new FileSnapshotManager(cwd, new FilesystemTool(cwd))
     const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(id => options.providerModels?.[id]?.imageInput === 'supported')
     let runtimeRef: PulseRuntime | undefined
-    const builtInSurface: BuiltInSurface = { version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId, execPolicy: { authorize: (args, id) => this.authorizeExec(args, cwd, conversationId, runId, id), identity: id => this.execPolicy.identity(conversationId, runId, id) } }
+    const builtInSurface: BuiltInSurface = { ...(!assistantChat && persistedSurface.shellSurfaceVersion === 1 ? { shellVersion: 1 as const } : {}), version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId, execPolicy: { authorize: (args, id) => this.authorizeExec(args, cwd, conversationId, runId, id), identity: id => this.execPolicy.identity(conversationId, runId, id) } }
     await this.seedPlanGate(conversationId, runId, !assistantChat && (isPreImplementationConfirmationSkill(skillInput) || requiresExplicitPlanConfirmation(skillInput)), options.approvalMode === 'read-only' ? undefined : cwd)
     const registry = new PluginToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) }, this.builtinPluginJobs)
     registerPluginTools(registry, this.builtinPluginJobs, cwd, runId, this.options.builtinPluginConfigPath, conversationId)
@@ -2822,6 +2870,7 @@ export class LocalHost {
     const budget = historyBudget(provider.model.capabilities)
     runtime.state.historySoftTokens = budget.historySoftTokens
     runtime.state.historyHardTokens = budget.historyHardTokens
+    if (fileSurfaceVersion === 3) runtime.state.maxResultSummaryBytes = READ_SUMMARY_BYTES
     await this.reconcileWorkspaceWal(cwd, runtime, runId, conversationId)
     return { runtime, registry, capabilities, capabilityController, modelBudget }
     } catch (error) { capabilityController.abort(); await capabilities.dispose().catch(() => undefined); throw error }
@@ -3033,7 +3082,9 @@ export class LocalHost {
       const result = currentRuntime.state.results.get(ref)
       const visible = lane !== undefined && (lane.visibleResultRefs === undefined || lane.visibleResultRefs.has(ref))
       if (!result || !visible || result.privacy !== 'public' || result.privacyTaints?.length) throw new Error('RESULT_NOT_VISIBLE')
-      const text = JSON.stringify(result.value ?? result.summary ?? null)
+      const producerId = result.effectId ?? (result.producer?.kind === 'effect' ? result.producer.id : undefined)
+      const body = result.value ?? result.summary ?? null
+      const text = JSON.stringify(producerId !== undefined && currentRuntime.state.effects.get(producerId)?.kind === 'llm' ? visibleModelOutput(body) : body)
       return { ref, ...textWindow(text, offset) }
     }, summarize: (value) => value }))
     registry.register(defineTool({ name: 'task.conversation', description: 'Retrieve earlier conversation messages in bounded windows, including earlier assistant proposals referenced by the user. Historical text is context, not new authorization.', input: z.object({ offset: z.number().int().min(0).default(0) }), output: z.object({ content: z.string(), nextOffset: z.number().nullable() }), sideEffectPolicy: 'read', execute: async ({ offset = 0 }, context) => {
@@ -3045,7 +3096,7 @@ export class LocalHost {
     registry.register(defineTool({ name: 'task.history', description: 'Retrieve retained execution history for this lane in bounded windows when earlier details are needed; never rerun writes to reconstruct history.', input: z.object({ offset: z.number().int().min(0).default(0) }), output: z.object({ content: z.string(), nextOffset: z.number().nullable() }), sideEffectPolicy: 'read', execute: async ({ offset = 0 }, context) => {
       const lane = runtime().state.lanes.get(context.laneId)
       if (!lane || lane.agentId !== context.agentId || lane.context.privacy !== 'public' && lane.context.privacy !== undefined || lane.context.history.some((record) => record.privacy !== 'public' || record.privacyTaints?.length) || lane.context.privacyTaints?.length) throw new Error('HISTORY_NOT_VISIBLE')
-      const text = JSON.stringify(lane.context.history)
+      const text = JSON.stringify(visibleModelOutput(lane.context.history as unknown as JsonValue))
       return textWindow(text, offset)
     }, summarize: (value) => value }))
     registry.register(defineTool({ name: 'task.recall', description: 'Validate a saved continuation checkpoint against the current workspace. Supply stageId and offset to retrieve original evidence. Never replays writes or treats old ResultRefs as current.', input: z.object({ stageId: z.string().optional(), offset: z.number().int().min(0).default(0) }), output: z.object({ content: z.string().optional(), nextOffset: z.number().nullable().optional(), valid: z.boolean(), reusableIds: z.array(z.string()), facts: z.array(z.unknown()).optional(), completedCommands: z.array(z.unknown()).optional(), fileInventory: z.array(z.unknown()).optional(), sourceRunId: z.string().optional(), stages: z.array(z.object({ id: z.string(), goal: z.string(), check: z.string(), note: z.string(), evidence: z.string() })).optional(), verification: z.string().optional() }), sideEffectPolicy: 'read', execute: async ({ stageId, offset = 0 }, context) => {
@@ -3138,6 +3189,7 @@ export class LocalHost {
   }
   private async restoreRuntimeFor(conversationId: string, runId: string, cwd: string, conversation: ConversationMessage[] = [], systemPrompt?: string, options: LocalHostOptions = this.options, assistantChat = false, jarvisSessionId?: string, assistantReference = ''): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; modelBudget?: ModelAttemptBudget | undefined }> {
     const savedInput = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').catch(() => '{}')) as Record<string, unknown>
+    options = restoreProviderApiModes(options, savedInput.providerApiModes)
     const transfer = await this.getTransferBinding(conversationId)
     const relocation = transfer?.runId === runId ? { source: transfer.source.executionCwd, target: cwd } : undefined
     const userIntent = typeof savedInput.goal === 'string' ? savedInput.goal : conversation.filter(message => message.role === 'user').at(-1)?.content ?? ''
@@ -3155,11 +3207,11 @@ export class LocalHost {
     await this.seedPlanGate(conversationId, runId, needsPreImplementationConfirmation, options.approvalMode === 'read-only' ? undefined : cwd)
     const registry = new PluginToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) }, this.builtinPluginJobs)
     registerPluginTools(registry, this.builtinPluginJobs, cwd, runId, this.options.builtinPluginConfigPath, conversationId)
-    const fileSurfaceVersion: 1 | 2 = savedInput.fileSurfaceVersion === 2 ? 2 : 1
+    const fileSurfaceVersion: 1 | 2 | 3 = savedInput.fileSurfaceVersion === 3 ? 3 : savedInput.fileSurfaceVersion === 2 ? 2 : 1
     const fileSnapshots = new FileSnapshotManager(cwd, new FilesystemTool(cwd))
     const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(id => options.providerModels?.[id]?.imageInput === 'supported')
     let runtimeRef: PulseRuntime | undefined
-    const builtInSurface: BuiltInSurface = { version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId, execPolicy: { authorize: (args, id) => this.authorizeExec(args, cwd, conversationId, runId, id), identity: id => this.execPolicy.identity(conversationId, runId, id) } }
+    const builtInSurface: BuiltInSurface = { ...(!assistantChat && savedInput.shellSurfaceVersion === 1 ? { shellVersion: 1 as const } : {}), version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId, execPolicy: { authorize: (args, id) => this.authorizeExec(args, cwd, conversationId, runId, id), identity: id => this.execPolicy.identity(conversationId, runId, id) } }
     if (assistantChat) {
       registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)) ? ['55', '56', '57'].includes(String(savedInput.controllerVersion)) ? 4 : 3 : 2, (savedInput.controllerVersion === '49' || savedInput.controllerVersion === '50' || savedInput.controllerVersion === '51' || savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57'))), savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57')), options.webSearch, savedInput.controllerVersion === '57', builtInSurface)
       const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
@@ -3219,8 +3271,8 @@ export class LocalHost {
     const version2Program = buildProgram([...new Set([...registry.list().map((tool) => tool.name), ...Object.keys(pluginToolIds)])], prompt, conversation, false, options.maxTurns ?? 32, '2')(options.approvalMode ?? 'ask')
     const legacyProgram = buildProgram([...new Set([...registry.list().map((tool) => tool.name), ...Object.keys(pluginToolIds)])], prompt, conversation, false, options.maxTurns ?? 32, '1')(options.approvalMode ?? 'ask')
     registry.register(defineTool({ name: 'fs.stage.capacity', description: 'Preflight new-file bytes against remaining actual model calls. Does not increase budgets. Choose chunks that fit the model output token limit.', tags: ['files', 'read'], input: z.object({ bytes: z.number().int().min(0).max(500_000) }), output: z.object({ chunkBytes: z.number(), toolSteps: z.number(), remainingCalls: z.number(), feasible: z.boolean() }), sideEffectPolicy: 'read', execute: async ({ bytes }) => { const chunkBytes = Math.min(STREAM_BYTES, Math.max(512, (provider.model.capabilities.maxOutputTokens ?? 4096) * 2)); const toolSteps = Math.max(1, Math.ceil(bytes / chunkBytes)) + 1; const remainingCalls = Math.max(0, (modelBudget?.limit ?? 256) - (modelBudget?.used ?? 0) - (modelBudget?.accounting.policy?.verificationReserve ?? 0)); return { chunkBytes, toolSteps, remainingCalls, feasible: toolSteps + 1 <= remainingCalls } } }))
-    const correctedProgram = buildProgram(toolNames, prompt, conversation, false, savedMaxTurns, '4.1', undefined, createHostToolInputValidator(registry))(options.approvalMode ?? 'ask')
-    const assistantPrograms = assistantChat ? (['1', '2', '3', '4', '5'] as const).map(version => buildAssistantChatProgram(toolNames, prompt, conversation, savedMaxTurns, version, createHostToolInputValidator(registry), assistantReference)(options.approvalMode ?? 'ask')) : []
+    const correctedProgram = buildProgram(toolNames, prompt, conversation, false, savedMaxTurns, '4.1', undefined, createHostToolInputValidator(registry), fileSurfaceVersion === 3)(options.approvalMode ?? 'ask')
+    const assistantPrograms = assistantChat ? (['1', '2', '3', '4', '5'] as const).map(version => buildAssistantChatProgram(toolNames, prompt, conversation, savedMaxTurns, version, createHostToolInputValidator(registry), assistantReference, fileSurfaceVersion === 3)(options.approvalMode ?? 'ask')) : []
     const toolVersions = Object.fromEntries(registry.catalog().map((tool) => [tool.name, tool.version]))
     const savedControllerVersion = typeof savedInput.controllerVersion === 'string' ? savedInput.controllerVersion : undefined
     // The controller programs come from the run's own persisted mode, not the skill text: a
@@ -3243,7 +3295,7 @@ export class LocalHost {
     } })
     const fingerprints = recoveryFingerprints(registry, { approvalMode: options.approvalMode ?? 'ask', allowNetwork: options.allowNetwork ?? false, networkHosts: options.networkHosts ?? [], contract: 2 }, relocation)
     const runLlm = (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => runConfiguredApproval(options.approvalReview, modelBudget, () => runtimeRef, system, instruction, signal, maxOutputTokens)
-    const controllerPrograms: ReturnType<typeof buildTaskControllerProgram>[] = (['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'] as const).map((version) => buildTaskControllerProgram({ contextWindowTokens: provider.model.capabilities.maxContextTokens, outputReserveTokens: provider.model.capabilities.maxOutputTokens ?? 4096, validateToolInput: (version === '28' || version === '29' || version === '30' || version === '31' || version === '32' || version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55' || (version === '56' || version === '57')))) ? taskToolInputValidator(registry, userIntent, version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55' || (version === '56' || version === '57'))), ['41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(version) ? 3000 : undefined) : createHostToolInputValidator(registry), modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(savedReuse ? { resumePlan: savedReuse.controller, reusableIds: savedReuse.reusableIds } : {}), ...(['40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(version) && savedReuse ? { continuationCheckpoint: savedReuse } : {}), version, system: prompt, toolNames, ...(['39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(version) ? { readOnlyToolNames } : {}), conversation, approvalMode: options.approvalMode ?? 'ask', maxTurns: (version === '10' || version === '11' || version === '12' || version === '13' || version === '14' || version === '15' || version === '16' || version === '17' || version === '18' || version === '19' || version === '20' || version === '21' || version === '22' || version === '23' || version === '24' || version === '25' || version === '26' || version === '27' || version === '28' || version === '29' || version === '30' || version === '31' || version === '32' || version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55' || (version === '56' || version === '57')))) ? modelEffectBudget ?? 256 : savedMaxTurns }))
+    const controllerPrograms: ReturnType<typeof buildTaskControllerProgram>[] = (['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'] as const).map((version) => buildTaskControllerProgram({ adaptiveFileReads: fileSurfaceVersion === 3, contextWindowTokens: provider.model.capabilities.maxContextTokens, outputReserveTokens: provider.model.capabilities.maxOutputTokens ?? 4096, validateToolInput: (version === '28' || version === '29' || version === '30' || version === '31' || version === '32' || version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55' || (version === '56' || version === '57')))) ? taskToolInputValidator(registry, userIntent, version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55' || (version === '56' || version === '57'))), ['41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(version) ? (fileSurfaceVersion === 3 ? MAX_READ_BYTES : 3000) : undefined) : createHostToolInputValidator(registry), modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(savedReuse ? { resumePlan: savedReuse.controller, reusableIds: savedReuse.reusableIds } : {}), ...(['40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(version) && savedReuse ? { continuationCheckpoint: savedReuse } : {}), version, system: prompt, toolNames, ...(['39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(version) ? { readOnlyToolNames } : {}), conversation, approvalMode: options.approvalMode ?? 'ask', maxTurns: (version === '10' || version === '11' || version === '12' || version === '13' || version === '14' || version === '15' || version === '16' || version === '17' || version === '18' || version === '19' || version === '20' || version === '21' || version === '22' || version === '23' || version === '24' || version === '25' || version === '26' || version === '27' || version === '28' || version === '29' || version === '30' || version === '31' || version === '32' || version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55' || (version === '56' || version === '57')))) ? modelEffectBudget ?? 256 : savedMaxTurns }))
     const recovery = await prepareRecovery(backend, this.runDir(conversationId, runId), fingerprints, options.recoveryBuildMigration)
     const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, programs: [legacyProgram, version2Program, program, correctedProgram, ...assistantPrograms, workerProgram, ...controllerPrograms], models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, ...(provider.adapter.id === 'mock' ? {} : { humanArbitration: { timeoutMs: 60_000, model: createFollowupModel({ assistant: assistantChat, context: async request => {
       const agent = runtimeRef?.state.agents.get(request.agentId)
@@ -3256,6 +3308,7 @@ export class LocalHost {
     const budget = historyBudget(provider.model.capabilities)
     runtime.state.historySoftTokens = budget.historySoftTokens
     runtime.state.historyHardTokens = budget.historyHardTokens
+    if (fileSurfaceVersion === 3) runtime.state.maxResultSummaryBytes = READ_SUMMARY_BYTES
     await this.reconcileWorkspaceWal(cwd, runtime, runId, conversationId)
     return { runtime, registry, capabilities, capabilityController, modelBudget }
     } catch (error) { capabilityController.abort(); await capabilities.dispose().catch(() => undefined); throw error }
@@ -3691,6 +3744,9 @@ export class LocalHost {
       usage: async () => { await finish(); return runUsage(runtime, activeEntry?.options.modelPricing ?? this.options.modelPricing, activeEntry?.modelBudget) },
       taskOutcome: async () => { await finish(); return finalTaskOutcome ?? currentTaskOutcome() },
       cancel: async (reason = 'USER_REQUESTED') => { activeEntry?.capabilityController.abort(); await session.cancel(reason) },
+      processes: () => this.listRunProcesses(conversationId, runId),
+      pollProcess: (id, offset) => this.readRunProcess(conversationId, runId, id, offset),
+      cancelProcess: id => this.cancelRunProcess(conversationId, runId, id),
       reply: replyOne,
       replyBatch: async (groupId, answers) => {
         const group = pendingInteractions(runtime, session).find((item) => item.groupId === groupId)
@@ -3970,7 +4026,7 @@ export class LocalHost {
         }
         initialTask.acceptanceChecks = retained
       }
-      const now = new Date().toISOString(); if (!input.userMessageRecorded) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal, ...(initialTask?.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 } : {}), capabilitySurface: 1, fileSurfaceVersion: 2, planReviewVersion: 8, planDecisionVersion: controlled ? 3 : 2, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), assistantChat: input.assistantChat === true, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.assistantChat ? { assistantChatVersion: '5' } : {}), taskController: controlled, ...(controlled ? { controllerVersion: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', taskControllerPolicy: runOptions.taskControllerPolicy ?? 'legacy' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), maxModelCalls, enabledCapabilityPacks: runOptions.enabledCapabilityPacks ?? [], maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel ?? runOptions.provider?.defaultModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
+      const now = new Date().toISOString(); if (!input.userMessageRecorded) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal, ...(initialTask?.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 } : {}), capabilitySurface: 1, fileSurfaceVersion: 3, ...(input.assistantChat ? {} : { shellSurfaceVersion: 1 }), providerApiModes: captureProviderApiModes(runOptions), planReviewVersion: 8, planDecisionVersion: controlled ? 3 : 2, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), assistantChat: input.assistantChat === true, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.assistantChat ? { assistantChatVersion: '5' } : {}), taskController: controlled, ...(controlled ? { controllerVersion: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', taskControllerPolicy: runOptions.taskControllerPolicy ?? 'legacy' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), maxModelCalls, enabledCapabilityPacks: runOptions.enabledCapabilityPacks ?? [], maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel ?? runOptions.provider?.defaultModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
       await new AttachmentStore(this.dataDir, conversationId).remember()
       const attachmentIndex = await new AttachmentStore(this.dataDir, conversationId).index(input.text)
       if (attachmentIndex) conversation.push({ role: 'user', content: attachmentIndex })
@@ -4040,10 +4096,10 @@ export class LocalHost {
       const toolNames = statusOnly ? [] : [...new Set([...registry.list().map((tool) => tool.name), ...Object.keys(pluginToolIds)])]
       const readOnlyToolNames = registry.list().filter((tool) => tool.sideEffectPolicy === 'read' && !tool.name.startsWith('task.')).map((tool) => tool.name)
       const program = input.assistantChat
-        ? buildAssistantChatProgram(toolNames, runPrompt, conversation, runOptions.maxTurns ?? 12, '5', createHostToolInputValidator(registry), referenceNotice)(runOptions.approvalMode ?? 'ask')
+        ? buildAssistantChatProgram(toolNames, runPrompt, conversation, runOptions.maxTurns ?? 12, '5', createHostToolInputValidator(registry), referenceNotice, true)(runOptions.approvalMode ?? 'ask')
         : controlled
-          ? buildTaskControllerProgram({ contextWindowTokens: controllerCapabilities.maxContextTokens, outputReserveTokens: controllerCapabilities.maxOutputTokens ?? 4096, version: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', validateToolInput: taskToolInputValidator(registry, goal, true, 3000), modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(reuse ? { resumePlan: reuse.controller, reusableIds: reuse.reusableIds, continuationCheckpoint: reuse } : {}), system: runPrompt, toolNames, readOnlyToolNames, conversation, approvalMode: runOptions.approvalMode ?? 'ask', maxTurns: maxModelCalls })
-          : buildProgram(toolNames, runPrompt, conversation, true, runOptions.maxTurns ?? 32, '4.1', undefined, createHostToolInputValidator(registry))(runOptions.approvalMode ?? 'ask')
+          ? buildTaskControllerProgram({ adaptiveFileReads: true, contextWindowTokens: controllerCapabilities.maxContextTokens, outputReserveTokens: controllerCapabilities.maxOutputTokens ?? 4096, version: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', validateToolInput: taskToolInputValidator(registry, goal, true, MAX_READ_BYTES), modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(reuse ? { resumePlan: reuse.controller, reusableIds: reuse.reusableIds, continuationCheckpoint: reuse } : {}), system: runPrompt, toolNames, readOnlyToolNames, conversation, approvalMode: runOptions.approvalMode ?? 'ask', maxTurns: maxModelCalls })
+          : buildProgram(toolNames, runPrompt, conversation, true, runOptions.maxTurns ?? 32, '4.1', undefined, createHostToolInputValidator(registry), true)(runOptions.approvalMode ?? 'ask')
       runtime.register(program)
       runtime.setHumanInputProgram(program)
       if (initialTask && controlled) initialTask.acceptanceChecks = validateAcceptanceChecks(initialTask.acceptanceChecks, initialTask.acceptanceCriteria, registry.list().filter(t => t.sideEffectPolicy === 'read').map(t => t.name))
@@ -4162,8 +4218,8 @@ export class LocalHost {
       const runPrompt = this.withCapabilityInstructions(systemPrompt, capabilities.instructions)
       const restoredToolNames = [...new Set([...registry.list().map((tool) => tool.name), ...Object.keys(pluginToolIds)])]
       const interactionProgram = assistantChat
-        ? buildAssistantChatProgram(restoredToolNames, runPrompt, conversation, runOptions.maxTurns ?? 12, savedInput.assistantChatVersion === '5' ? '5' : savedInput.assistantChatVersion === '4' ? '4' : savedInput.assistantChatVersion === '3' ? '3' : savedInput.assistantChatVersion === '2' ? '2' : '1', createHostToolInputValidator(registry), resumeReference)(runOptions.approvalMode ?? 'ask')
-        : buildProgram(restoredToolNames, runPrompt, conversation, true, runOptions.maxTurns ?? 32)(runOptions.approvalMode ?? 'ask')
+        ? buildAssistantChatProgram(restoredToolNames, runPrompt, conversation, runOptions.maxTurns ?? 12, savedInput.assistantChatVersion === '5' ? '5' : savedInput.assistantChatVersion === '4' ? '4' : savedInput.assistantChatVersion === '3' ? '3' : savedInput.assistantChatVersion === '2' ? '2' : '1', createHostToolInputValidator(registry), resumeReference, savedInput.fileSurfaceVersion === 3)(runOptions.approvalMode ?? 'ask')
+        : buildProgram(restoredToolNames, runPrompt, conversation, true, runOptions.maxTurns ?? 32, '2', undefined, undefined, savedInput.fileSurfaceVersion === 3)(runOptions.approvalMode ?? 'ask')
       runtime.setHumanInputProgram(interactionProgram)
       const agent = [...runtime.state.agents.values()].find((candidate) => candidate.parentAgentId === undefined)
       if (!agent) throw new Error('RESTORED_AGENT_NOT_FOUND')
@@ -4440,7 +4496,7 @@ export class LocalHost {
     this.approvedToolCalls.clear()
     for (const conversationId of [...this.conversationLocks.keys()]) await this.releaseConversationLock(conversationId)
   }
-  async doctor(options: { live?: boolean } = {}): Promise<{ ok: boolean; cwd: string; dataDir: string; node: string; tools: string[]; provider: string; errors: string[]; live?: { ok: boolean; message: string } }> {
+  async doctor(options: { live?: boolean } = {}): Promise<{ ok: boolean; cwd: string; dataDir: string; node: string; tools: string[]; provider: string; apiMode?: ProviderPresetConfig['apiMode']; errors: string[]; live?: { ok: boolean; message: string } }> {
     const errors: string[] = []
     try { await this.init() } catch (error) { errors.push(error instanceof Error ? error.message : String(error)) }
     try { errors.push(...(await checkShellSandbox()).errors.map((message) => `SHELL_SANDBOX: ${message}`)) } catch { errors.push('SHELL_SANDBOX: dependency probe failed') }
@@ -4456,12 +4512,17 @@ export class LocalHost {
         live = { ok: false, message: error instanceof Error ? error.message : String(error) }
       } finally { clearTimeout(timer) }
     }
-    return { ok: errors.length === 0 && (live?.ok ?? true), cwd: this.root, dataDir: this.dataDir, node: process.version, tools: registry.list().map((tool) => tool.name), provider: this.options.provider?.provider ?? 'mock', errors, ...(live === undefined ? {} : { live }) }
+    return { ok: errors.length === 0 && (live?.ok ?? true), cwd: this.root, dataDir: this.dataDir, node: process.version, tools: registry.list().map((tool) => tool.name), provider: this.options.provider?.provider ?? 'mock', ...(this.options.provider?.apiMode === undefined ? {} : { apiMode: this.options.provider.apiMode }), errors, ...(live === undefined ? {} : { live }) }
   }
   private async settlePersistedFileEffects(cwd: string, snapshot: { state?: { state?: { effects?: unknown[] } } }, conversationId: string, runId: string): Promise<void> {
     const effects = snapshot.state?.state?.effects
     if (!Array.isArray(effects)) return
     const owners: Array<{ conversationId: string; runId: string; effectId: string; laneId?: string; agentId?: string }> = []
+    const manager = new FileSnapshotManager(cwd, new FilesystemTool(cwd))
+    // Pending WAL is authoritative. An old writer may introduce a record even after a prior acknowledgement.
+    const pending = await manager.pendingOwners()
+    const pendingEffects = new Set(pending.filter(owner => owner.conversationId === conversationId && owner.runId === runId).map(owner => owner.effectId))
+    if (!pendingEffects.size) return
     for (const entry of effects) {
       if (!Array.isArray(entry) || typeof entry[0] !== 'string' || !entry[1] || typeof entry[1] !== 'object') continue
       const effect = entry[1] as { executionState?: string; sideEffectState?: string; outcome?: { status?: string; resultRef?: string }; input?: unknown; agentId?: string; ownerLaneId?: string }
@@ -4469,9 +4530,10 @@ export class LocalHost {
       const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, unknown> : undefined
       const name = typeof input?.name === 'string' ? input.name : ''
       if (!['fs.write', 'fs.overwrite', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'fs.move', 'plan.write', ...officeWriteTools].includes(name)) continue
+      if (!pendingEffects.has(entry[0])) continue
       owners.push({ conversationId, runId, effectId: entry[0], ...(typeof effect.ownerLaneId === 'string' ? { laneId: effect.ownerLaneId } : {}), ...(typeof effect.agentId === 'string' ? { agentId: effect.agentId } : {}) })
     }
-    await new FileSnapshotManager(cwd, new FilesystemTool(cwd)).settleConfirmed(owners)
+    await manager.settleConfirmed(owners)
   }
 
   async reconcileWorkspaceWal(cwd: string, runtime: PulseRuntime | undefined, runId: string, conversationId?: string): Promise<{ cleaned: string[]; restored: string[] }> {

@@ -14,7 +14,8 @@ export function assertWindowObservationScope(request: string, name: string, inpu
 
 /** Only direct prohibitions in the caller-owned request. Never scan tool/file evidence. */
 export function assertExplicitToolRestriction(request: string, name: string, input: JsonValue): void {
-  if (name === 'shell.start') name = 'shell.exec'
+  const interactiveInput = name === 'shell.stdin'
+  if (name === 'shell.start' || interactiveInput) name = 'shell.exec'
   // Quoted/code examples are data; this deliberately does not interpret them as policy.
   const text = request.replace(/```[\s\S]*?```|“[^”]*”|「[^」]*」|"[^"\n]*"/g, '').replace(/`([^`]+)`/g, '$1')
   const clauses = text.split(/[。！？;；\n]/).flatMap(s => {
@@ -26,11 +27,14 @@ export function assertExplicitToolRestriction(request: string, name: string, inp
   })
   const denied = (pattern: RegExp) => clauses.some(s => pattern.test(s))
   const args = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
-  const command = String(args.command ?? '').replaceAll('\\', '/').split('/').at(-1)?.toLowerCase() ?? ''
+  const command = String(args.command ?? (interactiveInput ? 'sh' : '')).replaceAll('\\', '/').split('/').at(-1)?.toLowerCase() ?? ''
   let reason: string | undefined
   if (name === 'shell.exec' && denied(/(?:不要|不得|禁止|不能)(?:运行|执行|调用)(?:任何)?(?:命令|shell)|\b(?:do not|don't|never)\s+(?:run|execute)\s+(?:any\s+)?(?:shell\s+)?commands?\b/i)) reason = 'Command execution is explicitly prohibited.'
   if (name === 'shell.exec' && denied(/(?:执行|运行)(?:系统)?脚本|\b(?:run|execute)\s+(?:system\s+)?scripts?\b/i) && (/^(?:env|command|sudo|xcrun|osascript|powershell(?:\.exe)?|pwsh(?:\.exe)?|cmd(?:\.exe)?|bash|zsh|sh|fish|python[\d.]*|node(?:\.exe)?|ruby|perl|wscript(?:\.exe)?|cscript(?:\.exe)?)$/.test(command) || /\.(?:sh|command|ps1|vbs|js|mjs|cjs|py|rb|pl)$/i.test(command))) reason = 'Script execution is explicitly prohibited.'
   if (name === 'shell.exec' && denied(/安装(?:软件|工具)|\binstall\s+(?:software|tools?|packages?)\b/i)) {
+    // An arbitrary interpreter input has no bounded argv we can verify against
+    // an explicit no-install constraint. Prefer the existing exact argv tool.
+    if (interactiveInput) reason = 'Interactive input cannot establish the explicit no-install boundary; use a bounded command.'
     const argv = Array.isArray(args.args) ? args.args.map(String) : []
     if (/^(?:brew|apt|apt-get|yum|dnf|pip[\d.]*|npm|pnpm|yarn|bun|uv|cargo|winget|choco|npx|uvx)$/.test(command) && (argv.some(a => /^(?:install|add|i|dlx|x|tool)$/.test(a)) || /^(?:npx|uvx)$/.test(command))) reason = 'Software installation is explicitly prohibited.'
   }

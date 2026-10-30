@@ -1,11 +1,11 @@
-import { createHash } from 'node:crypto'
-import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { appendFile, mkdir, open, readFile, readdir } from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 import { join } from 'node:path'
 import type { ToolContext } from '@hunterzhu/pulse-tool-sdk'
 import { replaceStateFile } from './atomic-file.js'
 
-export interface ShellCommand { command: string; args?: string[] | undefined; cwd?: string | undefined; timeoutMs?: number | undefined }
+export interface ShellCommand { command: string; args?: string[] | undefined; cwd?: string | undefined; timeoutMs?: number | undefined; pty?: boolean | undefined }
 export interface ProcessReceipt {
   processId: string
   agentId: string
@@ -14,9 +14,13 @@ export interface ProcessReceipt {
   command: ShellCommand
   result?: Record<string, unknown>
   error?: string
+  stdinReady?: boolean
+  inputUncertain?: boolean
 }
-type Runner = (command: ShellCommand, context: ToolContext, onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) => void) => Promise<Record<string, unknown>>
-interface LiveProcess { record: ProcessReceipt; controller: AbortController; done: Promise<void> }
+type InputWriter = (data: string) => void
+export interface ShellInputReceipt { processId: string; effectId: string; agentId: string; laneId: string; digest: string; bytes: number; status: 'pending' | 'delivered' | 'unknown' }
+type Runner = (command: ShellCommand, context: ToolContext, onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) => void, ready: (write: InputWriter) => void) => Promise<Record<string, unknown>>
+interface LiveProcess { record: ProcessReceipt; controller: AbortController; done: Promise<void>; write?: InputWriter }
 const managers = new Map<string, ShellProcesses>()
 const failure = (code: string) => Object.assign(new Error(code), { code, retryable: false })
 
@@ -26,7 +30,11 @@ export function shellAcceptanceGate(programVersion: string | undefined): boolean
 }
 
 export async function blockAcceptanceIfShellBusy(programVersion: string | undefined, runDirectory: string | undefined): Promise<void> {
-  if (!shellAcceptanceGate(programVersion)) return
+  if (!shellAcceptanceGate(programVersion)) {
+    if (!runDirectory) return
+    const input = JSON.parse(await readFile(join(runDirectory, 'input.json'), 'utf8').catch(error => { if (error.code === 'ENOENT') return '{}'; throw error })) as { shellSurfaceVersion?: unknown }
+    if (input.shellSurfaceVersion !== 1) return
+  }
   if (!runDirectory) throw failure('SHELL_PROCESS_STATE_UNKNOWN')
   await shellProcesses(runDirectory).assertIdle()
 }
@@ -42,6 +50,7 @@ export function summarizeShellProcess(value: unknown): Record<string, unknown> {
   }
   return {
     processId: record.processId, status: record.status,
+    ...(typeof record.stdinReady === 'boolean' ? { stdinReady: record.stdinReady, inputUncertain: record.inputUncertain === true } : {}),
     ...(typeof record.code === 'number' || record.code === null ? { code: record.code, aborted: record.aborted, timedOut: record.timedOut } : {}),
     ...(record.output === undefined ? {} : { offset: record.offset, nextOffset: record.offset + bytes, output, truncated: record.truncated || output.length < record.output.length }),
     ...(record.error ? { error: record.error } : {}),
@@ -53,15 +62,23 @@ export function summarizeShellProcess(value: unknown): Record<string, unknown> {
 export class ShellProcesses {
   private admission = Promise.resolve()
   private readonly live = new Map<string, LiveProcess>()
+  private inputTail = Promise.resolve()
+  private readonly inputs = new Map<string, { identity: string; promise: Promise<ShellInputReceipt> }>()
   constructor(readonly directory: string) {}
   private path(id: string): string {
     if (!/^[a-f0-9]{64}$/.test(id)) throw failure('INVALID_SHELL_PROCESS_ID')
     return join(this.directory, `${id}.json`)
   }
   private async persist(record: ProcessReceipt): Promise<void> {
-    const path = this.path(record.processId), temporary = path + '.tmp'
-    await writeFile(temporary, JSON.stringify(record), { mode: 0o600 })
+    await this.persistJson(this.path(record.processId), record)
+  }
+  private async persistJson(path: string, record: unknown): Promise<void> {
+    const temporary = path + '.' + randomUUID() + '.tmp'
+    const file = await open(temporary, 'wx', 0o600)
+    try { await file.writeFile(JSON.stringify(record)); await file.sync() } finally { await file.close() }
     await replaceStateFile(temporary, path)
+    const directory = await open(this.directory, 'r').catch(() => undefined)
+    if (directory) { try { await directory.sync() } catch { /* Some filesystems cannot sync a directory. */ } finally { await directory.close() } }
   }
   private async saved(id: string): Promise<ProcessReceipt> {
     const record = JSON.parse(await readFile(this.path(id), 'utf8')) as ProcessReceipt
@@ -76,6 +93,11 @@ export class ShellProcesses {
   }
   async assertIdle(): Promise<void> {
     for (const file of await readdir(this.directory).catch(error => { if (error.code === 'ENOENT') return []; throw error })) {
+      if (/^stdin-[a-f0-9]{64}\.json$/.test(file)) {
+        const receipt = JSON.parse(await readFile(join(this.directory, file), 'utf8')) as ShellInputReceipt
+        if (receipt.status !== 'delivered') throw failure('SHELL_STDIN_STATE_UNKNOWN')
+        continue
+      }
       if (!/^[a-f0-9]{64}\.json$/.test(file)) continue
       const id = file.slice(0, -5), record = this.live.get(id)?.record ?? await this.saved(id)
       if (record.status === 'running' || record.status === 'unknown') throw failure(this.live.has(id) ? 'SHELL_PROCESS_ACTIVE' : 'SHELL_PROCESS_STATE_UNKNOWN')
@@ -112,7 +134,10 @@ export class ShellProcesses {
     }
     live.done = (async () => {
       try {
-        const result = await run(command, { ...context, signal: controller.signal }, onOutput)
+        const result = await run(command, { ...context, signal: controller.signal }, onOutput, write => {
+          if (command.pty !== true || controller.signal.aborted || live.record.status !== 'running') throw failure('SHELL_STDIN_NOT_READY')
+          live.write = write
+        })
         await output
         live.record = { ...record, status: 'exited', result }
       } catch (cause) {
@@ -142,7 +167,89 @@ export class ShellProcesses {
     while (end > offset && end < log.length && (log[end]! & 0xc0) === 0x80) end--
     if (end === offset && end < log.length) { end++; while (end < log.length && (log[end]! & 0xc0) === 0x80) end++ }
     if (offset > log.length) throw failure('SHELL_OUTPUT_OFFSET_INVALID')
-    return { ...record, ...(record.status === 'exited' ? record.result : {}), output: log.subarray(offset, end).toString('utf8'), offset, nextOffset: end, truncated: end < log.length }
+    return { ...record, ...(record.command.pty === undefined ? {} : { stdinReady: record.status === 'running' && live?.write !== undefined, inputUncertain: await this.inputUncertain(id) }), ...(record.status === 'exited' ? record.result : {}), output: log.subarray(offset, end).toString('utf8'), offset, nextOffset: end, truncated: end < log.length }
+  }
+  private inputPath(effectId: string): string { return join(this.directory, `stdin-${createHash('sha256').update(effectId).digest('hex')}.json`) }
+  private async inputUncertain(id: string): Promise<boolean> {
+    for (const name of await readdir(this.directory)) {
+      if (!/^stdin-[a-f0-9]{64}\.json$/.test(name)) continue
+      const receipt = JSON.parse(await readFile(join(this.directory, name), 'utf8')) as ShellInputReceipt
+      if (receipt.processId === id && receipt.status !== 'delivered') return true
+    }
+    return false
+  }
+  async input(id: string, data: string, context: ToolContext): Promise<ShellInputReceipt> {
+    context.signal.throwIfAborted()
+    const bytes = Buffer.byteLength(data)
+    if (!bytes || bytes > 8192 || Buffer.from(data).toString('utf8') !== data) throw failure('SHELL_STDIN_RANGE_INVALID')
+    await this.owned(id, context)
+    const digest = createHash('sha256').update(data).digest('hex')
+    const identity = JSON.stringify([id, context.effectId, context.agentId, context.laneId, digest, bytes])
+    const prior = this.inputs.get(context.effectId)
+    if (prior) { if (prior.identity !== identity) throw failure('SHELL_STDIN_OPERATION_CHANGED'); return prior.promise }
+    const work = this.inputTail.then(async () => {
+      context.signal.throwIfAborted()
+      const path = this.inputPath(context.effectId)
+      const saved = await readFile(path, 'utf8').catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+      if (saved !== undefined) {
+        const receipt = JSON.parse(saved) as ShellInputReceipt
+        if (JSON.stringify([receipt.processId, receipt.effectId, receipt.agentId, receipt.laneId, receipt.digest, receipt.bytes]) !== identity) throw failure('SHELL_STDIN_OPERATION_CHANGED')
+        return receipt.status === 'delivered' ? receipt : { ...receipt, status: 'unknown' as const }
+      }
+      const record = await this.owned(id, context), live = this.live.get(id)
+      if (record.status === 'unknown') throw failure('SHELL_PROCESS_STATE_UNKNOWN')
+      if (await this.inputUncertain(id)) throw failure('SHELL_STDIN_DELIVERY_UNKNOWN')
+      if (record.command.pty !== true || record.status !== 'running' || !live?.write) throw failure('SHELL_STDIN_NOT_READY')
+      const receipt: ShellInputReceipt = { processId: id, effectId: context.effectId, agentId: context.agentId, laneId: context.laneId, digest, bytes, status: 'pending' }
+      await this.persistJson(path, receipt)
+      try {
+        context.signal.throwIfAborted()
+        if (live.controller.signal.aborted || live.record.status !== 'running') throw failure('SHELL_STDIN_NOT_READY')
+        live.write(data)
+        receipt.status = 'delivered'
+        await this.persistJson(path, receipt)
+        return receipt
+      } catch {
+        receipt.status = 'unknown'
+        await this.persistJson(path, receipt).catch(() => undefined)
+        return receipt
+      }
+    })
+    this.inputs.set(context.effectId, { identity, promise: work })
+    this.inputTail = work.then(() => undefined, () => undefined)
+    return work
+  }
+  async inputReceipt(id: string, effectId: string, context: Pick<ToolContext, 'agentId' | 'laneId'>): Promise<ShellInputReceipt | undefined> {
+    await this.owned(id, context)
+    const text = await readFile(this.inputPath(effectId), 'utf8').catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+    if (!text) return undefined
+    const record = JSON.parse(text) as ShellInputReceipt
+    if (record.processId !== id || record.effectId !== effectId || record.agentId !== context.agentId || record.laneId !== context.laneId) throw failure('RESULT_NOT_VISIBLE')
+    return record.status === 'delivered' ? record : { ...record, status: 'unknown' }
+  }
+  /** Human run controls derive ownership internally; they never accept a PID or lane override. */
+  private viewContext(record: ProcessReceipt): ToolContext {
+    return { agentId: record.agentId, laneId: record.laneId, effectId: 'human-process-view', toolCallId: 'human-process-view', attemptId: 'human-process-view', signal: new AbortController().signal, emit() {} }
+  }
+  async list(): Promise<ProcessReceipt[]> {
+    const files = await readdir(this.directory).catch(error => { if (error.code === 'ENOENT') return []; throw error })
+    const result: ProcessReceipt[] = []
+    for (const name of files) {
+      if (!/^[a-f0-9]{64}\.json$/.test(name)) continue
+      const id = name.slice(0, -5), saved = this.live.get(id)?.record ?? await this.saved(id)
+      const record = await this.owned(id, this.viewContext(saved))
+      const { result: output, ...meta } = record
+      result.push({ ...meta, ...(output ? { result: { code: output.code, aborted: output.aborted, timedOut: output.timedOut } } : {}), ...(record.command.pty === undefined ? {} : { stdinReady: record.status === 'running' && this.live.get(id)?.write !== undefined, inputUncertain: await this.inputUncertain(id) }) })
+    }
+    return result
+  }
+  async readForUser(id: string, offset = 0) {
+    const record = this.live.get(id)?.record ?? await this.saved(id)
+    return this.poll(id, this.viewContext(record), offset, 8192, 0)
+  }
+  async cancelForUser(id: string) {
+    const record = this.live.get(id)?.record ?? await this.saved(id)
+    return this.cancel(id, this.viewContext(record))
   }
   async cancel(id: string, context: ToolContext): Promise<ProcessReceipt> {
     const record = await this.owned(id, context)
