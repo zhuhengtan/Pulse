@@ -115,11 +115,22 @@ it.skipIf(process.platform === 'win32')('keeps external reads and forged git poi
       expect(cat.stdout).not.toContain('OUTSIDE SENTINEL')
     }
 
-    for (const dir of [forged, stray]) {
-      const result = await gitInSandbox(dir, ['status', '--short'])
-      expect(result.code, `${dir}: ${result.stdout}${result.stderr}`).not.toBe(0)
-      expect(result.stdout).not.toContain('worktree-only.txt')
+    // Same early refusal as the worktree guard: a trusted Git that cannot
+    // neutralize repository helpers throws GIT_HELPER_UNNEUTRALIZED before
+    // producing output. Any other error still fails. A returned result must
+    // stay non-zero and must not reveal the linked worktree.
+    const deniedPointer = async (dir: string) => {
+      try {
+        const result = await gitInSandbox(dir, ['status', '--short'])
+        expect(result.code, `${dir}: ${result.stdout}${result.stderr}`).not.toBe(0)
+        expect(result.stdout).not.toContain('worktree-only.txt')
+      } catch (error) {
+        const code = (error as { code?: string }).code
+        if (code !== 'GIT_HELPER_UNNEUTRALIZED') throw error
+        expect(code).toBe('GIT_HELPER_UNNEUTRALIZED')
+      }
     }
+    for (const dir of [forged, stray]) await deniedPointer(dir)
   } finally {
     await removeFixture(fx)
   }

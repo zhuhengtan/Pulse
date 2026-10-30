@@ -1,11 +1,9 @@
 import { createHash } from 'node:crypto'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import { lstat, open, realpath } from 'node:fs/promises'
 import { resolve, relative, isAbsolute } from 'node:path'
 import type { PulseRuntime, JsonValue } from '@hunterzhu/pulse-runtime'
 import { controllerFromGlobal, type TaskControllerState } from './state.js'
-const exec = promisify(execFile)
+import { readOnlySystemGit } from '../system-git.js'
 const digest = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
 /** A bounded serialized window. Offsets are UTF-16 positions, always at code-point boundaries. */
 export function textWindow(text: string, offset = 0): { content: string; nextOffset: number | null } {
@@ -36,7 +34,7 @@ async function boundedHash(path: string): Promise<string | undefined> {
 export interface WorkspaceStamp { available: boolean; files: Record<string, string>; digest?: string }
 export async function workspaceStamp(root: string): Promise<WorkspaceStamp> {
   try {
-    const { stdout } = await exec('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: root, maxBuffer: 1_000_000, timeout: 5000 })
+    const { stdout } = await readOnlySystemGit(root, ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { timeout: 5000, maxBuffer: 1_000_000 })
     const paths = [...new Set(stdout.split('\0').filter(path => path && !path.split(/[\\/]/).includes('node_modules')))].sort()
     if (paths.length > 5000) return { available: false, files: {} }
     const realRoot = await realpath(root)

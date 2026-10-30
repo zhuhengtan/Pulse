@@ -1,4 +1,4 @@
-import { overlayBuiltinPlugins, readMergedHostConfig, type ModelDefinition } from '@hunterzhu/pulse-server'
+import { mergeExecPolicies, workspaceExecPolicy, sourceExecPolicy, overlayBuiltinPlugins, readMergedHostConfig, type ModelDefinition } from '@hunterzhu/pulse-server'
 import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -79,6 +79,7 @@ export interface PulseCliConfig {
   /** Ordered providerId/modelId references per task; later entries act as fallbacks. */
   taskRouting?: Partial<Record<PulseModelTask, string[]>>
   capabilities?: PulseCliCapabilities
+  execPolicy?: import('@hunterzhu/pulse-server').ExecPolicyConfig
   approvalMode?: 'read-only' | 'ask' | 'auto'
   /** Task controller execution mode: 'legacy' (v56 DAG/stages, default) or 'continuous' (v57 continuous execution slices). */
   taskControllerPolicy?: 'legacy' | 'continuous'
@@ -220,6 +221,7 @@ export function sanitizeWorkspaceConfig(value: PulseCliConfig): PulseCliConfig {
     return Object.keys(safe).length ? [[name, safe]] : []
   }))
   return {
+    ...(value.execPolicy === undefined ? {} : { execPolicy: workspaceExecPolicy(value.execPolicy) }),
     ...(value.cwd === undefined ? {} : { cwd: value.cwd }),
     ...(value.dataDir === undefined ? {} : { dataDir: value.dataDir }),
     // Workspace configs cannot launch processes, select host skills, or enable installed capabilities.
@@ -243,10 +245,11 @@ export function sanitizeWorkspaceConfig(value: PulseCliConfig): PulseCliConfig {
   }
 }
 
-export function mergePulseConfigs(layers: Array<{ value: PulseCliConfig; trust: 'workspace' | 'user' }>): PulseCliConfig {
+export function mergePulseConfigs(layers: Array<{ value: PulseCliConfig; trust: 'workspace' | 'user'; source?: string }>): PulseCliConfig {
   let merged: PulseCliConfig = {}
   for (const layer of layers) {
-    const value = layer.trust === 'workspace' ? sanitizeWorkspaceConfig(layer.value) : layer.value
+    const value = { ...(layer.trust === 'workspace' ? sanitizeWorkspaceConfig(layer.value) : layer.value) }
+    if (value.execPolicy !== undefined) value.execPolicy = sourceExecPolicy(value.execPolicy, layer.source ?? layer.trust)
     const providers = { ...(merged.providers ?? {}) }
     for (const [providerId, profile] of Object.entries(value.providers ?? {})) {
       const previous = providers[providerId]
@@ -256,6 +259,7 @@ export function mergePulseConfigs(layers: Array<{ value: PulseCliConfig; trust: 
         ...(previous?.models === undefined && profile.models === undefined ? {} : { models: { ...previous?.models, ...profile.models } }),
       }
     }
+    const execPolicy = merged.execPolicy === undefined && value.execPolicy === undefined ? undefined : mergeExecPolicies(merged.execPolicy, value.execPolicy)
     const builtinPlugins = overlayBuiltinPlugins(merged.builtinPlugins, value.builtinPlugins)
     merged = {
       ...merged,
@@ -263,6 +267,7 @@ export function mergePulseConfigs(layers: Array<{ value: PulseCliConfig; trust: 
       ...(merged.providers === undefined && value.providers === undefined ? {} : { providers }),
       ...(merged.models === undefined && value.models === undefined ? {} : { models: { ...merged.models, ...value.models } }),
       ...(builtinPlugins ? { builtinPlugins } : {}),
+      ...(execPolicy ? { execPolicy } : {}),
     }
   }
   return merged
@@ -277,6 +282,7 @@ export async function loadPulseConfig(cwd: string, explicitPath?: string, trustW
   const homePath = defaultPulseConfigPath()
   const envPath = expandHome(process.env.PULSE_CONFIG)
   const layers: Array<{ value: PulseCliConfig; trust: 'workspace' | 'user'; source: string }> = []
+  const seenPolicySources = new Set<string>()
   for (const [path, trust, workspaceLayer] of [
     [workspacePath, trustWorkspace ? 'user' : 'workspace', true],
     [homePath, 'user', false],
@@ -284,14 +290,18 @@ export async function loadPulseConfig(cwd: string, explicitPath?: string, trustW
     [explicitPath, 'user', false],
   ] as const) {
     if (!path) continue
+    const sourceKey = `${resolve(path)}:${workspaceLayer ? 'workspace' : 'host'}`
+    if (seenPolicySources.has(sourceKey)) continue
+    seenPolicySources.add(sourceKey)
     try {
       const parsed = asConfig(JSON.parse(await readFile(path, 'utf8')))
+      if (!parsed) throw new Error('CONFIG_OBJECT_REQUIRED')
       if (parsed) {
         // Search endpoints and credentials are host-owned even when other workspace fields are trusted.
-        if (workspaceLayer) { delete parsed.webSearch; delete parsed.builtinPlugins }
+        if (workspaceLayer) { delete parsed.webSearch; delete parsed.builtinPlugins; if (parsed.execPolicy !== undefined) parsed.execPolicy = workspaceExecPolicy(parsed.execPolicy) }
         layers.push({ value: parsed, trust, source: path })
       }
-    } catch { /* absent or invalid config is reported by doctor */ }
+    } catch (cause) { if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause }
   }
   return { value: mergePulseConfigs(layers), ...(layers.at(-1) === undefined ? {} : { source: layers.at(-1)!.source }) }
 }

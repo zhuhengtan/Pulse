@@ -660,8 +660,8 @@ export function App({
           request={approvalRequest}
           inputMode={approvalInputMode}
           isFocused={approvalChoiceFocused && !approvalSubmitting}
-          onApprove={() => {
-            void approveAction(approvalRequest.effectId, true);
+          onApprove={(remember) => {
+            void approveAction(approvalRequest.effectId, true, undefined, remember, approvalRequest.execPolicy?.token);
           }}
           onDeny={(reason) => {
             void approveAction(approvalRequest.effectId, false, reason);

@@ -106,6 +106,53 @@ describe('page navigation and recovery', () => {
     await waitFor(() => expect(view.baseElement.querySelector('.ant-drawer-open')).toBeNull())
     expect(screen.getByRole('tablist', { name: 'Pulse 工作模式' }).closest('.history-head')).toBeTruthy()
   })
+
+  it('lets a clean settings page cancel an illegal program name without saving the mapping', async () => {
+    const fixture = settingsFixture()
+    const config = { ...fixture.config, execPolicy: { hostExecutables: { program1: ['/usr/bin/git'], program2: ['/bin/git'] } } }
+    let saved: { config?: { execPolicy?: { hostExecutables?: Record<string, string[]> }; maxTurns?: number } } | undefined
+    const transport = {
+      subscribe: fixture.transport.subscribe,
+      request: async (path: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        if (path === '/api/config' && method === 'GET') return new Response(JSON.stringify({ path: '/example/config.json', config, version: 'fixture', sources: {}, environment: {}, backupAvailable: false }), { headers: { 'Content-Type': 'application/json' } })
+        if (path === '/api/config' && method === 'PUT') {
+          saved = JSON.parse(String(init?.body))
+          return new Response(JSON.stringify({ ok: true, path: '/example/config.json', version: 'fixture-2', applied: true, restartRequired: [], config: saved?.config }), { headers: { 'Content-Type': 'application/json' } })
+        }
+        return fixture.transport.request(path, init)
+      },
+    }
+    render(<PulseDesignSystem><SettingsPage transport={transport} canEditConfig onClose={() => {}}/></PulseDesignSystem>)
+    fireEvent.click(screen.getByRole('button', { name: '审批与代审', exact: true }))
+    const name = await screen.findByRole('textbox', { name: '路径映射 1 程序名' })
+    expect((screen.getByRole('button', { name: '取消修改' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(name, { target: { value: 'program2' } })
+    expect((name as HTMLInputElement).value).toBe('program2')
+    expect((screen.getByRole('textbox', { name: '路径映射 2 受信路径' }) as HTMLTextAreaElement).value).toBe('/bin/git')
+    expect(screen.getByText('有未保存的修改')).toBeTruthy()
+    expect((screen.getByRole('button', { name: '取消修改' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: '保存全部' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: '取消修改' }))
+    fireEvent.click(await screen.findByRole('button', { name: '确认', exact: true }))
+    await waitFor(() => expect((screen.getByRole('textbox', { name: '路径映射 1 程序名' }) as HTMLInputElement).value).toBe('program1'))
+    expect(screen.getByText('所有修改已保存')).toBeTruthy()
+    expect((screen.getByRole('button', { name: '保存全部' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(screen.getByRole('textbox', { name: '路径映射 1 程序名' }), { target: { value: '' } })
+    expect((screen.getByRole('button', { name: '取消修改' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: '保存全部' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: '取消修改' }))
+    fireEvent.click(await screen.findByRole('button', { name: '确认', exact: true }))
+    await waitFor(() => expect((screen.getByRole('textbox', { name: '路径映射 1 程序名' }) as HTMLInputElement).value).toBe('program1'))
+    fireEvent.click(screen.getByRole('button', { name: '运行与存储', exact: true }))
+    const turns = await screen.findByRole('spinbutton', { name: /^最大执行轮数/ })
+    fireEvent.change(turns, { target: { value: '40' } })
+    fireEvent.blur(turns)
+    expect((screen.getByRole('button', { name: '保存全部' }) as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: '保存全部' }))
+    await waitFor(() => expect(saved?.config?.maxTurns).toBe(40))
+    expect(saved?.config?.execPolicy?.hostExecutables).toEqual({ program1: ['/usr/bin/git'], program2: ['/bin/git'] })
+  })
 })
 
 describe('question and approval pages', () => {

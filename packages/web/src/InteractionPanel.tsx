@@ -17,6 +17,7 @@ const planExecutionQuestion = (input: Record<string, unknown>) => {
 }
 type Props = {
   interaction: PendingInteraction; context?: string | undefined; reviewNote: string; delegated: boolean
+  localAdmin?: boolean | undefined
   draftScope?: string | undefined
   onDismiss?: (() => void) | undefined
   notificationTarget?: string | undefined
@@ -25,7 +26,7 @@ type Props = {
   submit: (answers: Array<{ effectId: string; value: Record<string, unknown> }>) => Promise<boolean>
 }
 
-export function InteractionPanel({ interaction, context, reviewNote, delegated, submit, onOpenConversation, onOpenFile, notificationTarget, onDismiss, draftScope }: Props) {
+export function InteractionPanel({ localAdmin = false, interaction, context, reviewNote, delegated, submit, onOpenConversation, onOpenFile, notificationTarget, onDismiss, draftScope }: Props) {
   const key = `pulse-web-interaction:${interaction.runId}:${interaction.groupId}${draftScope ? `:${draftScope}` : ''}`
   const panel = useRef<HTMLElement>(null)
   useEffect(() => {
@@ -97,6 +98,8 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
     const tools = interaction.items.flatMap(entry => Array.isArray(entry.input.tools) ? entry.input.tools as Array<{ toolName?: string; details?: Record<string, unknown> }> : [])
     const count = interaction.items.reduce((total, entry) => total + (typeof entry.input.operationCount === 'number' ? entry.input.operationCount : Array.isArray(entry.input.tools) ? entry.input.tools.length : 1), 0)
     const title = count > 1 ? `允许执行这 ${count} 项操作？` : tools[0]?.toolName === 'shell.exec' ? '允许执行此命令？' : tools[0]?.toolName?.startsWith('fs.') ? '允许访问这些文件？' : '允许执行此操作？'
+    const offer = interaction.items.length === 1 ? interaction.items[0]?.input.execPolicy as { token: string; prefix: string[]; canAmend: boolean } | undefined : undefined
+    const remember = (scope: 'session' | 'permanent') => void submitBatch(interaction.items.map(entry => ({ effectId: entry.effectId, value: { approved: true, remember: scope, execPolicyToken: offer!.token } })))
     const decide = (approved: boolean) => void submitBatch(interaction.items.map(entry => ({ effectId: entry.effectId, value: approved ? { approved: true } : { approved: false, reason: '用户拒绝' } })))
     return <section ref={panel} className="interaction-panel approval-panel" aria-label="待审批操作" aria-busy={sending}>
       <div className="interaction-heading"><Icon name="shield" size={16}/><strong>{title}</strong></div>
@@ -114,7 +117,7 @@ export function InteractionPanel({ interaction, context, reviewNote, delegated, 
         {(reviewNote || delegated) && <p className="review-note" role="status"><Icon name="info" size={14}/><span>{reviewNote || '自动审核需要你确认本次操作。'}</span></p>}
       </div>
       {error && <p className="interaction-error" role="alert">{error}</p>}
-      <div className="interaction-actions"><PulseButton disabled={sending} onClick={() => decide(false)}>拒绝</PulseButton><PulseButton className="primary" disabled={sending} onClick={() => decide(true)}>{sending ? '正在提交…' : '允许本次'}</PulseButton></div>
+      <div className="interaction-actions">{offer && localAdmin && <><PulseButton disabled={sending} onClick={() => remember('session')}>本次任务记住 {offer.prefix.join(' ')}（重启失效）</PulseButton>{offer.canAmend && <PulseButton disabled={sending} onClick={() => remember('permanent')}>永久记住 {offer.prefix.join(' ')}</PulseButton>}</>}<PulseButton disabled={sending} onClick={() => decide(false)}>拒绝</PulseButton><PulseButton className="primary" disabled={sending} onClick={() => decide(true)}>{sending ? '正在提交…' : '允许本次'}</PulseButton></div>
     </section>
   }
   const count = interaction.items.length

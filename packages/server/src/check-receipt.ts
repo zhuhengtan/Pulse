@@ -1,9 +1,8 @@
 import { pythonCheckInputs } from './python-check-inputs.js'
 import { promises as fs } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import { dirname, extname, join, relative, resolve } from 'node:path'
+import { readOnlySystemGit } from './system-git.js'
 import { FilesystemTool } from '@hunterzhu/pulse-adapters'
 import { candidateScriptCoverage, type CandidateScriptCoverage } from './task-controller/candidate-script-coverage.js'
 
@@ -363,10 +362,10 @@ export async function captureCheck(root: string, cwd: string, command: string, a
     let inventory: string | undefined
     try {
       if (version >= 3) {
-        const top = (await promisify(execFile)('git', ['rev-parse', '--show-toplevel'], { cwd, timeout: 10_000 })).stdout.trim()
+        const top = (await readOnlySystemGit(cwd, ['rev-parse', '--show-toplevel'], { timeout: 10_000 })).stdout.trim()
         if (relative(root, top).startsWith('..')) throw Object.assign(new Error('parent repository is not a git repository for this workspace'), { stderr: 'not a git repository' })
       }
-      inventory = (await promisify(execFile)('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', '.'], { cwd, timeout: 10_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true })).stdout
+      inventory = (await readOnlySystemGit(cwd, ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', '.'], { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 })).stdout
     } catch (error) {
       if ((error as { code?: string | number }).code !== 'ENOENT' && !/not a git repository/i.test(String((error as { stderr?: string }).stderr ?? ''))) throw error
     }

@@ -230,6 +230,7 @@ export function useRun({
               toolArgs: firstTool?.input ?? {},
               prompt: typeof input.prompt === 'string' ? input.prompt : '是否批准执行？',
               ...(typeof input.digest === 'string' ? { digest: input.digest } : {}),
+              ...(input.execPolicy ? { execPolicy: input.execPolicy as ApprovalRequest['execPolicy'] } : {}),
               ...(tools.length ? { tools } : {}),
             } });
             setCurrentStep('等待用户审批...');
@@ -418,11 +419,11 @@ export function useRun({
     if (run) void run.cancel('USER_INTERRUPT');
   }, []);
 
-  const approveAction = useCallback(async (effectId: string, approved: boolean, reason?: string) => {
+  const approveAction = useCallback(async (effectId: string, approved: boolean, reason?: string, remember?: 'session' | 'permanent', execPolicyToken?: string) => {
     if (!effectId || !runRef.current || approvalSubmitting) return;
     setApprovalSubmitting(true);
     try {
-      await runRef.current.reply(effectId, { approved, ...(approved ? {} : { reason: reason || '拒绝执行' }) });
+      await runRef.current.reply(effectId, { approved, ...(approved ? {} : { reason: reason || '拒绝执行' }), ...(remember ? { remember, execPolicyToken: execPolicyToken ?? '' } : {}) });
       removeInteraction(effectId);
       setCurrentStep('审批已提交，正在继续...');
       setError(null);

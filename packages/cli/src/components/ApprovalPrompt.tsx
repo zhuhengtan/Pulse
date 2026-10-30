@@ -8,7 +8,7 @@ interface Props {
   request: ApprovalRequest;
   isFocused?: boolean;
   inputMode?: boolean;
-  onApprove: () => void;
+  onApprove: (remember?: 'session' | 'permanent') => void;
   onDeny: (reason?: string) => void;
   onInput: () => void;
 }
@@ -60,12 +60,14 @@ export function ApprovalPrompt({ request, isFocused = false, inputMode = false, 
         isFocused={isFocused}
         initialIndex={1}
         items={[
-          { label: '同意', value: 'approve' as const },
+          { label: '同意（仅本次）', value: 'approve' as const },
           { label: '拒绝', value: 'deny' as const },
           { label: '输入', value: 'input' as const },
+          ...(request.execPolicy ? [{ label: `本次任务记住 ${request.execPolicy.prefix.join(' ')}（重启失效）`, value: 'session' as const }, ...(request.execPolicy.canAmend ? [{ label: `永久记住 ${request.execPolicy.prefix.join(' ')}（仅同程序与工作目录）`, value: 'permanent' as const }] : [])] : []),
         ]}
         onSelect={(item) => {
           if (item.value === 'approve') onApprove();
+          else if (item.value === 'session' || item.value === 'permanent') onApprove(item.value);
           else if (item.value === 'deny') onDeny('用户拒绝');
           else onInput();
         }}

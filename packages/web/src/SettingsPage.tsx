@@ -1,3 +1,4 @@
+import { ExecPolicyEditor, execPolicyDraftValid } from './ExecPolicyEditor.js'
 import { BuiltinPlugins, pluginErrorText, pluginTitles, type HostPluginSurface } from './BuiltinPlugins.js'
 import { WebSearchSettings, webSearchError } from './WebSearchSettings.js'
 import { ProviderWizard } from './ProviderWizard.js'
@@ -27,7 +28,7 @@ const categories: Category[] = [
   { id: 'models', label: '模型与服务商', description: '在各服务商下管理模型，并设置默认模型和助理聊天模型。支持填写 Key 自动接入，也可继续使用环境变量。', paths: ['providers', 'models', 'activeModel', 'assistantModel'] },
   { id: 'routing', label: '模型路由', description: '按任务配置首选模型和回退顺序。', paths: ['taskRouting'] },
   { id: 'front', label: '即时预回复', description: '选择已登记的服务商和模型作为即时预回复模型。', paths: ['frontModel'] },
-  { id: 'approval', label: '审批与代审', description: '工具审批策略和复核模型；聊天栏的审核方式全局保存。', paths: ['approvalMode', 'approvalReview'] },
+  { id: 'approval', label: '审批与代审', description: '工具审批策略和复核模型；聊天栏的审核方式全局保存。', paths: ['approvalMode', 'approvalReview', 'execPolicy'] },
   { id: 'jarvis', label: 'Jarvis', description: '记忆服务、连接地址、上下文预算和候选记忆策略。访问令牌会脱敏。', paths: ['jarvis'] },
   { id: 'tools', label: '工具与技能', description: '已启用能力、技能选择及受信任的技能目录。', paths: ['capabilities.enabled', 'capabilities.skills', 'capabilities.trustedSkillRoots'] },
   { id: 'mcp', label: 'MCP', description: '服务命令和参数会启动本机进程。环境变量值默认保留为脱敏占位。', paths: ['capabilities.mcpServers'] },
@@ -118,12 +119,16 @@ export function SettingsPage({ transport, canEditConfig, onClose, onOpenArchive,
   const [advancedText, setAdvancedText] = useState('')
   const [advancedError, setAdvancedError] = useState('')
   const [requestError, setRequestError] = useState('')
+  const [execPolicyValid, setExecPolicyValid] = useState(true)
+  const [policyRevision, setPolicyRevision] = useState(0)
+  const [policyLocalDirty, setPolicyLocalDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [providerWizard, setProviderWizard] = useState<{ providerId?: string }>()
   const [dirty, setDirty] = useState(false)
   const [localMobileDetail, setMobileDetail] = useState(false)
   const mobileDetail = onCategoryChange ? Boolean(category) : localMobileDetail
-  useEffect(() => { onDirtyChange?.(dirty || Boolean(advancedError)) }, [dirty, advancedError, onDirtyChange])
+  const formDirty = dirty || policyLocalDirty
+  useEffect(() => { onDirtyChange?.(formDirty || Boolean(advancedError)) }, [formDirty, advancedError, onDirtyChange])
   const contentEl = useRef<HTMLElement>(null)
   useEffect(() => { contentEl.current?.scrollTo({ top: 0 }) }, [categoryId, mobileDetail])
   const [followupBehavior, setFollowupBehavior] = useState(readFollowupBehavior)
@@ -138,15 +143,15 @@ export function SettingsPage({ transport, canEditConfig, onClose, onOpenArchive,
     if (!canEditConfig) return
     try {
       const value = await apiJson<ConfigEnvelope>(transport, '/api/config')
-      setEnvelope(value); setDraft(value.config); setAdvancedText(JSON.stringify(value.config, null, 2)); setDirty(false)
+      setEnvelope(value); setDraft(value.config); setAdvancedText(JSON.stringify(value.config, null, 2)); setDirty(false); setExecPolicyValid(execPolicyDraftValid(value.config)); setPolicyRevision(revision => revision + 1)
     } catch (error) { setRequestError(error instanceof ApiError && error.status === 403 ? '只有本机管理会话可以读取完整配置。' : '配置暂时无法加载，请检查本机 Pulse 连接。') }
   }
   useEffect(() => { void load() }, [canEditConfig, transport])
   useEffect(() => {
-    const listener = (event: BeforeUnloadEvent) => { if (dirty) { event.preventDefault(); event.returnValue = '' } }
+    const listener = (event: BeforeUnloadEvent) => { if (formDirty) { event.preventDefault(); event.returnValue = '' } }
     window.addEventListener('beforeunload', listener)
     return () => window.removeEventListener('beforeunload', listener)
-  }, [dirty])
+  }, [formDirty])
 
   const configChanged = (next: JsonObject) => {
     setDraft(next); setAdvancedText(JSON.stringify(next, null, 2)); setAdvancedError(''); setDirty(true)
@@ -171,7 +176,7 @@ export function SettingsPage({ transport, canEditConfig, onClose, onOpenArchive,
     return Object.fromEntries(ids.map(id => [id, decision]))
   }
   const save = async () => {
-    if (!envelope || !draft || saving) return
+    if (!envelope || !draft || saving || !execPolicyValid || !execPolicyDraftValid(draft)) return
     setSaving(true); setRequestError('')
     try {
       const validation = await apiJson<{ valid: boolean; restartRequired: string[] }>(transport, '/api/config/validate', jsonRequest('POST', { config: draft }))
@@ -180,7 +185,7 @@ export function SettingsPage({ transport, canEditConfig, onClose, onOpenArchive,
       if (!pluginDisableDecisions) return
       const result = await apiJson<{ ok: boolean; path: string; version: string; applied: boolean; restartRequired: string[]; cancellationWarnings?: string[]; config: JsonObject; host?: HostPluginSurface }>(transport, '/api/config', jsonRequest('PUT', { version: envelope.version, config: draft, pluginDisableDecisions }))
       setEnvelope(current => { if (!current) return current; const host = result.host ?? current.host; return { ...current, path: result.path, version: result.version, config: result.config, ...(host ? { host } : {}), backupAvailable: true } })
-      setDraft(result.config); setAdvancedText(JSON.stringify(result.config, null, 2)); setDirty(false)
+      setDraft(result.config); setAdvancedText(JSON.stringify(result.config, null, 2)); setDirty(false); setExecPolicyValid(execPolicyDraftValid(result.config)); setPolicyRevision(revision => revision + 1)
       const status = result.cancellationWarnings?.length ? '配置已保存，后续调用已禁用；部分在途请求未能发送停止信号，请检查生成任务状态。' : result.restartRequired.length ? `已保存；${result.restartRequired.join('、')}将在重启后生效。` : result.applied ? '已保存；插件配置从下一次工具调用生效。' : '已保存；配置将在服务重启后生效。'
       window.dispatchEvent(new CustomEvent('pulse-toast', { detail: status }))
     } catch (error) {
@@ -209,15 +214,15 @@ export function SettingsPage({ transport, canEditConfig, onClose, onOpenArchive,
         result = await apiJson(transport, '/api/config/restore', jsonRequest('POST', { version: envelope.version, pluginDisableDecisions }))
       }
       setEnvelope(current => { if (!current) return current; const host = result.host ?? current.host; return { ...current, version: result.version, config: result.config, ...(host ? { host } : {}), backupAvailable: true } })
-      setDraft(result.config); setAdvancedText(JSON.stringify(result.config, null, 2)); setDirty(false)
+      setDraft(result.config); setAdvancedText(JSON.stringify(result.config, null, 2)); setDirty(false); setExecPolicyValid(execPolicyDraftValid(result.config)); setPolicyRevision(revision => revision + 1)
       window.dispatchEvent(new CustomEvent('pulse-toast', { detail: result.cancellationWarnings?.length ? '已恢复备份配置；部分在途请求未能发送停止信号，请检查生成任务状态。' : '已恢复备份配置。' }))
     } catch (error) { setRequestError(error instanceof ApiError && error.status === 409 ? '配置已被外部修改，请重新加载后再恢复。' : '备份无法恢复；当前配置保持不变。') }
     finally { setSaving(false) }
   }
   const cancelChanges = async () => {
-    if (dirty && !await dialogs.confirm('放弃所有未保存修改？')) return
+    if (formDirty && !await dialogs.confirm('放弃所有未保存修改？')) return
     setRequestError('')
-    if (envelope) { setDraft(envelope.config); setAdvancedText(JSON.stringify(envelope.config, null, 2)); setAdvancedError(''); setDirty(false) }
+    if (envelope) { setDraft(envelope.config); setAdvancedText(JSON.stringify(envelope.config, null, 2)); setAdvancedError(''); setDirty(false); setPolicyLocalDirty(false); setExecPolicyValid(execPolicyDraftValid(envelope.config)); setPolicyRevision(revision => revision + 1) }
   }
 
   const selectCategory = (id: string) => { if (onCategoryChange) onCategoryChange(id); else { setCategoryId(id); setMobileDetail(true) } }
@@ -235,11 +240,11 @@ export function SettingsPage({ transport, canEditConfig, onClose, onOpenArchive,
 
   return <main className={`settings-shell ${mobileDetail ? 'settings-mobile-detail' : ''}`}>
     <aside className="settings-nav">
-      <div className="settings-nav-header"><PulseButton className="icon-button" onClick={async () => { if (!onDirtyChange && dirty && !await dialogs.confirm('放弃未保存修改并返回聊天？')) return; onClose() }} aria-label="返回聊天"><Icon name="back"/></PulseButton><strong>设置</strong></div>
+      <div className="settings-nav-header"><PulseButton className="icon-button" onClick={async () => { if (!onDirtyChange && formDirty && !await dialogs.confirm('放弃未保存修改并返回聊天？')) return; onClose() }} aria-label="返回聊天"><Icon name="back"/></PulseButton><strong>设置</strong></div>
       <nav aria-label="设置分类">{categories.filter(category => category.id !== 'desktop' || window.pulseDesktop?.installation).map(category => <PulseButton key={category.id} className={category.id === categoryId ? 'active' : ''} onClick={() => selectCategory(category.id)}><span>{category.label}</span>{category.id === 'advanced' && dirty && <i />}</PulseButton>)}</nav>
     </aside>
     <section className="settings-content" ref={contentEl}>
-      <header className="settings-content-header"><PulseButton className="settings-back" onClick={() => { if (onCategoryChange) onCategoryChange(); else setMobileDetail(false) }}><Icon name="back"/> 分类</PulseButton><div><h1>{selectedCategory.label}</h1><p>{selectedCategory.description}</p></div><PulseButton className="icon-button settings-close" onClick={async () => { if (!onDirtyChange && dirty && !await dialogs.confirm('放弃未保存修改并返回聊天？')) return; onClose() }} aria-label="返回聊天"><Icon name="close"/></PulseButton></header>
+      <header className="settings-content-header"><PulseButton className="settings-back" onClick={() => { if (onCategoryChange) onCategoryChange(); else setMobileDetail(false) }}><Icon name="back"/> 分类</PulseButton><div><h1>{selectedCategory.label}</h1><p>{selectedCategory.description}</p></div><PulseButton className="icon-button settings-close" onClick={async () => { if (!onDirtyChange && formDirty && !await dialogs.confirm('放弃未保存修改并返回聊天？')) return; onClose() }} aria-label="返回聊天"><Icon name="close"/></PulseButton></header>
       {categoryId !== 'updates' && categoryId !== 'desktop' && categoryId !== 'devices' && requestError && <div className="settings-alert" role="alert">{requestError}{requestError.includes('外部修改') && <PulseButton onClick={() => void load()}>重新加载</PulseButton>}</div>}
       {categoryId === 'updates' && <UpdateSettings transport={transport} canManage={canEditConfig} />}
       {categoryId === 'desktop' && (window.pulseDesktop?.installation ? <DesktopEnvironment transport={transport} onConfigureModels={() => selectCategory('models')} /> : <div className="settings-card">请在 Electron 客户端中查看和修复桌面环境。</div>)}
@@ -249,13 +254,13 @@ export function SettingsPage({ transport, canEditConfig, onClose, onOpenArchive,
       {categoryId === 'archive' && <Card className="settings-card" variant="outlined"><p>归档聊天可以恢复到原项目；永久删除不可撤销。</p><Button type="primary" onClick={onOpenArchive}>打开归档对话</Button></Card>}
       {categoryId !== 'appearance' && categoryId !== 'archive' && categoryId !== 'messages' && categoryId !== 'devices' && categoryId !== 'updates' && categoryId !== 'desktop' && !canEditConfig && <div className="settings-card">完整后台配置只在本机管理页开放。手机仍可更改外观并管理归档对话。</div>}
       {categoryId !== 'appearance' && categoryId !== 'archive' && categoryId !== 'messages' && categoryId !== 'devices' && categoryId !== 'updates' && categoryId !== 'desktop' && canEditConfig && <>
-        {categoryId === 'advanced' ? <div className="settings-card advanced-editor"><div className="settings-meta"><strong>配置文件</strong><code>{envelope?.path ?? '正在读取…'}</code><span>API Key 使用本机独立凭据或环境变量提供。已保存的 Jarvis 与 MCP 环境变量以“保留已保存值”显示；替换为新值或删除对应字段即可修改。</span></div><PulseTextArea aria-label="完整配置 JSON" spellCheck={false} value={advancedText} onChange={event => { const text = event.target.value; setAdvancedText(text); try { const parsed = JSON.parse(text) as unknown; if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('顶层必须是 JSON 对象'); setDraft(parsed as JsonObject); setAdvancedError(''); setDirty(!deepEqual(parsed, envelope?.config)) } catch (error) { setDirty(true); setAdvancedError(error instanceof Error ? error.message : 'JSON 格式错误') } }} /><div className="json-actions"><PulseButton onClick={() => { setAdvancedText(JSON.stringify(draft ?? {}, null, 2)); setAdvancedError(''); setDirty(!deepEqual(draft, envelope?.config)) }}>格式化草稿</PulseButton><PulseButton disabled={!envelope?.backupAvailable || saving} onClick={() => void restore()}>恢复上一份备份</PulseButton></div>{advancedError && <p className="settings-error">{advancedError}</p>}{changedPaths.length > 0 && <PulseDisclosure className="change-preview" label={<>变更预览（{changedPaths.length}个顶层字段）</>}><pre>{changedPaths.map(key => `${key}: ${JSON.stringify(envelope?.config[key]) ?? '（新增）'} → ${JSON.stringify(draft?.[key]) ?? '（删除）'}`).join('\n')}</pre></PulseDisclosure>}</div> : <div className="settings-card">
+        {categoryId === 'advanced' ? <div className="settings-card advanced-editor"><div className="settings-meta"><strong>配置文件</strong><code>{envelope?.path ?? '正在读取…'}</code><span>API Key 使用本机独立凭据或环境变量提供。已保存的 Jarvis 与 MCP 环境变量以“保留已保存值”显示；替换为新值或删除对应字段即可修改。</span></div><PulseTextArea aria-label="完整配置 JSON" spellCheck={false} value={advancedText} onChange={event => { const text = event.target.value; setAdvancedText(text); try { const parsed = JSON.parse(text) as unknown; if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('顶层必须是 JSON 对象'); setDraft(parsed as JsonObject); setAdvancedError(''); setExecPolicyValid(execPolicyDraftValid(parsed)); setDirty(!deepEqual(parsed, envelope?.config)) } catch (error) { setDirty(true); setAdvancedError(error instanceof Error ? error.message : 'JSON 格式错误') } }} /><div className="json-actions"><PulseButton onClick={() => { setAdvancedText(JSON.stringify(draft ?? {}, null, 2)); setAdvancedError(''); setDirty(!deepEqual(draft, envelope?.config)) }}>格式化草稿</PulseButton><PulseButton disabled={!envelope?.backupAvailable || saving} onClick={() => void restore()}>恢复上一份备份</PulseButton></div>{advancedError && <p className="settings-error">{advancedError}</p>}{changedPaths.length > 0 && <PulseDisclosure className="change-preview" label={<>变更预览（{changedPaths.length}个顶层字段）</>}><pre>{changedPaths.map(key => `${key}: ${JSON.stringify(envelope?.config[key]) ?? '（新增）'} → ${JSON.stringify(draft?.[key]) ?? '（删除）'}`).join('\n')}</pre></PulseDisclosure>}</div> : <div className="settings-card">
           <div className="settings-meta"><strong>配置文件</strong><code>{envelope?.path ?? '正在读取…'}</code><span>修改保存在同一份 JSON 草稿中。一般设置用于新任务；内置插件从下一次工具调用生效，已提交请求保留原配置。</span></div>
-          {draft && categoryId === 'models' ? <ModelsEditor transport={transport} config={draft} envStatus={envelope?.environment ?? {}} onChange={configChanged} onboardingBlocked={dirty || saving} onConnect={providerId => setProviderWizard(providerId ? { providerId } : {})} /> : draft && categoryId === 'routing' ? <RoutingEditor config={draft} onChange={configChanged} /> : draft && categoryId === 'mcp' ? <McpEditor config={draft} onChange={configChanged} /> : draft && categoryId === 'tools' ? <><SkillManager transport={transport} configVersion={envelope?.version} blocked={dirty} onChanged={load} /><ToolsEditor config={draft} onChange={configChanged} /></> : draft && categoryId === 'builtin-plugins' ? <BuiltinPlugins config={draft} onChange={configChanged} transport={transport} dirty={dirty || saving} networkOverride={envelope?.launchNetwork?.override ?? null} host={envelope?.host ?? null} /> : draft && categoryId === 'network' ? <NetworkEditor config={draft} onChange={configChanged} networkOverride={envelope?.launchNetwork?.override ?? null} inheritedNetwork={envelope?.host?.allowNetwork === true} networkSource={envelope?.host?.allowNetworkSource ?? null} /> : draft && categoryId === 'instructions' ? <InstructionsEditor config={draft} onChange={configChanged} /> : draft && ['front','approval','jarvis','runtime'].includes(categoryId) ? <FeatureEditor category={categoryId} config={draft} onChange={configChanged} /> : selectedCategory.paths.map(path => <ConfigField key={path} path={path} value={draft ? getPath(draft, path) : undefined} envStatus={envelope?.environment ?? {}} disabled={!draft || saving} onChange={value => setField(path, value)} />)}
+          {draft && categoryId === 'models' ? <ModelsEditor transport={transport} config={draft} envStatus={envelope?.environment ?? {}} onChange={configChanged} onboardingBlocked={dirty || saving} onConnect={providerId => setProviderWizard(providerId ? { providerId } : {})} /> : draft && categoryId === 'routing' ? <RoutingEditor config={draft} onChange={configChanged} /> : draft && categoryId === 'mcp' ? <McpEditor config={draft} onChange={configChanged} /> : draft && categoryId === 'tools' ? <><SkillManager transport={transport} configVersion={envelope?.version} blocked={dirty} onChanged={load} /><ToolsEditor config={draft} onChange={configChanged} /></> : draft && categoryId === 'builtin-plugins' ? <BuiltinPlugins config={draft} onChange={configChanged} transport={transport} dirty={dirty || saving} networkOverride={envelope?.launchNetwork?.override ?? null} host={envelope?.host ?? null} /> : draft && categoryId === 'network' ? <NetworkEditor config={draft} onChange={configChanged} networkOverride={envelope?.launchNetwork?.override ?? null} inheritedNetwork={envelope?.host?.allowNetwork === true} networkSource={envelope?.host?.allowNetworkSource ?? null} /> : draft && categoryId === 'instructions' ? <InstructionsEditor config={draft} onChange={configChanged} /> : draft && ['front','approval','jarvis','runtime'].includes(categoryId) ? <><FeatureEditor category={categoryId} config={draft} onChange={configChanged} />{categoryId === 'approval' && <ExecPolicyEditor config={draft} revision={policyRevision} onChange={configChanged} transport={transport} onValidityChange={setExecPolicyValid} onLocalDraftChange={setPolicyLocalDirty}/>}</> : selectedCategory.paths.map(path => <ConfigField key={path} path={path} value={draft ? getPath(draft, path) : undefined} envStatus={envelope?.environment ?? {}} disabled={!draft || saving} onChange={value => setField(path, value)} />)}
           {categoryId === 'models' && draft && <div className="settings-meta"><strong>当前生效模型</strong><span>{envelope?.active?.provider && envelope?.active?.model ? `${envelope.active.provider} · ${envelope.active.model}` : '当前配置尚未提供实际生效模型信息'}</span><small>来源覆盖：{Object.keys(envelope?.sources ?? {}).join('、') || '未检测到环境覆盖'}</small></div>}
           {categoryId === 'runtime' && <p className="restart-note">工作目录或数据目录属于启动设置，保存后需重启 Pulse 才会完全生效。</p>}
         </div>}
-        <footer className="settings-actions"><span>{dirty ? '有未保存的修改' : envelope ? '所有修改已保存' : ''}</span><PulseButton disabled={(!dirty && !advancedError) || saving} onClick={cancelChanges}>取消修改</PulseButton><PulseButton className="settings-primary" disabled={!dirty || saving || Boolean(advancedError)} onClick={() => void save()}>{saving ? '正在校验并保存…' : '保存全部'}</PulseButton></footer>
+        <footer className="settings-actions"><span>{formDirty ? '有未保存的修改' : envelope ? '所有修改已保存' : ''}</span><PulseButton disabled={(!formDirty && !advancedError) || saving} onClick={cancelChanges}>取消修改</PulseButton><PulseButton className="settings-primary" disabled={!dirty || saving || Boolean(advancedError) || !execPolicyValid || !execPolicyDraftValid(draft)} onClick={() => void save()}>{saving ? '正在校验并保存…' : '保存全部'}</PulseButton></footer>
       </>}
     </section>
     {providerWizard && envelope && draft && <ProviderWizard transport={transport} version={envelope.version} config={draft} {...providerWizard} onClose={() => setProviderWizard(undefined)} onConnected={load} />}

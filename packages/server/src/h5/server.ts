@@ -1,3 +1,5 @@
+import { withConfigFileLock } from '../config-write-lock.js'
+import { parseExecPolicy, mergeExecPolicies, sourceExecPolicy } from '../exec-policy.js'
 import { pluginDraft, parseBuiltinPlugins, connections, pluginEnabled, readHostSurface, type PluginId } from '../builtin-plugins/config.js'
 import { safeError } from '../builtin-plugins/http.js'
 import { webSearchDraft } from '../web-search-config.js'
@@ -233,7 +235,7 @@ export class H5Server {
     this.workspaces = new H5WorkspaceManager(options.dataDir)
     this.assistantInbox = new AssistantConversationStore(options.dataDir, this.host.conversationData)
     this.configuration = options.configuration
-    if (options.configuration) this.host.setBuiltinPluginConfigPath(resolve(options.configuration.path))
+    if (options.configuration) { this.host.setBuiltinPluginConfigPath(resolve(options.configuration.path)); this.host.setExecPolicyConfigPath(resolve(options.configuration.path)) }
     this.workWorker = options.workWorker
     this.host.setAssistantWorkTools({
       start: (projectId, task) => this.startWorkFromAssistant(projectId, task),
@@ -255,7 +257,7 @@ export class H5Server {
     let release!: () => void
     this.configWriteTail = new Promise<void>(resolveLock => { release = resolveLock })
     await previous
-    try { return await operation() } finally { release() }
+    try { return this.configuration ? await withConfigFileLock(this.configuration.path, operation) : await operation() } finally { release() }
   }
 
   private parseConfig(text: string): Record<string, unknown> {
@@ -269,6 +271,7 @@ export class H5Server {
     const search = webSearchDraft(config.webSearch)
     const plugins = pluginDraft(config.builtinPlugins)
     const normalizedConfig: Record<string, unknown> = normalizeModelConfig({ ...config, ...(plugins.config ? { builtinPlugins: plugins.config } : {}), ...(search.config ? { webSearch: search.config } : {}) })
+    parseExecPolicy(normalizedConfig.execPolicy)
     parseBuiltinPlugins(normalizedConfig.builtinPlugins, normalizedConfig)
     for (const source of Object.values(normalizedConfig.providers ?? {}) as Array<Record<string, unknown>>) {
       if ('apiKey' in source) throw new Error('PROVIDER_INLINE_KEY_FORBIDDEN')
@@ -280,7 +283,10 @@ export class H5Server {
       await writeFile(temporary, text, { flag: 'wx', mode: 0o600 })
       await chmod(temporary, 0o600)
       const options = await this.configuration.prepare(temporary)
-      return { text, options: { ...options, skillConfigPath: resolve(this.configuration.path), builtinPluginConfigPath: resolve(this.configuration.path) } }
+      const inherited = parseExecPolicy(options.execPolicy)
+      const primary = (source?: string) => source === temporary || source === this.configuration!.path
+      const base = { ...inherited, rules: inherited.rules?.filter(r => !primary(r.configSource)), restrictions: inherited.restrictions?.filter(r => !primary(r.configSource)), hostExecutables: Object.fromEntries(Object.entries(inherited.hostExecutables ?? {}).filter(([name]) => !primary(inherited.hostExecutableSources?.[name]))) }
+      return { text, options: { ...options, skillConfigPath: resolve(this.configuration.path), builtinPluginConfigPath: resolve(this.configuration.path), execPolicyConfigPath: resolve(this.configuration.path), execPolicy: mergeExecPolicies(base, sourceExecPolicy(normalizedConfig.execPolicy, this.configuration.path)) } }
     } finally { await rm(temporary, { force: true }).catch(() => undefined) }
   }
 
@@ -1485,6 +1491,19 @@ export class H5Server {
       return
     }
 
+    if (pathname === '/api/config/exec-policy/check' && method === 'POST') {
+      if (!localAdmin || !requireSameOrigin()) { res.writeHead(403).end(); return }
+      const body = await this.parseJsonBody(req)
+      try {
+        const argv = body.argv
+        if (body.cwd !== undefined && typeof body.cwd !== 'string') throw new Error('EXEC_POLICY_ARGV_INVALID')
+        if (!Array.isArray(argv) || !argv.length || argv.length > 128 || argv.some(v => typeof v !== 'string')) throw new Error('EXEC_POLICY_ARGV_INVALID')
+        const result = await this.host.checkExecPolicy({ command: argv[0], args: argv.slice(1), cwd: typeof body.cwd === 'string' ? body.cwd : '.' }, body.execPolicy)
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(result))
+      } catch (cause) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: cause instanceof Error ? cause.message.slice(0, 160) : 'EXEC_POLICY_INVALID' })) }
+      return
+    }
+
     if (pathname === '/api/config/web-search/test' && method === 'POST') {
       if (!localAdmin || !requireSameOrigin()) { res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: localAdmin ? 'SAME_ORIGIN_REQUIRED' : 'LOCAL_ADMIN_REQUIRED' })); return }
       const controller = new AbortController()
@@ -2295,6 +2314,7 @@ export class H5Server {
       }
       const body = await this.parseJsonBody(req)
       const effectId = typeof body.effectId === 'string' ? body.effectId : ''
+      if (body.remember !== undefined && (!localAdmin || !requireSameOrigin())) { res.writeHead(403).end(); return }
       const value = h5ReplyValue(body)
       if (!effectId || !value) {
         res.writeHead(400, { 'Content-Type': 'application/json' })
@@ -2324,6 +2344,7 @@ export class H5Server {
         const normalized = h5ReplyValue(value.value as Record<string, unknown>)
         return normalized ? [{ effectId: value.effectId, value: normalized as unknown as JsonValue }] : []
       })
+      if (answers.some(answer => answer.value && typeof answer.value === 'object' && !Array.isArray(answer.value) && answer.value.remember !== undefined) && (!localAdmin || !requireSameOrigin())) { res.writeHead(403).end(); return }
       if (answers.length !== body.answers.length) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'BATCH_REPLY_INVALID' })); return }
       const canonical = JSON.stringify({ groupId, answers: [...answers].sort((a, b) => a.effectId.localeCompare(b.effectId)) })
       const digest = createHash('sha256').update(canonical).digest('hex')
@@ -2772,7 +2793,7 @@ export class H5Server {
 function h5ReplyValue(body: Record<string, unknown>): JsonValue | undefined {
   if (typeof body.approved === 'boolean') {
     const reason = typeof body.reason === 'string' ? body.reason.slice(0, 500) : undefined
-    return { approved: body.approved, ...(reason ? { reason } : {}) }
+    return { approved: body.approved, ...(reason ? { reason } : {}), ...(body.remember !== undefined ? { remember: body.remember as JsonValue, execPolicyToken: typeof body.execPolicyToken === 'string' ? body.execPolicyToken : '' } : {}) }
   }
   if (typeof body.text === 'string') return { text: body.text }
   if (typeof body.value === 'string' && body.value.length > 0) return { value: body.value }
@@ -2792,6 +2813,7 @@ function publicInteraction(interaction: { groupId: string; kind: 'ask' | 'approv
         for (const key of ['kind', 'type', 'prompt', 'context', 'placeholder', 'defaultValue', 'min', 'max'] as const) if (input[key] !== undefined) safe[key] = input[key]
         if (Array.isArray(input.options)) safe.options = input.options.filter(item => typeof item === 'string' || Boolean(item && typeof item === 'object' && !Array.isArray(item) && typeof (item as Record<string, JsonValue>).value === 'string'))
       } else {
+        if (input.execPolicy) safe.execPolicy = input.execPolicy
         safe.kind = 'approval'
         safe.prompt = 'Pulse 需要你确认以下操作。'
         if (Array.isArray(input.tools)) {

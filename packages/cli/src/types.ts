@@ -74,6 +74,7 @@ export interface TokenStatsData {
 
 /** 审批请求数据 */
 export interface ApprovalRequest {
+  execPolicy?: { token: string; prefix: string[]; canAmend: boolean; scope: 'run' } | undefined
   effectId: string
   toolName: string
   toolArgs: Record<string, unknown>

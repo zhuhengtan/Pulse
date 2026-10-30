@@ -1,3 +1,8 @@
+import type { EffectRecord } from '@hunterzhu/pulse-runtime'
+import { ExecPolicyHost } from './exec-policy-host.js'
+import { parseExecPolicy, type ExecPolicyConfig } from './exec-policy.js'
+export { parseExecPolicy, evaluateExecPolicy, mergeExecPolicies, workspaceExecPolicy, sourceExecPolicy } from './exec-policy.js'
+export type { ExecPolicyConfig, ExecPrefixRule } from './exec-policy.js'
 import { approvalReuseIdentity, hasApprovalGrant } from './approval-reuse.js'
 import { verificationFingerprint, reusableVerification } from './task-controller/verification-reuse.js'
 import { shellProcesses, closeShellProcesses, summarizeShellProcess, blockAcceptanceIfShellBusy } from './shell-processes.js'
@@ -184,6 +189,8 @@ export interface LocalHostOptions {
   /** Assistant responses queued after each verifier decision that requests a replan. */
   mockReplanResponses?: string[]
   approvalMode?: ApprovalMode
+  execPolicy?: ExecPolicyConfig
+  execPolicyConfigPath?: string
   allowNetwork?: boolean
   networkHosts?: string[]
   builtinPluginNetworkOverride?: boolean
@@ -463,6 +470,7 @@ interface BuiltInSurface {
   visionAvailable?: boolean
   snapshots?: FileSnapshotManager
   conversationId?: string
+  execPolicy?: { authorize: (args: Record<string, any>, id: string) => Promise<boolean>; identity: (id: string) => import('@hunterzhu/pulse-adapters').ShellIdentity | undefined }
 }
 
 function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: ApprovalMode, allowNetwork = false, isApprovedToolCall: (toolCallId: string) => boolean = () => false, networkHosts?: string[], draftOwner = 'legacy', runData?: string, checkVersion: 2 | 3 | 4 = 2, copyReceipts = false, candidateScripts = false, webSearch?: WebSearchOptions, longCommands = false, surface: BuiltInSurface = {}): void {
@@ -581,7 +589,7 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
   registry.register(defineTool({
     name: 'artifact.record', description: 'Record a workspace file (text, image, PDF or other binary, up to 128 MiB) as a user-visible artifact.', tags: ['artifact', 'files', 'read'], input: z.object({ path: z.string(), mediaType: z.string().optional(), label: z.string().max(200).optional() }), output: z.object({ path: z.string(), mediaType: z.string(), label: z.string(), bytes: z.number(), hash: z.string() }), sideEffectPolicy: 'read', permissions: { workspaceRoots: [root] }, execute: async ({ path, mediaType, label }) => { const read = await readPreviewFile(root, path); const recordedPath = relative(await realpath(root), read.absolutePath).split(sep).join('/'); return { path: recordedPath, mediaType: mediaType ?? fileMediaType(path), label: label ?? path, bytes: read.size, hash: read.hash } }, summarize: (output) => output,
   }))
-  const executeShell = async ({ command, args, cwd, timeoutMs }: import('./shell-processes.js').ShellCommand, context: import('@hunterzhu/pulse-tool-sdk').ToolContext, onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void) => { if (approvalMode === 'read-only') throw new Error('SHELL_DISABLED_READ_ONLY'); if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:shell.exec'); let archiveBytes = 0; if (runData) for (const entry of await readdir(join(runData, 'shell-output')).catch(error => { if (error.code === 'ENOENT') return []; throw error })) archiveBytes += (await stat(join(runData, 'shell-output', entry))).size; const options = { cwd: await within(root, cwd ?? '.'), signal: context.signal, ...(onOutput ? { onOutput } : {}), env: safeShellEnv(), allowedDomains: allowNetwork ? networkHosts ?? [] : [], maxOutputBytes: 64 * 1024, ...(runData ? { outputDirectory: join(runData, 'shell-output'), maxArchiveBytes: Math.min(16 * 1024 * 1024, Math.max(0, Math.floor((64 * 1024 * 1024 - archiveBytes) / 2))) } : {}), ...(timeoutMs === undefined ? { timeoutMs: 30_000 } : { timeoutMs }) }; const receipt = isCheck(command, args ?? []) ? await captureCheck(root, options.cwd, command, args ?? [], false, checkVersion) : undefined; const copy = copyReceipts ? await captureCopy(root, options.cwd, command, args ?? []) : undefined; const inPlace = copyReceipts ? await captureInPlace(root, options.cwd, command, args ?? []) : undefined; const result = await runShell(command, args, options); const fileChanges = await finishCopy(root, copy, result) ?? await finishInPlace(root, inPlace, result); return { ...result, ...(fileChanges ? { fileChanges } : {}), ...(receipt ? { checkReceipt: await finishCheck(root, receipt, runData ? join(runData, 'check-definitions') : undefined, candidateScripts) } : {}) } }
+  const executeShell = async ({ command, args, cwd, timeoutMs }: import('./shell-processes.js').ShellCommand, context: import('@hunterzhu/pulse-tool-sdk').ToolContext, onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void) => { if (approvalMode === 'read-only') throw new Error('SHELL_DISABLED_READ_ONLY'); await surface.execPolicy?.authorize({ command, args, cwd, timeoutMs }, context.toolCallId); if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:shell.exec'); let archiveBytes = 0; if (runData) for (const entry of await readdir(join(runData, 'shell-output')).catch(error => { if (error.code === 'ENOENT') return []; throw error })) archiveBytes += (await stat(join(runData, 'shell-output', entry))).size; const options = { cwd: await within(root, cwd ?? '.'), expectedIdentity: surface.execPolicy?.identity(context.toolCallId), beforeLaunch: async () => { const prior = surface.execPolicy?.identity(context.toolCallId); const allowed = await surface.execPolicy?.authorize({ command, args, cwd, timeoutMs }, context.toolCallId); if (prior && !allowed) throw Object.assign(new Error('EXEC_POLICY_APPROVAL_CHANGED'), { code: 'EXEC_POLICY_APPROVAL_CHANGED' }); return surface.execPolicy?.identity(context.toolCallId) }, signal: context.signal, ...(onOutput ? { onOutput } : {}), env: safeShellEnv(), allowedDomains: allowNetwork ? networkHosts ?? [] : [], maxOutputBytes: 64 * 1024, ...(runData ? { outputDirectory: join(runData, 'shell-output'), maxArchiveBytes: Math.min(16 * 1024 * 1024, Math.max(0, Math.floor((64 * 1024 * 1024 - archiveBytes) / 2))) } : {}), ...(timeoutMs === undefined ? { timeoutMs: 30_000 } : { timeoutMs }) }; const receipt = isCheck(command, args ?? []) ? await captureCheck(root, options.cwd, command, args ?? [], false, checkVersion) : undefined; const copy = copyReceipts ? await captureCopy(root, options.cwd, command, args ?? []) : undefined; const inPlace = copyReceipts ? await captureInPlace(root, options.cwd, command, args ?? []) : undefined; const result = await runShell(command, args, options); const fileChanges = await finishCopy(root, copy, result) ?? await finishInPlace(root, inPlace, result); return { ...result, ...(fileChanges ? { fileChanges } : {}), ...(receipt ? { checkReceipt: await finishCheck(root, receipt, runData ? join(runData, 'check-definitions') : undefined, candidateScripts) } : {}) } }
   registry.register(defineTool({
     name: 'shell.exec', description: 'Run an authorized local command with argv arguments. cwd defaults to the workspace; relative paths and absolute paths inside the workspace are allowed.', tags: ['shell', 'system'], input: z.object({ command: z.string().min(1), args: z.array(z.string()).default([]), cwd: z.string().default('.'), timeoutMs: z.number().int().positive().max(300_000).optional() }), output: z.object({ code: z.number().nullable(), stdout: z.string(), stderr: z.string(), truncated: z.boolean(), timedOut: z.boolean(), aborted: z.boolean(), outputArchive: z.unknown().optional(), checkReceipt: z.unknown().optional(), fileChanges: z.unknown().optional() }), sideEffectPolicy: 'external', resolveResources: () => [{ resource: 'workspace', mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: shellToolTimeoutMs, resolveTimeoutMs: ({ timeoutMs }) => process.platform === 'win32' ? shellToolTimeoutMs : (timeoutMs ?? 30_000) + 120_000, permissions: { workspaceRoots: [root] }, execute: (input, context) => executeShell(input, context), summarize: (output) => ({ code: output.code, stdout: output.stdout.length > 2000 ? output.stdout.slice(0, 1000) + '\n[... read original output with shell.output ...]\n' + output.stdout.slice(-1000) : output.stdout, stderr: output.stderr.length > 2000 ? output.stderr.slice(0, 1000) + '\n[... read original output with shell.output ...]\n' + output.stderr.slice(-1000) : output.stderr, truncated: output.truncated, ...(output.fileChanges ? { fileChanges: json(output.fileChanges) } : {}), ...(output.outputArchive ? { outputArchive: json(output.outputArchive) } : {}) }),
   }))
@@ -595,6 +603,7 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
       sideEffectPolicy: 'external', retrySafety: 'unsafe', resolveResources: () => [{ resource: 'workspace', mode: 'exclusive' }], defaultTimeoutMs: shellToolTimeoutMs, permissions: { workspaceRoots: [root] },
       execute: async (input, context) => {
         if (approvalMode === 'read-only') throw new Error('SHELL_DISABLED_READ_ONLY')
+        await surface.execPolicy?.authorize(input, context.toolCallId)
         if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:shell.start')
         validateShellInvocation(input.command, input.args)
         return processes.start(input, context, async (command, execution, onOutput) => ({ ...await executeShell(command, execution, onOutput) }))
@@ -927,6 +936,7 @@ ${feedback}\nDo not expose private chain-of-thought.`
       : undefined,
     maxTurns: Math.max(1, Math.min(256, Math.floor(configuredMaxTurns))),
     maxTruncationRetries: 1,
+    ...(version === '3' || version === '4' || version === '4.1' ? { manualApprovalFallback: true, manualApprovalCodes: ['EXEC_POLICY_PROMPT', 'EXEC_POLICY_APPROVAL_CHANGED'] } : {}),
     maxToolsPerTurn: 4,
     maxReadOnlyRounds: (ctx) => !isPreImplementationConfirmationSkill(ctx.goal) && stageRequiresFileChange(ctx.goal, '') ? 6 : undefined,
     ...(version === '3' || version === '4' || version === '4.1' ? { resetTurnsOnEntry: (ctx) => { const record = taskRecordFromGlobal(ctx.global as unknown as JsonValue); return record?.status === 'replanning' ? record.replanCount : undefined } } : {}),
@@ -1693,7 +1703,7 @@ function taskToolInputValidator(registry: ToolRegistry, request: string, windowS
   }
 }
 
-function approvedToolExecutor(registry: ToolRegistry, provider: ReturnType<typeof providerFromOptions>, approvalMode: ApprovalMode | undefined, userIntent: string, modelId: string, workspaceRoot: string, runLlm: (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => Promise<LLMResult>, guard?: (name: string, input: Record<string, JsonValue>, policy: string | undefined) => boolean | Promise<boolean>, isApproved: (id: string) => boolean = () => false, reviewer?: { modelId: string; providerId: string; timeoutMs: number; manualOnRejection?: boolean }, relocation?: { source: string; target: string }, generalActions = false, guiEvidence?: JsonValue, restrictedRequest?: string, reuseRuntime?: () => PulseRuntime | undefined): EffectExecutor {
+function approvedToolExecutor(registry: ToolRegistry, provider: ReturnType<typeof providerFromOptions>, approvalMode: ApprovalMode | undefined, userIntent: string, modelId: string, workspaceRoot: string, runLlm: (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => Promise<LLMResult>, guard?: (name: string, input: Record<string, JsonValue>, policy: string | undefined) => boolean | Promise<boolean>, isApproved: (id: string) => boolean = () => false, reviewer?: { modelId: string; providerId: string; timeoutMs: number; manualOnRejection?: boolean }, relocation?: { source: string; target: string }, generalActions = false, guiEvidence?: JsonValue, restrictedRequest?: string, reuseRuntime?: () => PulseRuntime | undefined, execPolicyGate?: (effect: EffectRecord) => Promise<boolean>): EffectExecutor {
   const execute = createToolEffectExecutor(registry)
   return async (effect, signal, observe): Promise<EffectExecution> => {
     let input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
@@ -1727,10 +1737,11 @@ function approvedToolExecutor(registry: ToolRegistry, provider: ReturnType<typeo
     let execution: EffectExecution
     try {
       if (name === 'shell.exec' || name === 'shell.start') validateShellInvocation(String(args.command ?? ''), Array.isArray(args.args) ? args.args as string[] : [])
-      if (!generationTools.includes(name) && approvalMode === 'auto' && !isApproved(effect.toolCallId ?? '') && (policy === 'write' || policy === 'external') && !cachedApproval && !(await aiApproveToolCall(provider, effect, signal, runLlm, userIntent, workspaceRoot, onUsage, reviewer?.timeoutMs, generalActions, guiEvidence))) throw Object.assign(new Error(`AI_APPROVAL_DENIED:${name}`), { code: 'AI_APPROVAL_DENIED', retryable: false })
+      const policyAuthorized = await execPolicyGate?.(effect) ?? false
+      if (!policyAuthorized && !generationTools.includes(name) && approvalMode === 'auto' && !isApproved(effect.toolCallId ?? '') && (policy === 'write' || policy === 'external') && !cachedApproval && !(await aiApproveToolCall(provider, effect, signal, runLlm, userIntent, workspaceRoot, onUsage, reviewer?.timeoutMs, generalActions, guiEvidence))) throw Object.assign(new Error(`AI_APPROVAL_DENIED:${name}`), { code: 'AI_APPROVAL_DENIED', retryable: false })
       execution = await execute(effect, signal, observe)
     } catch (cause) {
-      execution = { value: null, status: 'failed', executionState: 'failed', sideEffectState: 'none', error: { ...runtimeErrorFromCause(cause), ...((cause as { code?: string })?.code === 'AI_APPROVAL_UNAVAILABLE' || reviewer?.manualOnRejection === true && ['AI_APPROVAL_DENIED', 'AI_APPROVAL_INVALID_RESPONSE', 'AI_APPROVAL_OUTPUT_TRUNCATED'].includes((cause as { code?: string })?.code ?? '') ? { details: { manualApproval: true, reviewCode: (cause as { code?: string })?.code ?? 'AI_APPROVAL_UNAVAILABLE', toolName: name, input: args, originalEffectId: effect.id, toolCallId: `manual:${effect.id}` } } : {}) } }
+      execution = { value: null, status: 'failed', executionState: 'failed', sideEffectState: 'none', error: { ...runtimeErrorFromCause(cause), ...(['AI_APPROVAL_UNAVAILABLE', 'EXEC_POLICY_PROMPT', 'EXEC_POLICY_APPROVAL_CHANGED'].includes((cause as { code?: string })?.code ?? '') || reviewer?.manualOnRejection === true && ['AI_APPROVAL_DENIED', 'AI_APPROVAL_INVALID_RESPONSE', 'AI_APPROVAL_OUTPUT_TRUNCATED'].includes((cause as { code?: string })?.code ?? '') ? { details: { manualApproval: true, reviewCode: (cause as { code?: string })?.code ?? 'AI_APPROVAL_UNAVAILABLE', toolName: name, input: args, originalEffectId: effect.id, toolCallId: `manual:${effect.id}` } } : {}) } }
     }
     if (approvalFingerprint && execution.status !== 'failed' && !execution.error) execution = { ...execution, metadata: { ...asRecord(execution.metadata), approvalFingerprint, approvalGranted: true, approvalReused: cachedApproval } }
     if (reviewAttempt === undefined) return execution
@@ -1807,6 +1818,7 @@ function pendingInteractions(runtime: PulseRuntime, session: PulseSession): Pend
 function snapshotHostOptions(source: LocalHostOptions): LocalHostOptions {
   return {
     ...source,
+    ...(source.execPolicy ? { execPolicy: structuredClone(source.execPolicy) } : {}),
     ...(source.provider ? { provider: { ...source.provider } } : {}),
     ...(source.providerProfiles ? { providerProfiles: Object.fromEntries(Object.entries(source.providerProfiles).map(([id, profile]) => [id, { ...profile }])) } : {}),
     ...(source.providerModels ? { providerModels: structuredClone(source.providerModels) } : {}),
@@ -1871,6 +1883,7 @@ export class LocalHost {
   private readonly logDir: string
   private readonly usesDefaultDataDir: boolean
   private readonly shouldMigrateLegacyData: boolean
+  private execPolicy: ExecPolicyHost
   private options: LocalHostOptions
   private activeProviderName: string | undefined
   private activeModelName: string | undefined
@@ -1895,6 +1908,7 @@ export class LocalHost {
     this.conversationData = new ConversationData(this.dataDir)
     this.logDir = resolve(options.logDir ?? process.env.PULSE_LOG_DIR ?? pulseLogPath())
     this.options = options
+    this.execPolicy = new ExecPolicyHost(options.execPolicy, options.execPolicyConfigPath)
     this.builtinPluginJobs = new BuiltinPluginJobs(this.dataDir, () => ({ ...this.options.builtinPluginConfig, allowNetwork: this.options.allowNetwork, webSearch: this.options.webSearch ?? this.options.builtinPluginConfig?.webSearch }), () => this.options.builtinPluginConfigPath, () => this.options.builtinPluginNetworkOverride)
     this.automation = new AutomationSessionManager(this.dataDir, options.automation, options.allowNetwork === true, undefined, options.networkHosts)
     this.automationBroker = new AutomationBroker(this.automation, this.dataDir)
@@ -2530,7 +2544,23 @@ export class LocalHost {
   /** Launch-time --no-network / --allow-network / PULSE_ALLOW_NETWORK. Undefined follows the host config. */
   launchNetworkOverride(): boolean | undefined { return this.options.builtinPluginNetworkOverride }
   /** Apply a validated user config to future Runs while active Run objects retain their captured Runtime and capabilities. */
+  async checkExecPolicy(args: Record<string, any>, config?: unknown) {
+    const policy = config === undefined ? this.execPolicy : new ExecPolicyHost(parseExecPolicy(config))
+    return policy.inspect(args, this.root)
+  }
+  setExecPolicyConfigPath(path: string) { this.options.execPolicyConfigPath = path; this.execPolicy.configure(this.execPolicy.getConfig(), path) }
+  private async authorizeExec(args: Record<string, any>, root: string, conversationId: string, runId: string, id: string): Promise<boolean> {
+    const allowed = await this.execPolicy.authorize(args, root, conversationId, runId, id)
+    if (allowed) { const grants = this.approvedToolCalls.get(runId) ?? new Set<string>(); grants.add(id); this.approvedToolCalls.set(runId, grants) }
+    return allowed
+  }
+  private async execApprovalInput(input: Record<string, JsonValue>, root: string, conversation: string, run: string, effect: string): Promise<Record<string, JsonValue>> {
+    const offer = await this.execPolicy.offer(input, root, conversation, run, effect)
+    return offer ? { ...input, execPolicy: json(offer) } : input
+  }
   applyLiveOptions(options: LocalHostOptions): { applied: boolean; restartRequired: string[] } {
+    parseExecPolicy(options.execPolicy)
+    this.execPolicy.configure(options.execPolicy, options.execPolicyConfigPath)
     const nextRoot = resolve(options.cwd ?? process.cwd())
     const nextDataDir = resolve(options.dataDir ?? process.env.PULSE_DATA_DIR ?? pulseDataPath())
     const restartRequired = [
@@ -2722,7 +2752,7 @@ export class LocalHost {
     const fileSnapshots = new FileSnapshotManager(cwd, new FilesystemTool(cwd))
     const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(id => options.providerModels?.[id]?.imageInput === 'supported')
     let runtimeRef: PulseRuntime | undefined
-    const builtInSurface: BuiltInSurface = { version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId }
+    const builtInSurface: BuiltInSurface = { version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId, execPolicy: { authorize: (args, id) => this.authorizeExec(args, cwd, conversationId, runId, id), identity: id => this.execPolicy.identity(conversationId, runId, id) } }
     await this.seedPlanGate(conversationId, runId, !assistantChat && (isPreImplementationConfirmationSkill(skillInput) || requiresExplicitPlanConfirmation(skillInput)), options.approvalMode === 'read-only' ? undefined : cwd)
     const registry = new PluginToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) }, this.builtinPluginJobs)
     registerPluginTools(registry, this.builtinPluginJobs, cwd, runId, this.options.builtinPluginConfigPath, conversationId)
@@ -2782,7 +2812,7 @@ export class LocalHost {
       const agent = runtimeRef?.state.agents.get(request.agentId)
       const global = agent?.globalVersions.get(agent.latestGlobalVersion)
       return { conversation: (await this.getConversationMessages(conversationId)).slice(-16).map(message => ({ role: message.role, text: message.text, ...(message.attachments ? { attachments: message.attachments } : {}) })), goal: agent?.goal, task: global && asRecord(global)?.taskRecord, controller: global && asRecord(global)?.taskController }
-    }, run: (system, instruction, signal) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens: Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096), task: 'reason' }) }) } }), effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness((e, s, o) => executeModelEffect(refreshPluginProjection(e, registry), s, o), () => runtimeRef, cwd, this.runDir(conversationId, runId), !assistantChat && options.taskController !== false, () => this.readManifest(conversationId).then(manifest => (manifest.artifacts ?? []).map(artifact => artifact.path)))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, userIntent, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: options.approvalReview.provider, timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined, undefined, !assistantChat, automationApprovalEvidence(runtimeRef, effect), record?.objective ?? skillInput, () => runtimeRef)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    }, run: (system, instruction, signal) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens: Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096), task: 'reason' }) }) } }), effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness((e, s, o) => executeModelEffect(refreshPluginProjection(e, registry), s, o), () => runtimeRef, cwd, this.runDir(conversationId, runId), !assistantChat && options.taskController !== false, () => this.readManifest(conversationId).then(manifest => (manifest.artifacts ?? []).map(artifact => artifact.path)))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, userIntent, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: options.approvalReview.provider, timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined, undefined, !assistantChat, automationApprovalEvidence(runtimeRef, effect), record?.objective ?? skillInput, () => runtimeRef, effect => { const input = asRecord(effect.input); return ['shell.exec', 'shell.start'].includes(String(input?.name)) ? this.authorizeExec(asRecord(input?.arguments) ?? {}, cwd, conversationId, runId, effect.toolCallId ?? '') : Promise.resolve(false) })(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     runtimeRef = runtime
     const budget = historyBudget(provider.model.capabilities)
     runtime.state.historySoftTokens = budget.historySoftTokens
@@ -3124,7 +3154,7 @@ export class LocalHost {
     const fileSnapshots = new FileSnapshotManager(cwd, new FilesystemTool(cwd))
     const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(id => options.providerModels?.[id]?.imageInput === 'supported')
     let runtimeRef: PulseRuntime | undefined
-    const builtInSurface: BuiltInSurface = { version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId }
+    const builtInSurface: BuiltInSurface = { version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId, execPolicy: { authorize: (args, id) => this.authorizeExec(args, cwd, conversationId, runId, id), identity: id => this.execPolicy.identity(conversationId, runId, id) } }
     if (assistantChat) {
       registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)) ? ['55', '56', '57'].includes(String(savedInput.controllerVersion)) ? 4 : 3 : 2, (savedInput.controllerVersion === '49' || savedInput.controllerVersion === '50' || savedInput.controllerVersion === '51' || savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57'))), savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57')), options.webSearch, savedInput.controllerVersion === '57', builtInSurface)
       const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
@@ -3214,7 +3244,7 @@ export class LocalHost {
       const agent = runtimeRef?.state.agents.get(request.agentId)
       const global = agent?.globalVersions.get(agent.latestGlobalVersion)
       return { conversation: (await this.getConversationMessages(conversationId)).slice(-16).map(message => ({ role: message.role, text: message.text, ...(message.attachments ? { attachments: message.attachments } : {}) })), goal: agent?.goal, task: global && asRecord(global)?.taskRecord, controller: global && asRecord(global)?.taskController }
-    }, run: (system, instruction, signal) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens: Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096), task: 'reason' }) }) } }), effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness((e, s, o) => executeModelEffect(refreshPluginProjection(e, registry), s, o), () => runtimeRef, cwd, this.runDir(conversationId, runId), (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57')), () => this.readManifest(conversationId).then(manifest => (manifest.artifacts ?? []).map(artifact => artifact.path)))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, reviewContext, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: options.approvalReview.provider, timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined, relocation, ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)) ? automationApprovalEvidence(runtimeRef, effect) : undefined, ['28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)) ? record?.objective ?? userIntent : undefined, () => runtimeRef)(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
+    }, run: (system, instruction, signal) => runLlmRequestAsRuntimeEffect({ models, router, execute: executeModelEffect, system, instruction, signal, maxOutputTokens: Math.min(4096, provider.model.capabilities.maxOutputTokens ?? 4096), task: 'reason' }) }) } }), effectExecutor: async (effect, signal, observe) => { if (effect.kind === 'llm') { return withEvidenceFreshness((e, s, o) => executeModelEffect(refreshPluginProjection(e, registry), s, o), () => runtimeRef, cwd, this.runDir(conversationId, runId), (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57')), () => this.readManifest(conversationId).then(manifest => (manifest.artifacts ?? []).map(artifact => artifact.path)))(effect, signal, observe) } if (effect.kind === 'tool') { const task = runtimeRef?.state.agents.get(effect.agentId); const record = task ? taskRecordFromGlobal(task.globalVersions.get(task.latestGlobalVersion) ?? {}) : undefined; const frozenCheck = record?.acceptanceChecks?.some(check => effect.key === `acceptance:${check.id}` && asRecord(effect.input)?.name === check.toolName && JSON.stringify(asRecord(effect.input)?.arguments) === JSON.stringify(check.input) && registry.get(check.toolName)?.manifest.sideEffectPolicy === 'read'); if (!frozenCheck) assertRunCanContinue(runtimeRef); const toolInput = asRecord(effect.input); if (toolInput?.name === 'shell.output' && (!runtimeRef || !canReadShellArchive(runtimeRef, effect.ownerLaneId, asRecord(toolInput.arguments)?.id))) return { value: null, status: 'failed', executionState: 'failed', error: { code: 'RESULT_NOT_VISIBLE', message: 'Original shell output is not visible in this lane.', retryable: false } }; return this.reviewPlanWrite(await approvedToolExecutor(registry, provider, options.approvalMode, reviewContext, options.activeModel ?? provider.model.id, cwd, runLlm, (name, input, policy) => this.planGateDenies(runId, name, input, policy, cwd), id => this.approvedToolCalls.get(runId)?.has(id) === true, options.approvalReview ? { modelId: options.approvalReview.model, providerId: options.approvalReview.provider, timeoutMs: options.approvalReview.timeoutMs, manualOnRejection: options.approvalReview.manualOnRejection === true } : undefined, relocation, ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)) ? automationApprovalEvidence(runtimeRef, effect) : undefined, ['28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)) ? record?.objective ?? userIntent : undefined, () => runtimeRef, effect => { const input = asRecord(effect.input); return ['shell.exec', 'shell.start'].includes(String(input?.name)) ? this.authorizeExec(asRecord(input?.arguments) ?? {}, cwd, conversationId, runId, effect.toolCallId ?? '') : Promise.resolve(false) })(effect, signal, observe), conversationId, runId, cwd, String(toolInput?.name ?? ''), signal, runPlanReview) } throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`) }, effectSubmissionPreparer: createToolEffectSubmissionPreparer(registry), persistenceBackend: backend })
     runtimeRef = runtime
     if (!assistantChat || savedInput.assistantChatVersion === '4' || savedInput.assistantChatVersion === '5') modelBudget = await ModelAttemptBudget.open(join(this.runDir(conversationId, runId), 'model-budget.json'), modelEffectBudget ?? Math.max(4, Math.min(256, Math.floor(options.maxModelCalls ?? 256))), legacyModelCalls(runtime), options.modelBudgetPolicy)
     if (recovery.journal) { await runtime.persist(backend); await finishRecovery(recovery.journal) }
@@ -3448,7 +3478,7 @@ export class LocalHost {
       current.updatedAt = new Date().toISOString()
       await this.saveManifest(current)
       this.active.delete(runId)
-      this.approvedToolCalls.delete(runId)
+      this.execPolicy.clearRun(conversationId, runId, activeEntry?.options.cwd ?? this.root); this.approvedToolCalls.delete(runId)
       await runtime.flushPersistence()
       const taskOutcome = acceptance ? { ...acceptance, ...outcomeDiagnostics(runtime.state, (projectedController?.tasks ?? stages) as unknown as Array<Record<string, JsonValue>>, outcome.error?.code) } : undefined
         const usage = runUsage(runtime, activeEntry?.options.modelPricing ?? this.options.modelPricing, activeEntry?.modelBudget)
@@ -3484,7 +3514,7 @@ export class LocalHost {
       try { await closeShellProcesses(this.runDir(conversationId, runId)) }
       finally {
         this.active.delete(runId)
-        this.approvedToolCalls.delete(runId)
+        this.execPolicy.clearRun(conversationId, runId, activeEntry?.options.cwd ?? this.root); this.approvedToolCalls.delete(runId)
         this.planGates.delete(runId)
         this.surfaceConversations.delete(runId)
         activeEntry?.capabilityController.abort()
@@ -3528,7 +3558,7 @@ export class LocalHost {
       const recording = replyText ? activeEntry?.jarvis?.recordUserInput(replyText, `reply:${effectId}`).catch(() => undefined) : undefined
       const approved = value && typeof value === 'object' && !Array.isArray(value) && (value as Record<string, JsonValue>).approved === true
       const previousGrants = new Set(this.approvedToolCalls.get(runId) ?? [])
-      if (approved) rememberApprovedCalls(effectId)
+      if (approved) { await this.execPolicy.approve(relocation ? presentTransferredApproval(asRecord(effect.input) ?? {}, relocation) : asRecord(effect.input) ?? {}, activeEntry?.options.cwd ?? this.root, conversationId, runId, effectId, asRecord(value) ?? {}); rememberApprovedCalls(effectId); this.options.execPolicy = this.execPolicy.getConfig() }
       try { await session.reply(effectId, value) } catch (error) {
         const grants = this.approvedToolCalls.get(runId)
         if (!runtime.state.effects.get(effectId)?.outcome) for (const id of grants ?? []) if (!previousGrants.has(id)) grants?.delete(id)
@@ -3550,6 +3580,10 @@ export class LocalHost {
       try {
         if (!effect || effect.kind !== 'human' || effect.outcome || !input || calls.length === 0) { reason = 'interaction_changed'; return result = { status: 'manual', reason } }
         const manifest = await this.readManifest(conversationId)
+        for (const call of calls) if (['shell.exec', 'shell.start'].includes(String(call.toolName ?? call.name))) {
+          const policy = await this.execPolicy.inspect(asRecord(call.input ?? call.arguments) ?? {}, manifest.executionCwd ?? manifest.cwd, conversationId, runId)
+          if (policy.decision === 'prompt' || policy.decision === 'forbidden') return result = { status: 'manual', reason: policy.reason }
+        }
         const dangerous = /\b(rm|rmdir|del|format|mkfs|sudo|chmod|chown|kill|shutdown|launchctl|security|keychain|curl|wget|ssh|scp|publish|git\s+push)\b|\.env|\.ssh|id_rsa|credentials|password|token/i
         const sensitivePath = /(^|[\\/])(?:\.git|\.ssh|\.aws|\.codex|\.pulse|\.env(?:\.[^\\/]*)?|id_(?:rsa|ed25519)(?:\.pub)?|(?:credentials?|passwords?|tokens?|secrets?)(?:\.(?:json|ya?ml|toml|txt|ini|pem|key))?)(?:[\\/]|$)/i
         const allowed = new Set(['fs.write', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'plan.write', 'fs.move', 'shell.exec'])
@@ -3661,6 +3695,8 @@ export class LocalHost {
           validateAskReply(effect?.input, answer.value)
           await this.observePlanConfirmation(runId, conversationId, answer.effectId, effect?.input, answer.value)
         }
+        for (const answer of answers) if (asRecord(answer.value)?.approved === true) await this.execPolicy.approve(relocation ? presentTransferredApproval(asRecord(runtime.state.effects.get(answer.effectId)?.input) ?? {}, relocation) : asRecord(runtime.state.effects.get(answer.effectId)?.input) ?? {}, activeEntry?.options.cwd ?? this.root, conversationId, runId, answer.effectId, asRecord(answer.value) ?? {})
+        this.options.execPolicy = this.execPolicy.getConfig()
         await session.replyBatch(groupId, answers)
         for (const answer of answers) await persistAskAnswer(answer.effectId, answer.value)
         for (const answer of answers) if (answer.value && typeof answer.value === 'object' && !Array.isArray(answer.value) && (answer.value as Record<string, JsonValue>).approved === true) rememberApprovedCalls(answer.effectId)
@@ -3669,7 +3705,7 @@ export class LocalHost {
           if (text) await activeEntry?.jarvis?.recordUserInput(text, `reply:${answer.effectId}`).catch(() => undefined)
         }
       },
-      pendingInteractions: async () => { const pending = pendingInteractions(runtime, session).map(group => ({ ...group, items: group.items.map(item => ({ ...item, input: relocation ? presentTransferredApproval(item.input, relocation) : item.input })) })); for (const group of pending) if (group.kind === 'ask') for (const item of group.items) await this.persistPlanPreview(conversationId, runId, runtime, item.effectId, item.input); return pending },
+      pendingInteractions: async () => { const pending = pendingInteractions(runtime, session).map(group => ({ ...group, items: group.items.map(item => ({ ...item, input: relocation ? presentTransferredApproval(item.input, relocation) : item.input })) })); for (const group of pending) if (group.kind === 'approval') for (const item of group.items) item.input = await this.execApprovalInput(item.input, activeEntry?.options.cwd ?? this.root, conversationId, runId, item.effectId); for (const group of pending) if (group.kind === 'ask') for (const item of group.items) await this.persistPlanPreview(conversationId, runId, runtime, item.effectId, item.input); return pending },
       reviewApproval,
       submitHumanInput: async (text, targetEffectId, inputOptions = {}) => {
         if (inputOptions.richContent) inputOptions = { ...inputOptions, richContent: parseRichContent(inputOptions.richContent)! }
@@ -4318,13 +4354,16 @@ export class LocalHost {
         // replyable; otherwise reconnects can replay the event without ever
         // showing the answer panel.
         if (!liveEffect || !['queued', 'running'].includes(liveEffect.state) || liveEffect.outcome !== undefined) continue
+        const root = this.active.get(runId)?.options.cwd ?? this.root
+        const automatic = await this.execPolicy.automatic(relocation ? presentTransferredApproval(asRecord(liveEffect.input) ?? {}, relocation) : asRecord(liveEffect.input) ?? {}, root, conversationId, runId)
+        if (automatic !== 'none') { await session.reply(liveEffect.id, { approved: automatic === 'allow', ...(automatic === 'forbidden' ? { reason: 'EXEC_POLICY_FORBIDDEN' } : {}) }); continue }
         const preview = await this.persistPlanPreview(conversationId, runId, runtime, liveEffect.id, liveEffect.input)
         if (preview !== undefined) {
           seq++
           yield { schemaVersion: 1, type: 'text', conversationId, runId, seq, data: preview }
         }
         seq++
-        yield { schemaVersion: 1, type: 'waiting', conversationId, runId, seq, data: { effectId: event.event.effectId ?? null, input: relocation && asRecord(event.event.data) ? presentTransferredApproval(asRecord(event.event.data)!, relocation) : event.event.data ?? null } }
+        yield { schemaVersion: 1, type: 'waiting', conversationId, runId, seq, data: { effectId: event.event.effectId ?? null, input: await this.execApprovalInput(relocation && asRecord(event.event.data) ? presentTransferredApproval(asRecord(event.event.data)!, relocation) : asRecord(event.event.data) ?? {}, root, conversationId, runId, liveEffect.id) } }
         continue
       }
       if (event.event?.type === 'effect.settled' && event.event.effectId) {

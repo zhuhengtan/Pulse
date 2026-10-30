@@ -1,8 +1,8 @@
 import { ShellOutput } from './shell-output.js'
 import { createRequire } from 'node:module'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
-import { basename, delimiter, dirname, join, parse, resolve, sep } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, parse, resolve, sep } from 'node:path'
 import { lstat, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -16,6 +16,38 @@ import { installationDependencyRoots, workspaceUsesInstallationDependencies } fr
 import { verifiedWindowsSrt } from './windows-srt-path.js'
 
 export interface ShellResult { code: number | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean; aborted: boolean; outputArchive?: ReturnType<ShellOutput['finish']> }
+
+export interface ShellIdentity { executable: string; prefixArgs: string[]; path: string; fingerprint: string; trusted: boolean }
+/** Resolve the same host wrappers and search path used by runShell, without
+ * launching the requested command or reading shell startup files. */
+export async function resolveShellIdentity(command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<ShellIdentity> {
+  validateShellInvocation(command, args)
+  cwd = await realpath(cwd)
+  const node = await realpath(process.execPath)
+  let executable = command, prefixArgs: string[] = []
+  if (command === 'node') executable = node
+  else if (process.platform === 'darwin' && command === 'git') executable = (await promisify(execFile)('/usr/bin/xcrun', ['--find', 'git'], { timeout: 5000, env: shellEnvironment(env) })).stdout.trim()
+  else {
+    const mapped = process.platform === 'win32' ? await resolveWindowsPackageManager(command, node, process.env.PNPM_HOME) : await resolveHostPackageManager(command, node)
+    if (mapped) { executable = mapped.executable; prefixArgs = mapped.prefixArgs }
+  }
+  if (!isAbsolute(executable)) {
+    const pathKey = Object.keys(env).find(k => k.toUpperCase() === 'PATH') ?? 'PATH'
+    const directories = [process.env.PNPM_HOME, dirname(node), join(cwd, 'node_modules', '.bin'), ...(env[pathKey] ?? '').split(delimiter)].filter((s): s is string => s !== undefined)
+    const names = process.platform === 'win32' && !/\.[a-z]+$/i.test(executable) ? [executable + '.exe', executable + '.cmd', executable] : [executable]
+    const candidates = /[\\/]/.test(executable) ? [resolve(cwd, executable)] : directories.flatMap(d => names.map(n => resolve(cwd, d, n)))
+    let found: string | undefined
+    for (const candidate of candidates) if ((await stat(candidate).catch(() => undefined))?.isFile()) { found = candidate; break }
+    if (!found) throw shellError('EXEC_POLICY_PROGRAM_UNRESOLVED')
+    executable = found
+  }
+  executable = await realpath(executable)
+  const files = [executable, ...prefixArgs.filter(isAbsolute)]
+  const stamps = await Promise.all(files.map(async file => { const path = await realpath(file), s = await stat(path); if (!s.isFile()) throw shellError('EXEC_POLICY_PROGRAM_UNRESOLVED'); return { path, dev: s.dev, ino: s.ino, size: s.size, mtime: s.mtimeMs, ctime: s.ctimeMs } }))
+  const path = stamps.at(-1)!.path
+  const trusted = files.every(file => file === node || /^\/(?:usr\/bin|bin|usr\/local|opt\/homebrew|Library\/Developer)\//.test(file)) && !(path === cwd || path.startsWith(cwd + sep))
+  return { executable, prefixArgs, path, fingerprint: createHash('sha256').update(JSON.stringify({ stamps, prefixArgs })).digest('hex'), trusted }
+}
 
 function shellError(code: string, retryable = false, cause?: unknown): Error & { code: string; retryable: boolean; cause?: unknown } {
   return Object.assign(new Error(code), { code, retryable, ...(cause === undefined ? {} : { cause }) })
@@ -233,11 +265,16 @@ async function trustedGitExecutable(command: string, executable: string, cwd: st
   if (process.platform === 'win32' || basename(command) !== 'git') return undefined
   const trusted = (await Promise.all(TRUSTED_GIT_DIRECTORIES.map((dir) => realpath(dir).catch(() => undefined)))).filter((dir): dir is string => dir !== undefined)
   const trustedParent = async (resolved: string): Promise<string | undefined> => {
+    // Follow the symlink. A trusted directory is not enough: /usr/bin/true must
+    // not inherit this grant just because a PATH entry was named git.
+    if (basename(resolved) !== 'git') return undefined
     const parent = await realpath(dirname(resolved)).catch(() => undefined)
     return parent && trusted.includes(parent) ? resolved : undefined
   }
   if (executable.includes('/') || executable.includes(sep)) {
-    const resolved = await realpath(executable).catch(() => undefined)
+    // execFile resolves a relative path against the shell cwd, not the host process cwd.
+    const candidate = isAbsolute(executable) ? executable : resolve(cwd, executable)
+    const resolved = await realpath(candidate).catch(() => undefined)
     return resolved ? trustedParent(resolved) : undefined
   }
   for (const entry of pathValue.split(delimiter)) {
@@ -295,7 +332,7 @@ async function gitFilterNeutralizingArguments(cwd: string, executable: string, p
     // defined outside the repository is never enumerated and never reachable.
     // `-z` keeps key names NUL separated, so a driver name containing a dot
     // (`filter.pulse.probe.clean`) is read whole instead of being cut in two.
-    const { stdout } = await promisify(execFile)(executable, ['--no-pager', 'config', '--includes', '--list', '--name-only', '-z'], {
+    const { stdout } = await promisify(execFile)(executable, ['--no-pager', '-c', 'core.fsmonitor=', '-c', 'core.hooksPath=/dev/null', '-c', 'core.pager=cat', 'config', '--includes', '--list', '--name-only', '-z'], {
       cwd,
       timeout: 5000,
       maxBuffer: 1 << 20,
@@ -352,6 +389,26 @@ async function approvedGitMetadata(cwd: string, command: string, executable: str
   if (filterArguments === undefined) return denied
   const subcommandArguments = textDiff ? [...GIT_DIFF_NEUTRALIZING_ARGUMENTS] : []
   return { roots, globalArguments: [...GIT_NEUTRALIZING_ARGUMENTS, ...filterArguments], subcommandArguments, executable: trusted }
+}
+
+/**
+ * Same bounded git argv as safeCommandPrefix in exec-policy.ts. These queries
+ * are neutralized even when the linked-worktree metadata grant is denied, so a
+ * normal repository cannot start fsmonitor, hooks, clean/process filters,
+ * external diff, textconv, or a pager. This does not add filesystem roots.
+ */
+function safeGitQuery(command: string, args: string[]): boolean {
+  if (basename(command).toLowerCase().replace(/\.exe$/, '') !== 'git') return false
+  const [sub, ...rest] = args
+  if (!sub || sub.startsWith('-') || rest.length > 32) return false
+  const allowed = (words: string[]) => rest.every(arg => words.includes(arg))
+  if (sub === 'status') return allowed(['--short', '--branch', '--porcelain', '--porcelain=v1', '-s', '-b'])
+  if (sub === 'diff') return allowed(['--stat', '--name-only', '--name-status', '--cached', '--staged', '--no-ext-diff', '--no-textconv'])
+  if (sub === 'log') {
+    const bound = /^(?:-(?:[1-9]|[1-9][0-9])|--max-count=(?:[1-9]|[1-9][0-9]))$/
+    return rest.some(arg => bound.test(arg)) && rest.every(arg => arg === '--oneline' || arg === '--no-decorate' || bound.test(arg))
+  }
+  return false
 }
 
 async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolchainRoots: string[] = [], scratch?: string, dependencyRoots: string[] = [], gitMetadataRoots: string[] = []): Promise<SandboxRuntimeConfig> {
@@ -435,7 +492,7 @@ export function validateShellInvocation(command: string, args: string[] = []): v
   encodeSandboxCommand(command, args)
 }
 
-export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void } = {}): Promise<ShellResult> {
+export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; expectedIdentity?: ShellIdentity | undefined; beforeLaunch?: () => Promise<ShellIdentity | undefined>; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void } = {}): Promise<ShellResult> {
   const max = options.maxOutputBytes ?? 256 * 1024
   if (!Number.isFinite(max) || max < 0) return Promise.reject(shellError('INVALID_SHELL_OUTPUT_LIMIT'))
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0)) return Promise.reject(shellError('INVALID_SHELL_TIMEOUT'))
@@ -514,11 +571,18 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         toolchainRoots.push(resolved.readRoot)
       }
     }
+    if (options.expectedIdentity) {
+      const actual = await resolveShellIdentity(command, args, cwd, baseEnv)
+      if (actual.fingerprint !== options.expectedIdentity.fingerprint) throw shellError('EXEC_POLICY_PROGRAM_CHANGED')
+      executable = actual.executable
+      executableArgs = [...actual.prefixArgs, ...args]
+    }
     const invocationId = randomUUID()
     const gitApproval = await approvedGitMetadata(cwd, command, executable, args, baseEnv, String(executionEnv[pathKey] ?? ''))
     // A granted call launches the path that was verified, so a `./git` or a PATH
     // entry swapped in after the check can no longer become the running binary.
-    // Ungranted calls keep their own argv untouched.
+    // Other ungranted calls keep their argv. Bounded git status/diff/log still
+    // receive neutralizing flags, without any extra filesystem root.
     if (gitApproval.executable) executable = gitApproval.executable
     if (gitApproval.globalArguments.length > 0) {
       // Global options precede the subcommand; per-subcommand options must
@@ -527,6 +591,20 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       // A status refresh would otherwise take the index lock; the grant is
       // read-only, so optional locks are switched off for this child only.
       executionEnv.GIT_OPTIONAL_LOCKS = '0'
+    } else if (safeGitQuery(command, args)) {
+      // Filter enumeration runs on the host, before the sandbox exists. Only a
+      // verified system Git may be executed there. A workspace, relative, or
+      // PATH impostor keeps the original argv and runs inside the sandbox.
+      const pathValue = String(executionEnv[pathKey] ?? '')
+      const trusted = await trustedGitExecutable(command, executable, cwd, pathValue)
+      if (trusted) {
+        const filterArguments = await gitFilterNeutralizingArguments(cwd, trusted, pathValue)
+        if (filterArguments === undefined) throw shellError('GIT_HELPER_UNNEUTRALIZED')
+        executable = trusted
+        const subcommandArguments = args[0] === 'diff' ? [...GIT_DIFF_NEUTRALIZING_ARGUMENTS] : []
+        executableArgs = [...GIT_NEUTRALIZING_ARGUMENTS, ...filterArguments, ...executableArgs.slice(0, 1), ...subcommandArguments, ...executableArgs.slice(1)]
+        executionEnv.GIT_OPTIONAL_LOCKS = '0'
+      }
     }
     const policy = await sandboxConfig(cwd, options.allowedDomains ?? [], toolchainRoots, scratch, dependencyRoots, gitApproval.roots)
     let child: ReturnType<typeof spawn> | undefined
@@ -585,6 +663,13 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         SandboxManager.cleanupAfterCommand()
         await SandboxManager.reset()
         return { code: null, stdout: '', stderr: '', truncated: false, timedOut: false, aborted: true }
+      }
+      // A call can wait for the process-global sandbox lease. Re-evaluate
+      // policy and executable identity after that wait, immediately before IO.
+      const launchIdentity = options.beforeLaunch ? await options.beforeLaunch() : options.expectedIdentity
+      if (launchIdentity) {
+        const fresh = await resolveShellIdentity(command, args, cwd, baseEnv)
+        if (fresh.fingerprint !== launchIdentity.fingerprint || fresh.executable !== executable || JSON.stringify(fresh.prefixArgs) !== JSON.stringify(options.expectedIdentity?.prefixArgs ?? fresh.prefixArgs)) throw shellError('EXEC_POLICY_PROGRAM_CHANGED')
       }
       child = spawn(sandboxArgv[0]!, sandboxArgv.slice(1), {
         cwd,

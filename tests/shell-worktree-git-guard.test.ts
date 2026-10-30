@@ -190,11 +190,22 @@ it.skipIf(process.platform === 'win32')('rejects forged, symlinked and redirecti
     await writeFile(outside, 'OUTSIDE SENTINEL')
     await writeFile(outsideTwo, 'OUTSIDE SENTINEL TWO')
 
-    for (const [label, dir] of [['symlinked', symlinked], ['forged', forged], ['stray', stray]] as const) {
-      const result = await sandboxGit(dir, ['status', '--short'])
-      expect(result.code, `${label}: ${result.stdout}${result.stderr}`).not.toBe(0)
-      expect(result.stdout).not.toContain('notes.txt')
+    // Trusted system Git now refuses before the sandbox when repository filter
+    // enumeration cannot be neutralized. That early GIT_HELPER_UNNEUTRALIZED
+    // rejection is the denial. Any other error still fails the test. A returned
+    // result must stay non-zero and must not reveal the linked worktree.
+    const deniedPointer = async (dir: string, label: string) => {
+      try {
+        const result = await sandboxGit(dir, ['status', '--short'])
+        expect(result.code, `${label}: ${result.stdout}${result.stderr}`).not.toBe(0)
+        expect(result.stdout).not.toContain('notes.txt')
+      } catch (error) {
+        const code = (error as { code?: string }).code
+        if (code !== 'GIT_HELPER_UNNEUTRALIZED') throw error
+        expect(code).toBe('GIT_HELPER_UNNEUTRALIZED')
+      }
     }
+    for (const [label, dir] of [['symlinked', symlinked], ['forged', forged], ['stray', stray]] as const) await deniedPointer(dir, label)
 
     // `--no-index` would hand back an arbitrary external file without needing
     // any repository metadata, so the read-only exception must not approve it.

@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { installProcessDiagnostics, createLocalHost, automationDoctor, requestAutomationPermissions, assertJarvisApiUrl, createBuiltinSkillCapabilityPack, createMcpCapabilityPack, createPdfCapabilityPack, createDocxCapabilityPack, createPptxCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
-import { modelSelectionId, normalizeModelConfig, resolveModelReference, resolveProviderApiKey, resolveWebSearchOptions, parseBuiltinPlugins } from '@hunterzhu/pulse-server'
+import { modelSelectionId, normalizeModelConfig, resolveModelReference, resolveProviderApiKey, resolveWebSearchOptions, parseBuiltinPlugins, parseExecPolicy } from '@hunterzhu/pulse-server'
 import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
 import { runOneShot } from './commands/run.js'
@@ -38,6 +38,7 @@ Usage:
   pulse resume <conversation-id> [task]    continue or recover a conversation
   pulse drafts <conversation-id> <run-id> <draft-id> [--revision <hash> --confirm-owner]
                                           preview or explicitly migrate an ownerless draft
+  pulse execpolicy check -- <program> [args...]  inspect command policy without execution
   pulse files rollback --confirm <path>:<sha256> [<path>:<sha256> ...] [--conversation <id> --run <id>]
                                           restore journaled file bytes; shell side effects are not rollbackable
   pulse doctor [options]                  check local configuration
@@ -163,7 +164,7 @@ export function parse(argv: string[]): Parsed {
       options[key] = true
       continue
     }
-  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp', 'h5', 'update', 'automation', 'drafts', 'files'].includes(arg)) {
+  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp', 'h5', 'update', 'automation', 'drafts', 'files', 'execpolicy'].includes(arg)) {
       command = arg
     } else {
       positionals.push(arg)
@@ -470,6 +471,8 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(mockAfterToolResponse === undefined ? {} : { mockAfterToolResponse }),
     ...(mockParallelPlan === undefined ? {} : { mockParallelPlan }),
     ...(approvalMode === undefined ? {} : { approvalMode }),
+    execPolicy: parseExecPolicy(config.execPolicy),
+    execPolicyConfigPath: resolve(expandHome(option(parsed.options, 'config') ?? process.env.PULSE_CONFIG) ?? defaultPulseConfigPath()),
     ...(configuredMaxTurns === undefined ? {} : { maxTurns: configuredMaxTurns }),
     maxModelCalls: configuredMaxModelCalls,
     ...(option(parsed.options, 'accept-build-migration') ? { recoveryBuildMigration: (() => { const pair = option(parsed.options, 'accept-build-migration')!.split(':'); if (pair.length !== 2 || pair.some(hash => !/^[a-f0-9]{64}$/.test(hash))) throw new Error('Invalid build migration pair; use the two hashes in the recovery diagnostic.'); return { from: pair[0]!, to: pair[1]! } })() } : {}),
@@ -503,6 +506,16 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
 
 export async function main(): Promise<number> {
   const parsed = parse(process.argv.slice(2))
+  // Resolve this before global --help/--version. Otherwise `execpolicy check node --version`
+  // is swallowed by the version flag and never reports that the `--` separator is missing.
+  if (parsed.command === 'execpolicy') {
+    const [sub, command, ...args] = parsed.positionals
+    if (sub !== 'check' || !command || !process.argv.includes('--')) throw new Error('Usage: pulse execpolicy check [--cwd <workspace>] -- <program> [args...]')
+    const cwd = resolve(expandHome(option(parsed.options, 'cwd')) ?? process.cwd())
+    const loaded = await loadPulseConfig(cwd, expandHome(option(parsed.options, 'config')), false)
+    const host = createLocalHost({ cwd, execPolicy: parseExecPolicy(loaded.value.execPolicy) })
+    try { process.stdout.write(JSON.stringify(await host.checkExecPolicy({ command, args }), null, 2) + '\n'); return 0 } finally { await host.close() }
+  }
   if (parsed.options.help || parsed.options.h) {
     process.stdout.write(help)
     return 0
