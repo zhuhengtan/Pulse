@@ -1,3 +1,5 @@
+import { presentRun, shellProcessPending, type RunCompletion } from '@hunterzhu/pulse-server/run-presentation'
+import { compactRunLabel, CompactRunStatus, ConnectionMark, missingCompleteStatus } from './run-status.js'
 import { messagePayload, retryMessagePayload } from './message-payload.js'
 import { chatReferenceFromQuery, chatModePath } from './chat-reference.js'
 import type { RunRecoveryPreflight } from '@hunterzhu/pulse-server/protocol'
@@ -54,7 +56,7 @@ const PreviewDock = lazy(() => import('./PreviewDock.js').then(module => ({ defa
 type RunStatus =
   | { kind: 'status'; label: string }
   | { kind: 'review'; label: string }
-  | { kind: 'tool'; activityId: string; label: string; state: string }
+  | { kind: 'tool'; activityId: string; label: string; state: string; processPending?: boolean }
   | PendingInteraction
   | { kind: 'complete'; label: string; outcome: 'succeeded' | 'failed' | 'cancelled' | 'interrupted' }
 
@@ -617,7 +619,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       // rewind would put answered approvals and stale tool rows back on screen.
       if (event.seq <= after && (event.type === 'status' || event.type === 'tool' || event.type === 'lanes' || event.type === 'waiting' || event.type === 'interactions' || event.type === 'text')) return
       if (event.type === 'status') setStatus(current => replaceStatus(current, { kind: 'status', label: event.data.label ?? (event.data.kind === 'context' ? '正在整理上下文' : '正在处理') }))
-      if (event.type === 'tool') setStatus(current => replaceStatus(current, { kind: 'tool', activityId: event.data.activityId, label: readableTool(event.data.tool), state: event.data.status }))
+      if (event.type === 'tool') setStatus(current => replaceStatus(current, toolRunStatus(event.data)))
       if (event.type === 'waiting') setStatus(current => replaceStatus(current, { kind: 'interaction', runId, groupId: `effect:${event.data.effectId}`, interactionKind: event.data.input.kind === 'ask' ? 'ask' : 'approval', items: [{ effectId: event.data.effectId, input: event.data.input }] }))
       if (event.type === 'interactions') {
         setReviewNote(event.data.reviewNote ?? '')
@@ -635,7 +637,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       if (event.type === 'text') setMessages(current => replaceRunMessage(current, runId, event.data))
       if (event.type === 'complete') {
         const outcome = event.data.status
-        const label = outcome === 'succeeded' ? '已完成' : outcome === 'cancelled' ? '已停止' : event.data.errorCode ? `未完成 · ${event.data.errorCode}` : '任务未完成'
+        const label = presentRun({ state: outcome, completion: event.data }).label
         setReviewNote('')
         setStatus(current => replaceStatus(current.filter(item => item.kind !== 'interaction'), { kind: 'complete', label, outcome }))
       }
@@ -1370,6 +1372,12 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   if (route.page === 'missing') return <main className="empty"><h1>页面不存在</h1><PulseButton onClick={() => go('/chat', true)}>返回聊天</PulseButton></main>
 
   const activeRunId = selected?.activeRunId
+  const completeItem = [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'complete' }> => item.kind === 'complete')
+  const interactionItem = [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'interaction' }> => item.kind === 'interaction')
+  const latestTool = [...status].reverse().find((item): item is Extract<RunStatus, { kind: 'tool' }> => item.kind === 'tool')
+  const activeTrace = activeRunId ? traces[activeRunId] : undefined
+  const traceSteps = activeTrace ? activeTrace.order.flatMap(id => activeTrace.lanes[id]?.steps ?? []) : []
+  const phaseLabel = compactRunLabel({ running, ...(completeItem ? { completeLabel: completeItem.label } : {}), ...(interactionItem ? { interaction: interactionItem.interactionKind } : {}), steps: traceSteps, ...(latestTool?.processPending ? { latestToolPending: true } : {}) })
   const recoveryVisible = Boolean(surfaceMode === 'work' && !running && recoveryRun && activeRunId && recoveryRun.conversationId === selected?.id && recoveryRun.runId === activeRunId)
   const emptyConversation = messages.length === 0 && !recoveryVisible && !(surfaceMode === 'work' && (artifactIndex.artifacts.length > 0 || route.query.has('artifactRun')))
   const composerApproval = <ApprovalPolicySelect borderless value={approvalPolicy} unavailable={!approvalReady} onRetry={retryApprovalPolicy} disabled={approvalSaving || !sessionCapabilities.localAdmin} onChange={policy => { void setApprovalPolicy(policy) }} />
@@ -1432,10 +1440,10 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         {surfaceMode === 'work' && <PulseButton ref={drawerTrigger} className="icon-button mobile-menu" onClick={() => setDrawerOpen(true)} aria-label="历史对话"><Icon name="menu"/></PulseButton>}
         {surfaceMode === 'work' && <PulseButton className="icon-button desktop-menu" onClick={() => historyLayout.toggle()} aria-label={sidebarCollapsed ? '展开历史对话' : '收起历史对话'}><Icon name="menu"/></PulseButton>}
         {!switchInHistory && modeSwitch}
-        <div className="navbar-title"><span className={`status-dot ${paired ? '' : 'offline'}`} /><span className="title-text" title={surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}>{surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}</span></div>
+        <div className="navbar-title"><ConnectionMark paired={paired} serviceConnected={serviceConnected} /><span className="title-text" title={surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}>{surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}</span></div>
         <div className="navbar-actions">
           {paired && <TaskNotificationInbox transport={transport} open={go}/>}
-          {running && <span className="running-pill"><i />{surfaceMode === 'chat' ? '正在回复' : '运行中'}</span>}
+          <CompactRunStatus label={phaseLabel} />
           {surfaceMode === 'work' ? <Dropdown open={moreOpen} onOpenChange={setMoreOpen} trigger={['click']} placement="bottomRight" menu={{ items: [transfer.exportItem], onClick: () => setMoreOpen(false) }}>
             <Tooltip title={moreOpen ? null : '更多'}><PulseButton className="navbar-tool" aria-label="更多" aria-haspopup="menu" aria-expanded={moreOpen}><Icon name="ellipsis" size={22}/></PulseButton></Tooltip>
           </Dropdown> : <Tooltip title="设置"><PulseButton className="navbar-tool" aria-label="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings" size={21}/></PulseButton></Tooltip>}
@@ -1475,17 +1483,25 @@ function snapshotStatus(snapshot: WebRunSnapshot): RunStatus[] {
   const items: RunStatus[] = []
   if (snapshot.status) items.push({ kind: 'status', label: snapshot.status.data.label ?? '正在处理' })
   if (snapshot.reviewNote) items.push({ kind: 'review', label: snapshot.reviewNote })
-  for (const activity of snapshot.activities) items.push({ kind: 'tool', activityId: activity.data.activityId, label: readableTool(activity.data.tool), state: activity.data.status })
+  for (const activity of snapshot.activities) items.push(toolRunStatus(activity.data))
   if (snapshot.interactions?.length) {
     for (const group of snapshot.interactions) items.push({ kind: 'interaction', runId: snapshot.runId, groupId: group.groupId, interactionKind: group.kind, items: group.items })
   } else if (snapshot.waiting) items.push({ kind: 'interaction', runId: snapshot.runId, groupId: `effect:${snapshot.waiting.data.effectId}`, interactionKind: snapshot.waiting.data.input.kind === 'ask' ? 'ask' : 'approval', items: [{ effectId: snapshot.waiting.data.effectId, input: snapshot.waiting.data.input }] })
-  if (snapshot.complete) items.push(completeStatus(snapshot.complete.data.status, snapshot.complete.data.errorCode))
-  else if (snapshot.state === 'interrupted') items.push({ kind: 'complete', outcome: 'interrupted', label: '任务已中断，没有自动恢复' })
+  if (snapshot.complete) items.push(completeStatus(snapshot.complete.data))
+  else {
+    const missing = missingCompleteStatus(snapshot.state)
+    if (missing) items.push({ kind: 'complete', outcome: missing.outcome, label: missing.label })
+  }
   return items
 }
 
-function completeStatus(outcome: 'succeeded' | 'failed' | 'cancelled', errorCode?: string): Extract<RunStatus, { kind: 'complete' }> {
-  return { kind: 'complete', outcome, label: outcome === 'succeeded' ? '已完成' : outcome === 'cancelled' ? '已停止' : errorCode ? `未完成 · ${errorCode}` : '任务未完成' }
+function toolRunStatus(data: { activityId: string; tool: string; status: string; preview?: Record<string, unknown> }): Extract<RunStatus, { kind: 'tool' }> {
+  const pending = shellProcessPending(data.tool, data.status, data.preview)
+  return { kind: 'tool', activityId: data.activityId, label: readableTool(data.tool), state: data.status, ...(pending ? { processPending: true } : {}) }
+}
+
+function completeStatus(completion: RunCompletion): Extract<RunStatus, { kind: 'complete' }> {
+  return { kind: 'complete', outcome: completion.status, label: presentRun({ state: completion.status, completion }).label }
 }
 
 function replaceStatus(items: RunStatus[], value: RunStatus): RunStatus[] {

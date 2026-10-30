@@ -1,3 +1,4 @@
+import { presentRun, runCompletion, shellProcessPending } from '@hunterzhu/pulse-server/run-presentation';
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { LocalHost, RunHandle } from '@hunterzhu/pulse-server';
 import { withCliNotifications } from '../utils/notification-bridge.js';
@@ -171,8 +172,14 @@ export function useRun({
                 ? calls.map((call, callIndex) => callIndex === index ? merged : call)
                 : [...calls, merged];
               addAssistantMessage({ ...assistantMessage, toolCalls: assistantMessage.toolCalls.map((call) => ({ ...call })) });
-              setCurrentStep(merged.status === 'succeeded' ? `已完成 ${merged.name}，正在整理结果…` : merged.status === 'failed' ? `${merged.name} 未成功，正在处理错误…` : `正在执行 ${merged.name}…`);
-              addProgress(`tool-result:${merged.id}:${merged.status}`, `${merged.status === 'succeeded' ? '已完成' : merged.status === 'cancelled' ? '已取消' : '执行失败'} · ${merged.name}`);
+              if (shellProcessPending(merged.name, merged.status, merged.preview)) {
+                const label = presentRun({ state: 'running', waiting: 'process' }).label;
+                setCurrentStep(label);
+                addProgress(`process:${merged.id}`, label);
+              } else {
+                setCurrentStep(merged.status === 'succeeded' ? `已完成 ${merged.name}，正在整理结果…` : merged.status === 'failed' ? `${merged.name} 未成功，正在处理错误…` : `正在执行 ${merged.name}…`);
+                addProgress(`tool-result:${merged.id}:${merged.status}`, `${merged.status === 'succeeded' ? '已完成' : merged.status === 'cancelled' ? '已取消' : '执行失败'} · ${merged.name}`);
+              }
             }
             break;
           }
@@ -206,8 +213,9 @@ export function useRun({
                 ...(typeof input.placeholder === 'string' ? { placeholder: input.placeholder } : {}),
                 ...(typeof input.defaultValue === 'string' ? { defaultValue: input.defaultValue } : {}),
               } });
-              setCurrentStep('等待你的回答...');
-              addProgress(`waiting:${effectId}`, '等待你的回答…');
+              const label = presentRun({ state: 'running', waiting: 'input' }).label;
+              setCurrentStep(label);
+              addProgress(`waiting:${effectId}`, label);
               break;
             }
             const tools = Array.isArray(input.tools)
@@ -233,8 +241,9 @@ export function useRun({
               ...(input.execPolicy ? { execPolicy: input.execPolicy as ApprovalRequest['execPolicy'] } : {}),
               ...(tools.length ? { tools } : {}),
             } });
-            setCurrentStep('等待用户审批...');
-            addProgress(`approval:${effectId}`, `等待审批 · ${tools.map((tool) => tool.name).join('、') || '系统操作'}`);
+            const label = presentRun({ state: 'running', waiting: 'approval' }).label;
+            setCurrentStep(label);
+            addProgress(`approval:${effectId}`, tools.length ? `${label} · ${tools.map((tool) => tool.name).join('、')}` : label);
             break;
           }
           case 'fact':
@@ -298,15 +307,17 @@ export function useRun({
             setLanes([]);
             break;
           case 'complete':
-            addProgress('finished', event.data && typeof event.data === 'object' && !Array.isArray(event.data) && (event.data as Record<string, unknown>).status === 'succeeded' ? '任务处理完成。' : '任务已结束。');
+            const completionView = runCompletion(event.data);
+            const presentation = presentRun({ state: completionView.status, completion: completionView });
+            addProgress('finished', presentation.label);
             setIsRunning(false);
             setCurrentStep(null);
             setPendingInteractions([]);
             if (event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
               const completion = event.data as Record<string, unknown>;
-              const accepted = completion.status === 'succeeded' && (!completion.taskOutcome || (typeof completion.taskOutcome === 'object' && completion.taskOutcome !== null && (completion.taskOutcome as Record<string, unknown>).status === 'accepted'));
+              // streamStatus is reply-byte completeness. Acceptance stays on the shared progress label.
               if (assistantStarted && assistantMessage.text) {
-                assistantMessage.streamStatus = accepted ? 'complete' : 'incomplete';
+                assistantMessage.streamStatus = completionView.status === 'succeeded' ? 'complete' : 'incomplete';
                 addAssistantMessage({ ...assistantMessage, toolCalls: assistantMessage.toolCalls?.map((call) => ({ ...call })) });
               }
               const usage = completion.usage && typeof completion.usage === 'object' && !Array.isArray(completion.usage)
@@ -323,25 +334,6 @@ export function useRun({
                 const estimate = usage.estimatedCost && typeof usage.estimatedCost === 'object' ? usage.estimatedCost as { currency?: unknown; amount?: unknown; pricingVersion?: unknown } : undefined;
                 const costLabel = costs.length ? costs.map((item) => `${item.amount} ${item.currency}`).join(', ') : estimate && typeof estimate.amount === 'number' ? `估算 ${estimate.amount} ${String(estimate.currency)} (价格 ${String(estimate.pricingVersion)})` : '费用未知';
                 addAssistantMessage({ id: `run-usage-${run.id}`, role: 'system', text: `用量：输入 ${input} · 输出 ${output} · 思考 ${reasoning} · 可见字符 ${visibleChars} · 模型调用 ${modelCalls} · 截断 ${truncations} · ${costLabel}${usage.completeness === 'partial' ? ' · 数据不完整' : ''}`, createdAt: new Date().toISOString(), runId: run.id });
-              }
-              const taskOutcome = completion.taskOutcome && typeof completion.taskOutcome === 'object' && !Array.isArray(completion.taskOutcome)
-                ? completion.taskOutcome as Record<string, unknown>
-                : undefined;
-              if (taskOutcome && typeof taskOutcome.status === 'string') {
-                const labels: Record<string, string> = {
-                  accepted: '任务验收通过',
-                  incomplete: '任务未完成',
-                  unverifiable: '任务结果无法核验',
-                  failed: '任务执行失败',
-                  cancelled: '任务已取消',
-                };
-                addAssistantMessage({
-                  id: `task-outcome-${run.id}`,
-                  role: 'system',
-                  text: labels[taskOutcome.status] ?? `任务验收状态：${taskOutcome.status}`,
-                  createdAt: new Date().toISOString(),
-                  runId: run.id,
-                });
               }
               const completionError = completion.error;
               if (completion.status === 'failed' && completionError && typeof completionError === 'object' && !Array.isArray(completionError)) {

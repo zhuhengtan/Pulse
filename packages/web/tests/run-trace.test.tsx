@@ -79,10 +79,35 @@ describe('execution trace replay', () => {
     expect(screen.queryByText('保持展开')).toBeNull()
   })
 
+  it('replays public acceptance and does not turn incomplete work green', () => {
+    const events: WebRunEvent[] = [{ type: 'complete', runId: 'r', seq: 1, data: { status: 'succeeded', taskRequired: true, taskOutcome: { status: 'incomplete' } } }]
+    const view = render(<RunTraceView trace={events.reduce(reduceTrace, emptyTrace)} running={false} />)
+    expect(screen.getByRole('button', { name: /主进程.*任务未完成/ })).toBeTruthy()
+    view.rerender(<RunTraceView trace={{ ...emptyTrace, outcome: 'succeeded', completion: { status: 'succeeded', taskOutcome: { status: 'accepted' } } }} running={false} />)
+    expect(screen.getByRole('button', { name: /主进程.*任务验收通过/ })).toBeTruthy()
+  })
+
+  it('shows a settled shell process as waiting until later work or completion', () => {
+    const started: WebRunEvent = { type: 'tool', runId: 'r', seq: 1, data: { activityId: 'process', effectId: 'process', tool: 'shell.poll', status: 'succeeded', preview: { status: 'running' } } }
+    const view = render(<RunTraceView trace={reduceTrace(emptyTrace, started)} running />)
+    expect(screen.getByRole('button', { name: /主进程.*等待进程/ })).toBeTruthy()
+    const reading: WebRunEvent = { type: 'tool', runId: 'r', seq: 2, data: { activityId: 'read', effectId: 'read', tool: 'fs.read', status: 'running' } }
+    const continued = reduceTrace(reduceTrace(emptyTrace, started), reading)
+    view.rerender(<RunTraceView trace={continued} running />)
+    expect(screen.getByRole('button', { name: /主进程.*执行中/ })).toBeTruthy()
+    const done = reduceTrace(continued, { type: 'complete', runId: 'r', seq: 3, data: { status: 'succeeded', taskRequired: true, taskOutcome: { status: 'incomplete' } } })
+    view.rerender(<RunTraceView trace={done} running={false} />)
+    expect(screen.getByRole('button', { name: /主进程.*任务未完成/ })).toBeTruthy()
+    view.unmount()
+    const exited: WebRunEvent = { type: 'tool', runId: 'r', seq: 1, data: { activityId: 'process', effectId: 'process', tool: 'shell.poll', status: 'succeeded', preview: { status: 'exited' } } }
+    render(<RunTraceView trace={reduceTrace(emptyTrace, exited)} running />)
+    expect(screen.queryByRole('button', { name: /等待进程/ })).toBeNull()
+  })
+
   it('keeps an empty completed process visible and collapsed', () => {
     const view = render(<RunTraceView trace={emptyTrace} running />)
     view.rerender(<RunTraceView trace={{ ...emptyTrace, outcome: 'succeeded' }} running={false} />)
-    expect(screen.getByRole('button', { name: /主进程.*已完成/ }).getAttribute('aria-expanded')).toBe('false')
+    expect(screen.getByRole('button', { name: /主进程.*验收状态未知/ }).getAttribute('aria-expanded')).toBe('false')
   })
 
   it('collapses when completion arrives before stream cleanup, without collapsing a manual replay again', () => {
@@ -90,7 +115,7 @@ describe('execution trace replay', () => {
     const view = render(<RunTraceView trace={trace} running />)
     const finished = { ...trace, outcome: 'succeeded' as const }
     view.rerender(<RunTraceView trace={finished} running />)
-    const head = screen.getByRole('button', { name: /主进程.*已完成/ })
+    const head = screen.getByRole('button', { name: /主进程.*验收状态未知/ })
     expect(head.getAttribute('aria-expanded')).toBe('false')
     fireEvent.click(head)
     view.rerender(<RunTraceView trace={finished} running={false} />)
@@ -109,7 +134,7 @@ describe('execution trace replay', () => {
     view.unmount()
     const legacyTransport: PulseWebTransport = { ...transport, request: async () => response({ events: events.map(({ timestamp: _timestamp, runStartedAt: _start, ...event }) => event) }) }
     render(<PersistedRunTrace runId="run-busy" transport={legacyTransport} />)
-    await screen.findByText('已完成', { exact: true })
+    await screen.findByText('运行已结束，验收状态未知', { exact: true })
     expect(screen.queryByText(/耗时/)).toBeNull()
   })
 })

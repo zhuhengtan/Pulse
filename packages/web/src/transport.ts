@@ -13,23 +13,70 @@ export interface PulseWebTransport {
   subscribe(path: string, onEvent: (event: WebRunEvent) => void, onError: () => void): () => void
 }
 
-export type EventSourceLike = Pick<EventSource, 'onmessage' | 'onerror' | 'close'>
+export type EventSourceLike = Pick<EventSource, 'onmessage' | 'onerror' | 'onopen' | 'close'>
 export type EventSourceFactory = (url: string, options: EventSourceInit) => EventSourceLike
+
+function requestAborted(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError'
+}
 
 export function createBrowserTransport(
   baseUrl = '',
   request: typeof fetch = fetch,
   createEventSource: EventSourceFactory = (url, options) => new EventSource(url, options),
 ): PulseWebTransport {
+  const listeners = new Set<(connected: boolean) => void>()
+  const streamsDown = new Set<number>()
+  let streamId = 0
+  let httpDown = false
+  let connected = true
+  const publish = () => {
+    const next = !httpDown && streamsDown.size === 0
+    if (next === connected) return
+    connected = next
+    for (const listener of listeners) listener(next)
+  }
   return {
-    request: (path, init = {}) => request(`${baseUrl}${path}`, { ...init, credentials: 'include' }),
+    onConnection(listener) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    async request(path, init = {}) {
+      try {
+        const response = await request(`${baseUrl}${path}`, { ...init, credentials: 'include' })
+        httpDown = false
+        publish()
+        return response
+      } catch (error) {
+        if (!requestAborted(error)) { httpDown = true; publish() }
+        throw error
+      }
+    },
     subscribe(path, onEvent, onError) {
       const source = createEventSource(`${baseUrl}${path}`, { withCredentials: true })
+      const id = ++streamId
+      let closed = false
+      source.onopen = () => {
+        if (closed) return
+        const recovered = streamsDown.delete(id) || httpDown
+        httpDown = false
+        if (recovered) publish()
+      }
       source.onmessage = (message) => {
         try { onEvent(JSON.parse(message.data) as WebRunEvent) } catch { onError() }
       }
-      source.onerror = onError
-      return () => source.close()
+      source.onerror = () => {
+        if (closed) return
+        streamsDown.add(id)
+        publish()
+        onError()
+      }
+      return () => {
+        closed = true
+        streamsDown.delete(id)
+        source.close()
+        publish()
+      }
     },
   }
 }
@@ -41,6 +88,14 @@ const webTransport: PulseWebTransport = {
   ...httpTransport,
   messages: async (id, before, signal) => apiJson(httpTransport, `/api/data/conversations/${encodeURIComponent(id)}/messages${before ? `?before=${encodeURIComponent(before)}` : ''}`, signal ? { signal } : {}),
   request: (path, init) => channel && path.startsWith('/api/assistant') ? channel.request(path, init) : httpTransport.request(path, init),
+  onConnection(listener) {
+    let httpUp = true
+    let chatUp = true
+    const emit = () => listener(httpUp && chatUp)
+    const stopHttp = httpTransport.onConnection?.(value => { httpUp = value; emit() }) ?? (() => {})
+    const stopChat = channel?.connection(value => { chatUp = value; emit() }) ?? (() => {})
+    return () => { stopHttp(); stopChat() }
+  },
   ...(channel ? { onChange: (listener: () => void) => channel.changes(listener), subscribeChat: (runId: string, after: number, onEvent: (event: WebRunEvent) => void, onError: () => void) => channel.subscribe(runId, after, onEvent, onError) } : {}),
 }
 

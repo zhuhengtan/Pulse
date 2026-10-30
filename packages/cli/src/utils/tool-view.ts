@@ -423,6 +423,7 @@ function parsePreview(value: unknown): ToolCallPreview | undefined {
   if (typeof row.exitCode === 'number' || row.exitCode === null) preview.exitCode = row.exitCode
   if (typeof row.output === 'string') preview.output = row.output
   if (typeof row.replacements === 'number') preview.replacements = row.replacements
+  if (row.status === 'running' || row.status === 'exited' || row.status === 'unknown') preview.status = row.status
   return Object.keys(preview).length ? preview : undefined
 }
 

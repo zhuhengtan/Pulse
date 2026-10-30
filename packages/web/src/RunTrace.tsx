@@ -1,3 +1,4 @@
+import { presentRun, shellProcessPending, type RunCompletion } from '@hunterzhu/pulse-server/run-presentation'
 import { Icon } from './Icon.js'
 import { Markdown } from './Markdown.js'
 import type { ComponentProps } from 'react'
@@ -39,6 +40,7 @@ export interface TraceState {
   lanes: Record<string, TraceLane>
   order: string[]
   label?: string
+  completion?: RunCompletion
   outcome?: 'succeeded' | 'failed' | 'cancelled'
   startedAt?: number
   endedAt?: number
@@ -110,7 +112,7 @@ export function reduceTrace(state: TraceState, event: WebRunEvent): TraceState {
     const d = event.data
     return putStep(base, d.laneId ?? findLaneOfEffect(base, d.effectId), { id: d.activityId, effectId: d.effectId, kind: 'tool', tool: d.tool, status: d.status, ...(d.args ? { args: d.args } : {}), ...(d.preview ? { preview: d.preview } : {}), ...(d.error ? { error: d.error } : {}) })
   }
-  if (event.type === 'complete') return { ...base, outcome: event.data.status, ...(event.timestamp === undefined ? {} : { endedAt: event.timestamp }) }
+  if (event.type === 'complete') return { ...base, outcome: event.data.status, completion: event.data, ...(event.timestamp === undefined ? {} : { endedAt: event.timestamp }) }
   if (event.type === 'error') return { ...base, outcome: 'failed', ...(event.timestamp === undefined ? {} : { endedAt: event.timestamp }) }
   return base
 }
@@ -251,7 +253,8 @@ function summary(state: TraceState, running: boolean): string {
   const latest = state.order.flatMap(id => state.lanes[id]?.steps ?? []).at(-1)
   const phase = latest?.kind === 'llm' ? TASK_LABEL[latest.task ?? ''] : undefined
   const label = emptyProgress ? undefined : state.label
-  const head = running ? (label ?? (phase ? `正在${phase}` : '执行中')) : state.outcome === 'succeeded' ? '已完成' : state.outcome === 'cancelled' ? '已停止' : state.outcome === 'failed' ? '未完成' : '已结束'
+  const processPending = latest?.kind === 'tool' && shellProcessPending(latest.tool, latest.status, latest.preview)
+  const head = running ? (processPending ? presentRun({ state: 'running', waiting: 'process' }).label : label ?? (phase ? `正在${phase}` : presentRun({ state: 'running' }).label)) : state.outcome ? presentRun({ state: state.outcome, ...(state.completion ? { completion: state.completion } : {}) }).label : '已结束'
   const seconds = state.startedAt !== undefined && state.endedAt !== undefined ? Math.max(1, Math.round((state.endedAt - state.startedAt) / 1000)) : undefined
   return `${head}${lanes > 1 ? ` · ${lanes} 个执行分支` : ''}${tools ? ` · ${tools} 次工具调用` : ''}${seconds ? ` · 耗时 ${seconds}s` : ''}`
 }
@@ -316,6 +319,7 @@ function RunProgress({ trace }: { trace: TraceState }) {
 /** Collapsible main-process header plus nested lane cards. */
 export function RunTraceView({ trace, running: streamRunning, onDiffClick }: { trace: TraceState; running: boolean; onDiffClick?: ((path: string) => void) | undefined }) {
   const running = streamRunning && !trace.outcome
+  const presentation = presentRun({ state: trace.outcome ?? 'running', ...(trace.completion ? { completion: trace.completion } : {}) })
   const [userOpen, setUserOpen] = useState<boolean | undefined>(undefined)
   const [wasRunning, setWasRunning] = useState(running)
   // Reset overrides at lifecycle transitions. Late replay events must not undo
@@ -331,7 +335,7 @@ export function RunTraceView({ trace, running: streamRunning, onDiffClick }: { t
   return <OpenDiffContext.Provider value={onDiffClick}><div className={`run-trace ${running ? 'is-running' : ''} outcome-${trace.outcome ?? 'running'}`}>
     <RunProgress trace={trace} />
     <PulseButton type="button" className="run-trace-head" onClick={() => setUserOpen(!open)} aria-expanded={open}>
-      <span className={`trace-dot ${running ? 'dot-running' : trace.outcome === 'succeeded' ? 'dot-succeeded' : 'dot-failed'}`} />
+      <span className={`trace-dot ${running ? 'dot-running' : presentation.tone === 'success' ? 'dot-succeeded' : presentation.tone === 'danger' ? 'dot-failed' : 'dot-neutral'}`} />
       <strong>主进程</strong><span className="run-trace-summary">{summary(trace, running)}</span>
       <span className="trace-caret">{open ? '▾' : '▸'}</span>
     </PulseButton>

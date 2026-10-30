@@ -1,5 +1,6 @@
 import { createLocalHost, type LocalHostOptions, type AssistantEvent, type RunHandle } from '@hunterzhu/pulse-server';
 import { consumeToolEvent } from '../utils/tool-view.js';
+import { cliRunExitCode, writeHumanRunResult } from './human-run-result.js';
 import { bindRunSignals } from './signals.js';
 import { withCliNotifications } from '../utils/notification-bridge.js';
 
@@ -73,16 +74,11 @@ export async function runOneShot(
           error: outcome.error ?? null,
         })}\n`
       );
-    } else if (outcome.status === 'failed' && outcome.error) {
-      process.stderr.write(`\n[错误] ${outcome.error.code}: ${outcome.error.message}\n`);
-    } else if (!streamedText && outcome.text) {
-      process.stdout.write(`${outcome.text}\n`);
     } else {
-      process.stdout.write(`\n[${outcome.status}]\n`);
+      writeHumanRunResult({ stdout: text => process.stdout.write(text), stderr: text => process.stderr.write(text) }, { streamedText, outcome, taskOutcome: taskOutcome ?? null });
     }
 
-    if (outcome.status === 'cancelled') return 3;
-    return outcome.status === 'succeeded' && (!taskOutcome || taskOutcome.status === 'accepted') ? 0 : 1;
+    return cliRunExitCode(outcome.status, taskOutcome ?? null);
   } catch (error) {
     process.stderr.write(`\n[错误] ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;

@@ -42,6 +42,8 @@ export interface ToolCallPreview {
   exitCode?: number | null | undefined
   output?: string | undefined
   replacements?: number | undefined
+  /** shell.start / shell.poll process state. Distinct from the tool call status. */
+  status?: 'running' | 'exited' | 'unknown' | undefined
 }
 
 /** 工具调用展示数据 */

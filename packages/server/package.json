@@ -22,6 +22,10 @@
     "./rich-content": {
       "types": "./dist/rich-content.d.ts",
       "import": "./dist/rich-content.js"
+    },
+    "./run-presentation": {
+      "types": "./dist/run-presentation.d.ts",
+      "import": "./dist/run-presentation.js"
     }
   },
   "main": "dist/index.js",

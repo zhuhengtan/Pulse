@@ -18,6 +18,23 @@ export class ChatChannel {
     private retry: ReturnType<typeof setTimeout> | undefined;
     private delay = 300;
     private heartbeat: ReturnType<typeof setInterval> | undefined;
+    private ignoreDisconnect = false;
+    private serviceDown = false;
+    private connectionListeners = new Set<(connected: boolean) => void>();
+    /** Connection changes only. An unknown socket does not announce a failure. */
+    connection(listener: (connected: boolean) => void): () => void {
+        this.connectionListeners.add(listener);
+        if (this.serviceDown)
+            listener(false);
+        return () => { this.connectionListeners.delete(listener); };
+    }
+    private setServiceConnected(connected: boolean): void {
+        if (this.serviceDown === !connected)
+            return;
+        this.serviceDown = !connected;
+        for (const listener of this.connectionListeners)
+            listener(connected);
+    }
     constructor(private readonly url: string, private readonly makeSocket: (url: string) => WebSocket = url => new WebSocket(url)) { }
     private connect(): Promise<WebSocket> {
         if (this.socket?.readyState === 1)
@@ -31,6 +48,7 @@ export class ChatChannel {
             socket.onopen = () => {
                 clearTimeout(timer);
                 this.delay = 300;
+                this.setServiceConnected(true);
                 for (const [runId, stream] of this.streams)
                     socket.send(JSON.stringify({ type: 'subscribe', runId, after: stream.after }));
                 clearInterval(this.heartbeat);
@@ -69,6 +87,7 @@ export class ChatChannel {
                     }
                 }
                 catch {
+                    this.ignoreDisconnect = true;
                     socket.close(1003);
                 }
             };
@@ -76,6 +95,10 @@ export class ChatChannel {
             socket.onclose = () => {
                 clearTimeout(timer);
                 clearInterval(this.heartbeat);
+                const ignore = this.ignoreDisconnect;
+                this.ignoreDisconnect = false;
+                if (!ignore)
+                    this.setServiceConnected(false);
                 this.connecting = undefined;
                 if (this.socket === socket)
                     this.socket = undefined;
@@ -125,5 +148,15 @@ export class ChatChannel {
         return () => { this.streams.delete(runId); if (this.socket?.readyState === 1)
             this.socket.send(JSON.stringify({ type: 'unsubscribe', runId })); };
     }
-    close(): void { this.watchers.clear(); this.streams.clear(); clearTimeout(this.retry); clearInterval(this.heartbeat); this.socket?.close(); }
+    close(): void {
+        this.watchers.clear();
+        this.streams.clear();
+        clearTimeout(this.retry);
+        clearInterval(this.heartbeat);
+        const socket = this.socket;
+        if (!socket)
+            return;
+        this.ignoreDisconnect = true;
+        socket.close();
+    }
 }

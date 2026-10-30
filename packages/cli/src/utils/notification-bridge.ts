@@ -1,3 +1,4 @@
+import { runCompletion } from '@hunterzhu/pulse-server/run-presentation'
 import { createHash } from 'node:crypto'
 import type { AssistantEvent, LocalHost, RunHandle } from '@hunterzhu/pulse-server'
 import type { WebRunSnapshot } from '@hunterzhu/pulse-server/protocol'
@@ -42,7 +43,7 @@ export class CliNotificationBridge {
       if (event.type === 'complete') {
         const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data : {}
         const status = data.status === 'succeeded' || data.status === 'cancelled' ? data.status : 'failed'
-        this.state = { ...this.state, state: status, seq: this.state.seq + 1, interactions: [], complete: { type: 'complete', runId: this.run.id, conversationId: this.run.conversationId, seq: this.state.seq + 1, data: { status } } }
+        this.state = { ...this.state, state: status, seq: this.state.seq + 1, interactions: [], complete: { type: 'complete', runId: this.run.id, conversationId: this.run.conversationId, seq: this.state.seq + 1, data: runCompletion(data) } }
         this.pending?.(new Set())
         await this.save()
       } else if (event.type === 'waiting') await this.refresh()

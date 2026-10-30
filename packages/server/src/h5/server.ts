@@ -1,3 +1,4 @@
+import { runCompletion } from '../run-presentation.js'
 import { withConfigFileLock } from '../config-write-lock.js'
 import { parseExecPolicy, mergeExecPolicies, sourceExecPolicy } from '../exec-policy.js'
 import { pluginDraft, parseBuiltinPlugins, connections, pluginEnabled, readHostSurface, type PluginId } from '../builtin-plugins/config.js'
@@ -2438,7 +2439,7 @@ export class H5Server {
           this.runSnapshots.set(runId, { ...snapshot, interactions: [] })
           await this.host.conversationData.call('saveState', `run:${runId}`, { ...snapshot, interactions: [] })
         } else {
-          this.pushEvent(runId, { type: 'complete', runId, conversationId, seq: snapshot.seq, data: { status: snapshot.state === 'succeeded' || snapshot.state === 'cancelled' ? snapshot.state : 'failed' } })
+          this.pushEvent(runId, { type: 'complete', runId, conversationId, seq: snapshot.seq, data: snapshot.complete?.data ?? { status: snapshot.state === 'succeeded' || snapshot.state === 'cancelled' ? snapshot.state : 'failed' } })
           this.finishStream(runId)
         }
       }
@@ -2896,9 +2897,7 @@ function publicH5Event(event: AssistantEvent): WebRunEvent | undefined {
   }
   if (event.type === 'complete' && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
     const data = event.data as Record<string, JsonValue>
-    const status = data.status === 'succeeded' || data.status === 'cancelled' ? data.status : 'failed'
-    const error = data.error && typeof data.error === 'object' && !Array.isArray(data.error) ? data.error as Record<string, JsonValue> : undefined
-    return { ...base, type: 'complete', data: { status, ...(typeof error?.code === 'string' ? { errorCode: error.code } : {}) } }
+    return { ...base, type: 'complete', data: runCompletion(data) }
   }
   if (event.type === 'error') return { ...base, type: 'error', data: { message: '运行遇到错误，请查看本机任务记录。' } }
   if (event.type === 'gap' && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {

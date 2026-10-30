@@ -6,6 +6,7 @@ export type { ExecPolicyConfig, ExecPrefixRule } from './exec-policy.js'
 import { approvalReuseIdentity, hasApprovalGrant } from './approval-reuse.js'
 import { verificationFingerprint, reusableVerification } from './task-controller/verification-reuse.js'
 import { shellProcesses, closeShellProcesses, summarizeShellProcess, blockAcceptanceIfShellBusy } from './shell-processes.js'
+import { publicShellProcessPreview } from './run-presentation.js'
 import { BuiltinPluginJobs } from './builtin-plugins/jobs.js'
 import { PluginToolRegistry, registerPluginTools, generationTools, pluginToolIds, refreshPluginProjection, createHostToolInputValidator } from './builtin-plugins/tools.js'
 import type { PluginHostConfig } from './builtin-plugins/config.js'
@@ -1548,6 +1549,10 @@ function toolPreview(name: string, value: JsonValue | undefined): JsonValue | un
     const stderr = typeof record.stderr === 'string' ? record.stderr : ''
     const clipped = clipPreviewText(stdout.trim() ? stdout : stderr)
     return { exitCode: typeof record.code === 'number' || record.code === null ? record.code : null, ...(record.timedOut === true ? { timedOut: true, errorCode: 'SHELL_TIMEOUT' } : {}), ...(record.aborted === true ? { aborted: true } : {}), ...(clipped.text ? { output: clipped.text } : {}), truncated: record.truncated === true || clipped.truncated }
+  }
+  if (name === 'shell.start' || name === 'shell.poll') {
+    const output = typeof record.output === 'string' ? clipPreviewText(record.output).text : ''
+    return publicShellProcessPreview({ status: record.status, ...(output ? { output } : {}), ...(record.truncated === true ? { truncated: true } : {}) })
   }
   return undefined
 }
@@ -3746,7 +3751,7 @@ export class LocalHost {
     const finish = async () => outcome
     const events = (async function* (): AsyncIterable<AssistantEvent> {
       yield { schemaVersion: 1, type: 'text', conversationId, runId, seq: 1, data: question }
-      yield { schemaVersion: 1, type: 'complete', conversationId, runId, seq: 2, data: { status: 'succeeded', usage: usage as unknown as JsonValue } }
+      yield { schemaVersion: 1, type: 'complete', conversationId, runId, seq: 2, data: { status: 'succeeded', taskRequired: false, usage: usage as unknown as JsonValue } }
     })()
     return {
       id: runId,
@@ -4411,7 +4416,7 @@ export class LocalHost {
         yield { schemaVersion: 1, type: 'text', conversationId, runId, seq, data: item.text }
       }
       const acceptance = taskOutcome()
-      yield { schemaVersion: 1, type: 'complete', conversationId, runId, seq: seq + 1, data: { status: outcome.status, usage: runUsage(runtime, modelPricing, modelBudget) as unknown as JsonValue, ...(acceptance === undefined ? {} : { taskOutcome: acceptance as unknown as JsonValue }), ...(outcome.error === undefined ? {} : { error: outcome.error as unknown as JsonValue }), ...(outcome.reason === undefined ? {} : { reason: outcome.reason }), ...(outcome.unresolvedEffectIds === undefined ? {} : { unresolvedEffectIds: outcome.unresolvedEffectIds }) } }
+      yield { schemaVersion: 1, type: 'complete', conversationId, runId, seq: seq + 1, data: { status: outcome.status, taskRequired: acceptance !== undefined, usage: runUsage(runtime, modelPricing, modelBudget) as unknown as JsonValue, ...(acceptance === undefined ? {} : { taskOutcome: acceptance as unknown as JsonValue }), ...(outcome.error === undefined ? {} : { error: outcome.error as unknown as JsonValue }), ...(outcome.reason === undefined ? {} : { reason: outcome.reason }), ...(outcome.unresolvedEffectIds === undefined ? {} : { unresolvedEffectIds: outcome.unresolvedEffectIds }) } }
     } catch (error) {
       yield { schemaVersion: 1, type: 'error', conversationId, runId, seq: seq + 1, data: String(error) }
     }

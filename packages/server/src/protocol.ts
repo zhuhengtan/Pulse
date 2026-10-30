@@ -104,7 +104,7 @@ type WebRunEventPayload =
   | { type: 'waiting'; runId: string; seq: number; data: { effectId: string; input: Record<string, unknown> } }
   | { type: 'interactions'; runId: string; seq: number; data: { interactions: WebPendingInteraction[]; reviewNote?: string } }
   | { type: 'lanes'; runId: string; seq: number; data: WebRunLanes }
-  | { type: 'complete'; runId: string; seq: number; data: { status: 'succeeded' | 'failed' | 'cancelled'; errorCode?: string } }
+  | { type: 'complete'; runId: string; seq: number; data: import('./run-presentation.js').RunCompletion }
   | { type: 'gap'; runId: string; seq: number; data: { fromSeq: number; toSeq: number } }
   | { type: 'error'; runId: string; seq: number; data: { message: string } }
   | { type: 'run_finished'; runId: string; seq: number }
