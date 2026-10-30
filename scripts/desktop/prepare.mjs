@@ -11,6 +11,7 @@ const run = (file, args, env = process.env) => { const result = spawnSync(file, 
     process.exit(result.status ?? 1); };
 run('pnpm', ['web:build']);
 run(process.execPath, ['node_modules/typescript/bin/tsc', '-b', '--pretty', 'false']);
+run(process.execPath, ['scripts/build/copy-adapter-assets.mjs']);
 run(process.execPath, ['scripts/cli/pack.mjs']);
 const version = JSON.parse(await readFile(join(root, 'packages/cli/package.json'), 'utf8')).version;
 const destination = join(root, 'artifacts/desktop-runtime');

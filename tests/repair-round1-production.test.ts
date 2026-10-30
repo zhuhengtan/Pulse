@@ -9,7 +9,7 @@ import { McpStdioClient } from '../packages/adapters/src/mcp/stdio.js'
 import { resolveModelCapability } from '../packages/adapters/src/providers/canonical/capabilities.js'
 import { FilesystemTool } from '../packages/adapters/src/tools/filesystem.js'
 import { utf8HeadTail } from '../packages/runtime/src/context/builder.js'
-import { createDocxCapabilityPack, unimplementedDocumentCapabilities } from '../packages/server/src/capabilities.js'
+import { createDocxCapabilityPack, createPdfCapabilityPack, createPptxCapabilityPack, createSpreadsheetCapabilityPack, unimplementedDocumentCapabilities } from '../packages/server/src/capabilities.js'
 import { ExactPatchEditor } from '../packages/server/src/editing.js'
 import { FileSnapshotManager } from '../packages/server/src/file-snapshots.js'
 import { hasVisibleFullRead, latestVisibleReadHash } from '../packages/server/src/file-read-evidence.js'
@@ -291,14 +291,22 @@ describe('repair round 1 production paths', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
-  it('enables the DOCX reader and records the document operations that are not implemented', async () => {
+  it('enables the office packs and records that the five document operations are implemented', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-docx-'))
     try {
-      const active = await createDocxCapabilityPack().activate({ workspaceRoot: root, config: {}, signal: new AbortController().signal })
-      expect(active.tools?.map((item) => item.manifest.name)).toContain('docx.read')
-      expect(unimplementedDocumentCapabilities).toEqual(['pptx.read', 'pdf.page.render', 'docx.write', 'xlsx.write', 'pptx.write'])
+      const docx = await createDocxCapabilityPack().activate({ workspaceRoot: root, config: {}, signal: new AbortController().signal })
+      const pdf = await createPdfCapabilityPack().activate({ workspaceRoot: root, config: {}, signal: new AbortController().signal })
+      const spreadsheet = await createSpreadsheetCapabilityPack().activate({ workspaceRoot: root, config: {}, signal: new AbortController().signal })
+      const pptx = await createPptxCapabilityPack().activate({ workspaceRoot: root, config: {}, signal: new AbortController().signal })
+      expect(docx.tools?.map((item) => item.manifest.name)).toEqual(['docx.read', 'docx.write'])
+      expect(pdf.tools?.map((item) => item.manifest.name)).toEqual(['pdf.read', 'pdf.page.render'])
+      expect(spreadsheet.tools?.map((item) => item.manifest.name)).toEqual(['spreadsheet.inspect', 'spreadsheet.xlsx.write'])
+      expect(pptx.tools?.map((item) => item.manifest.name)).toEqual(['pptx.read', 'pptx.write'])
+      expect(unimplementedDocumentCapabilities).toEqual([])
       const bin = await readFile(new URL('../packages/cli/src/bin.ts', import.meta.url), 'utf8')
       expect(bin).toContain('createDocxCapabilityPack()')
+      expect(bin).toContain('createPptxCapabilityPack()')
+      expect(bin).toContain("const enabledCapabilityPacks = ['builtin-skills', ...configuredCapabilityPacks.filter((id) => id !== 'builtin-skills')]")
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 

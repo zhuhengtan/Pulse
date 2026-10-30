@@ -134,46 +134,77 @@ export const referenceCapabilityPackCatalog: readonly CapabilityPackManifest[] =
   { id: 'jarvis', version: '1', kind: 'integration', title: 'Jarvis memory', description: 'Optional session-scoped memory and context integration.' },
   { id: 'browser', version: '1', kind: 'integration', title: 'Browser', description: 'Browse and interact in the internal right-panel browser by default. External Playwright browsers are used only when explicitly requested by the user.' },
   { id: 'computer', version: '1', kind: 'integration', title: 'Computer', description: 'Optional native desktop observation and input with explicit system permissions.' },
-  { id: 'pdf', version: '1', kind: 'integration', title: 'PDF', description: 'Optional PDF.js-based document extraction adapter.' },
-  { id: 'spreadsheet', version: '1', kind: 'integration', title: 'Spreadsheets', description: 'Optional ExcelJS-based spreadsheet read/write adapter.' },
-  { id: 'docx', version: '1', kind: 'integration', title: 'DOCX reader', description: 'Bounded DOCX document text extraction adapter.' },
+  { id: 'pdf', version: '1', kind: 'integration', title: 'PDF', description: 'Optional PDF.js text extraction and local page rendering to PNG.' },
+  { id: 'spreadsheet', version: '1', kind: 'integration', title: 'Spreadsheets', description: 'Optional ExcelJS workbook preview and xlsx.write.' },
+  { id: 'docx', version: '1', kind: 'integration', title: 'DOCX', description: 'Bounded DOCX text extraction and DOCX generation.' },
+  { id: 'pptx', version: '1', kind: 'integration', title: 'PPTX', description: 'Bounded PPTX reading in real slide order and PPTX generation.' },
 ]
 
-/** These document operations are not implemented. Enabling a pack must not pretend they exist. */
-export const unimplementedDocumentCapabilities = ['pptx.read', 'pdf.page.render', 'docx.write', 'xlsx.write', 'pptx.write'] as const
+/** Document operations that still have no adapter. The five office tools are implemented and must be enabled explicitly. */
+export const unimplementedDocumentCapabilities = [] as const
 
-/** Read-only PDF extraction capability, installed by the host and enabled explicitly. */
+function documentTool(workspaceRoot: string, name: string, code: string) {
+  const tool = createDocumentTools(workspaceRoot).find((item) => item.manifest.name === name)
+  if (!tool) throw new Error(code)
+  return tool
+}
+
+/** PDF text extraction and one-page PNG rendering. Enabling the pack does not change the user's enabled list. */
 export function createPdfCapabilityPack(): CapabilityPack {
   return {
-    manifest: { id: 'pdf', version: '1', kind: 'integration', title: 'PDF reader', description: 'Bounded PDF text and metadata extraction inside the active workspace.' },
+    manifest: { id: 'pdf', version: '1', kind: 'integration', title: 'PDF', description: 'Bounded PDF text extraction and local page rendering inside the active workspace.' },
     async activate({ workspaceRoot }) {
-      const tool = createDocumentTools(workspaceRoot).find((item) => item.manifest.name === 'document.pdf.read')
-      if (!tool) throw new Error('PDF_TOOL_UNAVAILABLE')
-      return { tools: [{ ...tool, manifest: { ...tool.manifest, name: 'pdf.read' } }] }
+      const read = documentTool(workspaceRoot, 'document.pdf.read', 'PDF_TOOL_UNAVAILABLE')
+      const render = documentTool(workspaceRoot, 'document.pdf.render', 'PDF_TOOL_UNAVAILABLE')
+      return { tools: [
+        { ...read, manifest: { ...read.manifest, name: 'pdf.read' } },
+        { ...render, manifest: { ...render.manifest, name: 'pdf.page.render' } },
+      ] }
     },
   }
 }
 
-/** Read-only worksheet metadata and bounded cell preview capability. */
+/** Worksheet preview and xlsx.write. The write tool name stays in the spreadsheet namespace. */
 export function createSpreadsheetCapabilityPack(): CapabilityPack {
   return {
-    manifest: { id: 'spreadsheet', version: '1', kind: 'integration', title: 'Spreadsheet reader', description: 'Bounded XLSX workbook metadata and cell preview inside the active workspace.' },
+    manifest: { id: 'spreadsheet', version: '1', kind: 'integration', title: 'Spreadsheets', description: 'Bounded XLSX preview and xlsx.write inside the active workspace.' },
     async activate({ workspaceRoot }) {
-      const tool = createDocumentTools(workspaceRoot).find((item) => item.manifest.name === 'document.xlsx.inspect')
-      if (!tool) throw new Error('SPREADSHEET_TOOL_UNAVAILABLE')
-      return { tools: [{ ...tool, manifest: { ...tool.manifest, name: 'spreadsheet.inspect' } }] }
+      const inspect = documentTool(workspaceRoot, 'document.xlsx.inspect', 'SPREADSHEET_TOOL_UNAVAILABLE')
+      const write = documentTool(workspaceRoot, 'document.xlsx.write', 'SPREADSHEET_TOOL_UNAVAILABLE')
+      return { tools: [
+        { ...inspect, manifest: { ...inspect.manifest, name: 'spreadsheet.inspect' } },
+        { ...write, manifest: { ...write.manifest, name: 'spreadsheet.xlsx.write' } },
+      ] }
     },
   }
 }
 
-/** Read-only Word DOCX document text extraction capability. */
+/** DOCX text extraction and DOCX generation. */
 export function createDocxCapabilityPack(): CapabilityPack {
   return {
-    manifest: { id: 'docx', version: '1', kind: 'integration', title: 'DOCX reader', description: 'Bounded DOCX document text extraction inside the active workspace.' },
+    manifest: { id: 'docx', version: '1', kind: 'integration', title: 'DOCX', description: 'Bounded DOCX text extraction and DOCX generation inside the active workspace.' },
     async activate({ workspaceRoot }) {
-      const tool = createDocumentTools(workspaceRoot).find((item) => item.manifest.name === 'document.docx.read')
-      if (!tool) throw new Error('DOCX_TOOL_UNAVAILABLE')
-      return { tools: [{ ...tool, manifest: { ...tool.manifest, name: 'docx.read' } }] }
+      const read = documentTool(workspaceRoot, 'document.docx.read', 'DOCX_TOOL_UNAVAILABLE')
+      const write = documentTool(workspaceRoot, 'document.docx.write', 'DOCX_TOOL_UNAVAILABLE')
+      return { tools: [
+        { ...read, manifest: { ...read.manifest, name: 'docx.read' } },
+        { ...write, manifest: { ...write.manifest, name: 'docx.write' } },
+      ] }
+    },
+  }
+}
+
+/** PPTX reading in real slide order and PPTX generation. */
+export function createPptxCapabilityPack(): CapabilityPack {
+  return {
+    manifest: { id: 'pptx', version: '1', kind: 'integration', title: 'PPTX', description: 'Bounded PPTX reading and PPTX generation inside the active workspace.' },
+    async activate({ workspaceRoot }) {
+      const read = documentTool(workspaceRoot, 'document.pptx.read', 'PPTX_TOOL_UNAVAILABLE')
+      const write = documentTool(workspaceRoot, 'document.pptx.write', 'PPTX_TOOL_UNAVAILABLE')
+      return { tools: [
+        { ...read, manifest: { ...read.manifest, name: 'pptx.read' } },
+        { ...write, manifest: { ...write.manifest, name: 'pptx.write' } },
+      ] }
     },
   }
 }

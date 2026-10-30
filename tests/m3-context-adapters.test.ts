@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { z } from 'zod'
 import { ContextBuilder, InMemoryModelRegistry, ModelFallbackController, ModelRouter, OutputValidationError, PulseRuntime, appendHistory, createAgent, createRuntimeState, modelFallbackError, stableSerialize, validateActionToolCalls, validateAdapterResult, validateStructuredOutput, MemoryStorage } from '@hunterzhu/pulse-runtime'
 import { AnthropicAdapter, createModelEffectExecutor, encodeSandboxCommand, FilesystemTool, normalizeAnthropicResponse, normalizeOpenAIResponse, OpenAICompatibleAdapter, quoteWindowsArgument, runShell, decodeUtf8WithinByteLimit, toOpenAIMessages } from '@hunterzhu/pulse-adapters'
@@ -630,6 +630,28 @@ describe('M1-3 context, models and adapters', () => {
     expect(quoteWindowsArgument('plain')).toBe('plain')
     expect(quoteWindowsArgument('with space\\')).toBe('"with space\\\\"')
     expect(quoteWindowsArgument('quote"value')).toBe('"quote\\"value"')
+  })
+
+  it('keeps a literal backslash in a POSIX filename and still splits the platform separator', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulse-literal-path-'))
+    try {
+      const filesystem = new FilesystemTool(root)
+      if (sep === '\\') {
+        await filesystem.write('literal/name.docx', 'payload')
+        expect(await filesystem.read('literal/name.docx')).toBe('payload')
+        expect(await filesystem.read('literal\\name.docx')).toBe('payload')
+        return
+      }
+      const path = `literal${String.fromCharCode(92)}name.docx`
+      await filesystem.write(path, 'payload')
+      expect(await filesystem.read(path)).toBe('payload')
+      expect(await readdir(root)).toEqual([path])
+      await expect(readFile(join(root, 'literal', 'name.docx'), 'utf8')).rejects.toThrow()
+      await filesystem.write('nested/ok.docx', 'inside')
+      expect(await filesystem.read('nested/ok.docx')).toBe('inside')
+      await expect(filesystem.write('../outside.docx', 'nope')).rejects.toThrow('PATH_OUTSIDE_SANDBOX')
+      expect(await filesystem.read(path)).toBe('payload')
+    } finally { await rm(root, { recursive: true, force: true }) }
   })
 
   it('rejects sandbox symlink escapes for reads, listings, hashes, and writes', async () => {

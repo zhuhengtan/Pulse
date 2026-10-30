@@ -118,6 +118,7 @@ async function main() {
         console.log('构建开发产物…');
         await run(pnpm, ['web:build'], env);
         await run(process.execPath, [join(repo, 'node_modules/typescript/bin/tsc'), '-b', '--pretty', 'false'], env);
+        await run(process.execPath, [join(repo, 'scripts/build/copy-adapter-assets.mjs')], env);
     }
     if (!await exists(join(repo, 'packages/cli/dist/bin.js'))) throw new Error('缺少后台编译产物，请去掉 --no-build 重试。');
     const playwright = createRequire(serverRequire.resolve('@playwright/mcp'));

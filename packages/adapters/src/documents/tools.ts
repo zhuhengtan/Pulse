@@ -1,16 +1,16 @@
-import { lstat, readFile, realpath } from 'node:fs/promises'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { resolve } from 'node:path'
 import { inflateRawSync } from 'node:zlib'
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import ExcelJS from 'exceljs'
 import { z } from 'zod'
 import { ToolError, type ToolDefinition, type ToolManifest } from '@hunterzhu/pulse-tool-sdk'
 import { extractDocxText } from './docx.js'
-
-const MAX_INPUT_BYTES = 20 * 1024 * 1024
-const MAX_PDF_PAGES = 2_000
-const MAX_PDF_PAGE_RANGE = 50
-const MAX_OUTPUT_CHARS = 50_000
+import { docError, MAX_INPUT_BYTES, MAX_OUTPUT_CHARS, MAX_PDF_PAGE_RANGE, MAX_PDF_PAGES, readWorkspaceFile } from './workspace-file.js'
+import { readPptx, type PptxReadRequest, type PptxReadResult } from './pptx-read.js'
+import { renderPdfPage, type PdfRenderRequest, type PdfRenderResult } from './pdf-render.js'
+import { writeDocx, writePptx, writeXlsx, type DocxWriteRequest, type OfficeWriteResult, type PptxWriteRequest, type XlsxWriteRequest } from './office-generate.js'
+export { officeBinaryWriter, requireOfficeBinaryWriter, type OfficeBinaryWriter } from './binary-writer.js'
+export { assertOfficeOutputPath } from './output-path.js'
 const MAX_XLSX_ENTRIES = 1_000
 const MAX_XLSX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
 const MAX_XLSX_ENTRY_BYTES = 16 * 1024 * 1024
@@ -76,43 +76,6 @@ export interface XlsxInspectOutput {
     preview?: Array<{ row: number; cells: Array<string | number | boolean | null> }>
   }>
   truncated: boolean
-}
-
-function docError(code: string, retryable = false, cause?: unknown): ToolError {
-  return new ToolError(code, code, { retryable: retryable || isRetryable(cause) })
-}
-
-function isRetryable(cause: unknown): boolean {
-  if (cause === null || typeof cause !== 'object') return false
-  const code = (cause as NodeJS.ErrnoException).code
-  return code === 'EAGAIN' || code === 'EBUSY' || code === 'EMFILE' || code === 'ENFILE' || code === 'ETIMEDOUT'
-}
-
-function within(root: string, target: string): boolean {
-  const path = relative(root, target)
-  return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path))
-}
-
-async function readWorkspaceFile(rootInput: string, path: string, signal: AbortSignal): Promise<{ absolutePath: string; data: Buffer }> {
-  if (signal.aborted) throw docError('ABORTED')
-  if (isAbsolute(path) || path.includes('\0')) throw docError('PATH_OUTSIDE_WORKSPACE')
-  const root = await realpath(rootInput).catch((cause) => { throw docError('WORKSPACE_UNAVAILABLE', false, cause) })
-  const candidate = resolve(root, path)
-  if (!within(root, candidate)) throw docError('PATH_OUTSIDE_WORKSPACE')
-  const candidateEntry = await lstat(candidate).catch((cause) => { throw docError((cause as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'DOCUMENT_NOT_FOUND' : 'DOCUMENT_READ_FAILED', false, cause) })
-  if (candidateEntry.isSymbolicLink()) throw docError('PATH_OUTSIDE_WORKSPACE')
-  const absolutePath = await realpath(candidate).catch((cause) => { throw docError((cause as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'DOCUMENT_NOT_FOUND' : 'DOCUMENT_READ_FAILED', false, cause) })
-  if (!within(root, absolutePath)) throw docError('PATH_OUTSIDE_WORKSPACE')
-  const entry = await lstat(absolutePath).catch((cause) => { throw docError('DOCUMENT_READ_FAILED', false, cause) })
-  if (!entry.isFile()) throw docError('DOCUMENT_NOT_A_FILE')
-  if (entry.size > MAX_INPUT_BYTES) throw docError('DOCUMENT_TOO_LARGE')
-  const data = await readFile(absolutePath, { signal }).catch((cause) => {
-    if ((cause as NodeJS.ErrnoException).name === 'AbortError') throw docError('ABORTED')
-    throw docError('DOCUMENT_READ_FAILED', false, cause)
-  })
-  if (signal.aborted) throw docError('ABORTED')
-  if (data.byteLength > MAX_INPUT_BYTES) throw docError('DOCUMENT_TOO_LARGE')
-  return { absolutePath, data }
 }
 
 function pdfText(items: unknown[]): string {
@@ -318,8 +281,8 @@ export async function readDocx(root: string, input: DocxInput, signal: AbortSign
   }
 }
 
-function manifest(name: string, description: string, inputSchema: Record<string, unknown>, outputSchema: Record<string, unknown>): ToolManifest {
-  return { name, version: '1.0.0', description, tags: ['documents', 'read'], inputSchema, outputSchema, concurrencyClass: 'tool', locks: [], supportsAbortSignal: true, sideEffectPolicy: 'read', retrySafety: 'read_only', defaultTimeoutMs: 60_000, maxResultSummaryBytes: 4_096 }
+function manifest(name: string, description: string, inputSchema: Record<string, unknown>, outputSchema: Record<string, unknown>, policy: 'read' | 'write' = 'read'): ToolManifest {
+  return { name, version: '1.0.0', description, tags: ['documents', policy], inputSchema, outputSchema, concurrencyClass: 'tool', locks: [], supportsAbortSignal: true, sideEffectPolicy: policy, retrySafety: policy === 'read' ? 'read_only' : 'unsafe', defaultTimeoutMs: policy === 'write' ? 120_000 : 60_000, maxResultSummaryBytes: 4_096 }
 }
 
 const pdfManifest = manifest('document.pdf.read', 'Extract bounded text and metadata from a PDF in the workspace.',
@@ -334,30 +297,102 @@ const docxManifest = manifest('document.docx.read', 'Extract bounded text from a
   { type: 'object', required: ['path'], properties: { path: { type: 'string' }, maxChars: { type: 'integer', minimum: 1, maximum: MAX_OUTPUT_CHARS, default: 20_000 } }, additionalProperties: false },
   { type: 'object', required: ['path', 'text', 'chars', 'truncated'], properties: { path: { type: 'string' }, text: { type: 'string' }, chars: { type: 'integer' }, truncated: { type: 'boolean' } }, additionalProperties: false })
 
+const hashSchema = { anyOf: [{ type: 'string', pattern: '^[a-f0-9]{64}$' }, { type: 'null' }] }
+const textSchema = { type: 'string', maxLength: 8_000 }
+const pptxManifest = manifest('document.pptx.read', 'Read bounded slide text in presentation order. startSlide/endSlide select a window of at most 20 slides; offset is a UTF-16 offset inside the first selected slide. Continue from nextSlide and nextOffset. Does not fetch links, run macros, or expand XML entities.',
+  { type: 'object', required: ['path'], properties: { path: { type: 'string', description: 'Workspace-relative PPTX path.' }, startSlide: { type: 'integer', minimum: 1, description: 'First slide to read, 1-based, in presentation.xml order.' }, endSlide: { type: 'integer', minimum: 1, description: 'Last slide to read, inclusive.' }, offset: { type: 'integer', minimum: 0, description: 'UTF-16 offset within the first selected slide body.' }, maxChars: { type: 'integer', minimum: 1, maximum: MAX_OUTPUT_CHARS, default: 20_000, description: 'Maximum slide-body characters in this window.' } }, additionalProperties: false },
+  { type: 'object', required: ['path', 'hash', 'totalSlides', 'startSlide', 'endSlide', 'nextSlide', 'nextOffset', 'text', 'truncated'], properties: { path: { type: 'string' }, hash: { type: 'string' }, totalSlides: { type: 'integer' }, startSlide: { type: 'integer' }, endSlide: { type: 'integer' }, nextSlide: { anyOf: [{ type: 'integer' }, { type: 'null' }] }, nextOffset: { anyOf: [{ type: 'integer' }, { type: 'null' }] }, text: { type: 'string' }, truncated: { type: 'boolean' } }, additionalProperties: false })
+const pdfRenderManifest = manifest('document.pdf.render', 'Render one PDF page to a PNG file with the installed PDF.js and local canvas. path is the workspace PNG to create. Omit expectedHash to create a new file; pass the current SHA-256 to replace that exact file. No fonts, images, or PDF resources are fetched from the network.',
+  { type: 'object', required: ['sourcePath', 'page', 'path'], properties: { sourcePath: { type: 'string', description: 'Workspace-relative PDF.' }, page: { type: 'integer', minimum: 1, description: '1-based page number.' }, path: { type: 'string', description: 'Workspace-relative PNG output path.' }, scale: { type: 'number', exclusiveMinimum: 0, maximum: 4, description: 'Zoom relative to 72 DPI. Do not combine with dpi.' }, dpi: { type: 'integer', minimum: 36, maximum: 300, description: 'Target resolution. Do not combine with scale.' }, expectedHash: { ...hashSchema, description: 'Null or omitted creates a new file. A SHA-256 replaces that exact binary.' } }, additionalProperties: false },
+  { type: 'object', required: ['path', 'hash', 'bytes', 'page', 'width', 'height', 'scale'], properties: { path: { type: 'string' }, hash: { type: 'string' }, bytes: { type: 'integer' }, page: { type: 'integer' }, width: { type: 'integer' }, height: { type: 'integer' }, scale: { type: 'number' } }, additionalProperties: false }, 'write')
+const docxWriteManifest = manifest('document.docx.write', 'Create a real DOCX file from bounded headings, paragraphs, lists, and tables. Strings are stored as text. path is the workspace output. Omit expectedHash to create; pass the current SHA-256 to replace that exact file.',
+  { type: 'object', required: ['path', 'blocks'], properties: { path: { type: 'string' }, expectedHash: hashSchema, title: { type: 'string', maxLength: 200 }, blocks: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'object', properties: { type: { type: 'string', enum: ['heading', 'paragraph', 'list', 'table'] }, level: { type: 'integer', enum: [1, 2, 3] }, text: textSchema, ordered: { type: 'boolean' }, header: { type: 'boolean' }, items: { type: 'array', items: { type: 'string', maxLength: 4_000 }, maxItems: 50 }, rows: { type: 'array', items: { type: 'array', items: { type: 'string', maxLength: 2_000 }, maxItems: 20 }, maxItems: 100 } }, required: ['type'], additionalProperties: false } } }, additionalProperties: false },
+  { type: 'object', required: ['path', 'hash', 'bytes', 'blocks'], properties: { path: { type: 'string' }, hash: { type: 'string' }, bytes: { type: 'integer' }, blocks: { type: 'integer' } }, additionalProperties: false }, 'write')
+const xlsxWriteManifest = manifest('document.xlsx.write', 'Create a real XLSX workbook. Cell strings are stored as text, even when they start with =. Use the formula object only for local arithmetic or ABS, AVERAGE, COUNT, COUNTA, INT, MAX, MIN, MOD, POWER, PRODUCT, ROUND, SQRT, and SUM. DDE, external references, and hyperlinks are rejected before any file is written. Omit expectedHash to create; pass the current SHA-256 to replace that exact file.',
+  { type: 'object', required: ['path', 'sheets'], properties: { path: { type: 'string' }, expectedHash: hashSchema, sheets: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', required: ['name', 'rows'], properties: { name: { type: 'string', maxLength: 31 }, header: { type: 'boolean', description: 'Bold the first row.' }, rows: { type: 'array', minItems: 1, maxItems: 500, items: { type: 'array', minItems: 1, maxItems: 50, items: { anyOf: [{ type: 'string', maxLength: 2_000 }, { type: 'number' }, { type: 'boolean' }, { type: 'null' }, { type: 'object', required: ['formula'], properties: { formula: { type: 'string', maxLength: 256, description: 'Local arithmetic or an allowed function, without a leading =. DDE, pipes, external workbooks, and links are rejected.' } }, additionalProperties: false } ] } } } }, additionalProperties: false } } }, additionalProperties: false },
+  { type: 'object', required: ['path', 'hash', 'bytes', 'sheets'], properties: { path: { type: 'string' }, hash: { type: 'string' }, bytes: { type: 'integer' }, sheets: { type: 'integer' } }, additionalProperties: false }, 'write')
+const pptxWriteManifest = manifest('document.pptx.write', 'Create a real PPTX deck. The document title is stored in core properties. Slides stay in the given order, with a title, optional bullets, an optional text table, and an optional local PNG or JPEG. Content that does not fit one slide continues on later slides; a deck that still cannot fit is rejected before writing. No remote images, templates, or macros. Omit expectedHash to create; pass the current SHA-256 to replace that exact file.',
+  { type: 'object', required: ['path', 'slides'], properties: { path: { type: 'string' }, expectedHash: hashSchema, title: { type: 'string', maxLength: 200 }, slides: { type: 'array', minItems: 1, maxItems: 40, items: { type: 'object', required: ['title'], properties: { title: { type: 'string', maxLength: 500 }, bullets: { type: 'array', maxItems: 30, items: { type: 'string', maxLength: 2_000 } }, table: { type: 'object', required: ['rows'], properties: { rows: { type: 'array', minItems: 1, maxItems: 30, items: { type: 'array', minItems: 1, maxItems: 12, items: { type: 'string', maxLength: 500 } } } }, additionalProperties: false }, imagePath: { type: 'string', description: 'Workspace-relative PNG or JPEG. URLs are rejected.' } }, additionalProperties: false } } }, additionalProperties: false },
+  { type: 'object', required: ['path', 'hash', 'bytes', 'slides'], properties: { path: { type: 'string' }, hash: { type: 'string' }, bytes: { type: 'integer' }, slides: { type: 'integer' } }, additionalProperties: false }, 'write')
+
+const pptxReadInput = z.object({ path: z.string().min(1).max(1_024), startSlide: z.number().int().positive().optional(), endSlide: z.number().int().positive().optional(), offset: z.number().int().min(0).optional(), maxChars: z.number().int().positive().max(MAX_OUTPUT_CHARS).default(20_000) }).strict()
+const pdfRenderInput = z.object({ sourcePath: z.string().min(1).max(1_024), page: z.number().int().positive(), path: z.string().min(1).max(1_024), scale: z.number().positive().max(4).optional(), dpi: z.number().int().min(36).max(300).optional(), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional() }).strict()
+const docxBlock = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('heading'), level: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(), text: z.string().max(8_000) }).strict(),
+  z.object({ type: z.literal('paragraph'), text: z.string().max(8_000) }).strict(),
+  z.object({ type: z.literal('list'), ordered: z.boolean().optional(), items: z.array(z.string().max(4_000)).min(1).max(50) }).strict(),
+  z.object({ type: z.literal('table'), header: z.boolean().optional(), rows: z.array(z.array(z.string().max(2_000)).min(1).max(20)).min(1).max(100) }).strict(),
+])
+const docxWriteInput = z.object({ path: z.string().min(1).max(1_024), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(), title: z.string().max(200).optional(), blocks: z.array(docxBlock).min(1).max(100) }).strict()
+const xlsxCell = z.union([z.string().max(2_000), z.number(), z.boolean(), z.null(), z.object({ formula: z.string().min(1).max(256) }).strict()])
+const xlsxWriteInput = z.object({ path: z.string().min(1).max(1_024), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(), sheets: z.array(z.object({ name: z.string().min(1).max(31), header: z.boolean().optional(), rows: z.array(z.array(xlsxCell).min(1).max(50)).min(1).max(500) }).strict()).min(1).max(20) }).strict()
+const pptxWriteInput = z.object({ path: z.string().min(1).max(1_024), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(), title: z.string().max(200).optional(), slides: z.array(z.object({ title: z.string().max(500), bullets: z.array(z.string().max(2_000)).max(30).optional(), table: z.object({ rows: z.array(z.array(z.string().max(500)).min(1).max(12)).min(1).max(30) }).strict().optional(), imagePath: z.string().min(1).max(1_024).optional() }).strict()).min(1).max(40) }).strict()
+
 export function createDocumentTools(workspaceRoot: string): [
   ToolDefinition<PdfInput, PdfReadOutput>,
   ToolDefinition<XlsxInput, XlsxInspectOutput>,
   ToolDefinition<DocxInput, DocxReadOutput>,
+  ToolDefinition<PptxReadRequest, PptxReadResult>,
+  ToolDefinition<PdfRenderRequest, PdfRenderResult>,
+  ToolDefinition<DocxWriteRequest, OfficeWriteResult & { blocks: number }>,
+  ToolDefinition<XlsxWriteRequest, OfficeWriteResult & { sheets: number }>,
+  ToolDefinition<PptxWriteRequest, OfficeWriteResult & { slides: number }>,
 ] {
   const root = resolve(workspaceRoot)
+  const shared = { locks: [{ resource: `workspace:${root}`, mode: 'shared' as const }], permissions: { workspaceRoots: [root] } }
+  const fileLock = (path: string) => [{ resource: `workspace:${root}`, mode: 'shared' as const }, { resource: `file:${resolve(root, path)}`, mode: 'exclusive' as const }]
   return [
     {
-      manifest: { ...pdfManifest, locks: [{ resource: `workspace:${root}`, mode: 'shared' }], permissions: { workspaceRoots: [root] } },
+      manifest: { ...pdfManifest, ...shared },
       validateInput: (input) => pdfInput.parse(input),
       execute: (input, context) => readPdf(root, input, context.signal),
       summarize: (output) => ({ path: output.path, totalPages: output.totalPages, firstPage: output.firstPage, lastPage: output.lastPage, truncated: output.truncated, textPreview: output.text.slice(0, 1_000) }),
     },
     {
-      manifest: { ...xlsxManifest, locks: [{ resource: `workspace:${root}`, mode: 'shared' }], permissions: { workspaceRoots: [root] } },
+      manifest: { ...xlsxManifest, ...shared },
       validateInput: (input) => xlsxInput.parse(input),
       execute: (input, context) => inspectXlsx(root, input, context.signal),
       summarize: (output) => ({ path: output.path, sheetCount: output.sheetCount, worksheets: output.worksheets.map(({ name, rowCount, columnCount, state }) => ({ name, rowCount, columnCount, state })), truncated: output.truncated }),
     },
     {
-      manifest: { ...docxManifest, locks: [{ resource: `workspace:${root}`, mode: 'shared' }], permissions: { workspaceRoots: [root] } },
+      manifest: { ...docxManifest, ...shared },
       validateInput: (input) => docxInput.parse(input),
       execute: (input, context) => readDocx(root, input, context.signal),
       summarize: (output) => ({ path: output.path, chars: output.chars, truncated: output.truncated, textPreview: output.text.slice(0, 1_000) }),
+    },
+    {
+      manifest: { ...pptxManifest, ...shared },
+      validateInput: (input) => pptxReadInput.parse(input),
+      execute: (input, context) => readPptx(root, input, context.signal),
+      summarize: (output) => ({ path: output.path, hash: output.hash, totalSlides: output.totalSlides, startSlide: output.startSlide, endSlide: output.endSlide, nextSlide: output.nextSlide, nextOffset: output.nextOffset, truncated: output.truncated, textPreview: output.text.slice(0, 1_000) }),
+    },
+    {
+      manifest: { ...pdfRenderManifest, permissions: { workspaceRoots: [root] } },
+      resolveResources: (input) => [...fileLock(input.path), { resource: `file:${resolve(root, input.sourcePath)}`, mode: 'shared' }],
+      validateInput: (input) => pdfRenderInput.parse(input),
+      execute: (input, context) => renderPdfPage(root, input, context.signal),
+      summarize: (output) => ({ path: output.path, hash: output.hash, bytes: output.bytes, page: output.page, width: output.width, height: output.height }),
+    },
+    {
+      manifest: { ...docxWriteManifest, permissions: { workspaceRoots: [root] } },
+      resolveResources: (input) => fileLock(input.path),
+      validateInput: (input) => docxWriteInput.parse(input),
+      execute: (input, context) => writeDocx(root, input, context.signal),
+      summarize: (output) => ({ path: output.path, hash: output.hash, bytes: output.bytes, blocks: output.blocks }),
+    },
+    {
+      manifest: { ...xlsxWriteManifest, permissions: { workspaceRoots: [root] } },
+      resolveResources: (input) => fileLock(input.path),
+      validateInput: (input) => xlsxWriteInput.parse(input),
+      execute: (input, context) => writeXlsx(root, input, context.signal),
+      summarize: (output) => ({ path: output.path, hash: output.hash, bytes: output.bytes, sheets: output.sheets }),
+    },
+    {
+      manifest: { ...pptxWriteManifest, permissions: { workspaceRoots: [root] } },
+      resolveResources: (input) => fileLock(input.path),
+      validateInput: (input) => pptxWriteInput.parse(input),
+      execute: (input, context) => writePptx(root, input, context.signal),
+      summarize: (output) => ({ path: output.path, hash: output.hash, bytes: output.bytes, slides: output.slides }),
     },
   ]
 }

@@ -36,15 +36,24 @@ importers:
       '@hunterzhu/pulse-tool-sdk':
         specifier: workspace:*
         version: link:../tool-sdk
+      '@napi-rs/canvas':
+        specifier: 0.1.100
+        version: 0.1.100
       exceljs:
         specifier: 4.4.0
         version: 4.4.0
+      jszip:
+        specifier: 3.10.2
+        version: 3.10.2
       mammoth:
         specifier: 1.11.0
         version: 1.11.0
       pdfjs-dist:
         specifier: 4.10.38
         version: 4.10.38
+      saxes:
+        specifier: 6.0.0
+        version: 6.0.0
 
   packages/cli:
     dependencies:
@@ -4200,7 +4209,6 @@ snapshots:
       '@napi-rs/canvas-linux-x64-musl': 0.1.100
       '@napi-rs/canvas-win32-arm64-msvc': 0.1.100
       '@napi-rs/canvas-win32-x64-msvc': 0.1.100
-    optional: true
 
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true

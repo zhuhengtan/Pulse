@@ -217,7 +217,7 @@ const splitLargeEditNotice = 'Runtime recovery notice: that edit was too large a
 const streamNewFileNotice = 'Runtime recovery notice: that new file was too large for one response and was not created. Stream it yourself with fs.stage: begin with the path, append at most 16384 UTF-8 bytes per step, then commit. Send only the next chunk now. Do not repeat a completed chunk.'
 const sameFileBatchNotice = 'Runtime recovery notice: changes to the same existing file were not applied. Send every local change for that file together as one fs.apply_patches call against a single baseline hash, with 2-16 non-overlapping exact fragments. Overlapping fragments write nothing. Do not rewrite the whole file.'
 const editRequiredNotice = 'Runtime recovery notice: this stage still has no file edit, so that read was not executed. If a previous fs.read of this file has nextOffset, call fs.read again with that offset and do not start over. Otherwise submit one local change now. Use fs.apply_patch or fs.apply_patches for an existing file, or fs.stage in chunks of at most 16384 bytes for a new file. Do not search or run a shell until that edit is submitted.'
-const fileEditTools = new Set(['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.stage', 'plan.write'])
+const fileEditTools = new Set(['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.stage', 'plan.write', 'pdf.page.render', 'docx.write', 'spreadsheet.xlsx.write', 'pptx.write'])
 
 /** Keep assertions verbatim; strip only timing syntax from recognized test reporters. */
 export function stableCheckOutput(text: string): string {

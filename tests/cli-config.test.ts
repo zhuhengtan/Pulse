@@ -251,7 +251,7 @@ describe('ensurePulseUserConfig', () => {
       const options = await hostOptions(parse(['--config', path]))
       expect(options.enabledCapabilityPacks).toEqual(['builtin-skills', 'pdf', 'skills', 'browser'])
       expect(options.capabilityConfig).toEqual({ skills: ['review'] })
-      expect(options.capabilityPacks?.map((pack) => pack.manifest.id)).toEqual(['builtin-skills', 'pdf', 'spreadsheet', 'docx', 'skills', 'browser'])
+      expect(options.capabilityPacks?.map((pack) => pack.manifest.id)).toEqual(['builtin-skills', 'pdf', 'spreadsheet', 'docx', 'pptx', 'skills', 'browser'])
     } finally {
       if (previousHome === undefined) delete process.env.PULSE_HOME
       else process.env.PULSE_HOME = previousHome

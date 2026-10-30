@@ -10,7 +10,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json && node ../../scripts/build/copy-adapter-assets.mjs"
   },
   "publishConfig": {
     "access": "public",
@@ -20,8 +20,11 @@
     "@anthropic-ai/sandbox-runtime": "0.0.77",
     "@hunterzhu/pulse-runtime": "workspace:*",
     "@hunterzhu/pulse-tool-sdk": "workspace:*",
+    "@napi-rs/canvas": "0.1.100",
     "exceljs": "4.4.0",
+    "jszip": "3.10.2",
     "mammoth": "1.11.0",
-    "pdfjs-dist": "4.10.38"
+    "pdfjs-dist": "4.10.38",
+    "saxes": "6.0.0"
   }
 }

@@ -5,6 +5,7 @@ import { copyChanges } from './copy-evidence.js'
 import type { Checkpoint } from './checkpoint.js'
 import { z } from 'zod'
 import { isReadProgress, defineLaneProgram, type ConversationMessage, type JsonValue, type StepContext } from '@hunterzhu/pulse-runtime'
+import { isOfficeFileEdit, isPptxPageProgress, officeWriteToolNames } from './office-evidence.js'
 import { acceptanceCriteriaFromObjective, taskRecordFromGlobal, taskRecordJson, type TaskOutcome } from '../task.js'
 import { detectResponseLanguage } from '../language.js'
 import { buildContextGraph, expandContextSurface, type SurfaceTask } from './context-page.js'
@@ -72,6 +73,7 @@ function committedFileEdit(ctx: Context, ref: string): boolean {
     const receipt = ctx.results.read(ref)
     return !!receipt && typeof receipt === 'object' && !Array.isArray(receipt) && receipt.committed === true
   }
+  if (isOfficeFileEdit(meta.toolName, body)) return true
   return meta.toolName !== undefined && ['fs.write', 'fs.overwrite', 'fs.apply_patch', 'fs.apply_patches', 'plan.write'].includes(meta.toolName)
 }
 function committedOutputPaths(ctx: Context, ref: string): string[] {
@@ -166,7 +168,7 @@ function stateOf(ctx: Context, readOnlyToolNames: readonly string[] = []): TaskC
 }
 function isReadContinuation(ctx: Context, refs: readonly string[]): boolean {
   const prior = [...new Set([...ctx.history.flatMap(h => h.resultRefs), ...stageEvidence(controllerOf(ctx) ?? initialController(16))])].filter(ref => !refs.includes(ref))
-  return refs.length > 0 && refs.every(ref => isReadProgress(ctx, ref, prior))
+  return refs.length > 0 && refs.every(ref => isReadProgress(ctx, ref, prior) || isPptxPageProgress(ctx, ref, prior))
 }
 function retainedEvidence(state: TaskControllerState): string[] {
   return [...new Set(state.priorTasks.flatMap((task) => task.evidenceRefs))].slice(-16)
@@ -300,7 +302,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
   const selectiveContext = programVersion === '9' || (programVersion === '10' || (programVersion === '11' || modernController))
   const stageTurnLimit = continuousExecution ? budget : (programVersion === '11' || modernController) ? Math.max(1, Math.min(16, budget - 3)) : enforceTurnBudget ? Math.max(1, Math.min(8, budget - 2)) : 8
   const controllerStageTurnLimit = continuousExecution ? budget : (programVersion === '11' || modernController) ? Math.max(1, Math.min(16, budget - 3)) : enforceTurnBudget ? Math.min(8, budget) : 8
-  const canEditFiles = options.toolNames.some((name) => ['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.stage', 'plan.write'].includes(name))
+  const canEditFiles = options.toolNames.some((name) => ['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.stage', 'plan.write', ...officeWriteToolNames].includes(name))
   const stageSummary = (task: ControlledTask) => [task.goal, task.check, task.note].filter((item): item is string => typeof item === 'string' && item.length > 0).join('\n')
   // User requirements and the latest exchange are the conversational contract.
   // Keep their roles and full text; older assistant detail stays on the graph.
@@ -459,7 +461,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
     }
   }
   const stageNeedsFileEdit = (ctx: Context): boolean => {
-    const fileEditTools = new Set(['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.overwrite', 'fs.stage', 'plan.write', ...(['49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(programVersion) ? ['fs.move', 'shell.exec'] : [])])
+    const fileEditTools = new Set(['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.overwrite', 'fs.stage', 'plan.write', ...officeWriteToolNames, ...(['49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(programVersion) ? ['fs.move', 'shell.exec'] : [])])
     if (continuousExecution || !options.toolNames.some((name) => fileEditTools.has(name))) return false
     const state = stateOf(ctx, options.readOnlyToolNames ?? [])
     const task = state.tasks.find((item) => item.id === (workerTaskId(ctx) ?? state.activeId))
@@ -1242,7 +1244,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
       onSuccess: (result, ctx) => {
         const state = stateOf(ctx, options.readOnlyToolNames ?? [])
         const task = state.tasks.find((item) => item.id === state.activeId)!
-        const fileEditTools = new Set(['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.overwrite', 'fs.stage', 'plan.write', ...(['49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(programVersion) ? ['fs.move', 'shell.exec'] : [])])
+        const fileEditTools = new Set(['fs.apply_patch', 'fs.apply_patches', 'fs.write', 'fs.overwrite', 'fs.stage', 'plan.write', ...officeWriteToolNames, ...(['49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(programVersion) ? ['fs.move', 'shell.exec'] : [])])
         const hostChecks = boundedTransitions ? namedHostChecks(taskRecordFromGlobal(ctx.global as JsonValue), task) : []
         const hostFailure = stageCheckFailure(ctx, task, hostChecks)
         const edited = hasStageEdit(ctx, task) || boundedTransitions && existingContractEvidence(ctx, task, hostChecks)
@@ -1677,7 +1679,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
         const skipped = state.tasks.filter((item) => isCascadeBlocked(item, state.tasks) && rootBlockedDependency(item, state.tasks)?.id === task.id)
         const skippedLine = skipped.length === 0 ? '' : zh ? `\n这些后续阶段没有开始：${skipped.map((item) => item.goal).join('；')}` : `\nThese later stages did not start: ${skipped.map((item) => item.goal).join('; ')}`
         const deliverable = refusalReport || modernController && /^\s*(?:读取|阅读|调查|定位|read\b|inspect\b|investigate\b)/i.test(task.goal) ? undefined : candidateText(ctx, isolatedCandidates && task.candidateAttempt !== task.attempts ? undefined : task.candidateRef)
-        const paths = [...new Set(task.evidenceRefs.flatMap(ref => { const meta = ctx.results.meta(ref); if (!meta?.toolName || !['fs.write', 'fs.overwrite', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'plan.write'].includes(meta.toolName) || !committedFileEdit(ctx, ref)) return []; const body = ctx.results.read(ref); return body && typeof body === 'object' && !Array.isArray(body) && typeof (body.path ?? body.target) === 'string' ? [String(body.path ?? body.target)] : [] }))]
+        const paths = [...new Set(task.evidenceRefs.flatMap(ref => { const meta = ctx.results.meta(ref); if (!meta?.toolName || !['fs.write', 'fs.overwrite', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'plan.write', ...officeWriteToolNames].includes(meta.toolName) || !committedFileEdit(ctx, ref)) return []; const body = ctx.results.read(ref); return body && typeof body === 'object' && !Array.isArray(body) && typeof (body.path ?? body.target) === 'string' ? [String(body.path ?? body.target)] : [] }))]
         const artifacts = paths.length ? `\n${zh ? '已交付文件' : 'Delivered files'}: ${paths.join(', ')}` : ''
         const body = refusalReport && task.status === 'passed' ? (zh ? '阶段检查已通过；整体验收仍未通过。' : 'Stage check passed; overall acceptance remains incomplete.') : deliverable ? `${task.note ?? task.status}\n\n交付内容：\n${deliverable}` : task.note ?? task.status
         return `${task.status === 'passed' ? '✓' : '•'} ${task.goal}\n${body}${artifacts}${skippedLine}`

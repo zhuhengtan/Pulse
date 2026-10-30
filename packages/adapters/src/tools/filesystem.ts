@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, relative, resolve } from 'node:path'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 
 export interface FilesystemWriteResult { hash: string; bytes: number }
@@ -49,12 +49,51 @@ export class FilesystemTool {
     return resolved
   }
   private async writable(path: string): Promise<string> {
-    const target = this.safe(path)
-    await mkdir(dirname(target), { recursive: true })
-    const [root, parent] = await Promise.all([realpath(this.root), realpath(dirname(target))])
-    const within = relative(root, parent)
-    if (within.startsWith('..') || isAbsolute(within)) throw filesystemError('PATH_OUTSIDE_SANDBOX')
-    const existing = await lstat(target).catch((cause) => (cause as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : Promise.reject(cause))
+    const root = await realpath(this.root)
+    const lexical = this.safe(path)
+    const segments = relative(resolve(this.root), lexical).split(sep).filter(Boolean)
+    if (segments.length === 0) throw filesystemError('PATH_OUTSIDE_SANDBOX')
+    const inside = (candidate: string): void => {
+      const within = relative(root, candidate)
+      if (within.startsWith('..') || isAbsolute(within)) throw filesystemError('PATH_OUTSIDE_SANDBOX')
+    }
+    let current = root
+    let index = 0
+    for (; index < segments.length - 1; index += 1) {
+      const next = resolve(current, segments[index]!)
+      inside(next)
+      let stat: Awaited<ReturnType<typeof lstat>>
+      try { stat = await lstat(next) } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code === 'ENOENT') break
+        throw filesystemCause(cause)
+      }
+      if (stat.isSymbolicLink()) {
+        inside(await realpath(next))
+        current = await realpath(next)
+        continue
+      }
+      if (!stat.isDirectory()) throw filesystemError('ENOTDIR')
+      current = next
+    }
+    const missing = segments.slice(index, -1)
+    if (missing.length > 0) {
+      const parent = resolve(current, ...missing)
+      inside(parent)
+      await mkdir(parent, { recursive: true })
+      let created: string
+      try { created = await realpath(parent) } catch (cause) {
+        await rm(parent, { recursive: true, force: true }).catch(() => undefined)
+        throw filesystemCause(cause)
+      }
+      try { inside(created) } catch (cause) {
+        await rm(parent, { recursive: true, force: true }).catch(() => undefined)
+        throw cause
+      }
+      current = created
+    }
+    const target = resolve(current, segments.at(-1)!)
+    inside(target)
+    const existing = await lstat(target).catch((cause) => (cause as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : Promise.reject(filesystemCause(cause)))
     if (existing?.isSymbolicLink()) throw filesystemError('PATH_OUTSIDE_SANDBOX')
     return target
   }

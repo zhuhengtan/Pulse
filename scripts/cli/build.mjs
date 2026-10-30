@@ -11,4 +11,7 @@ if (changelog.error) throw changelog.error
 if (changelog.status !== 0) process.exit(changelog.status ?? 1)
 const result = spawnSync(process.execPath, [compiler, '-b', '--pretty', 'false'], { cwd: repo, stdio: 'inherit' })
 if (result.error) throw result.error
-process.exitCode = result.status ?? 1
+if ((result.status ?? 1) !== 0) process.exit(result.status ?? 1)
+const copied = spawnSync(process.execPath, [fileURLToPath(new URL('../build/copy-adapter-assets.mjs', import.meta.url))], { cwd: repo, stdio: 'inherit' })
+if (copied.error) throw copied.error
+process.exitCode = copied.status ?? 1

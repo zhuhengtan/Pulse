@@ -105,6 +105,8 @@ import {
   validateShellInvocation,
   checkShellSandbox,
   FilesystemTool,
+  officeBinaryWriter,
+  assertOfficeOutputPath,
   type ProviderAdapter,
   type ProviderPresetConfig,
 } from '@hunterzhu/pulse-adapters'
@@ -122,7 +124,7 @@ import { JarvisRun } from './jarvis/run.js'
 import { JarvisSyncQueue } from './jarvis/sync.js'
 import { processFrontModel, heuristicFastAck, type FrontModelConfig, type FrontModelBrief, type FrontModelContextItem, type FrontModelResult } from './front-model.js'
 export { processFrontModel, heuristicFastAck, sanitizeFrontModelResult, type FrontModelConfig, type FrontModelBrief, type FrontModelResult } from './front-model.js'
-export { CapabilityPackRegistry, createMcpCapabilityPack, createPdfCapabilityPack, createSpreadsheetCapabilityPack, createDocxCapabilityPack, referenceCapabilityPackCatalog, type ActiveCapabilityPacks, type CapabilityPack, type CapabilityPackManifest } from './capabilities.js'
+export { CapabilityPackRegistry, createMcpCapabilityPack, createPdfCapabilityPack, createSpreadsheetCapabilityPack, createDocxCapabilityPack, createPptxCapabilityPack, referenceCapabilityPackCatalog, type ActiveCapabilityPacks, type CapabilityPack, type CapabilityPackManifest } from './capabilities.js'
 export { createSkillCapabilityPack, defaultSkillRoot, type SkillCapabilityPackOptions } from './skill-pack.js'
 export { createBuiltinSkillCapabilityPack, listBuiltinSkills, readBuiltinSkill, isBuiltinSkill, builtinSkillContents, type BuiltinSkill } from './builtin-skills.js'
 export { assertJarvisApiUrl, JarvisClient, jarvisResultForRun, type CandidateMemoryInput, type CloseSessionInput, type JarvisContextPackage, type JarvisMemoryRecord, type JarvisSession, type PulseJarvisConfig } from './jarvis/index.js'
@@ -452,6 +454,8 @@ const json = (value: unknown): JsonValue => {
 }
 
 const processRegistries = new WeakMap<ToolRegistry, ReturnType<typeof shellProcesses>>()
+const journaledFilesystems = new WeakMap<ToolRegistry, FilesystemTool>()
+const officeWriteTools = new Set(['pdf.page.render', 'docx.write', 'spreadsheet.xlsx.write', 'pptx.write'])
 
 interface BuiltInSurface {
   version?: 1 | 2
@@ -644,6 +648,7 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
         await surface.snapshots!.beginMove({ ...ctx, source: info.source, destination: info.destination, before: info.before })
       },
     })
+    journaledFilesystems.set(registry, fsTool)
     for (const manifest of registry.list()) {
       if (manifest.sideEffectPolicy !== 'write') continue
       const definition = registry.get(manifest.name)
@@ -654,15 +659,31 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
   }
 }
 
-function registerCapabilityTools(registry: ToolRegistry, capabilities: ActiveCapabilityPacks, mode: ApprovalMode): void {
+function registerCapabilityTools(registry: ToolRegistry, capabilities: ActiveCapabilityPacks, mode: ApprovalMode, identity?: { runId: string; conversationId: string; approved: (toolCallId: string) => boolean }): void {
+  const files = journaledFilesystems.get(registry)
   for (const tool of capabilities.tools) {
-    registry.register({ ...tool, execute: (input, context) => {
+    const officeWrite = officeWriteTools.has(tool.manifest.name)
+    registry.register({ ...tool, execute: async (input, context) => {
       // MCP tools are conservatively classified as external. Enabling their
       // process does not authorize side effects in a read-only run.
       if (mode === 'read-only' && tool.manifest.sideEffectPolicy !== 'read' && tool.manifest.sideEffectPolicy !== 'none') {
         throw Object.assign(new Error(`TOOL_DISABLED_READ_ONLY:${tool.manifest.name}`), { code: 'TOOL_DISABLED_READ_ONLY', retryable: false })
       }
-      return tool.execute(input, context)
+      if (!officeWrite) return tool.execute(input, context)
+      if (mode === 'ask' && identity?.approved(context.toolCallId) !== true) throw Object.assign(new Error(`APPROVAL_REQUIRED:${tool.manifest.name}`), { code: 'APPROVAL_REQUIRED', retryable: false })
+      await processRegistries.get(registry)?.assertIdle()
+      if (!files || !identity) throw Object.assign(new Error('OFFICE_WRITE_CHANNEL_REQUIRED'), { code: 'OFFICE_WRITE_CHANNEL_REQUIRED', retryable: false })
+      const writer = {
+        write: async (request: { path: string; bytes: Uint8Array; expectedHash: string | null; signal: AbortSignal }) => {
+          const normalized = request.path.replaceAll('\\', '/')
+          const kind = normalized.toLowerCase().endsWith('.png') ? 'png' : normalized.toLowerCase().endsWith('.docx') ? 'docx' : normalized.toLowerCase().endsWith('.xlsx') ? 'xlsx' : normalized.toLowerCase().endsWith('.pptx') ? 'pptx' : undefined
+          if (!kind) throw Object.assign(new Error('OFFICE_TARGET_EXTENSION'), { code: 'OFFICE_TARGET_EXTENSION', retryable: false })
+          assertOfficeOutputPath(kind, request.path)
+          const saved = await files.writeBytesIfUnchanged(request.path, request.bytes, request.expectedHash, request.signal)
+          return { path: request.path, hash: saved.hash, bytes: saved.bytes }
+        },
+      }
+      return officeBinaryWriter.run(writer, () => fileWriteContext.run({ effectId: context.effectId, runId: identity.runId, laneId: context.laneId, agentId: context.agentId, conversationId: identity.conversationId }, () => tool.execute(input, context)))
     } })
   }
 }
@@ -2736,7 +2757,7 @@ export class LocalHost {
         try { const sessions = await this.automationClient.request('list', []); for (const session of sessions) if (session.owner.startsWith(runId + ':') && session.state !== 'closed') await this.automationClient.request('releaseOwner', [session.owner]) } finally { await dispose() }
       }
     }
-    try { registerCapabilityTools(registry, capabilities, options.approvalMode ?? 'ask') } catch (error) { capabilityController.abort(); await capabilities.dispose(); throw error }
+    try { registerCapabilityTools(registry, capabilities, options.approvalMode ?? 'ask', { runId, conversationId, approved: (toolCallId) => this.approvedToolCalls.get(runId)?.has(toolCallId) === true }) } catch (error) { capabilityController.abort(); await capabilities.dispose(); throw error }
     try {
     const provider = providerFromOptions(options)
     const routing = createHostModelRouting({ activeModel: options.activeModel ?? provider.model.id, activeProviderCode: options.activeProviderCode ?? provider.adapter.id, activeProvider: options.provider ?? { provider: 'mock', defaultModel: provider.model.id }, ...(options.providerProfiles === undefined ? {} : { providerProfiles: options.providerProfiles }), ...(options.providerModels === undefined ? {} : { providerModels: options.providerModels }), ...(options.taskRouting === undefined ? {} : { taskRouting: options.taskRouting }), activeAdapter: provider.adapter })
@@ -3136,7 +3157,7 @@ export class LocalHost {
         try { const sessions = await this.automationClient.request('list', []); for (const session of sessions) if (session.owner.startsWith(runId + ':') && session.state !== 'closed') await this.automationClient.request('releaseOwner', [session.owner]) } finally { await dispose() }
       }
     }
-    try { registerCapabilityTools(registry, capabilities, options.approvalMode ?? 'ask') } catch (error) { capabilityController.abort(); await capabilities.dispose(); throw error }
+    try { registerCapabilityTools(registry, capabilities, options.approvalMode ?? 'ask', { runId, conversationId, approved: (toolCallId) => this.approvedToolCalls.get(runId)?.has(toolCallId) === true }) } catch (error) { capabilityController.abort(); await capabilities.dispose(); throw error }
     try {
     const provider = providerFromOptions(options)
     const routing = createHostModelRouting({ activeModel: options.activeModel ?? provider.model.id, activeProviderCode: options.activeProviderCode ?? provider.adapter.id, activeProvider: options.provider ?? { provider: 'mock', defaultModel: provider.model.id }, ...(options.providerProfiles === undefined ? {} : { providerProfiles: options.providerProfiles }), ...(options.providerModels === undefined ? {} : { providerModels: options.providerModels }), ...(options.taskRouting === undefined ? {} : { taskRouting: options.taskRouting }), activeAdapter: provider.adapter })
@@ -4403,7 +4424,7 @@ export class LocalHost {
       if (dispositionForEffect(effect) !== 'confirmed' || typeof effect.outcome?.resultRef !== 'string' || effect.outcome.resultRef.length === 0) continue
       const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, unknown> : undefined
       const name = typeof input?.name === 'string' ? input.name : ''
-      if (!['fs.write', 'fs.overwrite', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'fs.move', 'plan.write'].includes(name)) continue
+      if (!['fs.write', 'fs.overwrite', 'fs.apply_patch', 'fs.apply_patches', 'fs.stage', 'fs.move', 'plan.write', ...officeWriteTools].includes(name)) continue
       owners.push({ conversationId, runId, effectId: entry[0], ...(typeof effect.ownerLaneId === 'string' ? { laneId: effect.ownerLaneId } : {}), ...(typeof effect.agentId === 'string' ? { agentId: effect.agentId } : {}) })
     }
     await new FileSnapshotManager(cwd, new FilesystemTool(cwd)).settleConfirmed(owners)
