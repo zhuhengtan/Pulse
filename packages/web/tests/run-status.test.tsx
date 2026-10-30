@@ -52,6 +52,31 @@ describe('compact run status', () => {
     expect(screen.getByTitle('正在执行的任务').textContent).toBe('正在执行的任务')
   })
 
+  it('shows the mobile work connection mark outside the hidden title', async () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(query => ({ matches: query === '(max-width: 767px)', media: query, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList)
+    const base = sidebarFixture().transport
+    const transport: PulseWebTransport = {
+      async request(path, init) {
+        if (path === '/api/session/local' || path === '/api/session') return response({ localAdmin: true, canUseTerminal: false, connected: false })
+        if (path === '/api/runs/run-busy/state') return response({ runId: 'run-busy', state: 'failed', seq: 1, activities: [] })
+        if (path === '/api/runs/run-busy/trace') return response({ events: [], seq: 1 })
+        if (path === '/api/web/conversations/busy/messages') return response([])
+        return base.request(path, init)
+      },
+      subscribe: () => () => {},
+    }
+    render(<PulseDesignSystem><PulseApp transport={transport} /></PulseDesignSystem>)
+    fireEvent.click(await screen.findByRole('tab', { name: '工作' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^正在执行的任务/ }))
+    const mark = await screen.findByRole('status', { name: '服务未连接' })
+    const task = await screen.findByRole('status', { name: '任务执行失败' })
+    expect(mark.closest('.navbar-title')).toBeNull()
+    expect(mark.closest('.navbar-status')).toBeTruthy()
+    expect(task.closest('.navbar-status')).toBeTruthy()
+    expect(mark).not.toBe(task)
+    expect(screen.getByTitle('正在执行的任务').textContent).toBe('正在执行的任务')
+  })
+
   it('shows a recovered running process, then replaces it with later work and completion', async () => {
     const base = sidebarFixture().transport
     let receive: ((event: WebRunEvent) => void) | undefined

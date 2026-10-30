@@ -1,11 +1,24 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Icon } from './Icon.js'
 import type { PulseWebTransport } from './transport.js'
 
 type Notice = { id: string; kind: 'complete' | 'ask' | 'approval'; conversationId: string; runId: string; groupId?: string; surface?: 'chat' | 'work' }
+type NoticeBox = { top: number; left: number; width: number }
+/** Keep the menu inside the viewport. A right-anchored 280px panel overflows when the toggle sits near the left edge. */
+function noticeBox(anchor: DOMRect): NoticeBox {
+  const margin = 8
+  const width = Math.min(280, Math.max(0, window.innerWidth - margin * 2))
+  const left = Math.min(Math.max(anchor.right - width, margin), Math.max(margin, window.innerWidth - margin - width))
+  const top = Math.min(Math.max(margin, anchor.bottom + 6), Math.max(margin, window.innerHeight - margin - 48))
+  return { top, left, width }
+}
+
 /** Browser notifications require an explicit gesture. The inbox works without permission. */
 export function TaskNotificationInbox({ transport, open }: { transport: PulseWebTransport; open: (path: string) => void }) {
   const [items, setItems] = useState<Notice[]>([]), [expanded, setExpanded] = useState(false)
   const [permission, setPermission] = useState(() => typeof Notification === 'undefined' ? 'unsupported' : Notification.permission)
+  const [box, setBox] = useState<NoticeBox>()
+  const toggleRef = useRef<HTMLButtonElement>(null)
   const seen = useRef(new Set<string>()), initialized = useRef(false)
   const navigate = (item: Notice) => open(`${item.surface === 'chat' ? '/chat' : '/work/' + encodeURIComponent(item.conversationId)}?notification=${encodeURIComponent(item.groupId ?? item.id)}`)
   useEffect(() => {
@@ -44,14 +57,24 @@ export function TaskNotificationInbox({ transport, open }: { transport: PulseWeb
     void sync(); const timer = setInterval(() => void sync(), 5000)
     return () => { closed = true; clearInterval(timer) }
   }, [transport, permission])
+  useLayoutEffect(() => {
+    if (!expanded) return
+    const place = () => { const anchor = toggleRef.current?.getBoundingClientRect(); if (anchor) setBox(noticeBox(anchor)) }
+    place()
+    window.addEventListener('resize', place)
+    return () => window.removeEventListener('resize', place)
+  }, [expanded])
   if (window.pulseDesktop) return null
-  return <aside aria-label="任务通知" style={{ position: 'relative', zIndex: 80 }}>
-    <button type="button" onClick={() => setExpanded(value => !value)}>通知 / 待办（{items.length}）</button>
-    {expanded && <div style={{ position: 'absolute', right: 0, top: 38, width: 280, padding: 12, maxWidth: '85vw', maxHeight: 360, overflow: 'auto', background: 'var(--bg, #fff)', color: 'var(--text, #222)', border: '1px solid #999', borderRadius: 8 }}>
-      {permission === 'default' && <button type="button" onClick={() => { void Notification.requestPermission().then(setPermission).catch(() => setPermission('denied')) }}>启用系统通知</button>}
+  return <aside className="task-notice" aria-label="任务通知">
+    <button ref={toggleRef} type="button" className="task-notice-toggle" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+      <span className="task-notice-full">通知 / 待办（{items.length}）</span>
+      <span className="task-notice-compact" aria-hidden="true"><Icon name="archive" size={16}/><span className="task-notice-count">{items.length}</span></span>
+    </button>
+    {expanded && <div className="task-notice-panel" role="region" aria-label="待办列表" style={box ? { top: box.top, left: box.left, width: box.width, right: 'auto' } : undefined}>
+      {permission === 'default' && <button type="button" className="task-notice-action" onClick={() => { void Notification.requestPermission().then(setPermission).catch(() => setPermission('denied')) }}>启用系统通知</button>}
       <p>{permission === 'granted' ? '此页面打开时接收通知；点击通知进入任务。' : '系统通知未启用，待办仍保留在这里。'}</p>
       <p>浏览器通知内无法直接作答，请进入任务回答。</p>
-      {items.map(item => <button type="button" key={item.id} onClick={() => navigate(item)} style={{ display: 'block', marginTop: 8 }}>{item.kind === 'approval' ? '查看待审批任务' : item.kind === 'complete' ? '查看已结束任务' : '回答待处理问题'}</button>)}
+      {items.map(item => <button type="button" className="task-notice-action" key={item.id} onClick={() => navigate(item)}>{item.kind === 'approval' ? '查看待审批任务' : item.kind === 'complete' ? '查看已结束任务' : '回答待处理问题'}</button>)}
       {!items.length && <p>暂无待处理事项</p>}
     </div>}
   </aside>

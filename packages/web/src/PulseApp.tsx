@@ -34,8 +34,6 @@ import { RichComposer, emptyComposerDraft, type ComposerDraft, type ComposerPayl
 import { emptyTrace, isTraceEvent, PersistedRunTrace, reduceTrace, RunTraceView } from './RunTrace.js'
 import type { TraceState } from './RunTrace.js'
 import { copyText } from './clipboard.js'
-import { SettingsPage } from './SettingsPage.js'
-import { ArchivePage } from './ArchivePage.js'
 import { Icon } from './Icon.js'
 import { PulseBrand } from './PulseBrand.js'
 import { ApprovalPolicySelect, useApprovalPolicy } from './ApprovalPolicyMenu.js'
@@ -51,6 +49,9 @@ const recoveryBlockerMessage = (reason?: string) => {
   if (reason === 'RUN_NOT_INTERRUPTED') return '任务状态已变化或仍在运行，请刷新后检查。'
   return `当前无法恢复任务（${reason ?? 'RECOVERY_BLOCKED'}）；记录已保留，请检查后台诊断。`
 }
+const SettingsPage = lazy(() => import('./SettingsPage.js').then(module => ({ default: module.SettingsPage })))
+const ArchivePage = lazy(() => import('./ArchivePage.js').then(module => ({ default: module.ArchivePage })))
+const pageLoading = <main className="empty" role="status">正在打开页面…</main>
 const PreviewDock = lazy(() => import('./PreviewDock.js').then(module => ({ default: module.PreviewDock })))
 
 type RunStatus =
@@ -1366,8 +1367,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
 
   if (isPairPage) return <main role="status">正在打开设备管理…</main>
   if (!paired && (settingsOpen || archiveOpen)) return <main className="empty">{loading ? <p role="status">正在验证设备…</p> : <div role="alert"><p>{loadError}</p><PulseButton onClick={() => void bootstrap()}>重试</PulseButton></div>}</main>
-  if (settingsOpen) return <SettingsPage transport={transport} canEditConfig={sessionCapabilities.localAdmin} category={route.category} onCategoryChange={category => { if (category) go(`/settings/${category}`, false, location.state); else backToSettings() }} onDirtyChange={setSettingsDirty} onClose={() => backToSource()} onOpenArchive={() => openPage('/archive')} />
-  if (archiveOpen) return <ArchivePage transport={transport} onBack={() => backToSource()} onChanged={() => { void apiJson<ConversationList>(transport, '/api/conversations').then(setConversations); void refreshProjects() }} onOpen={conversation => { void openConversation(conversation) }} />
+  if (settingsOpen) return <Suspense fallback={pageLoading}><SettingsPage transport={transport} canEditConfig={sessionCapabilities.localAdmin} category={route.category} onCategoryChange={category => { if (category) go(`/settings/${category}`, false, location.state); else backToSettings() }} onDirtyChange={setSettingsDirty} onClose={() => backToSource()} onOpenArchive={() => openPage('/archive')} /></Suspense>
+  if (archiveOpen) return <Suspense fallback={pageLoading}><ArchivePage transport={transport} onBack={() => backToSource()} onChanged={() => { void apiJson<ConversationList>(transport, '/api/conversations').then(setConversations); void refreshProjects() }} onOpen={conversation => { void openConversation(conversation) }} /></Suspense>
 
   if (route.page === 'missing') return <main className="empty"><h1>页面不存在</h1><PulseButton onClick={() => go('/chat', true)}>返回聊天</PulseButton></main>
 
@@ -1440,10 +1441,11 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         {surfaceMode === 'work' && <PulseButton ref={drawerTrigger} className="icon-button mobile-menu" onClick={() => setDrawerOpen(true)} aria-label="历史对话"><Icon name="menu"/></PulseButton>}
         {surfaceMode === 'work' && <PulseButton className="icon-button desktop-menu" onClick={() => historyLayout.toggle()} aria-label={sidebarCollapsed ? '展开历史对话' : '收起历史对话'}><Icon name="menu"/></PulseButton>}
         {!switchInHistory && modeSwitch}
-        <div className="navbar-title"><ConnectionMark paired={paired} serviceConnected={serviceConnected} /><span className="title-text" title={surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}>{surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}</span></div>
+        <div className="navbar-title">{!(mobileLayout && surfaceMode === 'work') && <ConnectionMark paired={paired} serviceConnected={serviceConnected} />}<span className="title-text" title={surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}>{surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}</span></div>
+        {mobileLayout && surfaceMode === 'work' && <div className="navbar-status"><ConnectionMark paired={paired} serviceConnected={serviceConnected} /><CompactRunStatus label={phaseLabel} /></div>}
         <div className="navbar-actions">
           {paired && <TaskNotificationInbox transport={transport} open={go}/>}
-          <CompactRunStatus label={phaseLabel} />
+          {!(mobileLayout && surfaceMode === 'work') && <CompactRunStatus label={phaseLabel} />}
           {surfaceMode === 'work' ? <Dropdown open={moreOpen} onOpenChange={setMoreOpen} trigger={['click']} placement="bottomRight" menu={{ items: [transfer.exportItem], onClick: () => setMoreOpen(false) }}>
             <Tooltip title={moreOpen ? null : '更多'}><PulseButton className="navbar-tool" aria-label="更多" aria-haspopup="menu" aria-expanded={moreOpen}><Icon name="ellipsis" size={22}/></PulseButton></Tooltip>
           </Dropdown> : <Tooltip title="设置"><PulseButton className="navbar-tool" aria-label="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings" size={21}/></PulseButton></Tooltip>}

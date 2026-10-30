@@ -92,6 +92,7 @@ it('permits explicit manual model entry while keeping it unverified', async () =
 it('blocks opening onboarding while settings contain an unsaved draft', async () => {
   const f = settingsFixture()
   render(<PulseDesignSystem><SettingsPage transport={f.transport} canEditConfig category="models" onCategoryChange={() => {}} onClose={() => {}} /></PulseDesignSystem>)
+  fireEvent.click(await screen.findByRole('button', { name: '编辑服务商 示例服务商' }))
   fireEvent.change(await screen.findByDisplayValue('示例服务商'), { target: { value: 'edited' } })
   expect(screen.getByRole('button', { name: '＋ 添加服务商', exact: true }).hasAttribute('disabled')).toBe(true)
   expect(screen.getByText('请先保存或取消未保存修改，再打开接入向导。')).toBeTruthy()

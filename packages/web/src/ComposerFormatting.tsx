@@ -80,8 +80,15 @@ export function ComposerBubbleMenu({ editor }: { editor: Editor }) {
   useEffect(() => {
     const update = ({ transaction }: { transaction: Transaction }) => { if (transaction.docChanged || transaction.selectionSet || transaction.storedMarksSet) refresh(value => value + 1) }
     editor.on('transaction', update)
-    editor.view.dom.addEventListener('pulse-edit-link', openLink)
-    return () => { editor.off('transaction', update); editor.view.dom.removeEventListener('pulse-edit-link', openLink) }
+    let dom: HTMLElement | undefined
+    const bind = () => {
+      if (dom || editor.isDestroyed) return
+      dom = editor.view.dom
+      dom.addEventListener('pulse-edit-link', openLink)
+    }
+    bind()
+    editor.on('mount', bind)
+    return () => { editor.off('transaction', update); editor.off('mount', bind); dom?.removeEventListener('pulse-edit-link', openLink) }
   }, [editor])
   const shouldShow = useCallback(({ state }: { state: EditorState }) => editor.isEditable && !state.selection.empty && state.selection.$from.parent.type.name !== 'codeBlock' && !linkOpen, [editor, linkOpen])
   const format = (kind: string) => {

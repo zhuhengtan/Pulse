@@ -8,6 +8,7 @@ import './style.css'
 import './redesign.css'
 import './messages.css'
 import './composer.css'
+import './workbench-theme.css'
 
 try {
   const appearance = JSON.parse(window.localStorage.getItem('pulse-web-appearance') ?? '{}') as Record<string, string>
