@@ -1,3 +1,6 @@
+import './exec-policy.css'
+import { Drawer } from 'antd'
+import { PlusOutlined, SearchOutlined } from '@ant-design/icons'
 import { useEffect, useRef, useState } from 'react'
 import { PulseButton, PulseInput, PulseSelect, PulseTextArea } from './PulseControls.js'
 import { apiJson, jsonRequest, type PulseWebTransport } from './transport.js'
@@ -80,9 +83,11 @@ export function ExecPolicyEditor({ config, onChange, transport, onValidityChange
   const [hostRows, setHostRows] = useState<HostRow[]>(() => rowsFrom(hosts))
   const [rowKeys, setRowKeys] = useState<string[]>(() => rules.map(() => crypto.randomUUID()))
   const [seenRevision, setSeenRevision] = useState(revision)
+  const [filter, setFilter] = useState('allow'), [search, setSearch] = useState(''), [editing, setEditing] = useState<string | null>(null)
   if (seenRevision !== revision) {
     invalid.current.clear()
     setSeenRevision(revision)
+    setEditing(null)
     setHostRows(rowsFrom(hosts))
     setRowKeys(rules.map(() => crypto.randomUUID()))
   }
@@ -105,9 +110,22 @@ export function ExecPolicyEditor({ config, onChange, transport, onValidityChange
     report('hosts', pending)
     localDraft.current?.(pending)
   }, [hostRows])
+  const commandText = (r: Obj) => (Array.isArray(r.pattern) ? r.pattern : []).map((part: string | string[]) => Array.isArray(part) ? `{${part.join(' | ')}}` : /\s/.test(part) ? JSON.stringify(part) : part).join(' ')
+  const active = editing === null ? -1 : keys.indexOf(editing)
+  const visible = rules.map((r, i) => ({ r, i })).filter(({ r }) => (filter === 'all' || r.decision === filter) && `${commandText(r)} ${r.justification ?? ''} ${r.binding?.cwd ?? ''}`.toLowerCase().includes(search.toLowerCase()))
+  const removeRule = (i: number) => { report(`${keys[i]}:match`, false); report(`${keys[i]}:notMatch`, false); if (editing === keys[i]) setEditing(null); setRowKeys(keys.filter((_, index) => index !== i)); update({ rules: rules.filter((_, index) => index !== i) }) }
   return <div className="specialized-editor exec-policy-editor">
-    <section className="editor-section"><h2>命令前缀策略</h2><p>禁止优先于每次人工确认，再优先于允许。规则顺序不改变优先级。允许规则只减少审批，不能越过只读、工作区或网络限制。</p>
-      {rules.map((r, i) => <fieldset key={keys[i]}><legend>规则 {i + 1}</legend>
+    <section className="exec-policy-main" aria-label="命令授权列表">
+      <header className="exec-policy-heading"><div><h2>命令授权</h2><p>查看和管理已保存的命令规则。</p></div><PulseButton className="exec-policy-add" onClick={() => { const key = crypto.randomUUID(); setRowKeys([...keys, key]); update({ rules: [...rules, { id: crypto.randomUUID(), pattern: ['git', 'status'], decision: 'prompt' }] }); setEditing(key) }}><PlusOutlined/>添加命令规则</PulseButton></header>
+      <div className="exec-policy-toolbar"><div className="exec-policy-filters" role="group" aria-label="规则筛选">{[['allow', '已放行'], ['prompt', '每次确认'], ['forbidden', '已禁止'], ['all', '全部']].map(([value, label]) => <button type="button" key={value} aria-pressed={filter === value} onClick={() => setFilter(value!)}>{label}<span>{value === 'all' ? rules.length : rules.filter(r => r.decision === value).length}</span></button>)}</div><PulseInput className="exec-policy-search" prefix={<SearchOutlined/>} aria-label="搜索命令" placeholder="搜索命令或目录" value={search} onChange={e => setSearch(e.target.value)}/></div>
+      <div className="exec-policy-table-wrap"><table className="exec-policy-table"><thead><tr><th>命令</th><th>匹配方式</th><th>作用范围</th><th><span className="exec-policy-sr-only">操作</span></th></tr></thead><tbody>
+        {visible.map(({ r, i }) => <tr key={keys[i]}><td data-label="命令"><code>{commandText(r) || '未填写命令'}</code><div className="exec-policy-row-caption"><span className={`exec-policy-dot ${r.decision}`}/>{r.decision === 'allow' ? '允许' : r.decision === 'forbidden' ? '禁止执行' : '每次人工确认'}<span>·</span>{r.binding ? '审批记住' : '手动规则'}{r.justification && <span>· {r.justification}</span>}</div></td><td data-label="匹配方式"><span>{r.binding ? '完整参数' : '命令前缀'}</span>{r.binding && <small>绑定同版本程序</small>}</td><td data-label="作用范围"><span>{r.binding ? '指定目录' : '宿主配置'}</span><small title={r.binding?.cwd}>{r.binding?.cwd ?? '仍受工作区与权限限制'}</small></td><td className="exec-policy-row-actions"><PulseButton aria-label={`编辑规则 ${i + 1}`} onClick={() => setEditing(keys[i]!)}>编辑</PulseButton><PulseButton className="exec-policy-revoke" aria-label={`${r.decision === 'allow' ? '撤销授权' : '删除规则'} ${commandText(r)}`} onClick={() => removeRule(i)}>{r.decision === 'allow' ? '撤销' : '删除'}</PulseButton></td></tr>)}
+      </tbody></table>{visible.length === 0 && <div className="exec-policy-empty"><strong>{search ? '没有匹配的命令' : filter === 'allow' ? '还没有保存放行命令' : '暂无此类规则'}</strong><p>{search ? '换个关键词试试。' : '审批时选择“永久记住”，命令会显示在这里。'}</p></div>}</div>
+      <p className="exec-policy-footnote">禁止和“每次确认”优先于允许；列表中的允许规则仍受这些限制。撤销后需点击“保存全部”生效。</p>
+      <p className="exec-policy-footnote">“本次任务记住”仅在对应任务中有效，结束或重启即失效，不写入此永久配置列表。</p>
+    </section>
+    <Drawer title="编辑命令规则" open={active >= 0} onClose={() => setEditing(null)} size={560} rootClassName="exec-policy-drawer" footer={<PulseButton onClick={() => setEditing(null)}>完成编辑</PulseButton>}>
+      {active >= 0 && (() => { const i = active, r = rules[i]!; return <div className="exec-policy-rule-form">
         <label>决策<PulseSelect aria-label={`规则 ${i + 1} 决策`} value={r.decision ?? 'prompt'} onChange={decision => rule(i, { decision })}><option value="allow">允许</option><option value="prompt">每次人工确认</option><option value="forbidden">禁止执行</option></PulseSelect></label>
         <div>{(Array.isArray(r.pattern) ? r.pattern : ['']).map((part: string | string[], n: number) => <label key={n}>{n === 0 ? '程序名或绝对路径' : `参数 ${n}（候选值用 | 分隔）`}<PulseInput aria-label={`规则 ${i + 1} Token ${n}`} value={Array.isArray(part) ? part.join(' | ') : part} onChange={e => { const pattern = [...r.pattern]; const values = e.target.value.split('|').map(s => s.trim()); pattern[n] = n > 0 && values.length > 1 ? values : e.target.value; rule(i, { pattern }) }} />{n > 0 && <PulseButton onClick={() => rule(i, { pattern: r.pattern.filter((_: unknown, k: number) => k !== n) })}>移除参数</PulseButton>}</label>)}</div>
         <PulseButton onClick={() => rule(i, { pattern: [...r.pattern, ''] })}>添加参数</PulseButton>
@@ -115,18 +133,18 @@ export function ExecPolicyEditor({ config, onChange, transport, onValidityChange
         {r.binding && <p>记住的授权：仅适用于原工作目录、同版本程序和当时的完整参数。可删除此规则撤销。</p>}
         <Examples label={`规则 ${i + 1} 必须匹配示例`} value={r.match ?? []} onChange={match => rule(i, { match })} onInvalid={bad => report(`${keys[i]}:match`, bad)}/>
         <Examples label={`规则 ${i + 1} 必须不匹配示例`} value={r.notMatch ?? []} onChange={notMatch => rule(i, { notMatch })} onInvalid={bad => report(`${keys[i]}:notMatch`, bad)}/>
-        <PulseButton onClick={() => { report(`${keys[i]}:match`, false); report(`${keys[i]}:notMatch`, false); setRowKeys(keys.filter((_, index) => index !== i)); update({ rules: rules.filter((_, index) => index !== i) }) }}>删除规则</PulseButton>
-      </fieldset>)}
-      <PulseButton onClick={() => { setRowKeys([...keys, crypto.randomUUID()]); update({ rules: [...rules, { id: crypto.randomUUID(), pattern: ['git', 'status'], decision: 'prompt' }] }) }}>添加命令规则</PulseButton>
-    </section>
-    <section className="editor-section"><h2>受信程序路径</h2><p>普通 allow 规则必须绑定真实解析后的程序路径，未登记的同名程序不会自动继承授权。诊断结果会显示实际路径。</p>
-      {hostRows.map((row, index) => <div key={row.key}><label>程序名<PulseInput aria-label={`路径映射 ${index + 1} 程序名`} value={row.name} onChange={e => commitHosts(hostRows.map(item => item.key === row.key ? { ...item, name: e.target.value } : item))} /></label><PulseTextArea aria-label={`路径映射 ${index + 1} 受信路径`} rows={2} value={row.paths} onChange={e => commitHosts(hostRows.map(item => item.key === row.key ? { ...item, paths: e.target.value } : item))} /><PulseButton onClick={() => commitHosts(hostRows.filter(item => item.key !== row.key))}>移除路径映射</PulseButton></div>)}
+        <PulseButton onClick={() => { report(`${keys[i]}:match`, false); report(`${keys[i]}:notMatch`, false); setEditing(null); setRowKeys(keys.filter((_, index) => index !== i)); update({ rules: rules.filter((_, index) => index !== i) }) }}>删除规则</PulseButton>
+
+      </div> })()}
+    </Drawer>
+    <details className="exec-policy-advanced"><summary><span>受信程序路径</span><span>配置同名程序的真实位置</span></summary><div className="exec-policy-detail-body"><p>普通 allow 规则必须绑定真实解析后的程序路径，未登记的同名程序不会自动继承授权。诊断结果会显示实际路径。</p>
+      {hostRows.map((row, index) => <div className="exec-policy-host-row" key={row.key}><label>程序名<PulseInput aria-label={`路径映射 ${index + 1} 程序名`} value={row.name} onChange={e => commitHosts(hostRows.map(item => item.key === row.key ? { ...item, name: e.target.value } : item))} /></label><PulseTextArea aria-label={`路径映射 ${index + 1} 受信路径`} rows={2} value={row.paths} onChange={e => commitHosts(hostRows.map(item => item.key === row.key ? { ...item, paths: e.target.value } : item))} /><PulseButton onClick={() => commitHosts(hostRows.filter(item => item.key !== row.key))}>移除路径映射</PulseButton></div>)}
       <PulseButton onClick={() => commitHosts([...hostRows, { key: crypto.randomUUID(), name: unusedProgramName(hostRows), paths: '' }])}>添加路径映射</PulseButton>
-    </section>
-    <section className="editor-section"><h2>命令策略测试器</h2><p>只检查当前草稿，不运行命令；输入 argv 数组，保留每个参数的原始边界。保存时会校验全部规则与示例；后台授权写入造成版本冲突时需重载并重新合并。</p>
+    </div></details>
+    <details className="exec-policy-advanced"><summary><span>命令策略测试器</span><span>检查规则，不运行命令</span></summary><div className="exec-policy-detail-body"><p>只检查当前草稿，不运行命令；输入 argv 数组，保留每个参数的原始边界。保存时会校验全部规则与示例；后台授权写入造成版本冲突时需重载并重新合并。</p>
       <label>argv<PulseTextArea aria-label="命令 argv" value={argv} onChange={e => setArgv(e.target.value)}/></label><label>工作目录<PulseInput aria-label="策略测试工作目录" value={cwd} onChange={e => setCwd(e.target.value)}/></label>
       <PulseButton disabled={testing} onClick={() => { setTesting(true); setError(''); void (async () => { try { setResult(await apiJson(transport, '/api/config/exec-policy/check', jsonRequest('POST', { argv: JSON.parse(argv), cwd, execPolicy: policy }))) } catch (cause) { setResult(undefined); setError(cause instanceof Error ? cause.message : '检查失败') } finally { setTesting(false) } })() }}>测试匹配</PulseButton>
       {error && <p role="alert">{error}</p>}{result && <div role="status"><p>决策：{result.decision} · {result.reason}</p><p>实际程序：{result.resolvedProgram ?? '无法解析'}；配置版本：{result.version}</p><pre>{JSON.stringify(result.matchedRules, null, 2)}</pre></div>}
-    </section>
+    </div></details>
   </div>
 }

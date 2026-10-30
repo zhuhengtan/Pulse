@@ -125,6 +125,7 @@ describe('page navigation and recovery', () => {
     }
     render(<PulseDesignSystem><SettingsPage transport={transport} canEditConfig onClose={() => {}}/></PulseDesignSystem>)
     fireEvent.click(screen.getByRole('button', { name: '审批与代审', exact: true }))
+    fireEvent.click(await screen.findByText('受信程序路径'))
     const name = await screen.findByRole('textbox', { name: '路径映射 1 程序名' })
     expect((screen.getByRole('button', { name: '取消修改' }) as HTMLButtonElement).disabled).toBe(true)
     fireEvent.change(name, { target: { value: 'program2' } })

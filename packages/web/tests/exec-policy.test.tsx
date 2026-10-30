@@ -8,6 +8,8 @@ beforeAll(() => {
   window.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList
 })
 afterEach(() => { cleanup(); localStorage.clear() })
+const openRule = (view: ReturnType<typeof render>, index = 1) => { fireEvent.click(view.getByRole('button', { name: /^全部/ })); fireEvent.click(view.getByRole('button', { name: `编辑规则 ${index}` })) }
+const openHosts = (view: ReturnType<typeof render>) => fireEvent.click(view.getByText('受信程序路径'))
 const interaction: PendingInteraction = { kind: 'interaction', runId: 'r', groupId: 'g', interactionKind: 'approval', items: [{ effectId: 'e', input: { tools: [{ toolName: 'shell.exec', details: { command: 'git', args: ['status'] } }], execPolicy: { token: 'server-offer', prefix: ['git', 'status'], canAmend: true, scope: 'run' } } }] }
 it.each(['session', 'permanent'] as const)('submits only the %s choice and backend offer token from a local approval', async choice => {
   const submit = vi.fn(async () => true)
@@ -29,8 +31,11 @@ it('edits structured token alternatives and validates a draft through the diagno
   const change = vi.fn(), request = vi.fn(async () => new Response(JSON.stringify({ decision: 'forbidden', reason: 'exec_policy_forbidden', version: 'v1', resolvedProgram: '/usr/bin/git', matchedRules: [{ source: 'host', index: 0 }] })))
   const config = { execPolicy: { rules: [{ id: 'r1', pattern: ['git', 'status'], decision: 'prompt' }], hostExecutables: { git: ['/usr/bin/git'] } } }
   const view = render(<ExecPolicyEditor config={config} onChange={change} transport={{ request, subscribe: () => () => {} }}/>)
+  openRule(view)
   fireEvent.change(view.getByRole('textbox', { name: '规则 1 Token 1' }), { target: { value: 'status | diff' } })
   expect(change.mock.calls.at(-1)![0].execPolicy.rules[0].pattern).toEqual(['git', ['status', 'diff']])
+  fireEvent.click(view.getByRole('button', { name: '完成编辑' }))
+  fireEvent.click(view.getByText('命令策略测试器'))
   fireEvent.click(view.getByRole('button', { name: '测试匹配' }))
   await waitFor(() => expect(view.getByRole('status').textContent).toContain('forbidden'))
   const [path, init] = request.mock.calls[0] as unknown as [string, RequestInit]
@@ -41,6 +46,7 @@ it('edits structured token alternatives and validates a draft through the diagno
 it('reports invalid example drafts so save can be blocked instead of silently saving an old example', () => {
   const valid = vi.fn(), change = vi.fn()
   const view = render(<ExecPolicyEditor config={{ execPolicy: { rules: [{ id: 'r', pattern: ['git'], decision: 'prompt' }] } }} onChange={change} onValidityChange={valid} transport={{ request: vi.fn(), subscribe: () => () => {} }}/>)
+  openRule(view)
   fireEvent.change(view.getByRole('textbox', { name: '规则 1 必须匹配示例' }), { target: { value: 'git status' } })
   expect(valid).toHaveBeenLastCalledWith(false); expect(change.mock.calls.at(-1)![0].execPolicy.rules[0].match).toBe('git status')
   fireEvent.change(view.getByRole('textbox', { name: '规则 1 必须匹配示例' }), { target: { value: '["git","status"]' } })
@@ -51,12 +57,14 @@ it('does not keep an illegal example after the saved draft is restored', () => {
   const valid = vi.fn()
   const saved = { execPolicy: { rules: [{ id: 'r', pattern: ['git'], decision: 'prompt', match: [['git', 'status']] }] } }
   const view = render(<ExecPolicyEditor revision={1} config={saved} onChange={vi.fn()} onValidityChange={valid} transport={transport}/>)
+  openRule(view)
   const illegal = { execPolicy: { rules: [{ id: 'r', pattern: ['git'], decision: 'prompt', match: 'git status' }] } }
   view.rerender(<ExecPolicyEditor revision={1} config={illegal} onChange={vi.fn()} onValidityChange={valid} transport={transport}/>)
   expect((view.getByRole('textbox', { name: '规则 1 必须匹配示例' }) as HTMLTextAreaElement).value).toBe('git status')
   expect(valid).toHaveBeenLastCalledWith(false)
   expect(execPolicyDraftValid(illegal)).toBe(false)
   view.rerender(<ExecPolicyEditor revision={2} config={saved} onChange={vi.fn()} onValidityChange={valid} transport={transport}/>)
+  openRule(view)
   expect((view.getByRole('textbox', { name: '规则 1 必须匹配示例' }) as HTMLTextAreaElement).value).toBe('["git","status"]')
   expect(valid).toHaveBeenLastCalledWith(true)
   expect(execPolicyDraftValid(saved)).toBe(true)
@@ -65,14 +73,17 @@ it('does not reuse an invalid example when an id-less rule is deleted', () => {
   const change = vi.fn()
   const config = { execPolicy: { rules: [{ pattern: ['git', 'status'], decision: 'prompt', match: [['git', 'status']] }, { pattern: ['node', '--version'], decision: 'prompt', match: [['node', '--version']] }] } }
   const view = render(<ExecPolicyEditor config={config} onChange={change} transport={transport}/>)
+  openRule(view)
   fireEvent.change(view.getByRole('textbox', { name: '规则 1 必须匹配示例' }), { target: { value: 'not-json' } })
   fireEvent.click(view.getAllByRole('button', { name: '删除规则' })[0]!)
   view.rerender(<ExecPolicyEditor config={change.mock.calls.at(-1)![0]} onChange={change} transport={transport}/>)
+  openRule(view)
   expect((view.getByRole('textbox', { name: '规则 1 必须匹配示例' }) as HTMLTextAreaElement).value).toBe('["node","--version"]')
 })
 it('keeps a duplicate program name unsaved and does not overwrite another mapping', () => {
   const change = vi.fn(), valid = vi.fn(), localDraft = vi.fn()
   const view = render(<ExecPolicyEditor config={{ execPolicy: { hostExecutables: { program1: ['/usr/bin/git'], program2: ['/bin/git'] } } }} onChange={change} onValidityChange={valid} onLocalDraftChange={localDraft} transport={transport}/>)
+  openHosts(view)
   fireEvent.change(view.getByRole('textbox', { name: '路径映射 1 程序名' }), { target: { value: 'program2' } })
   expect(valid).toHaveBeenLastCalledWith(false)
   expect(localDraft).toHaveBeenLastCalledWith(true)
@@ -87,6 +98,7 @@ it('keeps a duplicate program name unsaved and does not overwrite another mappin
 it('allocates an unused program name instead of clearing an existing path mapping', () => {
   const change = vi.fn()
   const view = render(<ExecPolicyEditor config={{ execPolicy: { hostExecutables: { program1: ['/usr/bin/git'], program2: ['/bin/git'] } } }} onChange={change} transport={transport}/>)
+  openHosts(view)
   fireEvent.click(view.getAllByRole('button', { name: '移除路径映射' })[0]!)
   view.rerender(<ExecPolicyEditor config={change.mock.calls.at(-1)![0]} onChange={change} transport={transport}/>)
   fireEvent.click(view.getByRole('button', { name: '添加路径映射' }))
@@ -94,4 +106,21 @@ it('allocates an unused program name instead of clearing an existing path mappin
   expect(hosts.program2).toEqual(['/bin/git'])
   expect(hosts.program1).toEqual([])
   expect(hosts.program3).toBeUndefined()
+})
+
+it('starts with a searchable granted-command list and edits only the selected rule', () => {
+  const change = vi.fn()
+  const view = render(<ExecPolicyEditor config={{ execPolicy: { rules: [
+    { pattern: ['git', 'status', '--short'], decision: 'allow', binding: { cwd: '/workspace/demo', fingerprint: 'version' } },
+    { pattern: ['node', '--version'], decision: 'allow' },
+    { pattern: ['git', 'push'], decision: 'prompt' },
+  ] } }} onChange={change} transport={transport}/>)
+  expect(view.getByRole('table').textContent).toContain('git status --short')
+  expect(view.getByRole('table').textContent).toContain('/workspace/demo')
+  expect(view.getByRole('table').textContent).not.toContain('git push')
+  expect(view.queryByRole('textbox', { name: '规则 1 Token 0' })).toBeNull()
+  fireEvent.change(view.getByRole('textbox', { name: '搜索命令' }), { target: { value: 'node' } })
+  expect(view.getByRole('table').textContent).not.toContain('git status')
+  fireEvent.click(view.getByRole('button', { name: '撤销授权 node --version' }))
+  expect(change.mock.calls.at(-1)![0].execPolicy.rules.map((r: any) => r.pattern.join(' '))).toEqual(['git status --short', 'git push'])
 })
