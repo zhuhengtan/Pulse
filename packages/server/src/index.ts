@@ -1444,7 +1444,8 @@ async function runLlmRequestAsRuntimeEffect(input: { models: InMemoryModelRegist
     maxTurns: 1, requirements: { maxOutputTokens: input.maxOutputTokens },
     onFinish: (ref, ctx) => ({ complete: { value: ctx.results.read(ref) ?? null, derivedFrom: [ref] } }),
   })
-  const runtime = new PulseRuntime({ programs: [program], models: input.models, modelRouter: input.router, effectExecutor: (effect, signal, observe) => effect.kind === 'llm' ? input.execute(effect, signal, observe) : Promise.reject(new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`)), maxRuntimeMs: input.timeoutMs ?? 60_000, ...(input.historyHardTokens === undefined ? {} : { historySoftTokens: input.historyHardTokens, historyHardTokens: input.historyHardTokens }) })
+  const scopedExecute = input.execute.forkConnectionScope()
+  const runtime = new PulseRuntime({ programs: [program], models: input.models, modelRouter: input.router, effectExecutor: (effect, signal, observe) => effect.kind === 'llm' ? scopedExecute(effect, signal, observe) : Promise.reject(new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`)), maxRuntimeMs: input.timeoutMs ?? 60_000, ...(input.historyHardTokens === undefined ? {} : { historySoftTokens: input.historyHardTokens, historyHardTokens: input.historyHardTokens }) })
   const { agentId } = runtime.createAgent({ goal: input.instruction, program, initialGlobal: {} })
   const session = runtime.start(agentId)
   const abort = () => { void session.cancel('HOST_LLM_REQUEST_ABORTED') }
@@ -1458,6 +1459,7 @@ async function runLlmRequestAsRuntimeEffect(input: { models: InMemoryModelRegist
     return result as unknown as LLMResult
   } finally {
     input.signal.removeEventListener('abort', abort)
+    scopedExecute.dispose()
   }
 }
 
@@ -2880,6 +2882,7 @@ export class LocalHost {
     try {
     const provider = providerFromOptions(options)
     const routing = createHostModelRouting({ activeModel: options.activeModel ?? provider.model.id, activeProviderCode: options.activeProviderCode ?? provider.adapter.id, activeProvider: options.provider ?? { provider: 'mock', defaultModel: provider.model.id }, ...(options.providerProfiles === undefined ? {} : { providerProfiles: options.providerProfiles }), ...(options.providerModels === undefined ? {} : { providerModels: options.providerModels }), ...(options.taskRouting === undefined ? {} : { taskRouting: options.taskRouting }), activeAdapter: provider.adapter })
+    capabilityController.signal.addEventListener('abort', () => { for (const adapter of new Set([...routing.providers.values(), provider.adapter])) adapter.dispose?.() }, { once: true })
     const { models, router, providers } = routing
     const backend = await this.persistenceFor(conversationId, runId, options.persistenceBackend, cwd)
     if (!assistantChat) { await freezeCheckDefinitions(cwd, join(this.runDir(conversationId, runId), 'check-definitions'), testAdditionsRequested(userIntent), candidateTestChangesAllowed(userIntent), 4, !options.acceptanceChecks?.length && repositoryTestChangesAllowed(userIntent)); await freezeConstraintBaseline(cwd, this.runDir(conversationId, runId)) }
@@ -3295,6 +3298,7 @@ export class LocalHost {
     try {
     const provider = providerFromOptions(options)
     const routing = createHostModelRouting({ activeModel: options.activeModel ?? provider.model.id, activeProviderCode: options.activeProviderCode ?? provider.adapter.id, activeProvider: options.provider ?? { provider: 'mock', defaultModel: provider.model.id }, ...(options.providerProfiles === undefined ? {} : { providerProfiles: options.providerProfiles }), ...(options.providerModels === undefined ? {} : { providerModels: options.providerModels }), ...(options.taskRouting === undefined ? {} : { taskRouting: options.taskRouting }), activeAdapter: provider.adapter })
+    capabilityController.signal.addEventListener('abort', () => { for (const adapter of new Set([...routing.providers.values(), provider.adapter])) adapter.dispose?.() }, { once: true })
     const { models, router, providers } = routing
     const backend = await this.persistenceFor(conversationId, runId, options.persistenceBackend, cwd)
     if (!assistantChat) { await freezeCheckDefinitions(cwd, join(this.runDir(conversationId, runId), 'check-definitions'), testAdditionsRequested(userIntent), candidateTestChangesAllowed(userIntent), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)) ? ['55', '56', '57'].includes(String(savedInput.controllerVersion)) ? 4 : 3 : 2, (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57') && !options.acceptanceChecks?.length && repositoryTestChangesAllowed(userIntent)); await freezeConstraintBaseline(cwd, this.runDir(conversationId, runId)) }

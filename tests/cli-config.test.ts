@@ -265,13 +265,13 @@ describe('ensurePulseUserConfig', () => {
     await mkdir(join(workspace, '.pulse'), { recursive: true })
     await mkdir(home, { recursive: true })
     await writeFile(join(workspace, '.pulse/config.json'), JSON.stringify({ hooks: { enabled: true, hash: 'workspace', directory: '/outside' }, lsp: { enabled: 'false', servers: { evil: { command: 'workspace-lsp', languages: { '.ts': 'typescript' }, root: '/etc' } } }, providers: {
-      only: { provider: 'openai-compatible', apiMode: 'responses', baseURL: 'http://127.0.0.1:9/v1', models: { m: { modelCode: 'only-model' } } },
-      shared: { provider: 'openai-compatible', apiMode: 'responses', baseURL: 'http://127.0.0.1:8/v1' },
+      only: { provider: 'openai-compatible', apiMode: 'responses', responsesTransport: 'websocket', baseURL: 'http://127.0.0.1:9/v1', models: { m: { modelCode: 'only-model' } } },
+      shared: { provider: 'openai-compatible', apiMode: 'responses', responsesTransport: 'websocket', baseURL: 'http://127.0.0.1:8/v1' },
     } }))
     await writeFile(hostPath, JSON.stringify({
       providers: {
         shared: { provider: 'openai-compatible', baseURL: 'http://127.0.0.1:8/v1', models: { model: { modelCode: 'shared-model' } } },
-        explicit: { provider: 'openai-compatible', apiMode: 'responses', baseURL: 'http://127.0.0.1:7/v1', models: { model: { modelCode: 'explicit-model' } } },
+        explicit: { provider: 'openai-compatible', apiMode: 'responses', responsesTransport: 'websocket', baseURL: 'http://127.0.0.1:7/v1', models: { model: { modelCode: 'explicit-model' } } },
       },
       hooks: { enabled: false, hash: 'trusted', directory: '/trusted' },
       lsp: { enabled: true, servers: { mock: { command: 'trusted-lsp', languages: { '.ts': 'typescript' } } } },
@@ -293,6 +293,9 @@ describe('ensurePulseUserConfig', () => {
         const loaded = await loadPulseConfig(workspace, hostPath, trust)
         expect(loaded.value.providers?.only).toMatchObject({ provider: 'openai-compatible' })
         expect(loaded.value.providers?.only?.apiMode).toBeUndefined()
+        expect(loaded.value.providers?.only?.responsesTransport).toBeUndefined()
+        expect(loaded.value.providers?.shared?.responsesTransport).toBeUndefined()
+        expect(loaded.value.providers?.explicit?.responsesTransport).toBe('websocket')
         expect(loaded.value.providers?.shared?.apiMode).toBeUndefined()
         expect(loaded.value.providers?.explicit?.apiMode).toBe('responses')
         if (trust) expect(loaded.value.providers?.only?.baseURL).toBe('http://127.0.0.1:9/v1')
@@ -306,6 +309,7 @@ describe('ensurePulseUserConfig', () => {
         expect(loaded.value.lsp?.servers?.mock?.command).toBe('trusted-lsp')
         expect(JSON.stringify(loaded.value.lsp ?? {})).not.toContain('workspace-lsp')
         expect(explicit.provider?.apiMode).toBe('responses')
+        expect(explicit.provider?.responsesTransport).toBe('websocket')
         expect(explicit.providerProfiles?.only?.apiMode).toBeUndefined()
         expect(explicit.providerProfiles?.shared?.apiMode).toBeUndefined()
         expect(explicit.providerProfiles?.explicit?.apiMode).toBe('responses')
@@ -313,6 +317,70 @@ describe('ensurePulseUserConfig', () => {
         const only = await hostOptions(parse([...args, '--model', 'only/m']))
         expect(only.provider?.apiMode).toBeUndefined()
         expect(only.provider?.provider).toBe('openai-compatible')
+      }
+    } finally {
+      for (const key of keys) {
+        const value = previous[key]
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  })
+
+  it('strips a workspace transport by itself, including invalid and non-Responses values, while host HTTP and WebSocket stay explicit', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulse-cli-transport-only-'))
+    temporaryDirectories.push(root)
+    const workspace = join(root, 'workspace'), hostPath = join(root, 'host.json'), home = join(root, 'home')
+    await mkdir(join(workspace, '.pulse'), { recursive: true })
+    await mkdir(home, { recursive: true })
+    await writeFile(join(workspace, '.pulse/config.json'), JSON.stringify({ providers: {
+      transportOnly: { provider: 'openai-compatible', responsesTransport: 'websocket', models: { m: { modelCode: 'transport-only' } } },
+      invalid: { provider: 'openai-compatible', responsesTransport: 'not-a-transport', models: { m: { modelCode: 'invalid-model' } } },
+      anthropic: { provider: 'anthropic', apiMode: 'responses', responsesTransport: 'websocket', models: { m: { modelCode: 'anthropic-model' } } },
+      httpHost: { provider: 'openai-compatible', apiMode: 'responses', responsesTransport: 'websocket', baseURL: 'http://127.0.0.1:8/v1' },
+      wsHost: { provider: 'openai-compatible', apiMode: 'chat-completions', responsesTransport: 'http', baseURL: 'http://127.0.0.1:7/v1' },
+    } }))
+    await writeFile(hostPath, JSON.stringify({
+      providers: {
+        httpHost: { provider: 'openai-compatible', apiMode: 'responses', responsesTransport: 'http', baseURL: 'http://127.0.0.1:8/v1', models: { model: { modelCode: 'http-model' } } },
+        wsHost: { provider: 'openai-compatible', apiMode: 'responses', responsesTransport: 'websocket', baseURL: 'http://127.0.0.1:7/v1', models: { model: { modelCode: 'ws-model' } } },
+      },
+      activeModel: 'httpHost/model', jarvis: { enabled: false },
+    }))
+    const keys = ['PULSE_HOME', 'PULSE_CONFIG', 'PULSE_DATA_DIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME'] as const
+    const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]))
+    process.env.PULSE_HOME = home
+    delete process.env.PULSE_CONFIG
+    process.env.PULSE_DATA_DIR = join(home, 'data')
+    process.env.HOME = home
+    process.env.USERPROFILE = home
+    process.env.APPDATA = join(home, 'AppData')
+    process.env.LOCALAPPDATA = join(home, 'LocalAppData')
+    process.env.XDG_CONFIG_HOME = join(home, 'xdg-config')
+    process.env.XDG_DATA_HOME = join(home, 'xdg-data')
+    try {
+      for (const trust of [false, true]) {
+        const loaded = await loadPulseConfig(workspace, hostPath, trust)
+        for (const id of ['transportOnly', 'invalid', 'anthropic'] as const) {
+          expect(loaded.value.providers?.[id]?.apiMode).toBeUndefined()
+          expect(loaded.value.providers?.[id]?.responsesTransport).toBeUndefined()
+        }
+        expect(loaded.value.providers?.httpHost?.responsesTransport).toBe('http')
+        expect(loaded.value.providers?.httpHost?.apiMode).toBe('responses')
+        expect(loaded.value.providers?.wsHost?.responsesTransport).toBe('websocket')
+        expect(loaded.value.providers?.wsHost?.apiMode).toBe('responses')
+        const args = ['--config', hostPath, '--cwd', workspace, ...(trust ? ['--trust-workspace'] : [])]
+        expect((await hostOptions(parse([...args, '--model', 'httpHost/model']))).provider?.responsesTransport).toBe('http')
+        expect((await hostOptions(parse([...args, '--model', 'wsHost/model']))).provider?.responsesTransport).toBe('websocket')
+        const transportOnly = await hostOptions(parse([...args, '--model', 'transportOnly/m']))
+        expect(transportOnly.provider?.apiMode).toBeUndefined()
+        expect(transportOnly.provider?.responsesTransport).toBeUndefined()
+        const invalid = await hostOptions(parse([...args, '--model', 'invalid/m']))
+        expect(invalid.provider?.responsesTransport).toBeUndefined()
+        const anthropic = await hostOptions(parse([...args, '--model', 'anthropic/m']))
+        expect(anthropic.provider?.provider).toBe('anthropic')
+        expect(anthropic.provider?.apiMode).toBeUndefined()
+        expect(anthropic.provider?.responsesTransport).toBeUndefined()
       }
     } finally {
       for (const key of keys) {

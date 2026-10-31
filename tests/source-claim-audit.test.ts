@@ -1,3 +1,4 @@
+import { promises as fixtureDns } from 'node:dns'
 import { afterEach, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
@@ -10,7 +11,7 @@ import { createLocalHost } from '../packages/server/src/index.js'
 import { acceptanceCriteriaFromObjective } from '../packages/server/src/task.js'
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 it('covers assertions in summaries/tables and Chinese prose with stable IDs, excluding code', () => {
   const { targets, error } = sourceClaims([{ ref: 'delivery', path: 'report.md', text: '# Notes\nMy own summary: the flag never writes anything.\n| scope | all requests |\n它不会产生任何副作用。\n```js\nconst any = 1\n```\nA bounded ordinary description.' }])
@@ -20,6 +21,10 @@ it('covers assertions in summaries/tables and Chinese prose with stable IDs, exc
 })
 
 it.each([false, true])('checks actual Host source quotes and final-file freshness (external=%s)', async external => {
+  vi.spyOn(fixtureDns, 'lookup').mockImplementation((async (host: string) => {
+    if (host !== 'example.com') throw new Error('UNEXPECTED_FIXTURE_DNS:' + host)
+    return [{ address: '93.184.216.34', family: 4 }]
+  }) as typeof fixtureDns.lookup)
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-claim-host-'))
   const objective = 'Use https://example.com/docs to write report.md accurately explaining the documented flag.'
   const ids = acceptanceCriteriaFromObjective(objective).map(c => c.id)

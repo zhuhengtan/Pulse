@@ -1,3 +1,4 @@
+import { promises as fixtureDns } from 'node:dns'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { once } from 'node:events'
@@ -51,6 +52,10 @@ describe('search backends', () => {
     expect((await searchWeb('test', 5, signal(), { provider: 'custom', baseURL: empty.url })).results).toEqual([])
   })
   it('keeps the legacy endpoint and gives explicit configuration precedence', async () => {
+    vi.spyOn(fixtureDns, 'lookup').mockImplementation((async (host: string) => {
+      if (host !== 'html.duckduckgo.com') throw new Error('UNEXPECTED_FIXTURE_DNS:' + host)
+      return [{ address: '93.184.216.34', family: 4 }]
+    }) as typeof fixtureDns.lookup)
     vi.stubEnv('PULSE_SEARCH_URL', 'https://html.duckduckgo.com/legacy')
     const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(''))
     await searchWeb('test', 5, signal())

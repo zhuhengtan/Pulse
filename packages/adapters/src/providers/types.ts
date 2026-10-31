@@ -5,7 +5,9 @@ export type ProviderToolChoice = 'auto' | 'required' | 'none' | { type: 'functio
 export interface ProviderAdapter {
   readonly id: string
   readonly name: string
-  executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; onReasoning?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number; reasoningEffort?: 'low'; beforeRetryAttempt?: () => Promise<void> }): Promise<LLMResult>
+  releaseConnectionScope?(scope: string): void
+  dispose?(): void
+  executeAttempt(params: { request: LLMRequestProjection; connectionKey?: string; signal: AbortSignal; onObservation?: (chunk: string) => void; onReasoning?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number; reasoningEffort?: 'low'; beforeRetryAttempt?: () => Promise<void> }): Promise<LLMResult>
 }
 export type ProviderApiMode = 'chat-completions' | 'responses'
-export interface ProviderPresetConfig { provider: string; apiMode?: ProviderApiMode; continuationNamespace?: string; continuationConfigVersion?: string; apiKey?: string; baseURL?: string; defaultModel?: string; remote?: boolean; maxContextTokens?: number; maxOutputTokens?: number; toolChoice?: ProviderToolChoice; extraHeaders?: Record<string, string>; reasoningEffort?: 'low' | 'medium' | 'high' | 'none' | undefined; capabilityProfile?: Partial<import('./canonical/types.js').ModelCapabilityProfile> }
+export interface ProviderPresetConfig { provider: string; apiMode?: ProviderApiMode; responsesTransport?: 'http' | 'websocket'; continuationNamespace?: string; continuationConfigVersion?: string; apiKey?: string; baseURL?: string; defaultModel?: string; remote?: boolean; maxContextTokens?: number; maxOutputTokens?: number; toolChoice?: ProviderToolChoice; extraHeaders?: Record<string, string>; reasoningEffort?: 'low' | 'medium' | 'high' | 'none' | undefined; capabilityProfile?: Partial<import('./canonical/types.js').ModelCapabilityProfile> }

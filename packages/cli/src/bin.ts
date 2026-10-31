@@ -263,6 +263,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const provider = {
     provider: profile.provider,
     ...(profile.apiMode === undefined ? {} : { apiMode: profile.apiMode }),
+    ...(profile.responsesTransport === undefined ? {} : { responsesTransport: profile.responsesTransport }),
     continuationNamespace: providerName,
     continuationConfigVersion: createHash('sha256').update(JSON.stringify(profile)).digest('hex'),
     defaultModel: model,
@@ -281,6 +282,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     return [[name, {
       provider: adapterProvider,
       ...(item.apiMode === undefined ? {} : { apiMode: item.apiMode }),
+      ...(item.responsesTransport === undefined ? {} : { responsesTransport: item.responsesTransport }),
       continuationNamespace: name,
       continuationConfigVersion: createHash('sha256').update(JSON.stringify(item)).digest('hex'),
       ...(item.baseURL === undefined ? {} : { baseURL: item.baseURL }),

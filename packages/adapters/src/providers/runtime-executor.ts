@@ -91,11 +91,11 @@ function candidateMetadata(candidate: ModelCandidate, attempts: Array<{ effectId
   }) }
 }
 
-export function createModelEffectExecutor(config: { resolveImage?: (ref: string, agentId: string, privacy: LLMRequestProjection['privacy']) => string | Promise<string>; router: ModelRouter; providers: ReadonlyMap<string, ProviderAdapter>; requirements?: ModelRouteRequirements; maxConcurrentByProvider?: Readonly<Record<string, number>>; maxConcurrentByModel?: Readonly<Record<string, number>>; modelBudget?: () => { limit: number; used: number }; beforeProviderAttempt?: (purpose?: string) => Promise<void>; afterProviderAttempt?: (usage: LLMResult['usage'], receiptId?: string) => Promise<void> }): EffectExecutor {
+export function createModelEffectExecutor(config: { resolveImage?: (ref: string, agentId: string, privacy: LLMRequestProjection['privacy']) => string | Promise<string>; router: ModelRouter; providers: ReadonlyMap<string, ProviderAdapter>; requirements?: ModelRouteRequirements; maxConcurrentByProvider?: Readonly<Record<string, number>>; maxConcurrentByModel?: Readonly<Record<string, number>>; modelBudget?: () => { limit: number; used: number }; beforeProviderAttempt?: (purpose?: string) => Promise<void>; afterProviderAttempt?: (usage: LLMResult['usage'], receiptId?: string) => Promise<void> }): EffectExecutor & { forkConnectionScope(): EffectExecutor & { dispose(): void } } {
   const fallback = new ModelFallbackController()
   const providerSlots = new SlotPool(config.maxConcurrentByProvider)
   const modelSlots = new SlotPool(config.maxConcurrentByModel)
-  return async (effect, signal, emitObservation): Promise<EffectExecution> => {
+  const scoped = (scope: string): EffectExecutor => async (effect, signal, emitObservation): Promise<EffectExecution> => {
     if (effect.kind !== 'llm') throw new Error(`UNSUPPORTED_EFFECT_KIND:${effect.kind}`)
     const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : {}
     const task = (input.request as unknown as LLMRequestProjection | undefined)?.images?.length ? 'vision' : input.task
@@ -170,7 +170,7 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
         const budget = config.modelBudget?.()
         const blocks = budget ? [...hydrated.blocks, { kind: 'lane' as const, content: `Host model-call ledger: limit=${budget.limit}, used=${budget.used} (including this request), remaining=${Math.max(0, budget.limit - budget.used)}. This is shared by planning, tools' approval reviews, retries, compaction and final verification. Reserve at least two requests for verification. Produce an incremental usable deliverable now; do not spend the remaining allowance on discovery or start another run.` }] : hydrated.blocks
         const budgeted = budget ? { ...hydrated, blocks, projectionHash: contentHash(blocks) } : hydrated
-        const output = assignRuntimeToolCallIds(validateAdapterResult(await provider.executeAttempt({ request: budgeted, signal, model: attempt.candidate.id, ...(dynamicRequirements.reasoningEffort === 'low' ? { reasoningEffort: 'low' as const } : {}), ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation, ...(onReasoning === undefined ? {} : { onReasoning }), ...(config.beforeProviderAttempt === undefined ? {} : { beforeRetryAttempt: async () => {
+        const output = assignRuntimeToolCallIds(validateAdapterResult(await provider.executeAttempt({ request: budgeted, connectionKey: `${scope}:${effect.agentId}:${effect.ownerLaneId}`, signal, model: attempt.candidate.id, ...(dynamicRequirements.reasoningEffort === 'low' ? { reasoningEffort: 'low' as const } : {}), ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation, ...(onReasoning === undefined ? {} : { onReasoning }), ...(config.beforeProviderAttempt === undefined ? {} : { beforeRetryAttempt: async () => {
           await config.beforeProviderAttempt!(purpose)
           providerAttempts++
           if (!streamAttempt.emitted) return
@@ -233,4 +233,6 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
     const value = toJson(modelValue)
     return { value, privacy: projection.privacy, sideEffectState: 'none', executionState: 'succeeded', metadata: { ...(candidateMetadata(result.candidate, result.attempts, usage, slotWaitMs, routeDiagnostics as unknown as JsonValue) as Record<string, JsonValue>), providerAttempts }, ...(observations.length ? { observations } : {}) }
   }
+  const fork = () => { const scope = randomUUID(); return Object.assign(scoped(scope), { dispose: () => { for (const provider of config.providers.values()) provider.releaseConnectionScope?.(scope) } }) }
+  return Object.assign(fork(), { forkConnectionScope: fork })
 }

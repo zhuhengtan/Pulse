@@ -89,6 +89,8 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
     const translated: ProviderAdapter = {
       id: providerCode,
       name: adapter.name,
+      releaseConnectionScope: scope => { adapter.releaseConnectionScope?.(scope); for (const child of modelAdapters.values()) child.releaseConnectionScope?.(scope) },
+      dispose: () => { adapter.dispose?.(); for (const child of modelAdapters.values()) child.dispose?.(); modelAdapters.clear() },
       executeAttempt: (params) => {
         const selection = params.model ? providerModels[params.model] : undefined
         let selectedAdapter = adapter

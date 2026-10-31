@@ -1,4 +1,5 @@
-import { createHash } from 'node:crypto'
+import { ResponsesWebSocketPool } from './responses-websocket.js'
+import { createHash, randomUUID as randomConnectionKey } from 'node:crypto'
 import type { JsonValue, LLMResult } from '@hunterzhu/pulse-runtime'
 import type { CanonicalLLMRequest, CanonicalMessage, ModelCapabilityProfile } from './canonical/types.js'
 import { adaptCanonicalRequest, DynamicCapabilityProbe, lowerProjectionToCanonical, resolveModelCapability } from './canonical/index.js'
@@ -15,14 +16,21 @@ const digest = (value: unknown): string => createHash('sha256').update(JSON.stri
 export class ResponsesAdapter implements ProviderAdapter {
   readonly name = 'OpenAI Responses'
   private readonly endpoint: string
+  private readonly sockets = new ResponsesWebSocketPool()
+  dispose(): void { this.sockets.dispose() }
+  releaseConnectionScope(scope: string): void { this.sockets.releaseScope(scope) }
   private readonly probe = new DynamicCapabilityProbe()
   constructor(readonly id: string, private readonly config: ProviderPresetConfig) {
+    this.config = structuredClone(config)
+  if (config.responsesTransport !== undefined && !['http', 'websocket'].includes(config.responsesTransport)) throw new Error('PROVIDER_RESPONSES_TRANSPORT_INVALID')
+  if (config.responsesTransport !== undefined && (config.apiMode !== 'responses' || !['openai', 'openai-compatible'].includes(config.provider))) throw new Error('PROVIDER_RESPONSES_TRANSPORT_UNSUPPORTED')
     if (!['openai', 'openai-compatible'].includes(config.provider)) throw new Error('PROVIDER_RESPONSES_UNSUPPORTED')
     this.endpoint = `${(config.baseURL ?? 'https://api.openai.com/v1').replace(/\/$/, '')}/responses`
   }
   private scope(model: string | undefined): string {
     // Only this digest is persisted. Neither credentials nor arbitrary headers enter continuation metadata.
-    return digest([CONTINUATION, this.id, this.endpoint, model, this.config])
+    const { responsesTransport, ...rest } = this.config
+    return digest([CONTINUATION, this.id, this.endpoint, model, responsesTransport === 'websocket' ? this.config : rest])
   }
   async executeAttempt(params: Parameters<ProviderAdapter['executeAttempt']>[0]): Promise<LLMResult> {
     const streaming = params.onObservation !== undefined || params.onReasoning !== undefined
@@ -33,6 +41,22 @@ export class ResponsesAdapter implements ProviderAdapter {
     const { request: adapted } = adaptCanonicalRequest(canonical, capability, this.probe, toolNameAliases)
     const scope = this.scope(canonical.model)
     const body = responsesPayload(adapted, scope, capability)
+    if (this.config.responsesTransport === 'websocket') {
+      const connectionKey = params.connectionKey ?? randomConnectionKey()
+      try {
+        const terminal = await this.sockets.request(this.endpoint, { ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}), ...this.config.extraHeaders }, scope, connectionKey, body, {
+          signal: params.signal,
+          event: frame => {
+            if (frame.type === 'response.output_text.delta' || frame.type === 'response.refusal.delta') { if (typeof frame.delta === 'string') params.onObservation?.(frame.delta) }
+            if (frame.type === 'response.reasoning_summary_text.delta' || frame.type === 'response.reasoning_text.delta') { if (typeof frame.delta === 'string') params.onReasoning?.(frame.delta) }
+          },
+          validate: response => { normalizeResponses(response, toolNameAliases, scope) },
+          nativeItems: response => nativeItems(record(response)?.output),
+        })
+        params.signal.throwIfAborted()
+        return normalizeResponses(terminal, toolNameAliases, scope)
+      } finally { if (params.connectionKey === undefined) this.sockets.releaseOwner(connectionKey) }
+    }
     try {
       const response = await fetch(this.endpoint, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}), ...this.config.extraHeaders }, body: JSON.stringify(body) })
       if (!response.ok) throw await providerHttpErrorFromResponse(response)

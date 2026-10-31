@@ -175,7 +175,7 @@ describe('processFrontModel', () => {
       async recordEvent() {}, async recordCandidate() {}, async closeSession() {},
     }
     const host = createLocalHost({
-      cwd: dir, dataDir: join(dir, 'data'), jarvis: { enabled: true }, jarvisClient: mockClient as never,
+      cwd: dir, dataDir: join(dir, 'data'), jarvis: { enabled: true, protocol: 'legacy' }, jarvisClient: mockClient as never,
       provider: { provider: 'mock' }, mockResponse: '已按项目约定处理',
       frontModel: { enabled: true, model: 'selection-fixture', baseURL: `http://127.0.0.1:${port}`, timeoutMs: 2000 },
     })

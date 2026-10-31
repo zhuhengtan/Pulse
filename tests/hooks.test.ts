@@ -8,7 +8,13 @@ import { runShell } from '../packages/adapters/src/tools/shell.js';
 import { ShellProcesses } from '../packages/server/src/shell-processes.js';
 import type { EffectRecord } from '@hunterzhu/pulse-runtime';
 const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
+const services: HookService[] = [];
+const openService = (...args: ConstructorParameters<typeof HookService>) => { const service = new HookService(...args); services.push(service); return service };
+afterEach(async () => {
+    const pending = services.splice(0);
+    try { for (const service of pending) { await service.stop(); await service.dispose(); } }
+    finally { await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); }
+});
 async function fixture(output = '{}', events = ['SessionStart', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop']) {
     const base = await mkdtemp(join(tmpdir(), 'pulse-hooks-'));
     roots.push(base);
@@ -19,7 +25,7 @@ async function fixture(output = '{}', events = ['SessionStart', 'PreToolUse', 'P
     await writeFile(join(definitions, 'hook.cjs'), `let data='';process.stdin.on('data',s=>data+=s);process.stdin.on('end',()=>{JSON.parse(data);process.stdout.write(${JSON.stringify(output)})})`);
     const file = join(definitions, 'hooks.json');
     await writeFile(file, JSON.stringify({ hooks: Object.fromEntries(events.map(event => [event, [{ matcher: event.includes('Tool') ? 'Read' : '', hooks: [{ type: 'command', command: [process.execPath, 'hook.cjs'], timeout: 1 }] }]])) }));
-    const snapshot = await loadHookDefinitions(file, join(base, 'installed')), trusted = { ...snapshot, enabled: true }, journal = join(base, 'receipts'), service = new HookService(root, journal, { conversationId: 'c', runId: 'r' }, snapshot, trusted);
+    const snapshot = await loadHookDefinitions(file, join(base, 'installed')), trusted = { ...snapshot, enabled: true }, journal = join(base, 'receipts'), service = openService(root, journal, { conversationId: 'c', runId: 'r' }, snapshot, trusted);
     return { base, root, file, snapshot, trusted, journal, service };
 }
 const effect = (attemptId = 'a1') => ({ id: 'e1', kind: 'tool', attemptId, attemptNo: 1, agentId: 'agent', ownerLaneId: 'lane', toolCallId: 'tc', input: { name: 'fs.read', arguments: { path: 'a.txt', token: 'secret' } } }) as EffectRecord;
@@ -49,7 +55,7 @@ it('orders events, preserves receipts and never replays completed/unknown hooks 
     expect(pre).toMatchObject({ effectId: 'e1', attemptId: 'a1', definitionHash: f.snapshot.hash, status: 'continue' });
     const path = join(f.journal, files[receipts.indexOf(pre)]!);
     await writeFile(path, JSON.stringify({ ...pre, status: 'running' }));
-    const second = new HookService(f.root, f.journal, { conversationId: 'c', runId: 'r' }, f.snapshot, f.trusted);
+    const second = openService(f.root, f.journal, { conversationId: 'c', runId: 'r' }, f.snapshot, f.trusted);
     const result = await second.around(effect('a2'), signal(), undefined, execute);
     expect(result.error?.code).toBe('HOOK_PRE_DENIED');
     expect(execute).toHaveBeenCalledTimes(1);
@@ -89,7 +95,7 @@ it('pre timeout remains unknown across attempts and never executes the tool', as
     const raw = JSON.parse(await readFile(f.file,'utf8')); raw.hooks.PreToolUse[0].hooks[0].timeout = 0.2;
     await writeFile(f.file,JSON.stringify(raw));
     const snapshot=await loadHookDefinitions(f.file,join(f.base,'timeouts'));
-    const service=new HookService(f.root,f.journal,{conversationId:'c',runId:'r'},snapshot,{...snapshot,enabled:true});
+    const service=openService(f.root,f.journal,{conversationId:'c',runId:'r'},snapshot,{...snapshot,enabled:true});
     const execute=vi.fn();
     expect((await service.around(effect(),signal(),undefined,execute)).error?.code).toBe('HOOK_PRE_DENIED');
     expect((await service.around(effect('a2'),signal(),undefined,execute)).error?.code).toBe('HOOK_PRE_DENIED');
@@ -102,7 +108,7 @@ it('slow post observers cannot delay applied tool settlement and dispose drains 
     const f=await fixture('{}',['PostToolUse']);
     await writeFile(join(f.base,'source/hook.cjs'),'process.stdin.resume();setTimeout(()=>process.stdout.write("{}"),5000)');
     const snapshot=await loadHookDefinitions(f.file,join(f.base,'slow'));
-    const service=new HookService(f.root,f.journal,{conversationId:'c',runId:'r'},snapshot,{...snapshot,enabled:true});
+    const service=openService(f.root,f.journal,{conversationId:'c',runId:'r'},snapshot,{...snapshot,enabled:true});
     const started=Date.now(), execute=vi.fn(async()=>({status:'succeeded' as const,value:'once',sideEffectState:'applied' as const}));
     expect(await service.around(effect(),signal(),undefined,execute)).toMatchObject({status:'succeeded',sideEffectState:'applied'});
     expect(Date.now()-started).toBeLessThan(500);
@@ -111,9 +117,9 @@ it('slow post observers cannot delay applied tool settlement and dispose drains 
 },30000);
 it('revocation blocks new pre hooks while legacy runs without a snapshot remain independent', async()=>{
     const f=await fixture('{}',['PreToolUse']), execute=vi.fn(async()=>({status:'succeeded' as const,value:'ok'}));
-    const revoked=new HookService(f.root,f.journal,{conversationId:'c',runId:'r'},f.snapshot,{...f.trusted,enabled:false});
+    const revoked=openService(f.root,f.journal,{conversationId:'c',runId:'r'},f.snapshot,{...f.trusted,enabled:false});
     expect((await revoked.around(effect(),signal(),undefined,execute)).status).toBe('failed');
-    const legacy=new HookService(f.root,f.journal,{conversationId:'c',runId:'legacy'},undefined,f.trusted);
+    const legacy=openService(f.root,f.journal,{conversationId:'c',runId:'legacy'},undefined,f.trusted);
     expect((await legacy.around(effect(),signal(),undefined,execute)).status).toBe('succeeded');
     expect(execute).toHaveBeenCalledTimes(1);
 });
@@ -131,7 +137,7 @@ it('omits raw shell.stdin data from the hook and does not pass injected host mar
         raw.hooks.PreToolUse[0].matcher = 'shell.stdin';
         await writeFile(f.file, JSON.stringify(raw));
         const snapshot = await loadHookDefinitions(f.file, join(f.base, 'redacted'));
-        const service = new HookService(f.root, f.journal, { conversationId: 'c', runId: 'r' }, snapshot, { ...snapshot, enabled: true });
+        const service = openService(f.root, f.journal, { conversationId: 'c', runId: 'r' }, snapshot, { ...snapshot, enabled: true });
         const execute = vi.fn(async () => ({ status: 'succeeded' as const, value: 'ran' }));
         const result = await service.around({ ...effect(), input: { name: 'shell.stdin', arguments: { processId, data: 'fake-private-keystrokes' } } }, signal(), undefined, execute);
         expect(result.status).toBe('succeeded');
@@ -147,7 +153,7 @@ it('an early stdin close is unknown for pre, skips the tool, and stays closed on
     raw.hooks.PreToolUse[0].hooks[0].timeout = 5;
     await writeFile(f.file, JSON.stringify(raw));
     const snapshot = await loadHookDefinitions(f.file, join(f.base, 'closed'));
-    const service = new HookService(f.root, f.journal, { conversationId: 'c', runId: 'r' }, snapshot, { ...snapshot, enabled: true });
+    const service = openService(f.root, f.journal, { conversationId: 'c', runId: 'r' }, snapshot, { ...snapshot, enabled: true });
     const padding = 'p'.repeat(4000);
     const execute = vi.fn();
     const target = { ...effect(), input: { name: 'fs.read', arguments: { path: 'a.txt', p1: padding, p2: padding, p3: padding, p4: padding, p5: padding, p6: padding, p7: padding, p8: padding } } } as EffectRecord;
@@ -164,7 +170,7 @@ it('an early post stdin close stays diagnostic and leaves the applied tool resul
     raw.hooks.PostToolUse[0].hooks[0].timeout = 5;
     await writeFile(f.file, JSON.stringify(raw));
     const snapshot = await loadHookDefinitions(f.file, join(f.base, 'post-closed'));
-    const service = new HookService(f.root, f.journal, { conversationId: 'c', runId: 'r' }, snapshot, { ...snapshot, enabled: true });
+    const service = openService(f.root, f.journal, { conversationId: 'c', runId: 'r' }, snapshot, { ...snapshot, enabled: true });
     const marker = join(f.root, 'once.txt');
     const padding = 'p'.repeat(4000);
     const execute = vi.fn(async () => { await writeFile(marker, 'once'); return { status: 'succeeded' as const, value: 'once', sideEffectState: 'applied' as const }; });

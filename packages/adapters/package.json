@@ -25,6 +25,10 @@
     "jszip": "3.10.2",
     "mammoth": "1.11.0",
     "pdfjs-dist": "4.10.38",
-    "saxes": "6.0.0"
+    "saxes": "6.0.0",
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.2"
   }
 }

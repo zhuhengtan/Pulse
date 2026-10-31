@@ -11,6 +11,7 @@ export interface PulseCliProviderProfile {
   provider: string
   /** Explicit OpenAI-family transport; omitted preserves Chat Completions. */
   apiMode?: 'chat-completions' | 'responses'
+  responsesTransport?: 'http' | 'websocket'
   name?: string
   baseURL?: string
   apiKeyEnv?: string
@@ -306,7 +307,7 @@ export async function loadPulseConfig(cwd: string, explicitPath?: string, trustW
       if (!parsed) throw new Error('CONFIG_OBJECT_REQUIRED')
       if (parsed) {
         // Search endpoints and credentials are host-owned even when other workspace fields are trusted.
-        // Provider protocol stays host-owned. Trusted workspace fields may remain, but apiMode never does.
+        // Provider protocol stays host-owned. Trusted workspace fields may remain, but apiMode and responsesTransport never do.
         if (workspaceLayer) {
           delete parsed.hooks
           delete parsed.lsp
@@ -314,9 +315,9 @@ export async function loadPulseConfig(cwd: string, explicitPath?: string, trustW
           delete parsed.builtinPlugins
           if (parsed.execPolicy !== undefined) parsed.execPolicy = workspaceExecPolicy(parsed.execPolicy)
           if (parsed.providers) parsed.providers = Object.fromEntries(Object.entries(parsed.providers).map(([id, profile]) => {
-            if (profile.apiMode === undefined) return [id, profile]
             const next = { ...profile }
             delete next.apiMode
+            delete next.responsesTransport
             return [id, next]
           }))
         } else if (parsed.lsp !== undefined) parsed.lsp = parseLspConfig(parsed.lsp)

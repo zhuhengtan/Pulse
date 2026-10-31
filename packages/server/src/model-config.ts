@@ -21,6 +21,7 @@ export interface ProviderDefinition {
   credentialRef?: string
   provider: string
   apiMode?: 'chat-completions' | 'responses'
+  responsesTransport?: 'http' | 'websocket'
   name?: string
   baseURL?: string
   apiKeyEnv?: string
@@ -49,6 +50,8 @@ export function parseModelSelectionId(value: string): { providerId: string; mode
 export function normalizeModelConfig<T extends Record<string, any>>(input: T): T {
   const config: ModelConfig = structuredClone(input)
   for (const provider of Object.values(config.providers ?? {}) as any[]) {
+    if (provider.responsesTransport !== undefined && !['http', 'websocket'].includes(provider.responsesTransport)) throw new Error('PROVIDER_RESPONSES_TRANSPORT_INVALID')
+    if (provider.responsesTransport !== undefined && (provider.apiMode !== 'responses' || !['openai', 'openai-compatible'].includes(provider.provider))) throw new Error('PROVIDER_RESPONSES_TRANSPORT_UNSUPPORTED')
     if (provider.apiMode !== undefined && !['chat-completions', 'responses'].includes(provider.apiMode)) throw new Error('PROVIDER_API_MODE_INVALID')
     if (provider.apiMode === 'responses' && !['openai', 'openai-compatible'].includes(provider.provider)) throw new Error('PROVIDER_RESPONSES_UNSUPPORTED')
   }
