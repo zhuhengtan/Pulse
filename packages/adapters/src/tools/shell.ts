@@ -6,6 +6,9 @@ import { basename, delimiter, dirname, isAbsolute, join, parse, resolve, sep } f
 import { lstat, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
+import { windowsPtyCommand, type WindowsPty } from './windows-pty.js'
+import { windowsPtyProtocol } from './windows-pty-protocol.js'
 import { SandboxManager, checkWindowsDependenciesAsync, resolveSrtWin, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 import { resolveWindowsPackageManager } from './windows-package-manager.js'
 import { resolveHostPackageManager } from './host-package-manager.js'
@@ -19,12 +22,16 @@ export interface ShellResult { code: number | null; stdout: string; stderr: stri
 /** Host-only injection, after sandbox wrapping and the final executable check. */
 export interface ShellChild {
   readonly pid?: number | undefined
+  readonly exitCode?: number | null
+  readonly signalCode?: NodeJS.Signals | null
   readonly stdin?: { end(): unknown } | null
   readonly stdout?: { on(event: 'data', listener: (chunk: Buffer) => void): unknown } | null
   readonly stderr?: { on(event: 'data', listener: (chunk: Buffer) => void): unknown } | null
   once(event: 'error', listener: (error: Error) => void): unknown
   once(event: 'close', listener: (code: number | null) => void): unknown
   kill(signal?: NodeJS.Signals): boolean
+  /** Set only by the Windows broker transport. Absent means the close code is the result. */
+  readonly windowsPtyExit?: { framed: boolean; unknown: boolean; code?: number }
 }
 export type ShellSpawn = (sandboxArgv: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => ShellChild
 
@@ -503,7 +510,7 @@ export function validateShellInvocation(command: string, args: string[] = []): v
   encodeSandboxCommand(command, args)
 }
 
-export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; expectedIdentity?: ShellIdentity | undefined; beforeLaunch?: () => Promise<ShellIdentity | undefined>; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void; spawnProcess?: ShellSpawn } = {}): Promise<ShellResult> {
+export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; expectedIdentity?: ShellIdentity | undefined; beforeLaunch?: () => Promise<ShellIdentity | undefined>; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void; spawnProcess?: ShellSpawn; windowsPty?: WindowsPty } = {}): Promise<ShellResult> {
   const max = options.maxOutputBytes ?? 256 * 1024
   if (!Number.isFinite(max) || max < 0) return Promise.reject(shellError('INVALID_SHELL_OUTPUT_LIMIT'))
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0)) return Promise.reject(shellError('INVALID_SHELL_TIMEOUT'))
@@ -528,6 +535,20 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     const toolchainRoots = installation !== homedir() && installation !== parse(installation).root ? [installation] : [nodeExecutable]
     const dependencyRoots = await installationDependencyRoots()
     if (process.platform !== 'win32' || await workspaceUsesInstallationDependencies(cwd, dependencyRoots)) toolchainRoots.push(...dependencyRoots)
+    let ptyBridge: string | undefined
+    let windowsPty: WindowsPty | undefined
+    if (process.platform === 'win32' && options.windowsPty) {
+      if (!options.spawnProcess) throw shellError('WINDOWS_PTY_TRANSPORT_REQUIRED')
+      // Grant only the installed bridge, the protocol file it requires, and the
+      // node-pty package, each read-only. The bridge's relative require cannot
+      // see a sibling that is not named here, and the adapters directory itself
+      // stays closed.
+      const modulePath = await realpath(options.windowsPty.modulePath)
+      windowsPty = { modulePath, scope: options.windowsPty.scope }
+      ptyBridge = await realpath(fileURLToPath(new URL('./windows-pty-bridge.cjs', import.meta.url)))
+      const ptyProtocol = await realpath(fileURLToPath(new URL('./windows-pty-protocol.cjs', import.meta.url)))
+      toolchainRoots.push(ptyBridge, ptyProtocol, dirname(dirname(modulePath)))
+    }
     // The Windows broker relaunches itself as the sandbox user before starting
     // the target command. Permit only its fixed, integrity-checked image folder.
     if (process.platform === 'win32') toolchainRoots.push(dirname(verifiedWindowsSrt()))
@@ -582,9 +603,9 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         toolchainRoots.push(resolved.readRoot)
       }
     }
-    if (options.expectedIdentity) {
+    if (options.expectedIdentity || process.platform === 'win32' && options.windowsPty) {
       const actual = await resolveShellIdentity(command, args, cwd, baseEnv)
-      if (actual.fingerprint !== options.expectedIdentity.fingerprint) throw shellError('EXEC_POLICY_PROGRAM_CHANGED')
+      if (options.expectedIdentity && actual.fingerprint !== options.expectedIdentity.fingerprint) throw shellError('EXEC_POLICY_PROGRAM_CHANGED')
       executable = actual.executable
       executableArgs = [...actual.prefixArgs, ...args]
     }
@@ -626,19 +647,29 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     let termination: 'timeout' | 'aborted' | undefined
     let timer: NodeJS.Timeout | undefined
     let killTimer: NodeJS.Timeout | undefined
+    // Only the broker started by this call. Cleared once that process exits so a
+    // recycled Windows PID cannot be taskkilled later.
+    let brokerPid: number | undefined
+    const windowsBrokerLive = (): boolean => {
+      if (!brokerPid || brokerPid !== child?.pid) return false
+      if (child.exitCode != null || child.signalCode != null) { brokerPid = undefined; return false }
+      return true
+    }
 
     const signalProcessGroup = (signal: NodeJS.Signals): void => {
       if (!child?.pid) return
       if (process.platform !== 'win32') {
-        try { process.kill(-child.pid, signal); return } catch { /* process group may already be gone */ }
-      }
-      if (process.platform === 'win32') {
-        const tree = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, env: shellEnvironment(options.env) })
-        tree.once('error', () => child?.kill(signal))
-        tree.unref()
+        // A failed negative-PGID signal used to fall through into the Windows
+        // broker check. brokerPid is only set on win32, so that path returned
+        // without killing the child.
+        try { process.kill(-child.pid, signal) } catch { child.kill(signal) }
         return
       }
-      child.kill(signal)
+      if (!windowsBrokerLive()) return
+      const pid = brokerPid
+      const tree = spawn('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, env: shellEnvironment(options.env) })
+      tree.once('error', () => { if (pid === brokerPid && windowsBrokerLive()) child?.kill(signal) })
+      tree.unref()
     }
     const terminate = (reason: 'timeout' | 'aborted'): void => {
       if (closed) return
@@ -668,7 +699,8 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       const commandText = encodeSandboxCommand(executable, executableArgs)
       setupStage = 'wrap'
       const descriptor = await SandboxManager.wrapWithSandboxArgv(commandText, undefined, undefined, options.signal, cwd, { commandId: invocationId, commandText: 'shell.exec' })
-      const sandboxArgv = process.platform === 'win32' ? windowsShellEnvironment(descriptor.argv, executionEnv) : descriptor.argv
+      let sandboxArgv = process.platform === 'win32' ? windowsShellEnvironment(descriptor.argv, executionEnv) : descriptor.argv
+      if (ptyBridge && windowsPty) sandboxArgv = windowsPtyCommand(sandboxArgv, nodeExecutable, ptyBridge, windowsPty, executable, executableArgs)
       checkpoint('wrapped')
       if (options.signal?.aborted) {
         SandboxManager.cleanupAfterCommand()
@@ -682,6 +714,12 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         const fresh = await resolveShellIdentity(command, args, cwd, baseEnv)
         if (fresh.fingerprint !== launchIdentity.fingerprint || fresh.executable !== executable || JSON.stringify(fresh.prefixArgs) !== JSON.stringify(options.expectedIdentity?.prefixArgs ?? fresh.prefixArgs)) throw shellError('EXEC_POLICY_PROGRAM_CHANGED')
       }
+      // Cancellation during beforeLaunch or the identity read must not start a broker.
+      if (options.signal?.aborted) {
+        SandboxManager.cleanupAfterCommand()
+        await SandboxManager.reset()
+        return { code: null, stdout: '', stderr: '', truncated: false, timedOut: false, aborted: true }
+      }
       const launchOptions = { cwd, env: { ...baseEnv, ...shellEnvironment(descriptor.env), ...executionEnv } }
       child = options.spawnProcess ? options.spawnProcess(sandboxArgv, launchOptions) : spawn(sandboxArgv[0]!, sandboxArgv.slice(1), {
         cwd,
@@ -690,6 +728,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         detached: process.platform !== 'win32',
         windowsHide: true,
       })
+      if (process.platform === 'win32') brokerPid = child.pid
     } catch (cause) {
       let resetFailed = false
       try { await SandboxManager.reset() } catch { resetFailed = true /* preserve the setup failure */ }
@@ -721,6 +760,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       child!.stdout?.on('data', (chunk: Buffer) => append('stdout', chunk))
       child!.stderr?.on('data', (chunk: Buffer) => append('stderr', chunk))
       child!.once('error', (cause) => {
+        brokerPid = undefined
         closed = true
         cleanup()
         const errorCode = cause && typeof cause === 'object' ? (cause as unknown as { code?: unknown }).code : undefined
@@ -730,14 +770,35 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       })
       child!.once('close', (code) => {
         checkpoint('child closed')
+        brokerPid = undefined
         closed = true
         cleanup()
+        const tracked = child!.windowsPtyExit
+        const exitCode = tracked?.code
+        const framedCode = tracked?.framed === true && tracked.unknown === false && windowsPtyProtocol.isWindowsExitCode(exitCode) ? exitCode : undefined
+        if (tracked && !termination && framedCode === undefined) {
+          archive.finish()
+          reject(shellError('AGENT_PTY_EXIT_UNKNOWN'))
+          return
+        }
+        // Target exit 0 is success only together with broker exit 0. ?? would
+        // hide a broker failure because 0 is not nullish. A missing broker
+        // status is not a confirmed success.
+        let reported: number | null = framedCode ?? code
+        if (tracked && !termination && framedCode === 0 && code !== 0) {
+          if (typeof code !== 'number') {
+            archive.finish()
+            reject(shellError('AGENT_PTY_EXIT_UNKNOWN'))
+            return
+          }
+          reported = code
+        }
         const stdout = outputText('stdout')
         const stderr = outputText('stderr')
         const annotated = SandboxManager.annotateStderrWithSandboxFailures(invocationId, stderr)
         const boundedStderr = decodeUtf8WithinByteLimit(Buffer.from(annotated, 'utf8'), max)
         const outputWasTruncated = truncated || Buffer.byteLength(annotated, 'utf8') > max
-        resolve({ code, stdout, stderr: boundedStderr, truncated: outputWasTruncated, timedOut: termination === 'timeout', aborted: termination === 'aborted', outputArchive: archive.finish() })
+        resolve({ code: reported, stdout, stderr: boundedStderr, truncated: outputWasTruncated, timedOut: termination === 'timeout', aborted: termination === 'aborted', outputArchive: archive.finish() })
       })
     }).finally(async () => {
       checkpoint('cleanup start')

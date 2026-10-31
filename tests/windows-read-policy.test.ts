@@ -40,6 +40,24 @@ it('opens installed dependency trees while denying adjacent source and configura
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+it('keeps the bridge and its required protocol file readable without opening their directory', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pulse-pty-protocol-read-')))
+  try {
+    const tools = join(root, 'install', 'tools')
+    const bridge = join(tools, 'windows-pty-bridge.cjs')
+    const protocol = join(tools, 'windows-pty-protocol.cjs')
+    await mkdir(tools, { recursive: true })
+    await writeFile(bridge, 'bridge')
+    await writeFile(protocol, 'protocol')
+    await writeFile(join(tools, 'secret.txt'), 'secret')
+    const denies = await carveWindowsReadDenies([join(root, 'install')], [bridge, protocol])
+    expect(denies).toContain(join(tools, 'secret.txt'))
+    expect(denies).not.toContain(bridge)
+    expect(denies).not.toContain(protocol)
+    expect(denies).not.toContain(tools)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 it('denies writes to shared read-only toolchains while retaining workspace and scratch writes', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pulse-toolchain-write-')))
   try {

@@ -8,7 +8,7 @@ import { closeShellProcesses } from '../packages/server/src/shell-processes.js'
 import { assertExplicitToolRestriction } from '../packages/server/src/task-controller/explicit-restrictions.js'
 
 afterEach(() => vi.restoreAllMocks())
-it.skipIf(process.platform === 'win32')('uses the real Host, approval loop and native PTY without borrowing a host argv grant for stdin', async () => {
+it('uses the real Host, approval loop and native PTY without borrowing a host argv grant for stdin', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pulse-pty-host-'))), script = join(root, 'interactive.cjs')
   await writeFile(script, "console.log(process.stdin.isTTY?'tty-ready':'not-tty');require('readline').createInterface({input:process.stdin}).once('line',line=>{require('fs').writeFileSync('received.txt',line);console.log('received:'+line);process.exit(0)})")
   const identity = await resolveShellIdentity('node', [script], root)
@@ -35,8 +35,10 @@ it.skipIf(process.platform === 'win32')('uses the real Host, approval loop and n
     const call = (name: string, input: Record<string, unknown>) => ({ text: '', toolCalls: [{ toolCallId: `scripted-${work}`, name, input }], finishReason: 'tool_calls' as const })
     if (!handle) return call('shell.start', { command: 'node', args: [script], pty: true, timeoutMs: 10000 })
     if (values.some(value => value.status === 'exited')) return { text: 'Local interactive fixture finished.', toolCalls: [], finishReason: 'stop' }
-    if (!inputProposed && values.some(value => value.stdinReady === true)) { inputProposed = true; return call('shell.stdin', { processId: handle, data: 'one-line\n' }) }
-    return call('shell.poll', { processId: handle, waitMs: 200, limit: 4096 })
+    if (!inputProposed && values.some(value => value.stdinReady === true)) { inputProposed = true; return call('shell.stdin', { processId: handle, data: process.platform === 'win32' ? 'one-line\r' : 'one-line\n' }) }
+    // Windows cold SRT startup can take minutes. One poll may wait the tool maximum
+    // instead of issuing a new model turn every 200ms. The turn ceiling stays 15.
+    return call('shell.poll', { processId: handle, waitMs: process.platform === 'win32' ? 30_000 : 200, limit: 4096 })
   })
   const host = new LocalHost({ cwd: root, dataDir: join(root, 'data'), provider: { provider: 'mock' }, taskController: false, taskControllerPolicy: 'legacy', jarvis: { enabled: false }, approvalMode: 'ask', execPolicy: { rules: [{ pattern: [identity.path, script], decision: 'allow' }] } })
   let runDirectory: string | undefined
@@ -69,7 +71,7 @@ it.skipIf(process.platform === 'win32')('uses the real Host, approval loop and n
     expect(JSON.parse(await readFile(join(runDirectory!, 'input.json'), 'utf8')).shellSurfaceVersion).toBe(1)
     expect(globalThis.fetch).not.toHaveBeenCalled()
   } finally { if (runDirectory) await closeShellProcesses(runDirectory); await host.close(); await rm(root, { recursive: true, force: true }) }
-}, 20000)
+}, process.platform === 'win32' ? 300000 : 20000)
 
 it('keeps old tool surfaces unchanged and does not allow interactive input to bypass explicit command restrictions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pulse-pty-surface-'))

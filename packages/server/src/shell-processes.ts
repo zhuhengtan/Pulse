@@ -17,7 +17,7 @@ export interface ProcessReceipt {
   stdinReady?: boolean
   inputUncertain?: boolean
 }
-type InputWriter = (data: string) => void
+type InputWriter = (data: string) => void | Promise<void>
 export interface ShellInputReceipt { processId: string; effectId: string; agentId: string; laneId: string; digest: string; bytes: number; status: 'pending' | 'delivered' | 'unknown' }
 type Runner = (command: ShellCommand, context: ToolContext, onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) => void, ready: (write: InputWriter) => void) => Promise<Record<string, unknown>>
 interface LiveProcess { record: ProcessReceipt; controller: AbortController; done: Promise<void>; write?: InputWriter }
@@ -205,7 +205,7 @@ export class ShellProcesses {
       try {
         context.signal.throwIfAborted()
         if (live.controller.signal.aborted || live.record.status !== 'running') throw failure('SHELL_STDIN_NOT_READY')
-        live.write(data)
+        await live.write(data)
         receipt.status = 'delivered'
         await this.persistJson(path, receipt)
         return receipt
