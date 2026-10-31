@@ -5,7 +5,7 @@ import { extname, posix, win32 } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { z } from 'zod'
 import { defineTool, type ToolRegistry, type ToolContext } from '@hunterzhu/pulse-tool-sdk'
-import { resolveShellIdentity } from '@hunterzhu/pulse-adapters'
+import { resolveShellIdentity, windowsSystemExecutable } from '@hunterzhu/pulse-adapters'
 import { LspFrames, lspFrame } from './protocol.js'
 
 export interface LspServerConfig { command: string; args?: string[]; languages: Record<string, string>; readRoots?: string[]; initializationOptions?: Record<string, unknown> }
@@ -116,11 +116,7 @@ export function lexicalOutsideWorkspace(root: string, candidate: string, platfor
 
 /** Absolute System32 taskkill. A bare name would be resolved from the project cwd before PATH. */
 export function windowsSystemTaskkill(systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT): string | undefined {
-  if (!systemRoot || systemRoot.split(/[/\\]/).includes('..') || !win32.isAbsolute(systemRoot) || isUncPath(systemRoot)) return undefined
-  const base = win32.normalize(systemRoot)
-  if (!win32.isAbsolute(base) || isUncPath(base)) return undefined
-  const file = win32.join(base, 'System32', 'taskkill.exe')
-  return win32.relative(base, file) === 'System32\\taskkill.exe' ? file : undefined
+  return windowsSystemExecutable('taskkill.exe', systemRoot)
 }
 
 async function locateWorkspaceFile(root: string, uri: string): Promise<string | undefined> {

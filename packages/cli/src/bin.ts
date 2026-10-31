@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runHooksCommand } from './hooks.js'
 import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
@@ -53,6 +54,7 @@ Usage:
   pulse template <list|show|run> [name] [values...]
   pulse automation doctor                  check browser and desktop dependencies
   pulse mcp doctor [server-id]
+  pulse hooks load <file> | check [hash] | enable <hash> | disable
 
 Options:
   --cwd <path>              workspace directory
@@ -165,7 +167,7 @@ export function parse(argv: string[]): Parsed {
       options[key] = true
       continue
     }
-  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp', 'h5', 'update', 'automation', 'drafts', 'files', 'execpolicy'].includes(arg)) {
+  if (!command && ['run', 'sessions', 'resume', 'doctor', 'setup', 'schedule', 'service', 'template', 'mcp', 'h5', 'update', 'automation', 'drafts', 'files', 'execpolicy', 'hooks'].includes(arg)) {
       command = arg
     } else {
       positionals.push(arg)
@@ -496,6 +498,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(parsed.options['no-network'] === true ? { builtinPluginNetworkOverride: false } : parsed.options['allow-network'] === true || process.env.PULSE_ALLOW_NETWORK === '1' ? { builtinPluginNetworkOverride: true } : {}),
     builtinPluginConfig: { allowNetwork: pluginHostConfig.allowNetwork, builtinPlugins, providers: pluginHostConfig.providers, webSearch: pluginHostConfig.webSearch },
     ...(webSearch ? { webSearch } : {}),
+    ...(config.hooks ? { hooks: config.hooks } : {}),
     ...(config.lsp ? { lsp: parseLspConfig(config.lsp) } : {}),
     jarvis,
     ...(config.frontModel ? { frontModel: (() => {
@@ -541,6 +544,7 @@ export async function main(): Promise<number> {
     return runSetup(parsed.options.force === true, expandHome(option(parsed.options, 'config')))
   }
 
+  if (parsed.command === 'hooks') return runHooksCommand(parsed.positionals, resolve(expandHome(option(parsed.options, 'config') ?? process.env.PULSE_CONFIG) ?? defaultPulseConfigPath()))
   if (parsed.command === 'update') return runUpdateCommand(parsed.positionals, parsed.options, version)
 
   const options = await hostOptions(parsed)

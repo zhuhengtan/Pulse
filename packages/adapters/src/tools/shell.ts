@@ -1,3 +1,4 @@
+import { windowsSystemExecutable } from './windows-system.js'
 import { ShellOutput } from './shell-output.js'
 import { createRequire } from 'node:module'
 import { randomUUID, createHash } from 'node:crypto'
@@ -24,7 +25,7 @@ export interface ShellChild {
   readonly pid?: number | undefined
   readonly exitCode?: number | null
   readonly signalCode?: NodeJS.Signals | null
-  readonly stdin?: { end(data?: string): unknown } | null
+  readonly stdin?: { end(data?: string, callback?: (error?: Error | null) => void): unknown; on?(event: 'error', listener: (error: Error) => void): unknown; destroy?(): void } | null
   readonly stdout?: { on(event: 'data', listener: (chunk: Buffer) => void): unknown } | null
   readonly stderr?: { on(event: 'data', listener: (chunk: Buffer) => void): unknown } | null
   once(event: 'error', listener: (error: Error) => void): unknown
@@ -497,6 +498,25 @@ function shellEnvironment(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv
   ))
 }
 
+/** Names the sandbox itself assigns for proxy routing and TLS trust. */
+const SANDBOX_RUNTIME_ENV = new Set([
+  'SANDBOX_RUNTIME', 'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy',
+  'GRPC_PROXY', 'grpc_proxy', 'FTP_PROXY', 'ftp_proxy', 'RSYNC_PROXY', 'DOCKER_HTTP_PROXY', 'DOCKER_HTTPS_PROXY',
+  'GIT_SSH_COMMAND', 'GIT_CONFIG_PARAMETERS', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'CURL_CA_BUNDLE', 'REQUESTS_CA_BUNDLE',
+  'PIP_CERT', 'GIT_SSL_CAINFO', 'AWS_CA_BUNDLE', 'CARGO_HTTP_CAINFO', 'DENO_CERT', 'CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE', 'NIX_SSL_CERT_FILE',
+  'CLOUDSDK_PROXY_TYPE', 'CLOUDSDK_PROXY_ADDRESS', 'CLOUDSDK_PROXY_PORT', 'CLOUDSDK_PROXY_USERNAME', 'CLOUDSDK_PROXY_PASSWORD',
+])
+
+function sandboxRuntimeOverlay(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
+  if (!env) return {}
+  const overlay: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined || !SANDBOX_RUNTIME_ENV.has(key) || process.env[key] === value) continue
+    overlay[key] = value
+  }
+  return overlay
+}
+
 function shellLaunchesCommand(command: string, args: string[]): boolean {
   const base = basename(command).toLowerCase()
   if (!['sh', 'bash', 'zsh', 'dash', 'fish', 'ksh', 'cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe'].includes(base)) return false
@@ -521,7 +541,7 @@ export function validateShellInvocation(command: string, args: string[] = []): v
   encodeSandboxCommand(command, args)
 }
 
-export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; expectedIdentity?: ShellIdentity | undefined; beforeLaunch?: () => Promise<ShellIdentity | undefined>; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void; spawnProcess?: ShellSpawn; windowsPty?: WindowsPty; readOnlyWorkspace?: boolean; isolatedHome?: boolean; stdioTarget?: boolean; readRoots?: string[]; stdinData?: string } = {}): Promise<ShellResult> {
+export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; expectedIdentity?: ShellIdentity | undefined; beforeLaunch?: () => Promise<ShellIdentity | undefined>; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void; spawnProcess?: ShellSpawn; windowsPty?: WindowsPty; readOnlyWorkspace?: boolean; isolatedHome?: boolean; stdioTarget?: boolean; readRoots?: string[]; stdinData?: string; sealedCallerEnv?: boolean } = {}): Promise<ShellResult> {
   if (options.stdinData !== undefined && Buffer.byteLength(options.stdinData) > 65536) return Promise.reject(shellError('SHELL_STDIN_TOO_LARGE'))
   const max = options.maxOutputBytes ?? 256 * 1024
   if (!Number.isFinite(max) || max < 0) return Promise.reject(shellError('INVALID_SHELL_OUTPUT_LIMIT'))
@@ -686,7 +706,9 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       }
       if (!windowsBrokerLive()) return
       const pid = brokerPid
-      const tree = spawn('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, env: shellEnvironment(options.env) })
+      const taskkill = windowsSystemExecutable('taskkill.exe')
+      if (!taskkill) { if (windowsBrokerLive()) child?.kill(signal); return }
+      const tree = spawn(taskkill, ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, cwd: win32.dirname(taskkill), env: shellEnvironment(options.env) })
       tree.once('error', () => { if (pid === brokerPid && windowsBrokerLive()) child?.kill(signal) })
       tree.unref()
     }
@@ -718,7 +740,8 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       const commandText = encodeSandboxCommand(executable, executableArgs)
       setupStage = 'wrap'
       const descriptor = await SandboxManager.wrapWithSandboxArgv(commandText, undefined, undefined, options.signal, cwd, { commandId: invocationId, commandText: 'shell.exec' })
-      let sandboxArgv = process.platform === 'win32' ? windowsShellEnvironment(descriptor.argv, executionEnv) : descriptor.argv
+      const generated = options.sealedCallerEnv ? sandboxRuntimeOverlay(descriptor.env) : undefined
+      let sandboxArgv = process.platform === 'win32' ? windowsShellEnvironment(descriptor.argv, generated ? { ...generated, ...executionEnv } : executionEnv) : descriptor.argv
       if (process.platform === 'win32' && options.stdioTarget) {
         const separator = sandboxArgv.indexOf('--')
         if (separator < 2 || separator + 1 >= sandboxArgv.length) throw shellError('INVALID_WINDOWS_SANDBOX_COMMAND')
@@ -744,7 +767,10 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         await SandboxManager.reset()
         return { code: null, stdout: '', stderr: '', truncated: false, timedOut: false, aborted: true }
       }
-      const launchOptions = { cwd, env: { ...baseEnv, ...shellEnvironment(descriptor.env), ...executionEnv } }
+      // sealedCallerEnv keeps the caller's allow-list and sandbox-added proxy
+      // settings. descriptor.env on macOS/Linux is the host environment and must
+      // not be copied back into a hook child. Ordinary shells keep that merge.
+      const launchOptions = { cwd, env: options.sealedCallerEnv ? { ...baseEnv, ...generated, ...executionEnv } : { ...baseEnv, ...shellEnvironment(descriptor.env), ...executionEnv } }
       child = options.spawnProcess ? options.spawnProcess(sandboxArgv, launchOptions) : spawn(sandboxArgv[0]!, sandboxArgv.slice(1), {
         cwd,
         env: launchOptions.env,
@@ -768,8 +794,24 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       })
     }
 
-    // This API has no stdin payload; deliver EOF to readers inside the sandbox.
-    child!.stdin?.end(options.stdinData)
+    // A payload write is part of this owned child. Early close used to emit an
+    // uncaught EPIPE and kill the host; exit 0 with valid stdout is not delivery.
+    let stdinFailed = false
+    let stdinReleased = options.stdinData === undefined || !child!.stdin
+    let releaseStdin = (): void => { stdinReleased = true }
+    const stdinDone = stdinReleased ? Promise.resolve() : new Promise<void>(resolve => { releaseStdin = () => { if (stdinReleased) return; stdinReleased = true; resolve() } })
+    const stdin = child!.stdin
+    if (stdin) {
+      const fail = (failed: boolean): void => {
+        if (failed && options.stdinData !== undefined) stdinFailed = true
+        releaseStdin()
+      }
+      stdin.on?.('error', () => fail(options.stdinData !== undefined))
+      try {
+        if (options.stdinData !== undefined) stdin.end(options.stdinData, error => fail(Boolean(error)))
+        else stdin.end()
+      } catch { fail(options.stdinData !== undefined) }
+    }
 
     return await new Promise<ShellResult>((resolve, reject) => {
       const cleanup = (): void => {
@@ -797,6 +839,12 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         brokerPid = undefined
         closed = true
         cleanup()
+        if (!stdinReleased && options.stdinData !== undefined) {
+          child!.stdin?.destroy?.()
+          stdinFailed = true
+          releaseStdin()
+        }
+        void stdinDone.then(() => {
         const tracked = child!.windowsPtyExit
         const exitCode = tracked?.code
         const framedCode = tracked?.framed === true && tracked.unknown === false && windowsPtyProtocol.isWindowsExitCode(exitCode) ? exitCode : undefined
@@ -822,7 +870,13 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         const annotated = SandboxManager.annotateStderrWithSandboxFailures(invocationId, stderr)
         const boundedStderr = decodeUtf8WithinByteLimit(Buffer.from(annotated, 'utf8'), max)
         const outputWasTruncated = truncated || Buffer.byteLength(annotated, 'utf8') > max
+        if (options.stdinData !== undefined && stdinFailed && !termination) {
+          archive.finish()
+          reject(shellError('SHELL_STDIN_DELIVERY_UNKNOWN'))
+          return
+        }
         resolve({ code: reported, stdout, stderr: boundedStderr, truncated: outputWasTruncated, timedOut: termination === 'timeout', aborted: termination === 'aborted', outputArchive: archive.finish() })
+        })
       })
     }).finally(async () => {
       checkpoint('cleanup start')

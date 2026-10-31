@@ -15,3 +15,5 @@ export * from './tools/registry.js'
 export * from './workers/http.js'
 export * from './mcp/index.js'
 export * from './documents/docx.js'
+
+export { windowsSystemExecutable } from './tools/windows-system.js'

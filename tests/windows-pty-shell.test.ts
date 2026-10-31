@@ -19,11 +19,12 @@ vi.doMock('../packages/adapters/src/tools/windows-read-policy.js', () => ({ wind
 vi.doMock('node:child_process', () => ({ execFile: vi.fn(), spawn }))
 const { runShell, resolveShellIdentity } = await import('../packages/adapters/src/tools/shell.js')
 
-afterEach(async () => { Object.defineProperty(process, 'platform', { value: platform }); vi.clearAllMocks(); await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
+afterEach(async () => { Object.defineProperty(process, 'platform', { value: platform }); vi.clearAllMocks(); vi.unstubAllEnvs(); await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pulse-windows-pty-wiring-'))); directories.push(root)
   const modulePath = join(root, 'installed-node-pty', 'lib', 'index.js')
   await mkdir(dirname(modulePath), { recursive: true }); await writeFile(modulePath, 'scripted module, never executed')
+  vi.stubEnv('SystemRoot', 'C:\\Windows')
   Object.defineProperty(process, 'platform', { value: 'win32' })
   const broker = ['/fixed-install/srt-win.exe', 'exec', '--quiet', '--deny-read', '/private', '--env', 'HTTPS_PROXY=loopback', '--', 'cmd.exe', '/d', '/c', 'encoded-command']
   sandbox.wrapWithSandboxArgv.mockResolvedValue({ argv: broker, env: {} })
@@ -66,7 +67,7 @@ it.each(['abort', 'timeout'])('cancels the actual broker tree for Windows PTY %s
   const f = await fixture(), controller = new AbortController()
   const child = Object.assign(new EventEmitter(), { pid: 123, stdout: new EventEmitter(), stderr: null, stdin: null, kill: vi.fn(() => true) })
   spawn.mockImplementation((command, args) => {
-    expect(command).toBe('taskkill.exe'); expect(args).toEqual(['/PID', '123', '/T', '/F'])
+    expect(command).toBe('C:\\Windows\\System32\\taskkill.exe'); expect(args).toEqual(['/PID', '123', '/T', '/F'])
     const tree = Object.assign(new EventEmitter(), { unref: vi.fn() })
     setImmediate(() => { child.emit('close', null); tree.emit('close', 0) })
     return tree

@@ -66,6 +66,7 @@ export interface PulseCliCapabilities {
 }
 
 export interface PulseCliConfig {
+  hooks?: import('@hunterzhu/pulse-server').HookConfig
   lsp?: import('@hunterzhu/pulse-server').LspConfig
   cwd?: string
   dataDir?: string
@@ -307,6 +308,7 @@ export async function loadPulseConfig(cwd: string, explicitPath?: string, trustW
         // Search endpoints and credentials are host-owned even when other workspace fields are trusted.
         // Provider protocol stays host-owned. Trusted workspace fields may remain, but apiMode never does.
         if (workspaceLayer) {
+          delete parsed.hooks
           delete parsed.lsp
           delete parsed.webSearch
           delete parsed.builtinPlugins
