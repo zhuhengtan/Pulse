@@ -9,3 +9,6 @@ for (const asset of ['documents/pptx-parse.cjs', 'tools/windows-pty-bridge.cjs',
   mkdirSync(dirname(target), { recursive: true })
   cpSync(source, target)
 }
+
+mkdirSync(join(root, 'packages/server/dist/lsp'), { recursive: true })
+cpSync(join(root, 'packages/server/src/lsp/worker.cjs'), join(root, 'packages/server/dist/lsp/worker.cjs'))

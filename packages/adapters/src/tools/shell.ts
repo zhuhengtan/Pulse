@@ -2,7 +2,7 @@ import { ShellOutput } from './shell-output.js'
 import { createRequire } from 'node:module'
 import { randomUUID, createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
-import { basename, delimiter, dirname, isAbsolute, join, parse, resolve, sep } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, parse, posix, resolve, sep, win32 } from 'node:path'
 import { lstat, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -24,7 +24,7 @@ export interface ShellChild {
   readonly pid?: number | undefined
   readonly exitCode?: number | null
   readonly signalCode?: NodeJS.Signals | null
-  readonly stdin?: { end(): unknown } | null
+  readonly stdin?: { end(data?: string): unknown } | null
   readonly stdout?: { on(event: 'data', listener: (chunk: Buffer) => void): unknown } | null
   readonly stderr?: { on(event: 'data', listener: (chunk: Buffer) => void): unknown } | null
   once(event: 'error', listener: (error: Error) => void): unknown
@@ -429,7 +429,7 @@ function safeGitQuery(command: string, args: string[]): boolean {
   return false
 }
 
-async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolchainRoots: string[] = [], scratch?: string, dependencyRoots: string[] = [], gitMetadataRoots: string[] = []): Promise<SandboxRuntimeConfig> {
+async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolchainRoots: string[] = [], scratch?: string, dependencyRoots: string[] = [], gitMetadataRoots: string[] = [], readOnlyWorkspace = false): Promise<SandboxRuntimeConfig> {
   // Linux invokes this trusted helper *inside* the read-restricted namespace.
   // A user-local npm install otherwise hides it together with the home directory.
   const seccompPath = process.platform === 'linux'
@@ -464,8 +464,8 @@ async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolcha
       // that actually reference them need recursive Windows read grants.
       denyRead: process.platform === 'win32' ? await carveWindowsReadDenies([...denyRead], [...allowRead, ...dependencyRoots]) : [...denyRead],
       allowRead,
-      allowWrite: [cwd, ...(scratch ? [scratch] : [])],
-      denyWrite: process.platform === 'win32' ? await windowsToolchainWriteDenies([...toolchainRoots, ...dependencyRoots], [cwd, ...(scratch ? [scratch] : [])]) : [],
+      allowWrite: [...(readOnlyWorkspace ? [] : [cwd]), ...(scratch ? [scratch] : [])],
+      denyWrite: process.platform === 'win32' ? await windowsToolchainWriteDenies([...toolchainRoots, ...dependencyRoots], [...(readOnlyWorkspace ? [] : [cwd]), ...(scratch ? [scratch] : [])]) : [],
     },
     ...(seccompPath ? { seccomp: { applyPath: seccompPath } } : {}),
     ...(process.platform === 'win32' ? { windows: { srtWin: { path: verifiedWindowsSrt() } } } : {}),
@@ -503,6 +503,17 @@ function shellLaunchesCommand(command: string, args: string[]): boolean {
   return args.some((arg) => /^(?:-lc|-c|-command|\/c)$/i.test(arg))
 }
 
+/** Canonical home boundary. Windows compares case-insensitively and never treats a sibling prefix as a parent. */
+export function readRootTooBroad(root: string, home: string, platform: NodeJS.Platform = process.platform): boolean {
+  const api = platform === 'win32' ? win32 : posix
+  const fold = (value: string) => platform === 'win32' ? api.normalize(value).toLowerCase() : api.normalize(value)
+  const candidate = fold(root)
+  const canonicalHome = fold(home)
+  if (candidate === canonicalHome || candidate === fold(api.parse(root).root)) return true
+  const rel = api.relative(candidate, canonicalHome)
+  return rel === '' || (rel.length > 0 && !api.isAbsolute(rel) && !rel.split(/[/\\]/).includes('..'))
+}
+
 /** Deterministic argv validation, shared by pre-approval and actual execution. */
 export function validateShellInvocation(command: string, args: string[] = []): void {
   if (!command || typeof command !== 'string' || !Array.isArray(args) || args.some((arg) => typeof arg !== 'string')) throw shellError('INVALID_SHELL_ARGUMENT')
@@ -510,7 +521,8 @@ export function validateShellInvocation(command: string, args: string[] = []): v
   encodeSandboxCommand(command, args)
 }
 
-export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; expectedIdentity?: ShellIdentity | undefined; beforeLaunch?: () => Promise<ShellIdentity | undefined>; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void; spawnProcess?: ShellSpawn; windowsPty?: WindowsPty } = {}): Promise<ShellResult> {
+export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; expectedIdentity?: ShellIdentity | undefined; beforeLaunch?: () => Promise<ShellIdentity | undefined>; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void; spawnProcess?: ShellSpawn; windowsPty?: WindowsPty; readOnlyWorkspace?: boolean; isolatedHome?: boolean; stdioTarget?: boolean; readRoots?: string[]; stdinData?: string } = {}): Promise<ShellResult> {
+  if (options.stdinData !== undefined && Buffer.byteLength(options.stdinData) > 65536) return Promise.reject(shellError('SHELL_STDIN_TOO_LARGE'))
   const max = options.maxOutputBytes ?? 256 * 1024
   if (!Number.isFinite(max) || max < 0) return Promise.reject(shellError('INVALID_SHELL_OUTPUT_LIMIT'))
   if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 0)) return Promise.reject(shellError('INVALID_SHELL_TIMEOUT'))
@@ -533,6 +545,12 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     const nodeBin = dirname(nodeExecutable)
     const installation = basename(nodeBin) === 'bin' ? dirname(nodeBin) : nodeBin
     const toolchainRoots = installation !== homedir() && installation !== parse(installation).root ? [installation] : [nodeExecutable]
+    const homePath = await realpath(homedir()).catch(() => homedir())
+    for (const raw of options.readRoots ?? []) {
+      const root = await realpath(raw)
+      if (readRootTooBroad(root, homePath)) throw shellError('SANDBOX_READ_ROOT_TOO_BROAD')
+      toolchainRoots.push(root)
+    }
     const dependencyRoots = await installationDependencyRoots()
     if (process.platform !== 'win32' || await workspaceUsesInstallationDependencies(cwd, dependencyRoots)) toolchainRoots.push(...dependencyRoots)
     let ptyBridge: string | undefined
@@ -603,7 +621,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         toolchainRoots.push(resolved.readRoot)
       }
     }
-    if (options.expectedIdentity || process.platform === 'win32' && options.windowsPty) {
+    if (options.expectedIdentity || process.platform === 'win32' && (options.windowsPty || options.stdioTarget)) {
       const actual = await resolveShellIdentity(command, args, cwd, baseEnv)
       if (options.expectedIdentity && actual.fingerprint !== options.expectedIdentity.fingerprint) throw shellError('EXEC_POLICY_PROGRAM_CHANGED')
       executable = actual.executable
@@ -638,7 +656,8 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         executionEnv.GIT_OPTIONAL_LOCKS = '0'
       }
     }
-    const policy = await sandboxConfig(cwd, options.allowedDomains ?? [], toolchainRoots, scratch, dependencyRoots, gitApproval.roots)
+    if (options.isolatedHome) Object.assign(executionEnv, { HOME: scratch, USERPROFILE: scratch, APPDATA: scratch, LOCALAPPDATA: scratch, TMPDIR: scratch, TMP: scratch, TEMP: scratch, XDG_CONFIG_HOME: scratch, XDG_CACHE_HOME: scratch, XDG_DATA_HOME: scratch, XDG_STATE_HOME: scratch })
+    const policy = await sandboxConfig(cwd, options.allowedDomains ?? [], toolchainRoots, scratch, dependencyRoots, gitApproval.roots, options.readOnlyWorkspace === true)
     let child: ShellChild | undefined
     const archive = new ShellOutput(max, options.outputDirectory, options.maxArchiveBytes, options.outputDirectory !== undefined)
     const outputBytes = { stdout: 0, stderr: 0 }
@@ -700,6 +719,11 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       setupStage = 'wrap'
       const descriptor = await SandboxManager.wrapWithSandboxArgv(commandText, undefined, undefined, options.signal, cwd, { commandId: invocationId, commandText: 'shell.exec' })
       let sandboxArgv = process.platform === 'win32' ? windowsShellEnvironment(descriptor.argv, executionEnv) : descriptor.argv
+      if (process.platform === 'win32' && options.stdioTarget) {
+        const separator = sandboxArgv.indexOf('--')
+        if (separator < 2 || separator + 1 >= sandboxArgv.length) throw shellError('INVALID_WINDOWS_SANDBOX_COMMAND')
+        sandboxArgv = [...sandboxArgv.slice(0, separator + 1), executable, ...executableArgs]
+      }
       if (ptyBridge && windowsPty) sandboxArgv = windowsPtyCommand(sandboxArgv, nodeExecutable, ptyBridge, windowsPty, executable, executableArgs)
       checkpoint('wrapped')
       if (options.signal?.aborted) {
@@ -745,7 +769,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
     }
 
     // This API has no stdin payload; deliver EOF to readers inside the sandbox.
-    child!.stdin?.end()
+    child!.stdin?.end(options.stdinData)
 
     return await new Promise<ShellResult>((resolve, reject) => {
       const cleanup = (): void => {

@@ -1,4 +1,4 @@
-import { mergeExecPolicies, workspaceExecPolicy, sourceExecPolicy, overlayBuiltinPlugins, readMergedHostConfig, type ModelDefinition } from '@hunterzhu/pulse-server'
+import { mergeExecPolicies, workspaceExecPolicy, sourceExecPolicy, overlayBuiltinPlugins, readMergedHostConfig, parseLspConfig, type ModelDefinition } from '@hunterzhu/pulse-server'
 import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -66,6 +66,7 @@ export interface PulseCliCapabilities {
 }
 
 export interface PulseCliConfig {
+  lsp?: import('@hunterzhu/pulse-server').LspConfig
   cwd?: string
   dataDir?: string
   systemPrompt?: string
@@ -280,7 +281,9 @@ export function mergePulseConfigs(layers: Array<{ value: PulseCliConfig; trust: 
 export async function loadPulseConfig(cwd: string, explicitPath?: string, trustWorkspace = false, scope: 'all' | 'host' = 'all'): Promise<{ value: PulseCliConfig; source?: string }> {
   if (scope === 'host') {
     const read = readMergedHostConfig(explicitPath)
-    return { value: read.config as PulseCliConfig, ...(read.source ? { source: read.source } : {}) }
+    const value = read.config as PulseCliConfig
+    if (value.lsp !== undefined) value.lsp = parseLspConfig(value.lsp)
+    return { value, ...(read.source ? { source: read.source } : {}) }
   }
   const workspacePath = join(cwd, '.pulse', 'config.json')
   const homePath = defaultPulseConfigPath()
@@ -304,6 +307,7 @@ export async function loadPulseConfig(cwd: string, explicitPath?: string, trustW
         // Search endpoints and credentials are host-owned even when other workspace fields are trusted.
         // Provider protocol stays host-owned. Trusted workspace fields may remain, but apiMode never does.
         if (workspaceLayer) {
+          delete parsed.lsp
           delete parsed.webSearch
           delete parsed.builtinPlugins
           if (parsed.execPolicy !== undefined) parsed.execPolicy = workspaceExecPolicy(parsed.execPolicy)
@@ -313,7 +317,7 @@ export async function loadPulseConfig(cwd: string, explicitPath?: string, trustW
             delete next.apiMode
             return [id, next]
           }))
-        }
+        } else if (parsed.lsp !== undefined) parsed.lsp = parseLspConfig(parsed.lsp)
         layers.push({ value: parsed, trust, source: path })
       }
     } catch (cause) { if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause }

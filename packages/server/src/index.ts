@@ -132,6 +132,8 @@ import { CapabilityPackRegistry, type ActiveCapabilityPacks, type CapabilityPack
 import { JarvisClient, jarvisResultForRun, type JarvisContextPackage, type PulseJarvisConfig } from './jarvis/index.js'
 import { JarvisRun } from './jarvis/run.js'
 import { JarvisSyncQueue } from './jarvis/sync.js'
+import { LspService, parseLspConfig, registerLspTools, type LspConfig } from './lsp/index.js'
+export { LspService, lspTemplates, parseLspConfig, type LspConfig, type LspServerConfig } from './lsp/index.js'
 import { PersonalJarvisQueue, registerPersonalJarvisTools } from './jarvis/personal.js'
 import { processFrontModel, heuristicFastAck, type FrontModelConfig, type FrontModelBrief, type FrontModelContextItem, type FrontModelResult } from './front-model.js'
 export { processFrontModel, heuristicFastAck, sanitizeFrontModelResult, type FrontModelConfig, type FrontModelBrief, type FrontModelResult } from './front-model.js'
@@ -154,6 +156,7 @@ export { buildSystemPrompt, loadProjectInstructions, MAX_INSTRUCTION_BYTES, MAX_
 import type { WebAttachment } from './protocol.js'
 export type ApprovalMode = 'read-only' | 'ask' | 'auto'
 export interface LocalHostOptions {
+  lsp?: LspConfig
   automation?: AutomationConfig
   automationEndpoint?: AutomationEndpoint
   /** Override automatic staged execution for substantive tasks. Persisted per Run. */
@@ -1110,6 +1113,7 @@ ${responseLanguageInstruction(detectResponseLanguage(text))}`
 
 const assistantToolAllowList = [
   'image.generate', 'video.generate', 'audio.generate',
+  'code.definition', 'code.references', 'code.symbols', 'code.diagnostics',
   'capability.status', 'skills.read',
   'fs.list', 'fs.read', 'fs.search', 'web.fetch', 'web.search', 'attachment.read', 'attachment.list',
   'jarvis.observe', 'jarvis.knowledge_search', 'jarvis.knowledge_get', 'jarvis.context', 'jarvis.search', 'jarvis.get', 'jarvis.record', 'jarvis.remember', 'jarvis.candidates', 'jarvis.status',
@@ -1178,9 +1182,9 @@ export function assistantChatRequiredToolNames(toolNames: readonly string[], tex
   return toolNames.filter(name => required.has(name))
 }
 
-const assistantRepeatableReadTools = new Set(['work.list', 'work.status', 'conversation.search', 'conversation.read', 'fs.list', 'fs.read', 'fs.search', 'fs.glob', 'fs.view_image', 'web.search', 'web.fetch', 'attachment.read', 'attachment.list'])
+const assistantRepeatableReadTools = new Set(['code.definition', 'code.references', 'code.symbols', 'code.diagnostics', 'work.list', 'work.status', 'conversation.search', 'conversation.read', 'fs.list', 'fs.read', 'fs.search', 'fs.glob', 'fs.view_image', 'web.search', 'web.fetch', 'attachment.read', 'attachment.list'])
 /** Cross-conversation history stays out of this set so ask mode can require confirmation. */
-export const assistantAutoApprovedTools = new Set([...generationTools, 'fs.list', 'fs.read', 'fs.search', 'fs.glob', 'fs.view_image', 'web.search', 'web.fetch', 'jarvis.knowledge_search', 'jarvis.knowledge_get', 'jarvis.search', 'jarvis.context', 'jarvis.get', 'jarvis.status', 'jarvis.candidates', 'work.list', 'work.status', 'capability.status'])
+export const assistantAutoApprovedTools = new Set(['code.definition', 'code.references', 'code.symbols', 'code.diagnostics', ...generationTools, 'fs.list', 'fs.read', 'fs.search', 'fs.glob', 'fs.view_image', 'web.search', 'web.fetch', 'jarvis.knowledge_search', 'jarvis.knowledge_get', 'jarvis.search', 'jarvis.context', 'jarvis.get', 'jarvis.status', 'jarvis.candidates', 'work.list', 'work.status', 'capability.status'])
 
 export function assistantChatAllowedToolNames(toolNames: string[], text: string, calledTools: ReadonlySet<string>, repeatableReads = true, attachmentRequested = false, delegatedWork = false, scopedNegation = false): string[] {
   const required = assistantChatRequiredToolNames(toolNames, text, delegatedWork, scopedNegation).map(name => attachmentRequested && name === 'fs.read' ? 'attachment.read' : name)
@@ -2813,7 +2817,7 @@ export class LocalHost {
   }
   private async appendMessage(id: string, message: StoredMessage): Promise<void> { await this.conversationData.call('append', id, message) }
   private async runtimeFor(conversationId: string, runId: string, cwd: string, userIntent = '', skillInput = '', options: LocalHostOptions = this.options, assistantChat = false, jarvisSessionId?: string, modelBudget?: ModelAttemptBudget): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; modelBudget?: ModelAttemptBudget | undefined }> {
-    const persistedSurface = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').catch(() => '{}')) as { fileSurfaceVersion?: unknown; providerApiModes?: unknown; shellSurfaceVersion?: unknown; jarvisProtocol?: unknown; currentUserText?: unknown }
+    const persistedSurface = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').catch(() => '{}')) as { fileSurfaceVersion?: unknown; providerApiModes?: unknown; shellSurfaceVersion?: unknown; jarvisProtocol?: unknown; currentUserText?: unknown; codeSurfaceVersion?: unknown; lsp?: unknown }
     options = restoreProviderApiModes(options, persistedSurface.providerApiModes)
     options = { ...options, jarvis: { ...options.jarvis, protocol: persistedSurface.jarvisProtocol === 'personal' ? 'personal' : 'legacy' } }
     const currentUserText = typeof persistedSurface.currentUserText === 'string' ? persistedSurface.currentUserText : ''
@@ -2842,6 +2846,7 @@ export class LocalHost {
     const capabilityRegistry = new CapabilityPackRegistry()
     for (const pack of options.capabilityPacks ?? []) capabilityRegistry.register(pack)
     const capabilityController = new AbortController()
+    if (persistedSurface.codeSurfaceVersion === 1) registerLspTools(registry, new LspService(cwd, persistedSurface.lsp === undefined ? undefined : parseLspConfig(persistedSurface.lsp), capabilityController.signal))
     const activatedPackIds = assistantChat
       ? (options.enabledCapabilityPacks ?? []).filter(id => id === 'skills' || id === 'builtin-skills')
       : (options.enabledCapabilityPacks ?? []).filter(id => (id !== 'browser' && id !== 'computer') || options.capabilityPacks?.some(pack => pack.manifest.id === id))
@@ -3254,6 +3259,7 @@ export class LocalHost {
     const capabilityRegistry = new CapabilityPackRegistry()
     for (const pack of options.capabilityPacks ?? []) capabilityRegistry.register(pack)
     const capabilityController = new AbortController()
+    if (savedInput.codeSurfaceVersion === 1) registerLspTools(registry, new LspService(cwd, savedInput.lsp === undefined ? undefined : parseLspConfig(savedInput.lsp), capabilityController.signal))
     const activatedPackIds = assistantChat
       ? (options.enabledCapabilityPacks ?? []).filter(id => id === 'skills' || id === 'builtin-skills')
       : (options.enabledCapabilityPacks ?? []).filter(id => (id !== 'browser' && id !== 'computer') || options.capabilityPacks?.some(pack => pack.manifest.id === id))
@@ -4049,7 +4055,8 @@ export class LocalHost {
         }
         initialTask.acceptanceChecks = retained
       }
-      const now = new Date().toISOString(); if (!input.userMessageRecorded) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal, ...(initialTask?.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 } : {}), capabilitySurface: 1, fileSurfaceVersion: 3, jarvisProtocol: runOptions.jarvis?.protocol ?? 'personal', currentUserText: input.text, ...(input.assistantChat ? {} : { shellSurfaceVersion: 1 }), providerApiModes: captureProviderApiModes(runOptions), planReviewVersion: 8, planDecisionVersion: controlled ? 3 : 2, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), assistantChat: input.assistantChat === true, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.assistantChat ? { assistantChatVersion: '5' } : {}), taskController: controlled, ...(controlled ? { controllerVersion: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', taskControllerPolicy: runOptions.taskControllerPolicy ?? 'legacy' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), maxModelCalls, enabledCapabilityPacks: runOptions.enabledCapabilityPacks ?? [], maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel ?? runOptions.provider?.defaultModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
+      const lspSnapshot = runOptions.lsp === undefined ? undefined : parseLspConfig(runOptions.lsp)
+      const now = new Date().toISOString(); if (!input.userMessageRecorded) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal, ...(initialTask?.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 } : {}), capabilitySurface: 1, codeSurfaceVersion: 1, ...(lspSnapshot ? { lsp: lspSnapshot } : {}), fileSurfaceVersion: 3, jarvisProtocol: runOptions.jarvis?.protocol ?? 'personal', currentUserText: input.text, ...(input.assistantChat ? {} : { shellSurfaceVersion: 1 }), providerApiModes: captureProviderApiModes(runOptions), planReviewVersion: 8, planDecisionVersion: controlled ? 3 : 2, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), assistantChat: input.assistantChat === true, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.assistantChat ? { assistantChatVersion: '5' } : {}), taskController: controlled, ...(controlled ? { controllerVersion: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', taskControllerPolicy: runOptions.taskControllerPolicy ?? 'legacy' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), maxModelCalls, enabledCapabilityPacks: runOptions.enabledCapabilityPacks ?? [], maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel ?? runOptions.provider?.defaultModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
       await new AttachmentStore(this.dataDir, conversationId).remember()
       const attachmentIndex = await new AttachmentStore(this.dataDir, conversationId).index(input.text)
       if (attachmentIndex) conversation.push({ role: 'user', content: attachmentIndex })

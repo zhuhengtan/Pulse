@@ -264,7 +264,7 @@ describe('ensurePulseUserConfig', () => {
     const workspace = join(root, 'workspace'), hostPath = join(root, 'host.json'), home = join(root, 'home')
     await mkdir(join(workspace, '.pulse'), { recursive: true })
     await mkdir(home, { recursive: true })
-    await writeFile(join(workspace, '.pulse/config.json'), JSON.stringify({ providers: {
+    await writeFile(join(workspace, '.pulse/config.json'), JSON.stringify({ lsp: { enabled: 'false', servers: { evil: { command: 'workspace-lsp', languages: { '.ts': 'typescript' }, root: '/etc' } } }, providers: {
       only: { provider: 'openai-compatible', apiMode: 'responses', baseURL: 'http://127.0.0.1:9/v1', models: { m: { modelCode: 'only-model' } } },
       shared: { provider: 'openai-compatible', apiMode: 'responses', baseURL: 'http://127.0.0.1:8/v1' },
     } }))
@@ -273,6 +273,7 @@ describe('ensurePulseUserConfig', () => {
         shared: { provider: 'openai-compatible', baseURL: 'http://127.0.0.1:8/v1', models: { model: { modelCode: 'shared-model' } } },
         explicit: { provider: 'openai-compatible', apiMode: 'responses', baseURL: 'http://127.0.0.1:7/v1', models: { model: { modelCode: 'explicit-model' } } },
       },
+      lsp: { enabled: true, servers: { mock: { command: 'trusted-lsp', languages: { '.ts': 'typescript' } } } },
       activeModel: 'shared/model', jarvis: { enabled: false },
     }))
     const keys = ['PULSE_HOME', 'PULSE_CONFIG', 'PULSE_DATA_DIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME'] as const
@@ -297,6 +298,10 @@ describe('ensurePulseUserConfig', () => {
         else expect(loaded.value.providers?.only).not.toHaveProperty('baseURL')
         const args = ['--config', hostPath, '--cwd', workspace, ...(trust ? ['--trust-workspace'] : [])]
         const explicit = await hostOptions(parse([...args, '--model', 'explicit/model']))
+        expect(explicit.lsp?.servers?.mock?.command).toBe('trusted-lsp')
+        expect(explicit.lsp?.servers?.evil).toBeUndefined()
+        expect(loaded.value.lsp?.servers?.mock?.command).toBe('trusted-lsp')
+        expect(JSON.stringify(loaded.value.lsp ?? {})).not.toContain('workspace-lsp')
         expect(explicit.provider?.apiMode).toBe('responses')
         expect(explicit.providerProfiles?.only?.apiMode).toBeUndefined()
         expect(explicit.providerProfiles?.shared?.apiMode).toBeUndefined()
@@ -312,6 +317,27 @@ describe('ensurePulseUserConfig', () => {
         if (value === undefined) delete process.env[key]
         else process.env[key] = value
       }
+    }
+  })
+
+  it('rejects a non-boolean or root-overriding host lsp config', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pulse-cli-lsp-strict-'))
+    temporaryDirectories.push(root)
+    const previousHome = process.env.PULSE_HOME
+    const previousConfig = process.env.PULSE_CONFIG
+    process.env.PULSE_HOME = root
+    delete process.env.PULSE_CONFIG
+    const hostPath = join(root, 'host.json')
+    try {
+      await writeFile(hostPath, JSON.stringify({ lsp: { enabled: 'false', servers: { mock: { command: 'trusted-lsp', languages: { '.ts': 'typescript' } } } } }))
+      await expect(loadPulseConfig(root, hostPath, true)).rejects.toThrow('LSP_CONFIG_INVALID')
+      await writeFile(hostPath, JSON.stringify({ lsp: { enabled: true, servers: { mock: { command: 'trusted-lsp', languages: { '.ts': 'typescript' }, root: '/etc' } } } }))
+      await expect(loadPulseConfig(root, hostPath, true)).rejects.toThrow('LSP_CONFIG_INVALID')
+    } finally {
+      if (previousHome === undefined) delete process.env.PULSE_HOME
+      else process.env.PULSE_HOME = previousHome
+      if (previousConfig === undefined) delete process.env.PULSE_CONFIG
+      else process.env.PULSE_CONFIG = previousConfig
     }
   })
 })

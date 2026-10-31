@@ -5,7 +5,7 @@ import { createRequire } from 'node:module'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { installProcessDiagnostics, createLocalHost, automationDoctor, requestAutomationPermissions, assertJarvisApiUrl, createBuiltinSkillCapabilityPack, createMcpCapabilityPack, createPdfCapabilityPack, createDocxCapabilityPack, createPptxCapabilityPack, createSkillCapabilityPack, createSpreadsheetCapabilityPack, type LocalHostOptions } from '@hunterzhu/pulse-server'
-import { modelSelectionId, normalizeModelConfig, resolveModelReference, resolveProviderApiKey, resolveWebSearchOptions, parseBuiltinPlugins, parseExecPolicy } from '@hunterzhu/pulse-server'
+import { modelSelectionId, normalizeModelConfig, resolveModelReference, resolveProviderApiKey, resolveWebSearchOptions, parseBuiltinPlugins, parseExecPolicy, parseLspConfig } from '@hunterzhu/pulse-server'
 import { defaultPulseConfig, defaultPulseConfigPath, ensurePulseUserConfig, expandHome, loadPulseConfig, type PulseCliConfig, type PulseCliProviderProfile } from './config.js'
 import { runInteractive } from './commands/interactive.js'
 import { runOneShot } from './commands/run.js'
@@ -496,6 +496,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     ...(parsed.options['no-network'] === true ? { builtinPluginNetworkOverride: false } : parsed.options['allow-network'] === true || process.env.PULSE_ALLOW_NETWORK === '1' ? { builtinPluginNetworkOverride: true } : {}),
     builtinPluginConfig: { allowNetwork: pluginHostConfig.allowNetwork, builtinPlugins, providers: pluginHostConfig.providers, webSearch: pluginHostConfig.webSearch },
     ...(webSearch ? { webSearch } : {}),
+    ...(config.lsp ? { lsp: parseLspConfig(config.lsp) } : {}),
     jarvis,
     ...(config.frontModel ? { frontModel: (() => {
       const selected = typeof config.frontModel?.model === 'string' ? resolveModelReference(catalog, config.frontModel.model) : undefined
