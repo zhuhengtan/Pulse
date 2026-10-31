@@ -238,7 +238,7 @@ describe('Jarvis 3-tier memory integration', () => {
       const host = createLocalHost({
         cwd: tempDir,
         dataDir: join(tempDir, 'data'),
-        jarvis: { enabled: true },
+        jarvis: { enabled: true, protocol: 'legacy' },
         jarvisClient: mockClient,
         provider: { provider: 'mock' },
         mockResponse: 'Task completed successfully',
@@ -305,7 +305,7 @@ describe('Jarvis 3-tier memory integration', () => {
       const host = createLocalHost({
         cwd: tempDir,
         dataDir: join(tempDir, 'data'),
-        jarvis: { enabled: true },
+        jarvis: { enabled: true, protocol: 'legacy' },
         jarvisClient: mockClient,
         provider: { provider: 'mock' },
         approvalMode: 'auto',
@@ -345,7 +345,7 @@ describe('Jarvis 3-tier memory integration', () => {
       const host = createLocalHost({
         cwd: tempDir,
         dataDir: join(tempDir, 'data'),
-        jarvis: { enabled: true, autoCandidate },
+        jarvis: { enabled: true, protocol: 'legacy', autoCandidate },
         jarvisClient: mockClient,
         provider: { provider: 'mock' },
         mockResponse: 'The requested result is ready.',
@@ -377,7 +377,7 @@ describe('Jarvis 3-tier memory integration', () => {
         async recordCandidate() {},
         async closeSession() { order.push('close') },
       } as unknown as JarvisClient
-      const host = createLocalHost({ cwd: tempDir, dataDir: join(tempDir, 'data'), jarvisClient: client, provider: { provider: 'mock' }, approvalMode: 'auto', mockToolCalls: [{ name: 'fs.write', input: { path: 'private-config.json', content: '{"password":"SYNTHETIC_REVIEW_CREDENTIAL"}' } }], mockAfterToolResponse: 'Fixture written.' })
+      const host = createLocalHost({ cwd: tempDir, dataDir: join(tempDir, 'data'), jarvis: { protocol: 'legacy' as const }, jarvisClient: client, provider: { provider: 'mock' }, approvalMode: 'auto', mockToolCalls: [{ name: 'fs.write', input: { path: 'private-config.json', content: '{"password":"SYNTHETIC_REVIEW_CREDENTIAL"}' } }], mockAfterToolResponse: 'Fixture written.' })
       try {
         await host.init()
         const conv = await host.createConversation()
@@ -403,7 +403,7 @@ describe('Jarvis 3-tier memory integration', () => {
         async closeSession(id: string) { closed.push(id) },
       } as unknown as JarvisClient
       await writeFile(join(tempDir, 'note.txt'), 'hello')
-      const host = createLocalHost({ cwd: tempDir, dataDir: join(tempDir, 'data'), jarvisClient: client, provider: { provider: 'mock' }, approvalMode: 'auto', mockToolCalls: [{ name: 'fs.read', input: { path: 'note.txt' } }], mockAfterToolResponse: 'Read.' })
+      const host = createLocalHost({ cwd: tempDir, dataDir: join(tempDir, 'data'), jarvis: { protocol: 'legacy' as const }, jarvisClient: client, provider: { provider: 'mock' }, approvalMode: 'auto', mockToolCalls: [{ name: 'fs.read', input: { path: 'note.txt' } }], mockAfterToolResponse: 'Read.' })
       let deadline: ReturnType<typeof setTimeout> | undefined
       try {
         await host.init()
@@ -438,7 +438,7 @@ describe('Jarvis 3-tier memory integration', () => {
         ][modelTurn++]
         return new Response(JSON.stringify({ choices: [{ message: call ? { content: '', tool_calls: [{ id: `restore-call-${modelTurn}`, type: 'function', function: call }] } : { content: 'Read.' }, finish_reason: call ? 'tool_calls' : 'stop' }] }), { headers: { 'content-type': 'application/json' } })
       }))
-      const options = { cwd: tempDir, dataDir: join(tempDir, 'data'), jarvisClient: client, provider: { provider: 'deepseek' as const, defaultModel: 'deepseek-flash' }, taskController: false, approvalMode: 'auto' as const }
+      const options = { cwd: tempDir, dataDir: join(tempDir, 'data'), jarvis: { protocol: 'legacy' as const }, jarvisClient: client, provider: { provider: 'deepseek' as const, defaultModel: 'deepseek-flash' }, taskController: false, approvalMode: 'auto' as const }
       const first = createLocalHost(options)
       let second: ReturnType<typeof createLocalHost> | undefined
       try {
@@ -491,7 +491,7 @@ describe('Jarvis 3-tier memory integration', () => {
       const host = createLocalHost({
         cwd: tempDir,
         dataDir: join(tempDir, 'data'),
-        jarvis: { enabled: true },
+        jarvis: { enabled: true, protocol: 'legacy' },
         jarvisClient: mockClient,
         provider: { provider: 'mock' },
         capabilityPacks: [{
@@ -529,7 +529,7 @@ describe('Jarvis 3-tier memory integration', () => {
       const host = createLocalHost({
         cwd: tempDir,
         dataDir: join(tempDir, 'data'),
-        jarvis: { enabled: true },
+        jarvis: { enabled: true, protocol: 'legacy' },
         jarvisClient: failingClient,
         provider: { provider: 'mock' },
         mockResponse: 'Standalone fallback execution',

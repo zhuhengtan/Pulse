@@ -144,6 +144,7 @@ describe('H5Server End-to-End', () => {
       activeModel: 'mock',
       assistantModel: 'mock',
       jarvisClient,
+      jarvis: { protocol: 'legacy' },
       mockToolCalls: [{ name: 'jarvis.context', input: { query: 'Pulse 助理工作模式', scope: 'global' } }],
       mockAfterToolResponse: '已完成 Jarvis 查询。',
     })
@@ -183,7 +184,7 @@ describe('H5Server End-to-End', () => {
       recordEvent: async (_session: string, _type: string, content: string) => { evidence.push(content); return { id: 'event-user-rule' } },
       recordCandidate: async (_session: string, input: any) => { candidates.push(input); return { id: 'memory-rule', status: 'candidate' } },
     } as unknown as JarvisClient
-    const host = createLocalHost({ cwd: dir, dataDir: dir, jarvisClient, provider: { provider: 'mock', defaultModel: 'mock' }, providerProfiles: { mock: { provider: 'mock', defaultModel: 'mock' } }, providerModels: { mock: { provider: 'mock', model: 'mock' } }, activeModel: 'mock', assistantModel: 'mock', approvalMode: 'auto',
+    const host = createLocalHost({ cwd: dir, dataDir: dir, jarvisClient, jarvis: { protocol: 'legacy' }, provider: { provider: 'mock', defaultModel: 'mock' }, providerProfiles: { mock: { provider: 'mock', defaultModel: 'mock' } }, providerModels: { mock: { provider: 'mock', model: 'mock' } }, activeModel: 'mock', assistantModel: 'mock', approvalMode: 'auto',
       mockToolCalls: [{ name: 'jarvis.remember', input: { title: '审核条件', content: rule, kind: 'constraint', scope: 'global' } }], mockAfterToolResponse: '已提交待审核。' })
     try {
       const conversation = await host.createConversation()

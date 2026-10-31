@@ -118,6 +118,8 @@ export interface PulseCliConfig {
 }
 
 export interface PulseCliJarvisConfig {
+  protocol?: 'personal' | 'legacy'
+  observationPolicy?: 'important' | 'explicit'
   /** Master switch to enable or disable Jarvis cognitive memory architecture. */
   enabled?: boolean
   /** Base URL of the running Jarvis server. Defaults to http://127.0.0.1:7330 */

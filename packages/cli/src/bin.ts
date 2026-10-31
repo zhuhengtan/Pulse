@@ -445,6 +445,8 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
 
   const jarvis = {
     enabled: jarvisEnabled,
+    protocol: config.jarvis?.protocol ?? 'personal',
+    ...(config.jarvis?.observationPolicy ? { observationPolicy: config.jarvis.observationPolicy } : {}),
     ...(jarvisUrl ? { apiUrl: jarvisUrl } : {}),
     ...(jarvisToken ? { token: jarvisToken } : {}),
     ...(jarvisBudget ? { contextTokenBudget: jarvisBudget } : {}),

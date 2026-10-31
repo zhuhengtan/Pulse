@@ -66,7 +66,7 @@ it('retries candidate delivery before close and does not resend an acknowledged 
 
 it('retries completed offline runs on host initialization without restarting their tasks', async () => {
   const f = await fixture(); f.fail('/v1/sessions/session-outbox/close')
-  const options = { cwd: f.root, dataDir: join(f.root, 'pulse'), jarvisClient: f.client, mockResponse: 'Done' }
+  const options = { cwd: f.root, dataDir: join(f.root, 'pulse'), jarvis: { protocol: 'legacy' as const }, jarvisClient: f.client, mockResponse: 'Done' }
   const first = createLocalHost(options)
   const conversation = await first.createConversation()
   const run = await first.sendMessage(conversation.id, { text: 'Say hello' })
@@ -87,7 +87,7 @@ it('retries completed offline runs on host initialization without restarting the
 
 it.each(['submitHumanInput', 'reply'] as const)('records user corrections sent through %s before closing', async (method) => {
   const f = await fixture()
-  const host = createLocalHost({ cwd: f.root, dataDir: join(f.root, 'pulse'), jarvisClient: f.client, provider: { provider: 'mock' }, approvalMode: 'auto', mockToolCalls: [{ name: 'ask.input', input: { prompt: 'Continue?' } }], mockAfterToolResponse: 'Done' })
+  const host = createLocalHost({ cwd: f.root, dataDir: join(f.root, 'pulse'), jarvis: { protocol: 'legacy' as const }, jarvisClient: f.client, provider: { provider: 'mock' }, approvalMode: 'auto', mockToolCalls: [{ name: 'ask.input', input: { prompt: 'Continue?' } }], mockAfterToolResponse: 'Done' })
   try {
     const conversation = await host.createConversation()
     const run = await host.sendMessage(conversation.id, { text: 'Ask before continuing' })

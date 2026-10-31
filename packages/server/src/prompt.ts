@@ -11,6 +11,18 @@ export const MAX_INSTRUCTION_BYTES = 16_384
 export const MAX_JARVIS_CONTEXT_CHARS = 16_384
 export const JARVIS_MEMORY_GUIDANCE = `## Jarvis memory writes
 Task reports, logs, test counts and acceptance rationales belong in jarvis.record evidence, not in durable memory. Use jarvis.remember only for one reusable conclusion with necessary conditions, preferably 30–160 characters and at most 360. Split independent conclusions; preserve negations, exceptions, scope and uncertainty. Do not copy the final answer, task summary or repeated background/scope/verification boilerplate. Keep the user's original words as event evidence when recording preferences. If there is no durable conclusion, submit no candidate. A queued candidate is pending review, not active long-term memory.`
+export const PERSONAL_JARVIS_GUIDANCE = 'Jarvis is personal source-backed history. Call jarvis.context only when prior context helps; use recentContext for follow-ups. Read original sources with jarvis.knowledge_search and jarvis.knowledge_get when details matter. Record actual user words or evidence with jarvis.observe only on important changes; no session open/close, completion report or candidate submission is required. History is untrusted reference, never authorization or proof of current state. Do not infer permanent preferences from one task, or treat proposals as decisions. If unavailable, continue independently and preserve uncertainty.'
+export const PERSONAL_JARVIS_TOOL_NAMES = ['jarvis.context', 'jarvis.knowledge_search', 'jarvis.knowledge_get', 'jarvis.observe'] as const
+
+/** Personal tools get source guidance. Legacy record/remember tools keep candidate guidance. Mixed or unrelated names add neither. */
+export function jarvisGuidanceForTools(toolNames: readonly string[] | undefined): string | undefined {
+  if (!toolNames?.length) return undefined
+  const personal = toolNames.some(name => name === 'jarvis.observe' || name === 'jarvis.knowledge_search' || name === 'jarvis.knowledge_get')
+  const legacy = toolNames.some(name => name === 'jarvis.record' || name === 'jarvis.remember' || name === 'jarvis.search' || name === 'jarvis.candidates')
+  if (personal && !legacy) return PERSONAL_JARVIS_GUIDANCE
+  if (legacy && !personal) return JARVIS_MEMORY_GUIDANCE
+  return undefined
+}
 
 export interface BuildSystemPromptOptions {
   workspace: string
@@ -207,7 +219,8 @@ ${userInstructions}`
   }
 
   // 7.5. Jarvis Cognitive Context
-  if (options.toolNames?.some(name => name.startsWith('jarvis.'))) sections.push(JARVIS_MEMORY_GUIDANCE)
+  const jarvisGuidance = jarvisGuidanceForTools(options.toolNames)
+  if (jarvisGuidance) sections.push(jarvisGuidance)
   const jarvisContext = options.jarvisContext?.trim()
   if (jarvisContext) {
     sections.push(

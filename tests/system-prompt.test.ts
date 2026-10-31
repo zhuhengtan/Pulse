@@ -115,6 +115,12 @@ describe('system prompt and instructions discovery', () => {
       expect(prompt).toContain('at most 360')
       expect(prompt).toContain('pending review')
       expect(buildSystemPrompt({ workspace: '/test', toolNames: ['fs.read'] })).not.toContain('## Jarvis memory writes')
+      const personal = buildSystemPrompt({ workspace: '/test', toolNames: ['jarvis.context', 'jarvis.knowledge_search', 'jarvis.knowledge_get', 'jarvis.observe'] })
+      expect(personal).toContain('jarvis.observe')
+      expect(personal).toContain('jarvis.knowledge_search')
+      expect(personal).not.toContain('jarvis.remember')
+      expect(personal).not.toContain('jarvis.record')
+      expect(personal).not.toContain('## Jarvis memory writes')
     })
 
     it('fences and caps Jarvis context as untrusted reference data', () => {

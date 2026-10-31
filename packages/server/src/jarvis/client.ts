@@ -1,8 +1,10 @@
 import { assertJarvisApiUrl } from './endpoint.js'
+import { createHash } from 'node:crypto'
 import { jarvisMemoryTitle, redactJarvisText } from './privacy.js'
 import type { CandidateMemoryInput, CloseSessionInput, JarvisContextPackage, JarvisMemoryRecord, JarvisSession, PulseJarvisConfig } from './types.js'
 
 export class JarvisClient {
+  readonly destinationScope: string
   private readonly baseUrl: string
   private readonly token: string | undefined
   private readonly timeoutMs: number
@@ -12,6 +14,7 @@ export class JarvisClient {
   constructor(config: PulseJarvisConfig = {}, timeoutMs = 2000, contextTimeoutMs = 8000) {
     this.baseUrl = assertJarvisApiUrl(config.apiUrl ?? 'http://127.0.0.1:7330', config.allowRemote === true)
     this.token = config.token
+    this.destinationScope = createHash('sha256').update(JSON.stringify([this.baseUrl, this.token ?? ''])).digest('hex')
     this.timeoutMs = timeoutMs
     this.contextTimeoutMs = contextTimeoutMs
   }
@@ -42,12 +45,26 @@ export class JarvisClient {
     }
   }
 
-  async retrieveContext(task: string, tokenBudget = 4000, workspace?: string): Promise<JarvisContextPackage | undefined> {
+  async retrieveContext(task: string, tokenBudget = 4000, workspace?: string, recentContext?: string): Promise<JarvisContextPackage | undefined> {
     try {
       return await this.request<JarvisContextPackage>('/v1/context/retrieve', {
-        task: this.safeText(task), tokenBudget, client: 'pulse', ...(workspace ? { workspace } : {}),
+        task: this.safeText(task), tokenBudget: Math.max(500, Math.min(8000, tokenBudget)), client: 'pulse', ...(workspace ? { workspace } : {}), ...(recentContext ? { recentContext: this.safeText(recentContext).slice(-6000) } : {}),
       }, this.contextTimeoutMs)
     } catch (error) { this.warnFailure('retrieveContext', error); return undefined }
+  }
+
+  async observe(input: { externalId: string; content: string; title?: string; occurredAt: string; workspace?: string; keywords?: string[] }): Promise<{ id: string; status: string }> {
+    return this.request('/v1/observe', { ...input, content: this.safeText(input.content), ...(input.title ? { title: this.safeText(input.title) } : {}), client: 'pulse' }, this.contextTimeoutMs)
+  }
+
+  async searchKnowledge(input: { query: string; topicId?: string | undefined; keyword?: string | undefined; limit?: number | undefined; offset?: number | undefined }): Promise<unknown> {
+    const params = new URLSearchParams(Object.entries({ ...input, query: this.safeText(input.query) }).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)]))
+    return this.get(`/v1/knowledge/search?${params}`)
+  }
+
+  async getKnowledge(id: string, input: { offset?: number; charOffset?: number; maxLines?: number; maxChars?: number } = {}): Promise<unknown> {
+    const params = new URLSearchParams(Object.entries(input).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)]))
+    return this.get(`/v1/knowledge/${encodeURIComponent(id)}?${params}`)
   }
 
   async searchMemory(projectId: string, query: string, limit = 10): Promise<JarvisMemoryRecord[]> {
