@@ -316,7 +316,9 @@ it('really reruns a stale artifact check instead of recycling the old cached suc
     expect(await host.artifactFile(conversation.id, artifact, run.id)).toMatchObject({ hash: hash('new bytes') })
     expect((await host.listArtifacts(conversation.id, 'turn')).filter(item => item.path === artifact && item.runId === run.id)).toEqual([expect.objectContaining({ hash: hash('new bytes') })])
   } finally { await host.close() }
-}, 20_000)
+// Two real Python checks each include Windows sandbox setup and teardown;
+// retain the original command/model budgets and every current-hash assertion.
+}, process.platform === 'win32' ? 2 * 275_000 + 20_000 : 20_000)
 
 it('defers a successor check failure without hiding it from that successor', () => {
   const program = buildTaskControllerProgram({ version: '55', system: 'test', toolNames: ['fs.read', 'shell.exec'], approvalMode: 'auto', maxTurns: 32 })

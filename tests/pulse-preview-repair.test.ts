@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { createAgent, createRuntimeState, EffectOutbox, exportRuntimePersistence, MutationLog, type EffectRecord } from '@hunterzhu/pulse-runtime'
 import { ConversationData } from '../packages/data/src/index.js'
 import { createLocalHost } from '../packages/server/src/index.js'
+import { MockAdapter } from '@hunterzhu/pulse-adapters'
 import { acceptanceCriteriaFromObjective, isTaskContinuation } from '../packages/server/src/task.js'
 import { readConversationFixture, writeConversationFixture } from './conversation-fixtures.js'
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
@@ -100,53 +101,76 @@ it('settles a stopped host run without Jarvis and without dropping the busy mark
 
 it('keeps a settled shell.start blocked while its persisted process is unknown and releases a known exit', async () => {
   const directory = await temporary('pulse-f22-shell-')
-  const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), taskController: false, approvalMode: 'ask', jarvis: { enabled: false }, mockToolCalls: [{ name: 'shell.start', input: { command: 'node', args: ['--version'], timeoutMs: 5000 } }], mockAfterToolResponse: 'Local fixture launched.' })
-  hosts.push(host)
-  const conversation = await host.createConversation({ title: 'shell' })
-  const run = await host.sendMessage(conversation.id, { text: 'launch a local process' })
-  for await (const event of run.events) {
-    if (event.type === 'waiting') await run.reply(String((event.data as { effectId?: string }).effectId), { approved: true })
-  }
-  expect((await run.outcome()).status).toBe('succeeded')
-  const manifest = await (host as unknown as { readManifest(id: string): Promise<{ runs: string[]; activeRunId?: string }> }).readManifest(conversation.id)
-  const runId = manifest.runs.at(-1)!
-  const processDir = join(directory, 'data', 'conversations', conversation.id, 'runs', runId, 'shell-processes')
-  const receiptName = (await readdir(processDir)).find(name => /^[a-f0-9]{64}\.json$/.test(name))
-  expect(receiptName).toBeTruthy()
-  const receiptPath = join(processDir, receiptName!)
-  const budgetPath = join(directory, 'data', 'conversations', conversation.id, 'runs', runId, 'model-budget.json')
-  const runtimePath = join(directory, 'data', 'conversations', conversation.id, 'runs', runId, 'runtime.json')
-  expect((await host.listRunProcesses(conversation.id, runId))[0]?.status).toBe('exited')
-  const budgetBefore = await readFile(budgetPath).catch(() => Buffer.alloc(0))
-  const runtimeBefore = await readFile(runtimePath)
-  const exitedReceipt = await readFile(receiptPath)
-  manifest.activeRunId = runId
-  await (host as unknown as { saveManifest(manifest: { runs: string[]; activeRunId?: string }): Promise<void> }).saveManifest(manifest)
-  await expect(host.reconcileInactiveRun(conversation.id, runId)).resolves.toMatchObject({ cleared: true, status: 'succeeded' })
-  expect((await host.getConversation(conversation.id)).summary.activeRunId).toBeUndefined()
-  expect(await readFile(budgetPath).catch(() => Buffer.alloc(0))).toEqual(budgetBefore)
-  expect(await readFile(runtimePath)).toEqual(runtimeBefore)
-  expect(await readFile(receiptPath)).toEqual(exitedReceipt)
+  // Separate model turns keep the asynchronous process owned until actual exit.
+  // Model completion alone is not evidence that a cold Windows shell has exited.
+  const model = vi.spyOn(MockAdapter.prototype, 'executeAttempt')
+    .mockResolvedValueOnce({ text: '', toolCalls: [{ toolCallId: 'start', name: 'shell.start', input: { command: 'node', args: ['--version'], timeoutMs: 5000 } }], finishReason: 'tool_calls' })
+    .mockResolvedValueOnce({ text: '', toolCalls: [{ toolCallId: 'wait-exit', name: 'ask.choice', input: { prompt: 'Wait for the fixture process to exit.', decisionId: 'fixture-exit', options: [{ label: 'Continue', value: 'continue' }] } }], finishReason: 'tool_calls' })
+    .mockResolvedValue({ text: 'Local fixture launched.', toolCalls: [], finishReason: 'stop' })
+  try {
+    const host = createLocalHost({ cwd: directory, dataDir: join(directory, 'data'), taskController: false, approvalMode: 'ask', jarvis: { enabled: false } })
+    hosts.push(host)
+    const conversation = await host.createConversation({ title: 'shell' })
+    const run = await host.sendMessage(conversation.id, { text: 'launch a local process' })
+    for await (const event of run.events) {
+      if (event.type !== 'waiting') continue
+      const effectId = String((event.data as { effectId?: string }).effectId)
+      const group = (await run.pendingInteractions()).find(item => item.items.some(input => input.effectId === effectId))
+      expect(group).toBeDefined()
+      if (group?.kind === 'approval') await run.reply(effectId, { approved: true })
+      else {
+        const started = Date.now(), timeout = process.platform === 'win32' ? 275_000 : 10_000
+        for (;;) {
+          const child = (await host.listRunProcesses(conversation.id, run.id))[0]
+          if (child?.status === 'exited') { expect(child.result).toMatchObject({ code: 0 }); break }
+          expect(child?.status, child?.error).toBe('running')
+          if (Date.now() - started > timeout) throw new Error('Fixture shell did not reach a durable exit')
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+        await run.reply(effectId, { value: 'continue' })
+      }
+    }
+    expect((await run.outcome()).status).toBe('succeeded')
+    const manifest = await (host as unknown as { readManifest(id: string): Promise<{ runs: string[]; activeRunId?: string }> }).readManifest(conversation.id)
+    const runId = manifest.runs.at(-1)!
+    const processDir = join(directory, 'data', 'conversations', conversation.id, 'runs', runId, 'shell-processes')
+    const receiptName = (await readdir(processDir)).find(name => /^[a-f0-9]{64}\.json$/.test(name))
+    expect(receiptName).toBeTruthy()
+    const receiptPath = join(processDir, receiptName!)
+    const budgetPath = join(directory, 'data', 'conversations', conversation.id, 'runs', runId, 'model-budget.json')
+    const runtimePath = join(directory, 'data', 'conversations', conversation.id, 'runs', runId, 'runtime.json')
+    expect((await host.listRunProcesses(conversation.id, runId))[0]?.status).toBe('exited')
+    const budgetBefore = await readFile(budgetPath).catch(() => Buffer.alloc(0))
+    const runtimeBefore = await readFile(runtimePath)
+    const exitedReceipt = await readFile(receiptPath)
+    manifest.activeRunId = runId
+    await (host as unknown as { saveManifest(manifest: { runs: string[]; activeRunId?: string }): Promise<void> }).saveManifest(manifest)
+    await expect(host.reconcileInactiveRun(conversation.id, runId)).resolves.toMatchObject({ cleared: true, status: 'succeeded' })
+    expect((await host.getConversation(conversation.id)).summary.activeRunId).toBeUndefined()
+    expect(await readFile(budgetPath).catch(() => Buffer.alloc(0))).toEqual(budgetBefore)
+    expect(await readFile(runtimePath)).toEqual(runtimeBefore)
+    expect(await readFile(receiptPath)).toEqual(exitedReceipt)
 
-  const unknown = JSON.parse(exitedReceipt.toString('utf8')) as { status: string; result?: unknown; error?: unknown }
-  unknown.status = 'running'
-  delete unknown.result
-  delete unknown.error
-  await writeFile(receiptPath, JSON.stringify(unknown))
-  expect((await host.listRunProcesses(conversation.id, runId))[0]?.status).toBe('unknown')
-  const blockedBudget = await readFile(budgetPath).catch(() => Buffer.alloc(0))
-  const blockedRuntime = await readFile(runtimePath)
-  const blockedReceipt = await readFile(receiptPath)
-  const restored = await (host as unknown as { readManifest(id: string): Promise<{ runs: string[]; activeRunId?: string }> }).readManifest(conversation.id)
-  restored.activeRunId = runId
-  await (host as unknown as { saveManifest(manifest: { runs: string[]; activeRunId?: string }): Promise<void> }).saveManifest(restored)
-  await expect(host.reconcileInactiveRun(conversation.id, runId)).rejects.toThrow(/RECOVERY_SIDE_EFFECT_UNKNOWN|SHELL_PROCESS_STATE_UNKNOWN|SHELL_PROCESS_RUNNING/)
-  expect((await (host as unknown as { readManifest(id: string): Promise<{ activeRunId?: string }> }).readManifest(conversation.id)).activeRunId).toBe(runId)
-  expect(await host.inactiveReleaseBlocker(conversation.id, runId)).toBe('RECOVERY_SIDE_EFFECT_UNKNOWN')
-  expect(await readFile(budgetPath).catch(() => Buffer.alloc(0))).toEqual(blockedBudget)
-  expect(await readFile(runtimePath)).toEqual(blockedRuntime)
-  expect(await readFile(receiptPath)).toEqual(blockedReceipt)
-}, process.platform === 'win32' ? 240_000 : 20_000)
+    const unknown = JSON.parse(exitedReceipt.toString('utf8')) as { status: string; result?: unknown; error?: unknown }
+    unknown.status = 'running'
+    delete unknown.result
+    delete unknown.error
+    await writeFile(receiptPath, JSON.stringify(unknown))
+    expect((await host.listRunProcesses(conversation.id, runId))[0]?.status).toBe('unknown')
+    const blockedBudget = await readFile(budgetPath).catch(() => Buffer.alloc(0))
+    const blockedRuntime = await readFile(runtimePath)
+    const blockedReceipt = await readFile(receiptPath)
+    const restored = await (host as unknown as { readManifest(id: string): Promise<{ runs: string[]; activeRunId?: string }> }).readManifest(conversation.id)
+    restored.activeRunId = runId
+    await (host as unknown as { saveManifest(manifest: { runs: string[]; activeRunId?: string }): Promise<void> }).saveManifest(restored)
+    await expect(host.reconcileInactiveRun(conversation.id, runId)).rejects.toThrow(/RECOVERY_SIDE_EFFECT_UNKNOWN|SHELL_PROCESS_STATE_UNKNOWN|SHELL_PROCESS_RUNNING/)
+    expect((await (host as unknown as { readManifest(id: string): Promise<{ activeRunId?: string }> }).readManifest(conversation.id)).activeRunId).toBe(runId)
+    expect(await host.inactiveReleaseBlocker(conversation.id, runId)).toBe('RECOVERY_SIDE_EFFECT_UNKNOWN')
+    expect(await readFile(budgetPath).catch(() => Buffer.alloc(0))).toEqual(blockedBudget)
+    expect(await readFile(runtimePath)).toEqual(blockedRuntime)
+    expect(await readFile(receiptPath)).toEqual(blockedReceipt)
+  } finally { model.mockRestore() }
+}, process.platform === 'win32' ? 300_000 : 20_000)
 
 it('does not release a stopped host while a persisted shell is still unknown', async () => {
   const directory = await temporary('pulse-f22-close-')
