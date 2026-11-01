@@ -101,6 +101,9 @@ it('settles a stopped host run without Jarvis and without dropping the busy mark
 
 it('keeps a settled shell.start blocked while its persisted process is unknown and releases a known exit', async () => {
   const directory = await temporary('pulse-f22-shell-')
+  const sandboxTiming = process.env.PULSE_SANDBOX_TIMING
+  // Capture native phase latency only for this fixture, not JSON CLI children.
+  if (process.platform === 'win32') process.env.PULSE_SANDBOX_TIMING = '1'
   // Separate model turns keep the asynchronous process owned until actual exit.
   // Model completion alone is not evidence that a cold Windows shell has exited.
   const model = vi.spyOn(MockAdapter.prototype, 'executeAttempt')
@@ -169,7 +172,11 @@ it('keeps a settled shell.start blocked while its persisted process is unknown a
     expect(await readFile(budgetPath).catch(() => Buffer.alloc(0))).toEqual(blockedBudget)
     expect(await readFile(runtimePath)).toEqual(blockedRuntime)
     expect(await readFile(receiptPath)).toEqual(blockedReceipt)
-  } finally { model.mockRestore() }
+  } finally {
+    model.mockRestore()
+    if (sandboxTiming === undefined) delete process.env.PULSE_SANDBOX_TIMING
+    else process.env.PULSE_SANDBOX_TIMING = sandboxTiming
+  }
 }, process.platform === 'win32' ? 300_000 : 20_000)
 
 it('does not release a stopped host while a persisted shell is still unknown', async () => {

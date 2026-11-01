@@ -215,10 +215,25 @@ export class ConversationData {
         if (this.closed) throw new Error('DATA_CLIENT_CLOSED');
         return this.request<T>(method, args);
     }
-    private request<T>(method: string, args: unknown[]): Promise<T> { return new Promise<T>((resolveCall, reject) => { if (this.pending.size >= 256) {
-        reject(new Error('DATA_QUEUE_FULL'));
-        return;
-    } const id = ++this.serial; const timer = setTimeout(() => { this.pending.delete(id); reject(new Error('DATA_REQUEST_TIMEOUT')); }, 10000); this.pending.set(id, { resolve: v => resolveCall(v as T), reject, timer }); this.socket!.ref(); this.socket!.write(JSON.stringify({ id, method, args, ...(process.env.PULSE_UPDATE_TOKEN ? { updateToken: process.env.PULSE_UPDATE_TOKEN } : {}) }) + '\n'); }); }
+    private request<T>(method: string, args: unknown[]): Promise<T> {
+        return new Promise<T>((resolveCall, reject) => {
+            if (this.pending.size >= 256) { reject(new Error('DATA_QUEUE_FULL')); return; }
+            const id = ++this.serial;
+            const timer = setTimeout(() => {
+                // Native synchronous work can delay timers and socket callbacks
+                // together. Drain ready I/O before rejecting an already queued
+                // reply. This is one check turn, not a new request budget.
+                setImmediate(() => {
+                    if (!this.pending.delete(id)) return;
+                    if (!this.pending.size) this.socket?.unref();
+                    reject(new Error('DATA_REQUEST_TIMEOUT'));
+                });
+            }, 10000);
+            this.pending.set(id, { resolve: value => resolveCall(value as T), reject, timer });
+            this.socket!.ref();
+            this.socket!.write(JSON.stringify({ id, method, args, ...(process.env.PULSE_UPDATE_TOKEN ? { updateToken: process.env.PULSE_UPDATE_TOKEN } : {}) }) + '\n');
+        });
+    }
     close(): Promise<void> {
         if (this.closing) return this.closing;
         this.closed = true;
