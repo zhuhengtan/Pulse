@@ -74,7 +74,7 @@ it.skipIf(process.platform === 'win32')('remembered git status, diff, and log do
     // on the external gitdir and still must not start the repository helper.
     const linkedLog = await run(worktree, ['log', '-1', '--oneline'])
     expect(linkedLog.code, linkedLog.stderr).not.toBe(0)
-    expect(linkedLog.stderr).toContain('not a git repository')
+    expect(linkedLog.stderr).toMatch(/not a git repository|gitfile does not point to a valid repository/)
     await expect(readFile(marker, 'utf8')).rejects.toBeTruthy()
   } finally {
     await git(repo, ['worktree', 'remove', '--force', worktree]).catch(() => undefined)

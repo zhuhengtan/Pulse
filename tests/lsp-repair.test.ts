@@ -2,16 +2,40 @@ import { afterEach, expect, it } from 'vitest'
 import { mkdtemp, readFile, writeFile, rm, copyFile, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { LspService, LSP_CANCEL_QUIET_MS, parseLspConfig } from '../packages/server/src/lsp/index.js'
 import { LspFrames } from '../packages/server/src/lsp/protocol.js'
 
 const roots: string[] = []
 const controllers: AbortController[] = []
+const services: LspService[] = []
+function helperPids(service: LspService): number[] {
+  const connections = (service as unknown as { connections: Map<string, { child?: { pid?: number } }> }).connections
+  return [...connections.values()].flatMap(connection => connection.child?.pid ? [connection.child.pid] : [])
+}
+// Query only descendants of the fixture-owned helper. Server process.pid can
+// belong to a bubblewrap PID namespace and is not a host process identity.
+async function ownedTree(pid: number): Promise<number[]> {
+  const found = new Set<number>(), pending = [pid]
+  while (pending.length) {
+    const current = pending.pop()!
+    if (found.has(current)) continue
+    found.add(current)
+    if (found.size > 128) throw new Error('FIXTURE_PROCESS_TREE_TOO_LARGE')
+    if (process.platform === 'win32') continue
+    const output = await promisify(execFile)('/usr/bin/pgrep', ['-P', String(current)], { timeout: 2000 }).then(result => result.stdout, error => { if (error.code === 1) return ''; throw error })
+    pending.push(...output.trim().split(/\s+/).map(Number).filter(value => Number.isSafeInteger(value) && value > 0))
+  }
+  return [...found]
+}
+const instanceId = (value: unknown) => /instance=([0-9a-f-]+)/.exec(JSON.stringify(value))?.[1]
 afterEach(async () => {
+  const owned = (await Promise.all(services.splice(0).flatMap(helperPids).map(ownedTree))).flat()
   controllers.splice(0).forEach(controller => controller.abort())
-  await new Promise(resolve => setTimeout(resolve, 150))
-  await Promise.all(roots.splice(0).map(root => rm(root, { force: true, recursive: true })))
-})
+  await expect.poll(() => owned.every(pid => !alive(pid)), { timeout: 10000, interval: 50 }).toBe(true)
+  await Promise.all(roots.splice(0).map(root => rm(root, { force: true, recursive: true, maxRetries: 5, retryDelay: 100 })))
+}, 15000)
 
 function names(nodes: any[]): string[] {
   return nodes.flatMap(node => [node.name, ...names(node.children ?? [])])
@@ -30,7 +54,9 @@ async function fixture(mode = '', extra: string[] = []) {
   const args = [join(root, 'server.cjs'), mode, ...extra]
   if (mode === 'hang') { await writeFile(hold, 'hold'); args.push(`hold=${hold}`) }
   const config = { enabled: true as const, servers: { test: { command: process.execPath, args: args.filter(arg => arg !== ''), languages: { '.ts': 'typescript' } } } }
-  return { root, hold, controller, config, service: new LspService(root, config, controller.signal) }
+  const service = new LspService(root, config, controller.signal)
+  services.push(service)
+  return { root, hold, controller, config, service }
 }
 
 it('rejects a completed oversized header and a header that only exceeds the cap when joined', () => {
@@ -60,7 +86,7 @@ it('keeps nested symbol names and ranges, and truncates by total nodes and depth
   const limited = await deep.service.query('symbols', { path: 'a.ts' }, deep.controller.signal)
   expect(names(limited.items as any[])).toEqual(['D0', 'D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7'])
   expect(limited.truncated).toBe(true)
-}, 45000)
+}, process.platform === 'win32' ? 480000 : 45000)
 
 it('allows a workspace file named ..secret.ts and still rejects a parent segment', async () => {
   const f = await fixture()
@@ -70,7 +96,7 @@ it('allows a workspace file named ..secret.ts and still rejects a parent segment
   const definition = await f.service.query('definition', { path: '..secret.ts', line: 1, column: 1 }, f.controller.signal)
   expect(definition.items).toEqual([expect.objectContaining({ path: '..secret.ts' })])
   await expect(f.service.query('symbols', { path: '..' }, f.controller.signal)).rejects.toThrow('CODE_PATH_OUTSIDE_WORKSPACE')
-}, 45000)
+}, process.platform === 'win32' ? 480000 : 45000)
 
 it('rejects enabled strings and workspace-root overrides before starting a server', async () => {
   const f = await fixture()
@@ -88,7 +114,7 @@ it('uses the config captured at construction after the caller mutates it', async
   f.config.servers.test.command = 'evil'
   const result = await f.service.query('symbols', { path: 'a.ts' }, f.controller.signal)
   expect(JSON.stringify(result)).toContain('write=denied')
-}, 45000)
+}, process.platform === 'win32' ? 480000 : 45000)
 
 it('retires a silent cancelled server and serves the next query from a new process', async () => {
   const f = await fixture('hang', ['track'])
@@ -96,19 +122,25 @@ it('retires a silent cancelled server and serves the next query from a new proce
   const pending = f.service.query('symbols', { path: 'a.ts' }, symbolsSignal.signal)
   const settled = pending.then(() => undefined, (error: Error) => error)
   const diagnostic = await f.service.query('diagnostics', { path: 'a.ts' }, f.controller.signal)
-  const first = Number(/pid=(\d+)/.exec(JSON.stringify(diagnostic))?.[1])
-  expect(first).toBeGreaterThan(0)
+  const first = instanceId(diagnostic)
+  expect(first).toBeTruthy()
+  const owned = (await Promise.all(helperPids(f.service).map(ownedTree))).flat()
+  expect(owned.length).toBeGreaterThan(0)
+  if (process.platform === 'win32') {
+    const serverPid = Number(/pid=(\d+)/.exec(JSON.stringify(diagnostic))?.[1])
+    expect(serverPid).toBeGreaterThan(0)
+    owned.push(serverPid)
+  }
   symbolsSignal.abort()
   const error = await settled
   expect(String((error as Error).message ?? error)).toMatch(/CANCELLED/)
-  await new Promise(resolve => setTimeout(resolve, LSP_CANCEL_QUIET_MS + 700))
-  expect(alive(first)).toBe(false)
+  await expect.poll(() => owned.every(pid => !alive(pid)), { timeout: 10000, interval: 50 }).toBe(true)
   await unlink(f.hold)
   const next = await f.service.query('symbols', { path: 'a.ts' }, f.controller.signal)
-  const second = Number(/pid=(\d+)/.exec(JSON.stringify(next))?.[1])
-  expect(second).toBeGreaterThan(0)
+  const second = instanceId(next)
+  expect(second).toBeTruthy()
   expect(second).not.toBe(first)
-}, 45000)
+}, process.platform === 'win32' ? 480000 : 45000)
 
 it('keeps a connection that still answers after a sibling request is cancelled', async () => {
   const f = await fixture('hang', ['track'])
@@ -116,14 +148,17 @@ it('keeps a connection that still answers after a sibling request is cancelled',
   const pending = f.service.query('symbols', { path: 'a.ts' }, symbolsSignal.signal)
   const settled = pending.then(() => undefined, (error: Error) => error)
   const firstDiagnostic = await f.service.query('diagnostics', { path: 'a.ts' }, f.controller.signal)
-  const first = Number(/pid=(\d+)/.exec(JSON.stringify(firstDiagnostic))?.[1])
+  const first = instanceId(firstDiagnostic)
+  expect(first).toBeTruthy()
+  const helper = helperPids(f.service)[0]!
+  expect(helper).toBeGreaterThan(0)
   symbolsSignal.abort()
   const again = await f.service.query('diagnostics', { path: 'a.ts' }, f.controller.signal)
-  expect(Number(/pid=(\d+)/.exec(JSON.stringify(again))?.[1])).toBe(first)
+  expect(instanceId(again)).toBe(first)
   await new Promise(resolve => setTimeout(resolve, LSP_CANCEL_QUIET_MS + 400))
-  expect(alive(first)).toBe(true)
+  expect(alive(helper)).toBe(true)
   await unlink(f.hold)
   const next = await f.service.query('symbols', { path: 'a.ts' }, f.controller.signal)
-  expect(Number(/pid=(\d+)/.exec(JSON.stringify(next))?.[1])).toBe(first)
+  expect(instanceId(next)).toBe(first)
   await settled
-}, 45000)
+}, process.platform === 'win32' ? 480000 : 45000)

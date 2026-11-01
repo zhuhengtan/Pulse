@@ -27,8 +27,11 @@ function loadPty(): typeof import('node-pty') {
     return require('node-pty') as typeof import('node-pty')
   }
   const native = utils.loadNativeModule('pty')
-  const helper = join(dirname(entry), native.dir, 'spawn-helper').replace('app.asar', 'app.asar.unpacked').replace('node_modules.asar', 'node_modules.asar.unpacked')
-  accessSync(helper, constants.X_OK)
+  // node-pty builds spawn-helper only for macOS; Linux uses native forkpty.
+  if (process.platform === 'darwin') {
+    const helper = join(dirname(entry), native.dir, 'spawn-helper').replace('app.asar', 'app.asar.unpacked').replace('node_modules.asar', 'node_modules.asar.unpacked')
+    accessSync(helper, constants.X_OK)
+  }
   return require('node-pty') as typeof import('node-pty')
 }
 export function assertAgentPtyAvailable(): void {
