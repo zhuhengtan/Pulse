@@ -1305,3 +1305,151 @@ index 000000000..49cd975db
 +        );
 +    }
 +}
+diff --git a/vendor/srt-win-src/src/logon.rs b/vendor/srt-win-src/src/logon.rs
+--- a/vendor/srt-win-src/src/logon.rs
++++ b/vendor/srt-win-src/src/logon.rs
+@@ -377,8 +377,9 @@
+     drop(stdout.runner);
+     drop(stderr.runner);
+
+-    // Write the spec, then close stdin so the runner's
+-    // `read_exact` doesn't block waiting for more.
++    // Write the bounded spec first. Keep this pipe open afterwards: the
++    // runner reads exactly that prefix and its target inherits the remaining
++    // bytes as stdin (including private PTY frames).
+     {
+         let mut wrote = 0u32;
+         unsafe {
+@@ -393,7 +394,17 @@
+             ));
+         }
+     }
+-    drop(stdin.broker);
++    // The input pump owns only the runner-side write end. On caller EOF or
++    // failure it closes that end, so an interactive target observes owner loss.
++    // Do not join: the target may exit while the caller keeps stdin open. The
++    // broker exits after the runner and its existing Job owns all descendants.
++    let bin = std::io::stdin().as_raw().0 as isize;
++    let si = stdin.broker.into_raw().0 as isize;
++    std::thread::spawn(move || {
++        let src = HANDLE(bin as *mut c_void);
++        let dst = OwnedHandle(HANDLE(si as *mut c_void));
++        pump(src, dst.raw());
++    });
+
+     // Pump stdout/stderr on dedicated threads. `HANDLE` wraps a
+     // `*mut c_void` which is `!Send`; the value is just an opaque
+@@ -439,6 +450,11 @@
+ trait AsRawHandle {
+     fn as_raw(&self) -> HANDLE;
+ }
++impl AsRawHandle for std::io::Stdin {
++    fn as_raw(&self) -> HANDLE {
++        HANDLE(std::os::windows::io::AsRawHandle::as_raw_handle(self))
++    }
++}
+ impl AsRawHandle for std::io::Stdout {
+     fn as_raw(&self) -> HANDLE {
+         HANDLE(std::os::windows::io::AsRawHandle::as_raw_handle(self))
+@@ -452,7 +468,34 @@
+
+ #[cfg(test)]
+ mod tests {
+-    use super::cwd_drive_root;
++    use super::*;
++
++    #[test]
++    fn stdin_pump_preserves_binary_bytes_and_closes_on_owner_eof() {
++        let input = make_pipe(false).unwrap();
++        let output = make_pipe(false).unwrap();
++        let src = input.runner.into_raw().0 as isize;
++        let dst = output.broker.into_raw().0 as isize;
++        let worker = std::thread::spawn(move || {
++            let src = OwnedHandle(HANDLE(src as *mut c_void));
++            let dst = OwnedHandle(HANDLE(dst as *mut c_void));
++            pump(src.raw(), dst.raw());
++        });
++        let expected = b"PTY1\x00\xff\x03\r\n";
++        let mut wrote = 0;
++        unsafe { WriteFile(input.broker.raw(), Some(expected), Some(&mut wrote), None) }.unwrap();
++        assert_eq!(wrote as usize, expected.len());
++        drop(input.broker);
++        let mut actual = Vec::new();
++        loop {
++            let mut bytes = [0u8; 3];
++            let mut count = 0;
++            if unsafe { ReadFile(output.runner.raw(), Some(&mut bytes), Some(&mut count), None) }.is_err() || count == 0 { break; }
++            actual.extend_from_slice(&bytes[..count as usize]);
++        }
++        worker.join().unwrap();
++        assert_eq!(actual, expected);
++    }
+
+     #[test]
+     fn drive_letter_root() {
+diff --git a/vendor/srt-win-src/src/runner.rs b/vendor/srt-win-src/src/runner.rs
+--- a/vendor/srt-win-src/src/runner.rs
++++ b/vendor/srt-win-src/src/runner.rs
+@@ -19,6 +19,9 @@
+ use anyhow::{Context, Result, anyhow};
+ use serde::{Deserialize, Serialize};
+ use std::io::Read;
++use std::os::windows::io::FromRawHandle;
++use windows::Win32::Foundation::HANDLE;
++use windows::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
+
+ use crate::launch;
+
+@@ -70,11 +73,17 @@
+
+ /// Read a 4-byte little-endian length prefix followed by that many
+ /// bytes of JSON from stdin. The length prefix lets the runner know
+-/// when the spec ends without the broker closing the write end
+-/// (which it does anyway — the prefix is just robustness against a
+-/// future stdin-after-spec use).
++/// when the spec ends without consuming target stdin. Rust's buffered Stdin
++/// may prefetch bytes after the JSON; those bytes would then be invisible to
++/// the inherited OS handle in the target. Borrow the process handle as an
++/// unbuffered File and leave ownership with the process.
+ fn read_cmd_from_stdin() -> Result<RunnerCmd> {
+-    let mut stdin = std::io::stdin().lock();
++    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.context("runner: stdin handle")?;
++    read_cmd_from_handle(handle)
++}
++
++fn read_cmd_from_handle(handle: HANDLE) -> Result<RunnerCmd> {
++    let mut stdin = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(handle.0) });
+     let mut len_buf = [0u8; 4];
+     stdin
+         .read_exact(&mut len_buf)
+@@ -182,6 +191,30 @@
+     use super::*;
+
+     #[test]
++    fn spec_read_leaves_coalesced_target_input_on_the_inherited_handle() {
++        use crate::util::OwnedHandle;
++        use windows::Win32::Storage::FileSystem::WriteFile;
++        use windows::Win32::System::Pipes::CreatePipe;
++        let mut read = HANDLE::default();
++        let mut write = HANDLE::default();
++        unsafe { CreatePipe(&mut read, &mut write, None, 0) }.unwrap();
++        let (read, write) = (OwnedHandle(read), OwnedHandle(write));
++        let spec = RunnerCmd::ProbeEgress { target: "127.0.0.1:49999".into() };
++        let tail = b"PTY1\x00\xff\x03\r\n";
++        let mut bytes = encode_cmd(&spec).unwrap();
++        bytes.extend_from_slice(tail);
++        let mut wrote = 0;
++        unsafe { WriteFile(write.raw(), Some(&bytes), Some(&mut wrote), None) }.unwrap();
++        assert_eq!(wrote as usize, bytes.len());
++        drop(write);
++        assert!(matches!(read_cmd_from_handle(read.raw()).unwrap(), RunnerCmd::ProbeEgress { target } if target == "127.0.0.1:49999"));
++        let mut inherited = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(read.raw().0) });
++        let mut actual = Vec::new();
++        inherited.read_to_end(&mut actual).unwrap();
++        assert_eq!(actual, tail);
++    }
++
++    #[test]
+     fn cmd_roundtrip() {
+         let s = RunnerCmd::Exec(RunnerSpec {
+             argv: vec!["cmd.exe".into(), "/c".into(), "echo hi".into()],

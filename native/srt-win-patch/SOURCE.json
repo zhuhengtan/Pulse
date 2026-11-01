@@ -5,6 +5,7 @@
   "archiveSha256": "978b0bacedf88ac441d2c723290a1aba64c85571978ba517fabde68a9455ce90",
   "patchCommit": "26dbcbeaa29e665af25b6685564b3d550d94cf2c",
   "patchUrl": "https://github.com/anthropics/sandbox-runtime/pull/523",
-  "patchSha256": "c48cef987e00e1b3dcc5a770da9e593e377bf75e461e7a1980ca1177c3f1ccc3",
-  "testAdaptation": "Parent SDDL round-trip permits only D:( to D:AI( canonicalization; all owner/group/ACE/protection comparisons remain exact. Unit ACL fixtures use a per-process atomic suffix and verify parallel uniqueness with a frozen clock; ACL and rollback assertions remain unchanged."
+  "patchSha256": "6629d235662200e6cb4900e19931ec99d0f1ea34245ba3e153fd6ed9d54e57a1",
+  "testAdaptation": "Parent SDDL round-trip permits only D:( to D:AI( canonicalization; all owner/group/ACE/protection comparisons remain exact. Unit ACL fixtures use a per-process atomic suffix and verify parallel uniqueness with a frozen clock; ACL and rollback assertions remain unchanged.",
+  "stdinForwarding": "Pulse local addition: forward caller stdin after the bounded launch spec; parse spec without buffered prefetch. Native binary/EOF and coalesced-spec regressions retain restricted token, Job, ACL and WFP boundaries."
 }

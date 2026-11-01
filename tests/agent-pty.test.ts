@@ -110,15 +110,28 @@ it('launches a real PTY through the exact SRT wrapper, preserves the identity ch
   const root = await directory(), script = join(root, 'interactive.cjs')
   await writeFile(script, "console.log(process.stdin.isTTY ? 'tty-ready' : 'not-tty');require('readline').createInterface({input:process.stdin}).once('line',line=>{console.log('received:'+line);process.exit(0)})")
   const identity = await resolveShellIdentity('node', [script], root)
-  let write!: (data: string) => void, sent = false, checked = 0, argv: readonly string[] = []
+  let write!: (data: string) => void | Promise<void>, sent = false, checked = 0, argv: readonly string[] = []
+  let inputResult: Promise<{ ok: boolean; error?: string }> | undefined
+  let output = ''
   const ptyOptions = agentPtyShellOptions(input => { write = input })
   const result = await runShell('node', [script], { ...ptyOptions, cwd: root, timeoutMs: 10000, allowedDomains: [], expectedIdentity: identity, beforeLaunch: async () => { checked++; return identity },
     spawnProcess: (wrapped, options) => { argv = [...wrapped]; expect(options.env.NODE_OPTIONS).toBeUndefined(); return ptyOptions.spawnProcess(wrapped, options) },
-    onOutput: (_stream, chunk) => { if (!sent && chunk.toString().includes('tty-ready')) { sent = true; write(process.platform === 'win32' ? 'local-line\r' : 'local-line\n') } },
+    onOutput: (stream, chunk) => {
+      if (stream !== 'stdout') return
+      output = (output + chunk.toString()).slice(-1024)
+      if (!sent && output.includes('tty-ready')) {
+        sent = true
+        // Windows acknowledges input asynchronously. Observe rejection at once;
+        // a closed broker is an explicit failed delivery, not an unhandled task.
+        inputResult = Promise.resolve().then(() => write(process.platform === 'win32' ? 'local-line\r' : 'local-line\n'))
+          .then(() => ({ ok: true }), error => ({ ok: false, error: String(error) }))
+      }
+    },
   })
   expect(checked).toBe(1); expect(sent).toBe(true)
   expect(argv.length).toBeGreaterThan(2); expect(argv[0]).not.toBe(identity.executable)
-  expect(result).toMatchObject({ code: 0, aborted: false, timedOut: false })
+  expect(result, JSON.stringify(result)).toMatchObject({ code: 0, aborted: false, timedOut: false })
+  expect(await inputResult).toEqual({ ok: true })
   expect(result.stdout).toContain('tty-ready'); expect(result.stdout).toContain('received:local-line')
 }, process.platform === 'win32' ? 300000 : 20000)
 
