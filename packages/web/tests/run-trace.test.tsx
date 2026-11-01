@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { emptyTrace, PersistedRunTrace, reduceTrace, RunTraceView } from '../src/RunTrace.js'
+import { emptyTrace, PersistedRunTrace, reduceTrace, RunTraceView, traceDuration } from '../src/RunTrace.js'
 import { PulseApp } from './RouterApp.js'
 import { PulseDesignSystem } from '../src/PulseDesignSystem.js'
 import type { PulseWebTransport, WebRunEvent } from '../src/transport.js'
@@ -10,6 +10,75 @@ beforeAll(() => {
   Object.defineProperty(window, 'matchMedia', { value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }), configurable: true })
   Element.prototype.scrollTo = vi.fn()
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+})
+
+it.each([
+  [882_000, '14 分 42 秒'], [3_723_000, '1 小时 2 分 3 秒'], [60_000, '1 分'], [8_000, '8 秒'], [500, '不足 1 秒'],
+])('formats a recorded duration of %sms as %s', (duration, text) => {
+  expect(traceDuration({ startedAt: 1_000, endedAt: 1_000 + duration })).toBe(text)
+})
+
+it('does not manufacture elapsed time for incomplete, reversed or invalid timestamps', () => {
+  for (const value of [{ startedAt: 1_000 }, { endedAt: 20_000 }, { startedAt: 2_000, endedAt: 1_000 }, { startedAt: NaN, endedAt: Infinity }]) expect(traceDuration(value)).toBeUndefined()
+  const terminalOnly = reduceTrace(emptyTrace, { type: 'complete', runId: 'empty', seq: 1, timestamp: 20_000, data: { status: 'succeeded' } })
+  expect(traceDuration(terminalOnly)).toBeUndefined()
+  const unknownStart = reduceTrace(reduceTrace(emptyTrace, { type: 'status', runId: 'empty', seq: 1, timestamp: 10_000, data: { label: '旧版过程' } }), { type: 'complete', runId: 'empty', seq: 2, timestamp: 20_000, data: { status: 'succeeded' } })
+  expect(traceDuration(unknownStart)).toBeUndefined()
+})
+
+it('freezes completion time across duplicate terminal events, late notes and replay errors', () => {
+  const finished = [
+    { ...model(1, 'A', 1), runStartedAt: 1_000, timestamp: 2_000 },
+    { type: 'complete', runId: 'run-busy', seq: 2, timestamp: 883_000, data: { status: 'succeeded', taskRequired: false } },
+  ].reduce((t, e) => reduceTrace(t, e as WebRunEvent), emptyTrace)
+  const view = render(<RunTraceView trace={finished} running={false} />)
+  const header = screen.getByRole('button', { name: /执行过程/ })
+  expect(header.textContent).toContain('耗时 14 分 42 秒')
+  fireEvent.click(header)
+  const late = [
+    { type: 'complete', runId: 'run-busy', seq: 3, timestamp: 999_000, data: { status: 'succeeded', taskRequired: false } },
+    { type: 'trace', runId: 'run-busy', seq: 4, timestamp: 0, data: { kind: 'note', effectId: 'late', text: '迟到的公开说明' } },
+    { type: 'error', runId: 'run-busy', seq: 5, timestamp: 999_999, data: { message: '历史传输错误' } },
+  ].reduce((t, e) => reduceTrace(t, e as WebRunEvent), finished)
+  view.rerender(<RunTraceView trace={late} running={false} />)
+  expect(header.getAttribute('aria-expanded')).toBe('true')
+  expect(header.textContent).toContain('耗时 14 分 42 秒')
+  expect(screen.getByText('迟到的公开说明')).toBeTruthy()
+  expect(screen.queryByText('历史传输错误')).toBeNull()
+})
+
+it('folds notes at completion but keeps a public failure reason outside the disclosure', () => {
+  const note: WebRunEvent = { type: 'trace', runId: 'failed', seq: 1, runStartedAt: 1_000, timestamp: 1_000, data: { kind: 'note', effectId: 'work', text: '正在检查本地结果。' } }
+  const trace = reduceTrace(emptyTrace, note), view = render(<RunTraceView trace={trace} running />)
+  expect(screen.getByText('正在检查本地结果。')).toBeTruthy()
+  const failed = reduceTrace(trace, { type: 'error', runId: 'failed', seq: 2, timestamp: 9_000, data: { message: '本地模拟服务暂时不可用' } })
+  view.rerender(<RunTraceView trace={failed} running={false} />)
+  expect(screen.queryByText('正在检查本地结果。')).toBeNull()
+  expect(screen.getByText('本地模拟服务暂时不可用')).toBeTruthy()
+  expect(screen.getByRole('button', { name: /执行过程/ }).textContent).toContain('耗时 8 秒')
+})
+
+it('provides a local retry for unavailable history, including an empty completed trace', async () => {
+  let requests = 0
+  const transport: PulseWebTransport = { request: async () => ++requests === 1 ? response({}, 503) : response({ events: [{ type: 'complete', runId: 'empty', seq: 1, runStartedAt: 1_000, timestamp: 9_000, data: { status: 'succeeded', taskRequired: false } }] }), subscribe: () => () => {} }
+  render(<PersistedRunTrace runId="empty" transport={transport} />)
+  await screen.findByText('过程记录暂不可用')
+  fireEvent.click(screen.getByRole('button', { name: '重试加载执行过程' }))
+  const header = await screen.findByRole('button', { name: /执行过程/ })
+  expect(header.textContent).toBe('耗时 8 秒')
+  fireEvent.click(header)
+  expect(screen.getByText('暂无可用过程记录')).toBeTruthy()
+  expect(requests).toBe(2)
+})
+
+it('does not leak a late historical trace into a different run', async () => {
+  let resolve!: (response: Response) => void
+  const transport: PulseWebTransport = { request: async path => path.includes('old-run') ? new Promise(done => { resolve = done }) : response({ events: [] }), subscribe: () => () => {} }
+  const view = render(<PersistedRunTrace runId="old-run" transport={transport} />)
+  view.rerender(<PersistedRunTrace runId="new-run" transport={transport} />)
+  await act(async () => { resolve(response({ events: [{ type: 'trace', runId: 'old-run', seq: 1, data: { kind: 'note', effectId: 'x', text: '不能串入新任务' } }] })) })
+  fireEvent.click(await screen.findByRole('button', { name: /执行过程/ }))
+  expect(screen.queryByText('不能串入新任务')).toBeNull()
 })
 beforeEach(() => window.localStorage.clear())
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
@@ -40,16 +109,16 @@ describe('execution trace replay', () => {
     const trace = [model(1, 'A', 1), reasoning(2, '执行详情')].reduce(reduceTrace, emptyTrace)
     const lane = trace.lanes.root!
     const view = render(<RunTraceView trace={{ ...trace, label: '阶段进度: 0/0, 0 项受阻' }} running />)
-    expect(screen.getByRole('button', { name: /主进程/ }).textContent).toContain('正在推理')
-    expect(screen.getByRole('button', { name: /主进程/ }).textContent).not.toMatch(/0\/0|0 次工具调用/)
-    expect(screen.getByRole('button', { name: /主进程/ }).getAttribute('aria-expanded')).toBe('false')
-    fireEvent.click(screen.getByRole('button', { name: /主进程/ }))
+    expect(screen.getByRole('button', { name: /执行过程/ }).textContent).toContain('正在推理')
+    expect(screen.getByRole('button', { name: /执行过程/ }).textContent).not.toMatch(/0\/0|0 次工具调用/)
+    expect(screen.getByRole('button', { name: /执行过程/ }).getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(screen.getByRole('button', { name: /执行过程/ }))
     expect(view.container.querySelectorAll('.trace-model')).toHaveLength(1)
     expect(screen.getByText('执行详情')).toBeTruthy()
 
     const fallback = { ...lane.steps[0]!, id: 'fallback', modelId: 'B', fallback: true, reasoning: '备用模型详情' }
     view.rerender(<RunTraceView trace={{ ...trace, label: '阶段进度: 1/3, 1 项受阻', lanes: { root: { ...lane, steps: [...lane.steps, fallback] } } }} running />)
-    expect(screen.getByRole('button', { name: /主进程/ }).textContent).toContain('阶段进度: 1/3, 1 项受阻')
+    expect(screen.getByRole('button', { name: /执行过程/ }).textContent).toContain('阶段进度: 1/3, 1 项受阻')
     expect(view.container.querySelectorAll('.trace-row .trace-model')).toHaveLength(2)
     expect(screen.getByText('B · 回退')).toBeTruthy()
     expect(screen.getByText('备用模型详情')).toBeTruthy()
@@ -59,10 +128,10 @@ describe('execution trace replay', () => {
     const trace = [model(1, 'A', 1), reasoning(2, '保持展开')].reduce(reduceTrace, emptyTrace)
     const view = render(<RunTraceView trace={trace} running />)
     expect(screen.queryByText('保持展开')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: /主进程/ }))
+    fireEvent.click(screen.getByRole('button', { name: /执行过程/ }))
     expect(screen.getByText('保持展开')).toBeTruthy()
     // An explicit expansion during execution must also collapse on completion.
-    const head = screen.getByRole('button', { name: /主进程/ })
+    const head = screen.getByRole('button', { name: /执行过程/ })
     fireEvent.click(head)
     fireEvent.click(head)
     view.rerender(<RunTraceView trace={{ ...trace, outcome }} running={false} />)
@@ -82,22 +151,22 @@ describe('execution trace replay', () => {
   it('replays public acceptance and does not turn incomplete work green', () => {
     const events: WebRunEvent[] = [{ type: 'complete', runId: 'r', seq: 1, data: { status: 'succeeded', taskRequired: true, taskOutcome: { status: 'incomplete' } } }]
     const view = render(<RunTraceView trace={events.reduce(reduceTrace, emptyTrace)} running={false} />)
-    expect(screen.getByRole('button', { name: /主进程.*任务未完成/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /执行过程.*任务未完成/ })).toBeTruthy()
     view.rerender(<RunTraceView trace={{ ...emptyTrace, outcome: 'succeeded', completion: { status: 'succeeded', taskOutcome: { status: 'accepted' } } }} running={false} />)
-    expect(screen.getByRole('button', { name: /主进程.*任务验收通过/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /执行过程.*任务验收通过/ })).toBeTruthy()
   })
 
   it('shows a settled shell process as waiting until later work or completion', () => {
     const started: WebRunEvent = { type: 'tool', runId: 'r', seq: 1, data: { activityId: 'process', effectId: 'process', tool: 'shell.poll', status: 'succeeded', preview: { status: 'running' } } }
     const view = render(<RunTraceView trace={reduceTrace(emptyTrace, started)} running />)
-    expect(screen.getByRole('button', { name: /主进程.*等待进程/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /执行过程.*等待进程/ })).toBeTruthy()
     const reading: WebRunEvent = { type: 'tool', runId: 'r', seq: 2, data: { activityId: 'read', effectId: 'read', tool: 'fs.read', status: 'running' } }
     const continued = reduceTrace(reduceTrace(emptyTrace, started), reading)
     view.rerender(<RunTraceView trace={continued} running />)
-    expect(screen.getByRole('button', { name: /主进程.*执行中/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /执行过程.*执行中/ })).toBeTruthy()
     const done = reduceTrace(continued, { type: 'complete', runId: 'r', seq: 3, data: { status: 'succeeded', taskRequired: true, taskOutcome: { status: 'incomplete' } } })
     view.rerender(<RunTraceView trace={done} running={false} />)
-    expect(screen.getByRole('button', { name: /主进程.*任务未完成/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /执行过程.*任务未完成/ })).toBeTruthy()
     view.unmount()
     const exited: WebRunEvent = { type: 'tool', runId: 'r', seq: 1, data: { activityId: 'process', effectId: 'process', tool: 'shell.poll', status: 'succeeded', preview: { status: 'exited' } } }
     render(<RunTraceView trace={reduceTrace(emptyTrace, exited)} running />)
@@ -107,7 +176,7 @@ describe('execution trace replay', () => {
   it('keeps an empty completed process visible and collapsed', () => {
     const view = render(<RunTraceView trace={emptyTrace} running />)
     view.rerender(<RunTraceView trace={{ ...emptyTrace, outcome: 'succeeded' }} running={false} />)
-    expect(screen.getByRole('button', { name: /主进程.*验收状态未知/ }).getAttribute('aria-expanded')).toBe('false')
+    expect(screen.getByRole('button', { name: /执行过程.*验收状态未知/ }).getAttribute('aria-expanded')).toBe('false')
   })
 
   it('collapses when completion arrives before stream cleanup, without collapsing a manual replay again', () => {
@@ -115,7 +184,7 @@ describe('execution trace replay', () => {
     const view = render(<RunTraceView trace={trace} running />)
     const finished = { ...trace, outcome: 'succeeded' as const }
     view.rerender(<RunTraceView trace={finished} running />)
-    const head = screen.getByRole('button', { name: /主进程.*验收状态未知/ })
+    const head = screen.getByRole('button', { name: /执行过程.*验收状态未知/ })
     expect(head.getAttribute('aria-expanded')).toBe('false')
     fireEvent.click(head)
     view.rerender(<RunTraceView trace={finished} running={false} />)
@@ -130,7 +199,7 @@ describe('execution trace replay', () => {
     const transport: PulseWebTransport = { request: async () => response({ events }), subscribe: () => () => {} }
     vi.spyOn(Date, 'now').mockReturnValue(999_000)
     const view = render(<PersistedRunTrace runId="run-busy" transport={transport} />)
-    await screen.findByText(/耗时 90s/)
+    await screen.findByText(/耗时 1 分 30 秒/)
     view.unmount()
     const legacyTransport: PulseWebTransport = { ...transport, request: async () => response({ events: events.map(({ timestamp: _timestamp, runStartedAt: _start, ...event }) => event) }) }
     render(<PersistedRunTrace runId="run-busy" transport={legacyTransport} />)
@@ -167,7 +236,7 @@ describe('active work trace recovery', () => {
     const fixture = workFixture(async () => response({ events: [model(1, 'A', 1), reasoning(2, '历史思考'), reasoning(3, '加载期间思考')], seq: 3 }))
     await openWork(fixture.transport)
     await waitFor(() => expect(fixture.subscriptions).toEqual(['/api/runs/run-busy/events?after=2']))
-    fireEvent.click(await screen.findByRole('button', { name: /主进程/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /执行过程/ }))
     await screen.findByText('历史思考加载期间思考')
     act(() => { fixture.emit(reasoning(3, '加载期间思考')); fixture.emit(reasoning(4, '后续思考')) })
     await screen.findByText('历史思考加载期间思考后续思考')
@@ -176,7 +245,7 @@ describe('active work trace recovery', () => {
     fireEvent.click(screen.getByRole('button', { name: '完善项目记忆' }))
     await screen.findByText('对话内容会保留，所属项目可以随时调整。')
     fireEvent.click(screen.getByRole('button', { name: /^正在执行的任务/ }))
-    fireEvent.click(await screen.findByRole('button', { name: /主进程/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /执行过程/ }))
     await screen.findByText('历史思考加载期间思考')
     expect(fixture.subscriptions).toHaveLength(2)
   })
@@ -186,7 +255,7 @@ describe('active work trace recovery', () => {
     await openWork(fixture.transport)
     await waitFor(() => expect(fixture.subscriptions).toEqual(['/api/runs/run-busy/events?after=0']))
     act(() => { fixture.emit(model(1, 'A', 1)); fixture.emit(reasoning(2, '恢复完整思考')) })
-    fireEvent.click(await screen.findByRole('button', { name: /主进程/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /执行过程/ }))
     await screen.findByText('恢复完整思考')
   })
 
@@ -212,21 +281,24 @@ describe('active work trace recovery', () => {
   })
 })
 
-it('keeps public progress prose visible and tool output inspectable after completion', () => {
+it('folds public progress prose and tool summaries after completion, retaining inspection', () => {
   const trace = [
     { type: 'trace', runId: 'progress', seq: 1, data: { kind: 'note', effectId: 'step', task: 'reason', text: '已确认入口，接下来验证提交回显。' } },
     { type: 'tool', runId: 'progress', seq: 2, data: { activityId: 'check', effectId: 'check', tool: 'shell.exec', status: 'succeeded', args: { command: 'pnpm', args: ['test'] }, preview: { output: '4 tests passed', exitCode: 0 } } },
     { type: 'complete', runId: 'progress', seq: 3, data: { status: 'succeeded' } },
   ].reduce((state, event) => reduceTrace(state, event as WebRunEvent), emptyTrace)
   const view = render(<RunTraceView trace={trace} running={false} />)
-  expect(view.getByRole('button', { name: /主进程/ }).getAttribute('aria-expanded')).toBe('false')
-  expect(view.getByRole('log', { name: '工作进展' }).textContent).toContain('已确认入口，接下来验证提交回显。')
+  expect(view.getByRole('button', { name: /执行过程/ }).getAttribute('aria-expanded')).toBe('false')
+  expect(view.queryByText('已确认入口，接下来验证提交回显。')).toBeNull()
+  fireEvent.click(view.getByRole('button', { name: /执行过程/ }))
+  expect(view.getAllByText('已确认入口，接下来验证提交回显。')).toHaveLength(1)
+  expect(view.getByRole('region', { name: '工作进展' }).getAttribute('aria-live')).toBe('off')
   expect(view.queryByText('4 tests passed')).toBeNull()
   fireEvent.click(view.getByRole('button', { name: /执行 pnpm test/ }))
   expect(view.getByText('4 tests passed')).toBeTruthy()
 })
 
-it('groups consecutive tools between updates and keeps failures visible while folded', () => {
+it('folds process details while keeping the terminal failure visible', () => {
   const trace = {
     order: ['main'], outcome: 'failed' as const,
     lanes: { main: { id: 'main', label: '主任务', status: 'failed' as const, steps: [
@@ -238,6 +310,9 @@ it('groups consecutive tools between updates and keeps failures visible while fo
     ] } },
   }
   const view = render(<RunTraceView trace={trace} running={false} />)
+  expect(view.getByRole('button', { name: /执行过程.*任务执行失败/ })).toBeTruthy()
+  expect(view.queryByText('现在运行验证。')).toBeNull()
+  fireEvent.click(view.getByRole('button', { name: /执行过程/ }))
   expect(view.container.querySelector('.progress-note code')?.textContent).toBe('entry.ts')
   expect(view.getByText('现在运行验证。')).toBeTruthy()
   const tools = view.getByRole('button', { name: /读取文件 2/ })

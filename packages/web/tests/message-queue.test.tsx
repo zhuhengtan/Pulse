@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../src/transport.js'
-import { MessageQueueController, readFollowupBehavior, saveFollowupBehavior, type ConversationQueue, type QueueAdapter, type QueueEntry, type QueueRunState, type QueueStore } from '../src/MessageQueue.js'
+import { MessageQueueController, queueAdapter, readFollowupBehavior, saveFollowupBehavior, type ConversationQueue, type QueueAdapter, type QueueEntry, type QueueRunState, type QueueStore } from '../src/MessageQueue.js'
+import type { PulseWebTransport } from '../src/transport.js'
 
 class MemoryStore implements QueueStore {
   values = new Map<string, ConversationQueue>()
@@ -115,6 +116,106 @@ describe('durable frontend message queue', () => {
     await f.controller.tick(); expect(f.queue().entries).toHaveLength(1); expect(f.queue().paused).toBe(false)
     f.adapter.send = async () => { throw new ApiError(400, 'INVALID') }
     await f.controller.tick(); expect(f.queue().paused).toBe(true); expect(f.queue().entries).toHaveLength(1)
+  })
+  it('keeps a confirmed failed run sending and still blocks a newer failure, a wait, and an unknown side effect', async () => {
+    const f = fixture()
+    await f.controller.enqueue('conversation', 'work', { text: 'next', skills: ['keep'], mentionedFiles: ['file.ts'], attachments: [{ id: 'a', name: 'note.txt', type: 'file', size: 1, mediaType: 'text/plain', data: 'data:text/plain;base64,eA==' }] }, 'run-old')
+    f.state({ state: 'interrupted', runId: 'run-old', waiting: false })
+    await f.controller.tick()
+    expect(f.queue().paused).toBe(true)
+    expect(f.sent).toHaveLength(0)
+    await f.controller.pause('conversation', false)
+    expect(f.queue().confirmedRunId).toBe('run-old')
+    f.controller.close()
+    const restored = new MessageQueueController('service-one', f.store, f.adapter, () => {})
+    await restored.tick()
+    expect(f.sent).toHaveLength(1)
+    expect(f.sent[0]?.payload.text).toBe('next')
+    expect(f.sent[0]?.payload.skills).toEqual(['keep'])
+    expect(f.sent[0]?.payload.mentionedFiles).toEqual(['file.ts'])
+    expect(f.sent[0]?.payload.attachments?.[0]?.id).toBe('a')
+    restored.close()
+    const again = fixture()
+    await again.controller.enqueue('conversation', 'work', { text: 'later' }, 'run-old')
+    again.state({ state: 'interrupted', runId: 'run-old', waiting: false })
+    await again.controller.tick()
+    await again.controller.pause('conversation', false)
+    again.state({ state: 'failed', runId: 'run-new', waiting: false })
+    await again.controller.tick()
+    expect(again.sent).toHaveLength(0)
+    expect(again.queue().paused).toBe(true)
+    await again.controller.pause('conversation', false)
+    again.state({ state: 'interrupted', runId: 'run-old', waiting: true })
+    await again.controller.tick()
+    expect(again.sent).toHaveLength(0)
+    await again.controller.pause('conversation', false)
+    again.state({ state: 'running', runId: 'run-live', activeRunId: 'run-live', waiting: false })
+    await again.controller.tick()
+    expect(again.sent).toHaveLength(0)
+    await again.controller.pause('conversation', false)
+    again.state({ state: 'interrupted', runId: 'run-old', waiting: false, sideEffectUnknown: true })
+    await again.controller.tick()
+    expect(again.sent).toHaveLength(0)
+    expect(again.queue().paused).toBe(true)
+    expect(again.queue().entries[0]?.payload.text).toBe('later')
+  })
+  it('uses the latest failed run from the production adapter instead of an older confirmation', async () => {
+    const sent: Array<{ path: string; body: { requestId?: string; text?: string } }> = []
+    let runs = ['old']
+    let snapshot: { state: string; waiting?: boolean; interactions?: unknown[]; releaseBlocked?: string } = { state: 'failed', interactions: [] }
+    let activeRunId: string | undefined
+    const transport = {
+      request: async (path: string, init?: RequestInit) => {
+        if (init?.method === 'POST') { sent.push({ path, body: JSON.parse(String(init.body)) as { requestId?: string; text?: string } }); return Response.json({ runId: 'accepted' }) }
+        if (path === '/api/conversations/conversation') return Response.json({ id: 'conversation', ...(activeRunId ? { activeRunId } : {}), runs })
+        if (path === '/api/runs/old/state' || path === '/api/runs/new/state') return Response.json(snapshot)
+        return Response.json({ error: 'missing' }, { status: 404 })
+      },
+      subscribe: () => () => {},
+    } as PulseWebTransport
+    const same = new MemoryStore()
+    const confirmed = new MessageQueueController('service-one', same, queueAdapter(transport), () => {})
+    await confirmed.enqueue('conversation', 'work', { text: 'keep original message' }, 'old')
+    await confirmed.tick()
+    const requestId = same.values.get(confirmed.key('conversation'))!.entries[0]!.requestId
+    await confirmed.pause('conversation', false)
+    await confirmed.tick()
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ path: '/api/conversations/conversation/messages', body: { requestId, text: 'keep original message', delivery: 'whenIdle' } })
+    confirmed.close()
+
+    sent.length = 0
+    runs = ['old']
+    snapshot = { state: 'failed', interactions: [] }
+    const store = new MemoryStore()
+    const controller = new MessageQueueController('service-one', store, queueAdapter(transport), () => {})
+    await controller.enqueue('conversation', 'work', { text: 'keep original message' }, 'old')
+    await controller.tick()
+    expect(store.values.get(controller.key('conversation'))!.paused).toBe(true)
+    const held = store.values.get(controller.key('conversation'))!.entries[0]!.requestId
+    await controller.pause('conversation', false)
+    runs = ['old', 'new']
+    await controller.tick()
+    expect(sent).toEqual([])
+    expect(store.values.get(controller.key('conversation'))!.paused).toBe(true)
+    expect(store.values.get(controller.key('conversation'))!.entries[0]).toMatchObject({ requestId: held, payload: { text: 'keep original message' } })
+    await controller.pause('conversation', false)
+    snapshot = { state: 'failed', waiting: true, interactions: [{ id: 'ask' }] }
+    await controller.tick()
+    expect(sent).toEqual([])
+    await controller.pause('conversation', false)
+    activeRunId = 'new'
+    snapshot = { state: 'running', interactions: [] }
+    await controller.tick()
+    expect(sent).toEqual([])
+    await controller.pause('conversation', false)
+    activeRunId = undefined
+    snapshot = { state: 'failed', interactions: [], releaseBlocked: 'RECOVERY_SIDE_EFFECT_UNKNOWN' }
+    await controller.tick()
+    expect(sent).toEqual([])
+    expect(store.values.get(controller.key('conversation'))!.paused).toBe(true)
+    expect(store.values.get(controller.key('conversation'))!.entries).toHaveLength(1)
+    controller.close()
   })
   it('fails enqueue when durable storage fails', async () => {
     const store: QueueStore = { list: async () => [], update: async () => { throw new Error('quota') } }

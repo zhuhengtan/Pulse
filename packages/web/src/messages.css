@@ -3,7 +3,7 @@
   --work-content-width: min(800px, 96%);
   --work-body-font-size: 15px;
   --work-body-line-height: 1.75;
-  --message-incoming: #f2f3f5;
+  --message-incoming: #f3f3f3;
   --message-outgoing: #f3f3f3;
   --message-outgoing-text: #202020;
   --adm-color-primary: var(--blue);
@@ -16,13 +16,13 @@
 :root[data-interface-scale="compact"] { --work-body-font-size:13px; }
 :root[data-interface-scale="large"] { --work-body-font-size:17px; }
 :root[data-theme="dark"] {
-  --message-incoming: #272b32;
+  --message-incoming: #242424;
   --message-outgoing: #2d2d2d;
   --message-outgoing-text: #ededed;
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] {
-    --message-incoming: #272b32;
+    --message-incoming: #242424;
     --message-outgoing: #2d2d2d;
     --message-outgoing-text: #ededed;
   }

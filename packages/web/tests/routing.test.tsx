@@ -133,7 +133,8 @@ describe('explicit URL navigation', () => {
     const view = show('/work/old', fixture)
     const titles = (selector: string) => [...view.container.querySelectorAll(`${selector} .history-item`)].map(button => button.querySelector('span')?.textContent)
     const checkOrder = () => {
-      expect(titles('.project-conversations')).toEqual(['置顶项目对话', '较新项目对话', '较旧项目对话'])
+      expect(titles('[aria-label="置顶对话"]')).toEqual(['置顶项目对话'])
+      expect(titles('.project-conversations')).toEqual(['较新项目对话', '较旧项目对话'])
       expect(titles('.ungrouped-history')).toEqual(['较新未分组对话', '较旧未分组对话'])
     }
     await screen.findByText('消息：old'); checkOrder()

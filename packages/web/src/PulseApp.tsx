@@ -17,6 +17,7 @@ import { MessageQueuePanel, useMessageQueue } from './MessageQueuePanel.js'
 import type { FollowupBehavior } from './MessageQueue.js'
 import { ConversationCache } from './ConversationCache.js'
 import { WindowedMessages } from './WindowedMessages.js'
+import { BudgetContinuationPrompt } from './BudgetContinuationPrompt.js'
 import { RunRecoveryCard, type RunRecovery } from './RunRecoveryCard.js'
 import { useConversationTransfer, transferError } from './ConversationTransfer.js'
 import { createRequestId } from './requestId.js'
@@ -47,6 +48,8 @@ const recoveryBlockerMessage = (reason?: string) => {
   if (reason === 'RECOVERY_FORMAT_CONFLICT') return '此运行存在多种快照格式；请先检查数据迁移来源，原数据保持不变。'
   if (reason === 'RECOVERY_SNAPSHOT_MISSING') return '没有可恢复的运行快照；原对话和记录保留，可以结束本轮后开始新任务。'
   if (reason === 'RUN_NOT_INTERRUPTED') return '任务状态已变化或仍在运行，请刷新后检查。'
+  if (reason === 'RECOVERY_SIDE_EFFECT_UNKNOWN') return '存在执行结果未知的工具操作，不能结束或自动重试。请先查看诊断。'
+  if (reason === 'RUN_AWAITING_APPROVAL') return '这轮仍有待处理的确认，未结束。请先处理确认，或等运行真正停止。'
   return `当前无法恢复任务（${reason ?? 'RECOVERY_BLOCKED'}）；记录已保留，请检查后台诊断。`
 }
 const SettingsPage = lazy(() => import('./SettingsPage.js').then(module => ({ default: module.SettingsPage })))
@@ -261,6 +264,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const [sessionCapabilities, setSessionCapabilities] = useState({ localAdmin: false, canUseTerminal: false, canBrowseHostPaths: false, canRegisterProject: false })
   const [projectPickerOpen, setProjectPickerOpen] = useState(false)
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<string[]>(() => { try { return JSON.parse(window.localStorage.getItem('pulse-web-collapsed-projects') ?? '[]') as string[] } catch { return [] } })
+  const [pinnedCollapsed, setPinnedCollapsed] = useState(() => { try { return window.localStorage.getItem('pulse-web-pinned-collapsed') === 'true' } catch { return false } })
   const [atBottom, setAtBottom] = useState(true)
   const followBottom = useRef(true)
   const scrollView = useRef<{ key: string; element: HTMLElement | null }>({ key: '', element: null })
@@ -711,7 +715,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         for (const item of result.traces) {
           if (!runIds.includes(item.runId) || next[item.runId]) continue
           const reduced = item.events.reduce(reduceTrace, emptyTrace)
-          if (reduced.order.length === 0) continue
+          if (reduced.order.length === 0 && !reduced.outcome && reduced.startedAt === undefined) continue
           next[item.runId] = reduced
           changed = true
         }
@@ -1116,12 +1120,19 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     finally { setRenameSaving(false) }
   }
 
+  const pinPending = useRef(new Set<string>())
   const togglePinned = async (conversation: WebConversation) => {
+    if (pinPending.current.has(conversation.id)) return
+    pinPending.current.add(conversation.id)
+    const previousPinned = Boolean(conversation.pinned), nextPinned = !previousPinned
+    const applyPinned = (pinned: boolean) => setConversations(items => items.map(item => item.id === conversation.id ? { ...item, pinned } : item))
+    applyPinned(nextPinned)
+    setMenuId(undefined)
     try {
-      const updated = await apiJson<WebConversation>(transport, `/api/conversations/${encodeURIComponent(conversation.id)}`, jsonRequest('PATCH', { pinned: !conversation.pinned }))
-      setConversations(items => items.map(item => item.id === conversation.id ? updated : item))
-      setMenuId(undefined)
-    } catch { setToast('置顶状态更新失败。') }
+      const updated = await apiJson<WebConversation>(transport, `/api/conversations/${encodeURIComponent(conversation.id)}`, jsonRequest('PATCH', { pinned: nextPinned }))
+      setConversations(items => items.map(item => item.id === conversation.id ? { ...item, pinned: typeof updated.pinned === 'boolean' ? updated.pinned : nextPinned, ...(typeof updated.updatedAt === 'string' ? { updatedAt: updated.updatedAt } : {}) } : item))
+    } catch { applyPinned(previousPinned); setToast('置顶状态更新失败。') }
+    finally { pinPending.current.delete(conversation.id) }
   }
 
   const archiveConversation = async (conversation: WebConversation) => {
@@ -1243,9 +1254,10 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     .filter(item => `${item.title} ${item.cwd} ${projects.find(project => project.id === item.projectId)?.name ?? ''}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
     .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || (sidebarSort === 'created' ? b.createdAt.localeCompare(a.createdAt) : b.updatedAt.localeCompare(a.updatedAt))), [conversations, projects, query, sidebarSort])
   const orderedProjects = projects
-  const ungroupedConversations = sidebarGrouping === 'merged' ? visibleConversations : visibleConversations.filter(item => !projects.some(project => project.id === item.projectId))
-  const pinnedConversations = ungroupedConversations.filter(item => item.pinned)
-  const groupedHistory = groupConversations(ungroupedConversations.filter(item => !item.pinned), sidebarSort === 'created' ? 'createdAt' : 'updatedAt')
+  const ungroupedConversations = visibleConversations.filter(item => !item.pinned && (sidebarGrouping === 'merged' || !projects.some(project => project.id === item.projectId)))
+  const pinnedConversations = visibleConversations.filter(item => item.pinned)
+  const pinnedExpanded = !pinnedCollapsed || Boolean(query.trim())
+  const groupedHistory = groupConversations(ungroupedConversations, sidebarSort === 'created' ? 'createdAt' : 'updatedAt')
   const conversationRows = (items: WebConversation[]) => items.map(conversation => {
     const project = projects.find(item => item.id === conversation.projectId)
     const menu: MenuProps = {
@@ -1284,7 +1296,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     <div className="history-primary">{!mobileLayout && transfer.importButton}<PulseButton onClick={() => selectProject(undefined)}><Icon name="home"/><span>全部对话</span></PulseButton></div>
     <label className="history-search"><Icon name="search"/><PulseInput ref={searchRef} value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索对话" aria-label="搜索对话" /><kbd>⌘ K</kbd></label>
     <div className="history-list">
-      <section className="project-nav-group"><header><PulseButton className="project-nav-heading" aria-expanded={!collapsedProjectIds.includes('projects') || Boolean(query.trim())} onClick={() => setProjectCollapsed('projects', !collapsedProjectIds.includes('projects'))}>项目 <Icon className={collapsedProjectIds.includes('projects') && !query.trim() ? 'is-collapsed' : ''} name="chevron"/></PulseButton><Dropdown classNames={{ root: 'sidebar-menu' }} trigger={['click']} menu={{ triggerSubMenuAction: 'click', items: [
+      {pinnedConversations.length > 0 && <section className="project-nav-group pinned-history" aria-label="置顶对话"><header><PulseButton className="project-nav-heading" aria-expanded={pinnedExpanded} aria-controls="history-pinned-conversations" onClick={() => { const collapsed = !pinnedCollapsed; setPinnedCollapsed(collapsed); try { window.localStorage.setItem('pulse-web-pinned-collapsed', String(collapsed)) } catch { /* Keep the current view usable without storage. */ } }}>置顶 <Icon className={pinnedExpanded ? '' : 'is-collapsed'} name="chevron-rounded"/></PulseButton></header>{pinnedExpanded && <div id="history-pinned-conversations">{conversationRows(pinnedConversations)}</div>}</section>}
+      <section className="project-nav-group"><header><PulseButton className="project-nav-heading" aria-expanded={!collapsedProjectIds.includes('projects') || Boolean(query.trim())} onClick={() => setProjectCollapsed('projects', !collapsedProjectIds.includes('projects'))}>项目 <Icon className={collapsedProjectIds.includes('projects') && !query.trim() ? 'is-collapsed' : ''} name="chevron-rounded"/></PulseButton><Dropdown classNames={{ root: 'sidebar-menu' }} trigger={['click']} menu={{ triggerSubMenuAction: 'click', items: [
           { key: 'grouping', label: '整理侧边栏', icon: <Icon name="menu" size={15}/>, children: [
             { key: 'projects', label: `${sidebarGrouping === 'projects' ? '✓ ' : ''}分项目显示`, onClick: () => setSidebarGrouping('projects') },
             { key: 'merged', label: `${sidebarGrouping === 'merged' ? '✓ ' : ''}合并显示`, onClick: () => setSidebarGrouping('merged') },
@@ -1314,13 +1327,12 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
               </div>
             </Dropdown>
             </ProjectHoverCard>
-            {expanded && <div className="project-conversations">{conversationRows(items)}{!items.length && <p className="project-empty">{query.trim() ? '没有匹配的对话' : '暂无对话'}</p>}</div>}
+            {expanded && <div className="project-conversations">{conversationRows(items.filter(item => !item.pinned))}{!items.some(item => !item.pinned) && <p className="project-empty">{items.length ? '置顶对话显示在上方' : query.trim() ? '没有匹配的对话' : '暂无对话'}</p>}</div>}
           </section>
         })}
         {projects.length === 0 && <p className="history-empty">还没有登记项目</p>}
       </>}</section>
       {ungroupedConversations.length > 0 && <section className="ungrouped-history" aria-label={sidebarGrouping === 'merged' ? '全部对话' : '未分组对话'}><h2>{sidebarGrouping === 'merged' ? '聊天' : '未分组'}</h2>
-        {pinnedConversations.length > 0 && <section className="history-group"><h2>已置顶</h2>{conversationRows(pinnedConversations)}</section>}
         {groupedHistory.map(group => <section className="history-group" key={group.label}><h2>{group.label}</h2>{conversationRows(group.items)}</section>)}
       </section>}
       {!loading && visibleConversations.length === 0 && <p className="history-empty">{query ? '没有匹配的对话' : '还没有对话'}</p>}
@@ -1428,6 +1440,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       for (const runId of runIds) if (!deliveriesShown.has(runId)) { const card = deliveries(runId); if (card) items.push(card) }
       if (artifactIndex.error) items.push(<p key="artifact-error" role="alert">{artifactIndex.error}</p>)
     }
+    if (surfaceMode === 'work' && selected) items.push(<BudgetContinuationPrompt key={`budget:${selected.id}`} transport={transport} conversationId={selected.id} revision={`${activeRunId ?? ''}:${messages.length}`} running={running || loading} onContinued={runId => { if (selectedIdRef.current === selected.id) void openConversation({ ...selected, activeRunId: runId }) }} />)
     return items
   }
   return <main style={surfaceMode === 'work' ? historyLayout.style : { ...historyLayout.style, '--history-width': '0px' } as import('react').CSSProperties} data-history-dragging={historyLayout.dragging || undefined} className={`shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''} ${workbenchOpen ? 'workbench-open' : ''}`}>

@@ -9,6 +9,7 @@ import '../src/style.css'
 import '../src/redesign.css'
 import '../src/messages.css'
 import '../src/composer.css'
+import '../src/workbench-theme.css'
 const params = new URLSearchParams(location.search), surface = params.get('surface') === 'chat' ? 'chat' : 'work'
 document.documentElement.dataset.theme = params.get('theme') === 'dark' ? 'dark' : 'light'
 const fixture = followupFixture(surface), original = fixture.transport.request

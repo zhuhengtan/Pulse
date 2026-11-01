@@ -14,9 +14,16 @@ import { settingsFixture } from './fixtures/settings.js'
 import '../src/style.css'
 import '../src/redesign.css'
 import '../src/messages.css'
+import '../src/workbench-theme.css'
 
 const fixture = settingsFixture()
 const options = ['设置', '只读设置', '归档', '交付文件', '执行过程', '问答', '审批', '配对', '连接错误']
+const previewParams = new URLSearchParams(location.search)
+const previewTheme = previewParams.get('theme')
+if (previewTheme === 'light' || previewTheme === 'dark') {
+  localStorage.setItem('pulse-web-appearance', JSON.stringify({ theme: previewTheme, interfaceScale: 'standard', codeScale: 'standard' }))
+  document.documentElement.dataset.theme = previewTheme
+}
 const trace: TraceState = { order: ['main'], lanes: { main: { id: 'main', label: '检查页面与控件', status: 'running', steps: [
   { id: 'think', kind: 'llm', task: 'reason', modelId: 'sample/chat', reasoning: Array.from({length: 60}, (_, i) => `检查步骤 ${i + 1}：确认页面、输入框与交互布局正常。`).join('\n') },
   ...Array.from({length:40},(_,i)=>({id:`read-${i}`,kind:'tool' as const,tool:'fs.read',status:'succeeded' as const,args:{path:`packages/web/src/example-${i}.tsx`},preview:{output:'示例文件内容'}})),
@@ -27,7 +34,7 @@ const questions = [
   { effectId: 'input', input: { type: 'input', prompt: '补充检查要求', placeholder: '请输入检查要求' } },
 ]
 function Review() {
-  const [page, setPage] = useState('设置'), [done, setDone] = useState(false), [result, setResult] = useState('')
+  const [page, setPage] = useState(options.includes(previewParams.get('page') ?? '') ? previewParams.get('page')! : '设置'), [done, setDone] = useState(false), [result, setResult] = useState('')
   const interaction = { kind: 'interaction' as const, runId: 'page-audit-run', groupId: page, interactionKind: page === '审批' ? 'approval' as const : 'ask' as const, items: page === '审批' ? [{effectId: 'approval', input: { prompt: '是否允许这次示例文件操作？', operationCount: 1, tools: [{toolName: 'fs.write', details: {path: '/example/notes.txt', content: '测试内容'}}] }}] : questions }
   return <PulseDesignSystem><style>{'.page-audit-content{height:calc(100dvh - 48px);overflow:auto}.page-audit-content>.settings-shell{position:relative;inset:auto;height:100%}.page-audit-content .pair-page{min-height:100%;height:auto}.page-audit-content>.archive-shell{height:100%}'}</style><header style={{height:48,display:'flex',alignItems:'center',gap:12,padding:'0 12px'}}><Select aria-label="预览页面" value={page} onChange={setPage} options={options.map(value=>({value,label:value}))} style={{width:140}}/><PulseButton onClick={()=>{document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'}}>切换主题</PulseButton><span role="status">{result}</span></header><div className="page-audit-content">
     {page.endsWith('设置') && <SettingsPage key={page} transport={fixture.transport} canEditConfig={page==='设置'} onClose={()=>setResult('已返回')} onOpenArchive={()=>setPage('归档')}/>}

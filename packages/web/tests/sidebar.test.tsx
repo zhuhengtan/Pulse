@@ -52,16 +52,17 @@ describe('project sidebar', () => {
     expect(screen.getByRole('button', { name: '设置' })).toBeTruthy()
   })
 
-  it('nests conversations once, keeps other projects visible, and preserves selection while folding', async () => {
+  it('keeps pins above project folders once and preserves selection while folding', async () => {
     await show()
     const pulse = screen.getByRole('region', { name: 'Pulse项目对话' })
-    expect(within(pulse).getByRole('button', { name: '优化侧边栏和主题 已置顶' })).toBeTruthy()
+    expect(within(pulse).queryByRole('button', { name: '优化侧边栏和主题 已置顶' })).toBeNull()
+    expect(within(screen.getByRole('region', { name: '置顶对话' })).getByRole('button', { name: '优化侧边栏和主题 已置顶' })).toBeTruthy()
     expect(screen.getAllByRole('button', { name: '优化侧边栏和主题 已置顶' })).toHaveLength(1)
-    fireEvent.click(within(pulse).getByRole('button', { name: '优化侧边栏和主题 已置顶' }))
+    fireEvent.click(screen.getByRole('button', { name: '优化侧边栏和主题 已置顶' }))
     await waitFor(() => expect(window.localStorage.getItem('pulse-web-conversation')).toBe('pulse-chat'))
     expect(screen.getByRole('button', { name: '完善项目记忆' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '折叠项目：Pulse' }))
-    expect(screen.queryByRole('button', { name: '优化侧边栏和主题 已置顶' })).toBeNull()
+    expect(screen.getByRole('button', { name: '优化侧边栏和主题 已置顶' })).toBeTruthy()
     expect(window.localStorage.getItem('pulse-web-conversation')).toBe('pulse-chat')
     expect(JSON.parse(window.localStorage.getItem('pulse-web-collapsed-projects')!)).toContain('pulse')
     fireEvent.change(screen.getByRole('textbox', { name: '搜索对话' }), { target: { value: '优化侧边栏' } })

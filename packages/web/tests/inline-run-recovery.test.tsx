@@ -47,7 +47,7 @@ it('keeps Lane history and places exactly one recovery card directly after its t
   const card = await screen.findByRole('region', { name: '任务恢复' })
   await waitFor(() => expect(f.container.querySelector('.run-trace')?.nextElementSibling).toBe(card))
   expect(screen.getAllByRole('region', { name: '任务恢复' })).toHaveLength(1)
-  fireEvent.click(screen.getByRole('button', { name: /主进程/ }))
+  fireEvent.click(screen.getByRole('button', { name: /执行过程/ }))
   expect(screen.getByText('主任务')).toBeTruthy()
   expect(screen.getByText('已有任务记录')).toBeTruthy()
 })

@@ -98,8 +98,11 @@ export function InteractionPanel({ localAdmin = false, interaction, context, rev
     const tools = interaction.items.flatMap(entry => Array.isArray(entry.input.tools) ? entry.input.tools as Array<{ toolName?: string; details?: Record<string, unknown> }> : [])
     const count = interaction.items.reduce((total, entry) => total + (typeof entry.input.operationCount === 'number' ? entry.input.operationCount : Array.isArray(entry.input.tools) ? entry.input.tools.length : 1), 0)
     const title = count > 1 ? `允许执行这 ${count} 项操作？` : tools[0]?.toolName === 'shell.exec' ? '允许执行此命令？' : tools[0]?.toolName?.startsWith('fs.') ? '允许访问这些文件？' : '允许执行此操作？'
-    const offer = interaction.items.length === 1 ? interaction.items[0]?.input.execPolicy as { token: string; prefix: string[]; canAmend: boolean } | undefined : undefined
-    const remember = (scope: 'session' | 'permanent') => void submitBatch(interaction.items.map(entry => ({ effectId: entry.effectId, value: { approved: true, remember: scope, execPolicyToken: offer!.token } })))
+    type Offer = { token: string; prefix: string[]; commands?: string[][]; canAmend: boolean }
+    const offers = interaction.items.map(entry => ({ entry, offer: entry.input.execPolicy as Offer | undefined }))
+    const rememberable = offers.filter((value): value is { entry: PendingInteraction['items'][number]; offer: Offer } => Boolean(value.offer))
+    const commands = rememberable.flatMap(({ offer }) => offer.commands ?? [offer.prefix])
+    const remember = (scope: 'session' | 'permanent') => void submitBatch(offers.map(({ entry, offer }) => ({ effectId: entry.effectId, value: { approved: true, ...(offer ? { remember: scope, execPolicyToken: offer.token } : {}) } })))
     const decide = (approved: boolean) => void submitBatch(interaction.items.map(entry => ({ effectId: entry.effectId, value: approved ? { approved: true } : { approved: false, reason: '用户拒绝' } })))
     return <section ref={panel} className="interaction-panel approval-panel" aria-label="待审批操作" aria-busy={sending}>
       <div className="interaction-heading"><Icon name="shield" size={16}/><strong>{title}</strong></div>
@@ -117,7 +120,8 @@ export function InteractionPanel({ localAdmin = false, interaction, context, rev
         {(reviewNote || delegated) && <p className="review-note" role="status"><Icon name="info" size={14}/><span>{reviewNote || '自动审核需要你确认本次操作。'}</span></p>}
       </div>
       {error && <p className="interaction-error" role="alert">{error}</p>}
-      <div className="interaction-actions">{offer && localAdmin && <><PulseButton disabled={sending} onClick={() => remember('session')}>本次任务记住 {offer.prefix.join(' ')}（重启失效）</PulseButton>{offer.canAmend && <PulseButton disabled={sending} onClick={() => remember('permanent')}>永久记住 {offer.prefix.join(' ')}</PulseButton>}</>}<PulseButton disabled={sending} onClick={() => decide(false)}>拒绝</PulseButton><PulseButton className="primary" disabled={sending} onClick={() => decide(true)}>{sending ? '正在提交…' : '允许本次'}</PulseButton></div>
+      {rememberable.length > 0 && localAdmin && <div className="approval-remember-scope"><small>可记住以下命令；仅匹配相同参数、当前目录和可执行程序版本。其他操作仅允许本次。</small>{commands.map((command, i) => <code key={i}>{command.join(' ')}</code>)}</div>}
+      <div className="interaction-actions">{rememberable.length > 0 && localAdmin && <><PulseButton disabled={sending} onClick={() => remember('session')}>本次任务放行相同命令（重启失效）</PulseButton>{rememberable.every(({ offer }) => offer.canAmend) && <PulseButton disabled={sending} onClick={() => remember('permanent')}>以后放行相同命令</PulseButton>}</>}<PulseButton disabled={sending} onClick={() => decide(false)}>拒绝</PulseButton><PulseButton className="primary" disabled={sending} onClick={() => decide(true)}>{sending ? '正在提交…' : '允许本次'}</PulseButton></div>
     </section>
   }
   const count = interaction.items.length

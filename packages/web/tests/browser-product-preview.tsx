@@ -8,6 +8,7 @@ import '../src/style.css'
 import '../src/redesign.css'
 import '../src/messages.css'
 import '../src/composer.css'
+import '../src/workbench-theme.css'
 document.documentElement.dataset.theme = 'light'
 const fixture = followupFixture('work', true), baseRequest = fixture.transport.request
 fixture.conversation.title = '审计服务 · 请求限流与导出'

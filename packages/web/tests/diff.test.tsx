@@ -49,10 +49,21 @@ it('adds one-click diff actions to assistant file links and successful modificat
   fireEvent.click(screen.getByRole('button',{name:'查看 main.ts 的差异'}));expect(open).toHaveBeenCalledWith('main.ts');view.unmount()
   const trace:TraceState={order:['main'],lanes:{main:{id:'main',label:'主任务',status:'succeeded',steps:[{id:'edit',kind:'tool',tool:'fs.apply_patch',status:'succeeded',args:{path:'main.ts'}}]}},outcome:'succeeded'}
   render(<PulseDesignSystem><RunTraceView trace={trace} running={false} onDiffClick={open} /></PulseDesignSystem>)
+  expect(screen.queryByRole('button',{name:/修改 main.ts/})).toBeNull()
+  fireEvent.click(screen.getByRole('button',{name:/执行过程/}))
   fireEvent.click(screen.getByRole('button',{name:/修改 main.ts/}));expect(open).toHaveBeenCalledTimes(2)
   expect(screen.queryByText('查看差异 · main.ts')).toBeNull()
   expect(changedToolPaths({id:'stage',kind:'tool',tool:'fs.stage',status:'succeeded',args:{operation:'append',path:'draft.ts'}})).toEqual([])
   expect(changedToolPaths({id:'failed',kind:'tool',tool:'fs.write',status:'failed',args:{path:'bad.ts'}})).toEqual([])
+})
+it('keeps each changed file accessible after expanding a process with multiple tools', () => {
+  const open = vi.fn()
+  const trace:TraceState={order:['main'],lanes:{main:{id:'main',label:'主任务',status:'succeeded',steps:['a.ts','b.ts'].map(path=>({id:path,kind:'tool',tool:'fs.apply_patch',status:'succeeded',args:{path}}))}},outcome:'succeeded'}
+  render(<PulseDesignSystem><RunTraceView trace={trace} running={false} onDiffClick={open}/></PulseDesignSystem>)
+  fireEvent.click(screen.getByRole('button',{name:/执行过程/}))
+  fireEvent.click(screen.getByRole('button',{name:/修改 a.ts/}))
+  fireEvent.click(screen.getByRole('button',{name:/修改 b.ts/}))
+  expect(open.mock.calls).toEqual([['a.ts'],['b.ts']])
 })
 it('passes all lines of large changes to Monaco without pagination or truncation', () => {
   const text='@@ -0,0 +1,700 @@\n'+Array.from({length:700},(_,i)=>`+line ${i+1}`).join('\n')

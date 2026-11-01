@@ -27,6 +27,7 @@ export interface ConversationQueue {
   paused: boolean
   error?: string
   awaitingRunId?: string
+  confirmedRunId?: string
   lease?: { owner: string; until: number }
 }
 export interface QueueStore {
@@ -74,7 +75,7 @@ export class IndexedMessageQueueStore implements QueueStore {
   }
 }
 
-export interface QueueRunState { activeRunId?: string; waiting: boolean; state?: WebRunSnapshot['state'] }
+export interface QueueRunState { activeRunId?: string; runId?: string; waiting: boolean; state?: WebRunSnapshot['state']; sideEffectUnknown?: boolean }
 export interface QueueAdapter {
   inspect(queue: ConversationQueue): Promise<QueueRunState>
   send(queue: ConversationQueue, entry: QueueEntry): Promise<{ runId: string }>
@@ -86,10 +87,11 @@ export function queueAdapter(transport: PulseWebTransport, accepted?: QueueAdapt
       const conversation = queue.surface === 'chat'
         ? (await apiJson<{ conversation: WebConversation }>(transport, '/api/assistant')).conversation
         : await apiJson<WebConversation>(transport, `/api/conversations/${encodeURIComponent(queue.conversationId)}`)
-      const runId = conversation.activeRunId ?? queue.awaitingRunId
+      const latestRunId = conversation.runs?.at(-1)
+      const runId = conversation.activeRunId ?? latestRunId ?? queue.awaitingRunId ?? queue.confirmedRunId
       if (!runId) return { waiting: false }
       const snapshot = await apiJson<WebRunSnapshot>(transport, `/api/runs/${encodeURIComponent(runId)}/state`)
-      return { ...(conversation.activeRunId ? { activeRunId: conversation.activeRunId } : {}), waiting: Boolean(snapshot.waiting || snapshot.interactions?.length), state: snapshot.state }
+      return { ...(conversation.activeRunId ? { activeRunId: conversation.activeRunId } : {}), runId, waiting: Boolean(snapshot.waiting || snapshot.interactions?.length), state: snapshot.state, ...(snapshot.releaseBlocked === 'RECOVERY_SIDE_EFFECT_UNKNOWN' ? { sideEffectUnknown: true } : {}) }
     },
     async send(queue, entry) {
       return apiJson(transport, queue.surface === 'chat' ? '/api/assistant/messages' : `/api/conversations/${encodeURIComponent(queue.conversationId)}/messages`, jsonRequest('POST', {
@@ -124,9 +126,10 @@ export class MessageQueueController {
   }
   async pause(conversationId: string, paused: boolean): Promise<void> {
     await this.change(conversationId, queue => {
-      const { error: _error, awaitingRunId, ...rest } = queue
-      // Explicit resume acknowledges the failed/stopped barrier; still inspect any active run.
-      return { ...rest, ...(paused && awaitingRunId ? { awaitingRunId } : {}), paused }
+      const { error: _error, awaitingRunId, confirmedRunId: _previous, ...rest } = queue
+      // Explicit resume binds this failed run. A later run, a live wait, or an unknown side effect still blocks.
+      if (paused) return { ...rest, ...(awaitingRunId ? { awaitingRunId } : {}), paused: true }
+      return { ...rest, ...(awaitingRunId ? { confirmedRunId: awaitingRunId } : {}), paused: false }
     })
   }
   async remove(conversationId: string, requestId: string): Promise<void> {
@@ -171,15 +174,23 @@ export class MessageQueueController {
       const entry = immediate ?? claim.entries[0]!
       if (!entry.immediate && !entry.sending) {
         const state = await this.adapter.inspect(claim)
-        if (state.state && ['failed', 'cancelled', 'interrupted'].includes(state.state)) {
-          await this.change(claim.conversationId, queue => ({ ...queue, paused: true, error: '上轮未成功完成，队列已暂停。' })); return
+        const inspectedRun = state.runId ?? state.activeRunId ?? claim.awaitingRunId
+        const confirmedThisTerminal = Boolean(claim.confirmedRunId && inspectedRun === claim.confirmedRunId && state.state && ['failed', 'cancelled', 'interrupted'].includes(state.state) && !state.sideEffectUnknown && !state.activeRunId && !state.waiting)
+        if (state.sideEffectUnknown || (state.state && ['failed', 'cancelled', 'interrupted'].includes(state.state) && !confirmedThisTerminal)) {
+          await this.change(claim.conversationId, queue => {
+            const { confirmedRunId: _confirmed, ...rest } = queue
+            return { ...rest, paused: true, ...(inspectedRun ? { awaitingRunId: inspectedRun } : {}), error: state.sideEffectUnknown ? '存在执行结果未知的工具操作，队列已暂停。' : '上轮未成功完成，队列已暂停。' }
+          }); return
         }
         if (state.activeRunId || state.waiting || state.state === 'running') {
           if (state.activeRunId && state.activeRunId !== claim.awaitingRunId) await this.change(claim.conversationId, queue => ({ ...queue, awaitingRunId: state.activeRunId! }))
           return
         }
-        if (claim.awaitingRunId && state.state !== 'succeeded') {
-          await this.change(claim.conversationId, queue => ({ ...queue, paused: true, error: '上轮未成功完成，队列已暂停。' })); return
+        if (claim.awaitingRunId && state.state !== 'succeeded' && claim.confirmedRunId !== claim.awaitingRunId) {
+          await this.change(claim.conversationId, queue => {
+            const { confirmedRunId: _confirmed, ...rest } = queue
+            return { ...rest, paused: true, error: '上轮未成功完成，队列已暂停。' }
+          }); return
         }
       }
       // Persist the attempt before the network request. Unknown outcomes retry the same ID.
@@ -193,7 +204,7 @@ export class MessageQueueController {
       const attempt = sending.entries.find(item => item.requestId === entry.requestId)!
       const receipt = await this.adapter.send(sending, attempt)
       await this.store.update(claim.key, queue => {
-        const { error: _error, ...rest } = queue!
+        const { error: _error, confirmedRunId: _confirmed, ...rest } = queue!
         return { ...rest, awaitingRunId: receipt.runId, entries: rest.entries.filter(item => item.requestId !== entry.requestId) }
       })
       this.adapter.accepted?.(sending, attempt, receipt.runId)

@@ -4,7 +4,7 @@ import { Markdown } from './Markdown.js'
 import type { ComponentProps } from 'react'
 import { PulseButton } from './PulseControls.js'
 import type { ReactElement } from 'react'
-import { createContext, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useId, useRef, useState } from 'react'
 import { apiJson, type PulseWebTransport, type WebLane, type WebRunEvent } from './transport.js'
 
 export interface TraceStep {
@@ -44,6 +44,7 @@ export interface TraceState {
   outcome?: 'succeeded' | 'failed' | 'cancelled'
   startedAt?: number
   endedAt?: number
+  errorMessage?: string
 }
 
 export const emptyTrace: TraceState = { lanes: {}, order: [] }
@@ -79,8 +80,9 @@ function findLaneOfEffect(state: TraceState, effectId: string | undefined): stri
 
 /** Folds the browser-safe run events into a lane-oriented execution trace. */
 export function reduceTrace(state: TraceState, event: WebRunEvent): TraceState {
-  const startedAt = event.runStartedAt ?? event.timestamp
-  const base = startedAt !== undefined && Number.isFinite(startedAt) ? { ...state, startedAt: Math.min(state.startedAt ?? startedAt, startedAt) } : state
+  const startedAt = event.runStartedAt
+  const base = startedAt !== undefined && Number.isFinite(startedAt) && (!state.outcome || state.startedAt === undefined)
+    ? { ...state, startedAt: Math.min(state.startedAt ?? startedAt, startedAt) } : state
   if (event.type === 'status') return event.data.label ? { ...base, label: event.data.label } : base
   if (event.type === 'lanes') {
     const lanes = { ...base.lanes }
@@ -112,8 +114,8 @@ export function reduceTrace(state: TraceState, event: WebRunEvent): TraceState {
     const d = event.data
     return putStep(base, d.laneId ?? findLaneOfEffect(base, d.effectId), { id: d.activityId, effectId: d.effectId, kind: 'tool', tool: d.tool, status: d.status, ...(d.args ? { args: d.args } : {}), ...(d.preview ? { preview: d.preview } : {}), ...(d.error ? { error: d.error } : {}) })
   }
-  if (event.type === 'complete') return { ...base, outcome: event.data.status, completion: event.data, ...(event.timestamp === undefined ? {} : { endedAt: event.timestamp }) }
-  if (event.type === 'error') return { ...base, outcome: 'failed', ...(event.timestamp === undefined ? {} : { endedAt: event.timestamp }) }
+  if (event.type === 'complete') return { ...base, outcome: event.data.status, completion: event.data, ...(Number.isFinite(event.timestamp) ? { endedAt: state.completion ? state.endedAt ?? event.timestamp : event.timestamp } : {}) }
+  if (event.type === 'error') return state.completion ? base : { ...base, outcome: 'failed', errorMessage: event.data.message, ...(Number.isFinite(event.timestamp) ? { endedAt: state.endedAt ?? event.timestamp } : {}) }
   return base
 }
 
@@ -193,7 +195,7 @@ function StepRow({ step, live, showModel = true }: { step: TraceStep; live: bool
       {open && hasDetail && <ToolDetail step={step} />}
     </div>
   }
-  const body = [step.reasoning, step.note].filter(Boolean).join('\n\n')
+  const body = step.reasoning
   const open = userOpen ?? (live || seenLive.current)
   const task = TASK_LABEL[step.task ?? ''] ?? step.task ?? '推理'
   return <div className="trace-step trace-llm">
@@ -223,7 +225,7 @@ function LaneCard({ lane, depth, runActive }: { lane: TraceLane; depth: number; 
   const badge = modelBadge(lane)
   const multipleModels = new Set(lane.steps.flatMap(step => step.modelId ? [step.modelId] : [])).size > 1
   const tools = lane.steps.filter(step => step.kind === 'tool').length
-  const lastIndex = lane.steps.length - 1
+  const detailSteps = lane.steps.filter(step => step.kind === 'llm' && Boolean(step.reasoning || step.modelId))
   return <section className={`trace-lane trace-lane-${lane.status}`} style={{ marginLeft: depth * 14 }}>
     <PulseButton type="button" className="trace-lane-head" onClick={() => setUserOpen(!open)} aria-expanded={open}>
       <span className={`trace-dot dot-${lane.status}`} />
@@ -234,7 +236,7 @@ function LaneCard({ lane, depth, runActive }: { lane: TraceLane; depth: number; 
     </PulseButton>
     {open && <div className="trace-lane-body">
       {lane.steps.length === 0 && <p className="trace-empty">等待执行…</p>}
-      {lane.steps.map((step, index) => <StepRow key={step.id} step={step} live={active && index === lastIndex && step.kind === 'llm'} showModel={multipleModels || Boolean(step.fallback)} />)}
+      {detailSteps.map(step => <StepRow key={step.id} step={step} live={active && step.id === lane.steps.at(-1)?.id} showModel={multipleModels || Boolean(step.fallback)} />)}
     </div>}
   </section>
 }
@@ -255,8 +257,17 @@ function summary(state: TraceState, running: boolean): string {
   const label = emptyProgress ? undefined : state.label
   const processPending = latest?.kind === 'tool' && shellProcessPending(latest.tool, latest.status, latest.preview)
   const head = running ? (processPending ? presentRun({ state: 'running', waiting: 'process' }).label : label ?? (phase ? `正在${phase}` : presentRun({ state: 'running' }).label)) : state.outcome ? presentRun({ state: state.outcome, ...(state.completion ? { completion: state.completion } : {}) }).label : '已结束'
-  const seconds = state.startedAt !== undefined && state.endedAt !== undefined ? Math.max(1, Math.round((state.endedAt - state.startedAt) / 1000)) : undefined
-  return `${head}${lanes > 1 ? ` · ${lanes} 个执行分支` : ''}${tools ? ` · ${tools} 次工具调用` : ''}${seconds ? ` · 耗时 ${seconds}s` : ''}`
+  return `${head}${lanes > 1 ? ` · ${lanes} 个执行分支` : ''}${tools ? ` · ${tools} 次工具调用` : ''}`
+}
+
+/** Server wall-clock timestamps only; never fabricate elapsed time from page load. */
+export function traceDuration(trace: Pick<TraceState, 'startedAt' | 'endedAt'>): string | undefined {
+  const { startedAt, endedAt } = trace
+  if (startedAt === undefined || endedAt === undefined || !Number.isFinite(startedAt) || !Number.isFinite(endedAt) || endedAt < startedAt) return undefined
+  const seconds = Math.floor((endedAt - startedAt) / 1000)
+  if (!seconds) return '不足 1 秒'
+  const hours = Math.floor(seconds / 3600), minutes = Math.floor(seconds % 3600 / 60), rest = seconds % 60
+  return [hours ? `${hours} 小时` : '', minutes ? `${minutes} 分` : '', rest ? `${rest} 秒` : ''].filter(Boolean).join(' ')
 }
 
 function progressState(step: TraceStep): string {
@@ -291,8 +302,7 @@ function ProgressTools({ steps }: { steps: TraceStep[] }) {
     {open && <div className="progress-tool-list">
       {steps.map(step => <div className={`progress-result progress-${step.status ?? 'running'}`} key={step.id}>
         <span className="progress-result-state">{progressState(step)}</span><span>{summarizeTool(step).text}</span>
-        {typeof step.preview?.output === 'string' && <pre>{step.preview.output}</pre>}
-        {step.error && <p>{String(step.error.message ?? step.error.code ?? '操作失败')}</p>}
+        <ToolDetail step={step} />
       </div>)}
     </div>}
     {!open && failures.map(step => <ProgressFailure key={step.id} step={step} />)}
@@ -300,7 +310,7 @@ function ProgressTools({ steps }: { steps: TraceStep[] }) {
 }
 
 /** Public progress prose remains visible alongside compact tool summaries. */
-function RunProgress({ trace }: { trace: TraceState }) {
+function RunProgress({ trace, running }: { trace: TraceState; running: boolean }) {
   const groups: Array<{ kind: 'note'; id: string; note: string } | { kind: 'tools'; id: string; lane: string; steps: TraceStep[] }> = []
   for (const laneId of trace.order) for (const step of trace.lanes[laneId]?.steps ?? []) {
     const id = `${laneId}:${step.id}`
@@ -311,51 +321,61 @@ function RunProgress({ trace }: { trace: TraceState }) {
     } else if (step.note?.trim()) groups.push({ kind: 'note', id, note: step.note })
   }
   if (!groups.length) return null
-  return <div className="run-progress" role="log" aria-label="工作进展" aria-live="polite" aria-relevant="additions text">
+  return <div className="run-progress" role={running ? "log" : "region"} aria-label="工作进展" aria-live={running ? "polite" : "off"} aria-relevant="additions text">
     {groups.map(group => group.kind === 'tools' ? <ProgressTools key={group.id} steps={group.steps} /> : <div className="progress-note" key={group.id}><Markdown text={group.note} /></div>)}
   </div>
 }
 
-/** Collapsible main-process header plus nested lane cards. */
+/** One disclosure per run: public progress folds with technical details at completion. */
 export function RunTraceView({ trace, running: streamRunning, onDiffClick }: { trace: TraceState; running: boolean; onDiffClick?: ((path: string) => void) | undefined }) {
   const running = streamRunning && !trace.outcome
   const presentation = presentRun({ state: trace.outcome ?? 'running', ...(trace.completion ? { completion: trace.completion } : {}) })
   const [userOpen, setUserOpen] = useState<boolean | undefined>(undefined)
   const [wasRunning, setWasRunning] = useState(running)
-  // Reset overrides at lifecycle transitions. Late replay events must not undo
-  // the user's choice to reopen a completed run.
+  const bodyId = useId()
+  // Reset once at lifecycle transitions; replay and late events retain manual expansion.
   if (wasRunning !== running) { setWasRunning(running); setUserOpen(undefined) }
   const open = wasRunning !== running ? false : userOpen ?? false
+  const elapsed = !running ? traceDuration(trace) : undefined
+  const label = running ? summary(trace, true) : elapsed ? `耗时 ${elapsed}` : '执行过程'
+  const status = !running && trace.outcome ? presentation.label : ''
+  const problem = trace.outcome === 'failed' && !trace.completion?.errorCode ? trace.errorMessage : undefined
   const roots = trace.order.filter(id => { const lane = trace.lanes[id]!; return !lane.parentId || !trace.lanes[lane.parentId] })
   const render = (id: string): ReactElement[] => {
     const lane = trace.lanes[id]!
     const children = trace.order.filter(childId => trace.lanes[childId]?.parentId === id)
     return [<LaneCard key={id} lane={lane} depth={laneDepth(trace, lane)} runActive={running} />, ...children.flatMap(render)]
   }
-  return <OpenDiffContext.Provider value={onDiffClick}><div className={`run-trace ${running ? 'is-running' : ''} outcome-${trace.outcome ?? 'running'}`}>
-    <RunProgress trace={trace} />
-    <PulseButton type="button" className="run-trace-head" onClick={() => setUserOpen(!open)} aria-expanded={open}>
-      <span className={`trace-dot ${running ? 'dot-running' : presentation.tone === 'success' ? 'dot-succeeded' : presentation.tone === 'danger' ? 'dot-failed' : 'dot-neutral'}`} />
-      <strong>主进程</strong><span className="run-trace-summary">{summary(trace, running)}</span>
-      <span className="trace-caret">{open ? '▾' : '▸'}</span>
+  return <OpenDiffContext.Provider value={onDiffClick}><div className={`run-trace ${running ? 'is-running' : 'is-finished'} outcome-${trace.outcome ?? 'unknown'}`}>
+    {running && <RunProgress trace={trace} running />}
+    <PulseButton type="button" className="run-trace-head" onClick={() => setUserOpen(!open)} aria-controls={bodyId} aria-label={['执行过程', status, label === '执行过程' ? '' : label].filter(Boolean).join('，')} aria-expanded={open}>
+      {running && <span className="trace-dot dot-running" />}
+      <span className="run-trace-label">{label}</span>
+      <Icon className={open ? 'run-trace-caret is-open' : 'run-trace-caret'} name="chevron" size={12}/>
+      {!running && trace.outcome && !['accepted', 'finished'].includes(presentation.state) && <small className="run-trace-outcome">{status}</small>}
     </PulseButton>
-    {open && <div className="run-trace-body" role="region" aria-label="执行过程" tabIndex={0}>
-      {trace.order.length === 0 && <p className="trace-empty">{trace.label ?? '正在准备…'}</p>}
-      {roots.flatMap(render)}
+    {problem && <p className="run-trace-problem">{problem}</p>}
+    {open && <div id={bodyId} className="run-trace-body" role="region" aria-label="执行过程" tabIndex={0}>
+      {!running && <RunProgress trace={trace} running={false} />}
+      {trace.order.length === 0 ? <p className="trace-empty">暂无可用过程记录</p> : <div className="run-trace-details"><small className="run-trace-statistics">{summary(trace, running)}</small>{roots.flatMap(render)}</div>}
     </div>}
   </div></OpenDiffContext.Provider>
 }
 
-/** Loads the persisted trace of a finished run and shows it collapsed. */
+/** History keeps summaries usable when its optional process trace needs a retry. */
 export function PersistedRunTrace({ runId, transport, onDiffClick }: { runId: string; transport: PulseWebTransport; onDiffClick?: ((path: string) => void) | undefined }) {
-  const [trace, setTrace] = useState<TraceState | undefined>(undefined)
+  const [load, setLoad] = useState<{ runId: string; transport: PulseWebTransport; trace?: TraceState; error?: boolean }>()
+  const [retry, setRetry] = useState(0)
   useEffect(() => {
     let cancelled = false
+    setLoad({ runId, transport })
     apiJson<{ events: WebRunEvent[] }>(transport, `/api/runs/${encodeURIComponent(runId)}/trace`)
-      .then(result => { if (!cancelled) setTrace(result.events.reduce(reduceTrace, emptyTrace)) })
-      .catch(() => undefined)
+      .then(result => { if (!cancelled) setLoad({ runId, transport, trace: result.events.reduce(reduceTrace, emptyTrace) }) })
+      .catch(() => { if (!cancelled) setLoad({ runId, transport, error: true }) })
     return () => { cancelled = true }
-  }, [runId, transport])
-  if (!trace || trace.order.length === 0) return null
-  return <RunTraceView trace={trace} running={false} onDiffClick={onDiffClick} />
+  }, [runId, transport, retry])
+  if (load?.runId !== runId || load.transport !== transport) return null
+  if (load.error) return <div className="run-trace run-trace-unavailable" role="status"><span>过程记录暂不可用</span><PulseButton type="button" aria-label="重试加载执行过程" onClick={() => setRetry(value => value + 1)}>重试</PulseButton></div>
+  if (!load.trace) return null
+  return <RunTraceView key={runId} trace={load.trace} running={false} onDiffClick={onDiffClick} />
 }

@@ -14,18 +14,18 @@ const interaction: PendingInteraction = { kind: 'interaction', runId: 'r', group
 it.each(['session', 'permanent'] as const)('submits only the %s choice and backend offer token from a local approval', async choice => {
   const submit = vi.fn(async () => true)
   const view = render(<InteractionPanel localAdmin interaction={interaction} reviewNote="" delegated={false} submit={submit}/>)
-  fireEvent.click(view.getByRole('button', { name: choice === 'session' ? /本次任务记住/ : /永久记住/ }))
+  fireEvent.click(view.getByRole('button', { name: choice === 'session' ? /本次任务放行相同命令/ : /以后放行相同命令/ }))
   await waitFor(() => expect(submit).toHaveBeenCalledWith([{ effectId: 'e', value: { approved: true, remember: choice, execPolicyToken: 'server-offer' } }]))
 })
 it('does not display host authority buttons on a remote session', () => {
   const view = render(<InteractionPanel interaction={interaction} reviewNote="" delegated={false} submit={async () => true}/>)
-  expect(view.queryByRole('button', { name: /记住/ })).toBeNull()
+  expect(view.queryByRole('button', { name: /放行相同命令/ })).toBeNull()
   expect(view.getByRole('button', { name: '允许本次' })).toBeTruthy()
 })
 it('does not offer remember for an explicit prompt without a backend offer', () => {
   const item = structuredClone(interaction); delete item.items[0]!.input.execPolicy
   const view = render(<InteractionPanel localAdmin interaction={item} reviewNote="" delegated={false} submit={async () => true}/>)
-  expect(view.queryByRole('button', { name: /记住/ })).toBeNull()
+  expect(view.queryByRole('button', { name: /放行相同命令/ })).toBeNull()
 })
 it('edits structured token alternatives and validates a draft through the diagnostic endpoint', async () => {
   const change = vi.fn(), request = vi.fn(async () => new Response(JSON.stringify({ decision: 'forbidden', reason: 'exec_policy_forbidden', version: 'v1', resolvedProgram: '/usr/bin/git', matchedRules: [{ source: 'host', index: 0 }] })))

@@ -36,7 +36,7 @@ export function ChatSurface({ children }: { children: ReactNode }) {
 }
 export function ChatActionArea({ state, stopError, onRetryStop, className, children }: { state: ChatState; stopError: string; onRetryStop: () => void; className: string; children: ReactNode }) {
   return <footer className={className} data-chat-state={state}>
-    {stopError ? <div className="chat-stop-feedback" role="alert"><span>{stopError}</span><PulseButton onClick={onRetryStop}>重试停止</PulseButton></div> : (state === 'stopping' || state === 'stopped') && <div className="chat-stop-feedback" role="status">{state === 'stopping' ? '正在停止…' : '已停止'}</div>}
+    {stopError ? <div className="chat-stop-feedback" role="alert"><span>{stopError}</span><PulseButton onClick={onRetryStop}>重试停止</PulseButton></div> : state === 'stopping' && <div className="chat-stop-feedback" role="status">正在停止…</div>}
     {children}
   </footer>
 }
