@@ -125,7 +125,16 @@ it('keeps a settled shell.start blocked while its persisted process is unknown a
         const started = Date.now(), timeout = process.platform === 'win32' ? 275_000 : 10_000
         for (;;) {
           const child = (await host.listRunProcesses(conversation.id, run.id))[0]
-          if (child?.status === 'exited') { expect(child.result).toMatchObject({ code: 0 }); break }
+          if (child?.status === 'exited') {
+            // This fixture runs only a local node --version. Preserve bounded
+            // output and the deadline flags instead of losing the first native
+            // error behind the list API's intentionally abbreviated result.
+            const output = await host.readRunProcess(conversation.id, run.id, child.processId)
+            const diagnostic = JSON.stringify({ result: child.result, output: output.output })
+            if (child.result?.code !== 0) console.error('Fixture shell exit:', diagnostic)
+            expect(child.result, diagnostic).toMatchObject({ code: 0, aborted: false, timedOut: false })
+            break
+          }
           expect(child?.status, child?.error).toBe('running')
           if (Date.now() - started > timeout) throw new Error('Fixture shell did not reach a durable exit')
           await new Promise(resolve => setTimeout(resolve, 100))
