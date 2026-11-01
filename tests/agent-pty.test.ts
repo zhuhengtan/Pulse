@@ -128,6 +128,9 @@ it.skipIf(process.platform === 'win32')('blocks outbound connect inside the real
   await writeFile(script, "const s=require('net').connect(443,'198.51.100.1');s.on('connect',()=>{console.log('UNEXPECTED_CONNECTED');process.exit(2)});s.on('error',e=>{console.log('blocked:'+e.code);process.exit(0)})")
   const result = await runShell('node', [script], { cwd: root, timeoutMs: 5000, allowedDomains: [], ...agentPtyShellOptions(() => {}) })
   expect(result.code).toBe(0); expect(result.timedOut).toBe(false)
-  expect(result.stdout).toMatch(/blocked:(?:EPERM|EACCES|OFFLINE_NETWORK_BLOCKED)/)
+  // Linux's isolated network namespace has no outbound route.
+  expect(result.stdout).toMatch(process.platform === 'linux'
+    ? /blocked:(?:EPERM|EACCES|ENETUNREACH|OFFLINE_NETWORK_BLOCKED)/
+    : /blocked:(?:EPERM|EACCES|OFFLINE_NETWORK_BLOCKED)/)
   expect(result.stdout).not.toContain('UNEXPECTED_CONNECTED')
 }, 15000)

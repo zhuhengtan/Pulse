@@ -715,6 +715,18 @@ describe('repair round 1 production paths', () => {
   it('settles concurrent runs that reuse effect ids and undoes only the addressed owner', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-owner-undo-'))
     const hosts: LocalHost[] = []
+    let releaseWrites!: () => void
+    const bothAdmitted = new Promise<void>(resolve => { releaseWrites = resolve })
+    let arrivals = 0
+    const beginJournal = FileSnapshotManager.prototype.beginJournal
+    vi.spyOn(FileSnapshotManager.prototype, 'beginJournal').mockImplementation(async function (this: FileSnapshotManager, info) {
+      // Admit both Hosts before either leaves an unconfirmed foreign WAL.
+      // That separate startup state must still fail closed without its owner
+      // receipt. This case exercises concurrent writes/settlement identities.
+      if (++arrivals === 2) releaseWrites()
+      await bothAdmitted
+      return beginJournal.call(this, info)
+    })
     try {
       const open = (dataDir: string, path: string, content: string) => {
         const host = new LocalHost({ cwd: root, dataDir, provider: { provider: 'mock' }, approvalMode: 'auto', jarvis: { enabled: false }, mockToolCalls: [{ name: 'fs.write', input: { path, content } }], mockAfterToolResponse: 'done' })
@@ -730,6 +742,7 @@ describe('repair round 1 production paths', () => {
       ])
       expect(await runA.outcome()).toMatchObject({ status: 'succeeded' })
       expect(await runC.outcome()).toMatchObject({ status: 'succeeded' })
+      expect(arrivals).toBe(2)
       expect(await readFile(join(root, 'a.txt'), 'utf8')).toBe('A committed')
       expect(await readFile(join(root, 'c.txt'), 'utf8')).toBe('C committed')
       expect((await readdir(join(root, '.pulse/file-snapshots/wal'))).filter((name) => name.endsWith('.json'))).toEqual([])
@@ -742,7 +755,7 @@ describe('repair round 1 production paths', () => {
       expect((await hostA.rollbackFiles({ confirm: true, targets: [{ path: 'a.txt', expectedPostHash: hash }] })).status).toBe('completed')
       await expect(readFile(join(root, 'a.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
       expect(await readFile(join(root, 'c.txt'), 'utf8')).toBe('C committed')
-    } finally { await Promise.all(hosts.map((host) => host.close())); await rm(root, { recursive: true, force: true }) }
+    } finally { releaseWrites(); await Promise.all(hosts.map((host) => host.close())); await rm(root, { recursive: true, force: true }) }
   })
 
   it('parses the files rollback entry', () => {
