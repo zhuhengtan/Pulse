@@ -1,0 +1,27 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { HookService, loadHookDefinitions, checkHookDefinitions, hookArgv, hookMatches } from '../packages/server/src/hooks/index.js';
+import { createLocalHost } from '../packages/server/src/index.js';
+import { runShell } from '../packages/adapters/src/tools/shell.js';
+import * as adapters from '@hunterzhu/pulse-adapters';
+import { ShellProcesses } from '../packages/server/src/shell-processes.js';
+import type { EffectRecord } from '@hunterzhu/pulse-runtime';
+import { roots, services, openService, fixture, effect, signal, nativeTimeout } from './support/hook-fixture.js';
+it('orders events, preserves receipts and never replays completed/unknown hooks on another attempt', async () => {
+    const f = await fixture(), execute = vi.fn(async () => ({ status: 'succeeded' as const, value: 'ok' }));
+    await f.service.sessionStart(signal());
+    await f.service.around(effect(), signal(), undefined, execute);
+    await f.service.stop();
+    const files = await readdir(f.journal), receipts = await Promise.all(files.map(p => readFile(join(f.journal, p), 'utf8').then(JSON.parse)));
+    expect(receipts.map(r => r.event).sort(), JSON.stringify(receipts)).toEqual(['PostToolUse', 'PreToolUse', 'SessionStart', 'Stop']);
+    const pre = receipts.find(r => r.event === 'PreToolUse');
+    expect(pre).toMatchObject({ effectId: 'e1', attemptId: 'a1', definitionHash: f.snapshot.hash, status: 'continue' });
+    const path = join(f.journal, files[receipts.indexOf(pre)]!);
+    await writeFile(path, JSON.stringify({ ...pre, status: 'running' }));
+    const second = openService(f.root, f.journal, { conversationId: 'c', runId: 'r' }, f.snapshot, f.trusted);
+    const result = await second.around(effect('a2'), signal(), undefined, execute);
+    expect(result.error?.code).toBe('HOOK_PRE_DENIED');
+    expect(execute).toHaveBeenCalledTimes(1);
+}, nativeTimeout(4, 10000));

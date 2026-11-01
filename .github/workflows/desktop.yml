@@ -90,6 +90,7 @@ jobs:
         with:
           name: desktop-diagnostics-${{ matrix.os }}-${{ matrix.arch }}
           path: artifacts/desktop-smoke/
+          retention-days: 1
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
@@ -100,4 +101,5 @@ jobs:
             artifacts/desktop/*.exe
             artifacts/desktop/*.AppImage
             artifacts/desktop/*.deb
+          retention-days: 1
           if-no-files-found: error

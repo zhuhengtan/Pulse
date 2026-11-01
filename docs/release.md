@@ -47,6 +47,12 @@ pnpm ci:local
 
 平台依赖需提前准备：macOS 使用系统沙箱；Linux 需要 `bubblewrap`、`ripgrep`、`socat`，并允许非特权用户命名空间；Windows 需要 PowerShell 7，并用管理员权限执行一次 `pnpm --filter @hunterzhu/pulse-adapters exec srt windows-install`。Windows 的 `TEMP`/`TMP` 应指向沙箱账户可访问的目录，例如 `C:\pulse-ci-temp`，不要使用用户私有目录；GitHub runner 已自动配置。检查脚本不会安装或卸载本机沙箱服务。
 
+构建入口会核对源码、锁文件、Node/ABI、编译器、平台和输出内容哈希，校验一致时复用同一工作区的产物；输入变化、产物缺失或损坏时完整重建。`ci:local`、`check`、CLI 打包和开发入口共享这一机制。缓存只节省构建，不替代检查或跨平台验收；`.pulse-dev/build-state/` 可删除后重建。
+
+GitHub 的 Windows 后端测试按历史文件耗时分成四个独立的 `windows-2022` 标准虚拟机任务，每台仍串行执行，避免共享 SRT 账户和 ACL。另一个 Windows common 任务负责 Web、CLI 打包、安装和启动验证。最多同时运行四个 Windows 任务。`check (windows-2022)` 汇总任务会核对五个实际 Windows job 的状态与 runner 标签；任一个失败、取消、跳过或缺失都拒绝通过。发布检查也会重新核对，不能只凭汇总 job 绿灯发版。公开仓库使用标准托管 runner，不启用付费大规格 runner；临时 artifact 保留一天。
+
+每个分片从同一完整测试清单生成，四份必须无遗漏、无重复，新文件自动加入；测试结束时再次核对实际执行文件及用例终态。只有原有显式 skip/todo 可保持跳过。测试首个失败会立即输出，仍采用 `bail=1`，不能将提前中止称为完整通过。CI 的 Node 网络边界允许 loopback 夹具，拒绝意外外网及清空环境的直接 Node 子进程绕过；真实 Shell 测试仍使用原生沙箱，不改变产品权限。
+
 Windows 源码环境还需 Rust/MSVC 工具链，并先执行 `pnpm desktop:build`。它按 `native/srt-win-patch/SOURCE.json` 的固定源码与校验值构建 Windows 沙箱，执行原生 ACL 回归后生成带完整性清单的二进制；正式 npm 包及 CLI 压缩包直接包含该产物。Release 从 Windows 构建任务下载这一产物，不能回退到未修复的沙箱二进制。 权限初始化按小批次写入完整的读写拒绝规则，全部成功后才启动命令；各批次使用同一宿主 PID，失败或关闭时由原生账本统一回收。
 
 本地验证当前操作系统。macOS 不能代替 Windows 的权限、文件锁与网络隔离验证；Docker 也不能提供 Windows 内核。日常改动先跑本地检查，发布前再让云端矩阵验证同一提交的三个平台。

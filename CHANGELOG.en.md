@@ -21,6 +21,7 @@ This file records Pulse release notes in English and is the source for `pulse --
 - Reduce automatic-approval card flashes and repeated interruptions while retaining required human authorization; preserve conversations and checkpoints when sending follow-ups, stopping, recovering, or extending budgets.
 - Fix conversation pin updates, failure rollback, and duplicate rows; give pinned conversations an independently collapsible section and unify neutral colors and rounded disclosure arrows.
 - Fix preview desktop package bindings for runtime, version, and data directories to avoid loading another environment's backend or mixing production data.
+- Release checks reuse hash-verified build outputs; Windows backend tests run on four independent standard virtual machines with complete coverage and native-platform result checks.
 
 ## [0.10.0] - 2026-10-28
 

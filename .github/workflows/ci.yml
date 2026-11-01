@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   check:
@@ -15,18 +16,12 @@ jobs:
       matrix:
         # Match the supported installer/component images. Floating latest moved
         # to new kernels/OS releases before their sandbox contracts were tested.
-        os: [ubuntu-24.04, macos-15, windows-2022]
+        os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     env:
       PULSE_EXPECTED_PNPM_VERSION: 12.4.2
     steps:
       - uses: actions/checkout@v4
-      - name: Use runner workspace for Windows temporary files
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "TMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: pnpm/action-setup@v4
         with:
           version: ${{ env.PULSE_EXPECTED_PNPM_VERSION }}
@@ -53,18 +48,72 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+      - name: Run shared local and cloud checks
+        timeout-minutes: 30
+        run: pnpm ci:local
+
+  windows:
+    name: windows-${{ matrix.profile }}
+    strategy:
+      fail-fast: true
+      max-parallel: 4
+      matrix:
+        profile: [common, tests-1, tests-2, tests-3, tests-4]
+    runs-on: windows-2022
+    timeout-minutes: 180
+    env:
+      PULSE_EXPECTED_PNPM_VERSION: 12.4.2
+      CI_PROFILE: ${{ matrix.profile }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use runner workspace for temporary files
+        shell: pwsh
+        run: |
+          "TEMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+          dest: ${{ runner.temp }}/setup-pnpm
+      - run: node scripts/ci/verify-pnpm.mjs
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm desktop:build
       - name: Install Windows shell sandbox
         id: windows-sandbox
-        if: runner.os == 'Windows'
         run: pnpm --filter @hunterzhu/pulse-adapters exec srt windows-install
-      # Native Windows cases run once in the full suite below, including all
-      # file, skill, toolchain, ACL, Python and candidate-runner assertions.
-      - name: Run shared local and cloud checks
-        # Windows runs serially because SRT owns machine-wide ACL state; each
-        # real tool launch includes its cold permission setup and cleanup.
-        # Unix budgets include the full suite, archive/install and start/dev/debug.
-        timeout-minutes: ${{ runner.os == 'Windows' && 150 || 30 }}
-        run: pnpm ci:local
+      - name: Run assigned checks exactly once
+        timeout-minutes: 150
+        shell: pwsh
+        run: |
+          if ($env:CI_PROFILE -eq 'common') {
+            node scripts/ci/local.mjs --windows-common
+          } else {
+            $shard = $env:CI_PROFILE.Substring(6)
+            node scripts/ci/windows-shard.mjs $shard
+          }
+          exit $LASTEXITCODE
       - name: Remove Windows shell sandbox
-        if: always() && runner.os == 'Windows' && steps.windows-sandbox.outcome == 'success'
+        if: always() && steps.windows-sandbox.outcome == 'success'
         run: pnpm --filter @hunterzhu/pulse-adapters exec srt windows-uninstall
+
+  windows-gate:
+    name: check (windows-2022)
+    needs: windows
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Verify every native Windows job
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+        run: |
+          test "$WINDOWS_RESULT" = success
+          node scripts/ci/windows-gate.mjs

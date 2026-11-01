@@ -48,6 +48,10 @@ export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>
     {
       "zh": "修复 preview 桌面包的运行环境、版本及数据目录绑定，避免加载其他环境的后台或混用生产数据。",
       "en": "Fix preview desktop package bindings for runtime, version, and data directories to avoid loading another environment's backend or mixing production data."
+    },
+    {
+      "zh": "发布检查复用经过哈希验证的构建产物；Windows 后端测试分配到四台独立标准虚拟机，并逐项核对完整覆盖与真实平台结果。",
+      "en": "Release checks reuse hash-verified build outputs; Windows backend tests run on four independent standard virtual machines with complete coverage and native-platform result checks."
     }
   ],
   "0.10.0": [

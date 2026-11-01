@@ -1,3 +1,4 @@
+import { appendFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -6,6 +7,10 @@ import { fileURLToPath } from 'node:url'
 
 const repo = fileURLToPath(new URL('../../', import.meta.url))
 const windows = process.platform === 'win32'
+const profile = process.argv.slice(2)
+if (profile.length > 1 || profile.some(arg => arg !== '--windows-common')) throw Error('INVALID_CI_PROFILE')
+const commonOnly = profile.length === 1
+if (commonOnly && !windows) throw Error('WINDOWS_COMMON_REQUIRES_WINDOWS')
 const directory = await mkdtemp(join(tmpdir(), 'pulse-ci-'))
 const home = join(directory, 'home')
 const env = {
@@ -20,7 +25,13 @@ const env = {
 
 function run(command, args, options = {}) {
   console.log(`\n[ci:local] ${command} ${args.join(' ')}`)
-  const result = spawnSync(command, args, { cwd: repo, env, stdio: 'inherit', ...options })
+  const started = Date.now()
+  const guarded = args.includes('check') || args.at(-1) === 'test' || args.includes('scripts/ci/test.mjs') || args.some(arg => arg.replaceAll('\\', '/').endsWith('/scripts/ci/test.mjs'))
+  const testEnv = guarded ? { ...env, PULSE_CI_GUARD_OWNER: '1', PULSE_CI_NETWORK_LOG: join(directory, 'network-attempts.jsonl'), NODE_OPTIONS: (env.NODE_OPTIONS ?? '') + ' --import=' + join(repo, 'scripts/ci/network-guard.mjs') } : env
+  const result = spawnSync(command, args, { cwd: repo, env: testEnv, stdio: 'inherit', ...options })
+  const duration = Date.now() - started
+  console.log(`[ci:timing] ${command} ${args.join(' ')} ${duration}ms`)
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n${command} ${args.join(' ')}: ${duration}ms\n`)
   if (result.error) throw result.error
   if (result.status !== 0) throw new Error(`Check failed (${result.signal ?? result.status}): ${command} ${args.join(' ')}`)
 }
@@ -42,9 +53,13 @@ try {
     env.PATH = `${tools}${delimiter}${env.PATH ?? ''}`
     console.log('[ci:local] Using fixed macOS system Git: /usr/bin/git')
   }
+  await rm(join(repo, '.pulse-dev/ci-network-attempts.jsonl'), { force: true })
   pnpm('native:prepare')
-  pnpm('web:build')
-  pnpm('check')
+  pnpm('build')
+  if (commonOnly) {
+    pnpm('--filter', '@hunterzhu/pulse-web', 'check')
+    pnpm('--filter', '@hunterzhu/pulse-web', 'test')
+  } else pnpm('check')
   pnpm('eval:validate')
   pnpm('site:check')
   pnpm('release:check')
@@ -83,6 +98,11 @@ try {
   node('scripts/cli/dev.mjs', '--version')
   node('scripts/cli/debug.mjs', '--version')
 } finally {
+  for (const file of [join(directory, 'network-attempts.jsonl'), join(repo, '.pulse-dev/ci-network-attempts.jsonl')]) {
+    const attempts = await readFile(file, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error })
+    if (attempts.trim()) { console.error('UNEXPECTED_CI_NETWORK_ATTEMPT:' + attempts); process.exitCode = 1 }
+  }
   await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 }
-console.log(`\nLocal CI passed on ${process.platform}. No release was published.`)
+if (process.exitCode) throw Error('CI_NETWORK_BOUNDARY_FAILED')
+console.log(commonOnly ? 'Windows common checks passed. Backend shards are still required; this is not a full gate.' : `\nLocal CI passed on ${process.platform}. No release was published.`)

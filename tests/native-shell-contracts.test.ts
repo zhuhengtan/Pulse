@@ -3,11 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FilesystemTool, runShell } from '@hunterzhu/pulse-adapters'
-
-// Keep long native cold starts separate from pure model/adapter contracts.
-// All four cases still run exactly once through the unfiltered full CI suite.
 describe('native filesystem and shell contracts', () => {
-  it('enforces filesystem sandbox and runs bounded shell output', async () => {
+it('enforces filesystem sandbox and runs bounded shell output', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pulse-m3-'))
     const sibling = await mkdtemp(join(tmpdir(), 'pulse-m3-sibling-'))
     const privateProfile = process.platform === 'win32' ? await mkdtemp(join(homedir(), 'pulse-private-profile-')) : undefined
@@ -60,45 +57,4 @@ describe('native filesystem and shell contracts', () => {
   // Seven cold Windows launches include ACL setup and teardown, not just the
   // command timeout. Do not abandon a live policy halfway through this test.
   }, process.platform === 'win32' ? 1_200_000 : 60_000)
-
-  it('runs the installed development toolchain inside the sandbox by name', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'pulse toolchain 雪-'))
-    try {
-      if (process.env.CI && process.platform === 'win32') expect(process.env.PNPM_HOME, 'CI must expose the pnpm setup shim directory').toBeTruthy()
-      for (const [command, args] of [['node', ['--version']], ['pnpm', ['--version']], ['git', ['init', '--quiet']], ['git', ['status', '--porcelain']]] as const) {
-        if (process.env.CI) console.info(`[sandbox toolchain] starting ${command} ${args.join(' ')}`)
-        const result = await runShell(command, [...args], { cwd: root, timeoutMs: 30_000 })
-        if (process.env.CI) console.info(`[sandbox toolchain] ${command} exited ${result.code}`)
-        expect(result.code, `${command}; PNPM_HOME=${process.env.PNPM_HOME ?? '(unset)'}: ${result.stderr}`).toBe(0)
-        if (command === 'pnpm' && process.env.PULSE_EXPECTED_PNPM_VERSION) expect(result.stdout.trim()).toBe(process.env.PULSE_EXPECTED_PNPM_VERSION)
-        expect(result.stderr).not.toContain('Operation not permitted')
-      }
-      const child = await runShell('node', ['-e', 'const c=require("node:child_process").spawnSync("node",["--version"],{encoding:"utf8"});process.stdout.write(c.stdout||"");process.exit(c.status??1)'], { cwd: root })
-      expect(child.code, child.stderr).toBe(0)
-      expect(child.stdout).toMatch(/^v\d+/)
-    } finally { await rm(root, { recursive: true, force: true }) }
-  // Each Windows command provisions its own isolated ACL policy before the
-  // child timeout starts. Five cold launches include policy restoration as well as child execution.
-  // Hosted Windows runners measured 105–146 seconds per complete launch; keep
-  // the five-command test bounded without cutting off its final initialization.
-  }, process.platform === 'win32' ? 900_000 : 60_000)
-
-  it('cancels a shell process group instead of leaving a spawned child running', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'pulse-shell-'))
-    const marker = join(root, 'leaked.txt')
-    const script = 'const {spawn}=require("node:child_process"); const fs=require("node:fs"); spawn(process.execPath,["-e",`setTimeout(()=>fs.writeFileSync(${JSON.stringify(marker)},"leaked"),400)`],{stdio:"ignore"}); setTimeout(()=>{},10000)'
-    const controller = new AbortController()
-    const pending = runShell(process.execPath, ['-e', script], { signal: controller.signal })
-    setTimeout(() => controller.abort(), 25)
-    await pending
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    await expect(readFile(marker, 'utf8')).rejects.toThrow()
-    await rm(root, { recursive: true, force: true })
-  })
-
-  it('reports shell timeout and escalates after the grace period', async () => {
-    const result = await runShell(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], { timeoutMs: 25 })
-    expect(result.timedOut).toBe(true)
-    expect(result.aborted).toBe(false)
-  })
 })
