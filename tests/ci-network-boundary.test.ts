@@ -1,13 +1,14 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { copyFile, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { expect, it } from 'vitest'
 it('permits local fixtures and blocks sockets and DNS in scrubbed Node children', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'pulse-ci-boundary-'))
+  const root = await mkdtemp(join(tmpdir(), 'pulse ci boundary '))
   try {
-    const log = join(root, 'probe.jsonl'), guard = fileURLToPath(new URL('../scripts/ci/network-guard.mjs', import.meta.url))
+    const log = join(root, 'probe.jsonl'), guard = join(root, 'network guard.mjs')
+    await copyFile(fileURLToPath(new URL('../scripts/ci/network-guard.mjs', import.meta.url)), guard)
     const source = `
       import net from 'node:net'; import dns from 'node:dns'; import {spawnSync} from 'node:child_process';
       process.env.PULSE_CI_NETWORK_LOG=${JSON.stringify(log)};
@@ -21,7 +22,7 @@ it('permits local fixtures and blocks sockets and DNS in scrubbed Node children'
       if(child.status!==0||!child.stdout.includes('scrubbed child blocked'))throw Error(child.stderr||'CHILD_BOUNDARY_BYPASSED');
       console.log('local fixture passed; external access blocked');
     `
-    const result = spawnSync(process.execPath, ['--import=' + guard, '--input-type=module', '-e', source], { env: { PULSE_CI_NETWORK_LOG: log }, encoding: 'utf8', timeout: 10000 })
+    const result = spawnSync(process.execPath, ['--import=' + pathToFileURL(guard).href, '--input-type=module', '-e', source], { env: { PULSE_CI_NETWORK_LOG: log }, encoding: 'utf8', timeout: 10000 })
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('local fixture passed; external access blocked')
     const attempts = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)

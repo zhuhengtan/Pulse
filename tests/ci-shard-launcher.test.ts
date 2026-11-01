@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
 it('runs all four real shard entrypoints with exact collection receipts from a tiny installed fixture', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'pulse-ci-shard-'))
+  const root = await mkdtemp(join(tmpdir(), 'pulse ci shard '))
   try {
     await mkdir(join(root, 'scripts/ci'), { recursive: true }); await mkdir(join(root, 'tests'))
     await symlink(join(process.cwd(), 'node_modules'), join(root, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')

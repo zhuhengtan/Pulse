@@ -47,7 +47,7 @@ if (launchedDirectly()) {
     if (!env.PULSE_CI_GUARD_OWNER) await rm(join(repo, '.pulse-dev/ci-network-attempts.jsonl'), { force: true })
     env.PULSE_CI_GUARD_OWNER = '1'
     env.PULSE_CI_NETWORK_LOG ??= join(directory, 'network-attempts.jsonl')
-    env.NODE_OPTIONS = (env.NODE_OPTIONS ?? '') + ' --import=' + join(repo, 'scripts/ci/network-guard.mjs')
+    env.NODE_OPTIONS = (env.NODE_OPTIONS ?? '') + ' --import=' + pathToFileURL(join(repo, 'scripts/ci/network-guard.mjs')).href
     const options = process.argv.slice(2)
     if (options.some(arg => !/^--shard=[1-4]$/.test(arg)) || options.length > 1) throw Error('INVALID_CI_TEST_ARGUMENTS')
     const shard = options.length ? Number(options[0].slice(8)) : undefined
