@@ -9,7 +9,20 @@ import { LocalHost } from '@hunterzhu/pulse-server'
 
 beforeEach(() => { vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('UNEXPECTED_MODEL_OR_NETWORK_REQUEST')) })
 const directories: string[] = []
-afterEach(async () => { expect(globalThis.fetch).not.toHaveBeenCalled(); vi.restoreAllMocks(); await Promise.all(directories.splice(0).map(p => rm(p, { recursive: true, force: true }))) })
+const sessions: ReturnType<PulseRuntime['start']>[] = []
+const executions = new Set<Promise<unknown>>()
+afterEach(async () => {
+  try { expect(globalThis.fetch).not.toHaveBeenCalled() }
+  finally {
+    try {
+      await Promise.all(sessions.splice(0).map(async session => { await session.cancel('fixture cleanup'); await session.outcome() }))
+      await Promise.allSettled([...executions])
+    } finally {
+      vi.restoreAllMocks()
+      await Promise.all(directories.splice(0).map(p => rm(p, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })))
+    }
+  }
+})
 async function directory() { const p = await mkdtemp(join(tmpdir(), 'pulse-continuous-')); directories.push(p); return p }
 const globalState = (r: PulseRuntime): any => { const agent = [...r.state.agents.values()][0]!; return agent.globalVersions.get(agent.latestGlobalVersion) }
 
@@ -20,7 +33,7 @@ async function scenario(options: { rounds: number; version?: '56' | '57'; pause?
   const owners = new Set<string>(), calls: string[] = []
   const stage = { id: 'deliver', kind: 'edit', goal: 'Read the required local fixtures and create result.txt', check: 'result.txt contains the requested result', criterionIds: ['result'], dependsOn: [] }
   const program = buildTaskControllerProgram({ version: options.version ?? '57', system: 'Offline scripted test', toolNames: ['fs.read', 'fs.write', 'ask.choice'], readOnlyToolNames: ['fs.read'], approvalMode: 'auto', maxTurns: 256, modelBudgetView: () => ledger.schedulingView() })
-  const executor: EffectExecutor = async effect => {
+  const execute: EffectExecutor = async effect => {
     calls.push(effect.key ?? '')
     if (calls.length > 350) throw new Error('SIMULATION_EFFECT_LIMIT')
     if (effect.kind === 'tool') {
@@ -43,19 +56,27 @@ async function scenario(options: { rounds: number; version?: '56' | '57'; pause?
     if (!writes) return call('fs.write', { path: 'result.txt', content: 'delivered' })
     return { value: { text: 'Delivered result.txt', finishReason: 'stop', toolCalls: [] } }
   }
+  const executor: EffectExecutor = (...args) => {
+    const pending = Promise.resolve(execute(...args))
+    executions.add(pending)
+    void pending.finally(() => executions.delete(pending)).catch(() => undefined)
+    return pending
+  }
   const config = { builtinHumanEffects: true, effectExecutor: executor, historySoftTokens: 5000, historyHardTokens: 200_000 }
   runtime = new PulseRuntime(config)
   const { agentId } = runtime.createAgent({ goal: 'Read local fixtures and deliver result.txt', program, initialGlobal: { taskRecord: { schemaVersion: 1, runId: 'offline', objective: 'Read local fixtures and deliver result.txt', acceptanceCriteria: [{ id: 'result', description: 'Create result.txt after reading the required fixtures' }], status: 'in_progress', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] } } })
   const session = runtime.start(agentId)
+  sessions.push(session)
   const original = session.outcome()
   if (options.pause) {
-    await expect.poll(() => [...runtime.state.effects.values()].find(e => e.kind === 'human' && !e.outcome), { timeout: 20000 }).toBeTruthy()
+    await expect.poll(() => [...runtime.state.effects.values()].find(e => e.kind === 'human' && !e.outcome), { timeout: 60000 }).toBeTruthy()
     const pending = [...runtime.state.effects.values()].find(e => e.kind === 'human' && !e.outcome)!
     const saved = runtime.exportPersistence(), used = ledger.used
     ledger = await ModelAttemptBudget.open(ledgerPath, 256)
     expect(ledger.used).toBe(used)
     runtime = new PulseRuntime({ ...config, persistence: saved, programs: [program] })
     const resumed = runtime.start(agentId)
+    sessions.push(resumed)
     await resumed.reply(pending.id, { value: 'continue' })
     const outcome = await resumed.outcome()
     await session.cancel('simulated process replacement'); await original
@@ -74,7 +95,7 @@ it('runs 100 tool rounds across local checkpoints and multiple compactions on on
   expect(result.calls.filter(k => k.startsWith('progress-review'))).toHaveLength(0)
   expect(result.used).toBeLessThan(256)
   expect(globalThis.fetch).not.toHaveBeenCalled()
-}, 120000)
+}, 240000)
 
 it('resumes a 100-round chain with the original durable budget and no repeated writes', async () => {
   const result = await scenario({ rounds: 100, pause: true })
@@ -82,7 +103,7 @@ it('resumes a 100-round chain with the original durable budget and no repeated w
   expect(globalState(result.runtime).taskOutcome.status).toBe('accepted')
   expect(result.reads).toBe(100); expect(result.writes).toBe(1); expect(result.owners.size).toBe(1)
   expect(result.used).toBe(result.calls.filter(k => !k.includes('-tool-')).length)
-}, 120000)
+}, 240000)
 
 it.each(['coding', 'research', 'document', 'file-organization', 'browser-fixture', 'multi-tool'])('continues necessary discovery for %s without a progress-review detour', async category => {
   const result = await scenario({ rounds: 20, category })

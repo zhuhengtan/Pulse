@@ -8,5 +8,5 @@ const run = runs.filter(item => item.head_branch === 'main' && item.head_sha ===
 if (run?.status !== 'completed' || run.conclusion !== 'success') throw new Error('EXACT_COMMIT_CI_REQUIRED');
 const jobs = [];
 for (let page = 1; ; page++) { const value = await get(`${api}/runs/${run.id}/jobs?filter=latest&per_page=100&page=${page}`); jobs.push(...value.jobs); if (value.jobs.length < 100) break; }
-for (const os of ['ubuntu-latest', 'macos-latest', 'windows-latest']) if (!jobs.some(item => item.name === `check (${os})` && item.status === 'completed' && item.conclusion === 'success')) throw new Error(`CI_MATRIX_REQUIRED:${os}`);
+for (const os of ['ubuntu-24.04', 'macos-15', 'windows-2022']) if (!jobs.some(item => item.name === `check (${os})` && item.status === 'completed' && item.conclusion === 'success')) throw new Error(`CI_MATRIX_REQUIRED:${os}`);
 console.log(`Exact commit ${sha} passed all required CI platforms.`);

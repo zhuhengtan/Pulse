@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repo = fileURLToPath(new URL('../../', import.meta.url))
@@ -32,6 +32,16 @@ const node = (script, ...args) => run(process.execPath, [join(repo, script), ...
 
 try {
   console.log(`Checking ${process.platform} with Node ${process.version}; temporary Pulse home: ${home}`)
+  if (process.platform === 'darwin') {
+    // Tests require trusted host inventory, not a Homebrew/PATH substitute.
+    // Pin only Git in this owned fixture PATH; keep product PATH checks strict.
+    const tools = join(directory, 'host-tools')
+    await access('/usr/bin/git')
+    await mkdir(tools)
+    await symlink('/usr/bin/git', join(tools, 'git'))
+    env.PATH = `${tools}${delimiter}${env.PATH ?? ''}`
+    console.log('[ci:local] Using fixed macOS system Git: /usr/bin/git')
+  }
   pnpm('native:prepare')
   pnpm('web:build')
   pnpm('check')
