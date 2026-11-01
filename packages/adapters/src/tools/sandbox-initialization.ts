@@ -1,7 +1,7 @@
 import { realpath } from 'node:fs/promises'
 import { win32 } from 'node:path'
 import { setImmediate } from 'node:timers/promises'
-import { SandboxManager, expandWindowsFsPaths, getWindowsSandboxUserStatusAsync, resolveSrtWin, stampWindowsAcl, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
+import { SandboxManager, DEFAULT_WINDOWS_PROXY_PORT_RANGE, expandWindowsFsPaths, getWindowsSandboxUserStatusAsync, resolveSrtWin, stampWindowsAcl, type SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime'
 
 const windowsAclBatchSize = 8
 interface DenyBatch { denyRead: string[]; denyWrite: string[] }
@@ -37,16 +37,33 @@ export async function initializeShellSandbox(policy: SandboxRuntimeConfig, platf
   signal?.throwIfAborted()
   const batches = platform === 'win32' ? await windowsDenyBatches(policy) : undefined
   signal?.throwIfAborted()
-  const initial = batches ? { ...policy, filesystem: { ...policy.filesystem, ...batches[0]! } } : policy
-  try {
-    await SandboxManager.initialize(initial, undefined, false)
-  } catch (error) {
-    // Retry only the cold WFP readiness probe, before any command is run.
-    if (platform !== 'win32' || !error || typeof error !== 'object'
-      || !('code' in error) || error.code !== 'srt_win_timeout'
-      || !('subcommand' in error) || error.subcommand !== 'wfp') throw error
-    await SandboxManager.reset()
-    await SandboxManager.initialize(initial, undefined, false)
+  let initial = batches ? { ...policy, filesystem: { ...policy.filesystem, ...batches[0]! } } : policy
+  let range = policy.windows?.proxyPortRange ?? DEFAULT_WINDOWS_PROXY_PORT_RANGE
+  let retriedWfp = false
+  let proxyBindRetries = 0
+  for (;;) {
+    signal?.throwIfAborted()
+    try {
+      await SandboxManager.initialize(initial, undefined, false)
+      break
+    } catch (error) {
+      if (platform !== 'win32' || !error || typeof error !== 'object') throw error
+      const failure = error as NodeJS.ErrnoException & { subcommand?: string; address?: string; port?: number }
+      if (failure.code === 'srt_win_timeout' && failure.subcommand === 'wfp' && !retriedWfp) {
+        // One cold WFP readiness retry, before any command is run.
+        retriedWfp = true
+      } else if (proxyBindRetries < 3 && failure.code === 'EACCES' && failure.syscall === 'listen'
+        && failure.address === '127.0.0.1' && Number.isInteger(failure.port)
+        && failure.port! >= range[0] && failure.port! < range[1]) {
+        // Windows may reserve a loopback port. SRT only skips EADDRINUSE.
+        // Narrow its next bind to the SAME installed WFP permit range; never
+        // fall back to ephemeral ports, widen egress or replay a command.
+        range = [failure.port! + 1, range[1]]
+        proxyBindRetries++
+        initial = { ...initial, windows: { ...initial.windows, proxyPortRange: [...range] } }
+      } else throw error
+      await SandboxManager.reset()
+    }
   }
   signal?.throwIfAborted()
   if (!batches) return
@@ -64,5 +81,5 @@ export async function initializeShellSandbox(policy: SandboxRuntimeConfig, platf
   // first batch ensures its cleanup bookkeeping is active even without grants.
   // Publish the full declared policy only once every native deny has landed;
   // the SDK's cached deny list is only a per-exec deduplication optimization.
-  SandboxManager.updateConfig(policy)
+  SandboxManager.updateConfig(initial.windows === policy.windows ? policy : { ...policy, windows: initial.windows })
 }
