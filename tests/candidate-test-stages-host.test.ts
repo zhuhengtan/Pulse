@@ -50,4 +50,6 @@ it('extends a new candidate test across refactor stages without rebasing the cal
     expect(await readFile(join(cwd, 'candidate.test.mjs'), 'utf8')).toBe(second)
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
 // Three real cold sandbox launches, observed at 105–146 seconds each on Windows.
-}, process.platform === 'win32' ? 720_000 : 10_000)
+// The complete Unix Host flow also includes three stage/checkpoint transitions;
+// shared runners exceeded 10s without failing any baseline or acceptance assertion.
+}, process.platform === 'win32' ? 720_000 : 60_000)
