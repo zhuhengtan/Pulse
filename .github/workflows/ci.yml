@@ -57,49 +57,8 @@ jobs:
         id: windows-sandbox
         if: runner.os == 'Windows'
         run: pnpm --filter @hunterzhu/pulse-adapters exec srt windows-install
-      - name: Verify Windows paths, transfer, and shutdown
-        if: runner.os == 'Windows'
-        timeout-minutes: 12
-        run: |
-          pnpm exec tsc -b --pretty false
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/build/copy-adapter-assets.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          pnpm exec vitest run tests/completion-reply.test.ts tests/completion-reply-host.test.ts tests/skill-index-sharing.test.ts tests/attachment-http.test.ts tests/h5-workspaces.test.ts tests/windows-path-portability.test.ts tests/atomic-state-file.test.ts tests/conversation-manifest-atomic.test.ts tests/host-filesystem.test.ts tests/check-inventory.test.ts tests/conversation-bundle.test.ts tests/assistant-approval-http.test.ts tests/h5-work-notifications.test.ts tests/h5-shutdown.test.ts tests/self-host-snapshot.test.ts tests/h5-workspace-candidate.test.ts tests/self-host-main.test.ts tests/self-host-process.test.ts tests/copy-evidence.test.ts tests/git-diff.test.ts tests/windows-shell-environment.test.ts tests/runtime-persistence-sharing.test.ts tests/review-regressions.test.ts tests/shell-pnpm-exec.test.ts --reporter verbose
-      - name: Verify Windows native file and skill worker fixtures
-        if: runner.os == 'Windows'
-        timeout-minutes: 24
-        env:
-          PULSE_SANDBOX_TIMING: '1'
-        run: pnpm exec vitest run tests/inplace-evidence.test.ts tests/skill-worker.test.ts --reporter verbose
-      - name: Verify Windows sandbox toolchain
-        if: runner.os == 'Windows'
-        timeout-minutes: 18
-        env:
-          SRT_DEBUG: '1'
-          PULSE_SANDBOX_TIMING: '1'
-        run: pnpm exec vitest run tests/m3-context-adapters.test.ts -t "runs the installed development toolchain" --reporter verbose
-      - name: Verify Windows dependency access
-        if: runner.os == 'Windows'
-        timeout-minutes: 8
-        env:
-          SRT_DEBUG: '1'
-          PULSE_SANDBOX_TIMING: '1'
-        run: pnpm exec vitest run tests/lt02-four-issues-repair.test.ts tests/windows-acl-batches.test.ts -t "loads shared installed aliases|cleans up every native ACL batch" --reporter verbose
-      - name: Verify Windows Python behavior probes
-        if: runner.os == 'Windows'
-        timeout-minutes: 7
-        run: |
-          pnpm exec tsc -b --pretty false
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/build/copy-adapter-assets.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          pnpm exec vitest run tests/eval-grader.test.ts -t "executes valid Python behavior probes" --reporter verbose
-      - name: Verify Windows candidate test runner
-        if: runner.os == 'Windows'
-        # Two native cases budget 720s + 600s, including cold SRT setup.
-        timeout-minutes: 24
-        run: pnpm exec vitest run tests/candidate-test-script.test.ts -t "runs a corrected new test script|revalidates the corrected entrypoint" --reporter verbose
+      # Native Windows cases run once in the full suite below, including all
+      # file, skill, toolchain, ACL, Python and candidate-runner assertions.
       - name: Run shared local and cloud checks
         # Windows runs serially because SRT owns machine-wide ACL state; each
         # real tool launch includes its cold permission setup and cleanup.

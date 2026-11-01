@@ -1,11 +1,12 @@
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { TaskNotificationInbox } from '../src/TaskNotifications.js'
 import type { PulseWebTransport } from '../src/transport.js'
 
-const webRoot = process.cwd().endsWith('/packages/web') ? process.cwd() : join(process.cwd(), 'packages/web')
+const webRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const themeCss = readFileSync(join(webRoot, 'src/workbench-theme.css'), 'utf8')
 const surfaceCss = readFileSync(join(webRoot, 'src/chat-surface.css'), 'utf8')
 function installActionStyles() {
