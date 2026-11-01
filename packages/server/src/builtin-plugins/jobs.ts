@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 import { resolveProviderApiKey } from '../providers/credentials.js'
 import { within } from '../security.js'
+import { replaceStateFile } from '../atomic-file.js'
 import { cancelGeneration, pollGeneration, startGeneration, type MediaInput, type RemoteTicket } from './adapters.js'
 import { connections, pluginEnabled, pluginFor, readMergedHostConfig, resolveConnection, type MediaKind, type PluginHostConfig, type PluginId, type ResolvedConnection } from './config.js'
 import { materialize, pluginError, pluginNetworkGate, safeError, type PluginNetworkAction } from './http.js'
@@ -94,7 +95,11 @@ export class BuiltinPluginJobs {
   private async save(job: MediaJob): Promise<void> {
     const path = this.file(job.id), temp = path + '.' + randomUUID() + '.tmp'
     await writeFile(temp, JSON.stringify(job), { flag: 'wx', mode: 0o600 })
-    try { await rename(temp, path) } finally { await rm(temp, { force: true }) }
+    try { await replaceStateFile(temp, path) }
+    // Acknowledged remote work must not be reported as a transport failure
+    // when its local receipt cannot be replaced.
+    catch { throw pluginError('PLUGIN_STATE_PERSIST_FAILED') }
+    finally { await rm(temp, { force: true }) }
   }
   async list(): Promise<MediaJob[]> {
     const names = await readdir(this.directory).catch((e: NodeJS.ErrnoException) => { if (e.code === 'ENOENT') return []; throw e })
