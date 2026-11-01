@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { lstat, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { isBoundedWorkspaceRead } from './verification-policy.js'
 import { resolveShellIdentity, type ShellIdentity } from '@hunterzhu/pulse-adapters'
 import { evaluateExecPolicy, mergeExecPolicies, sourceExecPolicy, parseExecPolicy, safeCommandPrefix, type ExecPolicyConfig } from './exec-policy.js'
 import { safeShellEnv, within } from './security.js'
@@ -10,7 +11,7 @@ const record = (v: unknown): Record<string, any> => v && typeof v === 'object' &
 const canonical = (v: any): any => Array.isArray(v) ? v.map(canonical) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().filter(k => v[k] !== undefined).map(k => [k, canonical(v[k])])) : v
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(canonical(v))).digest('hex')
 function failure(code: string) { return Object.assign(new Error(code), { code, retryable: false }) }
-export interface ExecApprovalOffer { token: string; prefix: string[]; canAmend: boolean; scope: 'run' }
+export interface ExecApprovalOffer { token: string; prefix: string[]; canAmend: boolean; scope: 'run'; commands?: string[][] }
 interface Prepared { argv: string[]; cwd: string; identity?: ShellIdentity; version: string; binding: string; decision: ReturnType<typeof evaluateExecPolicy> }
 
 export class ExecPolicyHost {
@@ -18,8 +19,8 @@ export class ExecPolicyHost {
   private base: ExecPolicyConfig
   private version: string
   private sessions = new Map<string, ExecPolicyConfig>()
-  private once = new Map<string, string>()
-  private offers = new Map<string, { offer: ExecApprovalOffer; binding: string; rule: NonNullable<ExecPolicyConfig['rules']>[number] }>()
+  private once = new Map<string, { binding: string; remembered: boolean }>()
+  private offers = new Map<string, { offer: ExecApprovalOffer; binding: string; rules: NonNullable<ExecPolicyConfig['rules']> }>()
   private launches = new Map<string, ShellIdentity>()
   constructor(config?: ExecPolicyConfig, private configPath?: string) { this.config = parseExecPolicy(config); this.base = this.inherited(this.config); this.version = hash(this.config) }
   getConfig() { return structuredClone(this.config) }
@@ -58,7 +59,12 @@ export class ExecPolicyHost {
     try { identity = await resolveShellIdentity(argv[0]!, argv.slice(1), cwd, safeShellEnv()) } catch { /* unresolved commands cannot acquire an allow rule */ }
     const version = this.version
     const remembered = this.sessions.get(this.scope(conversation, run, root))?.rules ?? []
-    const decision = evaluateExecPolicy({ ...this.config, rules: [...this.config.rules ?? [], ...remembered] }, { argv, cwd, ...(identity ? { program: identity } : {}) })
+    const workspaceRead = ['ls', 'cat', 'pwd'].includes(argv[0]!)
+    const validRead = !workspaceRead || await isBoundedWorkspaceRead(root, args)
+    const rules = [...this.config.rules ?? [], ...remembered]
+    const evaluated = evaluateExecPolicy({ ...this.config, rules }, { argv, cwd, ...(identity ? { program: identity } : {}) })
+    const changedRead = !validRead && evaluated.decision === 'allow' && evaluated.matchedRules.some(rule => rule.source === 'host' && Boolean(rules[rule.index]?.binding))
+    const decision = changedRead ? { ...evaluated, decision: 'prompt' as const, reason: 'exec_policy_remembered_path_changed' } : evaluated
     return { argv, cwd, ...(identity ? { identity } : {}), version, binding: hash({ argv, cwd, identity: identity?.fingerprint ?? null, version }), decision }
   }
   async inspect(args: Record<string, any>, root: string, conversation = 'diagnostic', run = 'diagnostic') {
@@ -69,9 +75,9 @@ export class ExecPolicyHost {
     const p = await this.prepare(args, root, conversation, run), key = this.key(conversation, run, toolCallId)
     if (p.decision.decision === 'forbidden') throw failure('EXEC_POLICY_FORBIDDEN')
     const once = this.once.get(key)
-    if (once && once !== p.binding) throw failure('EXEC_POLICY_APPROVAL_CHANGED')
-    if (p.decision.decision === 'prompt' && once !== p.binding) throw failure('EXEC_POLICY_PROMPT')
-    const allowed = p.decision.decision === 'allow' || once === p.binding
+    if (once && (once.binding !== p.binding || once.remembered && ['ls', 'cat', 'pwd'].includes(p.argv[0]!) && !await isBoundedWorkspaceRead(root, args))) throw failure('EXEC_POLICY_APPROVAL_CHANGED')
+    if (p.decision.decision === 'prompt' && once?.binding !== p.binding) throw failure('EXEC_POLICY_PROMPT')
+    const allowed = p.decision.decision === 'allow' || once?.binding === p.binding
     if (allowed && p.identity) this.launches.set(key, p.identity)
     return allowed
   }
@@ -88,19 +94,28 @@ export class ExecPolicyHost {
     }
     return all ? 'allow' : 'none'
   }
+  private async recommendation(input: Record<string, any>, root: string, conversation: string, run: string) {
+    const calls = this.calls(input), prepared: Prepared[] = []
+    for (const call of calls) {
+      if (!['shell.exec', 'shell.start'].includes(call.toolName ?? call.name)) continue
+      const args = record(call.input ?? call.arguments), p = await this.prepare(args, root, conversation, run)
+      if (['forbidden', 'prompt'].includes(p.decision.decision) || !p.identity || !safeCommandPrefix(p.argv)) return undefined
+      const hostTrusted = Object.values(this.config.hostExecutables ?? {}).flat().includes(p.identity.path)
+      if (!p.identity.trusted && !hostTrusted || ['ls', 'cat', 'pwd'].includes(p.argv[0]!) && !await isBoundedWorkspaceRead(root, args)) return undefined
+      prepared.push(p)
+    }
+    if (!prepared.length) return undefined
+    return { prepared, binding: hash({ calls, bindings: prepared.map(p => p.binding) }) }
+  }
   async offer(input: Record<string, any>, root: string, conversation: string, run: string, effectId: string): Promise<ExecApprovalOffer | undefined> {
-    const key = this.key(conversation, run, effectId), calls = this.calls(input)
-    if (calls.length !== 1 || !['shell.exec', 'shell.start'].includes(calls[0]!.toolName ?? calls[0]!.name)) return undefined
-    const p = await this.prepare(record(calls[0]!.input ?? calls[0]!.arguments), root, conversation, run)
-    if (['forbidden', 'prompt'].includes(p.decision.decision) || !p.identity) return undefined
-    const prefix = safeCommandPrefix(p.argv)
-    const hostTrusted = Object.values(this.config.hostExecutables ?? {}).flat().includes(p.identity.path)
-    if (!prefix || !p.identity.trusted && !hostTrusted) return undefined
+    const key = this.key(conversation, run, effectId), recommended = await this.recommendation(input, root, conversation, run)
+    if (!recommended) return undefined
     const old = this.offers.get(key)
-    if (old?.binding === p.binding) return old.offer
-    const offer: ExecApprovalOffer = { token: randomUUID(), prefix, canAmend: Boolean(this.configPath), scope: 'run' }
-    const rule = { pattern: prefix as [string, ...string[]], decision: 'allow' as const, binding: { cwd: p.cwd, fingerprint: p.identity.fingerprint } }
-    this.offers.set(key, { offer, binding: p.binding, rule }); return offer
+    if (old?.binding === recommended.binding) return old.offer
+    const commands = recommended.prepared.map(p => p.argv)
+    const offer: ExecApprovalOffer = { token: randomUUID(), prefix: commands[0]!, canAmend: Boolean(this.configPath), scope: 'run', ...(commands.length > 1 ? { commands } : {}) }
+    const rules = recommended.prepared.map(p => ({ pattern: p.argv as [string, ...string[]], decision: 'allow' as const, binding: { cwd: p.cwd, fingerprint: p.identity!.fingerprint } }))
+    this.offers.set(key, { offer, binding: recommended.binding, rules }); return offer
   }
   async approve(input: Record<string, any>, root: string, conversation: string, run: string, effectId: string, reply: Record<string, any>): Promise<void> {
     const calls = this.calls(input)
@@ -108,14 +123,15 @@ export class ExecPolicyHost {
     const choice = reply.remember
     if (choice !== undefined && !['session', 'permanent'].includes(choice)) throw failure('EXEC_POLICY_REMEMBER_INVALID')
     const offerKey = this.key(conversation, run, effectId), saved = this.offers.get(offerKey)
-    if (choice && (!saved || reply.execPolicyToken !== saved.offer.token || calls.length !== 1)) throw failure('EXEC_POLICY_OFFER_STALE')
+    if (choice && (!saved || reply.execPolicyToken !== saved.offer.token)) throw failure('EXEC_POLICY_OFFER_STALE')
     for (const call of calls) {
       if (!['shell.exec', 'shell.start'].includes(call.toolName ?? call.name)) continue
       const p = await this.prepare(record(call.input ?? call.arguments), root, conversation, run)
       if (p.decision.decision === 'forbidden') throw failure('EXEC_POLICY_FORBIDDEN')
-      if (choice && (saved!.binding !== p.binding || ['forbidden', 'prompt'].includes(p.decision.decision))) throw failure('EXEC_POLICY_OFFER_STALE')
+      if (choice && ['forbidden', 'prompt'].includes(p.decision.decision)) throw failure('EXEC_POLICY_OFFER_STALE')
     }
-    if (choice === 'session') this.sessions.set(this.scope(conversation, run, root), { rules: [...this.sessions.get(this.scope(conversation, run, root))?.rules ?? [], saved!.rule].slice(-128) })
+    if (choice && (await this.recommendation(input, root, conversation, run))?.binding !== saved!.binding) throw failure('EXEC_POLICY_OFFER_STALE')
+    if (choice === 'session') this.sessions.set(this.scope(conversation, run, root), { rules: [...this.sessions.get(this.scope(conversation, run, root))?.rules ?? [], ...saved!.rules].slice(-128) })
     if (choice === 'permanent') {
       if (!this.configPath || !saved!.offer.canAmend) throw failure('EXEC_POLICY_AMEND_UNAVAILABLE')
       const path = this.configPath
@@ -125,11 +141,13 @@ export class ExecPolicyHost {
         const before = await readFile(path, 'utf8').catch(e => { if (e.code === 'ENOENT') return '{}'; throw e })
         const raw = JSON.parse(before)
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw failure('EXEC_POLICY_CONFIG_INVALID')
-        const fresh = await this.prepare(record(calls[0]!.input ?? calls[0]!.arguments), root, conversation, run)
-        if (fresh.binding !== saved!.binding || ['prompt', 'forbidden'].includes(fresh.decision.decision)) throw failure('EXEC_POLICY_OFFER_STALE')
-        const policy = parseExecPolicy(raw.execPolicy), rule = { ...saved!.rule, id: `remembered-${randomUUID()}` }
-        const rules = policy.rules ?? []
-        if (!rules.some(r => hash({ ...r, id: undefined }) === hash({ ...rule, id: undefined }))) rules.push(rule)
+        const fresh = await this.recommendation(input, root, conversation, run)
+        if (fresh?.binding !== saved!.binding) throw failure('EXEC_POLICY_OFFER_STALE')
+        const policy = parseExecPolicy(raw.execPolicy), rules = policy.rules ?? []
+        for (const candidate of saved!.rules) {
+          const rule = { ...candidate, id: `remembered-${randomUUID()}` }
+          if (!rules.some(r => hash({ ...r, id: undefined }) === hash({ ...rule, id: undefined }))) rules.push(rule)
+        }
         const next = parseExecPolicy({ ...policy, rules })
         const temp = `${path}.${randomUUID()}.tmp`
         try {
@@ -144,7 +162,7 @@ export class ExecPolicyHost {
     }
     for (const call of calls) if (['shell.exec', 'shell.start'].includes(call.toolName ?? call.name)) {
       const p = await this.prepare(record(call.input ?? call.arguments), root, conversation, run)
-      this.once.set(this.key(conversation, run, String(call.toolCallId ?? '')), p.binding)
+      this.once.set(this.key(conversation, run, String(call.toolCallId ?? '')), { binding: p.binding, remembered: Boolean(choice) })
     }
     this.offers.delete(offerKey)
   }

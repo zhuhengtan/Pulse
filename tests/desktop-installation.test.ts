@@ -153,3 +153,14 @@ it.runIf(process.platform !== 'win32')('preserves bash login profile precedence'
   expect(await readFile(join(root, '.bash_login'), 'utf8')).toContain('Pulse Desktop CLI')
  } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+it.runIf(process.platform !== 'win32')('binds a preview installation and CLI to its own bundle and environment',async()=>{
+ const f=await fixture()
+ try{
+  const bootstrap=join(f.source,'app/node_modules/@hunterzhu/pulse-server/dist/updates/bootstrap.js');await mkdir(join(bootstrap,'..'),{recursive:true});await writeFile(bootstrap,"throw new Error('PREVIEW_MUST_NOT_REGISTER_RELEASE_BOOTSTRAP')")
+  await writeRuntimeManifest(f.source,'0.7.0')
+  const setup=new DesktopInstallation({...f.options,env:{...f.options.env,PULSE_DESKTOP_RUNTIME_POLICY:'bundled'}});await setup.prepare();expect(setup.state.phase).toBe('starting');expect(setup.state.runtimePolicy).toBe('bundled')
+  const result=await exec(setup.state.cli.path,['--show-environment'],{env:{PATH:'/nonexistent',PULSE_HOME:'/formal',PULSE_CONFIG:'/formal/config',PULSE_DATA_DIR:'/formal/data',PULSE_MANAGED:'1'}})
+  expect(JSON.parse(result.stdout)).toEqual({config:setup.state.configPath,data:f.options.dataDirectory});expect(await readFile(setup.state.cli.path,'utf8')).toContain('export PULSE_MANAGED=0')
+ }finally{await rm(f.root,{recursive:true,force:true})}
+})

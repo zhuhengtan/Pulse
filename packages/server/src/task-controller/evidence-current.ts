@@ -5,6 +5,7 @@ import { captureCheck } from '../check-receipt.js'
 import { resolve } from 'node:path'
 import { FilesystemTool } from '@hunterzhu/pulse-adapters'
 import type { PulseRuntime } from '@hunterzhu/pulse-runtime'
+import { namedVitestCheck } from '../vitest-check.js'
 
 /** Host-side I/O, outside pure Runtime steps. Earlier edits remain historical evidence. */
 export async function staleFileEvidence(root: string, refs: string[], runtime: PulseRuntime, checkRefs?: ReadonlySet<string>, snapshotRefs: readonly string[] = [], originalText = '', currentChecksRefreshSnapshots = false): Promise<string[]> {
@@ -40,7 +41,9 @@ export async function staleFileEvidence(root: string, refs: string[], runtime: P
     if (!value || typeof value !== 'object' || Array.isArray(value)) continue
     const receipt = value.checkReceipt
     if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) continue
-    checks.set(JSON.stringify([receipt.command, receipt.args, receipt.cwd]), { ref, receipt, order: Number(ref.match(/(\d+)$/)?.[1] ?? 0), value, passed: value.code === 0 && !value.timedOut && !value.aborted && !value.truncated })
+    const identity = typeof receipt.command === 'string' && Array.isArray(receipt.args) && receipt.args.every(arg => typeof arg === 'string') && typeof receipt.cwd === 'string'
+      ? namedVitestCheck(receipt.command, receipt.args as string[], receipt.cwd)?.key : undefined
+    checks.set(identity ?? JSON.stringify([receipt.command, receipt.args, receipt.cwd]), { ref, receipt, order: Number(ref.match(/(\d+)$/)?.[1] ?? 0), value, passed: value.code === 0 && !value.timedOut && !value.aborted && !value.truncated })
   }
   for (const { ref, receipt, order, value } of checks.values()) {
     if ([...checks.values()].some(next => next.order > order && coversUnavailablePythonCheck(receipt as any, value, next.receipt as any, next.value, originalText))) continue

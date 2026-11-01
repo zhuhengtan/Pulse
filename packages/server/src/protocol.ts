@@ -7,6 +7,7 @@ export interface WebConversation {
   createdAt: string
   updatedAt: string
   activeRunId?: string
+  runs?: string[]
   approvalPolicy?: 'manual' | 'delegate'
   projectId?: string
   projectUnassigned?: boolean
@@ -137,6 +138,7 @@ export interface WebRunSnapshot {
   reviewNote?: string
   complete?: Extract<WebRunEvent, { type: 'complete' }>
   laneState?: WebRunLanes
+  releaseBlocked?: string
 }
 
 export type { AutomationSessionView as WebAutomationSession } from './automation/types.js'
@@ -162,3 +164,5 @@ export interface HostPathListing {
 
 export type { RunRecoveryPreflight } from './run-recovery-preflight.js'
 export type { ProviderPreset, ProviderVariant, DiscoveredModel, ProviderDiscovery, ProviderProbe, ProviderConnectionInput, ProbeCheck } from './providers/types.js'
+
+export type { BudgetContinuationView } from './model-budget.js'

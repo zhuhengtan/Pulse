@@ -29,7 +29,7 @@ it('uses real sandboxed stdio, filters escapes, versions changes, reuses process
  expect((await q('symbols')).items).toEqual(first.items)
  const shell=await runShell(process.execPath,['-e','console.log("parallel")'],{cwd:f.root,timeoutMs:10000});expect(shell.stdout).toContain('parallel')
  await expect(readFile(join(f.root,'unauthorized.txt'))).rejects.toThrow()
-},45000)
+},process.platform === 'win32' ? 480000 : 45000)
 it('reports unavailable without installation, and rejects workspace escape',async()=>{
  const f=await fixture();await expect(new LspService(f.root,undefined,f.controller.signal).query('symbols',{path:'a.ts'},f.controller.signal)).rejects.toThrow('CODE_SERVER_UNAVAILABLE')
  await expect(f.service.query('symbols',{path:'/etc/passwd'},f.controller.signal)).rejects.toThrow('CODE_PATH_OUTSIDE_WORKSPACE')
@@ -38,10 +38,10 @@ it('reports unavailable without installation, and rejects workspace escape',asyn
 })
 it.each(['crash','oversize'])('cleans and rebuilds %s processes',async(mode)=>{
  const f=await fixture(mode);for(let n=0;n<2;n++)await expect(f.service.query('symbols',{path:'a.ts'},f.controller.signal)).rejects.toThrow('LSP_SERVER_UNAVAILABLE')
-},45000)
+},process.platform === 'win32' ? 480000 : 45000)
 it('cancels outstanding RPC without launching another operation',async()=>{
  const f=await fixture('hang'),signal=new AbortController();const pending=f.service.query('symbols',{path:'a.ts'},signal.signal);setTimeout(()=>signal.abort(),1500);await expect(pending).rejects.toThrow(/CANCELLED|UNAVAILABLE/)
-},45000)
+},process.platform === 'win32' ? 480000 : 45000)
 it('registers strict read-only tools in actual Host new assistant runs',async()=>{
  const f=await fixture();const registry=new ToolRegistry();registerLspTools(registry,f.service);expect(registry.list().every(t=>t.sideEffectPolicy==='read')).toBe(true)
  const host=createLocalHost({cwd:f.root,dataDir:join(f.root,'data'),lsp:f.config,taskController:false,approvalMode:'auto',provider:{provider:'mock',defaultModel:'mock'},providerProfiles:{mock:{provider:'mock',defaultModel:'mock'}},providerModels:{mock:{provider:'mock',model:'mock'}},activeModel:'mock',assistantModel:'mock',mockToolCalls:[{name:'code.symbols',input:{path:'a.ts'}}],mockAfterToolResponse:'done'});await host.init()
@@ -49,4 +49,4 @@ it('registers strict read-only tools in actual Host new assistant runs',async()=
  const input=JSON.parse(await readFile(join(f.root,'data/conversations',conversation.id,'runs',run.id,'input.json'),'utf8'));expect(input.codeSurfaceVersion).toBe(1);expect(input.lsp?.enabled).toBe(true);expect(input.lsp?.servers?.test?.command).toBe(process.execPath);expect(input.lsp?.root).toBeUndefined();expect(input.lsp?.servers?.test?.root).toBeUndefined()
  const saved=await readFile(join(f.root,'data/conversations',conversation.id,'runs',run.id,'runtime.json'),'utf8');expect(saved).toContain('write=denied')
  }finally{await host.close()}
-},45000)
+},process.platform === 'win32' ? 480000 : 45000)

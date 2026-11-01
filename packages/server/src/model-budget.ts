@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs'
 import * as path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 const SCHEMA_VERSION = 1
 
@@ -36,7 +36,15 @@ export const usageMetricNames = ['inputTokens', 'outputTokens', 'cachedInputToke
 export type UsageMetric = typeof usageMetricNames[number]
 type UsageMetrics = Partial<Record<UsageMetric, { total: number; known: number }>>
 
+export interface BudgetRenewalAuthorization { sourceRunId: string; expectedUsed: number; expectedLimit: number; confirmed: true }
+export interface BudgetContinuationView { conversationId: string; runId: string; used: number; limit: number; totalUsed: number; calls: 256; continuationRunId: string; status: 'available' | 'continued' }
+export function budgetContinuationRunId(conversationId: string, sourceRunId: string, used: number, limit: number): string {
+  return `run-${createHash('sha256').update(JSON.stringify(['budget-renewal-v1', conversationId, sourceRunId, used, limit])).digest('hex')}`
+}
+type UsageBase = { used: number; tokens: number; unknown: number; costs: Record<string, number> }
 interface State {
+  renewal?: BudgetRenewalAuthorization | undefined
+  usageBase?: UsageBase | undefined
   inheritedFrom?: string | undefined
   truncationEvents?: number | undefined
   metrics?: UsageMetrics | undefined
@@ -73,7 +81,9 @@ function parseState(raw: string): State {
   if (record.metrics !== undefined && (typeof record.metrics !== 'object' || record.metrics === null || Object.entries(record.metrics).some(([key, value]) => !usageMetricNames.includes(key as UsageMetric) || !value || typeof value !== 'object' || typeof (value as any).total !== 'number' || !Number.isFinite((value as any).total) || (value as any).total < 0 || !isCount((value as any).known)))) throw fail(CORRUPT, 'Invalid usage metrics.')
   if (record.usageReceipts !== undefined && (!Array.isArray(record.usageReceipts) || record.usageReceipts.some(id => typeof id !== 'string'))) throw fail(CORRUPT, 'Invalid usage receipts.')
   if (record.inheritedFrom !== undefined && typeof record.inheritedFrom !== 'string') throw fail(CORRUPT, 'Invalid budget lineage.')
-  return { inheritedFrom: record.inheritedFrom as string | undefined, truncationEvents: record.truncationEvents as number | undefined, limit: record.limit, used: record.used, metrics: record.metrics as UsageMetrics | undefined, usageReceipts: record.usageReceipts as string[] | undefined, policy: record.policy as ModelBudgetPolicy | undefined, purposes: record.purposes as Record<string, number> | undefined, reportedUsage: record.reportedUsage as number | undefined, inputTokens: record.inputTokens as number | undefined, outputTokens: record.outputTokens as number | undefined, tokens: record.tokens as number | undefined, costs: record.costs as Record<string, number> | undefined, unknown: record.unknown as number | undefined }
+  if (record.renewal !== undefined) { const r = record.renewal as BudgetRenewalAuthorization; if (!r || r.confirmed !== true || typeof r.sourceRunId !== 'string' || !isCount(r.expectedUsed) || !isCount(r.expectedLimit)) throw fail(CORRUPT, 'Invalid budget renewal.') }
+  if (record.usageBase !== undefined) { const b = record.usageBase as UsageBase; if (!b || !isCount(b.used) || !isCount(b.tokens) || !isCount(b.unknown) || !b.costs || Object.values(b.costs).some(n => !Number.isFinite(n) || n < 0)) throw fail(CORRUPT, 'Invalid inherited usage.') }
+  return { renewal: record.renewal as BudgetRenewalAuthorization | undefined, usageBase: record.usageBase as UsageBase | undefined, inheritedFrom: record.inheritedFrom as string | undefined, truncationEvents: record.truncationEvents as number | undefined, limit: record.limit, used: record.used, metrics: record.metrics as UsageMetrics | undefined, usageReceipts: record.usageReceipts as string[] | undefined, policy: record.policy as ModelBudgetPolicy | undefined, purposes: record.purposes as Record<string, number> | undefined, reportedUsage: record.reportedUsage as number | undefined, inputTokens: record.inputTokens as number | undefined, outputTokens: record.outputTokens as number | undefined, tokens: record.tokens as number | undefined, costs: record.costs as Record<string, number> | undefined, unknown: record.unknown as number | undefined }
 }
 
 /** One instance per running task; LocalHost holds the conversation lock. */
@@ -100,6 +110,11 @@ export class ModelAttemptBudget {
 
   get limit(): number {
     return this.limitCount
+  }
+
+  static async read(filePath: string): Promise<ModelAttemptBudget> {
+    const state = parseState(await fs.readFile(filePath, 'utf8'))
+    return new ModelAttemptBudget(filePath, state.limit, state.used, state)
   }
 
   static async open(
@@ -140,14 +155,33 @@ export class ModelAttemptBudget {
   /** A continuation gets only its parent's unspent calls, never a fresh limit.
    * Counters remain per-run so evaluation can sum attempts without double counting.
    * Called before compaction/planning and while the conversation lock is held. */
-  async inheritRemaining(previousPath: string): Promise<void> {
-    if (this.state.inheritedFrom === previousPath) return
+  async inheritRemaining(previousPath: string, renewal?: BudgetRenewalAuthorization): Promise<void> {
+    if (this.state.inheritedFrom === previousPath) { if (renewal && JSON.stringify(this.state.renewal) !== JSON.stringify(renewal)) throw fail(CORRUPT, 'Budget renewal changed.'); return }
     if (this.used !== 0 || this.state.inheritedFrom) throw fail(CORRUPT, 'Budget inheritance must precede all model calls.')
     const previous = parseState(await fs.readFile(previousPath, 'utf8'))
-    const limit = Math.min(this.limit, Math.max(0, previous.limit - previous.used))
-    const next = { ...this.state, limit, inheritedFrom: previousPath }
+    if (renewal && (renewal.confirmed !== true || renewal.expectedUsed !== previous.used || renewal.expectedLimit !== previous.limit || !new ModelAttemptBudget(previousPath, previous.limit, previous.used, previous).canRenewCalls)) throw fail('BUDGET_RENEWAL_STALE', 'The exhausted call allowance has changed.')
+    const limit = renewal ? 256 : Math.min(this.limit, Math.max(0, previous.limit - previous.used))
+    const carry = renewal || previous.usageBase || previous.policy?.maxTokens !== undefined || Object.keys(previous.policy?.maxCostByCurrency ?? {}).length
+    const base = previous.usageBase
+    const costs = { ...base?.costs }
+    for (const [currency, amount] of Object.entries(previous.costs ?? {})) costs[currency] = (costs[currency] ?? 0) + amount
+    const maxTokens = [previous.policy?.maxTokens, this.state.policy?.maxTokens].filter((n): n is number => n !== undefined)
+    const caps = { ...previous.policy?.maxCostByCurrency, ...this.state.policy?.maxCostByCurrency }
+    for (const currency of Object.keys(caps)) caps[currency] = Math.min(previous.policy?.maxCostByCurrency?.[currency] ?? Infinity, this.state.policy?.maxCostByCurrency?.[currency] ?? Infinity)
+    const policy = { ...previous.policy, ...this.state.policy, ...(maxTokens.length ? { maxTokens: Math.min(...maxTokens) } : {}), ...(Object.keys(caps).length ? { maxCostByCurrency: caps } : {}), ...(previous.policy?.unknownUsage === 'stop' || this.state.policy?.unknownUsage === 'stop' ? { unknownUsage: 'stop' as const } : {}) }
+    const next: State = { ...this.state, limit, inheritedFrom: previousPath, ...(renewal ? { renewal } : {}), ...(carry ? { usageBase: { used: (base?.used ?? 0) + previous.used, tokens: (base?.tokens ?? 0) + (previous.tokens ?? 0), unknown: (base?.unknown ?? 0) + (previous.unknown ?? 0), costs }, policy } : {}) }
     await this.persist(next)
     this.state = next; this.limitCount = limit
+  }
+
+  /** Explicit renewal extends calls only; token/cost/unknown-usage boundaries remain. */
+  get canRenewCalls(): boolean {
+    const policy = this.state.policy ?? {}, base = this.state.usageBase
+    const reserve = Math.min(policy.verificationReserve ?? 0, Math.max(0, this.limit - 1))
+    if (this.limit - this.used > reserve) return false
+    if (policy.maxTokens !== undefined && (this.state.tokens ?? 0) + (base?.tokens ?? 0) >= policy.maxTokens) return false
+    for (const [currency, cap] of Object.entries(policy.maxCostByCurrency ?? {})) if ((this.state.costs?.[currency] ?? 0) + (base?.costs[currency] ?? 0) >= cap) return false
+    return !((policy.maxTokens !== undefined || Object.keys(policy.maxCostByCurrency ?? {}).length) && (this.state.unknown ?? 0) + (base?.unknown ?? 0) > 0 && policy.unknownUsage !== 'allow')
   }
 
   /** Host scheduling consults the same durable admission policy as dispatch. */
@@ -165,9 +199,9 @@ export class ModelAttemptBudget {
     const reserved = Math.min(policy.verificationReserve ?? 0, Math.max(0, this.limit - 1))
     const protectedCalls = purpose === 'final-verification' || purpose === 'completion-summary' ? 0 : purpose === 'verification' ? Math.min(1, reserved) : reserved
     if (this.limit - this.used <= protectedCalls) throw fail(EXHAUSTED, 'Model calls reserved for verification; checkpoint retained.')
-    if (policy.maxTokens !== undefined && (this.state.tokens ?? 0) >= policy.maxTokens) throw fail(EXHAUSTED, 'Model token budget exhausted.')
-    for (const [currency, limit] of Object.entries(policy.maxCostByCurrency ?? {})) if ((this.state.costs?.[currency] ?? 0) >= limit) throw fail(EXHAUSTED, `Model cost budget exhausted (${currency}).`)
-    if ((policy.maxTokens !== undefined || Object.keys(policy.maxCostByCurrency ?? {}).length) && (this.state.unknown ?? 0) > 0 && policy.unknownUsage !== 'allow') throw fail(EXHAUSTED, 'Usage or price unknown under a configured budget; explicit allow policy is required to continue.')
+    if (policy.maxTokens !== undefined && (this.state.tokens ?? 0) + (this.state.usageBase?.tokens ?? 0) >= policy.maxTokens) throw fail(EXHAUSTED, 'Model token budget exhausted.')
+    for (const [currency, limit] of Object.entries(policy.maxCostByCurrency ?? {})) if ((this.state.costs?.[currency] ?? 0) + (this.state.usageBase?.costs[currency] ?? 0) >= limit) throw fail(EXHAUSTED, `Model cost budget exhausted (${currency}).`)
+    if ((policy.maxTokens !== undefined || Object.keys(policy.maxCostByCurrency ?? {}).length) && (this.state.unknown ?? 0) + (this.state.usageBase?.unknown ?? 0) > 0 && policy.unknownUsage !== 'allow') throw fail(EXHAUSTED, 'Usage or price unknown under a configured budget; explicit allow policy is required to continue.')
   }
 
   private async reserveOnce(purpose: string): Promise<void> {

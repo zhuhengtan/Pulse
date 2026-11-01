@@ -67,8 +67,8 @@ import { FileSnapshotManager, dispositionForEffect, effectOwnsWalRecord, type Ro
 import { fileWriteContext } from './file-write-context.js'
 import { hasVisibleFullRead, latestVisibleReadHash } from './file-read-evidence.js'
 import { readBoundedImage } from './image-bytes.js'
-import { ModelAttemptBudget } from './model-budget.js'
-import { approvalScriptContext, isNecessaryVerification } from './verification-policy.js'
+import { ModelAttemptBudget, budgetContinuationRunId, type BudgetRenewalAuthorization, type BudgetContinuationView } from './model-budget.js'
+import { approvalScriptContext, isNecessaryVerification, isBoundedWorkspaceRead } from './verification-policy.js'
 import { acceptanceFailure, assessAcceptanceValue, validateAcceptanceChecks, type AcceptanceCheck, type AcceptanceResult } from './task-controller/acceptance.js'
 import { fetchText } from './web.js'
 import { type WebSearchOptions } from './web-search.js'
@@ -258,6 +258,8 @@ export interface UserMessageInput {
   text: string
   format?: 'text' | 'jsonl'
   continueTask?: boolean
+  /** Only an explicit human budget-continuation endpoint may supply this. */
+  budgetRenewal?: BudgetRenewalAuthorization
   assistantChat?: boolean
   assistantContext?: import('./protocol.js').AssistantContextReference
   requestId?: string
@@ -482,6 +484,7 @@ const journaledFilesystems = new WeakMap<ToolRegistry, FilesystemTool>()
 const officeWriteTools = new Set(['pdf.page.render', 'docx.write', 'spreadsheet.xlsx.write', 'pptx.write'])
 
 interface BuiltInSurface {
+  patchApplyVersion?: 1 | 2
   shellVersion?: 1
   version?: 1 | 2 | 3
   getRuntime?: () => PulseRuntime | undefined
@@ -495,6 +498,8 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
   const fsTool = new FilesystemTool(root)
   const fileSurfaceVersion = surface.version ?? 1
   const laneReadTracker = new LaneReadTracker()
+  const patchApplyVersion = surface.patchApplyVersion ?? 1
+  const patchOutput = z.object({ path: z.string(), replacements: z.number(), bytes: z.number(), hash: z.string(), beforeHash: z.string(), changed: z.boolean(), alreadyApplied: z.boolean().optional() }).extend(patchApplyVersion === 2 ? { rebased: z.boolean().optional(), requestedBaseHash: z.string().optional() } : {})
   const patchMatching = fileSurfaceVersion >= 2 ? 'normalized' as const : 'exact' as const
   const readBaseline = (path: string, expectedHash: string | undefined, context: { laneId: string; agentId: string }): string | undefined => {
     if (expectedHash !== undefined) return expectedHash
@@ -586,19 +591,19 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
     summarize: (output) => output,
   }))
   registry.register(defineTool({
-    name: 'fs.apply_patch', description: 'Preferred existing-file edit: replace one exact fragment, at most 8192 UTF-8 bytes each for find/replace. Include expectedHash from fs.read. An exact already-applied post-image returns changed=false, alreadyApplied=true and performs no write. Other conflicts return currentHash and a suggested bounded read; verify existing behavior or rebase from that actual window, never blindly repeat the old patch.', tags: ['files', 'write', 'patch'], input: z.object({ path: z.string(), find: z.string().min(1).max(8192), replace: z.string().max(8192), all: z.boolean().default(false), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }), output: z.object({ path: z.string(), replacements: z.number(), bytes: z.number(), hash: z.string(), beforeHash: z.string(), changed: z.boolean(), alreadyApplied: z.boolean().optional() }), sideEffectPolicy: 'write', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: writeToolTimeoutMs, permissions: { workspaceRoots: [root] }, execute: async ({ path, find, replace, all, expectedHash }, context) => {
+    name: 'fs.apply_patch', description: patchApplyVersion === 2 ? 'Preferred existing-file edit: one bounded fragment, up to 8192 UTF-8 bytes each for find/replace. Include expectedHash from your file read as the proposal baseline. At execution, the Host reads the latest file and applies only uniquely matching fragments, preserving unrelated edits. A stale baseline alone does not fail. Missing/ambiguous context writes nothing and returns currentHash and suggestedRead. A proven prior post-image returns alreadyApplied with no write; never blindly replay a conflict.' : 'Preferred existing-file edit: replace one exact fragment, at most 8192 UTF-8 bytes each for find/replace. Include expectedHash from fs.read. An exact already-applied post-image returns changed=false, alreadyApplied=true and performs no write. Other conflicts return currentHash and a suggested bounded read; verify existing behavior or rebase from that actual window, never blindly repeat the old patch.', tags: ['files', 'write', 'patch'], input: z.object({ path: z.string(), find: z.string().min(1).max(8192), replace: z.string().max(8192), all: z.boolean().default(false), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }), output: patchOutput, sideEffectPolicy: 'write', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: writeToolTimeoutMs, permissions: { workspaceRoots: [root] }, execute: async ({ path, find, replace, all, expectedHash }, context) => {
       if (approvalMode === 'read-only') throw new Error('WRITE_DISABLED_READ_ONLY');
       if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:fs.apply_patch');
       const effectiveExpectedHash = readBaseline(path, expectedHash, context);
-      return new ExactPatchEditor(fsTool, runData ? (path, content) => assertCheckEdit(root, join(runData, 'check-definitions'), path, content) : undefined, patchMatching).execute({ path, patches: [{ find, replace }], all, expectedHash: effectiveExpectedHash }, context.signal);
+      return new ExactPatchEditor(fsTool, runData ? (path, content) => assertCheckEdit(root, join(runData, 'check-definitions'), path, content) : undefined, patchMatching, patchApplyVersion).execute({ path, patches: [{ find, replace }], all, expectedHash: effectiveExpectedHash }, context.signal);
     }, summarize: (output) => json(output),
   }))
   registry.register(defineTool({
-    name: 'fs.apply_patches', description: 'Atomically apply 2-16 non-overlapping exact-fragment patches to one existing file from the same baseline, like one merge. Every find fragment must occur exactly once. Supply the same expectedHash from that baseline; overlapping fragments or a stale hash write nothing. A cryptographically proven prior post-image returns changed=false and alreadyApplied=true; other conflicts include currentHash and suggestedRead for targeted recovery.', tags: ['files', 'write', 'patch'], input: z.object({ path: z.string(), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), patches: z.array(z.object({ find: z.string().min(1).max(8192), replace: z.string().max(8192) })).min(2).max(16) }), output: z.object({ path: z.string(), replacements: z.number(), bytes: z.number(), hash: z.string(), beforeHash: z.string(), changed: z.boolean(), alreadyApplied: z.boolean().optional() }), sideEffectPolicy: 'write', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: writeToolTimeoutMs, permissions: { workspaceRoots: [root] }, execute: async ({ path, expectedHash, patches }, context) => {
+    name: 'fs.apply_patches', description: patchApplyVersion === 2 ? 'Atomically apply 2-16 non-overlapping bounded fragments to one existing file, writing once. Use expectedHash from the common proposal baseline. The Host locates every fragment uniquely in the latest contents, preserving unrelated edits even if the baseline hash changed. Any missing, ambiguous or overlapping fragment writes nothing and returns currentHash and suggestedRead. Proven replays perform no write.' : 'Atomically apply 2-16 non-overlapping exact-fragment patches to one existing file from the same baseline, like one merge. Every find fragment must occur exactly once. Supply the same expectedHash from that baseline; overlapping fragments or a stale hash write nothing. A cryptographically proven prior post-image returns changed=false and alreadyApplied=true; other conflicts include currentHash and suggestedRead for targeted recovery.', tags: ['files', 'write', 'patch'], input: z.object({ path: z.string(), expectedHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), patches: z.array(z.object({ find: z.string().min(1).max(8192), replace: z.string().max(8192) })).min(2).max(16) }), output: patchOutput, sideEffectPolicy: 'write', resolveResources: ({ path }) => [{ resource: 'workspace', mode: 'shared' }, { resource: `file:${resolve(root, path)}`, mode: 'exclusive' }], retrySafety: 'unsafe', defaultTimeoutMs: writeToolTimeoutMs, permissions: { workspaceRoots: [root] }, execute: async ({ path, expectedHash, patches }, context) => {
       if (approvalMode === 'read-only') throw new Error('WRITE_DISABLED_READ_ONLY')
       if (approvalMode === 'ask' && !isApprovedToolCall(context.toolCallId)) throw new Error('APPROVAL_REQUIRED:fs.apply_patches')
       const effectiveExpectedHash = readBaseline(path, expectedHash, context)
-      return new ExactPatchEditor(fsTool, runData ? (path, content) => assertCheckEdit(root, join(runData, 'check-definitions'), path, content) : undefined, patchMatching).execute({ path, patches, expectedHash: effectiveExpectedHash }, context.signal)
+      return new ExactPatchEditor(fsTool, runData ? (path, content) => assertCheckEdit(root, join(runData, 'check-definitions'), path, content) : undefined, patchMatching, patchApplyVersion).execute({ path, patches, expectedHash: effectiveExpectedHash }, context.signal)
     }, summarize: (output) => json(output),
   }))
   registry.register(defineTool({
@@ -894,7 +899,7 @@ export function isAllowedPlanWrite(name: string, args: Record<string, JsonValue>
 
 /** A bare continuation without a persisted task is conversational shorthand, not a new work plan. */
 function isBareTaskContinuation(text: string): boolean {
-  return /^(?:继续|接着|恢复(?:任务|执行)|continue|resume)[？?！!。.\s]*$/i.test(text.trim())
+  return /^(?:继续|接着|恢复(?:任务|执行)|continue|resume|重试|没做完啊?|retry)[？?！!。.\s]*$/i.test(text.trim())
 }
 
 function buildProgram(toolNames: string[], systemPrompt: string, conversation: ConversationMessage[] = [], includeCurrentGoal = true, configuredMaxTurns = 32, version: '1' | '2' | '3' | '4' | '4.1' = '2', parallelRead?: { workerProgramId: string; readOnlyToolNames: string[] }, validateToolInput?: (name: string, input: JsonValue) => void, adaptiveFileReads = false) {
@@ -1667,6 +1672,7 @@ async function aiApproveToolCall(provider: ReturnType<typeof providerFromOptions
   // These built-ins exist only with allowNetwork. Their handlers still enforce
   // the host allow-list, redirects, public addresses, time and response limits.
   if (name === 'web.fetch' || name === 'web.search') return true
+  if (name === 'shell.exec' && workspaceRoot && ['ls', 'cat', 'pwd'].includes(basename(String(asRecord(input.arguments)?.command ?? '')))) return isBoundedWorkspaceRead(workspaceRoot, asRecord(input.arguments) ?? {})
   if (name === 'shell.exec' && workspaceRoot && await isNecessaryVerification(workspaceRoot, asRecord(input.arguments) ?? {}, userIntent)) return true
   const args = JSON.stringify(input.arguments ?? {})
   const scriptContext = name === 'shell.exec' && workspaceRoot ? await approvalScriptContext(workspaceRoot, asRecord(input.arguments) ?? {}) : undefined
@@ -1917,6 +1923,27 @@ export class LocalHost {
   readonly conversationData: ConversationData
   private readonly persistenceCache = new Map<string, Promise<import('@hunterzhu/pulse-runtime').RuntimePersistenceBackend>>()
   private readonly runBackends = new Set<import('@hunterzhu/pulse-runtime').RuntimePersistenceBackend>()
+  private runPersistenceWriters = 0
+  private runPersistenceClosed = false
+  private runPersistenceIdle: (() => void) | undefined = undefined
+  private claimRunPersistence(): boolean {
+    if (this.runPersistenceClosed) return false
+    this.runPersistenceWriters += 1
+    return true
+  }
+  private releaseRunPersistence(): void {
+    this.runPersistenceWriters -= 1
+    if (this.runPersistenceWriters === 0) {
+      const idle = this.runPersistenceIdle
+      this.runPersistenceIdle = undefined
+      idle?.()
+    }
+  }
+  private sealRunPersistence(): Promise<void> {
+    this.runPersistenceClosed = true
+    if (this.runPersistenceWriters === 0) return Promise.resolve()
+    return new Promise(resolve => { this.runPersistenceIdle = resolve })
+  }
   private readonly runWorkspaces = new Map<string, string>()
   private async persistenceFor(conversationId: string, runId: string, kind = this.options.persistenceBackend, cwd?: string) {
     if (cwd) this.runWorkspaces.set(`${conversationId}\n${runId}`, cwd)
@@ -1969,7 +1996,7 @@ export class LocalHost {
   /** Conversation snapshot used to grow a context surface from a reached point. */
   private readonly surfaceConversations = new Map<string, ConversationMessage[]>()
   private readonly hookServices = new Map<string, HookService>()
-  private readonly active = new Map<string, { runtime: PulseRuntime; registry: ToolRegistry; session: PulseSession; conversationId: string; runId: string; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; options: LocalHostOptions; modelPricing?: LocalHostOptions['modelPricing']; jarvis?: JarvisRun; modelBudget?: ModelAttemptBudget | undefined; finish?: () => Promise<Outcome & { text?: string }> }>()
+  private readonly active = new Map<string, { runtime: PulseRuntime; registry: ToolRegistry; session: PulseSession; conversationId: string; runId: string; executionCwd: string; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; options: LocalHostOptions; modelPricing?: LocalHostOptions['modelPricing']; jarvis?: JarvisRun; modelBudget?: ModelAttemptBudget | undefined; finish?: () => Promise<Outcome & { text?: string }> }>()
   private readonly conversationLocks = new Map<string, Awaited<ReturnType<typeof open>>>()
   readonly builtinPluginJobs: BuiltinPluginJobs
   private assistantJarvisSession: Promise<string | undefined> | undefined
@@ -2642,6 +2669,14 @@ export class LocalHost {
     const offer = await this.execPolicy.offer(input, root, conversation, run, effect)
     return offer ? { ...input, execPolicy: json(offer) } : input
   }
+  /** Policy identity failures stay visible. They never become an automatic allow. */
+  private async diagnosableApprovalInput(input: Record<string, JsonValue>, root: string, conversation: string, run: string, effect: string): Promise<Record<string, JsonValue>> {
+    try { return await this.execApprovalInput(input, root, conversation, run, effect) }
+    catch (error) {
+      const code = error instanceof Error ? error.message : String(error)
+      return { ...input, execPolicyError: code }
+    }
+  }
   applyLiveOptions(options: LocalHostOptions): { applied: boolean; restartRequired: string[] } {
     parseExecPolicy(options.execPolicy)
     this.execPolicy.configure(options.execPolicy, options.execPolicyConfigPath)
@@ -2832,7 +2867,7 @@ export class LocalHost {
   }
   private async appendMessage(id: string, message: StoredMessage): Promise<void> { await this.conversationData.call('append', id, message) }
   private async runtimeFor(conversationId: string, runId: string, cwd: string, userIntent = '', skillInput = '', options: LocalHostOptions = this.options, assistantChat = false, jarvisSessionId?: string, modelBudget?: ModelAttemptBudget): Promise<{ runtime: PulseRuntime; registry: ToolRegistry; capabilities: ActiveCapabilityPacks; capabilityController: AbortController; modelBudget?: ModelAttemptBudget | undefined }> {
-    const persistedSurface = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').catch(() => '{}')) as { fileSurfaceVersion?: unknown; providerApiModes?: unknown; shellSurfaceVersion?: unknown; jarvisProtocol?: unknown; currentUserText?: unknown; codeSurfaceVersion?: unknown; lsp?: unknown; hookSnapshot?: unknown }
+    const persistedSurface = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').catch(() => '{}')) as { patchApplyVersion?: unknown; fileSurfaceVersion?: unknown; providerApiModes?: unknown; shellSurfaceVersion?: unknown; jarvisProtocol?: unknown; currentUserText?: unknown; codeSurfaceVersion?: unknown; lsp?: unknown; hookSnapshot?: unknown }
     options = restoreProviderApiModes(options, persistedSurface.providerApiModes)
     options = { ...options, jarvis: { ...options.jarvis, protocol: persistedSurface.jarvisProtocol === 'personal' ? 'personal' : 'legacy' } }
     const currentUserText = typeof persistedSurface.currentUserText === 'string' ? persistedSurface.currentUserText : ''
@@ -2841,7 +2876,7 @@ export class LocalHost {
     const fileSnapshots = new FileSnapshotManager(cwd, new FilesystemTool(cwd))
     const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(id => options.providerModels?.[id]?.imageInput === 'supported')
     let runtimeRef: PulseRuntime | undefined
-    const builtInSurface: BuiltInSurface = { ...(!assistantChat && persistedSurface.shellSurfaceVersion === 1 ? { shellVersion: 1 as const } : {}), version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId, execPolicy: { authorize: (args, id) => this.authorizeExec(args, cwd, conversationId, runId, id), identity: id => this.execPolicy.identity(conversationId, runId, id) } }
+    const builtInSurface: BuiltInSurface = { ...(!assistantChat && persistedSurface.shellSurfaceVersion === 1 ? { shellVersion: 1 as const } : {}), patchApplyVersion: persistedSurface.patchApplyVersion === 2 ? 2 : 1, version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId, execPolicy: { authorize: (args, id) => this.authorizeExec(args, cwd, conversationId, runId, id), identity: id => this.execPolicy.identity(conversationId, runId, id) } }
     await this.seedPlanGate(conversationId, runId, !assistantChat && (isPreImplementationConfirmationSkill(skillInput) || requiresExplicitPlanConfirmation(skillInput)), options.approvalMode === 'read-only' ? undefined : cwd)
     const registry = new PluginToolRegistry({ workspaceRoots: [cwd], ...(assistantChat ? { allow: assistantToolAllowList } : {}), allowNetwork: options.allowNetwork === true, ...(options.networkHosts === undefined ? {} : { networkHosts: options.networkHosts }) }, this.builtinPluginJobs)
     registerPluginTools(registry, this.builtinPluginJobs, cwd, runId, this.options.builtinPluginConfigPath, conversationId)
@@ -3259,7 +3294,7 @@ export class LocalHost {
     const fileSnapshots = new FileSnapshotManager(cwd, new FilesystemTool(cwd))
     const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(id => options.providerModels?.[id]?.imageInput === 'supported')
     let runtimeRef: PulseRuntime | undefined
-    const builtInSurface: BuiltInSurface = { ...(!assistantChat && savedInput.shellSurfaceVersion === 1 ? { shellVersion: 1 as const } : {}), version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId, execPolicy: { authorize: (args, id) => this.authorizeExec(args, cwd, conversationId, runId, id), identity: id => this.execPolicy.identity(conversationId, runId, id) } }
+    const builtInSurface: BuiltInSurface = { ...(!assistantChat && savedInput.shellSurfaceVersion === 1 ? { shellVersion: 1 as const } : {}), patchApplyVersion: savedInput.patchApplyVersion === 2 ? 2 : 1, version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId, execPolicy: { authorize: (args, id) => this.authorizeExec(args, cwd, conversationId, runId, id), identity: id => this.execPolicy.identity(conversationId, runId, id) } }
     if (assistantChat) {
       registerBuiltIns(registry, cwd, 'read-only', options.allowNetwork === true, undefined, options.networkHosts, runId, this.runDir(conversationId, runId), ['21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(savedInput.controllerVersion)) ? ['55', '56', '57'].includes(String(savedInput.controllerVersion)) ? 4 : 3 : 2, (savedInput.controllerVersion === '49' || savedInput.controllerVersion === '50' || savedInput.controllerVersion === '51' || savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57'))), savedInput.controllerVersion === '52' || savedInput.controllerVersion === '53' || (savedInput.controllerVersion === '54' || savedInput.controllerVersion === '55' || (savedInput.controllerVersion === '56' || savedInput.controllerVersion === '57')), options.webSearch, savedInput.controllerVersion === '57', builtInSurface)
       const getSession = async () => jarvisSessionId ?? await this.ensureAssistantJarvisSession()
@@ -3368,6 +3403,7 @@ export class LocalHost {
   private withCapabilityInstructions(prompt: string, instructions: string[]): string { return wrapCapabilityInstructions(prompt, instructions) }
   private makeRunHandle(conversationId: string, runId: string, runtime: PulseRuntime, session: PulseSession, contextNotice?: string, frontAck?: string, relocation?: { source: string; target: string }): RunHandle {
     const activeEntry = this.active.get(runId)
+    const executionRoot = activeEntry?.executionCwd ?? this.root
     const humanSubmissions = new Map<string, { digest: string; promise: Promise<void> }>()
     activeEntry?.jarvis?.observe(runtime, session, activeEntry.capabilityController.signal)
     let finalized: Promise<Outcome & { text?: string }> | undefined
@@ -3410,6 +3446,9 @@ export class LocalHost {
     }
     const finish = (): Promise<Outcome & { text?: string }> => finalized ??= (async () => {
       const outcome = await session.outcome()
+      const writable = this.claimRunPersistence()
+      try {
+      if (!writable) return { ...outcome }
       const goal = runtime.state.agents.get(session.agentId)?.goal ?? ''
       let acceptance = currentTaskOutcome(outcome.status)
       const finalAgent = runtime.state.agents.get(session.agentId)
@@ -3574,8 +3613,9 @@ export class LocalHost {
         // Link projection and the download registry must refer to the same
         // verified version. Keep one current registration per path and turn.
         const latest = new Map(artifacts.map(artifact => [artifact.path, artifact]))
-        const artifactRoot = current.executionCwd ?? current.cwd, root = await realpath(artifactRoot)
-        for (const [path, hash] of validatedArtifactVersions) {
+        let artifactRoot = current.executionCwd ?? current.cwd, root = artifactRoot
+        try { root = await realpath(artifactRoot) } catch { artifactRoot = '' }
+        if (artifactRoot) for (const [path, hash] of validatedArtifactVersions) {
           const file = await readPreviewFile(artifactRoot, path, hash).catch(() => undefined)
           if (!file) continue
           const recordedPath = relative(root, file.absolutePath).split(sep).join('/')
@@ -3584,11 +3624,11 @@ export class LocalHost {
         artifacts.splice(0, artifacts.length, ...latest.values())
       }
       current.artifacts = [...(current.artifacts ?? []).filter((item) => item.runId !== runId), ...artifacts]
-      if (current.activeRunId === runId) delete current.activeRunId
+      if (current.activeRunId === runId && await this.shellSettledForRelease(conversationId, runId)) delete current.activeRunId
       current.updatedAt = new Date().toISOString()
       await this.saveManifest(current)
       this.active.delete(runId)
-      this.execPolicy.clearRun(conversationId, runId, activeEntry?.options.cwd ?? this.root); this.approvedToolCalls.delete(runId)
+      this.execPolicy.clearRun(conversationId, runId, executionRoot); this.approvedToolCalls.delete(runId)
       await runtime.flushPersistence()
       const taskOutcome = acceptance ? { ...acceptance, ...outcomeDiagnostics(runtime.state, (projectedController?.tasks ?? stages) as unknown as Array<Record<string, JsonValue>>, outcome.error?.code) } : undefined
         const usage = runUsage(runtime, activeEntry?.options.modelPricing ?? this.options.modelPricing, activeEntry?.modelBudget)
@@ -3621,13 +3661,14 @@ export class LocalHost {
       if (taskGlobal) { const prior = await readFile(join(this.runDir(conversationId, runId), 'reuse-checkpoint.json'), 'utf8').then((text) => JSON.parse(text) as Checkpoint).catch(() => undefined); const version = taskAgent ? runtime.state.lanes.get(taskAgent.rootLaneId)?.resume.programVersion : undefined; const checkpointRoot = (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55' || (version === '56' || version === '57'))) ? current.executionCwd ?? current.cwd : current.cwd; const checkpoint = await createCheckpoint(runtime, checkpointRoot, runId, projectedController ? { ...(taskGlobal as object), taskController: projectedController } as unknown as JsonValue : taskGlobal, prior, ['40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(String(version)) ? { continuationCommands: true } : undefined); if (checkpoint) await writeFile(join(this.runDir(conversationId, runId), 'checkpoint.json'), JSON.stringify(checkpoint)) }
       await this.hookServices.get(`${conversationId}:${runId}`)?.stop()
       return { ...outcome, ...(text === undefined ? {} : { text }) }
+      } finally { if (writable) this.releaseRunPersistence() }
     })().finally(async () => {
       try { await closeShellProcesses(this.runDir(conversationId, runId)) }
       finally {
         await this.hookServices.get(`${conversationId}:${runId}`)?.dispose()
         this.hookServices.delete(`${conversationId}:${runId}`)
         this.active.delete(runId)
-        this.execPolicy.clearRun(conversationId, runId, activeEntry?.options.cwd ?? this.root); this.approvedToolCalls.delete(runId)
+        this.execPolicy.clearRun(conversationId, runId, executionRoot); this.approvedToolCalls.delete(runId)
         this.planGates.delete(runId)
         this.surfaceConversations.delete(runId)
         activeEntry?.capabilityController.abort()
@@ -3671,7 +3712,7 @@ export class LocalHost {
       const recording = replyText ? activeEntry?.jarvis?.recordUserInput(replyText, `reply:${effectId}`).catch(() => undefined) : undefined
       const approved = value && typeof value === 'object' && !Array.isArray(value) && (value as Record<string, JsonValue>).approved === true
       const previousGrants = new Set(this.approvedToolCalls.get(runId) ?? [])
-      if (approved) { await this.execPolicy.approve(relocation ? presentTransferredApproval(asRecord(effect.input) ?? {}, relocation) : asRecord(effect.input) ?? {}, activeEntry?.options.cwd ?? this.root, conversationId, runId, effectId, asRecord(value) ?? {}); rememberApprovedCalls(effectId); this.options.execPolicy = this.execPolicy.getConfig() }
+      if (approved) { await this.execPolicy.approve(relocation ? presentTransferredApproval(asRecord(effect.input) ?? {}, relocation) : asRecord(effect.input) ?? {}, executionRoot, conversationId, runId, effectId, asRecord(value) ?? {}); rememberApprovedCalls(effectId); this.options.execPolicy = this.execPolicy.getConfig() }
       try { await session.reply(effectId, value) } catch (error) {
         const grants = this.approvedToolCalls.get(runId)
         if (!runtime.state.effects.get(effectId)?.outcome) for (const id of grants ?? []) if (!previousGrants.has(id)) grants?.delete(id)
@@ -3694,7 +3735,7 @@ export class LocalHost {
         if (!effect || effect.kind !== 'human' || effect.outcome || !input || calls.length === 0) { reason = 'interaction_changed'; return result = { status: 'manual', reason } }
         const manifest = await this.readManifest(conversationId)
         for (const call of calls) if (['shell.exec', 'shell.start'].includes(String(call.toolName ?? call.name))) {
-          const policy = await this.execPolicy.inspect(asRecord(call.input ?? call.arguments) ?? {}, manifest.executionCwd ?? manifest.cwd, conversationId, runId)
+          const policy = await this.execPolicy.inspect(asRecord(call.input ?? call.arguments) ?? {}, executionRoot, conversationId, runId)
           if (policy.decision === 'prompt' || policy.decision === 'forbidden') return result = { status: 'manual', reason: policy.reason }
         }
         const dangerous = /\b(rm|rmdir|del|format|mkfs|sudo|chmod|chown|kill|shutdown|launchctl|security|keychain|curl|wget|ssh|scp|publish|git\s+push)\b|\.env|\.ssh|id_rsa|credentials|password|token/i
@@ -3719,8 +3760,9 @@ export class LocalHost {
           const riskyInput = name === 'shell.exec' ? dangerous.test(JSON.stringify(args)) : Object.entries(args).some(([key, value]) => typeof value === 'string' && (['path', 'source', 'destination', 'target', 'cwd'].includes(key) ? sensitivePath.test(value) : key === 'url' && dangerous.test(value)))
           const policy = safeReads.has(name) ? 'read' : allowed.has(name) ? 'write' : undefined
           const shellCommand = name === 'shell.exec' && typeof args.command === 'string' ? basename(args.command).toLowerCase() : ''
+          if (['ls', 'cat', 'pwd'].includes(shellCommand) && !await isBoundedWorkspaceRead(manifest.executionCwd ?? manifest.cwd, args)) return result = { status: 'manual', reason: 'risk_requires_user' }
           const intent = runtime.state.agents.get(session.agentId)?.goal ?? ''
-          const verification = name === 'shell.exec' && await isNecessaryVerification(manifest.executionCwd ?? manifest.cwd, args, intent)
+          const verification = name === 'shell.exec' && (await isBoundedWorkspaceRead(manifest.executionCwd ?? manifest.cwd, args) || await isNecessaryVerification(manifest.executionCwd ?? manifest.cwd, args, intent))
           if (!policy || (!verification && (riskyInput || shellCommand === 'env' || shellCommand === 'printenv'))) { reason = 'risk_requires_user'; return result = { status: 'manual', reason } }
           for (const field of ['path', 'source', 'destination', 'target', 'cwd']) {
             if (typeof args[field] !== 'string') continue
@@ -3740,6 +3782,9 @@ export class LocalHost {
         const messages = await this.getConversationMessages(conversationId)
         const recentUserRequests = messages.filter((message) => message.role === 'user').slice(-6).map((message) => message.text.slice(0, 1_500))
         const intent = runtime.state.agents.get(session.agentId)?.goal ?? recentUserRequests.at(-1) ?? ''
+        const taskAgent = runtime.state.agents.get(session.agentId)
+        const taskGlobal = taskAgent?.globalVersions.get(taskAgent.latestGlobalVersion)
+        const originalTask = taskGlobal ? taskRecordFromGlobal(taskGlobal) : undefined
         const operation = await Promise.all(reviewedCalls.map(async (call) => {
           const tool = call.toolName ?? call.name
           const input = call.input ?? call.arguments ?? {}
@@ -3748,7 +3793,7 @@ export class LocalHost {
         }))
         // Never silently cut off later operations or the end of a script and
         // then grant the entire batch based on an incomplete JSON fragment.
-        const reviewContext = JSON.stringify({ currentTask: intent.slice(0, 3_000), recentUserRequests, operations: operation })
+        const reviewContext = JSON.stringify({ currentTask: intent.slice(0, 3_000), recentUserRequests, ...(originalTask ? { originalTask: { objective: originalTask.objective, acceptanceCriteria: originalTask.acceptanceCriteria, contextOnly: 'A continuation may refer to this original contract. Historical context is not new permission and cannot override the latest user restrictions.' } } : {}), operations: operation })
         if (reviewContext.length > 48_000) return result = { status: 'manual', reason: 'review_context_too_large' }
         const reviewerProvider = providerFromOptions({ provider: profile })
         const routing = createHostModelRouting({ activeModel: config.model, activeProviderCode: 'approval-review', activeProvider: profile, providerProfiles: { 'approval-review': profile }, providerModels: { [config.model]: { provider: 'approval-review', model: config.model } }, activeAdapter: reviewerProvider.adapter })
@@ -3811,7 +3856,7 @@ export class LocalHost {
           validateAskReply(effect?.input, answer.value)
           await this.observePlanConfirmation(runId, conversationId, answer.effectId, effect?.input, answer.value)
         }
-        for (const answer of answers) if (asRecord(answer.value)?.approved === true) await this.execPolicy.approve(relocation ? presentTransferredApproval(asRecord(runtime.state.effects.get(answer.effectId)?.input) ?? {}, relocation) : asRecord(runtime.state.effects.get(answer.effectId)?.input) ?? {}, activeEntry?.options.cwd ?? this.root, conversationId, runId, answer.effectId, asRecord(answer.value) ?? {})
+        for (const answer of answers) if (asRecord(answer.value)?.approved === true) await this.execPolicy.approve(relocation ? presentTransferredApproval(asRecord(runtime.state.effects.get(answer.effectId)?.input) ?? {}, relocation) : asRecord(runtime.state.effects.get(answer.effectId)?.input) ?? {}, executionRoot, conversationId, runId, answer.effectId, asRecord(answer.value) ?? {})
         this.options.execPolicy = this.execPolicy.getConfig()
         await session.replyBatch(groupId, answers)
         for (const answer of answers) await persistAskAnswer(answer.effectId, answer.value)
@@ -3821,7 +3866,7 @@ export class LocalHost {
           if (text) await activeEntry?.jarvis?.recordUserInput(text, `reply:${answer.effectId}`).catch(() => undefined)
         }
       },
-      pendingInteractions: async () => { const pending = pendingInteractions(runtime, session).map(group => ({ ...group, items: group.items.map(item => ({ ...item, input: relocation ? presentTransferredApproval(item.input, relocation) : item.input })) })); for (const group of pending) if (group.kind === 'approval') for (const item of group.items) item.input = await this.execApprovalInput(item.input, activeEntry?.options.cwd ?? this.root, conversationId, runId, item.effectId); for (const group of pending) if (group.kind === 'ask') for (const item of group.items) await this.persistPlanPreview(conversationId, runId, runtime, item.effectId, item.input); return pending },
+      pendingInteractions: async () => { const pending = pendingInteractions(runtime, session).map(group => ({ ...group, items: group.items.map(item => ({ ...item, input: relocation ? presentTransferredApproval(item.input, relocation) : item.input })) })); for (const group of pending) if (group.kind === 'approval') for (const item of group.items) item.input = await this.diagnosableApprovalInput(item.input, executionRoot, conversationId, runId, item.effectId); for (const group of pending) if (group.kind === 'ask') for (const item of group.items) await this.persistPlanPreview(conversationId, runId, runtime, item.effectId, item.input); return pending },
       reviewApproval,
       submitHumanInput: async (text, targetEffectId, inputOptions = {}) => {
         if (inputOptions.richContent) inputOptions = { ...inputOptions, richContent: parseRichContent(inputOptions.richContent)! }
@@ -3879,6 +3924,34 @@ export class LocalHost {
       submitHumanInput: async () => { throw new Error('RUN_NOT_ACTIVE') },
     }
   }
+  async describeBudgetContinuation(conversationId: string, sourceRunId?: string): Promise<BudgetContinuationView | undefined> {
+    const manifest = await this.readManifest(conversationId), runId = sourceRunId ?? manifest.runs.at(-1)
+    if (!runId || !manifest.runs.includes(runId)) return undefined
+    const budget = await ModelAttemptBudget.read(join(this.runDir(conversationId, runId), 'model-budget.json')).catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+    if (!budget) return undefined
+    const continuationRunId = budgetContinuationRunId(conversationId, runId, budget.used, budget.limit)
+    let totalUsed = budget.used, ancestor = budget.accounting.inheritedFrom
+    const known = new Map(manifest.runs.map(id => [join(this.runDir(conversationId, id), 'model-budget.json'), id])), seen = new Set([runId])
+    while (ancestor) {
+      const id = known.get(ancestor)
+      if (!id || seen.has(id)) throw new Error('BUDGET_LINEAGE_INVALID')
+      seen.add(id)
+      const ledger = await ModelAttemptBudget.read(ancestor)
+      totalUsed += ledger.used; ancestor = ledger.accounting.inheritedFrom
+    }
+    const base = { conversationId, runId, used: budget.used, limit: budget.limit, totalUsed, calls: 256 as const, continuationRunId }
+    if (manifest.runs.includes(continuationRunId)) {
+      const next = await ModelAttemptBudget.read(join(this.runDir(conversationId, continuationRunId), 'model-budget.json'))
+      if (next.accounting.renewal?.sourceRunId === runId && next.accounting.renewal.expectedUsed === budget.used && next.accounting.renewal.expectedLimit === budget.limit) return { ...base, status: 'continued' }
+      throw new Error('BUDGET_RENEWAL_CONFLICT')
+    }
+    if (manifest.activeRunId || manifest.runs.at(-1) !== runId || !budget.canRenewCalls) return undefined
+    const read = (name: string) => readFile(join(this.runDir(conversationId, runId), name), 'utf8').then(text => JSON.parse(text)).catch(error => { if (error.code === 'ENOENT') return undefined; throw error })
+    const [outcome, task, controller] = await Promise.all([read('outcome.json'), read('task-outcome.json'), read('task-controller.json')])
+    if (!outcome || task?.status === 'accepted' || !/TASK_MODEL_CALL_BUDGET_EXHAUSTED|MODEL_BUDGET_CHECKPOINT/.test(JSON.stringify([outcome.error, task?.blockers, controller?.budgetStopped]))) return undefined
+    return { ...base, status: 'available' }
+  }
+
   async sendMessage(conversationId: string, input: UserMessageInput): Promise<RunHandle> {
     if (input.richContent) input = { ...input, richContent: parseRichContent(input.richContent)! }
     if (!input.text.trim() && !input.attachments?.length) throw new Error('MESSAGE_REQUIRED')
@@ -3904,6 +3977,12 @@ export class LocalHost {
       // project mutation remains governed by that work conversation's policy.
       runOptions = { ...runOptions, taskController: false, approvalMode: runOptions.approvalMode ?? 'ask', ...(runOptions.approvalReview ? { approvalReview: { ...runOptions.approvalReview, manualOnRejection: true } } : {}) }
     }
+    if (input.budgetRenewal) {
+      const grant = input.budgetRenewal
+      if (grant.confirmed !== true || typeof grant.sourceRunId !== 'string' || !Number.isSafeInteger(grant.expectedUsed) || !Number.isSafeInteger(grant.expectedLimit) || grant.expectedUsed < 0 || grant.expectedLimit < 0 || input.assistantChat) throw new Error('BUDGET_RENEWAL_INVALID')
+      input = { ...input, continueTask: true, runId: budgetContinuationRunId(conversationId, grant.sourceRunId, grant.expectedUsed, grant.expectedLimit) }
+      runOptions = { ...runOptions, maxModelCalls: 256 }
+    }
     const runJarvisClient = this.jarvisClient
     const runId = input.runId ?? `run-${randomUUID()}`; await this.acquireConversationLock(conversationId, runId)
     let activated: Awaited<ReturnType<LocalHost['runtimeFor']>> | undefined
@@ -3911,14 +3990,24 @@ export class LocalHost {
     let modelBudget: ModelAttemptBudget | undefined
     const maxModelCalls = Math.max(4, Math.min(256, Math.floor(runOptions.maxModelCalls ?? 256)))
     try {
-      const manifest = await this.readManifest(conversationId); if (manifest.activeRunId) throw new Error('CONVERSATION_BUSY')
+      const manifest = await this.readManifest(conversationId)
+      if (input.budgetRenewal) {
+        const view = await this.describeBudgetContinuation(conversationId, input.budgetRenewal.sourceRunId)
+        if (view?.status === 'continued') throw new Error(`BUDGET_ALREADY_CONTINUED:${view.continuationRunId}`)
+        if (!view || view.used !== input.budgetRenewal.expectedUsed || view.limit !== input.budgetRenewal.expectedLimit || view.continuationRunId !== runId) throw new Error('BUDGET_RENEWAL_STALE')
+      }
+      if (manifest.activeRunId) throw new Error('CONVERSATION_BUSY')
       const executionCwd = manifest.executionCwd ?? manifest.cwd
       const jarvisWorkspace = manifest.jarvisWorkspace ?? manifest.cwd
       {
         await mkdir(this.runDir(conversationId, runId), { recursive: true })
         modelBudget = await ModelAttemptBudget.open(join(this.runDir(conversationId, runId), 'model-budget.json'), maxModelCalls, 0, { verificationReserve: runOptions.taskController === false || isPreImplementationConfirmationSkill(input.text) ? 0 : 2, ...(runOptions.maxCostByCurrency ? { maxCostByCurrency: runOptions.maxCostByCurrency } : {}), ...runOptions.modelBudgetPolicy })
+        if (input.budgetRenewal) await modelBudget.inheritRemaining(join(this.runDir(conversationId, input.budgetRenewal.sourceRunId), 'model-budget.json'), input.budgetRenewal)
         await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal: input.text, maxModelCalls, cwd: executionCwd, provider: runOptions.provider?.provider ?? 'mock', createdAt: new Date().toISOString() }, null, 2))
       }
+      // Persist the single renewal identity before any front-model/compaction call.
+      // Local manifest stays unchanged until normal continuation setup has read its parent.
+      if (input.budgetRenewal) await this.saveManifest({ ...manifest, activeRunId: runId, runs: [...manifest.runs, runId], updatedAt: new Date().toISOString() })
       if (!input.assistantChat) await this.retryJarvisForConversation(conversationId).catch(() => undefined)
       const previous = await this.getConversationMessages(conversationId)
       const conversation = previous.map((message): ConversationMessage => ({ role: message.role, content: message.text }))
@@ -3948,35 +4037,40 @@ export class LocalHost {
           break
         }
       }
+      let continuationBudgetRunId: string | undefined
       if (!inheritedTask && !input.assistantChat && !isStatusOnlyTurn(input.text) && (input.continueTask ?? (isTaskContinuation(input.text) || isInterruptedTaskContinuation(input.text)))) {
         for (const previousId of [...manifest.runs].reverse()) {
           const priorInput = JSON.parse(await readFile(join(this.runDir(conversationId, previousId), 'input.json'), 'utf8')) as { goal: string; criteriaParsingVersion?: 2 }
           if (isStatusOnlyTurn(priorInput.goal)) continue
+          // The newest spent budget stays the anchor even when its saved goal was only "重试".
+          if (!continuationBudgetRunId) continuationBudgetRunId = previousId
           try {
             const record = JSON.parse(await readFile(join(this.runDir(conversationId, previousId), 'task-record.json'), 'utf8')) as JsonValue
             inheritedTask = taskRecordFromGlobal({ taskRecord: record })
             if (!inheritedTask) throw new Error('TASK_CONTINUATION_STATE_INVALID')
-            // Older runs accidentally saved corrections as independent tasks.
-            // Recover the earlier objective without editing those historical runs.
-            if (!inheritedTask.continuedFromRunId && isTaskContinuation(inheritedTask.objective) && manifest.runs.indexOf(previousId) > 0) { inheritedTask = undefined; continue }
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
             // Legacy runs have no task export. Preserve their objective, not stale ResultRefs.
             inheritedTask = { schemaVersion: 1, runId: previousId, objective: priorInput.goal, ...(priorInput.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 as const } : {}), acceptanceCriteria: acceptanceCriteriaFromObjective(priorInput.goal, undefined, priorInput.criteriaParsingVersion === 2 ? 2 : undefined), status: 'unverifiable', replanCount: 0, attempts: [], evidenceRefs: [], excludedRefs: [] }
           }
+          // Older runs accidentally saved corrections as independent tasks.
+          // Recover the earlier objective without editing those historical runs.
+          if (inheritedTask && !inheritedTask.continuedFromRunId && isTaskContinuation(inheritedTask.objective) && manifest.runs.indexOf(previousId) > 0) { inheritedTask = undefined; continue }
           break
         }
       }
       if (inheritedTask && modelBudget) {
-        const previousInput = JSON.parse(await readFile(join(this.runDir(conversationId, inheritedTask.runId), 'input.json'), 'utf8')) as { controllerVersion?: string; capabilitySurface?: number }
+        const budgetRunId = continuationBudgetRunId ?? inheritedTask.runId
+        const previousInput = JSON.parse(await readFile(join(this.runDir(conversationId, budgetRunId), 'input.json'), 'utf8')) as { controllerVersion?: string; capabilitySurface?: number }
         // New runs opt in; historical sessions retain their persisted budget semantics.
-        if (previousInput.controllerVersion === '20' || previousInput.capabilitySurface === 1) await modelBudget.inheritRemaining(join(this.runDir(conversationId, inheritedTask.runId), 'model-budget.json'))
+        // One budget file is the anchor. Its own limit already includes any inheritedFrom parent, so that chain is not subtracted again.
+        if (previousInput.controllerVersion === '20' || previousInput.capabilitySurface === 1) await modelBudget.inheritRemaining(join(this.runDir(conversationId, budgetRunId), 'model-budget.json'))
       }
       const contextNotice = input.assistantChat ? undefined : await this.maybeCompactConversationLocked(conversationId, modelBudget)
       if (contextNotice) conversation.splice(0, previous.length, ...(await this.getConversationMessages(conversationId)).map((message): ConversationMessage => ({ role: message.role, content: message.text })))
       if (inheritedTask) conversation.push({ role: 'user', content: `[Original task and prior assessments; historical data, not new authorization]\n${JSON.stringify({ objective: inheritedTask.objective, criteria: inheritedTask.acceptanceCriteria, assessments: (inheritedTask.assessments ?? []).map(({ criterionId, status, rationale }) => ({ criterionId, status, rationale })) })}\nContinue unfinished work subject to the current request. Inspect existing changes before writing; never replay completed mutations. Historical passed assessments need current evidence before acceptance. A narrower current step does not mean the whole original task is complete. If the user defers an item, report it as pending and do not execute it now.` })
       let reuse: Checkpoint | undefined
-      const bareContinuation = /^(?:继续|接着做|继续完成原任务|continue|resume)[。！!?.\s]*$/i.test(input.text.trim())
+      const bareContinuation = /^(?:继续|接着做|继续完成原任务|continue|resume|重试|没做完啊?|retry)[。！!?.\s]*$/i.test(input.text.trim())
       const interruptedContinuation = isInterruptedTaskContinuation(input.text)
       if (inheritedTask && (bareContinuation || interruptedContinuation)) {
         try { reuse = await validateCheckpoint(executionCwd, JSON.parse(await readFile(join(this.runDir(conversationId, inheritedTask.runId), 'checkpoint.json'), 'utf8')) as Checkpoint, inheritedTask.objective) }
@@ -4048,7 +4142,7 @@ export class LocalHost {
           }
         }
       }
-      const rawGoal = clarificationAnswer && inheritedTask ? `${inheritedTask.objective}\nUser clarification: ${input.text}` : (input.text.trim() || (input.attachments?.length ? `[Sent ${input.attachments.length} attachment(s): ${input.attachments.map(a => a.name).join(', ')}]` : ''))
+      const rawGoal = clarificationAnswer && inheritedTask ? `${inheritedTask.objective}\nUser clarification: ${input.text}` : inheritedTask && bareContinuation ? inheritedTask.objective : (input.text.trim() || (input.attachments?.length ? `[Sent ${input.attachments.length} attachment(s): ${input.attachments.map(a => a.name).join(', ')}]` : ''))
       const goal = explicitSkills.length ? `${explicitSkills.map(skill => '/' + skill).join(' ')}\n${rawGoal}` : rawGoal
       const summaryFollowup = !clarificationAnswer && !input.requirementUpdate && !input.assistantChat && input.continueTask !== true && !isTaskContinuation(goal) && !isInterruptedTaskContinuation(goal) && inheritedTask !== undefined && isExecutionSummaryFollowup(goal)
       // /grill-and-plan must confirm before implementing; its parallel task controller would
@@ -4082,7 +4176,7 @@ export class LocalHost {
         initialTask.acceptanceChecks = retained
       }
       const lspSnapshot = runOptions.lsp === undefined ? undefined : parseLspConfig(runOptions.lsp)
-      const now = new Date().toISOString(); if (!input.userMessageRecorded) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal, ...(initialTask?.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 } : {}), capabilitySurface: 1, ...(runOptions.hooks?.enabled === true ? { hookSnapshot: { hash: runOptions.hooks.hash, directory: runOptions.hooks.directory } } : {}), codeSurfaceVersion: 1, ...(lspSnapshot ? { lsp: lspSnapshot } : {}), fileSurfaceVersion: 3, jarvisProtocol: runOptions.jarvis?.protocol ?? 'personal', currentUserText: input.text, ...(input.assistantChat ? {} : { shellSurfaceVersion: 1 }), providerApiModes: captureProviderApiModes(runOptions), planReviewVersion: 8, planDecisionVersion: controlled ? 3 : 2, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), assistantChat: input.assistantChat === true, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.assistantChat ? { assistantChatVersion: '5' } : {}), taskController: controlled, ...(controlled ? { controllerVersion: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', taskControllerPolicy: runOptions.taskControllerPolicy ?? 'legacy' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), maxModelCalls, enabledCapabilityPacks: runOptions.enabledCapabilityPacks ?? [], maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel ?? runOptions.provider?.defaultModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
+      const now = new Date().toISOString(); if (!input.userMessageRecorded) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal, ...(initialTask?.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 } : {}), capabilitySurface: 1, ...(runOptions.hooks?.enabled === true ? { hookSnapshot: { hash: runOptions.hooks.hash, directory: runOptions.hooks.directory } } : {}), codeSurfaceVersion: 1, ...(lspSnapshot ? { lsp: lspSnapshot } : {}), fileSurfaceVersion: 3, patchApplyVersion: 2, jarvisProtocol: runOptions.jarvis?.protocol ?? 'personal', currentUserText: input.text, ...(input.assistantChat ? {} : { shellSurfaceVersion: 1 }), providerApiModes: captureProviderApiModes(runOptions), planReviewVersion: 8, planDecisionVersion: controlled ? 3 : 2, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), assistantChat: input.assistantChat === true, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.assistantChat ? { assistantChatVersion: '5' } : {}), taskController: controlled, ...(controlled ? { controllerVersion: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', taskControllerPolicy: runOptions.taskControllerPolicy ?? 'legacy' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), maxModelCalls, enabledCapabilityPacks: runOptions.enabledCapabilityPacks ?? [], maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel ?? runOptions.provider?.defaultModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
       await new AttachmentStore(this.dataDir, conversationId).remember()
       const attachmentIndex = await new AttachmentStore(this.dataDir, conversationId).index(input.text)
       if (attachmentIndex) conversation.push({ role: 'user', content: attachmentIndex })
@@ -4163,7 +4257,7 @@ export class LocalHost {
       const initialGlobal = initialTask ? { taskRecord: taskRecordJson(initialTask) } : {}
       const { agentId } = runtime.createAgent({ goal, program, initialGlobal })
       const session = runtime.start(agentId)
-      this.active.set(runId, { runtime, registry, session, conversationId, runId, capabilities, capabilityController, modelBudget, options: runOptions, ...(runOptions.modelPricing ? { modelPricing: structuredClone(runOptions.modelPricing) } : {}), ...(jarvis ? { jarvis } : {}) })
+      this.active.set(runId, { runtime, registry, session, conversationId, runId, executionCwd, capabilities, capabilityController, modelBudget, options: runOptions, ...(runOptions.modelPricing ? { modelPricing: structuredClone(runOptions.modelPricing) } : {}), ...(jarvis ? { jarvis } : {}) })
       manifest.activeRunId = runId
       manifest.runs.push(runId)
       manifest.updatedAt = now
@@ -4283,7 +4377,7 @@ export class LocalHost {
       const agent = [...runtime.state.agents.values()].find((candidate) => candidate.parentAgentId === undefined)
       if (!agent) throw new Error('RESTORED_AGENT_NOT_FOUND')
       const session = runtime.start(agent.id)
-      this.active.set(runId, { runtime, registry, session, conversationId, runId, capabilities, capabilityController, modelBudget, options: runOptions, ...(runOptions.modelPricing ? { modelPricing: structuredClone(runOptions.modelPricing) } : {}), ...(jarvis ? { jarvis } : {}) })
+      this.active.set(runId, { runtime, registry, session, conversationId, runId, executionCwd, capabilities, capabilityController, modelBudget, options: runOptions, ...(runOptions.modelPricing ? { modelPricing: structuredClone(runOptions.modelPricing) } : {}), ...(jarvis ? { jarvis } : {}) })
       return this.makeRunHandle(conversationId, runId, runtime, session, undefined, undefined, transfer ? { source: transfer.source.executionCwd, target: manifest.executionCwd ?? manifest.cwd } : undefined)
     } catch (error) {
       const active = this.active.get(runId)
@@ -4301,7 +4395,74 @@ export class LocalHost {
       throw error
     }
   }
-  async reconcileInactiveRun(conversationId: string, runId: string): Promise<{ cleared: boolean; activeRunId?: string }> {
+  /** A dead run may release its busy marker only when every side effect is already settled. */
+  async inactiveReleaseBlocker(conversationId: string, runId: string): Promise<string | undefined> {
+    const directory = this.runDir(conversationId, runId)
+    const shell = await this.persistedShellReleaseBlocker(directory)
+    if (shell) return shell
+    const exists = async (name: string) => stat(join(directory, name)).then(() => true, () => false)
+    if (!await exists('runtime.json') && !await exists('runtime.sqlite')) return undefined
+    let snapshot: Awaited<ReturnType<import('@hunterzhu/pulse-runtime').RuntimePersistenceBackend['load']>>
+    try { snapshot = await (await this.persistenceFor(conversationId, runId)).load() }
+    catch { return 'RECOVERY_SNAPSHOT_UNREADABLE' }
+    if (!snapshot) return undefined
+    let restored: ReturnType<typeof importRuntimePersistence>
+    try { restored = importRuntimePersistence(snapshot) }
+    catch { return 'RECOVERY_SNAPSHOT_UNREADABLE' }
+    const terminal = new Set(['succeeded', 'failed', 'cancelled'])
+    for (const effect of restored.state.effects.values()) {
+      if (effect.executionState === 'remote_unknown' || effect.sideEffectState === 'unknown' || effect.state === 'reconcile_required') return 'RECOVERY_SIDE_EFFECT_UNKNOWN'
+      const input = effect.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input as Record<string, JsonValue> : undefined
+      const name = String(input?.name ?? '')
+      if ((name === 'shell.exec' || name === 'shell.start') && !effect.outcome && !terminal.has(effect.state)) return 'RECOVERY_SIDE_EFFECT_UNKNOWN'
+      if (effect.kind === 'human' && !effect.outcome && (effect.state === 'queued' || effect.state === 'running')) return 'RUN_AWAITING_APPROVAL'
+    }
+    if (snapshot.quarantine?.length) return 'RECOVERY_SIDE_EFFECT_UNKNOWN'
+    if (snapshot.outbox?.entries?.some(entry => entry.state === 'claimed' && !restored.state.effects.get(entry.effectId)?.outcome)) return 'RECOVERY_SIDE_EFFECT_UNKNOWN'
+    return undefined
+  }
+  private async persistedShellReleaseBlocker(directory: string): Promise<string | undefined> {
+    try {
+      const processes = await shellProcesses(directory).list()
+      if (processes.some(process => process.status === 'running' || process.status === 'unknown')) return 'RECOVERY_SIDE_EFFECT_UNKNOWN'
+      return undefined
+    } catch {
+      return 'RECOVERY_SIDE_EFFECT_UNKNOWN'
+    }
+  }
+  private async recordStoppedRun(conversationId: string, runId: string, status: 'succeeded' | 'failed' | 'cancelled'): Promise<void> {
+    if (await this.inactiveReleaseBlocker(conversationId, runId)) return
+    const outcomePath = join(this.runDir(conversationId, runId), 'outcome.json')
+    const existing = await readFile(outcomePath, 'utf8').then(text => JSON.parse(text) as { status?: string }).catch(() => undefined)
+    if (!existing?.status) await writeFile(outcomePath, JSON.stringify({ schemaVersion: 1, status, reason: 'HOST_STOPPED', error: { code: 'HOST_STOPPED', message: 'The host stopped this run without rerunning it or discarding settled evidence.', retryable: false }, completedAt: new Date().toISOString() }, null, 2))
+    const manifest = await this.readManifest(conversationId).catch(() => undefined)
+    if (manifest?.activeRunId === runId && await this.shellSettledForRelease(conversationId, runId)) {
+      delete manifest.activeRunId
+      manifest.updatedAt = new Date().toISOString()
+      await this.saveManifest(manifest)
+    }
+  }
+  private async shellSettledForRelease(conversationId: string, runId: string): Promise<boolean> {
+    return (await this.persistedShellReleaseBlocker(this.runDir(conversationId, runId))) === undefined
+  }
+  private async recordOrphanOutcome(conversationId: string, runId: string): Promise<string | undefined> {
+    const directory = this.runDir(conversationId, runId)
+    const existing = await readFile(join(directory, 'outcome.json'), 'utf8').then(text => JSON.parse(text) as { status?: string }).catch(() => undefined)
+    if (existing?.status) return existing.status
+    const exists = async (name: string) => stat(join(directory, name)).then(() => true, () => false)
+    if (!await exists('runtime.json') && !await exists('runtime.sqlite')) return undefined
+    let status: 'succeeded' | 'failed' | 'cancelled' = 'cancelled'
+    try {
+      const snapshot = await (await this.persistenceFor(conversationId, runId)).load()
+      if (snapshot) {
+        const root = [...importRuntimePersistence(snapshot).state.agents.values()].find(agent => agent.parentAgentId === undefined)
+        if (root?.state === 'succeeded' || root?.state === 'failed') status = root.state
+      }
+    } catch { /* The diagnostic outcome still records the release. */ }
+    await writeFile(join(directory, 'outcome.json'), JSON.stringify({ schemaVersion: 1, status, reason: 'ORPHAN_ACTIVE_RELEASED', error: { code: 'ORPHAN_ACTIVE_RELEASED', message: 'The stopped run kept its settled evidence and budget. The busy marker was released without rerunning.', retryable: false }, completedAt: new Date().toISOString() }, null, 2))
+    return status
+  }
+  async reconcileInactiveRun(conversationId: string, runId: string): Promise<{ cleared: boolean; activeRunId?: string; status?: string }> {
     if (this.active.has(runId)) throw new Error('CONVERSATION_BUSY')
     await this.acquireConversationLock(conversationId, `reconcile-${runId}`)
     try {
@@ -4310,9 +4471,14 @@ export class LocalHost {
       if (manifest.activeRunId !== runId) {
         return { cleared: false, ...(manifest.activeRunId ? { activeRunId: manifest.activeRunId } : {}) }
       }
+      const blocker = await this.inactiveReleaseBlocker(conversationId, runId)
+      if (blocker) throw new Error(blocker)
+      const status = await this.recordOrphanOutcome(conversationId, runId)
+      if (!await this.shellSettledForRelease(conversationId, runId)) throw new Error('RECOVERY_SIDE_EFFECT_UNKNOWN')
       delete manifest.activeRunId
+      manifest.updatedAt = new Date().toISOString()
       await this.saveManifest(manifest)
-      return { cleared: true }
+      return { cleared: true, ...(status ? { status } : {}) }
     } finally {
       await this.releaseConversationLock(conversationId)
     }
@@ -4397,6 +4563,7 @@ export class LocalHost {
     let lastLaneSnapshot = ''
     const startedTools = new Set<string>()
     let lastTaskProgress = ''
+    try {
     for await (const event of session.stream()) {
       seq++
       if (event.kind === 'observation') {
@@ -4474,16 +4641,34 @@ export class LocalHost {
         // replyable; otherwise reconnects can replay the event without ever
         // showing the answer panel.
         if (!liveEffect || !['queued', 'running'].includes(liveEffect.state) || liveEffect.outcome !== undefined) continue
-        const root = this.active.get(runId)?.options.cwd ?? this.root
-        const automatic = await this.execPolicy.automatic(relocation ? presentTransferredApproval(asRecord(liveEffect.input) ?? {}, relocation) : asRecord(liveEffect.input) ?? {}, root, conversationId, runId)
-        if (automatic !== 'none') { await session.reply(liveEffect.id, { approved: automatic === 'allow', ...(automatic === 'forbidden' ? { reason: 'EXEC_POLICY_FORBIDDEN' } : {}) }); continue }
+        const root = this.active.get(runId)?.executionCwd ?? this.root
+        const approvalSubject = relocation ? presentTransferredApproval(asRecord(liveEffect.input) ?? {}, relocation) : asRecord(liveEffect.input) ?? {}
+        let automatic: 'allow' | 'forbidden' | 'none' = 'none'
+        let policyDiagnostic: string | undefined
+        try { automatic = await this.execPolicy.automatic(approvalSubject, root, conversationId, runId) }
+        catch (error) {
+          const code = error instanceof Error ? error.message : String(error)
+          if (code === 'PATH_OUTSIDE_WORKSPACE') { automatic = 'forbidden'; policyDiagnostic = 'PATH_OUTSIDE_WORKSPACE' }
+          else policyDiagnostic = code
+        }
+        if (automatic !== 'none') { await session.reply(liveEffect.id, { approved: automatic === 'allow', ...(automatic === 'forbidden' ? { reason: policyDiagnostic ?? 'EXEC_POLICY_FORBIDDEN' } : {}) }); continue }
         const preview = await this.persistPlanPreview(conversationId, runId, runtime, liveEffect.id, liveEffect.input)
         if (preview !== undefined) {
           seq++
           yield { schemaVersion: 1, type: 'text', conversationId, runId, seq, data: preview }
         }
+        const presented = relocation && asRecord(event.event.data) ? presentTransferredApproval(asRecord(event.event.data)!, relocation) : asRecord(event.event.data) ?? {}
+        let approvalInput = presented
+        if (!policyDiagnostic) {
+          try { approvalInput = await this.execApprovalInput(presented, root, conversationId, runId, liveEffect.id) }
+          catch (error) {
+            const code = error instanceof Error ? error.message : String(error)
+            if (code === 'PATH_OUTSIDE_WORKSPACE') { await session.reply(liveEffect.id, { approved: false, reason: 'PATH_OUTSIDE_WORKSPACE' }); continue }
+            policyDiagnostic = code
+          }
+        }
         seq++
-        yield { schemaVersion: 1, type: 'waiting', conversationId, runId, seq, data: { effectId: event.event.effectId ?? null, input: await this.execApprovalInput(relocation && asRecord(event.event.data) ? presentTransferredApproval(asRecord(event.event.data)!, relocation) : asRecord(event.event.data) ?? {}, root, conversationId, runId, liveEffect.id) } }
+        yield { schemaVersion: 1, type: 'waiting', conversationId, runId, seq, data: { effectId: event.event.effectId ?? null, input: policyDiagnostic ? { ...approvalInput, execPolicyError: policyDiagnostic } : approvalInput } }
         continue
       }
       if (event.event?.type === 'effect.settled' && event.event.effectId) {
@@ -4516,6 +4701,12 @@ export class LocalHost {
       seq++
       yield { schemaVersion: 1, type: 'fact', conversationId, runId, seq, data: event.event?.data ?? event.event?.type ?? null }
     }
+    } catch (error) {
+      seq++
+      yield { schemaVersion: 1, type: 'error', conversationId, runId, seq, data: error instanceof Error ? error.message : String(error) }
+      this.active.get(runId)?.capabilityController.abort()
+      await session.cancel('STREAM_FAILED').catch(() => undefined)
+    }
     try {
       const outcome = await finish()
       // Publish selected results only after execution and verification settle.
@@ -4544,13 +4735,22 @@ export class LocalHost {
       const preserved = options?.preserveHumanWaits === true && await active.runtime.checkpointHumanWait()
       if (!preserved) await active.runtime.shutdown()
       const root = active.runtime.state.agents.get(active.session.agentId)
-      if (active.jarvis && active.finish && root && ['succeeded', 'failed', 'cancelled'].includes(root.state ?? '')) { await active.finish(); return }
+      if (!preserved && root && ['succeeded', 'failed', 'cancelled'].includes(root.state ?? '')) {
+        const settled = active.finish ? await Promise.race([active.finish().then(() => true, () => false), new Promise<boolean>(resolve => setTimeout(() => resolve(false), 400))]) : false
+        if (!settled) {
+          const status = root.state === 'failed' ? 'failed' : root.state === 'succeeded' ? 'succeeded' : 'cancelled'
+          await this.recordStoppedRun(active.conversationId, active.runId, status).catch(() => undefined)
+        }
+        await active.capabilities.dispose().catch(() => undefined)
+        return
+      }
       await this.hookServices.get(`${active.conversationId}:${active.runId}`)?.dispose()
       if (!preserved && root && ['succeeded', 'failed', 'cancelled'].includes(root.state ?? '')) await this.hookServices.get(`${active.conversationId}:${active.runId}`)?.stop()
       await active.capabilities.dispose()
     }))
     this.active.clear()
     this.hookServices.clear()
+    await this.sealRunPersistence()
     await Promise.allSettled([...this.runBackends].map(backend => backend.close?.()))
     this.runBackends.clear()
     this.persistenceCache.clear()

@@ -74,7 +74,7 @@ describe('work conversation transfer', () => {
     expect((await original.getConversationMessages(conversation.id)).some(message => message.text.includes(secret))).toBe(true)
   }, 30_000)
 
-  it.each(['json', 'h5-isolated'] as const)('resumes an approved file move only in the target workspace (%s)', async mode => {
+  it.each(['json', 'h5-current', 'h5-isolated'] as const)('resumes an approved file move only in the target workspace (%s)', async mode => {
     const directory = await root(), source = join(directory, 'source'), destination = join(directory, 'destination'), data = join(directory, 'data'), targetData = join(directory, 'target-data')
     await project(source); await project(destination)
     if (mode === 'h5-isolated') await exec('git', ['-C', destination, 'config', 'core.autocrlf', 'true'])
@@ -85,7 +85,7 @@ describe('work conversation transfer', () => {
     expect((await run.pendingInteractions())[0]?.kind).toBe('approval')
     const conversationDir = join(data, 'conversations', conversation.id), crashImage = join(directory, 'crash-image')
     await cp(conversationDir, crashImage, { recursive: true, filter: path => !path.endsWith('.lock') && !path.includes('.tmp-') })
-    await original.close(); await iterator.return?.()
+    await original.close({ preserveHumanWaits: true }); await iterator.return?.()
     await cp(crashImage, conversationDir, { recursive: true, force: true })
     await rm(join(conversationDir, 'conversation.lock'), { force: true })
     const reader = host(source, data), target = host(destination, targetData)
@@ -103,7 +103,8 @@ describe('work conversation transfer', () => {
       expect(await readFile(join(cwd, 'note.txt'), 'utf8')).toBe('portable project\n')
       await expect(stat(join(cwd, 'renamed.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
     }
-    if (mode === 'h5-isolated') {
+    if (mode !== 'json') {
+      if (mode === 'h5-isolated') await new H5WorkspaceManager(targetData).prepare(conversation.id, projectEntry.id, destination, { isolated: true })
       const server = new H5Server(target, { dataDir: targetData, port: 0, host: '127.0.0.1' })
       const info = await server.start(), base = `http://127.0.0.1:${info.port}`
       try {
@@ -118,7 +119,7 @@ describe('work conversation transfer', () => {
           interaction = state.interactions?.[0]; expect(interaction).toBeTruthy()
         })
         const workspace = await new H5WorkspaceManager(targetData).get(conversation.id)
-        expect(workspace?.kind).toBe('git'); executionDirectory = workspace!.worktreeRoot
+        expect(workspace?.kind).toBe(mode === 'h5-isolated' ? 'git' : 'shared'); executionDirectory = workspace!.worktreeRoot
         await assertApproval(interaction, executionDirectory)
         const reply = await fetch(`${base}/api/runs/${run.id}/replies`, { method: 'POST', headers, body: JSON.stringify({ conversationId: conversation.id, groupId: interaction!.groupId, requestId: 'move-after-transfer', answers: interaction!.items.map(item => ({ effectId: item.effectId, value: { approved: true } })) }) })
         expect(reply.status).toBe(200)
@@ -210,7 +211,7 @@ describe('work conversation transfer', () => {
     }
     expect((await run.pendingInteractions())[0]?.kind).toBe('approval')
     await expect(original.exportConversationBundle(conversation.id)).rejects.toThrow('CONVERSATION_BUSY')
-    await original.close()
+    await original.close({ preserveHumanWaits: true })
     await iterator.return?.()
     await cp(crashImage, conversationDir, { recursive: true, force: true })
     await rm(join(conversationDir, 'conversation.lock'), { force: true })
@@ -228,6 +229,7 @@ describe('work conversation transfer', () => {
     const budgetBefore = JSON.parse(await readFile(join(targetData, 'conversations', conversation.id, 'runs', run.id, 'model-budget.json'), 'utf8'))
     let executionDirectory = destination
     if (mode === 'h5-isolated') {
+      await new H5WorkspaceManager(targetData).prepare(conversation.id, destinationProject.id, destination, { isolated: true })
       const server = new H5Server(target, { dataDir: targetData, port: 0, host: '127.0.0.1' })
       const info = await server.start(), base = `http://127.0.0.1:${info.port}`
       try {

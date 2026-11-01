@@ -13,6 +13,7 @@ function fixture(tasks: ReturnType<typeof stage>[], retry?: string, fail?: strin
   const work = new Map<string, number>(), owners = new Map<string, Set<string>>(), writes: string[] = [], inputs: any[] = []
   const program = buildTaskControllerProgram({ system: 'offline simulation', toolNames: ['fs.write', 'shell.exec', 'ask.choice'], approvalMode: 'auto', maxTurns: 128 })
   const executor = async (e: any) => {
+    if (e.key === '$compact-summary') return { value: { text: 'Preserve the original task, settled delivery receipts, and pending verification. Continue unfinished work without replaying completed writes.', finishReason: 'stop', toolCalls: [] } }
     if (e.key?.startsWith('plan')) return { value: { tasks } }
     const state = activeState(r, e.ownerLaneId), active = state?.tasks.find((t: any) => t.id === state.activeId)
     if (e.kind === 'tool') {

@@ -26,6 +26,7 @@ export async function assertDesktopDataReady(directory) {
 }
 
 export function desktopServiceMessage(error) {
+    if (error === 'PREVIEW_BACKEND_VERSION_MISMATCH') return '预览后台与本包构建不一致，已阻止连接和发送任务。请点击“应用后台更新”切换到本包版本；会话、配置和已有改动保留。';
     if (error === 'DATA_MIGRATION_REQUIRED') return '所选目录仍是旧版数据，须停用该目录的旧服务并完成迁移后才能连接。也可以选择已经迁移的开发数据目录。';
     if (error === 'DATA_MIGRATION_IN_PROGRESS') return '所选目录正在迁移，请等待迁移完成后重新连接。';
     if (/^PULSE_SERVICE_(?:START_ERROR|EXITED|START_FAILED)/.test(error ?? '')) return `后台启动失败（${error}）。请打开“查看启动诊断”检查运行环境和退出原因，再重试。`;

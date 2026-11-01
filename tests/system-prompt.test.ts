@@ -45,6 +45,8 @@ describe('system prompt and instructions discovery', () => {
       expect(prompt).toContain('general-purpose task assistant')
       expect(prompt).toContain('research, organize files')
       expect(prompt).toContain('/test/workspace')
+      expect(prompt).toContain('unless the user explicitly requests it')
+      expect(prompt).toContain('do not initialize a repository just to perform the task')
       expect(prompt).toContain('## Investigation & Tool Safety')
       expect(prompt).toContain('## Software Engineering Tasks')
       expect(prompt).toContain('## Task Execution Contract')

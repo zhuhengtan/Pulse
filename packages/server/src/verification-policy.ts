@@ -43,6 +43,30 @@ export async function approvalScriptContext(root: string, input: Record<string, 
   } catch { return undefined }
 }
 
+/** Filesystem-equivalent reads only; rechecked when a remembered command executes. */
+export async function isBoundedWorkspaceRead(root: string, input: Record<string, unknown>): Promise<boolean> {
+  if (!['ls', 'cat', 'pwd'].includes(String(input.command)) || input.cwd !== undefined && typeof input.cwd !== 'string' || input.args !== undefined && (!Array.isArray(input.args) || input.args.some(arg => typeof arg !== 'string'))) return false
+  const args = (input.args ?? []) as string[]
+  if (args.length > 16 || args.some(arg => /[\r\n\0;&|<>`$*?\[\]{}]/.test(arg))) return false
+  const flags = input.command === 'ls' ? ['-a', '-l', '-la', '-al', '-h', '-lah', '-lha', '--all', '--long', '--human-readable'] : input.command === 'cat' ? ['-n'] : []
+  const names = args.filter(arg => !flags.includes(arg))
+  if (names.length > 8 || names.some(name => !name || name.startsWith('-') || name.length > 1024) || input.command === 'pwd' && args.length || input.command === 'cat' && !names.length) return false
+  const sensitiveRead = /(^|[\\/])(?:\.git|\.ssh|\.aws|\.pulse|\.codex|\.env(?:\.[^\\/]*)?|id_(?:rsa|ed25519)(?:\.pub)?|(?:credentials?|passwords?|tokens?|secrets?)(?:\.[^\\/]*)?)(?:[\\/]|$)/i
+  try {
+    const canonical = await within(root, '.')
+    const cwd = await within(root, typeof input.cwd === 'string' ? input.cwd : '.')
+    if (sensitiveRead.test(relative(canonical, cwd))) return false
+    const sizes = await Promise.all((names.length ? names : ['.']).map(async name => {
+      const lexical = resolve(root, typeof input.cwd === 'string' ? input.cwd : '.', name), target = await within(root, lexical)
+      if (sensitiveRead.test(relative(canonical, lexical)) || sensitiveRead.test(relative(canonical, target))) throw new Error('SENSITIVE_READ')
+      const info = await stat(target)
+      if (input.command === 'cat' ? !info.isFile() : !info.isFile() && !info.isDirectory()) throw new Error('SPECIAL_FILE')
+      return info.size
+    }))
+    return input.command !== 'cat' || sizes.reduce((a, b) => a + b, 0) <= 65_536
+  } catch { return false }
+}
+
 /** A narrow task-authorized bypass; all other commands retain ordinary review. */
 export async function isNecessaryVerification(root: string, input: Record<string, JsonValue>, intent: string): Promise<boolean> {
   if (!authorized(intent) || typeof input.command !== 'string' || !['node', 'pnpm', 'npm', 'grep', 'rg', 'git', 'wc', 'cat'].includes(input.command)) return false

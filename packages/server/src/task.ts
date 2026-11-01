@@ -165,7 +165,8 @@ export function isExplicitNewTask(text: string): boolean {
 
 export function isTaskContinuation(text: string): boolean {
   const request = text.trim()
-  if (isExplicitNewTask(request)) return false
+  if (isExplicitNewTask(request) || /^(?:不要|别|不用|do not|don't)\s*(?:重试|继续|恢复|resume|continue|retry)\b/i.test(request)) return false
+  if (/^(?:重试|没做完啊?|retry)[。！!?.\s]*$/i.test(request)) return true
   return /^(?:继续|接着|恢复(?:任务|执行)|continue(?:\b)|resume(?:\b))/i.test(request) || /^(?:(?:你|这|这个|刚才|之前|还是|仍然|怎么|为什么|为啥)[，,\s]*){0,3}(?:没有|没看到|找不到|缺少|遗漏|漏了)[^。！？!?\n]{0,30}(?:计划|文件|产物|报告|测试|功能|修改|结果)|^(?:这个|刚才的|之前的).{0,16}(?:不对|有问题|没修好)|^(?:the |that )?(?:plan|file|artifact|report|test|fix).{0,20}(?:missing|not found|still broken)/i.test(request)
 }
 

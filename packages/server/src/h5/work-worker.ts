@@ -8,7 +8,7 @@ import type { AssistantEvent, LocalHost, LocalHostOptions, RunHandle, RunUsage, 
 
 export const H5_WORKER_PROTOCOL_VERSION = 1 as const
 
-type WorkerPayload = { recoveryAuthorization?: RunRecoveryAuthorization; requestId?: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[] }
+type WorkerPayload = { budgetRenewal?: import('../model-budget.js').BudgetRenewalAuthorization; recoveryAuthorization?: RunRecoveryAuthorization; requestId?: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[] }
 type WorkerStart = Omit<WorkerPayload, 'requestId'> & { messageRequestId?: string } & { schemaVersion: 1; type: 'start'; requestId: string; conversationId: string; text: string; resume: boolean }
 type WorkerConfigure = { schemaVersion: 1; type: 'configure'; runtimeOptions: WorkWorkerRuntimeOptions }
 type WorkerRpc = { schemaVersion: 1; type: 'rpc'; requestId: string; method: 'cancel' | 'reply' | 'replyBatch' | 'pendingInteractions' | 'reviewApproval' | 'submitHumanInput' | 'processes' | 'pollProcess' | 'cancelProcess'; args: unknown[] }
@@ -191,7 +191,7 @@ class RemoteWorkRun {
       await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'configure', runtimeOptions })
       await this.configured
       const requestId = this.startRequestId
-      await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'start', requestId, conversationId: this.conversationId, text, resume, ...(input.requestId ? { messageRequestId: input.requestId } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), ...(input.recoveryAuthorization ? { recoveryAuthorization: input.recoveryAuthorization } : {}) })
+      await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'start', requestId, conversationId: this.conversationId, text, resume, ...(input.budgetRenewal ? { budgetRenewal: input.budgetRenewal } : {}), ...(input.requestId ? { messageRequestId: input.requestId } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), ...(input.recoveryAuthorization ? { recoveryAuthorization: input.recoveryAuthorization } : {}) })
       const started = await this.started
       this.runId = started.runId
     } catch (error) {
@@ -310,7 +310,7 @@ export async function runH5WorkWorker(host: LocalHost, conversationId: string): 
 
   let handle: RunHandle
   try {
-    handle = start.resume ? await host.resumeRun(conversationId, start.recoveryAuthorization) : await host.sendMessage(conversationId, { text: start.text, ...(start.messageRequestId ? { requestId: start.messageRequestId } : {}), ...(start.attachments ? { attachments: start.attachments } : {}), ...(start.skills ? { skills: start.skills } : {}), ...(start.mentionedFiles ? { mentionedFiles: start.mentionedFiles } : {}), ...(start.richContent ? { richContent: start.richContent } : {}) })
+    handle = start.resume ? await host.resumeRun(conversationId, start.recoveryAuthorization) : await host.sendMessage(conversationId, { text: start.text, ...(start.budgetRenewal ? { budgetRenewal: start.budgetRenewal, continueTask: true } : {}), ...(start.messageRequestId ? { requestId: start.messageRequestId } : {}), ...(start.attachments ? { attachments: start.attachments } : {}), ...(start.skills ? { skills: start.skills } : {}), ...(start.mentionedFiles ? { mentionedFiles: start.mentionedFiles } : {}), ...(start.richContent ? { richContent: start.richContent } : {}) })
     await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'started', requestId: start.requestId, runId: handle.id, conversationId })
   } catch (error) {
     await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'fatal', message: errorText(error).slice(0, 400) }).catch(() => undefined)
@@ -370,8 +370,8 @@ export async function runH5WorkWorker(host: LocalHost, conversationId: string): 
     process.disconnect?.()
     return 0
   } catch (error) {
-    await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'fatal', message: errorText(error).slice(0, 400) }).catch(() => undefined)
     await host.close().catch(() => undefined)
+    await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'fatal', message: errorText(error).slice(0, 400) }).catch(() => undefined)
     process.disconnect?.()
     return 1
   }

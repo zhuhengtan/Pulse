@@ -5,6 +5,7 @@ import { dirname, extname, join, relative, resolve } from 'node:path'
 import { readOnlySystemGit } from './system-git.js'
 import { FilesystemTool } from '@hunterzhu/pulse-adapters'
 import { candidateScriptCoverage, type CandidateScriptCoverage } from './task-controller/candidate-script-coverage.js'
+import { namedVitestCheck, nodeVitestScript } from './vitest-check.js'
 
 export interface CheckReceipt {
   schemaVersion: 1 | 2 | 3 | 4
@@ -166,7 +167,7 @@ export function isCheck(command: string, args: string[]): boolean {
       // are that code's argv, so no script position exists to classify.
       if (options.some((arg) => EVAL_FLAGS.has(arg))) return false
       const script = scriptIndex < 0 ? undefined : rest[scriptIndex]
-      return runsNamedScript(script) || (script !== undefined && TEST_FILE.test(baseName(script)))
+      return runsNamedScript(script) || (script !== undefined && (TEST_FILE.test(baseName(script)) || (program === 'node' || program === 'nodejs') && nodeVitestScript(script)))
     }
     return RUNNERS.has(program) || runsNamedScript(program)
   }
@@ -352,6 +353,9 @@ export async function captureCheck(root: string, cwd: string, command: string, a
     }
   }
   const seeds = version === 1 ? legacyInputs : savedScope ? savedScope.inputs.map(p => resolve(root, p)) : [...new Set([...legacyInputs, ...directInputs])]
+  const vitest = !savedScope && version >= 2 ? namedVitestCheck(command, args, relative(root, cwd) || '.') : undefined
+  if (vitest) seeds.push(...vitest.files.map(path => resolve(root, path)))
+  if (vitest) for (const name of ['package.json', 'tsconfig.json', 'vitest.config.ts', 'vitest.config.js', 'vitest.config.mts', 'vitest.config.mjs', 'vite.config.ts', 'vite.config.js', 'vite.config.mts', 'vite.config.mjs']) seeds.push(resolve(root, vitest.root, name))
   const pending = [...seeds]
   const named = savedScope ? savedScope.mode === 'explicit' : pending.length > 0
   const scope: NonNullable<CheckReceipt['scope']> = { mode: named ? 'explicit' : 'project', inputs: seeds.map(p => relative(root, p).replaceAll('\\', '/')), coverage: named ? /(?:^|[/\\])(?:xmllint|jq)$/.test(command) ? 'declared-inputs' : 'unknown-dynamic' : 'conservative' }

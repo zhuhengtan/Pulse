@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { HookService, loadHookDefinitions, checkHookDefinitions, hookArgv, hookMatches } from '../packages/server/src/hooks/index.js';
 import { createLocalHost } from '../packages/server/src/index.js';
 import { runShell } from '../packages/adapters/src/tools/shell.js';
+import * as adapters from '@hunterzhu/pulse-adapters';
 import { ShellProcesses } from '../packages/server/src/shell-processes.js';
 import type { EffectRecord } from '@hunterzhu/pulse-runtime';
 const roots: string[] = [];
@@ -13,7 +14,7 @@ const openService = (...args: ConstructorParameters<typeof HookService>) => { co
 afterEach(async () => {
     const pending = services.splice(0);
     try { for (const service of pending) { await service.stop(); await service.dispose(); } }
-    finally { await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); }
+    finally { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); }
 });
 async function fixture(output = '{}', events = ['SessionStart', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop']) {
     const base = await mkdtemp(join(tmpdir(), 'pulse-hooks-'));
@@ -30,6 +31,8 @@ async function fixture(output = '{}', events = ['SessionStart', 'PreToolUse', 'P
 }
 const effect = (attemptId = 'a1') => ({ id: 'e1', kind: 'tool', attemptId, attemptNo: 1, agentId: 'agent', ownerLaneId: 'lane', toolCallId: 'tc', input: { name: 'fs.read', arguments: { path: 'a.txt', token: 'secret' } } }) as EffectRecord;
 const signal = () => new AbortController().signal;
+// Budget only whole native cases for measured Windows sandbox ACL setup.
+const nativeTimeout = (launches: number, local = 30000) => process.platform === 'win32' ? launches * 240000 : local;
 it('supports bounded common matching and literal argv, rejecting shell execution and unsupported regex', () => {
     expect(hookArgv('node "a b.js"')).toEqual(['node', 'a b.js']);
     expect(hookMatches('Bash|Write', 'shell.exec')).toBe(true);
@@ -59,19 +62,19 @@ it('orders events, preserves receipts and never replays completed/unknown hooks 
     const result = await second.around(effect('a2'), signal(), undefined, execute);
     expect(result.error?.code).toBe('HOOK_PRE_DENIED');
     expect(execute).toHaveBeenCalledTimes(1);
-});
+}, nativeTimeout(4, 10000));
 it.each(['{"continue":false}', '{"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{}}}', 'not-json'])('blocks invalid or denied pre output %s', async (output) => {
     const f = await fixture(output, ['PreToolUse']), execute = vi.fn();
     expect((await f.service.around(effect(), signal(), undefined, execute)).error?.code).toBe('HOOK_PRE_DENIED');
     expect(execute).not.toHaveBeenCalled();
-});
+}, nativeTimeout(1, 10000));
 it('keeps post failure observational and does not repeat the underlying side effect', async () => {
     const f = await fixture('invalid', ['PostToolUse']), execute = vi.fn(async () => ({ status: 'succeeded' as const, value: 'done', sideEffectState: 'applied' as const }));
     expect((await f.service.around(effect(), signal(), undefined, execute)).status).toBe('succeeded');
     expect(execute).toHaveBeenCalledTimes(1);
     await f.service.stop();
     expect(await readFile(join(f.journal, (await readdir(f.journal))[0]!), 'utf8')).toContain('diagnostic');
-});
+}, nativeTimeout(1, 10000));
 it('executes the real Host effect boundary and Stop lifecycle using mock models only', async () => {
     const f = await fixture(), dataDir = join(f.base, 'data'), host = createLocalHost({ cwd: f.root, dataDir, hooks: f.trusted, taskController: false, approvalMode: 'auto', mockToolCalls: [{ name: 'fs.read', input: { path: 'a.txt' } }], mockAfterToolResponse: 'done' });
     await host.init();
@@ -87,8 +90,7 @@ it('executes the real Host effect boundary and Stop lifecycle using mock models 
     finally {
         await host.close();
     }
-}, 30000);
-
+}, nativeTimeout(4, 30000));
 it('pre timeout remains unknown across attempts and never executes the tool', async () => {
     const f = await fixture('{}', ['PreToolUse']);
     await writeFile(join(f.base, 'source/hook.cjs'), 'setTimeout(()=>{},10000)');
@@ -103,7 +105,7 @@ it('pre timeout remains unknown across attempts and never executes the tool', as
     const receipts=await Promise.all((await readdir(f.journal)).map(p=>readFile(join(f.journal,p),'utf8').then(JSON.parse)));
     expect(receipts.some(r=>r.status==='unknown')).toBe(true);
     await service.dispose();
-},30000);
+}, nativeTimeout(1, 30000));
 it('slow post observers cannot delay applied tool settlement and dispose drains owned scripts', async () => {
     const f=await fixture('{}',['PostToolUse']);
     await writeFile(join(f.base,'source/hook.cjs'),'process.stdin.resume();setTimeout(()=>process.stdout.write("{}"),5000)');
@@ -114,7 +116,7 @@ it('slow post observers cannot delay applied tool settlement and dispose drains 
     expect(Date.now()-started).toBeLessThan(500);
     expect(execute).toHaveBeenCalledTimes(1);
     await service.dispose();
-},30000);
+}, nativeTimeout(1, 30000));
 it('revocation blocks new pre hooks while legacy runs without a snapshot remain independent', async()=>{
     const f=await fixture('{}',['PreToolUse']), execute=vi.fn(async()=>({status:'succeeded' as const,value:'ok'}));
     const revoked=openService(f.root,f.journal,{conversationId:'c',runId:'r'},f.snapshot,{...f.trusted,enabled:false});
@@ -145,7 +147,7 @@ it('omits raw shell.stdin data from the hook and does not pass injected host mar
     } finally {
         for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     }
-}, 30000);
+}, nativeTimeout(1, 30000));
 it('an early stdin close is unknown for pre, skips the tool, and stays closed on another attempt', async () => {
     const f = await fixture('{}', ['PreToolUse']);
     await writeFile(join(f.base, 'source/hook.cjs'), `require('node:fs').closeSync(0);process.stdout.write('{}')`);
@@ -154,12 +156,16 @@ it('an early stdin close is unknown for pre, skips the tool, and stays closed on
     await writeFile(f.file, JSON.stringify(raw));
     const snapshot = await loadHookDefinitions(f.file, join(f.base, 'closed'));
     const service = openService(f.root, f.journal, { conversationId: 'c', runId: 'r' }, snapshot, { ...snapshot, enabled: true });
+    // Pipe capacity varies by OS: closing fd 0 does not guarantee EPIPE after
+    // a small write. Inject the adapter's definite delivery failure here.
+    const shell = vi.spyOn(adapters, 'runShell').mockRejectedValueOnce(Object.assign(new Error('SHELL_STDIN_DELIVERY_UNKNOWN'), { code: 'SHELL_STDIN_DELIVERY_UNKNOWN' }));
     const padding = 'p'.repeat(4000);
     const execute = vi.fn();
     const target = { ...effect(), input: { name: 'fs.read', arguments: { path: 'a.txt', p1: padding, p2: padding, p3: padding, p4: padding, p5: padding, p6: padding, p7: padding, p8: padding } } } as EffectRecord;
     expect((await service.around(target, signal(), undefined, execute)).error?.code).toBe('HOOK_PRE_DENIED');
     expect((await service.around({ ...target, attemptId: 'a2' }, signal(), undefined, execute)).error?.code).toBe('HOOK_PRE_DENIED');
     expect(execute).not.toHaveBeenCalled();
+    expect(shell).toHaveBeenCalledTimes(1);
     const receipts = await Promise.all((await readdir(f.journal)).map(p => readFile(join(f.journal, p), 'utf8').then(JSON.parse)));
     expect(receipts).toContainEqual(expect.objectContaining({ event: 'PreToolUse', status: 'unknown', error: 'HOOK_OUTCOME_UNKNOWN' }));
 }, 30000);
@@ -171,6 +177,7 @@ it('an early post stdin close stays diagnostic and leaves the applied tool resul
     await writeFile(f.file, JSON.stringify(raw));
     const snapshot = await loadHookDefinitions(f.file, join(f.base, 'post-closed'));
     const service = openService(f.root, f.journal, { conversationId: 'c', runId: 'r' }, snapshot, { ...snapshot, enabled: true });
+    const shell = vi.spyOn(adapters, 'runShell').mockRejectedValueOnce(Object.assign(new Error('SHELL_STDIN_DELIVERY_UNKNOWN'), { code: 'SHELL_STDIN_DELIVERY_UNKNOWN' }));
     const marker = join(f.root, 'once.txt');
     const padding = 'p'.repeat(4000);
     const execute = vi.fn(async () => { await writeFile(marker, 'once'); return { status: 'succeeded' as const, value: 'once', sideEffectState: 'applied' as const }; });
@@ -178,6 +185,7 @@ it('an early post stdin close stays diagnostic and leaves the applied tool resul
     expect(await service.around(target, signal(), undefined, execute)).toMatchObject({ status: 'succeeded', sideEffectState: 'applied' });
     expect(execute).toHaveBeenCalledTimes(1);
     await service.stop();
+    expect(shell).toHaveBeenCalledTimes(1);
     expect(await readFile(marker, 'utf8')).toBe('once');
     const receipts = await Promise.all((await readdir(f.journal)).map(p => readFile(join(f.journal, p), 'utf8').then(JSON.parse)));
     expect(receipts).toEqual([expect.objectContaining({ event: 'PostToolUse', status: 'diagnostic', error: 'HOOK_OUTCOME_UNKNOWN' })]);
@@ -199,7 +207,7 @@ it('observes shell.stdin unknown at the host boundary without treating it as a g
         const conversation = await host.createConversation();
         const run = await host.sendMessage(conversation.id, { text: 'Send input' });
         void (async () => { for await (const event of run.events) void event; })();
-        const deadline = Date.now() + 15000;
+        const deadline = Date.now() + (process.platform === 'win32' ? 240000 : 15000);
         const journal = join(root, 'data', 'conversations', conversation.id, 'runs', run.id, 'hooks');
         let settled: { executionState?: string; sideEffectState?: string; state?: string } | undefined;
         let receipts: Array<{ event?: string; status?: string }> = [];
@@ -216,7 +224,7 @@ it('observes shell.stdin unknown at the host boundary without treating it as a g
         input.mockRestore();
         await host.close();
     }
-}, 30000);
+}, nativeTimeout(1, 30000));
 it('a sealed hook child keeps sandbox runtime settings and drops injected host markers', async () => {
     const previous = { AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID, SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK, KUBECONFIG: process.env.KUBECONFIG };
     process.env.AWS_ACCESS_KEY_ID = 'fake-aws-marker';
@@ -234,4 +242,4 @@ it('a sealed hook child keeps sandbox runtime settings and drops injected host m
     } finally {
         for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     }
-}, 30000);
+}, nativeTimeout(1, 30000));

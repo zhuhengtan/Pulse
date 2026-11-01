@@ -16,6 +16,10 @@ function filesystemError(code: string, retryable = false, cause?: unknown): Erro
   return Object.assign(new Error(code), { code, retryable, ...(cause === undefined ? {} : { cause }) })
 }
 
+function beforeCommitConflict() {
+  return Object.assign(filesystemError('FILE_BASELINE_CONFLICT'), { beforeCommit: true })
+}
+
 function filesystemCause(cause: unknown): Error & { code: string; retryable: boolean; cause?: unknown } {
   if (cause instanceof Error && typeof (cause as Error & { code?: unknown }).code === 'string' && typeof (cause as Error & { retryable?: unknown }).retryable === 'boolean') return cause as Error & { code: string; retryable: boolean; cause?: unknown }
   const code = cause && typeof cause === 'object' && typeof (cause as { code?: unknown }).code === 'string' ? String((cause as { code: string }).code) : 'FILESYSTEM_OPERATION_FAILED'
@@ -199,34 +203,83 @@ export class FilesystemTool {
     if (signal?.aborted) throw filesystemError('ABORTED')
     if (expectedHash !== null && !/^[a-f0-9]{64}$/.test(expectedHash)) throw filesystemError('INVALID_FILE_BASELINE_HASH')
     const target = await this.writable(path)
+    return this.withLock(target, () => this.writeBytesLocked(path, target, content, expectedHash, signal))
+  }
+
+  /** Existing UTF-8 files only. Recompute once if a non-cooperating editor changes
+   * the file during validation; cooperating Pulse writers share the path lock. */
+  async editText<T>(path: string, maxBytes: number, transform: (content: string) => Promise<{ content: string; result: T }>, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) throw filesystemError('ABORTED')
+    const target = await this.existing(path)
+    if (await this.existing(path) !== target || await this.writable(path) !== target) throw filesystemError('PATH_OUTSIDE_SANDBOX')
     return this.withLock(target, async () => {
-      if (signal?.aborted) throw filesystemError('ABORTED')
-      let current: Buffer | undefined
-      try { current = await readFile(target) } catch (cause) { if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw filesystemCause(cause) }
-      if (current === undefined && expectedHash !== null) throw filesystemError('FILE_BASELINE_MISSING')
-      const currentHash = current === undefined ? null : createHash('sha256').update(current).digest('hex')
-      if (currentHash !== expectedHash) throw filesystemError('FILE_BASELINE_CONFLICT')
-      await this.journal?.begin({ path, absolute: target, before: current ?? null, next: content })
-      const bytes = content.byteLength
-      const temporary = `${target}.tmp-${process.pid}-${process.hrtime.bigint().toString()}`
-      let handle: Awaited<ReturnType<typeof open>> | undefined
-      try {
-        handle = await open(temporary, 'wx', 0o600)
-        await handle.writeFile(content)
-        if (current !== undefined) await handle.chmod((await lstat(target)).mode & 0o777)
-        await handle.sync()
-        await handle.close()
-        handle = undefined
+      for (let attempt = 0; attempt < 2; attempt++) {
         if (signal?.aborted) throw filesystemError('ABORTED')
-        if (expectedHash === null) await link(temporary, target)
-        else await rename(temporary, target)
-        await this.journal?.landed()
-      } finally {
-        if (handle) await handle.close().catch(() => undefined)
-        await rm(temporary, { force: true }).catch(() => undefined)
+        if (await this.existing(path) !== target || await this.writable(path) !== target) throw filesystemError('PATH_OUTSIDE_SANDBOX')
+        const reader = await open(target, 'r')
+        let bytes: Buffer
+        try {
+          if ((await reader.stat()).size > maxBytes) throw filesystemError('FILE_TOO_LARGE')
+          const buffer = Buffer.alloc(maxBytes + 1)
+          let length = 0
+          while (length < buffer.length) {
+            const { bytesRead } = await reader.read(buffer, length, buffer.length - length, length)
+            if (!bytesRead) break
+            length += bytesRead
+          }
+          if (length > maxBytes) throw filesystemError('FILE_TOO_LARGE')
+          bytes = buffer.subarray(0, length)
+        } finally { await reader.close() }
+        const content = bytes.toString('utf8')
+        if (!Buffer.from(content).equals(bytes)) throw filesystemError('FILE_NOT_UTF8')
+        const expectedHash = createHash('sha256').update(bytes).digest('hex')
+        const proposal = await transform(content)
+        if (signal?.aborted) throw filesystemError('ABORTED')
+        if (await this.existing(path) !== target || await this.writable(path) !== target) throw filesystemError('PATH_OUTSIDE_SANDBOX')
+        try {
+          if (proposal.content === content) {
+            if (!bytes.equals(await readFile(target))) throw beforeCommitConflict()
+          } else await this.writeBytesLocked(path, target, Buffer.from(proposal.content, 'utf8'), expectedHash, signal, true)
+          return proposal.result
+        } catch (error) {
+          if ((error as { code?: string; beforeCommit?: boolean }).code !== 'FILE_BASELINE_CONFLICT' || !(error as { beforeCommit?: boolean }).beforeCommit || attempt === 1) throw error
+        }
       }
-      return { hash: createHash('sha256').update(content).digest('hex'), bytes }
-    })
+      throw filesystemError('FILE_BASELINE_CONFLICT')
+    }, signal)
+  }
+
+  /** Caller holds the canonical path lock; never acquire it again here. */
+  private async writeBytesLocked(path: string, target: string, content: Uint8Array, expectedHash: string | null, signal?: AbortSignal, verifyBeforeCommit = false): Promise<FilesystemWriteResult> {
+    if (signal?.aborted) throw filesystemError('ABORTED')
+    let current: Buffer | undefined
+    try { current = await readFile(target) } catch (cause) { if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw filesystemCause(cause) }
+    if (current === undefined && expectedHash !== null) throw filesystemError('FILE_BASELINE_MISSING')
+    const currentHash = current === undefined ? null : createHash('sha256').update(current).digest('hex')
+    if (currentHash !== expectedHash) throw verifyBeforeCommit ? beforeCommitConflict() : filesystemError('FILE_BASELINE_CONFLICT')
+    await this.journal?.begin({ path, absolute: target, before: current ?? null, next: content })
+    const bytes = content.byteLength
+    const temporary = `${target}.tmp-${process.pid}-${process.hrtime.bigint().toString()}`
+    let handle: Awaited<ReturnType<typeof open>> | undefined
+    try {
+      handle = await open(temporary, 'wx', 0o600)
+      await handle.writeFile(content)
+      if (current !== undefined) await handle.chmod((await lstat(target)).mode & 0o777)
+      await handle.sync()
+      await handle.close()
+      handle = undefined
+      if (signal?.aborted) throw filesystemError('ABORTED')
+      if (verifyBeforeCommit) {
+        if (await this.existing(path) !== target || await this.writable(path) !== target || createHash('sha256').update(await readFile(target)).digest('hex') !== expectedHash) throw beforeCommitConflict()
+      }
+      if (expectedHash === null) await link(temporary, target)
+      else await rename(temporary, target)
+      await this.journal?.landed()
+    } finally {
+      if (handle) await handle.close().catch(() => undefined)
+      await rm(temporary, { force: true }).catch(() => undefined)
+    }
+    return { hash: createHash('sha256').update(content).digest('hex'), bytes }
   }
 
   async removeIfUnchanged(path: string, expectedHash: string, signal?: AbortSignal): Promise<{ beforeHash: string }> {
@@ -248,12 +301,13 @@ export class FilesystemTool {
     })
   }
 
-  private async withLock<T>(target: string, work: () => Promise<T>): Promise<T> {
+  private async withLock<T>(target: string, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const lockPath = `${target}.pulse.lock`
     const deadline = Date.now() + this.lockTimeoutMs
     const payload = JSON.stringify({ pid: process.pid, token: `${process.pid}:${process.hrtime.bigint()}` })
     let lock: Awaited<ReturnType<typeof open>> | undefined
     while (lock === undefined) {
+      if (signal?.aborted) throw filesystemError('ABORTED')
       try {
         lock = await open(lockPath, 'wx', 0o600)
         await lock.writeFile(payload)

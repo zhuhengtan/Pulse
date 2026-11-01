@@ -70,6 +70,13 @@ export function safeCommandPrefix(input: string[]): string[] | undefined {
   const [command, ...args] = input
   if (!command || /[\\/]/.test(command) || args.length > 32) return undefined
   if (['node', 'pnpm', 'npm', 'python', 'python3'].includes(command) && args.length === 1 && args[0] === '--version') return input
+  if (command === 'pwd' && args.length === 0) return input
+  if (['ls', 'cat'].includes(command)) {
+    const flags = command === 'ls' ? ['-a', '-l', '-la', '-al', '-h', '-lah', '-lha', '--all', '--long', '--human-readable'] : ['-n']
+    const names = args.filter(arg => !flags.includes(arg))
+    if (args.length <= 16 && names.length <= 8 && (command === 'ls' || names.length > 0) && names.every(arg => arg.length <= 1024 && !arg.startsWith('-') && !/[\r\n\0;&|<>`$*?\[\]{}]/.test(arg))) return input
+    return undefined
+  }
   if (command !== 'git' || !args[0] || args[0].startsWith('-')) return undefined
   const rest = args.slice(1)
   const allowed = (words: string[]) => rest.every(arg => words.includes(arg))

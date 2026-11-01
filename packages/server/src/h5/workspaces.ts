@@ -187,7 +187,10 @@ export class H5WorkspaceManager {
     try { await replaceStateFile(temporary, path) } finally { await rm(temporary, { force: true }).catch(() => undefined) }
   }
 
-  async prepare(conversationId: string, projectId: string, requestedCwd: string): Promise<PreparedWorkspace> {
+  /** New tasks use the selected directory, without requiring Git. Isolation is
+   * an explicit caller choice after the user requests it, never an inference
+   * from the presence of a repository. Retain unfinished legacy work in place. */
+  async prepare(conversationId: string, projectId: string, requestedCwd: string, options?: { isolated: true }): Promise<PreparedWorkspace> {
     const excludedRoot = await this.canonicalWorkspaceRoot()
     const existing = await this.get(conversationId)
     if (existing && existing.status !== 'merged' && existing.status !== 'noop') {
@@ -197,6 +200,7 @@ export class H5WorkspaceManager {
       return { cwd: join(existing.worktreeRoot, existing.projectSubdirectory), isolated: true }
     }
     const projectCwd = await realpath(requestedCwd)
+    if (options?.isolated !== true) return this.prepareShared(conversationId, projectId, projectCwd)
     let projectRoot: string
     try { projectRoot = (await git(projectCwd, ['rev-parse', '--show-toplevel'])).trim() }
     catch { return this.prepareShared(conversationId, projectId, projectCwd) }

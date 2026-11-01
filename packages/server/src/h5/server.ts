@@ -178,6 +178,7 @@ export class H5Server {
   private readonly runSseClients = new Map<string, Set<SseClient>>()
   private readonly bufferTimers = new Map<string, NodeJS.Timeout>()
   private readonly reviewNotes = new Map<string, string>()
+  private readonly manualApprovalEffects = new Map<string, Set<string>>()
   private readonly approvalReviewControllers = new Map<string, AbortController>()
   private readonly approvalReviewAgain = new Set<string>()
   private readonly batchReplyLocks = new Map<string, Promise<void>>()
@@ -491,7 +492,7 @@ export class H5Server {
     // case too; absence from the parent lookup is not evidence of completion.
     await Promise.allSettled([...this.pendingWorkStarts].filter(([, id]) => !conversationId || id === conversationId).map(([promise]) => promise))
   }
-  private async startConversationRun(conversationId: string, text: string, options?: { requestId?: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[] }): Promise<RunHandle> {
+  private async startConversationRun(conversationId: string, text: string, options?: { requestId?: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[]; budgetRenewal?: import('../model-budget.js').BudgetRenewalAuthorization }): Promise<RunHandle> {
     await this.host.listSkills()
     const key = options?.requestId ? `${conversationId}:${options.requestId}` : undefined
     const digest = createHash('sha256').update(JSON.stringify({ text, options })).digest('hex')
@@ -2093,10 +2094,40 @@ export class H5Server {
         const result = await this.host.reconcileInactiveRun(conversationId, runId)
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(result))
       } catch (error) {
-        if (error instanceof Error && error.message === 'CONVERSATION_BUSY') {
-          res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'CONVERSATION_BUSY' }))
+        const message = error instanceof Error ? error.message : String(error)
+        if (message === 'CONVERSATION_BUSY' || message === 'RUN_AWAITING_APPROVAL' || message.startsWith('RECOVERY_')) {
+          res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message }))
           return
         }
+        throw error
+      }
+      return
+    }
+
+    const budgetViewMatch = pathname.match(/^\/api\/conversations\/([^/]+)\/budget-continuation$/)
+    if (budgetViewMatch && method === 'GET') {
+      const view = await this.host.describeBudgetContinuation(budgetViewMatch[1]!)
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(view?.status === 'available' ? view : null)); return
+    }
+    const budgetContinueMatch = pathname.match(/^\/api\/conversations\/([^/]+)\/runs\/([^/]+)\/budget-continuation$/)
+    if (budgetContinueMatch && method === 'POST') {
+      if (!requireSameOrigin()) { res.writeHead(403).end(); return }
+      const [, conversationId, runId] = budgetContinueMatch
+      const body = await this.parseJsonBody(req)
+      if (body.confirmed !== true || !Number.isSafeInteger(body.expectedUsed) || !Number.isSafeInteger(body.expectedLimit)) { res.writeHead(400).end(JSON.stringify({ error: 'BUDGET_RENEWAL_CONFIRMATION_REQUIRED' })); return }
+      const view = await this.host.describeBudgetContinuation(conversationId!, runId!)
+      if (!view || view.used !== body.expectedUsed || view.limit !== body.expectedLimit) { res.writeHead(409).end(JSON.stringify({ error: 'BUDGET_RENEWAL_STALE' })); return }
+      if (view.status === 'continued') {
+        await this.workStarts.get(`${conversationId}:budget-${view.continuationRunId}`)?.promise
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId: view.continuationRunId, duplicate: true })); return
+      }
+      try {
+        const handle = await this.startConversationRun(conversationId!, '继续完成原任务', { requestId: `budget-${view.continuationRunId}`, budgetRenewal: { sourceRunId: runId!, expectedUsed: view.used, expectedLimit: view.limit, confirmed: true } })
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId: handle.id }))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (message === `BUDGET_ALREADY_CONTINUED:${view.continuationRunId}`) { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId: view.continuationRunId, duplicate: true })); return }
+        if (['CONVERSATION_BUSY', 'BUDGET_RENEWAL_STALE'].includes(message)) { res.writeHead(409).end(JSON.stringify({ error: message })); return }
         throw error
       }
       return
@@ -2268,6 +2299,13 @@ export class H5Server {
       const buffer = this.runEventBuffers.get(runId) ?? []
       const snapshot = await this.snapshotRun(runId, buffer, this.activeRuns.has(runId) || this.assistantPendingRuns.has(runId))
       const conversationId = this.runConversations.get(runId) ?? await this.host.findConversationByRunId(runId)
+      if (conversationId && !this.activeRuns.has(runId) && !this.assistantPendingRuns.has(runId)) {
+        const conversation = await this.host.getConversation(conversationId).catch(() => undefined)
+        if (conversation?.summary.activeRunId === runId) {
+          const blocker = await this.host.inactiveReleaseBlocker(conversationId, runId).catch(() => undefined)
+          if (blocker) snapshot.releaseBlocked = blocker
+        }
+      }
       snapshot.laneState ??= { runId, available: false, lanes: [] }
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(snapshot))
       return
@@ -2533,7 +2571,10 @@ export class H5Server {
   private async publish(runId: string, event: AssistantEvent): Promise<void> {
     const buffer = this.runEventBuffers.get(runId)
     if (!buffer) return
+    // Approval waiting is a Runtime fact, not yet a request for human input.
+    // Do not publish it until delegation has actually handed this effect back.
     let projected = publicH5Event(event)
+    if (projected?.type === 'waiting' && projected.data.input.kind !== 'ask' && await this.globalApprovalPolicy() === 'delegate') projected = undefined
     const fact = event.type === 'fact' && event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data as Record<string, JsonValue> : undefined
     if (fact?.type === 'lane.snapshot' && event.conversationId) {
       const data = this.runSnapshots.get(runId)?.laneState ?? { runId, available: false, lanes: [] }
@@ -2543,9 +2584,8 @@ export class H5Server {
     if (event.type === 'waiting') void (async () => {
       const handle = this.activeRuns.get(runId)
       if (handle) {
-        const items = await handle.pendingInteractions()
         const currentSeq = (event.seq ?? 0) + 0.25
-        this.pushEvent(runId, { runId, conversationId: handle.conversationId, seq: currentSeq, type: 'interactions', data: { interactions: items.map(publicInteraction), ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}) } })
+        await this.pushInteractionSnapshot(runId, currentSeq)
         if (await this.globalApprovalPolicy() === 'delegate') {
           void this.reviewPendingApprovals(runId).then(() => this.pushInteractionSnapshot(runId, currentSeq + 0.25)).catch(() => undefined)
         }
@@ -2593,11 +2633,20 @@ export class H5Server {
     }
   }
 
+  private async visiblePendingInteractions(runId: string, items: Awaited<ReturnType<RunHandle['pendingInteractions']>>): Promise<WebPendingInteraction[]> {
+    const delegated = await this.globalApprovalPolicy() === 'delegate'
+    const manual = this.manualApprovalEffects.get(runId)
+    const visible = items.map(group => delegated && group.kind === 'approval'
+      ? { ...group, items: group.items.filter(item => manual?.has(item.effectId)) }
+      : group).filter(group => group.items.length > 0)
+    return visible.map(publicInteraction)
+  }
+
   private async pushInteractionSnapshot(runId: string, seq: number): Promise<void> {
     const handle = this.activeRuns.get(runId)
     if (!handle) return
-    const items = await handle.pendingInteractions()
-    this.pushEvent(runId, { runId, conversationId: handle.conversationId, seq, type: 'interactions', data: { interactions: items.map(publicInteraction), ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}) } })
+    const interactions = await this.visiblePendingInteractions(runId, await handle.pendingInteractions())
+    this.pushEvent(runId, { runId, conversationId: handle.conversationId, seq, type: 'interactions', data: { interactions, ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}) } })
   }
 
   private async globalApprovalPolicy(): Promise<'manual' | 'delegate'> {
@@ -2607,8 +2656,10 @@ export class H5Server {
 
   private async setGlobalApprovalPolicy(policy: 'manual' | 'delegate'): Promise<void> {
     // One shared preference, independent of conversation creation or navigation.
+    const previous = await this.globalApprovalPolicy()
     await this.host.conversationData.call('saveState', 'approval-policy', { policy })
     for (const runId of this.activeRuns.keys()) {
+      if (previous !== policy) this.manualApprovalEffects.delete(runId)
       if (policy === 'manual') {
         this.approvalReviewControllers.get(runId)?.abort()
         this.approvalReviewControllers.delete(runId)
@@ -2616,6 +2667,7 @@ export class H5Server {
         this.reviewNotes.delete(runId)
       }
       const update = async () => {
+        await this.pushInteractionSnapshot(runId, (this.runEventBuffers.get(runId)?.at(-1)?.seq ?? 0) + 0.25)
         if (policy === 'delegate') await this.reviewPendingApprovals(runId)
         await this.pushInteractionSnapshot(runId, (this.runEventBuffers.get(runId)?.at(-1)?.seq ?? 0) + 0.25)
       }
@@ -2646,15 +2698,22 @@ export class H5Server {
           break
         }
         reviewed.add(next.effectId)
-        const result = await handle.reviewApproval(next.effectId, controller.signal)
+        const result = await handle.reviewApproval(next.effectId, controller.signal).catch(() => ({ status: 'manual' as const, reason: 'review_failed' }))
         if (controller.signal.aborted) return
         if (result.status === 'manual') {
+          const manual = this.manualApprovalEffects.get(runId) ?? new Set<string>()
+          manual.add(next.effectId)
+          this.manualApprovalEffects.set(runId, manual)
           const reasons: Record<string, string> = { reviewer_not_configured: '尚未配置审核模型', reviewer_must_be_local: '审核模型需要使用本机服务', review_timeout: '审核模型响应超时', review_failed: '审核模型调用失败', review_output_truncated: '审核回复不完整', review_not_explicitly_approved: '审核模型未明确批准本次操作', risk_requires_user: '本次操作涉及风险或尚未支持的工具', path_outside_workspace: '目标路径超出当前工作区', invalid_shell_syntax: '命令格式需要人工确认' }
           reasons.reviewer_unavailable = '本机审核服务未启动或无法连接'
           reasons.review_context_too_large = '本次操作内容过多，无法完整自动审核，请拆分操作或人工确认'
           this.reviewNotes.set(runId, `需要你决定：${reasons[result.reason] ?? '代审无法确认本次操作'}。`)
         }
-        else this.reviewNotes.delete(runId)
+        else {
+          this.manualApprovalEffects.get(runId)?.delete(next.effectId)
+          this.reviewNotes.delete(runId)
+        }
+        await this.pushInteractionSnapshot(runId, (this.runEventBuffers.get(runId)?.at(-1)?.seq ?? 0) + 0.25)
       }
     } finally {
       if (this.approvalReviewControllers.get(runId) === controller) this.approvalReviewControllers.delete(runId)
@@ -2667,6 +2726,25 @@ export class H5Server {
     return join(this.dataDir, 'conversations', conversationId, 'runs', runId, 'interaction-receipts.json')
   }
 
+  private async withVisibleInteractions(snapshot: WebRunSnapshot, active: boolean): Promise<WebRunSnapshot> {
+    const handle = active ? this.activeRuns.get(snapshot.runId) : undefined
+    if (!handle) return snapshot
+    // A state read/reconnect may race the first projection of a waiting fact.
+    // Use the same visibility rule as the live event stream, including on restore.
+    const interactions = await this.visiblePendingInteractions(snapshot.runId, await handle.pendingInteractions())
+    const next = { ...snapshot, interactions }
+    if (next.waiting && !interactions.some(group => group.items.some(item => item.effectId === next.waiting!.data.effectId))) delete next.waiting
+    // A state read may see a live wait before its event consumer projects it.
+    // Persist that public snapshot here; chat history must stay independent of
+    // worker RPCs, including workers whose pendingInteractions never resolves.
+    if (JSON.stringify(snapshot.interactions ?? []) !== JSON.stringify(interactions)) {
+      this.pushEvent(snapshot.runId, { runId: snapshot.runId, conversationId: handle.conversationId, seq: next.seq + 0.25, type: 'interactions', data: { interactions } })
+      await this.projectionWrites.get(snapshot.runId)
+      next.seq = this.runSnapshots.get(snapshot.runId)?.seq ?? next.seq
+    }
+    return next
+  }
+
   private async snapshotRun(runId: string, events: AssistantEvent[], active: boolean): Promise<WebRunSnapshot> {
     if (!active) {
       const cli = await this.cliNotices.snapshot(runId)
@@ -2674,7 +2752,7 @@ export class H5Server {
     }
     await this.projectionWrites.get(runId)?.catch(() => undefined)
     const projected = this.runSnapshots.get(runId) ?? await this.host.conversationData.call<WebRunSnapshot | undefined>('readState', `run:${runId}`)
-    if (projected) return { ...projected, ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}), ...(active ? { state: 'running' as const } : projected.state === 'running' ? { state: 'interrupted' as const } : {}) }
+    if (projected) return this.withVisibleInteractions({ ...projected, ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}), ...(active ? { state: 'running' as const } : projected.state === 'running' ? { state: 'interrupted' as const } : {}) }, active)
     let status: WebRunSnapshot['status']
     let complete: WebRunSnapshot['complete']
     let waiting: WebRunSnapshot['waiting']
@@ -2693,7 +2771,7 @@ export class H5Server {
       else if (event.type === 'complete') { complete = event; waiting = undefined; interactions = [] }
     }
     const state = active ? 'running' : complete?.data.status ?? 'interrupted'
-    return { runId, state, seq, ...(status ? { status } : {}), activities: [...activities.values()].slice(-30), ...(waiting ? { waiting } : {}), ...(interactions ? { interactions } : {}), ...(laneState ? { laneState } : {}), ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}), ...(complete ? { complete } : {}) }
+    return this.withVisibleInteractions({ runId, state, seq, ...(status ? { status } : {}), activities: [...activities.values()].slice(-30), ...(waiting ? { waiting } : {}), ...(interactions ? { interactions } : {}), ...(laneState ? { laneState } : {}), ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}), ...(complete ? { complete } : {}) }, active)
   }
 
   private flushClient(client: SseClient, buffer: AssistantEvent[], clients: Set<SseClient>): void {
@@ -2778,6 +2856,7 @@ export class H5Server {
     this.approvalReviewControllers.delete(runId)
     this.approvalReviewAgain.delete(runId)
     this.reviewNotes.delete(runId)
+    this.manualApprovalEffects.delete(runId)
     const clients = this.runSseClients.get(runId)
     if (clients) {
       for (const client of clients) {

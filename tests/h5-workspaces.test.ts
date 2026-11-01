@@ -34,7 +34,7 @@ describe('H5 isolated project workspaces', () => {
   it('merges task commits even when the task worktree is clean', async () => {
     const project = await repository()
     const manager = new H5WorkspaceManager(join(project, '.pulse-data'))
-    const prepared = await manager.prepare('conv-committed', 'project-1', project)
+    const prepared = await manager.prepare('conv-committed', 'project-1', project, { isolated: true })
     await writeFile(join(prepared.cwd, 'code.txt'), 'committed result\n')
     await git(prepared.cwd, 'add', '.')
     await git(prepared.cwd, 'commit', '--quiet', '-m', 'Task commit')
@@ -46,12 +46,12 @@ describe('H5 isolated project workspaces', () => {
   it('retries an already committed conflict without discarding its result', async () => {
     const project = await repository()
     const manager = new H5WorkspaceManager(join(project, '.pulse-data'))
-    const prepared = await manager.prepare('conv-retry', 'project-1', project)
+    const prepared = await manager.prepare('conv-retry', 'project-1', project, { isolated: true })
     await writeFile(join(prepared.cwd, 'code.txt'), 'task result\n')
     await writeFile(join(project, 'code.txt'), 'conflicting user result\n')
     expect((await manager.finish('conv-retry', true)).status).toBe('conflict')
     await writeFile(join(project, 'code.txt'), 'base one\nbase two\n')
-    await manager.prepare('conv-retry', 'project-1', project)
+    await manager.prepare('conv-retry', 'project-1', project, { isolated: true })
     expect((await manager.finish('conv-retry', true)).status).toBe('merged')
     expect(await readFile(join(project, 'code.txt'), 'utf8')).toBe('task result\n')
     await manager.close()
@@ -93,7 +93,7 @@ describe('H5 isolated project workspaces', () => {
     await writeFile(join(project, 'untracked.txt'), 'user untracked\n')
     const indexBefore = await git(project, 'diff', '--cached', '--binary')
 
-    const prepared = await manager.prepare('conv-merge', 'project-1', project)
+    const prepared = await manager.prepare('conv-merge', 'project-1', project, { isolated: true })
     expect(prepared.isolated).toBe(true)
     expect(await readFile(join(prepared.cwd, 'staged.txt'), 'utf8')).toBe('user staged\n')
     expect(await readFile(join(prepared.cwd, 'code.txt'), 'utf8')).toBe('user one\nbase two\n')
@@ -112,7 +112,7 @@ describe('H5 isolated project workspaces', () => {
   it('keeps conflicting output in its worktree and leaves the project untouched', async () => {
     const project = await repository()
     const manager = new H5WorkspaceManager(join(project, '.pulse-data'))
-    const prepared = await manager.prepare('conv-conflict', 'project-1', project)
+    const prepared = await manager.prepare('conv-conflict', 'project-1', project, { isolated: true })
     await writeFile(join(prepared.cwd, 'code.txt'), 'task edit\nbase two\n')
     await writeFile(join(project, 'code.txt'), 'user edit\nbase two\n')
 
@@ -148,7 +148,7 @@ it('does not copy cached children through a replaced directory symlink', async (
   await symlink(outside, join(project, 'nested'), process.platform === 'win32' ? 'junction' : 'dir')
   const manager = new H5WorkspaceManager(join(outside, 'data'))
   try {
-    const workspace = await manager.prepare('conv-linked-parent', 'project', project)
+    const workspace = await manager.prepare('conv-linked-parent', 'project', project, { isolated: true })
     expect(await readFile(join(outside, 'file.txt'), 'utf8')).toBe('outside must remain unchanged')
     expect(workspace.isolated).toBe(true)
     expect(await readFile(join(project, 'nested', 'file.txt'), 'utf8')).toBe('outside must remain unchanged')
@@ -172,6 +172,6 @@ it('uses the exact ignored project directory rather than a missing parent-reposi
 it('materializes an explicitly selected empty subdirectory in the isolated workspace', async () => {
   const parent = await repository(), project = join(parent, 'empty'); await mkdir(project)
   const manager = new H5WorkspaceManager(join(parent, '.test-data'))
-  try { const prepared = await manager.prepare('conv-empty', 'project', project); expect(prepared.isolated).toBe(true); await writeFile(join(prepared.cwd, 'output.txt'), 'result'); expect(await readFile(join(prepared.cwd, 'output.txt'), 'utf8')).toBe('result') }
+  try { const prepared = await manager.prepare('conv-empty', 'project', project, { isolated: true }); expect(prepared.isolated).toBe(true); await writeFile(join(prepared.cwd, 'output.txt'), 'result'); expect(await readFile(join(prepared.cwd, 'output.txt'), 'utf8')).toBe('result') }
   finally { await manager.close() }
 })

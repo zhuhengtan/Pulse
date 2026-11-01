@@ -39,7 +39,8 @@ it.each(['bounded-count', 'sensitive-count', 'declared-test-glob', 'data-script-
     const observations: any[] = []
     for await (const event of run.events) if (event.type === 'observation') observations.push(event.data)
     const denied = sensitive || mode === 'data-script-readonly'
-    expect(safetyReviews).toBe(denied ? 1 : 0)
+    // Sensitive cat reads require a user decision before any model reviewer.
+    expect(safetyReviews).toBe(denied && mode !== 'data-script-sensitive-read' ? 1 : 0)
     expect(runShell).toHaveBeenCalledTimes(denied ? 0 : 1)
     if (!denied) expect(vi.mocked(runShell).mock.calls[0]?.slice(0, 2)).toEqual([input.command, input.args])
     expect(observations).toContainEqual(expect.objectContaining({ tool: 'shell.exec', status: denied ? 'failed' : 'succeeded', ...(denied ? { result: expect.objectContaining({ code: 'AI_APPROVAL_DENIED' }) } : {}) }))

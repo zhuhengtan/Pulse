@@ -86,7 +86,19 @@ it('does not copy host markers into the Windows hook child overlay', async () =>
 it('rejects an early stdin close instead of trusting exit 0, and still accepts a delivered payload', async () => {
   const root = await workspace()
   sandbox.wrapWithSandboxArgv.mockImplementation(async (command: string) => ({ argv: [process.execPath, '-e', command.includes('closeSync') ? `require('node:fs').closeSync(0);process.stdout.write('{}')` : `let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d==='{}'?'{}':'bad'))`], env: process.env }))
-  await expect(runShell('node', ['-e', 'closeSync'], { cwd: root, readOnlyWorkspace: true, isolatedHome: true, allowedDomains: [], timeoutMs: 5000, stdinData: 'x'.repeat(60000) })).rejects.toMatchObject({ code: 'SHELL_STDIN_DELIVERY_UNKNOWN' })
+  // Force the actual pipe-error boundary without depending on OS pipe capacity
+  // or closing libuv's fd behind its back (which can abort newer Node builds).
+  const broken = child()
+  const stdin = Object.assign(new EventEmitter(), { end: (_data: string, callback?: (error: Error) => void) => {
+    setImmediate(() => {
+      const error = Object.assign(new Error('broken pipe'), { code: 'EPIPE' })
+      stdin.emit('error', error)
+      callback?.(error)
+      broken.emit('close', 0)
+    })
+  } })
+  Object.assign(broken, { stdin })
+  await expect(runShell('node', ['-e', 'closeSync'], { cwd: root, readOnlyWorkspace: true, isolatedHome: true, allowedDomains: [], timeoutMs: 5000, stdinData: 'x'.repeat(60000), spawnProcess: () => broken })).rejects.toMatchObject({ code: 'SHELL_STDIN_DELIVERY_UNKNOWN' })
   const delivered = await runShell('node', ['-e', 'read'], { cwd: root, readOnlyWorkspace: true, isolatedHome: true, allowedDomains: [], timeoutMs: 5000, stdinData: '{}' })
   expect(delivered).toMatchObject({ code: 0, stdout: '{}' })
 })

@@ -15,7 +15,7 @@ it.each([false, true])('bounds provider-rejected final JSON correction without a
     let message: any
     if (text.includes('Create an executable plan')) message = { tasks: [{ id: 'save', kind: 'edit', goal: 'Create note.txt', check: 'Saved ready', criterionIds: ['criterion-1'], dependsOn: [] }] }
     else if (text.includes('Verify ONLY the active')) message = { status: 'passed', evidenceRefs: refs, note: 'Saved file' }
-    else if (text.includes('Independently verify every ORIGINAL') || text.includes('Correct the listed field errors')) {
+    else if (text.includes('Independently verify every ORIGINAL') || text.includes('Correct the listed field errors') || text.includes('Correct every listed validation error')) {
       finals++
       const criteria = [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: refs.filter(r => r === 'result-3'), rationale: 'Saved artifact tool evidence' }]
       message = finals === 1 || repeated ? criteria : { criteria }

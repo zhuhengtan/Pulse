@@ -23,13 +23,13 @@ export async function detectCommand(pathValue, windows = process.platform === 'w
 }
 export function launcherText(node, entry, root, windows = process.platform === 'win32', browser, runtimeId, locations = {}) {
     const shared = Object.entries({ PULSE_CONFIG: locations.configPath, PULSE_DATA_DIR: locations.dataDirectory }).filter(([, value]) => value);
-    const environment = shared.map(([key, value]) => windows ? `if not defined ${key} set "${key}=${value.replaceAll('%', '%%')}"\r\n` : `if [ -z "\${${key}+x}" ]; then ${key}=${quote(value)}; export ${key}; fi\n`).join('');
+    const environment = shared.map(([key, value]) => locations.pinned ? (windows ? `set "${key}=${value.replaceAll('%', '%%')}"\r\n` : `${key}=${quote(value)}; export ${key}\n`) : windows ? `if not defined ${key} set "${key}=${value.replaceAll('%', '%%')}"\r\n` : `if [ -z "\${${key}+x}" ]; then ${key}=${quote(value)}; export ${key}; fi\n`).join('');
     if (windows) {
         // Runtime paths below the managed root have generated, safe basenames.
         const relativeNode = node.slice(root.length + 1).replaceAll('/', '\\'), relativeEntry = entry.slice(root.length + 1).replaceAll('/', '\\');
-        return `@echo off\r\nREM ${marker}\r\nsetlocal DisableDelayedExpansion\r\nif not defined PULSE_HOME set "PULSE_HOME=%~dp0.."\r\n${environment}set "ELECTRON_RUN_AS_NODE=1"\r\n${runtimeId ? `set "PULSE_RUNTIME_ID=${runtimeId}"\r\n` : ''}${browser ? `if not defined PULSE_BROWSER_EXECUTABLE set "PULSE_BROWSER_EXECUTABLE=%~dp0..\\${browser.slice(root.length + 1).replaceAll('/', '\\')}"\r\n` : ''}"%~dp0..\\${relativeNode}" "%~dp0..\\${relativeEntry}" %*\r\nexit /b %errorlevel%\r\n`;
+        return `@echo off\r\nREM ${marker}\r\nsetlocal DisableDelayedExpansion\r\n${locations.pinned ? 'set' : 'if not defined PULSE_HOME set'} "PULSE_HOME=%~dp0.."\r\n${environment}${locations.pinned ? 'set "PULSE_MANAGED=0"\r\n' : ''}set "ELECTRON_RUN_AS_NODE=1"\r\n${runtimeId ? `set "PULSE_RUNTIME_ID=${runtimeId}"\r\n` : ''}${browser ? `if not defined PULSE_BROWSER_EXECUTABLE set "PULSE_BROWSER_EXECUTABLE=%~dp0..\\${browser.slice(root.length + 1).replaceAll('/', '\\')}"\r\n` : ''}"%~dp0..\\${relativeNode}" "%~dp0..\\${relativeEntry}" %*\r\nexit /b %errorlevel%\r\n`;
     }
-    return `#!/bin/sh\n# ${marker}\nif [ -z "\${PULSE_HOME+x}" ]; then PULSE_HOME=${quote(root)}; export PULSE_HOME; fi\n${environment}export ELECTRON_RUN_AS_NODE=1\n${runtimeId ? `export PULSE_RUNTIME_ID=${quote(runtimeId)}\n` : ''}${browser ? `if [ -z "\${PULSE_BROWSER_EXECUTABLE+x}" ]; then PULSE_BROWSER_EXECUTABLE=${quote(browser)}; export PULSE_BROWSER_EXECUTABLE; fi\n` : ''}exec ${quote(node)} ${quote(entry)} "$@"\n`;
+    return `#!/bin/sh\n# ${marker}\n${locations.pinned ? `PULSE_HOME=${quote(root)}; export PULSE_HOME` : `if [ -z "\${PULSE_HOME+x}" ]; then PULSE_HOME=${quote(root)}; export PULSE_HOME; fi`}\n${environment}${locations.pinned ? 'export PULSE_MANAGED=0\n' : ''}export ELECTRON_RUN_AS_NODE=1\n${runtimeId ? `export PULSE_RUNTIME_ID=${quote(runtimeId)}\n` : ''}${browser ? `if [ -z "\${PULSE_BROWSER_EXECUTABLE+x}" ]; then PULSE_BROWSER_EXECUTABLE=${quote(browser)}; export PULSE_BROWSER_EXECUTABLE; fi\n` : ''}exec ${quote(node)} ${quote(entry)} "$@"\n`;
 }
 export async function registerLauncher(root, node, entry, windows = process.platform === 'win32', browser, runtimeId, locations) {
     let conflict;
@@ -82,7 +82,8 @@ export async function registerPath(bin, home, env = process.env, platform = proc
 export class DesktopInstallation {
     constructor({ root, userData, source, node, entry, shellHome, dataDirectory, shellVersion = '0.8.0', chromium = 0, packaged = false, env = process.env, platform = process.platform, arch = process.arch }) {
         Object.assign(this, { root, userData, source, node, entry, shellHome, dataDirectory, shellVersion, chromium, packaged, env, platform, arch });
-        this.state = { phase: 'preparing', firstRun: false, steps: [], development: !packaged && !source };
+        this.runtimePolicy = env.PULSE_DESKTOP_RUNTIME_POLICY === 'bundled' ? 'bundled' : 'managed';
+        this.state = { runtimePolicy: this.runtimePolicy, phase: 'preparing', firstRun: false, steps: [], development: !packaged && !source };
         this.statePath = join(userData, 'desktop-installation.json');
     }
     snapshot() { return structuredClone(this.state); }
@@ -104,7 +105,7 @@ export class DesktopInstallation {
         try {
             this.step('runtime', '准备 Pulse 运行环境', 'running');
             if (this.source) {
-                const selected = await selectedBackend(this.root, this.dataDirectory, this.shellVersion, this.chromium, full);
+                const selected = this.runtimePolicy === 'bundled' ? undefined : await selectedBackend(this.root, this.dataDirectory, this.shellVersion, this.chromium, full);
                 const seed = selected ?? this.source;
                 const manifest = await readRuntimeManifest(seed, this.platform, this.arch);
                 await verifyRuntime(seed, manifest);
@@ -151,10 +152,10 @@ export class DesktopInstallation {
             if (!this.state.development) {
                 this.step('cli', '注册 pulse 命令', 'running');
                 const bootstrap = join(dirname(this.entry), '../../pulse-server/dist/updates/bootstrap.js');
-                if (await exists(bootstrap)) {
+                if (this.runtimePolicy !== 'bundled' && await exists(bootstrap)) {
                     const result = await execute(this.node, ['--input-type=module', '-e', `const m=await import(${JSON.stringify(pathToFileURL(bootstrap).href)}); console.log(await m.installManagedLauncher(${JSON.stringify(this.root)}, ${JSON.stringify(this.state.runtimeDirectory)}, ${JSON.stringify(this.dataDirectory)}, ${JSON.stringify(this.state.configPath)}));`], { env: { ...this.env, ELECTRON_RUN_AS_NODE: '1' }, timeout: 15000 });
                     this.state.cli = { path: result.stdout.trim() };
-                } else this.state.cli = await registerLauncher(this.root, this.node, this.entry, this.platform === 'win32', this.browserExecutable, this.state.runtimeId, { configPath: this.state.configPath, dataDirectory: this.dataDirectory });
+                } else this.state.cli = await registerLauncher(this.root, this.node, this.entry, this.platform === 'win32', this.browserExecutable, this.state.runtimeId, { configPath: this.state.configPath, dataDirectory: this.dataDirectory, pinned: this.runtimePolicy === 'bundled' });
                 const detected = await detectCommand(this.env.PATH, this.platform === 'win32');
                 if (detected && resolve(detected) !== resolve(this.state.cli.path)) this.state.cli.conflict = detected;
                 this.step('cli', '注册 pulse 命令', this.state.cli.conflict ? 'warning' : 'ready', this.state.cli.conflict ? `保留已有命令：${this.state.cli.conflict}` : this.state.cli.path);

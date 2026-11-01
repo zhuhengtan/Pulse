@@ -80,3 +80,23 @@ it('keeps long-output status and a lossless continuation cursor within the summa
   expect(String(summary.output)).not.toContain('�')
   expect(summarizeShellProcess({ processId: 'h', status: 'running' })).not.toHaveProperty('code')
 })
+
+
+it('does not expose an exit before its durable receipt is available to a cold reader', async () => {
+  const f = await fixture()
+  let entered!: () => void, release!: () => void
+  const pending = new Promise<void>(resolve => { entered = resolve })
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const subject = f.manager as unknown as { persist(record: { status: string }): Promise<void> }
+  const persist = subject.persist.bind(f.manager)
+  subject.persist = async record => { if (record.status === 'exited') { entered(); await gate }; await persist(record) }
+  try {
+    const started = await f.manager.start({ command: process.execPath }, f.context, async () => ({ code: 0 }))
+    await pending
+    expect(await f.manager.poll(started.processId, f.context)).toMatchObject({ status: 'running' })
+    expect(await new ShellProcesses(f.manager.directory).poll(started.processId, f.context)).toMatchObject({ status: 'unknown' })
+    release()
+    await expect.poll(async () => (await f.manager.poll(started.processId, f.context)).status).toBe('exited')
+    expect(await new ShellProcesses(f.manager.directory).poll(started.processId, f.context)).toMatchObject({ status: 'exited', result: { code: 0 } })
+  } finally { release() }
+})

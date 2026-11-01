@@ -2,7 +2,7 @@ import { createTrayIcon } from './tray-icon.mjs';
 import { shouldRevealMain } from './desktop-activation.mjs';
 import { QuestionWindows } from './question-windows.mjs';
 import { TaskNotifications, readNotificationLaunch, matchTaskNotice } from './task-notifications.mjs';
-import { isOwnedService, restoreOwnedService, cliShellCommand, cliWindowsScript, observeServiceStartup, serviceMonitorAction } from './background-service.mjs';
+import { isOwnedService, restoreOwnedService, cliShellCommand, cliWindowsScript, observeServiceStartup, serviceMonitorAction, serviceRuntimeEnvironment } from './background-service.mjs';
 import { selectedFrontend, verifySelectedFile } from './update-loader.mjs';
 import { controlUpdate } from './update-control.mjs';
 import { NativeBrowser } from './native-browser.mjs';
@@ -29,7 +29,7 @@ if (!app.requestSingleInstanceLock())
     app.quit();
 else {
     let directory;
-    let window, reader, installation, setupPending, backendInfo, cookie = '', apiSession, base = '', serviceError = '', ownedPid, serviceStoppedByUser = false;
+    let window, reader, installation, setupPending, backendInfo, cookie = '', apiSession, base = '', serviceError = '', ownedPid, serviceStoppedByUser = false, serviceVersionBlocked = false;
     const pendingReads = new Map(), pendingChat = new Map(), subscriptions = new Map(), nativeSockets = new Map();
     const send = (channel, value) => { if (window && !window.isDestroyed())
         window.webContents.send(channel, value); };
@@ -43,7 +43,7 @@ else {
     const notificationFile = () => join(app.getPath('userData'), 'task-notifications.json');
     const browserRequests = new Map();
     function connectBrowserHost() {
-        if (!base || app.isQuitting || browserHost?.readyState === WebSocket.OPEN || browserHost?.readyState === WebSocket.CONNECTING) return;
+        if (!base || serviceVersionBlocked || app.isQuitting || browserHost?.readyState === WebSocket.OPEN || browserHost?.readyState === WebSocket.CONNECTING) return;
         const socket = browserHost = new WebSocket(base.replace('http:', 'ws:') + '/api/automation/native-host', { headers: { Origin: base, Cookie: cookie, 'X-Pulse-Client': 'electron', 'X-Pulse-Native-Protocol': '1' }, maxPayload: 1024 * 1024 });
         socket.on('message', async raw => {
             let frame; try { frame = JSON.parse(raw.toString()); } catch { return; }
@@ -59,11 +59,12 @@ else {
     const allowedPath = path => { if (typeof path !== 'string' || !path.startsWith('/api/') || path.startsWith('//') || path.includes('\\') || path.length > 4096)
         throw new Error('API_PATH_INVALID'); return path; };
     const localQuery = path => /^\/api\/(approval-policy$|assistant(?:\?|$)|conversations(?:\?|$|\/[^/]+$)|projects$|data\/conversations\/[^/]+\/(?:messages|body|search)(?:\?|$))/.test(path);
-    async function query(path) { await ensureReader(); return new Promise((resolveQuery, reject) => { if (pendingReads.size >= 64) {
+    async function query(path) { if (serviceVersionBlocked) throw new Error('PREVIEW_BACKEND_VERSION_MISMATCH'); await ensureReader(); return new Promise((resolveQuery, reject) => { if (pendingReads.size >= 64) {
         reject(new Error('LOCAL_QUERY_QUEUE_FULL'));
         return;
     } const id = randomUUID(), timer = setTimeout(() => { pendingReads.delete(id); reject(new Error('LOCAL_QUERY_TIMEOUT')); }, 5000); pendingReads.set(id, { resolve: resolveQuery, reject, timer }); reader.send({ protocol: 1, id, path }); }); }
     async function http(path, init = {}) {
+        if (serviceVersionBlocked && !['/api/session', '/api/session/local'].includes(path)) throw new Error('PREVIEW_BACKEND_VERSION_MISMATCH');
         if (!base)
             throw new Error(serviceError || 'PULSE_SERVICE_UNAVAILABLE');
         const headers = { 'Origin': base, 'Cookie': cookie, 'X-Pulse-Client': 'electron', 'X-Pulse-Shell-Version': app.getVersion(), 'X-Pulse-Chromium': process.versions.chrome.split('.')[0], 'User-Agent': `Pulse Electron/${app.getVersion()} (${process.platform})`, ...(init.body ? { 'Content-Type': 'application/json' } : {}) };
@@ -77,6 +78,7 @@ else {
     }
     let chat, chatConnecting, retry;
     async function connectChat() {
+        if (serviceVersionBlocked) throw new Error('PREVIEW_BACKEND_VERSION_MISMATCH');
         if (chat?.readyState === WebSocket.OPEN)
             return chat;
         if (chatConnecting)
@@ -128,6 +130,7 @@ else {
         return;
     } const id = randomUUID(), timer = setTimeout(() => { pendingChat.delete(id); reject(new Error('CHAT_REQUEST_TIMEOUT')); }, 10000); pendingChat.set(id, { resolve: resolveRequest, reject, timer }); socket.send(JSON.stringify({ type: 'request', id, path, method: init.method ?? 'GET', ...(init.body ? { body: JSON.parse(init.body) } : {}) })); }); }
     async function ensureService() {
+        serviceVersionBlocked = false;
         await mkdir(directory, { recursive: true, mode: 0o700 });
         await assertDesktopDataReady(directory);
         const saved = await readFile(join(directory, 'service.json'), 'utf8').then(JSON.parse).catch(() => undefined);
@@ -148,7 +151,7 @@ else {
         if (!base) {
             const entry = installation.entry;
             const runtime = installation.node;
-            const child = spawn(runtime, [entry, 'h5', 'start', '--port', '0', '--data-dir', directory], { detached: true, stdio: 'ignore', cwd: homedir(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PULSE_DATA_DIR: directory, PULSE_H5_HOST: '127.0.0.1', PULSE_DESKTOP_DIAGNOSTICS: '1', PULSE_LOG_DIR: diagnosticDirectory(), ...(installation.source ? { PULSE_HOME: installation.root, PULSE_CONFIG: installation.state.configPath, PULSE_RUNTIME_ID: installation.state.runtimeId, PULSE_MANAGED: '1', PULSE_RUNTIME_DIR: installation.state.runtimeDirectory, ...(installation.browserExecutable ? { PULSE_BROWSER_EXECUTABLE: installation.browserExecutable } : {}) } : {}) } });
+            const child = spawn(runtime, [entry, 'h5', 'start', '--port', '0', '--data-dir', directory], { detached: true, stdio: 'ignore', cwd: homedir(), env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PULSE_DATA_DIR: directory, PULSE_H5_HOST: '127.0.0.1', PULSE_DESKTOP_DIAGNOSTICS: '1', PULSE_LOG_DIR: diagnosticDirectory(), ...serviceRuntimeEnvironment(installation) } });
             child.unref();
             diagnosticLog?.record('launch', { pid: child.pid, dataDirectory: directory });
             const startupFailure = observeServiceStartup(child, diagnosticLog);
@@ -182,6 +185,11 @@ else {
             await writeFile(temporary, JSON.stringify({ instanceId: descriptor.instanceId, launchedPid: ownedPid, pid: descriptor.pid }), { mode: 0o600 });
             await rename(temporary, ownershipFile());
         }
+        if (installation.runtimePolicy === 'bundled' && backendInfo.outdated) {
+            serviceVersionBlocked = true; serviceStoppedByUser = true;
+            chat?.close(); browserHost?.close();
+            throw new Error('PREVIEW_BACKEND_VERSION_MISMATCH');
+        }
         await ensureReader();
         void connectChat().catch(() => { });
         connectBrowserHost();
@@ -203,7 +211,7 @@ else {
         const failed = () => { for (const item of pendingReads.values()) { clearTimeout(item.timer); item.reject(new Error('READER_DISCONNECTED')); } pendingReads.clear(); };
         reader.on('error', failed); reader.on('exit', failed);
     }
-    function setupSnapshot() { return { ...installation.snapshot(), dataDirectory: directory, service: { ...backendInfo, connected: Boolean(base), error: serviceError } }; }
+    function setupSnapshot() { return { ...installation.snapshot(), dataDirectory: directory, service: { ...backendInfo, connected: Boolean(base) && !serviceVersionBlocked, error: serviceError } }; }
     async function prepareDesktop(full = false) {
         if (setupPending) return setupPending;
         serviceStoppedByUser = false;
@@ -216,7 +224,8 @@ else {
                 installation.state.phase = 'ready';
             } catch (error) {
                 diagnosticLog?.record('prepare-error', { name: error.name, message: error.message });
-                base = ''; serviceError = error.message; installation.state.phase = 'error';
+                if (error.message !== 'PREVIEW_BACKEND_VERSION_MISMATCH') base = '';
+                serviceError = error.message; installation.state.phase = 'error';
                 if (!installation.state.error) installation.step('server', '启动本机后台', 'error', desktopServiceMessage(serviceError));
             }
             return setupSnapshot();
@@ -272,7 +281,7 @@ else {
         chat?.close(); browserHost?.close(); updateTray(); return true;
     }
     async function openCli() {
-        const command = cliShellCommand(installation.node, installation.entry, { PULSE_HOME: installation.root, PULSE_DATA_DIR: directory, ...(installation.state.configPath ? { PULSE_CONFIG: installation.state.configPath } : {}) });
+        const command = cliShellCommand(installation.node, installation.entry, { ...(installation.runtimePolicy === 'bundled' ? serviceRuntimeEnvironment(installation) : {}), PULSE_HOME: installation.root, PULSE_DATA_DIR: directory, ...(installation.state.configPath ? { PULSE_CONFIG: installation.state.configPath } : {}) });
         if (process.platform === 'darwin') {
             const child = spawn('/usr/bin/osascript', ['-e', `tell application "Terminal" to do script ${JSON.stringify(command)}`, '-e', 'tell application "Terminal" to activate']);
             child.on('error', () => showDesktop('/settings/desktop'));
@@ -280,7 +289,7 @@ else {
             // A script opened by the OS retains an interactive terminal and shared data/config.
             const path = join(app.getPath('temp'), `pulse-cli-${process.pid}.${process.platform === 'win32' ? 'cmd' : 'sh'}`);
             const { writeFile } = await import('node:fs/promises');
-            const script = process.platform === 'win32' ? cliWindowsScript(installation.node, installation.entry, { PULSE_HOME: installation.root, PULSE_DATA_DIR: directory, ...(installation.state.configPath ? { PULSE_CONFIG: installation.state.configPath } : {}) }) : `#!/bin/sh\n${command}\n`;
+            const script = process.platform === 'win32' ? cliWindowsScript(installation.node, installation.entry, { ...(installation.runtimePolicy === 'bundled' ? serviceRuntimeEnvironment(installation) : {}), PULSE_HOME: installation.root, PULSE_DATA_DIR: directory, ...(installation.state.configPath ? { PULSE_CONFIG: installation.state.configPath } : {}) }) : `#!/bin/sh\n${command}\n`;
             await writeFile(path, script, { mode: 0o700 });
             if (process.platform === 'win32') await shell.openPath(path);
             else { const child = spawn('x-terminal-emulator', ['-e', 'sh', path]); child.on('error', () => showDesktop('/settings/desktop')); }
@@ -293,7 +302,9 @@ else {
         directory = await desktopDataDirectory(app.getPath('userData'), process.env, homedir());
         const root = resolve(process.env.PULSE_DESKTOP_INSTALL_ROOT ?? process.env.PULSE_HOME ?? join(homedir(), '.pulse'));
         const source = app.isPackaged ? join(process.resourcesPath, 'runtime') : process.env.PULSE_DESKTOP_RUNTIME_DIR;
-        installation = new DesktopInstallation({ root, userData: app.getPath('userData'), source, dataDirectory: directory, packaged: app.isPackaged, node: process.execPath, entry: fileURLToPath(new URL('../../cli/dist/bin.js', import.meta.url)), shellVersion: app.getVersion(), chromium: Number(process.versions.chrome.split('.')[0]), shellHome: process.env.PULSE_DESKTOP_SHELL_HOME ?? (source && !app.isPackaged ? join(app.getPath('userData'), 'shell-profile') : homedir()) });
+        const packageBuild = await readFile(join(app.getAppPath(), 'preview-build.json'), 'utf8').then(JSON.parse).catch(() => ({}));
+        const installationEnv = packageBuild.channel === 'preview' ? { ...process.env, PULSE_DESKTOP_RUNTIME_POLICY: 'bundled' } : process.env;
+        installation = new DesktopInstallation({ env: installationEnv, root, userData: app.getPath('userData'), source, dataDirectory: directory, packaged: app.isPackaged, node: process.execPath, entry: fileURLToPath(new URL('../../cli/dist/bin.js', import.meta.url)), shellVersion: app.getVersion(), chromium: Number(process.versions.chrome.split('.')[0]), shellHome: process.env.PULSE_DESKTOP_SHELL_HOME ?? (source && !app.isPackaged ? join(app.getPath('userData'), 'shell-profile') : homedir()) });
         const diagnosticEntry = source ? join(source, 'app/node_modules/@hunterzhu/pulse-server/dist/diagnostics.js') : fileURLToPath(new URL('../../server/dist/diagnostics.js', import.meta.url));
         diagnostics = await import(pathToFileURL(diagnosticEntry).href).catch(() => undefined);
         try { if (diagnostics) diagnosticLog = new diagnostics.LocalDiagnosticLog(diagnosticDirectory(), 'desktop-launcher.log'); } catch { /* UI can still explain unavailable logs. */ }
@@ -303,6 +314,7 @@ else {
             if (url.host !== 'app')
                 return new Response('Forbidden', { status: 403 });
             if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/file-preview/')) {
+                if (serviceVersionBlocked) return Response.json({ error: 'PREVIEW_BACKEND_VERSION_MISMATCH' }, { status: 503 });
                 try {
                     const response = url.pathname.startsWith('/file-preview/') ? await fetch(base + url.pathname + url.search, { redirect: 'error', headers: { Cookie: cookie, Origin: base }, signal: AbortSignal.timeout(10000) }) : await http(url.pathname + url.search);
                     return new Response(await response.arrayBuffer(), { status: response.status, headers: { 'Content-Type': response.headers.get('content-type') ?? 'application/octet-stream', 'Content-Disposition': response.headers.get('content-disposition') ?? 'inline', ...(response.headers.get('content-security-policy') ? { 'Content-Security-Policy': response.headers.get('content-security-policy') } : {}), 'X-Content-Type-Options': 'nosniff' } });
@@ -317,7 +329,8 @@ else {
             const requestedId = url.pathname === '/question' ? 'bundled' : versioned?.[1];
             const bundledWeb = app.isPackaged ? join(process.resourcesPath, 'web') : fileURLToPath(new URL('../../web/dist', import.meta.url));
             let selected;
-            if (requestedId !== 'bundled') {
+            if (installation.runtimePolicy === 'bundled' && requestedId && requestedId !== 'bundled') return new Response('Preview frontend is pinned to this package', { status: 404 });
+            if (installation.runtimePolicy !== 'bundled' && requestedId !== 'bundled') {
                 try { selected = await selectedFrontend(installation.root, directory, app.getVersion(), Number(process.versions.chrome.split('.')[0]), requestedId); }
                 catch { if (requestedId) return new Response('Frontend unavailable', { status: 404 }); }
             }
@@ -356,6 +369,7 @@ else {
             allowedPath(path);
             if (!['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].includes(init.method ?? 'GET') || init.body && typeof init.body !== 'string')
                 throw new Error('API_REQUEST_INVALID');
+            if (installation.runtimePolicy === 'bundled' && path.startsWith('/api/updates/') && init.method === 'POST') return { status: 409, body: { error: 'PREVIEW_RUNTIME_PINNED', message: '预览版使用包内构建，请安装新的预览包以更新。' } };
             if (path === '/api/updates' || /^\/api\/updates\/(check|download|apply|rollback|settings)$/.test(path)) {
                 try { const response = await http(path, init); if (response.status < 500 && response.status !== 404) return { status: response.status, body: await response.json() }; } catch {}
                 return controlUpdate(installation, app.getVersion(), Number(process.versions.chrome.split('.')[0]), path, init);
@@ -370,11 +384,19 @@ else {
                 if (confirmation.response !== 1) return { status: 200, body: setupSnapshot() };
                 const descriptor = JSON.parse(await readFile(join(directory, 'service.json'), 'utf8'));
                 if (!backendInfo?.pid || descriptor.pid !== backendInfo.pid || Number(new URL(base).port) !== descriptor.port) return { status: 409, body: { error: 'SERVICE_IDENTITY_UNVERIFIED' } };
+                if (installation.runtimePolicy === 'bundled') {
+                    if (!isOwnedService(descriptor, ownedPid, backendInfo.pid)) return { status: 409, body: { error: 'SERVICE_IDENTITY_UNVERIFIED' } };
+                    const identity = await http('/api/session');
+                    if (!identity.ok) return { status: 409, body: { error: 'SERVICE_IDENTITY_UNVERIFIED' } };
+                    const authenticated = await identity.json();
+                    if (authenticated.serverPid !== descriptor.pid || authenticated.serverInstanceId !== descriptor.instanceId) return { status: 409, body: { error: 'SERVICE_IDENTITY_CHANGED' } };
+                }
                 chat?.close(); process.kill(descriptor.pid, 'SIGTERM');
                 for (let i = 0; i < 200; i++) { try { process.kill(descriptor.pid, 0); } catch (error) { if (error.code === 'ESRCH') break; throw error; } await new Promise(resolve => setTimeout(resolve, 50)); }
                 try { process.kill(descriptor.pid, 0); return { status: 409, body: { error: 'SERVICE_STILL_RUNNING' } }; } catch (error) { if (error.code !== 'ESRCH') throw error; }
                 base = ''; void prepareDesktop(); return { status: 202, body: setupSnapshot() };
             }
+            if (serviceVersionBlocked) return { status: 503, body: { error: 'PREVIEW_BACKEND_VERSION_MISMATCH' } };
             if ((init.method ?? 'GET') === 'GET' && localQuery(path))
                 return query(path);
             if (path === '/api/desktop/reconnect') {
@@ -587,7 +609,7 @@ else {
                     const info = await response.json();
                     if (serviceStoppedByUser || setupPending || app.isQuitting) return;
                     serviceError = '';
-                    if (backendInfo?.pid !== info.serverPid || backendInfo?.version !== info.serverVersion) await prepareDesktop();
+                    if (backendInfo?.pid !== info.serverPid || backendInfo?.version !== info.serverVersion || installation.runtimePolicy === 'bundled' && info.runtimeId !== installation.state.runtimeId) await prepareDesktop();
                 }
               } catch (error) {
                 if (serviceStoppedByUser || setupPending || app.isQuitting) return;

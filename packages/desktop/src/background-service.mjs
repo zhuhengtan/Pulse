@@ -38,3 +38,9 @@ export function observeServiceStartup(child, log) {
     });
     return () => failure;
 }
+
+/** Preview executables must not enter the release supervisor's saved bootstrap. */
+export function serviceRuntimeEnvironment(installation) {
+    if (!installation.source) return {};
+    return { PULSE_HOME: installation.root, PULSE_CONFIG: installation.state.configPath, PULSE_RUNTIME_ID: installation.state.runtimeId, PULSE_MANAGED: installation.runtimePolicy === 'bundled' ? '0' : '1', PULSE_RUNTIME_DIR: installation.state.runtimeDirectory, ...(installation.browserExecutable ? { PULSE_BROWSER_EXECUTABLE: installation.browserExecutable } : {}) };
+}

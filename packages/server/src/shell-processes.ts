@@ -133,18 +133,26 @@ export class ShellProcesses {
       if (part.length) { output = output.then(() => appendFile(join(this.directory, `${processId}.log`), part, { mode: 0o600 })); void output.catch(() => undefined) }
     }
     live.done = (async () => {
+      let terminal: ProcessReceipt
       try {
         const result = await run(command, { ...context, signal: controller.signal }, onOutput, write => {
           if (command.pty !== true || controller.signal.aborted || live.record.status !== 'running') throw failure('SHELL_STDIN_NOT_READY')
           live.write = write
         })
         await output
-        live.record = { ...record, status: 'exited', result }
+        terminal = { ...record, status: 'exited', result }
       } catch (cause) {
         await output.catch(() => undefined)
-        live.record = { ...record, status: 'unknown', error: String((cause as { code?: string }).code ?? 'SHELL_PROCESS_FAILED') }
+        terminal = { ...record, status: 'unknown', error: String((cause as { code?: string }).code ?? 'SHELL_PROCESS_FAILED') }
       }
-      await this.persist(live.record)
+      // Publish completion only after its receipt is durable for cold readers.
+      try {
+        await this.persist(terminal)
+        live.record = terminal
+      } catch (error) {
+        live.record = { ...record, status: 'unknown', error: 'SHELL_RECEIPT_PERSIST_FAILED' }
+        throw error
+      }
     })()
     // Keep rejection observed even when the caller is cancelled before polling.
     void live.done.catch(() => undefined)

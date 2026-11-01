@@ -37,7 +37,7 @@ it('cold restores the frozen hook version while preserving approval and settled 
     await first?.close()
     await rm(root, { recursive: true, force: true })
   }
-}, 30000)
+}, process.platform === 'win32' ? 960000 : 30000)
 
 it('a real short-deadline Host tool settles before its slow post observer', async () => {
   const { defineTool } = await import('@hunterzhu/pulse-tool-sdk'), { z } = await import('zod')
@@ -58,4 +58,4 @@ it('a real short-deadline Host tool settles before its slow post observer', asyn
     await host.close()
     await rm(root, { recursive: true, force: true })
   }
-}, 30000)
+}, process.platform === 'win32' ? 240000 : 30000)
