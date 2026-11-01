@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module'
 import { EventEmitter } from 'node:events'
+import { spawn } from 'node:child_process'
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -16,6 +17,9 @@ vi.doMock('../packages/adapters/src/tools/windows-srt-path.js', () => ({ verifie
 vi.doMock('../packages/adapters/src/tools/installation-dependencies.js', () => ({ installationDependencyRoots: async () => [], workspaceUsesInstallationDependencies: async () => false }))
 vi.doMock('../packages/adapters/src/tools/windows-read-policy.js', () => ({ windowsReadDenyRoots: () => [], carveWindowsReadDenies: async (paths: string[]) => paths, windowsToolchainWriteDenies: async (paths: string[]) => paths }))
 const { runShell } = await import('../packages/adapters/src/tools/shell.js')
+const wrappedNode = (script: string) => process.platform === 'win32'
+  ? ['/fixed-install/srt-win.exe', 'exec', '--', process.execPath, '-e', script]
+  : [process.execPath, '-e', script]
 
 afterEach(async () => {
   Object.defineProperty(process, 'platform', { value: platform })
@@ -45,7 +49,7 @@ it('keeps an ordinary shell merge and seals only the hook child environment', as
   process.env.KUBECONFIG = '/tmp/fake-kube-marker'
   const proxy = 'http://127.0.0.1:9/pulse-hook-proxy-marker'
   const host = { ...process.env, HTTP_PROXY: proxy, FAKE_HOST_MARKER: 'kept' }
-  sandbox.wrapWithSandboxArgv.mockResolvedValue({ argv: [process.execPath, '-e', 'process.exit(0)'], env: host })
+  sandbox.wrapWithSandboxArgv.mockResolvedValue({ argv: wrappedNode('process.exit(0)'), env: host })
   const ordinary = child()
   const ordinarySpawn = vi.fn(() => { setImmediate(() => ordinary.emit('close', 0)); return ordinary })
   await runShell('node', ['-e', 'process.exit(0)'], { cwd: root, env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C' }, spawnProcess: ordinarySpawn })
@@ -85,7 +89,7 @@ it('does not copy host markers into the Windows hook child overlay', async () =>
 
 it('rejects an early stdin close instead of trusting exit 0, and still accepts a delivered payload', async () => {
   const root = await workspace()
-  sandbox.wrapWithSandboxArgv.mockImplementation(async (command: string) => ({ argv: [process.execPath, '-e', command.includes('closeSync') ? `require('node:fs').closeSync(0);process.stdout.write('{}')` : `let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d==='{}'?'{}':'bad'))`], env: process.env }))
+  sandbox.wrapWithSandboxArgv.mockImplementation(async () => ({ argv: wrappedNode(`let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>process.stdout.write(d==='{}'?'{}':'bad'))`), env: process.env }))
   // Force the actual pipe-error boundary without depending on OS pipe capacity
   // or closing libuv's fd behind its back (which can abort newer Node builds).
   const broken = child()
@@ -99,6 +103,16 @@ it('rejects an early stdin close instead of trusting exit 0, and still accepts a
   } })
   Object.assign(broken, { stdin })
   await expect(runShell('node', ['-e', 'closeSync'], { cwd: root, readOnlyWorkspace: true, isolatedHome: true, allowedDomains: [], timeoutMs: 5000, stdinData: 'x'.repeat(60000), spawnProcess: () => broken })).rejects.toMatchObject({ code: 'SHELL_STDIN_DELIVERY_UNKNOWN' })
-  const delivered = await runShell('node', ['-e', 'read'], { cwd: root, readOnlyWorkspace: true, isolatedHome: true, allowedDomains: [], timeoutMs: 5000, stdinData: '{}' })
+  const delivered = await runShell('node', ['-e', 'read'], { cwd: root, readOnlyWorkspace: true, isolatedHome: true, allowedDomains: [], timeoutMs: 5000, stdinData: '{}', spawnProcess: (argv, options) => {
+    const target = process.platform === 'win32' ? argv.slice(argv.indexOf('--') + 1) : argv
+    return spawn(target[0]!, target.slice(1), { ...options, stdio: 'pipe', windowsHide: true })
+  } })
   expect(delivered).toMatchObject({ code: 0, stdout: '{}' })
+})
+
+it('classifies a final program-identity rejection without launching or exposing its raw message', async () => {
+  const root = await workspace(), launch = vi.fn(() => child())
+  sandbox.wrapWithSandboxArgv.mockResolvedValue({ argv: wrappedNode('process.exit(0)'), env: process.env })
+  await expect(runShell('node', ['--version'], { cwd: root, spawnProcess: launch, beforeLaunch: async () => { throw Object.assign(new Error('private diagnostic fixture'), { code: 'EXEC_POLICY_APPROVAL_CHANGED' }) } })).rejects.toMatchObject({ code: 'SANDBOX_SETUP_FAILED', message: 'SANDBOX_SETUP_FAILED (identity: EXEC_POLICY_APPROVAL_CHANGED)', details: { stage: 'identity', reason: 'EXEC_POLICY_APPROVAL_CHANGED' } })
+  expect(launch).not.toHaveBeenCalled()
 })

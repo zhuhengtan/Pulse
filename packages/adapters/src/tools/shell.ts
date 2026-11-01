@@ -2,6 +2,7 @@ import { windowsSystemExecutable } from './windows-system.js'
 import { ShellOutput } from './shell-output.js'
 import { createRequire } from 'node:module'
 import { randomUUID, createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, parse, posix, resolve, sep, win32 } from 'node:path'
 import { lstat, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
@@ -62,7 +63,25 @@ export async function resolveShellIdentity(command: string, args: string[], cwd:
   }
   executable = await realpath(executable)
   const files = [executable, ...prefixArgs.filter(isAbsolute)]
-  const stamps = await Promise.all(files.map(async file => { const path = await realpath(file), s = await stat(path); if (!s.isFile()) throw shellError('EXEC_POLICY_PROGRAM_UNRESOLVED'); return { path, dev: s.dev, ino: s.ino, size: s.size, mtime: s.mtimeMs, ctime: s.ctimeMs } }))
+  const stamps = await Promise.all(files.map(async file => {
+    const path = await realpath(file), s = await stat(path)
+    if (!s.isFile()) throw shellError('EXEC_POLICY_PROGRAM_UNRESOLVED')
+    const stamp = { path, dev: s.dev, ino: s.ino, size: s.size, mtime: s.mtimeMs }
+    if (process.platform !== 'win32') return { ...stamp, ctime: s.ctimeMs }
+    // Windows SRT updates ACLs on declared read roots. That can change ctime
+    // without changing the approved program. Bind its actual bytes instead;
+    // never cache by mtime alone (an in-place replacement can restore it).
+    const digest = createHash('sha256')
+    let bytes = 0
+    for await (const chunk of createReadStream(path)) {
+      bytes += chunk.length
+      if (bytes > s.size) throw shellError('EXEC_POLICY_PROGRAM_CHANGED')
+      digest.update(chunk)
+    }
+    const after = await stat(path)
+    if (bytes !== s.size || after.dev !== s.dev || after.ino !== s.ino || after.size !== s.size || after.mtimeMs !== s.mtimeMs || after.ctimeMs !== s.ctimeMs) throw shellError('EXEC_POLICY_PROGRAM_CHANGED')
+    return { ...stamp, sha256: digest.digest('hex') }
+  }))
   const path = stamps.at(-1)!.path
   const trusted = files.every(file => file === node || /^\/(?:usr\/bin|bin|usr\/local|opt\/homebrew|Library\/Developer)\//.test(file)) && !(path === cwd || path.startsWith(cwd + sep))
   return { executable, prefixArgs, path, fingerprint: createHash('sha256').update(JSON.stringify({ stamps, prefixArgs })).digest('hex'), trusted }
@@ -756,6 +775,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       }
       // A call can wait for the process-global sandbox lease. Re-evaluate
       // policy and executable identity after that wait, immediately before IO.
+      setupStage = 'identity'
       const launchIdentity = options.beforeLaunch ? await options.beforeLaunch() : options.expectedIdentity
       if (launchIdentity) {
         const fresh = await resolveShellIdentity(command, args, cwd, baseEnv)
@@ -771,6 +791,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       // settings. descriptor.env on macOS/Linux is the host environment and must
       // not be copied back into a hook child. Ordinary shells keep that merge.
       const launchOptions = { cwd, env: options.sealedCallerEnv ? { ...baseEnv, ...generated, ...executionEnv } : { ...baseEnv, ...shellEnvironment(descriptor.env), ...executionEnv } }
+      setupStage = 'launch'
       child = options.spawnProcess ? options.spawnProcess(sandboxArgv, launchOptions) : spawn(sandboxArgv[0]!, sandboxArgv.slice(1), {
         cwd,
         env: launchOptions.env,
@@ -786,7 +807,8 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       // Persist only classified diagnostics, never raw subprocess output or credentials.
       const message = cause instanceof Error ? cause.message : ''
       const nativeCode = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
-      const reason = /windows-install|not provisioned/i.test(message) ? 'WINDOWS_SANDBOX_NOT_PROVISIONED'
+      const policyFailure = /^EXEC_POLICY_(?:PROGRAM_CHANGED|PROGRAM_UNRESOLVED|APPROVAL_CHANGED|PROMPT|FORBIDDEN)$/.test(nativeCode)
+      const reason = policyFailure ? nativeCode : /windows-install|not provisioned/i.test(message) ? 'WINDOWS_SANDBOX_NOT_PROVISIONED'
         : ['ENOENT', 'EACCES', 'EPERM'].includes(nativeCode) ? nativeCode : 'SANDBOX_INITIALIZATION_ERROR'
       throw Object.assign(shellError('SANDBOX_SETUP_FAILED', false, cause), {
         message: `SANDBOX_SETUP_FAILED (${setupStage}: ${reason})`,

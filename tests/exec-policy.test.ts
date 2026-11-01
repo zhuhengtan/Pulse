@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { evaluateExecPolicy, mergeExecPolicies, parseExecPolicy, safeCommandPrefix, sourceExecPolicy, workspaceExecPolicy } from '../packages/server/src/exec-policy.js'
@@ -126,5 +126,26 @@ describe('host-owned remembered approvals', () => {
     const host = new ExecPolicyHost({ rules: [{ pattern: [after.path], decision: 'allow' }] })
     expect((await host.inspect({ command: executable, args: ['; literally data'] }, dir)).decision).toBe('allow')
     expect(await readFile(executable, 'utf8')).toBe('different program')
+  })
+  it('keeps Windows identities stable across permission metadata changes but detects restored-mtime content replacement', async () => {
+    const dir = await root(), executable = join(dir, 'fixture.exe')
+    await writeFile(executable, 'before')
+    const fixedTime = new Date('2020-01-01T00:00:00Z')
+    await utimes(executable, fixedTime, fixedTime)
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
+    try {
+      const before = await resolveShellIdentity(executable, [], dir)
+      await chmod(executable, 0o444)
+      expect((await resolveShellIdentity(executable, [], dir)).fingerprint).toBe(before.fingerprint)
+      await chmod(executable, 0o644)
+      const metadata = await stat(executable)
+      const approved = await resolveShellIdentity(executable, [], dir)
+      await writeFile(executable, 'after!')
+      await utimes(executable, metadata.atime, metadata.mtime)
+      expect((await stat(executable)).mtimeMs).toBe(metadata.mtimeMs)
+      expect((await stat(executable)).size).toBe(metadata.size)
+      expect((await resolveShellIdentity(executable, [], dir)).fingerprint).not.toBe(approved.fingerprint)
+    } finally { Object.defineProperty(process, 'platform', platform); await chmod(executable, 0o644) }
   })
 })
