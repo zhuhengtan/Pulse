@@ -24,6 +24,9 @@ export interface HookSnapshot {
     hash: string;
     directory: string;
 }
+// Windows sandbox ACL setup can take over a minute before the script timer starts.
+// Keep the script's configured deadline; only the observer envelope includes setup.
+const observerTimeoutMs = () => process.platform === 'win32' ? 275000 : 35000;
 const hash = (v: string | Buffer) => createHash('sha256').update(v).digest('hex');
 const inside = (root: string, file: string) => { const p = relative(root, file); return !isAbsolute(p) && p !== '..' && !p.startsWith('..' + (process.platform === 'win32' ? '\\' : '/')); };
 const definitionSchema = z.object({ event: z.enum(hookEvents), matcher: z.string().max(500), command: z.string(), args: z.array(z.string()).max(100), timeoutMs: z.number().int().min(100).max(30000), identity: z.object({ executable: z.string(), prefixArgs: z.array(z.string()), path: z.string(), fingerprint: z.string(), trusted: z.boolean() }), assets: z.record(z.string()) }).strict();
@@ -175,7 +178,7 @@ export class HookService {
     }, private readonly snapshot: HookSnapshot | undefined, private readonly trusted: HookConfig | undefined, private readonly source: 'startup' | 'resume' = 'startup') { }
     async sessionStart(signal: AbortSignal): Promise<void> { return this.start ??= this.fire('SessionStart', undefined, undefined, signal); }
     async stop(): Promise<void> { await Promise.allSettled([...this.pending]); try {
-        await this.fire('Stop', undefined, undefined, AbortSignal.timeout(35000));
+        await this.fire('Stop', undefined, undefined, AbortSignal.timeout(observerTimeoutMs()));
     }
     catch (error) { await this.diagnostic('Stop', error); } }
     async around(effect: EffectRecord, signal: AbortSignal, observe: Parameters<EffectExecutor>[2], execute: EffectExecutor): Promise<EffectExecution> {
@@ -194,7 +197,7 @@ export class HookService {
     }
     private enqueuePost(event: HookEvent, effect: EffectRecord, result: EffectExecution): void {
         if (this.postController.signal.aborted) return;
-        const signal = AbortSignal.any([this.postController.signal, AbortSignal.timeout(35000)]);
+        const signal = AbortSignal.any([this.postController.signal, AbortSignal.timeout(observerTimeoutMs())]);
         const saved = { id: effect.id, attemptId: effect.attemptId, attemptNo: effect.attemptNo, toolCallId: effect.toolCallId, input: structuredClone(effect.input) } as EffectRecord;
         const status: EffectExecution = { value: null, ...(result.status ? { status: result.status } : {}), ...(result.executionState ? { executionState: result.executionState } : {}), ...(result.sideEffectState ? { sideEffectState: result.sideEffectState } : {}), ...(result.error ? { error: { code: result.error.code, message: 'Tool execution failed.' } } : {}) };
         const pending = this.fire(event, saved, status, signal).catch(error => this.diagnostic(event, error, saved));

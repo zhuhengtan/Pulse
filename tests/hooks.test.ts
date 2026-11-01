@@ -243,3 +243,42 @@ it('a sealed hook child keeps sandbox runtime settings and drops injected host m
         for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     }
 }, nativeTimeout(1, 30000));
+
+it.each(['PostToolUse', 'Stop'] as const)('lets Windows %s finish cold sandbox setup without extending the script deadline', async (event) => {
+    // Freeze real local paths first. The adapter is scripted, so no Windows binary is launched.
+    const f = await fixture('{}', [event]);
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+    try {
+        vi.useFakeTimers();
+        vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+            const controller = new AbortController();
+            setTimeout(() => controller.abort(), ms);
+            return controller.signal;
+        });
+        let entered!: () => void;
+        const ready = new Promise<void>(resolve => { entered = resolve; });
+        const shell = vi.spyOn(adapters, 'runShell').mockImplementation(async (_command, _args, options = {}) => {
+            expect(options.timeoutMs).toBe(1000);
+            entered();
+            await new Promise(resolve => setTimeout(resolve, 40000));
+            return { code: options.signal?.aborted ? null : 0, stdout: '{}', stderr: '', truncated: false, timedOut: false, aborted: options.signal?.aborted ?? false };
+        });
+        const execute = vi.fn(async () => ({ value: 'once', status: 'succeeded' as const, sideEffectState: 'applied' as const }));
+        let stopping: Promise<void> | undefined;
+        if (event === 'Stop') stopping = f.service.stop();
+        else expect(await f.service.around(effect(), signal(), undefined, execute)).toMatchObject({ status: 'succeeded', sideEffectState: 'applied' });
+        await ready;
+        await vi.advanceTimersByTimeAsync(40000);
+        await (stopping ?? f.service.stop());
+        const receipts = await Promise.all((await readdir(f.journal)).map(async p => JSON.parse(await readFile(join(f.journal, p), 'utf8'))));
+        expect(receipts).toEqual([expect.objectContaining({ event, status: 'continue' })]);
+        expect(shell).toHaveBeenCalledTimes(1);
+        expect(execute).toHaveBeenCalledTimes(event === 'Stop' ? 0 : 1);
+    } finally {
+        await f.service.dispose();
+        vi.restoreAllMocks();
+        vi.useRealTimers();
+        Object.defineProperty(process, 'platform', platform);
+    }
+});
