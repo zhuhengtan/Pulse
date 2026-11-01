@@ -106,8 +106,13 @@ it('keeps a settled shell.start blocked while its persisted process is unknown a
   if (process.platform === 'win32') process.env.PULSE_SANDBOX_TIMING = '1'
   // Separate model turns keep the asynchronous process owned until actual exit.
   // Model completion alone is not evidence that a cold Windows shell has exited.
+  // Native Windows evidence includes PowerShell's first-use module preparation:
+  // a 5s request really timed out despite node --version eventually exiting 0.
+  // This success-path fixture requests 20s there; production deadlines and the
+  // separate real 25ms timeout regression remain unchanged.
+  const commandTimeoutMs = process.platform === 'win32' ? 20_000 : 5_000
   const model = vi.spyOn(MockAdapter.prototype, 'executeAttempt')
-    .mockResolvedValueOnce({ text: '', toolCalls: [{ toolCallId: 'start', name: 'shell.start', input: { command: 'node', args: ['--version'], timeoutMs: 5000 } }], finishReason: 'tool_calls' })
+    .mockResolvedValueOnce({ text: '', toolCalls: [{ toolCallId: 'start', name: 'shell.start', input: { command: 'node', args: ['--version'], timeoutMs: commandTimeoutMs } }], finishReason: 'tool_calls' })
     .mockResolvedValueOnce({ text: '', toolCalls: [{ toolCallId: 'wait-exit', name: 'ask.choice', input: { prompt: 'Wait for the fixture process to exit.', decisionId: 'fixture-exit', options: [{ label: 'Continue', value: 'continue' }] } }], finishReason: 'tool_calls' })
     .mockResolvedValue({ text: 'Local fixture launched.', toolCalls: [], finishReason: 'stop' })
   try {
