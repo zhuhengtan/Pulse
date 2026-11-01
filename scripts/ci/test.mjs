@@ -6,7 +6,9 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repo = fileURLToPath(new URL('../../', import.meta.url))
-export const ciVitestArgs = ['run', '--exclude', 'tests/live/**', '--maxWorkers=2', '--minWorkers=1']
+// Stop on a confirmed failure instead of spending another native sandbox batch
+// before reporting it. A passing candidate still executes the entire non-Live suite.
+export const ciVitestArgs = ['run', '--exclude', 'tests/live/**', '--maxWorkers=2', '--minWorkers=1', '--bail=1']
 
 export function ciVitestEntry(root = repo) {
   return {

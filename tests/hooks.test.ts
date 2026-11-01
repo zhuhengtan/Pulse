@@ -13,9 +13,10 @@ const services: HookService[] = [];
 const openService = (...args: ConstructorParameters<typeof HookService>) => { const service = new HookService(...args); services.push(service); return service };
 afterEach(async () => {
     const pending = services.splice(0);
-    try { for (const service of pending) { await service.stop(); await service.dispose(); } }
-    finally { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); }
-});
+    // Drain owned scripts; cleanup must not start a new Stop hook on an unused fixture.
+    try { for (const service of pending) await service.dispose(); }
+    finally { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))); }
+}, process.platform === 'win32' ? 280000 : 10000);
 async function fixture(output = '{}', events = ['SessionStart', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop']) {
     const base = await mkdtemp(join(tmpdir(), 'pulse-hooks-'));
     roots.push(base);
@@ -53,7 +54,7 @@ it('orders events, preserves receipts and never replays completed/unknown hooks 
     await f.service.around(effect(), signal(), undefined, execute);
     await f.service.stop();
     const files = await readdir(f.journal), receipts = await Promise.all(files.map(p => readFile(join(f.journal, p), 'utf8').then(JSON.parse)));
-    expect(receipts.map(r => r.event).sort()).toEqual(['PostToolUse', 'PreToolUse', 'SessionStart', 'Stop']);
+    expect(receipts.map(r => r.event).sort(), JSON.stringify(receipts)).toEqual(['PostToolUse', 'PreToolUse', 'SessionStart', 'Stop']);
     const pre = receipts.find(r => r.event === 'PreToolUse');
     expect(pre).toMatchObject({ effectId: 'e1', attemptId: 'a1', definitionHash: f.snapshot.hash, status: 'continue' });
     const path = join(f.journal, files[receipts.indexOf(pre)]!);
@@ -81,10 +82,11 @@ it('executes the real Host effect boundary and Stop lifecycle using mock models 
     try {
         const c = await host.createConversation({ cwd: f.root });
         const run = await host.sendMessage(c.id, { text: 'Read a.txt' });
-        expect((await run.outcome()).status).toBe('succeeded');
+        const outcome = await run.outcome();
         const journal = join(dataDir, 'conversations', c.id, 'runs', run.id, 'hooks');
         const receipts = await Promise.all((await readdir(journal)).map(p => readFile(join(journal, p), 'utf8').then(JSON.parse)));
-        expect(receipts.map(r => r.event).sort()).toEqual(['PostToolUse', 'PreToolUse', 'SessionStart', 'Stop']);
+        expect(outcome.status, JSON.stringify({ outcome, receipts })).toBe('succeeded');
+        expect(receipts.map(r => r.event).sort(), JSON.stringify(receipts)).toEqual(['PostToolUse', 'PreToolUse', 'SessionStart', 'Stop']);
         expect(receipts.every(r => r.runId === run.id && r.definitionHash === f.snapshot.hash)).toBe(true);
     }
     finally {
@@ -103,7 +105,7 @@ it('pre timeout remains unknown across attempts and never executes the tool', as
     expect((await service.around(effect('a2'),signal(),undefined,execute)).error?.code).toBe('HOOK_PRE_DENIED');
     expect(execute).not.toHaveBeenCalled();
     const receipts=await Promise.all((await readdir(f.journal)).map(p=>readFile(join(f.journal,p),'utf8').then(JSON.parse)));
-    expect(receipts.some(r=>r.status==='unknown')).toBe(true);
+    expect(receipts.some(r=>r.status==='unknown'), JSON.stringify(receipts)).toBe(true);
     await service.dispose();
 }, nativeTimeout(1, 30000));
 it('slow post observers cannot delay applied tool settlement and dispose drains owned scripts', async () => {
@@ -142,7 +144,8 @@ it('omits raw shell.stdin data from the hook and does not pass injected host mar
         const service = openService(f.root, f.journal, { conversationId: 'c', runId: 'r' }, snapshot, { ...snapshot, enabled: true });
         const execute = vi.fn(async () => ({ status: 'succeeded' as const, value: 'ran' }));
         const result = await service.around({ ...effect(), input: { name: 'shell.stdin', arguments: { processId, data: 'fake-private-keystrokes' } } }, signal(), undefined, execute);
-        expect(result.status).toBe('succeeded');
+        const receipts = await Promise.all((await readdir(f.journal)).map(p => readFile(join(f.journal, p), 'utf8').then(JSON.parse)));
+        expect(result.status, JSON.stringify({ result, receipts })).toBe('succeeded');
         expect(execute).toHaveBeenCalledTimes(1);
     } finally {
         for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
@@ -219,7 +222,7 @@ it('observes shell.stdin unknown at the host boundary without treating it as a g
             await new Promise(resolve => setTimeout(resolve, 50));
         }
         expect(settled).toMatchObject({ executionState: 'remote_unknown', sideEffectState: 'unknown', state: 'reconcile_required' });
-        expect(receipts).toContainEqual(expect.objectContaining({ event: 'PostToolUseFailure', status: 'continue' }));
+        expect(receipts, JSON.stringify(receipts)).toContainEqual(expect.objectContaining({ event: 'PostToolUseFailure', status: 'continue' }));
     } finally {
         input.mockRestore();
         await host.close();

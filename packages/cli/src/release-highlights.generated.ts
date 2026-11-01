@@ -30,8 +30,8 @@ export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>
       "en": "Work in the user-selected current directory by default without automatically creating a Git workspace; relocate batched same-file patches against current content, preserving unrelated edits and rejecting ambiguity or conflicts."
     },
     {
-      "zh": "加固整文件写入、编辑日志和条件恢复，完整绑定会话、运行与 Effect 身份，保护已确认写入、原始字节和路径边界；修复 Windows 临时文件占用导致生成任务回执保存失败的问题。",
-      "en": "Harden whole-file writes, edit journals, and conditional recovery with complete conversation, run, and Effect ownership, protecting confirmed writes, original bytes, and path boundaries; fix generation-ticket persistence failures caused by transient file sharing violations on Windows."
+      "zh": "加固整文件写入、编辑日志和条件恢复，完整绑定会话、运行与 Effect 身份，保护已确认写入、原始字节和路径边界；修复 Windows 临时文件占用导致生成任务及 Hook 回执保存失败的问题。",
+      "en": "Harden whole-file writes, edit journals, and conditional recovery with complete conversation, run, and Effect ownership, protecting confirmed writes, original bytes, and path boundaries; fix generation-ticket and hook-receipt persistence failures caused by transient file sharing violations on Windows."
     },
     {
       "zh": "修复直接使用 Node 执行 Vitest 时缺少验收回执的问题，让同一套测试换启动器后的真实复验更新旧证据，同时保留失败检查和外部变更保护。",

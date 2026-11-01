@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { resolveShellIdentity, validateShellInvocation, runShell, type ShellIdentity } from '@hunterzhu/pulse-adapters';
 import type { EffectRecord, EffectExecution, EffectExecutor } from '@hunterzhu/pulse-runtime';
+import { replaceStateFile } from '../atomic-file.js';
 export const hookEvents = ['SessionStart', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop'] as const;
 export type HookEvent = typeof hookEvents[number];
 export interface HookDefinition {
@@ -284,7 +285,7 @@ export class HookService {
             }
             const temp = path + '.' + randomUUID();
             await writeFile(temp, JSON.stringify({ ...receipt, status: error ? (pre ? (error === 'HOOK_OUTCOME_UNKNOWN' ? 'unknown' : 'deny') : 'diagnostic') : 'continue', ...(error ? { error } : {}), completedAt: new Date().toISOString() }), { mode: 0o600 });
-            await rename(temp, path);
+            await replaceStateFile(temp, path);
             if (error && pre)
                 throw Error(error);
         }

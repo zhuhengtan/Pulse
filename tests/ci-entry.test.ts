@@ -11,7 +11,7 @@ it('starts the installed Vitest with the current Node and does not launch a pack
   expect(entry.command).toBe(process.execPath)
   expect(entry.script).toBe(join(repo, 'node_modules', 'vitest', 'vitest.mjs'))
   expect(entry.args).toEqual(ciVitestArgs)
-  expect(entry.args).toEqual(['run', '--exclude', 'tests/live/**', '--maxWorkers=2', '--minWorkers=1'])
+  expect(entry.args).toEqual(['run', '--exclude', 'tests/live/**', '--maxWorkers=2', '--minWorkers=1', '--bail=1'])
   await access(entry.script)
   const source = await readFile(join(repo, 'scripts', 'ci', 'test.mjs'), 'utf8')
   expect(source).toContain('process.execPath')
