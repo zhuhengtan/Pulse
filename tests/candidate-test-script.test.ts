@@ -78,7 +78,8 @@ it('revalidates the corrected entrypoint and detects later external changes with
     // A valid manifest is only freshness proof; actual nonzero exit remains a failure.
     expect(failureReceipt.stable).toBe(true)
   } finally { await rm(root, { recursive: true, force: true }) }
-})
+// Three real native launches; each command still has its own 20-second limit.
+}, process.platform === 'win32' ? 3 * 240_000 : 10_000)
 
 it('runs a corrected new test script through the actual sandboxed Host before accepting', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-script-host-'))

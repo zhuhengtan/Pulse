@@ -97,7 +97,8 @@ jobs:
           pnpm exec vitest run tests/eval-grader.test.ts -t "executes valid Python behavior probes" --reporter verbose
       - name: Verify Windows candidate test runner
         if: runner.os == 'Windows'
-        timeout-minutes: 12
+        # Two native cases budget 720s + 600s, including cold SRT setup.
+        timeout-minutes: 24
         run: pnpm exec vitest run tests/candidate-test-script.test.ts -t "runs a corrected new test script|revalidates the corrected entrypoint" --reporter verbose
       - name: Run shared local and cloud checks
         # Windows runs serially because SRT owns machine-wide ACL state; each
