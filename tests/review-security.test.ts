@@ -139,7 +139,7 @@ describe('conversation and workspace path safety', () => {
       await writeFile(join(directory, 'nested', 'first.txt'), 'needle')
       await writeFile(join(directory, 'nested', 'later.txt'), 'needle')
       await expect(searchFiles(directory, 'needle', '.', 0, visited, matched)).resolves.toEqual([
-        { path: join('nested', 'first.txt'), line: 1, text: 'needle' },
+        { path: 'nested/first.txt', line: 1, text: 'needle' },
       ])
       expect(matched.count).toBe(100)
       expect(visited.count).toBe(2)
