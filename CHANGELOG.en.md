@@ -2,6 +2,26 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.11.0] - 2026-11-01
+
+### Added
+
+- Added local Office document reading and generation, paged PDF rendering, and bounded image reading, covering PPTX, DOCX, XLSX, and related artifact previews.
+- Use personal-memory retrieval and observations for Jarvis by default, retaining a redacted local outbox, stable submission identities, and recovery of legacy session protocols.
+- Added read-only LSP definitions, references, symbols, and diagnostics, plus explicitly trusted, version-bound command lifecycle hooks.
+- Added optional Responses WebSocket transport with connection reuse and safe incremental requests, plus Agent PTY support on macOS, Linux, and Windows.
+- Remember bounded command grants, show them in a searchable list, and let users explicitly add another 256 model calls when the current allowance is exhausted.
+- Added host-level web-search settings, media tools, and job management; fold public progress after each task round while retaining fixed elapsed time, summaries, artifacts, and recovery actions.
+
+### Fixed
+
+- Work in the user-selected current directory by default without automatically creating a Git workspace; relocate batched same-file patches against current content, preserving unrelated edits and rejecting ambiguity or conflicts.
+- Harden whole-file writes, edit journals, and conditional recovery with complete conversation, run, and Effect ownership, protecting confirmed writes, original bytes, and path boundaries.
+- Record acceptance receipts when Vitest runs directly through Node, allowing an actual rerun of the same suite through another launcher to refresh old evidence while retaining failed-check and external-change protections.
+- Reduce automatic-approval card flashes and repeated interruptions while retaining required human authorization; preserve conversations and checkpoints when sending follow-ups, stopping, recovering, or extending budgets.
+- Fix conversation pin updates, failure rollback, and duplicate rows; give pinned conversations an independently collapsible section and unify neutral colors and rounded disclosure arrows.
+- Fix preview desktop package bindings for runtime, version, and data directories to avoid loading another environment's backend or mixing production data.
+
 ## [0.10.0] - 2026-10-28
 
 ### Added

@@ -1,5 +1,55 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.11.0": [
+    {
+      "zh": "新增本地 Office 文档读取与生成、PDF 分页渲染及受限图片读取，支持 PPTX、DOCX、XLSX 与相关产物预览。",
+      "en": "Added local Office document reading and generation, paged PDF rendering, and bounded image reading, covering PPTX, DOCX, XLSX, and related artifact previews."
+    },
+    {
+      "zh": "Jarvis 默认接入个人记忆检索和 observation，保留脱敏本地 outbox、稳定提交身份与旧会话协议恢复。",
+      "en": "Use personal-memory retrieval and observations for Jarvis by default, retaining a redacted local outbox, stable submission identities, and recovery of legacy session protocols."
+    },
+    {
+      "zh": "新增只读 LSP 定义、引用、符号与诊断工具，以及显式信任、版本绑定的命令型生命周期 Hook。",
+      "en": "Added read-only LSP definitions, references, symbols, and diagnostics, plus explicitly trusted, version-bound command lifecycle hooks."
+    },
+    {
+      "zh": "新增可选 Responses WebSocket 传输、连接复用和安全增量请求，以及 macOS、Linux 和 Windows Agent PTY 支持。",
+      "en": "Added optional Responses WebSocket transport with connection reuse and safe incremental requests, plus Agent PTY support on macOS, Linux, and Windows."
+    },
+    {
+      "zh": "支持记住有界命令放行规则、展示可搜索的放行列表，并在模型调用额度耗尽时由用户明确续增 256 次调用。",
+      "en": "Remember bounded command grants, show them in a searchable list, and let users explicitly add another 256 model calls when the current allowance is exhausted."
+    },
+    {
+      "zh": "新增宿主级网页搜索配置、媒体工具及任务管理；每轮任务结束后折叠公开过程，保留固定耗时、总结、产物和恢复入口。",
+      "en": "Added host-level web-search settings, media tools, and job management; fold public progress after each task round while retaining fixed elapsed time, summaries, artifacts, and recovery actions."
+    },
+    {
+      "zh": "默认在用户选择的当前目录工作，不再自动创建 Git 工作区；同文件合批补丁在最新内容上重新定位，保留无关改动并拒绝歧义和冲突。",
+      "en": "Work in the user-selected current directory by default without automatically creating a Git workspace; relocate batched same-file patches against current content, preserving unrelated edits and rejecting ambiguity or conflicts."
+    },
+    {
+      "zh": "加固整文件写入、编辑日志和条件恢复，完整绑定会话、运行与 Effect 身份，保护已确认写入、原始字节和路径边界。",
+      "en": "Harden whole-file writes, edit journals, and conditional recovery with complete conversation, run, and Effect ownership, protecting confirmed writes, original bytes, and path boundaries."
+    },
+    {
+      "zh": "修复直接使用 Node 执行 Vitest 时缺少验收回执的问题，让同一套测试换启动器后的真实复验更新旧证据，同时保留失败检查和外部变更保护。",
+      "en": "Record acceptance receipts when Vitest runs directly through Node, allowing an actual rerun of the same suite through another launcher to refresh old evidence while retaining failed-check and external-change protections."
+    },
+    {
+      "zh": "降低自动审批卡片闪烁与重复打断，保留必要的人为授权；继续发送、停止、恢复和预算续额保持原有会话与检查点。",
+      "en": "Reduce automatic-approval card flashes and repeated interruptions while retaining required human authorization; preserve conversations and checkpoints when sending follow-ups, stopping, recovering, or extending budgets."
+    },
+    {
+      "zh": "修复会话置顶更新、失败回滚和列表去重；置顶会话使用独立可折叠区块，并统一中性色主题和圆润折叠箭头。",
+      "en": "Fix conversation pin updates, failure rollback, and duplicate rows; give pinned conversations an independently collapsible section and unify neutral colors and rounded disclosure arrows."
+    },
+    {
+      "zh": "修复 preview 桌面包的运行环境、版本及数据目录绑定，避免加载其他环境的后台或混用生产数据。",
+      "en": "Fix preview desktop package bindings for runtime, version, and data directories to avoid loading another environment's backend or mixing production data."
+    }
+  ],
   "0.10.0": [
     {
       "zh": "在桌面和本机 Web 中新增模型厂商接入向导，支持主流官方厂商、SiliconFlow、OpenRouter 及自定义 OpenAI 兼容接口，分别管理站点、账号和套餐。",
