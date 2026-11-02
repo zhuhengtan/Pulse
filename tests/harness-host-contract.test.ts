@@ -14,7 +14,8 @@ vi.mock('@hunterzhu/pulse-adapters', async original => ({ ...await original<type
 afterEach(() => { vi.unstubAllGlobals(); vi.mocked(runShell).mockClear() })
 
 it.each(['old-check', 'rerun', 'unrelated', 'weakened'])('Host binds successful checks to the current artifact: %s', async scenario => {
-  const root = await mkdtemp(join(tmpdir(), 'pulse-host-contract-'))
+  // A workspace name is context, never permission to "fix" its frozen tests.
+  const root = await mkdtemp(join(tmpdir(), 'pulse-fixtures-fix-host-contract-'))
   const objective = 'Verify feature.mjs with the original feature.test.mjs.'
   const source = 'export const feature = 1\n', check = "import './feature.mjs'\n"
   const sourceHash = createHash('sha256').update(source).digest('hex'), checkHash = createHash('sha256').update(check).digest('hex')
@@ -51,7 +52,9 @@ it.each(['old-check', 'rerun', 'unrelated', 'weakened'])('Host binds successful 
     if (scenario === 'weakened') {
       // The Host now rejects destructive patches before writes: the original
       // passing check stays valid because neither it nor its source changed.
-      expect(await readFile(join(root, 'feature.test.mjs'), 'utf8')).toBe("import './feature.mjs'\n")
+      const frozen = join(root, 'data/conversations', conversation.id, 'runs', run.id, 'check-definitions')
+      const diagnostics = { original: await readFile(join(frozen, 'original.json'), 'utf8'), policy: await readFile(join(frozen, 'repository-test-policy.json'), 'utf8') }
+      expect(await readFile(join(root, 'feature.test.mjs'), 'utf8'), JSON.stringify(diagnostics)).toBe("import './feature.mjs'\n")
       expect([...runtime.state.effects.values()].some(effect => effect.outcome?.error?.code === 'FROZEN_TEST_CHANGE')).toBe(true)
     }
     expect(plans).toBe(1); expect(calls).toBeLessThanOrEqual(10)

@@ -29,7 +29,7 @@ export interface CheckReceipt {
  */
 export function repositoryTestChangesAllowed(intent: string): boolean {
   if (/(?:不(?:要)?|禁止|不得|不能|不可|仅|只).{0,24}(?:改|动|重写|删除|移除).{0,20}(?:测试|断言)|(?:保留|保持|保护|原封不动).{0,24}(?:测试|断言)|(?:测试|断言).{0,20}(?:不(?:能|可|准|要)?|禁止|不得).{0,12}(?:改|动|重写|删除|移除)|(?:preserve|keep|retain).{0,30}(?:tests?|assertions?)|(?:baseline|placeholder|frozen|caller-owned)|(?:do not|don't|never|must not|without).{0,35}(?:modify|change|remove|rewrite).{0,20}(?:tests?|assertions?)/i.test(intent)) return false
-  return /(?:合并|新增|实现|重构|迁移|调整|修改|修复|删除|移除|merge|combine|implement|refactor|migrate|fix|remove)/i.test(intent)
+  return /(?:合并|新增|实现|重构|迁移|调整|修改|修复|删除|移除)|\b(?:merg(?:e|ing)|combin(?:e|ing)|implement(?:ed|ing)?|refactor(?:ed|ing)?|migrat(?:e|ing)|fix(?:ed|ing)?|remov(?:e|ing))\b/i.test(intent)
     && /(?:页面|界面|功能|导航|菜单|组件|pages?|screens?|feature|navigation|components?)/i.test(intent)
 }
 async function repositoryTestsMutable(store: string): Promise<boolean> {
