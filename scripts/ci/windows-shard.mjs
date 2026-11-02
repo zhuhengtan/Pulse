@@ -54,6 +54,7 @@ try {
     console.log('[ci:local] Using fixed macOS system Git: /usr/bin/git')
   }
   await rm(join(repo, '.pulse-dev/ci-network-attempts.jsonl'), { force: true })
+  node('scripts/ci/workflow-env-contexts.mjs')
   pnpm('native:prepare')
   pnpm('build')
   node('scripts/ci/test.mjs', '--shard=' + shard)

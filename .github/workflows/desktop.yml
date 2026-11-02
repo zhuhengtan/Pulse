@@ -25,7 +25,6 @@ jobs:
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       PULSE_DESKTOP_SMOKE_ARTIFACTS: artifacts/desktop-smoke
-      PULSE_DESKTOP_CARGO_TARGET_DIR: ${{ runner.temp }}/pulse-desktop-cargo
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,6 +49,8 @@ jobs:
           fi
       - run: pnpm native:prepare
       - run: pnpm desktop:build
+        env:
+          PULSE_DESKTOP_CARGO_TARGET_DIR: ${{ runner.temp }}/pulse-desktop-cargo
       - run: pnpm desktop:app:prepare
       - name: Verify runtime pruning and dependency resolution
         run: pnpm exec vitest run tests/desktop-runtime-optimization.test.ts
