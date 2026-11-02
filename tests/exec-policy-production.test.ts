@@ -5,16 +5,32 @@ import { join } from 'node:path'
 import { createLocalHost, H5Server, type LocalHostOptions } from '@hunterzhu/pulse-server'
 
 const directories: string[] = []
-afterEach(async () => { vi.restoreAllMocks(); await Promise.all(directories.splice(0).map(p => rm(p, { recursive: true, force: true }))) })
+const hosts = new Set<ReturnType<typeof createLocalHost>>()
+const closingHosts = new WeakMap<ReturnType<typeof createLocalHost>, Promise<void>>()
+function closeOwnedHost(host: ReturnType<typeof createLocalHost>): Promise<void> {
+  const closing = closingHosts.get(host)
+  if (closing) return closing
+  const result = host.close()
+  closingHosts.set(host, result)
+  return result
+}
+afterEach(async () => {
+  // A Vitest timeout does not await the test body's finally. Drain the same
+  // owned Host once before deleting its SQLite files, including cancellation.
+  try { await Promise.all([...hosts].map(closeOwnedHost)) }
+  finally { hosts.clear(); vi.restoreAllMocks() }
+  await Promise.all(directories.splice(0).map(p => rm(p, { recursive: true, force: true })))
+})
 async function root() { const dir = await mkdtemp(join(tmpdir(), 'pulse-policy-production-')); directories.push(dir); return dir }
 async function versionRun(options: Partial<LocalHostOptions>, reply?: (run: any, event: any) => Promise<void>) {
   const dir = options.cwd ?? await root()
   const host = createLocalHost({ cwd: dir, dataDir: join(dir, 'data'), provider: { provider: 'mock' }, taskController: false, mockToolCalls: [{ name: 'shell.exec', input: { command: 'node', args: ['--version'] } }], mockAfterToolResponse: 'Checked local Node.', ...options })
+  hosts.add(host)
   try {
     const conversation = await host.createConversation(), run = await host.sendMessage(conversation.id, { text: 'Check the locally installed Node version.' }), events: any[] = []
     for await (const event of run.events) { events.push(event); if (event.type === 'waiting') { if (reply) await reply(run, event); else await run.reply((event.data as any).effectId, { approved: false }) } }
     return { events, outcome: await run.outcome() }
-  } finally { await host.close() }
+  } finally { await closeOwnedHost(host) }
 }
 const output = (events: any[]) => JSON.stringify(events.filter(e => e.type === 'observation'))
 

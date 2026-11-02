@@ -3,8 +3,9 @@ import { mkdtemp, mkdir, symlink, writeFile, rm, copyFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { syncBuiltinESMExports } from 'node:module'
-import { pathToFileURL } from 'node:url'
+import { pathToFileURL, fileURLToPath } from 'node:url'
 import fs from 'node:fs/promises'
+import cp from 'node:child_process'
 import { LspService, lexicalOutsideWorkspace, localFilePath } from '../packages/server/src/lsp/index.js'
 
 const roots: string[] = []
@@ -35,6 +36,15 @@ it('rejects UNC paths and remote file URLs before any filesystem lookup', () => 
 it('keeps flat symbol names and does not open outside inputs or returned URIs', async () => {
   const calls: string[] = []
   const realpath = fs.realpath
+  const spawn = cp.spawn
+  const trace = process.platform === 'win32' ? process.env.PULSE_CI_SRT_LOG : undefined
+  const worker = fileURLToPath(new URL('../packages/server/src/lsp/worker.cjs', import.meta.url))
+  // Fixture-only observability: production keeps its sealed helper environment.
+  if (trace) cp.spawn = function (file: string, args: string[], options: any) {
+    return Reflect.apply(spawn, cp, [file, args, file === process.execPath && args.includes(worker) ? { ...options, env: { ...options.env, PULSE_CI_SRT_LOG: trace } } : options])
+  } as typeof cp.spawn
+  const began = Date.now()
+  const phase = (phase: string) => { if (process.platform === 'win32') console.info('LSP_REPAIR_PHASE ' + JSON.stringify({ phase, elapsedMs: Date.now() - began })) }
   fs.realpath = async function (path, ...args) {
     const text = String(path).replaceAll('\\', '/')
     calls.push(text)
@@ -54,12 +64,15 @@ it('keeps flat symbol names and does not open outside inputs or returned URIs', 
     await writeFile(join(root, 'a.ts'), 'const a=1\n')
     await symlink(outsideFile, join(root, 'link.ts'))
     const service = new LspService(root, { enabled: true, servers: { test: { command: process.execPath, args: [join(root, 'server.cjs'), 'flat'], languages: { '.ts': 'typescript' } } } }, controller.signal)
+    phase('outside-checks')
     const outside = join(root, '..', 'outside-lsp-probe.ts')
     await expect(service.query('symbols', { path: outside }, controller.signal)).rejects.toThrow('CODE_PATH_OUTSIDE_WORKSPACE')
     await expect(service.query('symbols', { path: '\\\\files.example\\share\\a.ts' }, controller.signal)).rejects.toThrow('CODE_PATH_OUTSIDE_WORKSPACE')
     await expect(service.query('symbols', { path: 'file://files.example/share/a.ts' }, controller.signal)).rejects.toThrow('CODE_PATH_OUTSIDE_WORKSPACE')
     await expect(service.query('symbols', { path: 'link.ts' }, controller.signal)).rejects.toThrow('CODE_PATH_OUTSIDE_WORKSPACE')
+    phase('symbols-start')
     const symbols = await service.query('symbols', { path: 'a.ts' }, controller.signal)
+    phase('symbols-finish')
     const items = symbols.items as Array<{ name?: string; kind?: number; path?: string; children?: unknown[] }>
     expect(items.find(item => item.name === 'NamedSymbol')).toMatchObject({ name: 'NamedSymbol', kind: 12, path: 'a.ts' })
     expect(items.some(item => item.name === 'OutsideSymbol' || item.name === 'RemoteSymbol')).toBe(false)
@@ -69,6 +82,7 @@ it('keeps flat symbol names and does not open outside inputs or returned URIs', 
     expect(calls.some(call => call.endsWith('/link.ts'))).toBe(true)
   } finally {
     fs.realpath = realpath
+    cp.spawn = spawn
     syncBuiltinESMExports()
   }
 }, 45000)

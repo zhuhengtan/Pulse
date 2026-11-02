@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { realpath } from 'node:fs/promises'
-import { basename, delimiter, dirname, join, win32 } from 'node:path'
+import { posix, win32 } from 'node:path'
 import { promisify } from 'node:util'
 
 const exec = promisify(execFile)
@@ -75,13 +75,13 @@ async function trustedUnixGit(io: SystemGitIO, cwd: string): Promise<string | un
   const trustedParent = async (resolved: string): Promise<string | undefined> => {
     // The PATH name can be `git` while the canonical file is another program
     // in the same trusted directory, such as /usr/bin/true.
-    if (basename(resolved) !== 'git') return undefined
-    const parent = await io.realpath(dirname(resolved))
+    if (posix.basename(resolved) !== 'git') return undefined
+    const parent = await io.realpath(posix.dirname(resolved))
     return parent && trusted.includes(parent) ? resolved : undefined
   }
-  for (const entry of io.pathValue.split(delimiter)) {
+  for (const entry of io.pathValue.split(posix.delimiter)) {
     const directory = entry === '' ? cwd : entry
-    const resolved = await io.realpath(join(directory, 'git'))
+    const resolved = await io.realpath(posix.join(directory, 'git'))
     if (!resolved) continue
     return trustedParent(resolved)
   }

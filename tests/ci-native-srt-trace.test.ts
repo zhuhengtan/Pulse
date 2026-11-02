@@ -5,6 +5,38 @@ import { join } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
 
+it('classifies ACL batches using only fixed enums without disclosing input or inspecting getters', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pulse-acl-trace-')), log = join(root, 'trace.jsonl')
+  const guard = pathToFileURL(fileURLToPath(new URL('../scripts/ci/network-guard.mjs', import.meta.url))).href
+  const checkout = fileURLToPath(new URL('../', import.meta.url))
+  try {
+    const source = `
+      import assert from 'node:assert/strict';import {traceSrtCall} from ${JSON.stringify(guard)};
+      const sentinel={status:0},args=[['acl','stamp']],fake='private-install/pulse-srt.exe';let calls=0;
+      const invoke=()=>{calls++;return sentinel};
+      const input=JSON.stringify({denyRead:[${JSON.stringify(join(checkout, 'packages/cli/private-password'))},${JSON.stringify(join(checkout, '.git/private-password'))},'/outside/private-password'],denyWrite:[${JSON.stringify(join(checkout, 'node_modules/private-password'))}],password:'private-password'});
+      assert.equal(traceSrtCall('spawnSync',fake,[...args,{input}],invoke),sentinel);
+      assert.equal(traceSrtCall('spawnSync',fake,[['acl','grant'],{input:Buffer.from(JSON.stringify({read:[${JSON.stringify(join(checkout, 'packages/runtime/private-password'))}],write:[]}))}],invoke),sentinel);
+      assert.equal(traceSrtCall('spawnSync',fake,[...args,{input:'private-password'}],invoke),sentinel);
+      assert.equal(traceSrtCall('spawnSync',fake,[...args,{input:'private-password'.repeat(65536)}],invoke),sentinel);
+      let getters=0;const options={};Object.defineProperty(options,'input',{get(){getters++;throw Error('private-password')}});
+      assert.equal(traceSrtCall('spawnSync',fake,[...args,options],invoke),sentinel);assert.equal(getters,0);assert.equal(calls,5);
+    `
+    const result = spawnSync(process.execPath, ['--import=' + guard, '--input-type=module', '-e', source], { env: { PULSE_CI_SRT_LOG: log }, encoding: 'utf8', timeout: 20000 })
+    expect(result.status, result.stderr).toBe(0)
+    const text = await readFile(log, 'utf8'), rows = text.trim().split('\n').map(line => JSON.parse(line))
+    expect(text).not.toContain('private-password')
+    expect(text).not.toContain('private-install')
+    expect(text).not.toContain(checkout)
+    const starts = rows.filter(row => row.phase === 'start')
+    expect(starts).toHaveLength(5)
+    expect(rows.filter(row => row.phase === 'end')).toHaveLength(5)
+    expect(starts[0].acl).toEqual({ readKinds: ['package-cli', 'checkout-git', 'other'], writeKinds: ['checkout-dependencies'] })
+    expect(starts[1].acl).toEqual({ readKinds: ['package-runtime'], writeKinds: [] })
+    expect(starts.slice(2).every(row => row.acl === undefined)).toBe(true)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 it('records native phases without changing results, stdin, custom promises or unhandled errors, and never records payloads', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pulse srt trace ')), log = join(root, 'trace.jsonl')
   const guard = pathToFileURL(fileURLToPath(new URL('../scripts/ci/network-guard.mjs', import.meta.url))).href

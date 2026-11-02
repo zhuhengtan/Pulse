@@ -87,17 +87,17 @@ it('does not execute an argv outside the fixed reads', async () => {
   expect(calls).toEqual([])
 })
 
-it('keeps the Unix system git path and still rejects the first PATH shadow', async () => {
+it.each(['linux', 'darwin'] as const)('keeps the %s system git path and still rejects the first PATH shadow', async platform => {
   const identity = async (path: string) => path === '/usr/bin' || path === '/usr/bin/git' ? path : undefined
   const trusted = recorder(args => args.includes('config') ? '' : 'tracked\0')
-  const result = await readOnlySystemGitUsing({ platform: 'linux', pathValue: '/usr/bin', realpath: identity, exec: trusted.exec }, '/work', lsFiles, { timeout: 5000 })
+  const result = await readOnlySystemGitUsing({ platform, pathValue: '/usr/bin', realpath: identity, exec: trusted.exec }, '/work', lsFiles, { timeout: 5000 })
   expect(result.stdout).toBe('tracked\0')
   expect(trusted.calls.map(call => call.file)).toEqual(['/usr/bin/git', '/usr/bin/git'])
   expect(trusted.calls[1]?.args).toContain('core.hooksPath=/dev/null')
   expect(trusted.calls[1]?.env.GIT_CONFIG_GLOBAL).toBe('/dev/null')
   const shadow = recorder(() => 'should-not-run')
   const shadowed = async (path: string) => path === '/tmp/shadow/git' ? '/tmp/shadow/git' : identity(path)
-  await expect(readOnlySystemGitUsing({ platform: 'linux', pathValue: '/tmp/shadow:/usr/bin', realpath: shadowed, exec: shadow.exec }, '/work', lsFiles, { timeout: 5000 })).rejects.toMatchObject({ code: 'ENOENT' })
+  await expect(readOnlySystemGitUsing({ platform, pathValue: '/tmp/shadow:/usr/bin', realpath: shadowed, exec: shadow.exec }, '/work', lsFiles, { timeout: 5000 })).rejects.toMatchObject({ code: 'ENOENT' })
   expect(shadow.calls).toEqual([])
 })
 
