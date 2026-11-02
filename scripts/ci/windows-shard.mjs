@@ -4,6 +4,7 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:f
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { testTempEnvironment } from './test-temp.mjs'
 
 const repo = fileURLToPath(new URL('../../', import.meta.url))
 const windows = process.platform === 'win32'
@@ -11,6 +12,7 @@ const shard = process.argv[2]
 if (process.argv.length !== 3 || !/^[1-4]$/.test(shard) || !windows) throw Error('INVALID_WINDOWS_SHARD')
 const directory = await mkdtemp(join(tmpdir(), 'pulse-ci-'))
 const home = join(directory, 'home')
+const fixtureTemp = await testTempEnvironment(directory)
 const env = {
   ...process.env,
   PULSE_HOME: home,
@@ -25,7 +27,7 @@ function run(command, args, options = {}) {
   console.log(`\n[ci:local] ${command} ${args.join(' ')}`)
   const started = Date.now()
   const guarded = args.includes('check') || args.at(-1) === 'test' || args.includes('scripts/ci/test.mjs') || args.some(arg => arg.replaceAll('\\', '/').endsWith('/scripts/ci/test.mjs'))
-  const testEnv = guarded ? { ...env, PULSE_CI_GUARD_OWNER: '1', PULSE_CI_NETWORK_LOG: join(directory, 'network-attempts.jsonl'), NODE_OPTIONS: (env.NODE_OPTIONS ?? '') + ' --import=' + pathToFileURL(join(repo, 'scripts/ci/network-guard.mjs')).href } : env
+  const testEnv = guarded ? { ...env, ...fixtureTemp, PULSE_CI_GUARD_OWNER: '1', PULSE_CI_NETWORK_LOG: join(directory, 'network-attempts.jsonl'), NODE_OPTIONS: (env.NODE_OPTIONS ?? '') + ' --import=' + pathToFileURL(join(repo, 'scripts/ci/network-guard.mjs')).href } : env
   const result = spawnSync(command, args, { cwd: repo, env: testEnv, stdio: 'inherit', ...options })
   const duration = Date.now() - started
   console.log(`[ci:timing] ${command} ${args.join(' ')} ${duration}ms`)

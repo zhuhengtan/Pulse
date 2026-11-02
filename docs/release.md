@@ -49,6 +49,8 @@ pnpm ci:local
 
 构建入口会核对源码、锁文件、Node/ABI、编译器、平台和输出内容哈希，校验一致时复用同一工作区的产物；输入变化、产物缺失或损坏时完整重建。`ci:local`、`check`、CLI 打包和开发入口共享这一机制。缓存只节省构建，不替代检查或跨平台验收；`.pulse-dev/build-state/` 可删除后重建。
 
+检查子进程的 `TMPDIR`/`TMP`/`TEMP` 指向本轮拥有的独立 fixtures 目录；构建进程保留原临时目录，避免 pnpm 和编译器缓存混入测试工作区的兄弟目录、被 Windows 沙箱重复设置 ACL。CI 的桌面 Cargo 中间产物通过 `PULSE_DESKTOP_CARGO_TARGET_DIR` 放在 runner 临时目录，最终 helper 仍复制到原位置并写入校验清单。本地未设置该变量时保留原构建路径。这些布局调整不扩大沙箱授权，不改变命令或测试时限。
+
 GitHub 的 Windows 后端测试按历史文件耗时分成四个独立的 `windows-2022` 标准虚拟机任务，每台仍串行执行，避免共享 SRT 账户和 ACL。另一个 Windows common 任务负责 Web、CLI 打包、安装和启动验证。最多同时运行四个 Windows 任务。`check (windows-2022)` 汇总任务会核对五个实际 Windows job 的状态与 runner 标签；任一个失败、取消、跳过或缺失都拒绝通过。发布检查也会重新核对，不能只凭汇总 job 绿灯发版。公开仓库使用标准托管 runner，不启用付费大规格 runner；临时 artifact 保留一天。
 
 每个分片从同一完整测试清单生成，四份必须无遗漏、无重复，新文件自动加入；测试结束时再次核对实际执行文件及用例终态。只有原有显式 skip/todo 可保持跳过。测试首个失败会立即输出，仍采用 `bail=1`，不能将提前中止称为完整通过。CI 的 Node 网络边界允许 loopback 夹具，拒绝意外外网及清空环境的直接 Node 子进程绕过；真实 Shell 测试仍使用原生沙箱，不改变产品权限。

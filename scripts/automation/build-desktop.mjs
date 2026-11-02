@@ -12,6 +12,7 @@ if (process.platform === 'darwin' && arch !== 'arm64') throw new Error('macOS de
 const target = process.env.PULSE_DESKTOP_TARGET ?? ({darwin:{arm64:'aarch64-apple-darwin'},win32:{x64:'x86_64-pc-windows-msvc'},linux:{x64:'x86_64-unknown-linux-gnu'}}[process.platform]?.[arch])
 if (!target) throw new Error(`Unsupported native target: ${process.platform}/${arch}`)
 const destination = process.env.PULSE_DESKTOP_OUTPUT_DIR ? resolve(process.env.PULSE_DESKTOP_OUTPUT_DIR) : resolve(root, `packages/server/native/${process.platform}-${arch}`)
+const cargoTarget = process.env.PULSE_DESKTOP_CARGO_TARGET_DIR ? resolve(process.env.PULSE_DESKTOP_CARGO_TARGET_DIR) : resolve(root, 'native/desktop-helper/target')
 await mkdir(destination, { recursive: true })
 function run(command, args) {
   const result = spawnSync(command, args, { cwd: root, stdio: 'inherit' })
@@ -27,8 +28,8 @@ if (process.argv.includes('--swift-only')) {
   if (manifest.protocolVersion !== 1 || manifest.platform !== 'darwin' || manifest.arch !== arch || typeof expected !== 'string' || expected !== actual || manifest.applicationBundle !== 'Pulse.app') throw new Error('Existing desktop supervisor is missing or incompatible with Pulse.app; perform a complete Cargo build')
   console.log('Reusing checksum-verified desktop supervisor; rebuilding only Swift application')
 } else {
-  run(process.env.PULSE_CARGO ?? 'cargo', ['build', '--manifest-path', 'native/desktop-helper/Cargo.toml', '--release', '--locked', '--target', target])
-  await copyFile(resolve(root, `native/desktop-helper/target/${target}/release`, executable), resolve(destination, executable))
+  run(process.env.PULSE_CARGO ?? 'cargo', ['build', '--manifest-path', 'native/desktop-helper/Cargo.toml', '--release', '--locked', '--target', target, '--target-dir', cargoTarget])
+  await copyFile(resolve(cargoTarget, target, 'release', executable), resolve(destination, executable))
 }
 if (process.platform === 'darwin') {
   // Development and packaged helpers must not share a TCC identity. An
