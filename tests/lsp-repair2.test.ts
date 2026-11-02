@@ -1,5 +1,6 @@
-import { afterEach, expect, it } from 'vitest'
-import { mkdtemp, mkdir, symlink, writeFile, rm, copyFile } from 'node:fs/promises'
+import { expect, it } from 'vitest'
+import { mkdtemp, mkdir, symlink, writeFile, copyFile } from 'node:fs/promises'
+import { registerLspFixtureTeardown } from './helpers/lsp-fixture-teardown.js'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { syncBuiltinESMExports } from 'node:module'
@@ -10,11 +11,7 @@ import { LspService, lexicalOutsideWorkspace, localFilePath } from '../packages/
 
 const roots: string[] = []
 const controllers: AbortController[] = []
-afterEach(async () => {
-  controllers.splice(0).forEach(controller => controller.abort())
-  await new Promise(resolveTimer => setTimeout(resolveTimer, 150))
-  await Promise.all(roots.splice(0).map(root => rm(root, { force: true, recursive: true, maxRetries: 5, retryDelay: 100 })))
-})
+registerLspFixtureTeardown(roots, controllers)
 
 it('rejects UNC paths and remote file URLs before any filesystem lookup', () => {
   expect(localFilePath('file://files.example/share/a.ts')).toBeUndefined()

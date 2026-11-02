@@ -134,5 +134,6 @@ it.each([
     expect(stage).toBe(3)
     expect((await readFile(join(cwd, 'feature.test.mjs'), 'utf8')).startsWith(original)).toBe(true)
   } finally { await host.close(); await rm(cwd, { recursive: true, force: true }) }
-// Three real cold Windows launches plus receipt checks and sandbox cleanup.
-}, process.platform === 'win32' ? 720_000 : 10_000)
+// Three actual cold launches plus durable receipts and sandbox cleanup.
+// macOS must not use the generic 10s unit-test cap for this integration.
+}, process.platform === 'win32' ? 720_000 : process.platform === 'darwin' ? 45_000 : 10_000)

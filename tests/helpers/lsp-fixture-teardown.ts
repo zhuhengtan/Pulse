@@ -1,0 +1,37 @@
+import { afterEach, beforeEach, expect } from 'vitest'
+import cp from 'node:child_process'
+import { rm } from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
+import { fileURLToPath } from 'node:url'
+
+/** Observe only these fixtures' fixed LSP sidecars; never kill unrelated PIDs. */
+export function registerLspFixtureTeardown(roots: string[], controllers: AbortController[]): void {
+  const worker = fileURLToPath(new URL('../../packages/server/src/lsp/worker.cjs', import.meta.url))
+  const closing = new Set<Promise<void>>()
+  let previous: typeof cp.spawn
+  beforeEach(() => {
+    previous = cp.spawn
+    cp.spawn = function (file: string, args: string[], options: any) {
+      const child = Reflect.apply(previous, cp, [file, args, options])
+      if (file === process.execPath && Array.isArray(args) && args.includes(worker)) {
+        const closed = new Promise<void>(resolve => child.once('close', () => { closing.delete(closed); resolve() }))
+        closing.add(closed)
+      }
+      return child
+    } as typeof cp.spawn
+    syncBuiltinESMExports()
+  })
+  afterEach(async () => {
+    controllers.splice(0).forEach(controller => controller.abort())
+    try {
+      // A fixed 150ms sleep is shorter than the Windows helper's 250ms grace.
+      // Wait for actual close before removing a still-owned current directory.
+      await Promise.all([...closing])
+      expect(closing.size).toBe(0)
+      await Promise.all(roots.splice(0).map(root => rm(root, { force: true, recursive: true, maxRetries: 5, retryDelay: 100 })))
+    } finally {
+      cp.spawn = previous
+      syncBuiltinESMExports()
+    }
+  })
+}

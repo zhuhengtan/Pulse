@@ -1,5 +1,6 @@
-import { afterEach, expect, it } from 'vitest'
-import { mkdtemp, readFile, writeFile, rm, copyFile } from 'node:fs/promises'
+import { expect, it } from 'vitest'
+import { mkdtemp, readFile, writeFile, copyFile } from 'node:fs/promises'
+import { registerLspFixtureTeardown } from './helpers/lsp-fixture-teardown.js'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { LspService, registerLspTools, lspTemplates } from '../packages/server/src/lsp/index.js'
@@ -8,7 +9,7 @@ import { createLocalHost } from '../packages/server/src/index.js'
 import { runShell } from '@hunterzhu/pulse-adapters'
 import { ToolRegistry } from '@hunterzhu/pulse-tool-sdk'
 const roots:string[]=[], controllers:AbortController[]=[]
-afterEach(async()=>{controllers.splice(0).forEach(c=>c.abort());await new Promise(r=>setTimeout(r,150));await Promise.all(roots.splice(0).map(root=>rm(root,{force:true,recursive:true})))})
+registerLspFixtureTeardown(roots, controllers)
 async function fixture(mode=''){
  const root=await mkdtemp(join(tmpdir(),'pulse-lsp-'));roots.push(root);const controller=new AbortController();controllers.push(controller)
  await copyFile(resolve('tests/fixtures/lsp/server.cjs'),join(root,'server.cjs'));await writeFile(join(root,'a.ts'),'const a=1\n')
@@ -28,6 +29,7 @@ it('uses real sandboxed stdio, filters escapes, versions changes, reuses process
  expect(JSON.stringify(await q('diagnostics'))).toContain('v1');await writeFile(join(f.root,'a.ts'),'const a=2\n');expect(JSON.stringify(await q('diagnostics'))).toContain('v2')
  expect((await q('symbols')).items).toEqual(first.items)
  const shell=await runShell(process.execPath,['-e','console.log("parallel")'],{cwd:f.root,timeoutMs:10000});expect(shell.stdout).toContain('parallel')
+ expect(shell.code).toBe(0);expect(shell.aborted).toBe(false);expect(shell.timedOut).toBe(false)
  await expect(readFile(join(f.root,'unauthorized.txt'))).rejects.toThrow()
 },process.platform === 'win32' ? 480000 : 45000)
 it('reports unavailable without installation, and rejects workspace escape',async()=>{
