@@ -55,7 +55,8 @@ jobs:
   windows:
     name: windows-${{ matrix.profile }}
     strategy:
-      fail-fast: true
+      # Keep first-failure evidence from every independent VM. Each VM still bails on its first failed test.
+      fail-fast: false
       max-parallel: 4
       matrix:
         profile: [common, tests-1, tests-2, tests-3, tests-4]
@@ -90,6 +91,7 @@ jobs:
         timeout-minutes: 150
         shell: pwsh
         run: |
+          $env:PULSE_CI_SRT_LOG = Join-Path $env:RUNNER_TEMP 'pulse-native-srt.jsonl'
           if ($env:CI_PROFILE -eq 'common') {
             node scripts/ci/local.mjs --windows-common
           } else {
@@ -97,6 +99,15 @@ jobs:
             node scripts/ci/windows-shard.mjs $shard
           }
           exit $LASTEXITCODE
+      - name: Retain bounded native sandbox phase evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $trace = Join-Path $env:RUNNER_TEMP 'pulse-native-srt.jsonl'
+          if (Test-Path -LiteralPath $trace) {
+            try { Get-Content -LiteralPath $trace -Tail 400 -ErrorAction Stop }
+            catch { Write-Host 'Native trace unavailable; required test status remains authoritative.' }
+          }
       - name: Remove Windows shell sandbox
         if: always() && steps.windows-sandbox.outcome == 'success'
         run: pnpm --filter @hunterzhu/pulse-adapters exec srt windows-uninstall
