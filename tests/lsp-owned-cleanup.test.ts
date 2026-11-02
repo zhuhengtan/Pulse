@@ -125,7 +125,7 @@ it.each([false, true])('handles scripted helper EOF before process exit without 
   await writeFile(join(root, 'a.ts'), 'const a=1\n')
   // A real stdio pipe with a scripted peer, not a real language server/sandbox.
   const worker = fileURLToPath(new URL('../packages/server/src/lsp/worker.cjs', import.meta.url))
-  await writeFile(script, `const output=require(${JSON.stringify(worker)}).createProtocolOutput();let bytes=Buffer.alloc(0),done=false;
+  await writeFile(script, `const output=require(${JSON.stringify(worker)}).createProtocolOutput();process.stdout.write('helper diagnostics are not RPC');let bytes=Buffer.alloc(0),done=false;
 const send=(id,result)=>{const body=Buffer.from(JSON.stringify({jsonrpc:'2.0',id,result}));output.write(Buffer.concat([Buffer.from('Content-Length: '+body.length+'\\r\\n\\r\\n'),body]))};
 process.on('SIGTERM',()=>{});
 process.stdin.on('end',()=>{if(done)setTimeout(()=>process.exit(0),1000)});
@@ -147,7 +147,7 @@ process.stdin.on('data',chunk=>{bytes=Buffer.concat([bytes,chunk]);for(;;){const
     else await expect(query()).rejects.toThrow('LSP_SERVER_UNAVAILABLE')
     expect(children).toHaveLength(1)
     expect(children[0]!.exitCode).toBeNull()
-    const stdout = children[0]!.stdout!
+    const stdout = children[0]!.stdio[3] as import('node:stream').Readable
     if (!stdout.readableEnded) await new Promise<void>(done => stdout.once('end', done))
     await new Promise(resolve => setTimeout(resolve, LSP_HELPER_EXIT_GRACE_MS + 100))
     expect(children[0]!.exitCode).toBeNull()

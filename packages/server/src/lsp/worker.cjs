@@ -3,12 +3,10 @@
 // Keep the trusted helper HOME for read-deny computation. Only the target's HOME
 // is replaced by runShell. No user config/provider module is loaded here.
 function createProtocolOutput() {
-  // Node's standard stdout deliberately does not close its descriptor. Own a
-  // normal pipe stream instead, so flushing/destroying it produces Windows EOF
-  // while this fixed helper continues its mandatory native cleanup.
-  const output = new (require('node:net').Socket)({ fd: 1, readable: false, writable: true })
-  Object.defineProperty(process, 'stdout', { configurable: true, enumerable: true, value: output })
-  return output
+  // Windows libuv duplicates stdio descriptors 0-2 and retains the originals.
+  // This dedicated Host pipe is fully owned: closing it exposes protocol EOF
+  // while ordinary stdout and mandatory native cleanup can remain alive.
+  return new (require('node:net').Socket)({ fd: 3, readable: false, writable: true })
 }
 
 async function main() {

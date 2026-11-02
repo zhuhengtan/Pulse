@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { readFile, realpath } from 'node:fs/promises'
 import { extname, posix, win32 } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import type { Readable } from 'node:stream'
 import { z } from 'zod'
 import { defineTool, type ToolRegistry, type ToolContext } from '@hunterzhu/pulse-tool-sdk'
 import { resolveShellIdentity, windowsSystemExecutable } from '@hunterzhu/pulse-adapters'
@@ -182,15 +183,17 @@ class Connection {
     const env: NodeJS.ProcessEnv = {}
     for (const key of ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'LANG', 'LC_ALL', 'PNPM_HOME', 'TMPDIR', 'TMP', 'TEMP']) if (process.env[key] !== undefined) env[key] = process.env[key]
     const spec = Buffer.from(JSON.stringify({ root: this.root, command: this.config.command, args: this.config.args ?? [], ...(this.config.readRoots ? { readRoots: this.config.readRoots } : {}), identity })).toString('base64')
-    const child = this.child = spawn(process.execPath, [fileURLToPath(new URL('./worker.cjs', import.meta.url)), spec], { cwd: this.root, env, shell: false, windowsHide: true, stdio: 'pipe' })
+    const child = this.child = spawn(process.execPath, [fileURLToPath(new URL('./worker.cjs', import.meta.url)), spec], { cwd: this.root, env, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] })
     this.ownedPid = child.pid
     const parser = new LspFrames(message => this.message(message))
     child.stdin.on('error', () => this.close())
     child.stderr.on('data', () => {})
-    child.stdout.on('data', chunk => { try { parser.push(chunk) } catch { this.close() } })
+    child.stdout.on('data', () => {})
+    const output = child.stdio[3] as Readable
+    output.on('data', chunk => { try { parser.push(chunk) } catch { this.close() } })
     // The RPC transport may end before the helper finishes native cleanup.
-    child.stdout.once('end', () => this.close(true))
-    child.stdout.once('error', () => this.close())
+    output.once('end', () => this.close(true))
+    output.once('error', () => this.close())
     child.once('error', () => this.close())
     child.once('close', () => { this.ownedPid = undefined; this.close() })
     const initial = await this.request('initialize', { processId: null, rootUri: pathToFileURL(this.root).href, workspaceFolders: [{ uri: pathToFileURL(this.root).href, name: 'workspace' }], capabilities: { textDocument: { definition: { linkSupport: true }, diagnostic: { dynamicRegistration: false } } }, initializationOptions: this.config.initializationOptions ?? {} }, this.lifetime, process.platform === 'win32' ? 240000 : 30000)
