@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { JsonValue, RuntimeState } from '../core/types.js'
 import type { Mutation } from '../core/mutations.js'
-import { apply } from '../core/mutations.js'
+import { apply, forkRuntimeStateForAdmission } from '../core/mutations.js'
 
 export interface MutationLogEntry {
   seq: number
@@ -144,7 +144,9 @@ export function commitMutationTransaction(state: RuntimeState, log: MutationLog,
   const existing = log.findTransaction(transactionId)
   if (existing) return existing
   const transactionalMutations = mutations.map((mutation) => mutation.op === 'appendEvent' && mutation.event.txId === undefined ? { ...mutation, event: { ...mutation.event, txId: transactionId } } : mutation)
-  const candidate = structuredClone(state)
+  // Admission and transaction preflight share the same isolated apply surface;
+  // historical payloads need not be deep-cloned for every new transaction.
+  const candidate = forkRuntimeStateForAdmission(state, transactionalMutations)
   apply(candidate, transactionalMutations, { sessionId, timestamp: committedAt })
   const entry = log.prepareAppend(transactionId, transactionalMutations, committedAt)
   apply(state, cloneMutations(entry.mutations), { sessionId, timestamp: committedAt })

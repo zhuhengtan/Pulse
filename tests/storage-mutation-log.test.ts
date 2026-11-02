@@ -101,6 +101,42 @@ describe('mutation log and replay', () => {
     expect(log.size).toBe(0)
   })
 
+  it.each(['apply', 'prepare'] as const)('isolates live records and visibility when %s fails after in-place mutations', (failure) => {
+    const state = createRuntimeState()
+    const { agent, root } = createAgent(state, 'atomic', { programId: 'p', programVersion: '1', step: 'start', locals: {} })
+    root.visibleResultRefs = new Set(['existing'])
+    const before = structuredClone(state)
+    const originalVersions = agent.globalVersions
+    const originalContext = root.context
+    const originalRefs = root.visibleResultRefs
+    const log = new MutationLog()
+    const mutations = [
+      { op: 'setGlobal' as const, agentId: agent.id, version: 1, value: { next: true }, metadata: { privacy: 'local_only' as const } },
+      { op: 'setLaneContext' as const, laneId: root.id, version: 1, value: { updated: true } },
+      { op: 'publishFinding' as const, record: { id: 'finding-7', kind: 'finding' as const, producer: { kind: 'lane' as const, id: root.id }, value: { note: true }, statement: 'note', evidenceRefs: [], agentId: agent.id, laneId: root.id, privacy: 'public' as const, derivedFrom: [] } },
+      { op: 'appendEvent' as const, event: { type: 'atomic.event' } },
+    ]
+    const invalid = failure === 'apply'
+      ? { op: 'setGlobal', agentId: 'missing', version: 1, value: {} } as const
+      : { op: 'setNow', now: (() => 1) } as never
+    expect(() => commitMutationTransaction(state, log, 'atomic', [...mutations, invalid])).toThrow()
+    expect(state).toEqual(before)
+    expect(agent.globalVersions).toBe(originalVersions)
+    expect(root.context).toBe(originalContext)
+    expect(root.visibleResultRefs).toBe(originalRefs)
+    expect(log.snapshot()).toEqual(new MutationLog().snapshot())
+
+    // The rejected identity/sequence remains usable, and cold replay is exact.
+    expect(commitMutationTransaction(state, log, 'atomic', mutations).seq).toBe(1)
+    const committed = structuredClone(state)
+    const restoredLog = MutationLog.fromSnapshot(JSON.parse(JSON.stringify(log.snapshot())))
+    restoredLog.replay(before)
+    expect(before).toEqual(committed)
+    expect(commitMutationTransaction(state, log, 'atomic', mutations).seq).toBe(1)
+    expect(state).toEqual(committed)
+    expect(log.size).toBe(1)
+  })
+
   it('does not consume a log sequence when mutation cloning fails', () => {
     const log = new MutationLog()
     const invalid = { op: 'setNow', now: (() => 1) } as never

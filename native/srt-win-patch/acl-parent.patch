@@ -1,6 +1,5 @@
 diff --git a/vendor/srt-win-src/ci/smoke-acl-parent.mjs b/vendor/srt-win-src/ci/smoke-acl-parent.mjs
 new file mode 100644
-index 000000000..2d44f2c42
 --- /dev/null
 +++ b/vendor/srt-win-src/ci/smoke-acl-parent.mjs
 @@ -0,0 +1,330 @@
@@ -335,10 +334,9 @@ index 000000000..2d44f2c42
 +}
 +if (testFailure) throw testFailure
 diff --git a/vendor/srt-win-src/ci/smoke-exec.ps1 b/vendor/srt-win-src/ci/smoke-exec.ps1
-index 7321b9a8b..fce766962 100644
 --- a/vendor/srt-win-src/ci/smoke-exec.ps1
 +++ b/vendor/srt-win-src/ci/smoke-exec.ps1
-@@ -575,7 +575,7 @@ try {
+@@ -606,7 +606,7 @@
    Write-Host 'G2 ok: DENY ACE + working-tree grant compose — sibling readable, stamped file denied'
 
    # ── G3: parent-FDC DENY — child cannot del/ren the stamped file ──
@@ -348,7 +346,6 @@ index 7321b9a8b..fce766962 100644
    # parent inherits an allow-FDC the child has no path through it.
    $r = RExec @('--', $cmd, '/c', "del `"$secret`"")
 diff --git a/vendor/srt-win-src/src/acl.rs b/vendor/srt-win-src/src/acl.rs
-index 0efb5956f..1335b309b 100644
 --- a/vendor/srt-win-src/src/acl.rs
 +++ b/vendor/srt-win-src/src/acl.rs
 @@ -9,7 +9,7 @@
@@ -369,7 +366,16 @@ index 0efb5956f..1335b309b 100644
  //!
  //! The PROTECTED allow-lists in [`set_path_dacl_from_sddl`]'s
  //! callers are the ONE remaining `PROTECTED` consumer — they
-@@ -619,8 +621,8 @@ pub fn set_handle_dacl_from_sddl(
+@@ -50,7 +52,7 @@
+     FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
+ };
+ use windows::Win32::System::SystemServices::{
+-    ACCESS_DENIED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
++    ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
+ };
+
+ use crate::sid::LocalPsid;
+@@ -619,8 +621,8 @@
  // rights on real-user-owned files. `acl grant` adds an inheritable
  // ALLOW ACE for the sandbox user's SID on a path (typically the
  // working-tree root) so the child can read/write there; `acl stamp
@@ -380,7 +386,7 @@ index 0efb5956f..1335b309b 100644
  // can NOT read/write/delete it even when an inherited
  // `BUILTIN\Users` ACE would otherwise allow. Both are ADDITIVE
  // (the path keeps its own explicit ACEs and inheritance);
-@@ -650,18 +652,19 @@ pub enum DenyMask {
+@@ -650,18 +652,19 @@
  /// One explicit ACE the sandbox user holds on a path. The
  /// separate-user FS model is entirely additive: `acl grant` adds
  /// ALLOW ACEs, `acl stamp --sandbox-user-sid` adds DENY ACEs (plus
@@ -403,7 +409,7 @@ index 0efb5956f..1335b309b 100644
      DenyFdc,
      /// `(D;;DELETE;;;<sb>)` — object-only (`NO_INHERIT`) DELETE deny
      /// on a placeholder INTERMEDIATE directory. Blocks the sandbox
-@@ -767,19 +770,29 @@ pub struct SbAceSet {
+@@ -767,32 +770,183 @@
 
  impl SbAceSet {
      /// The set's entries as [`NewAce`]s for `sid`, in canonical
@@ -438,10 +444,11 @@ index 0efb5956f..1335b309b 100644
          }
          if let Some(m) = self.grant {
              v.push(NewAce::Allow(sid, m.bits(), OICI));
-@@ -788,11 +801,110 @@ impl SbAceSet {
+         }
+         v
      }
- }
-
++}
++
 +/// Update only object-local sandbox ACEs without walking the subtree.
 +///
 +/// `SetNamedSecurityInfoW`, even with only a non-inheritable ACE
@@ -452,7 +459,7 @@ index 0efb5956f..1335b309b 100644
 +/// sandbox ACE is being added, changed or removed; in particular,
 +/// old OICI parent-FDC ACEs must take the propagating cleanup path.
 +/// https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo
-+fn try_apply_object_aces(path: &str, sid: &LocalPsid, set: SbAceSet) -> Result<bool> {
++fn try_apply_object_aces(path: &str, sid: &LocalPsid, set: SbAceSet, object_change: bool) -> Result<bool> {
 +    use windows::Win32::Security::Authorization::{GetSecurityInfo, SetSecurityInfo};
 +    use windows::Win32::Storage::FileSystem::{
 +        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -463,7 +470,7 @@ index 0efb5956f..1335b309b 100644
 +
 +    // Grants and full denies must still converge the subtree, even
 +    // if the root ACE already matches (descendants may have drifted).
-+    if set.grant.is_some() || set.deny.is_some() {
++    if !object_change && (set.grant.is_some() || set.deny.is_some()) {
 +        return Ok(false);
 +    }
 +    let name = wstr(path);
@@ -507,12 +514,39 @@ index 0efb5956f..1335b309b 100644
 +    )?;
 +    let sd = OwnedSd::from_raw(raw_sd);
 +    let protected = sd_dacl_protected(&sd)?;
++    if object_change {
++        // A parent-FDC/delete-only ledger mutation can coexist with a live
++        // grant/deny. Rewriting that unchanged inheritable state by name would
++        // propagate it through the whole tree on every sibling mutation.
++        // Require exact explicit ACE masks, flags, order and multiplicity;
++        // legacy OICI FDC and any changed/unknown inheritable ACE fall back.
++        let mut actual = Vec::new();
++        filter_aces(old, |hdr, body| {
++            if hdr.AceFlags & INHERITED_ACE == 0
++                && ace_sid_is(body, sid.as_bytes())
++                && hdr.AceFlags & OICI.0 as u8 != 0
++            {
++                actual.push((hdr.AceType, hdr.AceFlags, u32::from_le_bytes([body[4], body[5], body[6], body[7]])));
++            }
++            false
++        })?;
++        let mut expected = Vec::new();
++        if let Some(mask) = set.deny {
++            expected.push((ACCESS_DENIED_ACE_TYPE as u8, OICI.0 as u8, mask.bits() | Mask::FILE_DELETE_CHILD.bits()));
++        }
++        if let Some(mask) = set.grant {
++            expected.push((ACCESS_ALLOWED_ACE_TYPE as u8, OICI.0 as u8, mask.bits()));
++        }
++        if actual != expected {
++            return Ok(false);
++        }
++    }
 +    let mut needs_propagation = false;
 +    let kept = filter_aces(old, |hdr, body| {
 +        let inherited = hdr.AceFlags & INHERITED_ACE != 0;
 +        let sandbox = ace_sid_is(body, sid.as_bytes());
 +        needs_propagation |=
-+            (!inherited && sandbox && hdr.AceFlags & OICI.0 as u8 != 0) || (protected && inherited);
++            (!object_change && !inherited && sandbox && hdr.AceFlags & OICI.0 as u8 != 0) || (protected && inherited);
 +        inherited || !sandbox
 +    })?;
 +    if needs_propagation {
@@ -540,6 +574,21 @@ index 0efb5956f..1335b309b 100644
 +    Ok(true)
 +}
 +
++/// Converge an explicitly object-local ledger mutation (FDC or DELETE only).
++/// Returns true only when the non-propagating writer was used. A changed or
++/// legacy inheritable ACE always takes the ordinary full convergence path.
++/// Grant/deny operations must call `apply_sandbox_aces`, even if masks match,
++/// so they retain their descendant-convergence semantics after drift.
++pub fn apply_sandbox_object_aces(canonical_path: &str, sandbox_sid: &str, set: SbAceSet) -> Result<bool> {
++    let sid = LocalPsid::from_string(sandbox_sid)
++        .with_context(|| format!("parse sandbox SID '{sandbox_sid}'"))?;
++    if try_apply_object_aces(canonical_path, &sid, set, true)? {
++        return Ok(true);
++    }
++    apply_sandbox_aces(canonical_path, sandbox_sid, set)?;
++    Ok(false)
+ }
+
  /// Converge `canonical_path`'s explicit ACEs for `sandbox_sid` to
  /// exactly `set`. Idempotent — every existing explicit ACE for the
  /// SID (allow AND deny) is dropped, then `set`'s entries are
@@ -551,21 +600,20 @@ index 0efb5956f..1335b309b 100644
  /// `SetNamedSecurityInfoW` without `PROTECTED_` re-derives them from
  /// the parent. A `SE_DACL_PROTECTED` DACL (inheritance deliberately
  /// severed — its ACEs are normally all explicit, so nothing is
-@@ -816,6 +928,9 @@ impl SbAceSet {
+@@ -816,6 +970,9 @@
  pub fn apply_sandbox_aces(canonical_path: &str, sandbox_sid: &str, set: SbAceSet) -> Result<()> {
      let sid = LocalPsid::from_string(sandbox_sid)
          .with_context(|| format!("parse sandbox SID '{sandbox_sid}'"))?;
-+    if try_apply_object_aces(canonical_path, &sid, set)? {
++    if try_apply_object_aces(canonical_path, &sid, set, false)? {
 +        return Ok(());
 +    }
      let sid_bytes = sid.as_bytes();
      // 1. Read the current DACL and its protection state. `sd` owns
      //    the buffer `old`/`keep` point into; it's freed after step
 diff --git a/vendor/srt-win-src/src/cli.rs b/vendor/srt-win-src/src/cli.rs
-index 25c32ff34..f5a86da66 100644
 --- a/vendor/srt-win-src/src/cli.rs
 +++ b/vendor/srt-win-src/src/cli.rs
-@@ -278,7 +278,7 @@ enum UserCmd {
+@@ -278,7 +278,7 @@
  enum AclCmd {
      /// Read `{denyRead:[…], denyWrite:[…]}` from stdin and add an
      /// additive `(D;OICI;mask;;;<sid>)` ACE for the sandbox user on
@@ -575,7 +623,6 @@ index 25c32ff34..f5a86da66 100644
      /// Refcounted per holder; `acl restore` removes the ACE when
      /// the last holder releases. Globs are rejected; directory
 diff --git a/vendor/srt-win-src/src/state_db.rs b/vendor/srt-win-src/src/state_db.rs
-index d3778f4e6..78c39d150 100644
 --- a/vendor/srt-win-src/src/state_db.rs
 +++ b/vendor/srt-win-src/src/state_db.rs
 @@ -39,7 +39,7 @@
@@ -587,7 +634,76 @@ index d3778f4e6..78c39d150 100644
  //! between leaves a row whose ACE hasn't been written; the next
  //! call re-derives and reapplies.
 
-@@ -1406,6 +1406,162 @@ mod tests {
+@@ -799,7 +799,7 @@
+                 eff.as_str()
+             ])
+             .context("UPSERT working_aces")?;
+-        recompose_at(&self.conn, canon, sandbox_sid)?;
++        recompose_at(&self.conn, canon, sandbox_sid, matches!(want, SbAce::DenyFdc | SbAce::DenyDelete))?;
+         Ok(AceWitness {
+             canon: canon.to_string(),
+             ace: eff,
+@@ -875,7 +875,7 @@
+         let want_id = FileId::from_bytes(&fid)?;
+         match identity_gate(canon, want_id) {
+             IdGate::Match => {
+-                recompose_at(&self.conn, canon, sandbox_sid)?;
++                recompose_at(&self.conn, canon, sandbox_sid, kind == "deny_fdc" || kind == "deny_delete")?;
+                 Ok(match new_eff {
+                     Some(e) if e.as_str() == stored => AceRelease::StillHeld,
+                     Some(_) => AceRelease::Downgraded,
+@@ -895,7 +895,7 @@
+                             "srt-win: grant '{canon}': file_id moved \
+                              to '{at}'; revoking there"
+                         );
+-                        recompose_at(&self.conn, &at, sandbox_sid)?;
++                        recompose_at(&self.conn, &at, sandbox_sid, false)?;
+                         AceRelease::Relocated { moved_to: at }
+                     }
+                     None => {
+@@ -1018,7 +1018,7 @@
+ /// for sandbox-user ACE state — every add/drop/crash-recover routes
+ /// here so a path with both a grant AND a deny (or a parent that is
+ /// both granted and `deny_fdc`'d) is handled consistently.
+-fn recompose_at(conn: &Connection, canon: &str, sandbox_sid: &str) -> Result<()> {
++fn recompose_at(conn: &Connection, canon: &str, sandbox_sid: &str, object_change: bool) -> Result<()> {
+     let rows: Vec<(String, String)> = query_vec(
+         conn,
+         "SELECT kind, mask FROM working_aces \
+@@ -1044,8 +1044,12 @@
+     if crate::install::ambient_deny_recorded(canon) {
+         set.deny.get_or_insert(acl::DenyMask::WriteDeny);
+     }
+-    acl::apply_sandbox_aces(canon, sandbox_sid, set)
+-        .with_context(|| format!("recompose '{canon}' ({set:?})"))
++    let applied = if object_change {
++        acl::apply_sandbox_object_aces(canon, sandbox_sid, set).map(|_| ())
++    } else {
++        acl::apply_sandbox_aces(canon, sandbox_sid, set)
++    };
++    applied.with_context(|| format!("recompose '{canon}' ({set:?})"))
+ }
+
+ /// Sealed proof that [`Locked::apply_aces`] converged `canon` to
+@@ -1172,7 +1176,7 @@
+             let want = FileId::from_bytes(&fid)?;
+             match identity_gate(&canon, want) {
+                 IdGate::Match => {
+-                    if let Err(e) = recompose_at(conn, &canon, &sb) {
++                    if let Err(e) = recompose_at(conn, &canon, &sb, kind == "deny_fdc" || kind == "deny_delete") {
+                         eprintln!(
+                             "srt-win: orphaned {kind} '{canon}': \
+                              recompose failed ({e:#})"
+@@ -1182,7 +1186,7 @@
+                 }
+                 IdGate::Mismatch if kind == "grant" => {
+                     if let Some(at) = path_id::locate_by_file_id(&want) {
+-                        let _ = recompose_at(conn, &at, &sb);
++                        let _ = recompose_at(conn, &at, &sb, false);
+                     }
+                 }
+                 _ => {} // gone/substituted — nothing on disk to do
+@@ -1406,6 +1410,162 @@
          });
      }
 
@@ -752,10 +868,9 @@ index d3778f4e6..78c39d150 100644
          let ct = process_create_time(unsafe { GetCurrentProcess() }).unwrap();
 diff --git a/vendor/srt-win-src/tests/acl_parent_scope.rs b/vendor/srt-win-src/tests/acl_parent_scope.rs
 new file mode 100644
-index 000000000..49cd975db
 --- /dev/null
 +++ b/vendor/srt-win-src/tests/acl_parent_scope.rs
-@@ -0,0 +1,549 @@
+@@ -0,0 +1,610 @@
 +//! Parent deletion protection must not spread over unrelated sibling trees.
 +//! All ACL changes are confined to a fresh owned fixture. No sandbox account,
 +//! elevation, WFP installation or machine-wide state is needed.
@@ -766,7 +881,7 @@ index 000000000..49cd975db
 +use std::time::{SystemTime, UNIX_EPOCH};
 +
 +use srt_win::acl::{
-+    DenyMask, GrantMask, Mask, SbAceSet, apply_sandbox_aces, set_path_dacl_from_sddl,
++    DenyMask, GrantMask, Mask, SbAceSet, apply_sandbox_aces, apply_sandbox_object_aces, set_path_dacl_from_sddl,
 +};
 +use srt_win::sid::LocalPsid;
 +use srt_win::util::{OwnedSd, from_pwstr, local_free, pcwstr, wstr};
@@ -1303,6 +1418,67 @@ index 000000000..49cd975db
 +            restore.as_secs_f64() * 1000.0,
 +            paths.len()
 +        );
++    }
++}
++
++
++#[test]
++fn object_parent_changes_preserve_live_inheritable_masks_without_propagation() {
++    for held in [
++        SbAceSet { grant: Some(GrantMask::ReadOnly), ..Default::default() },
++        SbAceSet { deny: Some(DenyMask::WriteDeny), ..Default::default() },
++        SbAceSet { grant: Some(GrantMask::ReadOnly), deny: Some(DenyMask::WriteDeny), ..Default::default() },
++    ] {
++        let fixture = Fixture::new();
++        let subtree = fixture.0.join("unrelated");
++        std::fs::create_dir(&subtree).unwrap();
++        let child = subtree.join("sentinel");
++        std::fs::write(&child, "unchanged").unwrap();
++        let parent = fixture.0.to_str().unwrap();
++        apply_sandbox_aces(parent, TEST_SID, held).unwrap();
++        let before_root = snapshot(&fixture.0);
++        let before_subtree = snapshot(&subtree);
++        let before_child = snapshot(&child);
++        let object = SbAceSet { deny_fdc: true, ..held };
++        assert!(apply_sandbox_object_aces(parent, TEST_SID, object).unwrap(), "unchanged live grant/deny must use object-local writer");
++        assert_eq!(snapshot(&subtree), before_subtree);
++        assert_eq!(snapshot(&child), before_child);
++        assert!(sandbox_aces(&fixture.0).iter().any(|(kind, flags, mask)| *kind == 1 && *flags == 0 && *mask == Mask::FILE_DELETE_CHILD.bits()));
++        let future = subtree.join("future");
++        std::fs::write(&future, "future").unwrap();
++        assert!(!sandbox_aces(&future).iter().any(|(kind, _, mask)| *kind == 1 && *mask == Mask::FILE_DELETE_CHILD.bits()), "object FDC must not inherit");
++        assert!(apply_sandbox_object_aces(parent, TEST_SID, held).unwrap());
++        assert_eq!(snapshot(&fixture.0), before_root);
++        assert_eq!(snapshot(&subtree), before_subtree);
++        assert_eq!(snapshot(&child), before_child);
++        assert_eq!(std::fs::read_to_string(&child).unwrap(), "unchanged");
++        apply_sandbox_aces(parent, TEST_SID, SbAceSet::default()).unwrap();
++    }
++}
++
++#[test]
++fn object_hint_cannot_skip_changed_masks_or_legacy_inherited_parent_cleanup() {
++    let fixture = Fixture::new();
++    let child = fixture.0.join("child");
++    std::fs::write(&child, "original").unwrap();
++    let parent = fixture.0.to_str().unwrap();
++    apply_sandbox_aces(parent, TEST_SID, SbAceSet { grant: Some(GrantMask::ReadOnly), ..Default::default() }).unwrap();
++    let modified = SbAceSet { grant: Some(GrantMask::Modify), deny_fdc: true, ..Default::default() };
++    assert!(!apply_sandbox_object_aces(parent, TEST_SID, modified).unwrap(), "grant upgrades must propagate");
++    assert!(sandbox_aces(&child).iter().any(|(kind, flags, mask)| *kind == 0 && *flags & 0x10 != 0 && *mask == Mask::MODIFY_NO_FDC.bits()));
++    let denied = SbAceSet { deny: Some(DenyMask::ReadDeny), ..modified };
++    assert!(!apply_sandbox_object_aces(parent, TEST_SID, denied).unwrap(), "new denies must propagate");
++    {
++        let _impersonation = Impersonation::begin();
++        assert!(std::fs::read_to_string(&child).is_err());
++    }
++    apply_sandbox_aces(parent, TEST_SID, SbAceSet::default()).unwrap();
++    for keep_parent in [false, true] {
++        set_fixture_dacl(&fixture.0, &format!("(D;OICI;0x40;;;{TEST_SID})"));
++        assert!(sandbox_aces(&child).iter().any(|(_, flags, mask)| *flags & 0x10 != 0 && *mask == Mask::FILE_DELETE_CHILD.bits()));
++        assert!(!apply_sandbox_object_aces(parent, TEST_SID, SbAceSet { deny_fdc: keep_parent, ..Default::default() }).unwrap(), "legacy inheritable FDC must use full cleanup");
++        assert!(sandbox_aces(&child).is_empty());
++        apply_sandbox_aces(parent, TEST_SID, SbAceSet::default()).unwrap();
 +    }
 +}
 diff --git a/vendor/srt-win-src/src/logon.rs b/vendor/srt-win-src/src/logon.rs

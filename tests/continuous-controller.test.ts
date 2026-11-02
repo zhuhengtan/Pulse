@@ -30,6 +30,9 @@ async function scenario(options: { rounds: number; version?: '56' | '57'; pause?
   const dir = await directory(), ledgerPath = join(dir, 'model-budget.json')
   let ledger = await ModelAttemptBudget.open(ledgerPath, 256)
   let runtime: PulseRuntime, reads = 0, writes = 0, summaries = 0, work = 0, reviews = 0
+  const began = Date.now(), nativeTiming = process.platform === 'win32' && options.rounds === 100
+  let ledgerMs = 0
+  const timing = (phase: string) => { if (nativeTiming) console.info('CONTINUOUS_TIMING ' + JSON.stringify({ phase, elapsedMs: Date.now() - began, reads, writes, summaries, work, used: ledger.used, ledgerMs, effects: runtime?.state.effects.size })) }
   const owners = new Set<string>(), calls: string[] = []
   const stage = { id: 'deliver', kind: 'edit', goal: 'Read the required local fixtures and create result.txt', check: 'result.txt contains the requested result', criterionIds: ['result'], dependsOn: [] }
   const program = buildTaskControllerProgram({ version: options.version ?? '57', system: 'Offline scripted test', toolNames: ['fs.read', 'fs.write', 'ask.choice'], readOnlyToolNames: ['fs.read'], approvalMode: 'auto', maxTurns: 256, modelBudgetView: () => ledger.schedulingView() })
@@ -42,7 +45,9 @@ async function scenario(options: { rounds: number; version?: '56' | '57'; pause?
       reads++
       return { value: { path: input.arguments.path, offset: input.arguments.offset ?? 0, nextOffset: null, hash: contentHash(input.arguments.path), content: `${options.category ?? 'source'} ${input.arguments.path} `.repeat(30) } }
     }
+    const reserveBegan = Date.now()
     await ledger.reserve(effect.key === '$compact-summary' ? 'compaction' : effect.key.startsWith('verify') ? 'verification' : 'work')
+    ledgerMs += Date.now() - reserveBegan
     if (effect.key === '$compact-summary') { summaries++; if (summaries > 200) throw Object.assign(new Error('SUMMARY_LOOP'), { code: 'SUMMARY_LOOP' }); return { value: { text: summaries <= (options.summariesInvalid ?? 0) ? '' : 'Original contract: inspect fixtures and deliver result.txt. Settled reads retained; continue the next unread fixture. Do not repeat writes.', finishReason: 'stop', toolCalls: [] } } }
     if (effect.key.startsWith('plan')) return { value: { tasks: [stage] } }
     const controller = globalState(runtime).taskController, active = controller.tasks.find((t: any) => t.id === controller.activeId)
@@ -50,6 +55,7 @@ async function scenario(options: { rounds: number; version?: '56' | '57'; pause?
     if (effect.key.startsWith('verify-stage')) { reviews++; return { value: { status: writes ? 'passed' : 'blocked', evidenceRefs: active.evidenceRefs.slice(-4), note: writes ? 'Delivered' : 'Missing deliverable' } } }
     if (effect.key.startsWith('verify-task')) { reviews++; return { value: { criteria: [{ criterionId: 'result', status: writes ? 'passed' : 'not_met', evidenceRefs: controller.tasks[0].evidenceRefs.slice(-4), rationale: writes ? 'Settled output' : 'No output' }] } } }
     owners.add(effect.ownerLaneId); work++
+    if (work === 1 || work % 10 === 0) timing('work')
     const call = (name: string, input: any) => ({ value: { text: '', finishReason: 'tool_calls', toolCalls: [{ name, input }] } })
     if (options.pause && reads === 35 && ![...runtime.state.results.values()].some(r => (r.value as any)?.value === 'continue')) return call('ask.choice', { prompt: 'Continue this local fixture?', options: [{ label: 'Continue', value: 'continue' }, { label: 'Stop', value: 'stop' }] })
     if (reads < options.rounds) return call('fs.read', { path: `fixtures/${reads}.txt` })
@@ -71,10 +77,14 @@ async function scenario(options: { rounds: number; version?: '56' | '57'; pause?
   if (options.pause) {
     await expect.poll(() => [...runtime.state.effects.values()].find(e => e.kind === 'human' && !e.outcome), { timeout: 60000 }).toBeTruthy()
     const pending = [...runtime.state.effects.values()].find(e => e.kind === 'human' && !e.outcome)!
+    timing('export-start')
     const saved = runtime.exportPersistence(), used = ledger.used
+    timing('export-finish')
     ledger = await ModelAttemptBudget.open(ledgerPath, 256)
     expect(ledger.used).toBe(used)
+    timing('restore-start')
     runtime = new PulseRuntime({ ...config, persistence: saved, programs: [program] })
+    timing('restore-finish')
     const resumed = runtime.start(agentId)
     sessions.push(resumed)
     await resumed.reply(pending.id, { value: 'continue' })
