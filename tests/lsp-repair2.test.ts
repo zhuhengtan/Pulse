@@ -85,4 +85,4 @@ it('keeps flat symbol names and does not open outside inputs or returned URIs', 
     cp.spawn = spawn
     syncBuiltinESMExports()
   }
-}, 45000)
+}, process.platform === 'win32' ? 180_000 : 45_000)

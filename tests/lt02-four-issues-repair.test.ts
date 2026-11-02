@@ -45,6 +45,8 @@ it('loads shared installed aliases in the actual sandbox while denying sibling s
     const result = await runShell('node', ['probe.mjs'], { cwd, env: { PATH: process.env.PATH }, timeoutMs: 30000 })
     if (process.platform === 'win32') console.info('Dependency boundary fixture:', JSON.stringify({ elapsedMs: Date.now() - began, code: result.code, aborted: result.aborted, timedOut: result.timedOut }))
     expect(result.code, result.stderr + result.stdout).toBe(0)
+    expect(result.aborted).toBe(false)
+    expect(result.timedOut).toBe(false)
     expect(result.stdout).toContain('DEPENDENCY_READ_ONLY_OK')
     expect(await readFile(forbiddenOverwrite, 'utf8')).toBe('original')
   } finally {

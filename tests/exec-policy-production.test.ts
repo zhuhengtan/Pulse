@@ -33,13 +33,20 @@ async function versionRun(options: Partial<LocalHostOptions>, reply?: (run: any,
   } finally { await closeOwnedHost(host) }
 }
 const output = (events: any[]) => JSON.stringify(events.filter(e => e.type === 'observation'))
+// Cold Windows SRT verification, ACL setup and cleanup are outside the tool's
+// process deadline. Measured valid native phases alone exceed the generic 45s.
+const nativeRunTimeout = (runs = 1) => process.platform === 'win32' ? runs * 180_000 : 45_000
+function expectShellSucceeded(events: any[]): void {
+  expect(events.filter(e => e.type === 'observation').map(e => e.data)).toContainEqual(expect.objectContaining({ tool: 'shell.exec', status: 'succeeded' }))
+}
 
 it('enforces a trusted allow through the real ask Host, native sandbox and Node process without an approval popup', async () => {
   const node = await realpath(process.execPath)
   const { events, outcome } = await versionRun({ approvalMode: 'ask', execPolicy: { hostExecutables: { node: [node] }, rules: [{ pattern: ['node', '--version'], decision: 'allow' }] } })
   expect(events.some(e => e.type === 'waiting')).toBe(false)
   expect(outcome.status).toBe('succeeded'); expect(output(events)).toMatch(/v\d+\.\d+/)
-}, 45000)
+  expectShellSucceeded(events)
+}, nativeRunTimeout())
 
 it.each(['ask', 'auto'] as const)('explicit prompt requires a real human response in %s mode and disables remember', async approvalMode => {
   let waiting = 0
@@ -50,7 +57,8 @@ it.each(['ask', 'auto'] as const)('explicit prompt requires a real human respons
     await run.reply(event.data.effectId, { approved: true })
   })
   expect(waiting).toBe(1); expect(output(events)).toMatch(/v\d+\.\d+/)
-}, 45000)
+  expectShellSucceeded(events)
+}, nativeRunTimeout())
 
 it.each(['ask', 'auto', 'read-only'] as const)('forbidden never executes or consumes a true reviewer in %s mode', async approvalMode => {
   const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('UNEXPECTED_MODEL_REQUEST'))
@@ -78,11 +86,13 @@ it('binds permanent approval to the real pending offer and retains unrelated fix
     await run.reply(event.data.effectId, { approved: true, remember: 'permanent', execPolicyToken: policy.token })
   })
   expect(waiting).toBe(1); expect(output(events)).toMatch(/v\d+\.\d+/)
+  expectShellSucceeded(events)
   const saved = JSON.parse(await readFile(path, 'utf8'))
   expect(saved.unrelated.keep).toBe(true); expect(saved.execPolicy.rules).toHaveLength(1)
   const next = await versionRun({ cwd: dir, approvalMode: 'ask', execPolicyConfigPath: path })
   expect(next.events.some(e => e.type === 'waiting')).toBe(false); expect(output(next.events)).toMatch(/v\d+\.\d+/)
-}, 45000)
+  expectShellSucceeded(next.events)
+}, nativeRunTimeout(2))
 
 it('evaluates and validates draft rules through authenticated H5 without spawning a program', async () => {
   const dir = await root(), path = join(dir, 'settings.json')

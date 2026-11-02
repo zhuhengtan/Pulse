@@ -5,8 +5,8 @@
   "archiveSha256": "978b0bacedf88ac441d2c723290a1aba64c85571978ba517fabde68a9455ce90",
   "patchCommit": "26dbcbeaa29e665af25b6685564b3d550d94cf2c",
   "patchUrl": "https://github.com/anthropics/sandbox-runtime/pull/523",
-  "patchSha256": "0ad20b1e10b97ba4f2f00b2249857fcc4fef4a7529d26e93f362be002bfd7ca0",
+  "patchSha256": "000c0d146a7b20816debac1695d92ee610364bfdf98180b80d1b710dae7c66b7",
   "testAdaptation": "Parent SDDL round-trip permits only D:( to D:AI( canonicalization; all owner/group/ACE/protection comparisons remain exact. Unit ACL fixtures use a per-process atomic suffix and verify parallel uniqueness with a frozen clock; ACL and rollback assertions remain unchanged.",
   "stdinForwarding": "Pulse local addition: forward caller stdin after the bounded launch spec; parse spec without buffered prefetch. Native binary/EOF and coalesced-spec regressions retain restricted token, Job, ACL and WFP boundaries.",
-  "objectLocalMutation": "Parent FDC/DELETE-only ledger changes reuse the non-propagating handle writer only when explicit inheritable sandbox ACE masks, flags, order and multiplicity match exactly. Grant/deny mutations and legacy/drifted inheritance still use full convergence."
+  "objectLocalMutation": "Object FDC/DELETE-only changes first verify the exact standard-ACE sandbox prefix, masks, flags, order and multiplicity through a read-only non-reparse handle. An already-exact state needs no write, including when current-directory sharing prevents MAXIMUM_ALLOWED. Missing, drifted, opaque, null-DACL and legacy states retain convergence; grant/deny operations always reconcile descendants."
 }

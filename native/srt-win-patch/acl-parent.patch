@@ -1,5 +1,6 @@
 diff --git a/vendor/srt-win-src/ci/smoke-acl-parent.mjs b/vendor/srt-win-src/ci/smoke-acl-parent.mjs
 new file mode 100644
+index 00000000..2d44f2c4
 --- /dev/null
 +++ b/vendor/srt-win-src/ci/smoke-acl-parent.mjs
 @@ -0,0 +1,330 @@
@@ -334,9 +335,10 @@ new file mode 100644
 +}
 +if (testFailure) throw testFailure
 diff --git a/vendor/srt-win-src/ci/smoke-exec.ps1 b/vendor/srt-win-src/ci/smoke-exec.ps1
+index 3f9dd74c..408ade89 100644
 --- a/vendor/srt-win-src/ci/smoke-exec.ps1
 +++ b/vendor/srt-win-src/ci/smoke-exec.ps1
-@@ -606,7 +606,7 @@
+@@ -606,7 +606,7 @@ try {
    Write-Host 'G2 ok: DENY ACE + working-tree grant compose — sibling readable, stamped file denied'
 
    # ── G3: parent-FDC DENY — child cannot del/ren the stamped file ──
@@ -346,6 +348,7 @@ diff --git a/vendor/srt-win-src/ci/smoke-exec.ps1 b/vendor/srt-win-src/ci/smoke-
    # parent inherits an allow-FDC the child has no path through it.
    $r = RExec @('--', $cmd, '/c', "del `"$secret`"")
 diff --git a/vendor/srt-win-src/src/acl.rs b/vendor/srt-win-src/src/acl.rs
+index 0efb5956..e22df63c 100644
 --- a/vendor/srt-win-src/src/acl.rs
 +++ b/vendor/srt-win-src/src/acl.rs
 @@ -9,7 +9,7 @@
@@ -366,7 +369,7 @@ diff --git a/vendor/srt-win-src/src/acl.rs b/vendor/srt-win-src/src/acl.rs
  //!
  //! The PROTECTED allow-lists in [`set_path_dacl_from_sddl`]'s
  //! callers are the ONE remaining `PROTECTED` consumer — they
-@@ -50,7 +52,7 @@
+@@ -50,7 +52,7 @@ use windows::Win32::Storage::FileSystem::{
      FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
  };
  use windows::Win32::System::SystemServices::{
@@ -375,7 +378,7 @@ diff --git a/vendor/srt-win-src/src/acl.rs b/vendor/srt-win-src/src/acl.rs
  };
 
  use crate::sid::LocalPsid;
-@@ -619,8 +621,8 @@
+@@ -619,8 +621,8 @@ pub fn set_handle_dacl_from_sddl(
  // rights on real-user-owned files. `acl grant` adds an inheritable
  // ALLOW ACE for the sandbox user's SID on a path (typically the
  // working-tree root) so the child can read/write there; `acl stamp
@@ -386,7 +389,7 @@ diff --git a/vendor/srt-win-src/src/acl.rs b/vendor/srt-win-src/src/acl.rs
  // can NOT read/write/delete it even when an inherited
  // `BUILTIN\Users` ACE would otherwise allow. Both are ADDITIVE
  // (the path keeps its own explicit ACEs and inheritance);
-@@ -650,18 +652,19 @@
+@@ -650,18 +652,19 @@ pub enum DenyMask {
  /// One explicit ACE the sandbox user holds on a path. The
  /// separate-user FS model is entirely additive: `acl grant` adds
  /// ALLOW ACEs, `acl stamp --sandbox-user-sid` adds DENY ACEs (plus
@@ -409,7 +412,7 @@ diff --git a/vendor/srt-win-src/src/acl.rs b/vendor/srt-win-src/src/acl.rs
      DenyFdc,
      /// `(D;;DELETE;;;<sb>)` — object-only (`NO_INHERIT`) DELETE deny
      /// on a placeholder INTERMEDIATE directory. Blocks the sandbox
-@@ -767,32 +770,183 @@
+@@ -767,19 +770,29 @@ pub struct SbAceSet {
 
  impl SbAceSet {
      /// The set's entries as [`NewAce`]s for `sid`, in canonical
@@ -444,9 +447,68 @@ diff --git a/vendor/srt-win-src/src/acl.rs b/vendor/srt-win-src/src/acl.rs
          }
          if let Some(m) = self.grant {
              v.push(NewAce::Allow(sid, m.bits(), OICI));
-         }
-         v
+@@ -788,11 +801,216 @@ impl SbAceSet {
      }
+ }
+
++/// A matching object-only state needs no write at all. Unlike MAXIMUM_ALLOWED,
++/// this read-only open also works while a caller pins its current directory
++/// without FILE_SHARE_DELETE. Do not use this shortcut for grant/deny changes:
++/// matching root ACEs do not prove descendant convergence.
++fn object_aces_already_match(path: &str, sid: &LocalPsid, set: SbAceSet) -> Result<bool> {
++    use windows::Win32::Security::Authorization::GetSecurityInfo;
++    use windows::Win32::Storage::FileSystem::{
++        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
++        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
++        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
++        OPEN_EXISTING,
++    };
++    let name = wstr(path);
++    let Ok(handle) = (unsafe {
++        CreateFileW(pcwstr(&name), Mask::READ_CONTROL.bits() | FILE_READ_ATTRIBUTES.0,
++            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, None, OPEN_EXISTING,
++            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, None)
++    }) else { return Ok(false) };
++    let handle = crate::util::OwnedHandle(handle);
++    let mut info = BY_HANDLE_FILE_INFORMATION::default();
++    unsafe { GetFileInformationByHandle(handle.raw(), &mut info) }
++        .with_context(|| format!("GetFileInformationByHandle('{path}')"))?;
++    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
++        bail!("recompose '{path}': refusing a reparse point");
++    }
++    let mut old: *mut ACL = std::ptr::null_mut();
++    let mut raw_sd = PSECURITY_DESCRIPTOR::default();
++    win32_ok(unsafe {
++        GetSecurityInfo(handle.raw(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
++            None, None, Some(&mut old), None, Some(&mut raw_sd))
++    }, &format!("GetSecurityInfo(read-only, '{path}')"))?;
++    let sd = OwnedSd::from_raw(raw_sd);
++    // A null DACL is not an empty DACL; preserve the ordinary convergence path.
++    if old.is_null() { return Ok(false); }
++    let protected = sd_dacl_protected(&sd)?;
++    let mut stray_inherited = false;
++    let mut opaque = false;
++    let mut prefix_is_ours = true;
++    let mut index = 0usize;
++    let mut actual = Vec::new();
++    filter_aces(old, |hdr, body| {
++        let inherited = hdr.AceFlags & INHERITED_ACE != 0;
++        opaque |= hdr.AceType != ACCESS_ALLOWED_ACE_TYPE as u8 && hdr.AceType != ACCESS_DENIED_ACE_TYPE as u8;
++        stray_inherited |= protected && inherited;
++        if !inherited && ace_sid_is(body, sid.as_bytes()) {
++            // Matching masks behind another principal's ALLOW are not enough:
++            // that earlier ALLOW may already satisfy deletion access.
++            prefix_is_ours &= index == actual.len();
++            actual.push((hdr.AceType, hdr.AceFlags, u32::from_le_bytes([body[4], body[5], body[6], body[7]])));
++        }
++        index += 1;
++        false
++    })?;
++    let expected: Vec<_> = set.head_aces(sid.as_psid()).iter().map(|ace| match ace {
++        NewAce::Allow(_, mask, flags) => (ACCESS_ALLOWED_ACE_TYPE as u8, flags.0 as u8, *mask),
++        NewAce::Deny(_, mask, flags) => (ACCESS_DENIED_ACE_TYPE as u8, flags.0 as u8, *mask),
++    }).collect();
++    Ok(!stray_inherited && !opaque && prefix_is_ours && actual == expected)
 +}
 +
 +/// Update only object-local sandbox ACEs without walking the subtree.
@@ -472,6 +534,9 @@ diff --git a/vendor/srt-win-src/src/acl.rs b/vendor/srt-win-src/src/acl.rs
 +    // if the root ACE already matches (descendants may have drifted).
 +    if !object_change && (set.grant.is_some() || set.deny.is_some()) {
 +        return Ok(false);
++    }
++    if object_change && object_aces_already_match(path, sid, set)? {
++        return Ok(true);
 +    }
 +    let name = wstr(path);
 +    let handle = unsafe {
@@ -575,8 +640,9 @@ diff --git a/vendor/srt-win-src/src/acl.rs b/vendor/srt-win-src/src/acl.rs
 +}
 +
 +/// Converge an explicitly object-local ledger mutation (FDC or DELETE only).
-+/// Returns true only when the non-propagating writer was used. A changed or
-+/// legacy inheritable ACE always takes the ordinary full convergence path.
++/// Returns true when the exact object state was already present or the
++/// non-propagating writer was used. A changed or legacy inheritable ACE always
++/// takes the ordinary full convergence path.
 +/// Grant/deny operations must call `apply_sandbox_aces`, even if masks match,
 +/// so they retain their descendant-convergence semantics after drift.
 +pub fn apply_sandbox_object_aces(canonical_path: &str, sandbox_sid: &str, set: SbAceSet) -> Result<bool> {
@@ -587,8 +653,8 @@ diff --git a/vendor/srt-win-src/src/acl.rs b/vendor/srt-win-src/src/acl.rs
 +    }
 +    apply_sandbox_aces(canonical_path, sandbox_sid, set)?;
 +    Ok(false)
- }
-
++}
++
  /// Converge `canonical_path`'s explicit ACEs for `sandbox_sid` to
  /// exactly `set`. Idempotent — every existing explicit ACE for the
  /// SID (allow AND deny) is dropped, then `set`'s entries are
@@ -600,7 +666,7 @@ diff --git a/vendor/srt-win-src/src/acl.rs b/vendor/srt-win-src/src/acl.rs
  /// `SetNamedSecurityInfoW` without `PROTECTED_` re-derives them from
  /// the parent. A `SE_DACL_PROTECTED` DACL (inheritance deliberately
  /// severed — its ACEs are normally all explicit, so nothing is
-@@ -816,6 +970,9 @@
+@@ -816,6 +1034,9 @@ impl SbAceSet {
  pub fn apply_sandbox_aces(canonical_path: &str, sandbox_sid: &str, set: SbAceSet) -> Result<()> {
      let sid = LocalPsid::from_string(sandbox_sid)
          .with_context(|| format!("parse sandbox SID '{sandbox_sid}'"))?;
@@ -611,9 +677,10 @@ diff --git a/vendor/srt-win-src/src/acl.rs b/vendor/srt-win-src/src/acl.rs
      // 1. Read the current DACL and its protection state. `sd` owns
      //    the buffer `old`/`keep` point into; it's freed after step
 diff --git a/vendor/srt-win-src/src/cli.rs b/vendor/srt-win-src/src/cli.rs
+index 25c32ff3..f5a86da6 100644
 --- a/vendor/srt-win-src/src/cli.rs
 +++ b/vendor/srt-win-src/src/cli.rs
-@@ -278,7 +278,7 @@
+@@ -278,7 +278,7 @@ enum UserCmd {
  enum AclCmd {
      /// Read `{denyRead:[…], denyWrite:[…]}` from stdin and add an
      /// additive `(D;OICI;mask;;;<sid>)` ACE for the sandbox user on
@@ -623,6 +690,7 @@ diff --git a/vendor/srt-win-src/src/cli.rs b/vendor/srt-win-src/src/cli.rs
      /// Refcounted per holder; `acl restore` removes the ACE when
      /// the last holder releases. Globs are rejected; directory
 diff --git a/vendor/srt-win-src/src/state_db.rs b/vendor/srt-win-src/src/state_db.rs
+index d3778f4e..b173dd23 100644
 --- a/vendor/srt-win-src/src/state_db.rs
 +++ b/vendor/srt-win-src/src/state_db.rs
 @@ -39,7 +39,7 @@
@@ -634,7 +702,7 @@ diff --git a/vendor/srt-win-src/src/state_db.rs b/vendor/srt-win-src/src/state_d
  //! between leaves a row whose ACE hasn't been written; the next
  //! call re-derives and reapplies.
 
-@@ -799,7 +799,7 @@
+@@ -799,7 +799,7 @@ impl Locked {
                  eff.as_str()
              ])
              .context("UPSERT working_aces")?;
@@ -643,7 +711,7 @@ diff --git a/vendor/srt-win-src/src/state_db.rs b/vendor/srt-win-src/src/state_d
          Ok(AceWitness {
              canon: canon.to_string(),
              ace: eff,
-@@ -875,7 +875,7 @@
+@@ -875,7 +875,7 @@ impl Locked {
          let want_id = FileId::from_bytes(&fid)?;
          match identity_gate(canon, want_id) {
              IdGate::Match => {
@@ -652,7 +720,7 @@ diff --git a/vendor/srt-win-src/src/state_db.rs b/vendor/srt-win-src/src/state_d
                  Ok(match new_eff {
                      Some(e) if e.as_str() == stored => AceRelease::StillHeld,
                      Some(_) => AceRelease::Downgraded,
-@@ -895,7 +895,7 @@
+@@ -895,7 +895,7 @@ impl Locked {
                              "srt-win: grant '{canon}': file_id moved \
                               to '{at}'; revoking there"
                          );
@@ -661,7 +729,7 @@ diff --git a/vendor/srt-win-src/src/state_db.rs b/vendor/srt-win-src/src/state_d
                          AceRelease::Relocated { moved_to: at }
                      }
                      None => {
-@@ -1018,7 +1018,7 @@
+@@ -1018,7 +1018,7 @@ impl Locked {
  /// for sandbox-user ACE state — every add/drop/crash-recover routes
  /// here so a path with both a grant AND a deny (or a parent that is
  /// both granted and `deny_fdc`'d) is handled consistently.
@@ -670,7 +738,7 @@ diff --git a/vendor/srt-win-src/src/state_db.rs b/vendor/srt-win-src/src/state_d
      let rows: Vec<(String, String)> = query_vec(
          conn,
          "SELECT kind, mask FROM working_aces \
-@@ -1044,8 +1044,12 @@
+@@ -1044,8 +1044,12 @@ fn recompose_at(conn: &Connection, canon: &str, sandbox_sid: &str) -> Result<()>
      if crate::install::ambient_deny_recorded(canon) {
          set.deny.get_or_insert(acl::DenyMask::WriteDeny);
      }
@@ -685,7 +753,7 @@ diff --git a/vendor/srt-win-src/src/state_db.rs b/vendor/srt-win-src/src/state_d
  }
 
  /// Sealed proof that [`Locked::apply_aces`] converged `canon` to
-@@ -1172,7 +1176,7 @@
+@@ -1172,7 +1176,7 @@ fn crash_recovery(conn: &Connection, force: bool) -> Result<RecoveryReport> {
              let want = FileId::from_bytes(&fid)?;
              match identity_gate(&canon, want) {
                  IdGate::Match => {
@@ -694,7 +762,7 @@ diff --git a/vendor/srt-win-src/src/state_db.rs b/vendor/srt-win-src/src/state_d
                          eprintln!(
                              "srt-win: orphaned {kind} '{canon}': \
                               recompose failed ({e:#})"
-@@ -1182,7 +1186,7 @@
+@@ -1182,7 +1186,7 @@ fn crash_recovery(conn: &Connection, force: bool) -> Result<RecoveryReport> {
                  }
                  IdGate::Mismatch if kind == "grant" => {
                      if let Some(at) = path_id::locate_by_file_id(&want) {
@@ -703,7 +771,7 @@ diff --git a/vendor/srt-win-src/src/state_db.rs b/vendor/srt-win-src/src/state_d
                      }
                  }
                  _ => {} // gone/substituted — nothing on disk to do
-@@ -1406,6 +1410,162 @@
+@@ -1406,6 +1410,162 @@ mod tests {
          });
      }
 
@@ -868,9 +936,10 @@ diff --git a/vendor/srt-win-src/src/state_db.rs b/vendor/srt-win-src/src/state_d
          let ct = process_create_time(unsafe { GetCurrentProcess() }).unwrap();
 diff --git a/vendor/srt-win-src/tests/acl_parent_scope.rs b/vendor/srt-win-src/tests/acl_parent_scope.rs
 new file mode 100644
+index 00000000..0a323def
 --- /dev/null
 +++ b/vendor/srt-win-src/tests/acl_parent_scope.rs
-@@ -0,0 +1,610 @@
+@@ -0,0 +1,696 @@
 +//! Parent deletion protection must not spread over unrelated sibling trees.
 +//! All ACL changes are confined to a fresh owned fixture. No sandbox account,
 +//! elevation, WFP installation or machine-wide state is needed.
@@ -1481,10 +1550,97 @@ new file mode 100644
 +        apply_sandbox_aces(parent, TEST_SID, SbAceSet::default()).unwrap();
 +    }
 +}
++
++#[test]
++fn identical_object_state_uses_read_only_validation_under_a_directory_share_pin() {
++    use std::fs::OpenOptions;
++    use std::os::windows::fs::OpenOptionsExt;
++    use windows::Win32::Foundation::ERROR_SHARING_VIOLATION;
++    use windows::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
++    use windows::Win32::System::SystemServices::MAXIMUM_ALLOWED;
++
++    for held in [
++        SbAceSet::default(),
++        SbAceSet { grant: Some(GrantMask::ReadOnly), ..Default::default() },
++        SbAceSet { deny: Some(DenyMask::WriteDeny), ..Default::default() },
++        SbAceSet { grant: Some(GrantMask::ReadOnly), deny: Some(DenyMask::WriteDeny), ..Default::default() },
++    ] {
++        let fixture = Fixture::new();
++        let child = fixture.0.join("child");
++        std::fs::create_dir(&child).unwrap();
++        let file = child.join("keep");
++        std::fs::write(&file, "keep").unwrap();
++        let parent = fixture.0.to_str().unwrap();
++        apply_sandbox_aces(parent, TEST_SID, held).unwrap();
++        let object = SbAceSet { deny_fdc: true, deny_delete: true, ..held };
++        assert!(apply_sandbox_object_aces(parent, TEST_SID, object).unwrap());
++        let before_root = snapshot(&fixture.0);
++        let before_child = snapshot(&child);
++        let before_file = snapshot(&file);
++        // Model a process current-directory handle: no DELETE sharing. Do not
++        // change the test process cwd, which would race parallel native tests.
++        let pin = OpenOptions::new().access_mode(Mask::READ_CONTROL.bits())
++            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
++            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0).open(&fixture.0).unwrap();
++        let denied = OpenOptions::new().access_mode(MAXIMUM_ALLOWED)
++            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0)
++            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0).open(&fixture.0).unwrap_err();
++        assert_eq!(denied.raw_os_error(), Some(ERROR_SHARING_VIOLATION.0 as i32));
++        for _ in 0..20 {
++            assert!(apply_sandbox_object_aces(parent, TEST_SID, object).unwrap(),
++                "already-correct object state must not fall back to a subtree write");
++        }
++        assert_eq!(snapshot(&fixture.0), before_root);
++        assert_eq!(snapshot(&child), before_child);
++        assert_eq!(snapshot(&file), before_file);
++        // A missing object deny must still be repaired; never turn a sharing
++        // violation into success without verifying the complete wanted set.
++        apply_sandbox_aces(parent, TEST_SID, held).unwrap();
++        assert!(!apply_sandbox_object_aces(parent, TEST_SID, object).unwrap());
++        assert!(sandbox_aces(&fixture.0).iter().any(|(kind, flags, mask)|
++            *kind == 1 && *flags == 0 && *mask == Mask::FILE_DELETE_CHILD.bits()));
++        drop(pin);
++        apply_sandbox_aces(parent, TEST_SID, SbAceSet::default()).unwrap();
++    }
++}
++
++#[test]
++fn object_state_behind_another_principals_allow_must_not_skip_repair() {
++    use std::fs::OpenOptions;
++    use std::os::windows::fs::OpenOptionsExt;
++    use windows::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE};
++    let fixture = Fixture::new();
++    // Deliberately non-canonical order: Everyone's earlier ALLOW defeats the
++    // same sandbox FDC mask that the object-only ledger wants to enforce.
++    set_fixture_dacl(&fixture.0, &format!("(A;OICI;FA;;;WD)(D;;0x40;;;{TEST_SID})"));
++    let before = fixture.0.join("before");
++    let after = fixture.0.join("after");
++    for file in [&before, &after] {
++        std::fs::write(file, "keep").unwrap();
++        set_fixture_dacl(file, &format!("(D;;0x10000;;;{TEST_SID})(A;;FA;;;WD)"));
++    }
++    {
++        let _impersonation = Impersonation::begin();
++        std::fs::remove_file(&before).expect("fixture must expose the parent-FDC bypass before repair");
++    }
++    let pin = OpenOptions::new().access_mode(Mask::READ_CONTROL.bits())
++        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
++        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0).open(&fixture.0).unwrap();
++    assert!(!apply_sandbox_object_aces(fixture.0.to_str().unwrap(), TEST_SID,
++        SbAceSet { deny_fdc: true, ..Default::default() }).unwrap(),
++        "an out-of-order deny must converge, even when its mask already matches");
++    {
++        let _impersonation = Impersonation::begin();
++        assert!(std::fs::remove_file(&after).is_err());
++    }
++    drop(pin);
++    apply_sandbox_aces(fixture.0.to_str().unwrap(), TEST_SID, SbAceSet::default()).unwrap();
++}
 diff --git a/vendor/srt-win-src/src/logon.rs b/vendor/srt-win-src/src/logon.rs
+index f2482f4a..d2f39be4 100644
 --- a/vendor/srt-win-src/src/logon.rs
 +++ b/vendor/srt-win-src/src/logon.rs
-@@ -377,8 +377,9 @@
+@@ -377,8 +377,9 @@ pub fn spawn_runner(
      drop(stdout.runner);
      drop(stderr.runner);
 
@@ -1496,7 +1652,7 @@ diff --git a/vendor/srt-win-src/src/logon.rs b/vendor/srt-win-src/src/logon.rs
      {
          let mut wrote = 0u32;
          unsafe {
-@@ -393,7 +394,17 @@
+@@ -393,7 +394,17 @@ pub fn spawn_runner(
              ));
          }
      }
@@ -1515,7 +1671,7 @@ diff --git a/vendor/srt-win-src/src/logon.rs b/vendor/srt-win-src/src/logon.rs
 
      // Pump stdout/stderr on dedicated threads. `HANDLE` wraps a
      // `*mut c_void` which is `!Send`; the value is just an opaque
-@@ -439,6 +450,11 @@
+@@ -439,6 +450,11 @@ pub fn spawn_runner(
  trait AsRawHandle {
      fn as_raw(&self) -> HANDLE;
  }
@@ -1527,7 +1683,7 @@ diff --git a/vendor/srt-win-src/src/logon.rs b/vendor/srt-win-src/src/logon.rs
  impl AsRawHandle for std::io::Stdout {
      fn as_raw(&self) -> HANDLE {
          HANDLE(std::os::windows::io::AsRawHandle::as_raw_handle(self))
-@@ -452,7 +468,34 @@
+@@ -452,7 +468,34 @@ impl AsRawHandle for std::io::Stderr {
 
  #[cfg(test)]
  mod tests {
@@ -1564,6 +1720,7 @@ diff --git a/vendor/srt-win-src/src/logon.rs b/vendor/srt-win-src/src/logon.rs
      #[test]
      fn drive_letter_root() {
 diff --git a/vendor/srt-win-src/src/runner.rs b/vendor/srt-win-src/src/runner.rs
+index eee26105..3829cdc5 100644
 --- a/vendor/srt-win-src/src/runner.rs
 +++ b/vendor/srt-win-src/src/runner.rs
 @@ -19,6 +19,9 @@
@@ -1576,7 +1733,7 @@ diff --git a/vendor/srt-win-src/src/runner.rs b/vendor/srt-win-src/src/runner.rs
 
  use crate::launch;
 
-@@ -70,11 +73,17 @@
+@@ -70,11 +73,17 @@ pub struct RunnerSpec {
 
  /// Read a 4-byte little-endian length prefix followed by that many
  /// bytes of JSON from stdin. The length prefix lets the runner know
@@ -1598,10 +1755,11 @@ diff --git a/vendor/srt-win-src/src/runner.rs b/vendor/srt-win-src/src/runner.rs
      let mut len_buf = [0u8; 4];
      stdin
          .read_exact(&mut len_buf)
-@@ -182,6 +191,30 @@
+@@ -181,6 +190,30 @@ pub fn run() -> Result<u32> {
+ mod tests {
      use super::*;
 
-     #[test]
++    #[test]
 +    fn spec_read_leaves_coalesced_target_input_on_the_inherited_handle() {
 +        use crate::util::OwnedHandle;
 +        use windows::Win32::Storage::FileSystem::WriteFile;
@@ -1625,7 +1783,6 @@ diff --git a/vendor/srt-win-src/src/runner.rs b/vendor/srt-win-src/src/runner.rs
 +        assert_eq!(actual, tail);
 +    }
 +
-+    #[test]
+     #[test]
      fn cmd_roundtrip() {
          let s = RunnerCmd::Exec(RunnerSpec {
-             argv: vec!["cmd.exe".into(), "/c".into(), "echo hi".into()],
