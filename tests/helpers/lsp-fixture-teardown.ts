@@ -12,8 +12,10 @@ export function registerLspFixtureTeardown(roots: string[], controllers: AbortCo
   beforeEach(() => {
     previous = cp.spawn
     cp.spawn = function (file: string, args: string[], options: any) {
-      const child = Reflect.apply(previous, cp, [file, args, options])
-      if (file === process.execPath && Array.isArray(args) && args.includes(worker)) {
+      const owned = file === process.execPath && Array.isArray(args) && args.includes(worker)
+      const trace = process.platform === 'win32' && owned ? process.env.PULSE_CI_SRT_LOG : undefined
+      const child = Reflect.apply(previous, cp, [file, args, trace ? { ...options, env: { ...options.env, PULSE_CI_SRT_LOG: trace } } : options])
+      if (owned) {
         const closed = new Promise<void>(resolve => child.once('close', () => { closing.delete(closed); resolve() }))
         closing.add(closed)
       }

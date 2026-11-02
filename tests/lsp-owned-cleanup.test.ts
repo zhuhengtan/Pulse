@@ -124,12 +124,13 @@ it.each([false, true])('handles scripted helper EOF before process exit without 
   const script = join(root, 'helper.cjs')
   await writeFile(join(root, 'a.ts'), 'const a=1\n')
   // A real stdio pipe with a scripted peer, not a real language server/sandbox.
-  await writeFile(script, `let bytes=Buffer.alloc(0),done=false;
-const send=(id,result)=>{const body=Buffer.from(JSON.stringify({jsonrpc:'2.0',id,result}));process.stdout.write(Buffer.concat([Buffer.from('Content-Length: '+body.length+'\\r\\n\\r\\n'),body]))};
+  const worker = fileURLToPath(new URL('../packages/server/src/lsp/worker.cjs', import.meta.url))
+  await writeFile(script, `const output=require(${JSON.stringify(worker)}).createProtocolOutput();let bytes=Buffer.alloc(0),done=false;
+const send=(id,result)=>{const body=Buffer.from(JSON.stringify({jsonrpc:'2.0',id,result}));output.write(Buffer.concat([Buffer.from('Content-Length: '+body.length+'\\r\\n\\r\\n'),body]))};
 process.on('SIGTERM',()=>{});
 process.stdin.on('end',()=>{if(done)setTimeout(()=>process.exit(0),1000)});
-process.stdin.on('data',chunk=>{bytes=Buffer.concat([bytes,chunk]);for(;;){const at=bytes.indexOf('\\r\\n\\r\\n');if(at<0)return;const length=Number(/Content-Length: (\\d+)/i.exec(bytes.subarray(0,at).toString())[1]);if(bytes.length<at+4+length)return;const message=JSON.parse(bytes.subarray(at+4,at+4+length));bytes=bytes.subarray(at+4+length);if(message.method==='initialize')send(message.id,{capabilities:{}});else if(message.method==='textDocument/documentSymbol'&&!done){done=true;if(${complete})send(message.id,[{name:'complete reply',kind:12}]);process.stdout.end();setTimeout(()=>process.exit(0),4000)}}});`)
-  const spawn = cp.spawn, worker = fileURLToPath(new URL('../packages/server/src/lsp/worker.cjs', import.meta.url))
+process.stdin.on('data',chunk=>{bytes=Buffer.concat([bytes,chunk]);for(;;){const at=bytes.indexOf('\\r\\n\\r\\n');if(at<0)return;const length=Number(/Content-Length: (\\d+)/i.exec(bytes.subarray(0,at).toString())[1]);if(bytes.length<at+4+length)return;const message=JSON.parse(bytes.subarray(at+4,at+4+length));bytes=bytes.subarray(at+4+length);if(message.method==='initialize')send(message.id,{capabilities:{}});else if(message.method==='textDocument/documentSymbol'&&!done){done=true;if(${complete})send(message.id,[{name:'complete reply',kind:12}]);output.end(()=>output.destroy());setTimeout(()=>process.exit(0),4000)}}});`)
+  const spawn = cp.spawn
   const children: ReturnType<typeof cp.spawn>[] = [], closed: Promise<void>[] = []
   const controller = new AbortController()
   cp.spawn = function (file: string, args: string[], options: any) {
