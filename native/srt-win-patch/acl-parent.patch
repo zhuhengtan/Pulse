@@ -1556,7 +1556,7 @@ index 00000000..0a323def
 +    use std::fs::OpenOptions;
 +    use std::os::windows::fs::OpenOptionsExt;
 +    use windows::Win32::Foundation::ERROR_SHARING_VIOLATION;
-+    use windows::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
++    use windows::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
 +    use windows::Win32::System::SystemServices::MAXIMUM_ALLOWED;
 +
 +    for held in [
@@ -1577,9 +1577,9 @@ index 00000000..0a323def
 +        let before_root = snapshot(&fixture.0);
 +        let before_child = snapshot(&child);
 +        let before_file = snapshot(&file);
-+        // Model a process current-directory handle: no DELETE sharing. Do not
-+        // change the test process cwd, which would race parallel native tests.
-+        let pin = OpenOptions::new().access_mode(Mask::READ_CONTROL.bits())
++        // Data-read access participates in sharing; a metadata-only READ_CONTROL
++        // pin does not. Keep process cwd untouched for parallel native tests.
++        let pin = OpenOptions::new().access_mode(Mask::READ_CONTROL.bits() | FILE_LIST_DIRECTORY.0)
 +            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
 +            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0).open(&fixture.0).unwrap();
 +        let denied = OpenOptions::new().access_mode(MAXIMUM_ALLOWED)
@@ -1608,7 +1608,7 @@ index 00000000..0a323def
 +fn object_state_behind_another_principals_allow_must_not_skip_repair() {
 +    use std::fs::OpenOptions;
 +    use std::os::windows::fs::OpenOptionsExt;
-+    use windows::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE};
++    use windows::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_SHARE_READ, FILE_SHARE_WRITE};
 +    let fixture = Fixture::new();
 +    // Deliberately non-canonical order: Everyone's earlier ALLOW defeats the
 +    // same sandbox FDC mask that the object-only ledger wants to enforce.
@@ -1623,7 +1623,7 @@ index 00000000..0a323def
 +        let _impersonation = Impersonation::begin();
 +        std::fs::remove_file(&before).expect("fixture must expose the parent-FDC bypass before repair");
 +    }
-+    let pin = OpenOptions::new().access_mode(Mask::READ_CONTROL.bits())
++    let pin = OpenOptions::new().access_mode(Mask::READ_CONTROL.bits() | FILE_LIST_DIRECTORY.0)
 +        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
 +        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0).open(&fixture.0).unwrap();
 +    assert!(!apply_sandbox_object_aces(fixture.0.to_str().unwrap(), TEST_SID,
