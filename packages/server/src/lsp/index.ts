@@ -143,7 +143,7 @@ export function ownedHelperLive(child: OwnedHelper, ownedPid: number | undefined
 }
 
 /** End the helper's stdin, then on Windows kill only that same still-live process tree. */
-export function releaseOwnedHelper(child: OwnedHelper | undefined, ownedPid: number | undefined, platform: NodeJS.Platform = process.platform, taskkill?: (file: string, args: string[]) => void): void {
+export function releaseOwnedHelper(child: OwnedHelper | undefined, ownedPid: number | undefined, platform: NodeJS.Platform = process.platform, taskkill?: (file: string, args: string[]) => void): (() => void) | undefined {
   child?.stdin?.end()
   if (!child || !ownedHelperLive(child, ownedPid)) return
   if (platform !== 'win32') { child.kill('SIGTERM'); return }
@@ -160,6 +160,7 @@ export function releaseOwnedHelper(child: OwnedHelper | undefined, ownedPid: num
   }, LSP_HELPER_EXIT_GRACE_MS)
   timer.unref()
   child.once('close', () => clearTimeout(timer))
+  return () => clearTimeout(timer)
 }
 
 type Document = { uri: string; path: string; hash: string; text: string; version: number; diagnostics?: { version?: number; items: any[] } }
@@ -174,8 +175,22 @@ class Connection {
   capabilities: Record<string, any> = {}
   private connecting: Promise<void> | undefined
   private closed = false
+  private cancelForcedRelease: (() => void) | undefined
+  private cleanupComplete: Promise<void> = Promise.resolve()
   constructor(readonly root: string, readonly config: LspServerConfig, readonly lifetime: AbortSignal) { lifetime.addEventListener('abort', () => this.close(), { once: true }) }
   async connect(): Promise<void> { return this.connecting ??= this.start() }
+  async waitForCleanup(signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted()
+    let abort: () => void
+    try {
+      await new Promise<void>((resolve, reject) => {
+        abort = () => reject(new Error('LSP_REQUEST_CANCELLED'))
+        signal.addEventListener('abort', abort, { once: true })
+        this.cleanupComplete.then(resolve)
+        if (signal.aborted) abort()
+      })
+    } finally { signal.removeEventListener('abort', abort!) }
+  }
   private async start(): Promise<void> {
     this.lifetime.throwIfAborted()
     const identity = await resolveShellIdentity(this.config.command, this.config.args ?? [], this.root)
@@ -184,6 +199,7 @@ class Connection {
     for (const key of ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'LANG', 'LC_ALL', 'PNPM_HOME', 'TMPDIR', 'TMP', 'TEMP']) if (process.env[key] !== undefined) env[key] = process.env[key]
     const spec = Buffer.from(JSON.stringify({ root: this.root, command: this.config.command, args: this.config.args ?? [], ...(this.config.readRoots ? { readRoots: this.config.readRoots } : {}), identity })).toString('base64')
     const child = this.child = spawn(process.execPath, [fileURLToPath(new URL('./worker.cjs', import.meta.url)), spec], { cwd: this.root, env, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] })
+    this.cleanupComplete = new Promise(resolve => child.once('close', () => resolve()))
     this.ownedPid = child.pid
     const parser = new LspFrames(message => this.message(message))
     child.stdin.on('error', () => this.close())
@@ -249,6 +265,10 @@ class Connection {
     })
   }
   close(drainNativeCleanup = false): void {
+    // EOF can acknowledge target shutdown after cancellation already closed the
+    // connection. Preserve native cleanup even in that order; silent helpers
+    // retain their original bounded forced-exit deadline.
+    if (drainNativeCleanup) { this.cancelForcedRelease?.(); this.cancelForcedRelease = undefined }
     if (this.closed) return; this.closed = true
     if (this.silence) { clearTimeout(this.silence); this.silence = undefined }
     for (const pending of this.pending.values()) { pending.cleanup(); pending.reject(new Error('LSP_SERVER_UNAVAILABLE')) }
@@ -260,7 +280,7 @@ class Connection {
     // that closed stdout but kept running, then let the trusted wrapper finish
     // bounded native cleanup instead of taskkilling it during ACL restoration.
     if (drainNativeCleanup) child?.stdin?.end()
-    else releaseOwnedHelper(child, owned)
+    else this.cancelForcedRelease = releaseOwnedHelper(child, owned)
   }
   get unavailable(): boolean { return this.closed }
 }
@@ -318,6 +338,10 @@ export class LspService {
     if (!server) throw new Error('CODE_SERVER_UNAVAILABLE')
     const [key, config] = server
     let connection = this.connections.get(key)
+    if (connection?.unavailable) {
+      await connection.waitForCleanup(signal)
+      connection = this.connections.get(key)
+    }
     if (!connection || connection.unavailable) { connection = new Connection(root, config, this.lifetime); this.connections.set(key, connection) }
     try {
       await new Promise<void>((done, fail) => {

@@ -135,6 +135,7 @@ process.stdin.on('data',chunk=>{bytes=Buffer.concat([bytes,chunk]);for(;;){const
   const controller = new AbortController()
   cp.spawn = function (file: string, args: string[], options: any) {
     const owned = file === process.execPath && Array.isArray(args) && args.includes(worker)
+    if (owned && children.length) expect(children.at(-1)!.exitCode).not.toBeNull()
     const child = Reflect.apply(spawn, cp, [file, owned ? [script] : args, options])
     if (owned) { children.push(child); closed.push(new Promise<void>(done => child.once('close', done))) }
     return child
@@ -155,13 +156,67 @@ process.stdin.on('data',chunk=>{bytes=Buffer.concat([bytes,chunk]);for(;;){const
     if (complete) {
       // Completed results survive EOF; the next query must get a fresh peer.
       expect(JSON.stringify(await query())).toContain('complete reply')
-      expect(children).toHaveLength(2)
+    } else {
+      const waiting = new AbortController()
+      const cancelled = service.query('symbols', { path: 'a.ts' }, waiting.signal)
+      setTimeout(() => waiting.abort(), 25)
+      await expect(cancelled).rejects.toThrow('LSP_REQUEST_CANCELLED')
+      expect(children).toHaveLength(1)
+      await expect(query()).rejects.toThrow('LSP_SERVER_UNAVAILABLE')
     }
+    expect(children).toHaveLength(2)
   } finally {
     controller.abort()
     await Promise.all(closed)
     cp.spawn = spawn
     syncBuiltinESMExports()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+it('preserves acknowledged native cleanup when Windows cancellation already armed the forced exit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pulse-lsp-abort-eof-'))
+  const script = join(root, 'helper.cjs')
+  const worker = fileURLToPath(new URL('../packages/server/src/lsp/worker.cjs', import.meta.url))
+  await writeFile(join(root, 'a.ts'), 'const a=1\n')
+  await writeFile(script, `const output=require(${JSON.stringify(worker)}).createProtocolOutput();let bytes=Buffer.alloc(0);
+const send=(id,result)=>{const body=Buffer.from(JSON.stringify({jsonrpc:'2.0',id,result}));output.write(Buffer.concat([Buffer.from('Content-Length: '+body.length+'\\r\\n\\r\\n'),body]))};
+process.stdin.on('end',()=>{output.end(()=>output.destroy());setTimeout(()=>process.exit(0),1000)});
+process.stdin.on('data',chunk=>{bytes=Buffer.concat([bytes,chunk]);for(;;){const at=bytes.indexOf('\\r\\n\\r\\n');if(at<0)return;const length=Number(/Content-Length: (\\d+)/i.exec(bytes.subarray(0,at).toString())[1]);if(bytes.length<at+4+length)return;const message=JSON.parse(bytes.subarray(at+4,at+4+length));bytes=bytes.subarray(at+4+length);if(message.method==='initialize')send(message.id,{capabilities:{}});else if(message.method==='textDocument/documentSymbol')send(message.id,[{name:'ready',kind:12}])}});`)
+  const spawn = cp.spawn, platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+  const systemRoot = process.env.SystemRoot
+  const forced: string[][] = [], children: ReturnType<typeof cp.spawn>[] = [], closed: Promise<void>[] = []
+  cp.spawn = function (file: string, args: string[], options: any) {
+    if (file.endsWith('taskkill.exe')) {
+      forced.push(args)
+      return { once() {}, unref() {} } as ReturnType<typeof cp.spawn>
+    }
+    const owned = file === process.execPath && Array.isArray(args) && args.includes(worker)
+    const child = Reflect.apply(spawn, cp, [file, owned ? [script] : args, options])
+    if (owned) { children.push(child); closed.push(new Promise<void>(done => child.once('close', done))) }
+    return child
+  } as typeof cp.spawn
+  syncBuiltinESMExports()
+  const controller = new AbortController()
+  try {
+    const service = new LspService(root, { enabled: true, servers: { test: { command: process.execPath, args: [script], languages: { '.ts': 'typescript' } } } }, controller.signal)
+    expect(JSON.stringify(await service.query('symbols', { path: 'a.ts' }, controller.signal))).toContain('ready')
+    process.env.SystemRoot = 'C:\\Windows'
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
+    try { controller.abort() } finally { Object.defineProperty(process, 'platform', platform) }
+    const output = children[0]!.stdio[3] as import('node:stream').Readable
+    if (!output.readableEnded) await new Promise<void>(done => output.once('end', done))
+    await new Promise(resolve => setTimeout(resolve, LSP_HELPER_EXIT_GRACE_MS + 100))
+    expect(children[0]!.exitCode).toBeNull()
+    expect(forced).toEqual([])
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
+    controller.abort()
+    await Promise.all(closed)
+    cp.spawn = spawn
+    syncBuiltinESMExports()
+    if (systemRoot === undefined) delete process.env.SystemRoot
+    else process.env.SystemRoot = systemRoot
     await rm(root, { recursive: true, force: true })
   }
 })

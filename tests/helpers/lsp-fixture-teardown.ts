@@ -28,6 +28,8 @@ export function registerLspFixtureTeardown(roots: string[], controllers: AbortCo
     try {
       // A fixed 150ms sleep is shorter than the Windows helper's 250ms grace.
       // Wait for actual close before removing a still-owned current directory.
+      // Native ACL cleanup can exceed Vitest's 10s default; use the existing
+      // Windows LSP fixture deadline, without changing any production deadline.
       await Promise.all([...closing])
       expect(closing.size).toBe(0)
       await Promise.all(roots.splice(0).map(root => rm(root, { force: true, recursive: true, maxRetries: 5, retryDelay: 100 })))
@@ -35,5 +37,5 @@ export function registerLspFixtureTeardown(roots: string[], controllers: AbortCo
       cp.spawn = previous
       syncBuiltinESMExports()
     }
-  })
+  }, process.platform === 'win32' ? 480000 : 10000)
 }
