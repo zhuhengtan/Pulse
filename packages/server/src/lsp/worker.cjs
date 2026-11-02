@@ -27,6 +27,8 @@ async function main() {
       input.on('error', () => controller.abort())
       for (const chunk of buffered.splice(0)) input.write(chunk)
       child.stdout.on('data', chunk => process.stdout.write(chunk))
+      // Flush complete frames, then propagate EOF without waiting for ACL cleanup.
+      child.stdout.once('end', () => process.stdout.end())
       // Protocol output never passes through a text/line converter.
       return { pid: child.pid, get exitCode() { return child.exitCode }, get signalCode() { return child.signalCode }, stdin: null, stdout: null, stderr: child.stderr, once: child.once.bind(child), kill: child.kill.bind(child) }
     },

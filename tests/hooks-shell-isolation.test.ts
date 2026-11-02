@@ -120,3 +120,26 @@ it('classifies a final program-identity rejection without launching or exposing 
   await expect(runShell('node', ['--version'], { cwd: root, spawnProcess: launch, beforeLaunch: async () => { throw Object.assign(new Error('private diagnostic fixture'), { code: 'EXEC_POLICY_APPROVAL_CHANGED' }) } })).rejects.toMatchObject({ code: 'SANDBOX_SETUP_FAILED', message: 'SANDBOX_SETUP_FAILED (identity: EXEC_POLICY_APPROVAL_CHANGED)', details: { stage: 'identity', reason: 'EXEC_POLICY_APPROVAL_CHANGED' } })
   expect(launch).not.toHaveBeenCalled()
 })
+
+it('reports confirmed process completion without releasing the sandbox lease or command promise before cleanup', async () => {
+  const root = await workspace()
+  let release!: () => void, received!: (result: unknown) => void
+  const cleanup = new Promise<void>(resolve => { release = resolve })
+  const result = new Promise<unknown>(resolve => { received = resolve })
+  sandbox.cleanupAfterCommand.mockImplementationOnce(() => cleanup)
+  sandbox.wrapWithSandboxArgv.mockResolvedValue({ argv: wrappedNode('process.exit(0)'), env: process.env })
+  const launched = child()
+  const next = child(), nextSpawn = vi.fn(() => { setImmediate(() => next.emit('close', 0)); return next })
+  let settled = false
+  const command = runShell('node', ['-e', 'process.exit(0)'], { cwd: root, onProcessResult: received, spawnProcess: () => { setImmediate(() => launched.emit('close', 0)); return launched } }).then(value => { settled = true; return value })
+  let following: ReturnType<typeof runShell> | undefined
+  try {
+    expect(await result).toMatchObject({ code: 0, aborted: false, timedOut: false })
+    following = runShell('node', ['-e', 'process.exit(0)'], { cwd: root, spawnProcess: nextSpawn })
+    await new Promise(resolve => setImmediate(resolve))
+    expect(settled).toBe(false)
+    expect(nextSpawn).not.toHaveBeenCalled()
+  } finally { release(); await command; await following }
+  expect(settled).toBe(true)
+  expect(nextSpawn).toHaveBeenCalledTimes(1)
+})

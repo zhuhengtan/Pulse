@@ -563,7 +563,7 @@ export function validateShellInvocation(command: string, args: string[] = []): v
   encodeSandboxCommand(command, args)
 }
 
-export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; expectedIdentity?: ShellIdentity | undefined; beforeLaunch?: () => Promise<ShellIdentity | undefined>; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void; spawnProcess?: ShellSpawn; windowsPty?: WindowsPty; readOnlyWorkspace?: boolean; isolatedHome?: boolean; stdioTarget?: boolean; readRoots?: string[]; stdinData?: string; sealedCallerEnv?: boolean } = {}): Promise<ShellResult> {
+export function runShell(command: string, args: string[] = [], options: { cwd?: string; signal?: AbortSignal; timeoutMs?: number; maxOutputBytes?: number; env?: NodeJS.ProcessEnv; allowedDomains?: string[]; outputDirectory?: string; maxArchiveBytes?: number; expectedIdentity?: ShellIdentity | undefined; beforeLaunch?: () => Promise<ShellIdentity | undefined>; onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void; onProcessResult?: (result: ShellResult) => void; spawnProcess?: ShellSpawn; windowsPty?: WindowsPty; readOnlyWorkspace?: boolean; isolatedHome?: boolean; stdioTarget?: boolean; readRoots?: string[]; stdinData?: string; sealedCallerEnv?: boolean } = {}): Promise<ShellResult> {
   if (options.stdinData !== undefined && Buffer.byteLength(options.stdinData) > 65536) return Promise.reject(shellError('SHELL_STDIN_TOO_LARGE'))
   const max = options.maxOutputBytes ?? 256 * 1024
   if (!Number.isFinite(max) || max < 0) return Promise.reject(shellError('INVALID_SHELL_OUTPUT_LIMIT'))
@@ -901,7 +901,11 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
           reject(shellError('SHELL_STDIN_DELIVERY_UNKNOWN'))
           return
         }
-        resolve({ code: reported, stdout, stderr: boundedStderr, truncated: outputWasTruncated, timedOut: termination === 'timeout', aborted: termination === 'aborted', outputArchive: archive.finish() })
+        const result = { code: reported, stdout, stderr: boundedStderr, truncated: outputWasTruncated, timedOut: termination === 'timeout', aborted: termination === 'aborted', outputArchive: archive.finish() }
+        // A trusted Host observer may consume a confirmed process result. The
+        // returned promise AND sandbox lease still include mandatory cleanup.
+        options.onProcessResult?.(result)
+        resolve(result)
         }).catch(cause => { archive.finish(); reject(shellError('SANDBOX_RESULT_FAILED', false, cause)) })
       })
     }).finally(async () => {

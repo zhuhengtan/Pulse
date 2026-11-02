@@ -188,6 +188,9 @@ class Connection {
     child.stdin.on('error', () => this.close())
     child.stderr.on('data', () => {})
     child.stdout.on('data', chunk => { try { parser.push(chunk) } catch { this.close() } })
+    // The RPC transport may end before the helper finishes native cleanup.
+    child.stdout.once('end', () => this.close(true))
+    child.stdout.once('error', () => this.close())
     child.once('error', () => this.close())
     child.once('close', () => { this.ownedPid = undefined; this.close() })
     const initial = await this.request('initialize', { processId: null, rootUri: pathToFileURL(this.root).href, workspaceFolders: [{ uri: pathToFileURL(this.root).href, name: 'workspace' }], capabilities: { textDocument: { definition: { linkSupport: true }, diagnostic: { dynamicRegistration: false } } }, initializationOptions: this.config.initializationOptions ?? {} }, this.lifetime, process.platform === 'win32' ? 240000 : 30000)
@@ -242,7 +245,7 @@ class Connection {
       try { this.send({ jsonrpc: '2.0', id, method, params }) } catch { finish(new Error('LSP_SERVER_UNAVAILABLE')) }
     })
   }
-  close(): void {
+  close(drainNativeCleanup = false): void {
     if (this.closed) return; this.closed = true
     if (this.silence) { clearTimeout(this.silence); this.silence = undefined }
     for (const pending of this.pending.values()) { pending.cleanup(); pending.reject(new Error('LSP_SERVER_UNAVAILABLE')) }
@@ -250,7 +253,11 @@ class Connection {
     const child = this.child
     const owned = this.ownedPid
     this.ownedPid = undefined
-    releaseOwnedHelper(child, owned)
+    // Natural transport EOF is not a stuck helper. End input to stop a target
+    // that closed stdout but kept running, then let the trusted wrapper finish
+    // bounded native cleanup instead of taskkilling it during ACL restoration.
+    if (drainNativeCleanup) child?.stdin?.end()
+    else releaseOwnedHelper(child, owned)
   }
   get unavailable(): boolean { return this.closed }
 }

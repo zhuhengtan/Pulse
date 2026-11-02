@@ -69,3 +69,78 @@ it.each(['PostToolUse', 'Stop'] as const)('lets Windows %s finish cold sandbox s
         Object.defineProperty(process, 'platform', platform);
     }
 });
+
+it('uses the confirmed pre decision before native cleanup, but drains teardown before Stop and dispose', async () => {
+    const f = await fixture('{}', ['PreToolUse']);
+    let release!: () => void;
+    const teardown = new Promise<void>(resolve => { release = resolve; });
+    const shell = vi.spyOn(adapters, 'runShell').mockImplementation(async (_command, _args, options = {}) => {
+        expect(options.timeoutMs).toBe(1000);
+        const result = { code: 0, stdout: '{}', stderr: '', truncated: false, timedOut: false, aborted: false };
+        options.onProcessResult?.(result);
+        await teardown;
+        return result;
+    });
+    const execute = vi.fn(async () => ({ status: 'succeeded' as const, value: 'once', sideEffectState: 'applied' as const }));
+    try {
+        const result = await f.service.around(effect(), signal(), undefined, execute);
+        expect(result).toMatchObject({ status: 'succeeded', sideEffectState: 'applied' });
+        expect(execute).toHaveBeenCalledTimes(1);
+        let stopped = false, disposed = false;
+        const stop = f.service.stop().then(() => { stopped = true; });
+        const dispose = f.service.dispose().then(() => { disposed = true; });
+        await new Promise(resolve => setImmediate(resolve));
+        expect(stopped).toBe(false);
+        expect(disposed).toBe(false);
+        release();
+        await Promise.all([stop, dispose]);
+        expect(stopped && disposed).toBe(true);
+        expect(shell).toHaveBeenCalledTimes(1);
+    } finally { release(); }
+});
+
+it('keeps a late cleanup failure diagnostic, preserves the settled tool, and blocks another pre operation', async () => {
+    const f = await fixture('{}', ['PreToolUse']);
+    let fail!: (error: Error) => void;
+    const teardown = new Promise<void>((_resolve, reject) => { fail = reject; });
+    const shell = vi.spyOn(adapters, 'runShell').mockImplementation(async (_command, _args, options = {}) => {
+        const result = { code: 0, stdout: '{}', stderr: '', truncated: false, timedOut: false, aborted: false };
+        options.onProcessResult?.(result);
+        await teardown;
+        return result;
+    });
+    const execute = vi.fn(async () => ({ status: 'succeeded' as const, value: 'once', sideEffectState: 'applied' as const }));
+    try {
+        expect(await f.service.around(effect(), signal(), undefined, execute)).toMatchObject({ status: 'succeeded', sideEffectState: 'applied' });
+        fail(Error('SANDBOX_CLEANUP_FAILED'));
+        const second = await f.service.around(effect('a2'), signal(), undefined, execute);
+        expect(second.error).toMatchObject({ code: 'HOOK_PRE_DENIED', message: 'HOOK_SANDBOX_CLEANUP_FAILED' });
+        expect(execute).toHaveBeenCalledTimes(1);
+        expect(shell).toHaveBeenCalledTimes(1);
+        const receipts = await Promise.all((await readdir(f.journal)).map(p => readFile(join(f.journal, p), 'utf8').then(JSON.parse)));
+        expect(receipts).toContainEqual(expect.objectContaining({ event: 'PreToolUse', status: 'continue' }));
+        expect(receipts).toContainEqual(expect.objectContaining({ event: 'PreToolUse', status: 'diagnostic', error: 'HOOK_SANDBOX_CLEANUP_FAILED' }));
+    } finally { fail(Error('test cleanup')); }
+});
+
+it('never executes a cancelled tool even when the script returns a valid pre decision', async () => {
+    const f = await fixture('{}', ['PreToolUse']), controller = new AbortController();
+    vi.spyOn(adapters, 'runShell').mockImplementation(async () => {
+        controller.abort();
+        return { code: 0, stdout: '{}', stderr: '', truncated: false, timedOut: false, aborted: false };
+    });
+    const execute = vi.fn();
+    expect((await f.service.around(effect(), controller.signal, undefined, execute)).status).toBe('failed');
+    expect(execute).not.toHaveBeenCalled();
+});
+
+it('blocks a tool when cleanup failure is already known before persisting its valid pre decision', async () => {
+    const f = await fixture('{}', ['PreToolUse']);
+    vi.spyOn(adapters, 'runShell').mockImplementation(async (_command, _args, options = {}) => {
+        options.onProcessResult?.({ code: 0, stdout: '{}', stderr: '', truncated: false, timedOut: false, aborted: false });
+        throw Error('SANDBOX_CLEANUP_FAILED');
+    });
+    const execute = vi.fn();
+    expect((await f.service.around(effect(), signal(), undefined, execute)).error).toMatchObject({ code: 'HOOK_PRE_DENIED', message: 'HOOK_SANDBOX_CLEANUP_FAILED' });
+    expect(execute).not.toHaveBeenCalled();
+});

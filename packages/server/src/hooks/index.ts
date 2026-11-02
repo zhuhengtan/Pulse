@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { z } from 'zod';
-import { resolveShellIdentity, validateShellInvocation, runShell, type ShellIdentity } from '@hunterzhu/pulse-adapters';
+import { resolveShellIdentity, validateShellInvocation, runShell, type ShellIdentity, type ShellResult } from '@hunterzhu/pulse-adapters';
 import type { EffectRecord, EffectExecution, EffectExecutor } from '@hunterzhu/pulse-runtime';
 import { replaceStateFile } from '../atomic-file.js';
 export const hookEvents = ['SessionStart', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop'] as const;
@@ -173,18 +173,32 @@ export class HookService {
     private readonly postController = new AbortController();
     private readonly pending = new Set<Promise<void>>();
     private readonly activeHooks = new Set<Promise<void>>();
+    private readonly cleanup = new Set<Promise<void>>();
+    private cleanupFailed = false;
     constructor(private readonly root: string, private readonly journal: string, private readonly owner: {
         conversationId: string;
         runId: string;
     }, private readonly snapshot: HookSnapshot | undefined, private readonly trusted: HookConfig | undefined, private readonly source: 'startup' | 'resume' = 'startup') { }
-    async sessionStart(signal: AbortSignal): Promise<void> { return this.start ??= this.fire('SessionStart', undefined, undefined, signal); }
+    async sessionStart(signal: AbortSignal): Promise<void> {
+        // At the next Host dispatch, drain previous native teardown before a
+        // fresh model/tool operation. No sandbox lease is released early.
+        await Promise.all([...this.cleanup]);
+        return this.start ??= this.fire('SessionStart', undefined, undefined, signal);
+    }
     async stop(): Promise<void> { await Promise.allSettled([...this.pending]); try {
+        await Promise.all([...this.cleanup]);
         await this.fire('Stop', undefined, undefined, AbortSignal.timeout(observerTimeoutMs()));
     }
     catch (error) { await this.diagnostic('Stop', error); } }
     async around(effect: EffectRecord, signal: AbortSignal, observe: Parameters<EffectExecutor>[2], execute: EffectExecutor): Promise<EffectExecution> {
         try {
+            await Promise.all([...this.cleanup]);
+            if (this.cleanupFailed) throw Error('HOOK_SANDBOX_CLEANUP_FAILED');
             await this.fire('PreToolUse', effect, undefined, signal);
+            if (this.cleanupFailed) throw Error('HOOK_SANDBOX_CLEANUP_FAILED');
+            // A script can finish before cancellation is noticed during native
+            // teardown. Its valid output never authorizes a cancelled tool.
+            signal.throwIfAborted();
         }
         catch (cause) {
             return { value: null, status: 'failed', executionState: 'failed', sideEffectState: 'none', error: { code: 'HOOK_PRE_DENIED', message: cause instanceof Error ? cause.message : 'HOOK_PRE_DENIED', retryable: false } };
@@ -205,7 +219,7 @@ export class HookService {
         this.pending.add(pending);
         void pending.finally(() => this.pending.delete(pending));
     }
-    async dispose(): Promise<void> { this.postController.abort(); await Promise.allSettled([...this.activeHooks]); }
+    async dispose(): Promise<void> { this.postController.abort(); await Promise.allSettled([...this.activeHooks]); await Promise.all([...this.cleanup]); }
     private async diagnostic(event: HookEvent, error: unknown, effect?: EffectRecord): Promise<void> {
         if (!this.snapshot) return;
         try {
@@ -266,7 +280,24 @@ export class HookService {
                     throw Error('HOOK_ASSET_UNPINNED'); return join(this.snapshot!.directory, 'assets', path); });
                 const payload = JSON.stringify(redacted({ hook_event_name: event, ...(event === 'SessionStart' ? { source: this.source } : {}), session_id: this.owner.runId, conversation_id: this.owner.conversationId, cwd: this.root, tool_name: name, tool_use_id: effect?.toolCallId, tool_input: hookToolInput(name, input?.arguments), effect_id: effect?.id, attempt_id: effect?.attemptId, attempt_no: effect?.attemptNo, definition_hash: this.snapshot.hash, ...(result ? { tool_response: { status: result.status, error: result.error?.code, executionState: result.executionState, sideEffectState: result.sideEffectState } } : {}) }));
                 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => ['PATH', 'HOME', 'USERPROFILE', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'LANG', 'LC_ALL', 'TMPDIR', 'TMP', 'TEMP'].includes(key)));
-                const outcome = await runShell(d.command, args, { cwd: this.root, env, signal, timeoutMs: d.timeoutMs, maxOutputBytes: 32768, readOnlyWorkspace: true, isolatedHome: true, stdioTarget: true, readRoots: [this.snapshot.directory], allowedDomains: [], stdinData: payload, sealedCallerEnv: true, expectedIdentity: d.identity, beforeLaunch: async () => { await checkHookDefinitions(this.snapshot!); return d.identity; } });
+                let completed!: (result: ShellResult) => void;
+                const processResult = new Promise<ShellResult>(resolve => { completed = resolve; });
+                let confirmed = false;
+                const command = runShell(d.command, args, { cwd: this.root, env, signal, timeoutMs: d.timeoutMs, maxOutputBytes: 32768, readOnlyWorkspace: true, isolatedHome: true, stdioTarget: true, readRoots: [this.snapshot.directory], allowedDomains: [], stdinData: payload, sealedCallerEnv: true, expectedIdentity: d.identity, beforeLaunch: async () => { await checkHookDefinitions(this.snapshot!); return d.identity; }, ...(pre ? { onProcessResult: (result: ShellResult) => { confirmed = true; completed(result); } } : {}) });
+                // Pre decisions depend on confirmed stdin/exit/output, not on
+                // slow ACL restoration after the script has already stopped.
+                // Retain ownership of teardown through Stop/dispose; a failure
+                // is diagnostic and blocks subsequent pre-hook operations.
+                if (pre) {
+                    const cleanup = command.then(() => {}, async () => {
+                        if (!confirmed) return;
+                        this.cleanupFailed = true;
+                        await this.diagnostic(event, Error('HOOK_SANDBOX_CLEANUP_FAILED'), effect);
+                    });
+                    this.cleanup.add(cleanup);
+                    void cleanup.then(() => this.cleanup.delete(cleanup));
+                }
+                const outcome = await (pre ? Promise.race([processResult, command]) : command);
                 if (outcome.timedOut || outcome.aborted) throw Error('HOOK_OUTCOME_UNKNOWN');
                 if (outcome.code !== 0 || outcome.truncated) throw Error('HOOK_COMMAND_FAILED');
                 let raw: unknown;
