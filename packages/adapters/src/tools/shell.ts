@@ -16,7 +16,7 @@ import { resolveWindowsPackageManager } from './windows-package-manager.js'
 import { resolveHostPackageManager } from './host-package-manager.js'
 import { windowsShellEnvironment } from './windows-shell-environment.js'
 import { carveWindowsReadDenies, windowsReadDenyRoots, windowsToolchainWriteDenies } from './windows-read-policy.js'
-import { initializeShellSandbox } from './sandbox-initialization.js'
+import { shellSandboxManager, withWindowsSandboxLease } from './shell-sandbox.js'
 import { installationDependencyRoots, workspaceUsesInstallationDependencies } from './installation-dependencies.js'
 import { verifiedWindowsSrt } from './windows-srt-path.js'
 
@@ -96,6 +96,7 @@ function shellError(code: string, retryable = false, cause?: unknown): Error & {
 // call widening another call's filesystem grants.
 let sandboxTail: Promise<void> = Promise.resolve()
 function withSandboxLease<T>(work: () => Promise<T>): Promise<T> {
+  if (process.platform === 'win32') return withWindowsSandboxLease(work)
   const result = sandboxTail.then(work, work)
   sandboxTail = result.then(() => undefined, () => undefined)
   return result
@@ -747,18 +748,19 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       return decodeUtf8WithinByteLimit(Buffer.from(archive.text(target)), max)
     }
 
+    const manager = shellSandboxManager()
     checkpoint('policy ready')
     let setupStage = 'reset'
     try {
       // reset first in case an earlier initialize failed part-way through.
-      await SandboxManager.reset()
+      await manager.reset()
       checkpoint('reset complete')
       setupStage = 'initialize'
-      await initializeShellSandbox(policy, process.platform, options.signal)
+      await manager.initialize(policy, options.signal)
       checkpoint('initialized')
       const commandText = encodeSandboxCommand(executable, executableArgs)
       setupStage = 'wrap'
-      const descriptor = await SandboxManager.wrapWithSandboxArgv(commandText, undefined, undefined, options.signal, cwd, { commandId: invocationId, commandText: 'shell.exec' })
+      const descriptor = await manager.wrap(commandText, options.signal, cwd, { commandId: invocationId, commandText: 'shell.exec' })
       const generated = options.sealedCallerEnv ? sandboxRuntimeOverlay(descriptor.env) : undefined
       let sandboxArgv = process.platform === 'win32' ? windowsShellEnvironment(descriptor.argv, generated ? { ...generated, ...executionEnv } : executionEnv) : descriptor.argv
       if (process.platform === 'win32' && options.stdioTarget) {
@@ -769,8 +771,8 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       if (ptyBridge && windowsPty) sandboxArgv = windowsPtyCommand(sandboxArgv, nodeExecutable, ptyBridge, windowsPty, executable, executableArgs)
       checkpoint('wrapped')
       if (options.signal?.aborted) {
-        SandboxManager.cleanupAfterCommand()
-        await SandboxManager.reset()
+        await manager.cleanup()
+        await manager.reset()
         return { code: null, stdout: '', stderr: '', truncated: false, timedOut: false, aborted: true }
       }
       // A call can wait for the process-global sandbox lease. Re-evaluate
@@ -783,8 +785,8 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       }
       // Cancellation during beforeLaunch or the identity read must not start a broker.
       if (options.signal?.aborted) {
-        SandboxManager.cleanupAfterCommand()
-        await SandboxManager.reset()
+        await manager.cleanup()
+        await manager.reset()
         return { code: null, stdout: '', stderr: '', truncated: false, timedOut: false, aborted: true }
       }
       // sealedCallerEnv keeps the caller's allow-list and sandbox-added proxy
@@ -802,7 +804,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
       if (process.platform === 'win32') brokerPid = child.pid
     } catch (cause) {
       let resetFailed = false
-      try { await SandboxManager.reset() } catch { resetFailed = true /* preserve the setup failure */ }
+      try { await manager.reset() } catch { resetFailed = true /* preserve the setup failure */ }
       if (options.signal?.aborted && !resetFailed) return { code: null, stdout: '', stderr: '', truncated: false, timedOut: false, aborted: true }
       // Persist only classified diagnostics, never raw subprocess output or credentials.
       const message = cause instanceof Error ? cause.message : ''
@@ -866,7 +868,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
           stdinFailed = true
           releaseStdin()
         }
-        void stdinDone.then(() => {
+        void stdinDone.then(async () => {
         const tracked = child!.windowsPtyExit
         const exitCode = tracked?.code
         const framedCode = tracked?.framed === true && tracked.unknown === false && windowsPtyProtocol.isWindowsExitCode(exitCode) ? exitCode : undefined
@@ -889,7 +891,7 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
         }
         const stdout = outputText('stdout')
         const stderr = outputText('stderr')
-        const annotated = SandboxManager.annotateStderrWithSandboxFailures(invocationId, stderr)
+        const annotated = await manager.annotate(invocationId, stderr)
         const boundedStderr = decodeUtf8WithinByteLimit(Buffer.from(annotated, 'utf8'), max)
         const outputWasTruncated = truncated || Buffer.byteLength(annotated, 'utf8') > max
         if (options.stdinData !== undefined && stdinFailed && !termination) {
@@ -898,13 +900,13 @@ export function runShell(command: string, args: string[] = [], options: { cwd?: 
           return
         }
         resolve({ code: reported, stdout, stderr: boundedStderr, truncated: outputWasTruncated, timedOut: termination === 'timeout', aborted: termination === 'aborted', outputArchive: archive.finish() })
-        })
+        }).catch(cause => { archive.finish(); reject(shellError('SANDBOX_RESULT_FAILED', false, cause)) })
       })
     }).finally(async () => {
       checkpoint('cleanup start')
       try {
-        SandboxManager.cleanupAfterCommand()
-        await SandboxManager.reset()
+        await manager.cleanup()
+        await manager.reset()
         checkpoint('cleanup complete')
       } catch (cause) {
         // A teardown failure must be visible and fail closed for the next call.

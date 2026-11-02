@@ -17,6 +17,7 @@ This file records Pulse release notes in English and is the source for `pulse --
 
 - Work in the user-selected current directory by default without automatically creating a Git workspace; relocate batched same-file patches against current content, preserving unrelated edits and rejecting ambiguity or conflicts.
 - Harden whole-file writes, edit journals, and conditional recovery with complete conversation, run, and Effect ownership, protecting confirmed writes, original bytes, and path boundaries; fix generation-ticket and hook-receipt persistence failures caused by transient file sharing violations on Windows, and avoid timing out data acknowledgements already queued behind synchronous native work.
+- Move Windows sandbox preparation and cleanup to a host I/O worker to keep the host responsive; wake polls on interactive readiness and new output while retaining existing hard deadlines, cancellation, and unknown-result safeguards.
 - Record acceptance receipts when Vitest runs directly through Node, allowing an actual rerun of the same suite through another launcher to refresh old evidence while retaining failed-check and external-change protections.
 - Reduce automatic-approval card flashes and repeated interruptions while retaining required human authorization; preserve conversations and checkpoints when sending follow-ups, stopping, recovering, or extending budgets.
 - Fix conversation pin updates, failure rollback, and duplicate rows; give pinned conversations an independently collapsible section and unify neutral colors and rounded disclosure arrows.

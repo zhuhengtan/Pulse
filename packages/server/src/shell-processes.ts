@@ -20,7 +20,19 @@ export interface ProcessReceipt {
 type InputWriter = (data: string) => void | Promise<void>
 export interface ShellInputReceipt { processId: string; effectId: string; agentId: string; laneId: string; digest: string; bytes: number; status: 'pending' | 'delivered' | 'unknown' }
 type Runner = (command: ShellCommand, context: ToolContext, onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) => void, ready: (write: InputWriter) => void) => Promise<Record<string, unknown>>
-interface LiveProcess { record: ProcessReceipt; controller: AbortController; done: Promise<void>; write?: InputWriter }
+interface LiveProcess { record: ProcessReceipt; controller: AbortController; done: Promise<void>; write?: InputWriter; outputBytes: number; inputSeen: boolean; changed: Set<() => void> }
+const notifyProcess = (live: LiveProcess) => { for (const listener of live.changed) listener() }
+// Keep an incomplete UTF-8 suffix in the raw log, but do not expose/consume it
+// before its remaining bytes arrive. Invalid complete bytes retain normal
+// Buffer decoding semantics and cannot grow this suffix beyond three bytes.
+function incompleteSuffix(bytes: Buffer): Buffer {
+  if (!bytes.length) return Buffer.alloc(0)
+  let lead = bytes.length - 1
+  while (lead > 0 && (bytes[lead]! & 0xc0) === 0x80 && bytes.length - lead < 4) lead--
+  const first = bytes[lead]!
+  const width = first >= 0xc2 && first <= 0xdf ? 2 : first >= 0xe0 && first <= 0xef ? 3 : first >= 0xf0 && first <= 0xf4 ? 4 : 1
+  return width > bytes.length - lead ? Buffer.from(bytes.subarray(lead)) : Buffer.alloc(0)
+}
 const managers = new Map<string, ShellProcesses>()
 const failure = (code: string) => Object.assign(new Error(code), { code, retryable: false })
 
@@ -124,13 +136,24 @@ export class ShellProcesses {
     // Commit intent before invoking the runner; uncertain intent is never replayed.
     await this.persist(record)
     const controller = new AbortController()
-    const live: LiveProcess = { record, controller, done: Promise.resolve() }
+    const live: LiveProcess = { record, controller, done: Promise.resolve(), outputBytes: 0, inputSeen: false, changed: new Set() }
     this.live.set(processId, live)
-    let output = Promise.resolve(), bytes = 0
+    let output = Promise.resolve(), bytes = 0, durableBytes = 0
+    let suffix: Buffer = Buffer.alloc(0)
     const onOutput = (_stream: 'stdout' | 'stderr', chunk: Buffer): void => {
       const part = Buffer.from(chunk.subarray(0, Math.max(0, 16 * 1024 * 1024 - bytes)))
       bytes += part.length
-      if (part.length) { output = output.then(() => appendFile(join(this.directory, `${processId}.log`), part, { mode: 0o600 })); void output.catch(() => undefined) }
+      if (part.length) {
+        output = output.then(async () => {
+          await appendFile(join(this.directory, `${processId}.log`), part, { mode: 0o600 })
+          const previous = live.outputBytes
+          durableBytes += part.length
+          suffix = incompleteSuffix(Buffer.concat([suffix, part]))
+          live.outputBytes = durableBytes - suffix.length
+          if (live.outputBytes > previous) notifyProcess(live)
+        })
+        void output.catch(() => undefined)
+      }
     }
     live.done = (async () => {
       let terminal: ProcessReceipt
@@ -138,6 +161,7 @@ export class ShellProcesses {
         const result = await run(command, { ...context, signal: controller.signal }, onOutput, write => {
           if (command.pty !== true || controller.signal.aborted || live.record.status !== 'running') throw failure('SHELL_STDIN_NOT_READY')
           live.write = write
+          notifyProcess(live)
         })
         await output
         terminal = { ...record, status: 'exited', result }
@@ -165,16 +189,25 @@ export class ShellProcesses {
     const live = this.live.get(id)
     if (record.status === 'running' && live && waitMs > 0) {
       const wait = new AbortController()
-      try { await Promise.race([live.done, delay(waitMs, undefined, { signal: AbortSignal.any([context.signal, wait.signal]) })]) }
-      finally { wait.abort() }
+      let changed!: () => void
+      const update = new Promise<void>(resolve => { changed = resolve })
+      live.changed.add(changed)
+      try {
+        // Register before checking to avoid losing a transition between the
+        // snapshot and subscription. Readiness remains actionable until the
+        // first input intent; afterwards a quiet PTY must not cause a busy loop.
+        if (live.outputBytes <= offset && !(live.write && !live.inputSeen)) await Promise.race([live.done, update, delay(waitMs, undefined, { signal: AbortSignal.any([context.signal, wait.signal]) })])
+        context.signal.throwIfAborted()
+      } finally { live.changed.delete(changed); wait.abort() }
       record = await this.owned(id, context)
     }
     const log = await readFile(join(this.directory, `${id}.log`)).catch(error => { if (error.code === 'ENOENT') return Buffer.alloc(0); throw error })
-    let end = Math.min(log.length, offset + limit)
+    const available = record.status === 'running' && live ? Math.min(log.length, live.outputBytes) : log.length
+    let end = Math.min(available, offset + limit)
     if (offset < log.length && (log[offset]! & 0xc0) === 0x80) throw failure('SHELL_OUTPUT_OFFSET_INVALID')
-    while (end > offset && end < log.length && (log[end]! & 0xc0) === 0x80) end--
-    if (end === offset && end < log.length) { end++; while (end < log.length && (log[end]! & 0xc0) === 0x80) end++ }
-    if (offset > log.length) throw failure('SHELL_OUTPUT_OFFSET_INVALID')
+    while (end > offset && end < available && (log[end]! & 0xc0) === 0x80) end--
+    if (end === offset && end < available) { end++; while (end < available && (log[end]! & 0xc0) === 0x80) end++ }
+    if (offset > available) throw failure('SHELL_OUTPUT_OFFSET_INVALID')
     return { ...record, ...(record.command.pty === undefined ? {} : { stdinReady: record.status === 'running' && live?.write !== undefined, inputUncertain: await this.inputUncertain(id) }), ...(record.status === 'exited' ? record.result : {}), output: log.subarray(offset, end).toString('utf8'), offset, nextOffset: end, truncated: end < log.length }
   }
   private inputPath(effectId: string): string { return join(this.directory, `stdin-${createHash('sha256').update(effectId).digest('hex')}.json`) }
@@ -210,16 +243,20 @@ export class ShellProcesses {
       if (record.command.pty !== true || record.status !== 'running' || !live?.write) throw failure('SHELL_STDIN_NOT_READY')
       const receipt: ShellInputReceipt = { processId: id, effectId: context.effectId, agentId: context.agentId, laneId: context.laneId, digest, bytes, status: 'pending' }
       await this.persistJson(path, receipt)
+      live.inputSeen = true
+      notifyProcess(live)
       try {
         context.signal.throwIfAborted()
         if (live.controller.signal.aborted || live.record.status !== 'running') throw failure('SHELL_STDIN_NOT_READY')
         await live.write(data)
         receipt.status = 'delivered'
         await this.persistJson(path, receipt)
+        notifyProcess(live)
         return receipt
       } catch {
         receipt.status = 'unknown'
         await this.persistJson(path, receipt).catch(() => undefined)
+        notifyProcess(live)
         return receipt
       }
     })

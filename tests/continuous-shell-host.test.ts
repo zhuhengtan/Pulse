@@ -36,23 +36,33 @@ it('connects start/poll to the sandbox runner and blocks another write until set
         const deps = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies) : []
         const ref = deps.flatMap(d => d.state === 'settled' && d.outcome.resultRef ? [d.outcome.resultRef] : [])[0]!
         const started = ctx.results.read(ref) as any
-        return { actions: [{ type: 'submit_effects', effects: [tool('blocked-write', 'fs.write', { path: 'racing.txt', content: 'must not write' }), tool('poll-process', 'shell.poll', { processId: started.processId, waitMs: 30000 })], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'finish' }
+        return { actions: [{ type: 'submit_effects', effects: [tool('blocked-write', 'fs.write', { path: 'racing.txt', content: 'must not write' }), tool('poll-process', 'shell.poll', { processId: started.processId, waitMs: 30000 })], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'finish', locals: { processId: started.processId, output: '', blocked: false, polls: 1 } }
       })
       b.addStep('finish', ctx => {
         const deps = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies) : []
         const settled = deps.flatMap(d => d.state === 'settled' ? [{ error: d.outcome.error?.code ?? null, value: d.outcome.resultRef ? ctx.results.read(d.outcome.resultRef) : null }] : [])
-        return { actions: [{ type: 'complete', result: settled }], next: 'finish' }
+        const prior = ctx.lane.resume.locals as { processId: string; output: string; blocked: boolean; polls: number }
+        const process = settled.find(row => row.value && typeof row.value === 'object' && !Array.isArray(row.value) && 'processId' in row.value)?.value as any
+        const blocked = prior.blocked || settled.some(row => row.error === 'SHELL_PROCESS_ACTIVE')
+        const output = prior.output + (process?.output ?? '')
+        if (process?.status === 'exited') return { actions: [{ type: 'complete', result: { blocked, process: { ...process, output }, polls: prior.polls } }], next: 'finish' }
+        if (!process || prior.polls >= 5) throw new Error('SCRIPTED_POLL_DID_NOT_SETTLE')
+        // Output may wake a poll before exit. Keep the handle and byte cursor;
+        // never resubmit the shell or assume a running receipt is completion.
+        return { actions: [{ type: 'submit_effects', effects: [tool(`poll-${prior.polls + 1}`, 'shell.poll', { processId: prior.processId, offset: process.nextOffset, waitMs: 30000 })], wait: { onUnsatisfied: 'resume_with_error' } }], next: 'finish', locals: { processId: prior.processId, output, blocked, polls: prior.polls + 1 } }
       })
     })
     const session = runtime.start(runtime.createAgent('Run local fixture', program).agentId)
     const completed = session.outcome()
     await expect.poll(() => [...runtime.state.effects.values()].some((e: any) => e.outcome?.error?.code === 'SHELL_PROCESS_ACTIVE')).toBe(true)
+    await expect.poll(() => [...runtime.state.effects.values()].some((e: any) => e.input?.name === 'shell.poll' && e.outcome?.resultRef && (runtime.state.results.get(e.outcome.resultRef)?.value as any)?.status === 'running')).toBe(true)
     finishShell()
     const outcome = await completed
     expect(outcome.status).toBe('succeeded')
-    const result = runtime.state.results.get(outcome.resultRef!)?.value as any[]
-    expect(result.some(r => r.error === 'SHELL_PROCESS_ACTIVE'), JSON.stringify(result)).toBe(true)
-    expect(result.some(r => r.value?.status === 'exited' && r.value.code === 0 && r.value.output === 'started\ndone\n')).toBe(true)
+    const result = runtime.state.results.get(outcome.resultRef!)?.value as any
+    expect(result.blocked, JSON.stringify(result)).toBe(true)
+    expect(result.process).toMatchObject({ status: 'exited', code: 0, output: 'started\ndone\n' })
+    expect(result.polls).toBeGreaterThan(1)
     expect(vi.mocked(runShell)).toHaveBeenCalledTimes(1)
     await expect(readFile(join(root, 'racing.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
   } finally { finishShell?.(); if (runDirectory) await closeShellProcesses(runDirectory); await host.close(); await rm(root, { recursive: true, force: true }) }

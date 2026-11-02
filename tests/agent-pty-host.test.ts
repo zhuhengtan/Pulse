@@ -38,7 +38,8 @@ it('uses the real Host, approval loop and native PTY without borrowing a host ar
     if (!inputProposed && values.some(value => value.stdinReady === true)) { inputProposed = true; return call('shell.stdin', { processId: handle, data: process.platform === 'win32' ? 'one-line\r' : 'one-line\n' }) }
     // Windows cold SRT startup can take minutes. One poll may wait the tool maximum
     // instead of issuing a new model turn every 200ms. The turn ceiling stays 15.
-    return call('shell.poll', { processId: handle, waitMs: process.platform === 'win32' ? 30_000 : 200, limit: 4096 })
+    const offset = Math.max(0, ...values.filter(value => value.processId === handle && Number.isSafeInteger(value.nextOffset)).map(value => value.nextOffset as number))
+    return call('shell.poll', { processId: handle, offset, waitMs: process.platform === 'win32' ? 30_000 : 200, limit: 4096 })
   })
   const host = new LocalHost({ cwd: root, dataDir: join(root, 'data'), provider: { provider: 'mock' }, taskController: false, taskControllerPolicy: 'legacy', jarvis: { enabled: false }, approvalMode: 'ask', execPolicy: { rules: [{ pattern: [identity.path, script], decision: 'allow' }] } })
   let runDirectory: string | undefined
@@ -46,6 +47,7 @@ it('uses the real Host, approval loop and native PTY without borrowing a host ar
     const conversation = await host.createConversation()
     const run = await host.sendMessage(conversation.id, { text: 'Use the local interactive fixture once and send one-line.' })
     const approvals: string[] = [], events: unknown[] = []
+    const observedRuntime = [...(host as any).active.values()].find((value: any) => value.runId === run.id)?.runtime
     for await (const event of run.events) {
       events.push(event)
       if (event.type !== 'waiting') continue
@@ -62,6 +64,7 @@ it('uses the real Host, approval loop and native PTY without borrowing a host ar
       await run.reply(effectId!, { approved: true })
     }
     const outcome = await run.outcome()
+    if (outcome.error) console.error('Host PTY fixture:', JSON.stringify({ error: outcome.error, work, inputProposed, effects: [...(observedRuntime?.state.effects.values() ?? [])].map((effect: any) => ({ id: effect.id, kind: effect.kind, tool: effect.input?.name, waitMs: effect.input?.arguments?.waitMs, attemptTimeoutMs: effect.attemptTimeoutMs, status: effect.outcome?.status, error: effect.outcome?.error?.code })) }))
     expect(outcome.error).toBeUndefined()
     expect(outcome.status).toBe('succeeded')
     expect(approvals.filter(name => name !== 'shell.poll')).toEqual(['shell.stdin'])

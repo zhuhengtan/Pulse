@@ -639,7 +639,8 @@ function registerBuiltIns(registry: ToolRegistry, root: string, approvalMode: Ap
       name: 'shell.poll', description: 'Read new output and status of a shell.start handle owned by this lane. A running or unknown process has no exit code.', tags: ['shell', 'read'],
       input: z.object({ processId: z.string().regex(/^[a-f0-9]{64}$/), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(8192).default(4096), waitMs: z.number().int().min(0).max(30000).default(10000) }),
       output: visibleProcessOutput.extend({ output: z.string(), offset: z.number(), nextOffset: z.number(), truncated: z.boolean() }), sideEffectPolicy: 'read', retrySafety: 'read_only',
-      execute: (input, context) => processes.poll(input.processId, context, input.offset, input.limit, input.waitMs), summarize: output => json(summarizeShellProcess(output)),
+      // Long polls may return early; reserve read-back time inside the unchanged 30s Effect deadline.
+      execute: (input, context) => processes.poll(input.processId, context, input.offset, input.limit, Math.min(input.waitMs ?? 10_000, 29_000)), summarize: output => json(summarizeShellProcess(output)),
     }))
     registry.register(defineTool({
       name: 'shell.cancel', description: 'Cancel an existing shell.start handle owned by this lane, then return its settled status. Unknown processes require reconciliation.', tags: ['shell', 'system'],

@@ -34,6 +34,10 @@ export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>
       "en": "Harden whole-file writes, edit journals, and conditional recovery with complete conversation, run, and Effect ownership, protecting confirmed writes, original bytes, and path boundaries; fix generation-ticket and hook-receipt persistence failures caused by transient file sharing violations on Windows, and avoid timing out data acknowledgements already queued behind synchronous native work."
     },
     {
+      "zh": "将 Windows 沙箱准备和清理移至宿主 I/O worker，避免卡住宿主；让交互程序就绪和新输出及时唤醒轮询，同时保留原有硬期限、取消和未知结果约束。",
+      "en": "Move Windows sandbox preparation and cleanup to a host I/O worker to keep the host responsive; wake polls on interactive readiness and new output while retaining existing hard deadlines, cancellation, and unknown-result safeguards."
+    },
+    {
       "zh": "修复直接使用 Node 执行 Vitest 时缺少验收回执的问题，让同一套测试换启动器后的真实复验更新旧证据，同时保留失败检查和外部变更保护。",
       "en": "Record acceptance receipts when Vitest runs directly through Node, allowing an actual rerun of the same suite through another launcher to refresh old evidence while retaining failed-check and external-change protections."
     },

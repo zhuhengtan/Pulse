@@ -12,6 +12,10 @@ const initialize = vi.fn(async () => {})
 const adapterRequire = createRequire(new URL('../packages/adapters/package.json', import.meta.url))
 vi.doMock(adapterRequire.resolve('@anthropic-ai/sandbox-runtime'), () => ({ SandboxManager: sandbox }))
 vi.doMock('../packages/adapters/src/tools/sandbox-initialization.js', () => ({ initializeShellSandbox: initialize }))
+vi.doMock('../packages/adapters/src/tools/shell-sandbox.js', async () => {
+  const actual = await vi.importActual<typeof import('../packages/adapters/src/tools/shell-sandbox.js')>('../packages/adapters/src/tools/shell-sandbox.js')
+  return { ...actual, shellSandboxManager: () => actual.directShellSandbox() }
+})
 vi.doMock('../packages/adapters/src/tools/windows-srt-path.js', () => ({ verifiedWindowsSrt: () => '/fixed-install/srt-win.exe' }))
 vi.doMock('../packages/adapters/src/tools/installation-dependencies.js', () => ({ installationDependencyRoots: async () => [], workspaceUsesInstallationDependencies: async () => false }))
 vi.doMock('../packages/adapters/src/tools/windows-read-policy.js', () => ({ windowsReadDenyRoots: () => [], carveWindowsReadDenies: async (paths: string[]) => paths, windowsToolchainWriteDenies: async (paths: string[]) => paths }))

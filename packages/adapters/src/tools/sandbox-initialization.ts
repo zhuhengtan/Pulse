@@ -33,16 +33,17 @@ async function windowsDenyBatches(policy: SandboxRuntimeConfig): Promise<DenyBat
   return batches.length > 1 ? batches : undefined
 }
 
-export async function initializeShellSandbox(policy: SandboxRuntimeConfig, platform: NodeJS.Platform = process.platform, signal?: AbortSignal): Promise<void> {
-  signal?.throwIfAborted()
+export async function initializeShellSandbox(policy: SandboxRuntimeConfig, platform: NodeJS.Platform = process.platform, signal?: AbortSignal, checkCancelled?: () => void): Promise<void> {
+  const check = () => { signal?.throwIfAborted(); checkCancelled?.() }
+  check()
   const batches = platform === 'win32' ? await windowsDenyBatches(policy) : undefined
-  signal?.throwIfAborted()
+  check()
   let initial = batches ? { ...policy, filesystem: { ...policy.filesystem, ...batches[0]! } } : policy
   let range = policy.windows?.proxyPortRange ?? DEFAULT_WINDOWS_PROXY_PORT_RANGE
   let retriedWfp = false
   let proxyBindRetries = 0
   for (;;) {
-    signal?.throwIfAborted()
+    check()
     try {
       await SandboxManager.initialize(initial, undefined, false)
       break
@@ -65,17 +66,17 @@ export async function initializeShellSandbox(policy: SandboxRuntimeConfig, platf
       await SandboxManager.reset()
     }
   }
-  signal?.throwIfAborted()
+  check()
   if (!batches) return
   const srtWin = resolveSrtWin(policy.windows?.srtWin)
   const status = await getWindowsSandboxUserStatusAsync({ srtWin })
   if (!status.provisioned || !status.sid) throw new Error('Windows sandbox not provisioned')
   for (const batch of batches.slice(1)) {
-    signal?.throwIfAborted()
+    check()
     stampWindowsAcl({ ...batch, sandboxUserSid: status.sid, holderPid: process.pid, srtWin })
     await setImmediate()
   }
-  signal?.throwIfAborted()
+  check()
   // Additional batches use the SAME holder PID. The SDK's reset() releases all
   // ledger holds for that PID, including partial batches after failure. The
   // first batch ensures its cleanup bookkeeping is active even without grants.
