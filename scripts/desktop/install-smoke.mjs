@@ -20,6 +20,9 @@ const env = { ...process.env, PATH: join(root, 'empty-path'), PULSE_HOME: instal
 delete env.ELECTRON_RUN_AS_NODE;
 delete env.PULSE_DESKTOP_DEV_URL;
 delete env.PULSE_BROWSER_EXECUTABLE;
+// A packaged smoke must consume its installed resources, never the checkout's
+// runtime (which previously hid missing files in final Windows installers).
+if (process.env.PULSE_DESKTOP_EXECUTABLE) delete env.PULSE_DESKTOP_RUNTIME_DIR;
 let desktop, pid, failure, phase = 'initializing';
 const instances = [];
 const diagnostics = process.env.PULSE_DESKTOP_SMOKE_ARTIFACTS;

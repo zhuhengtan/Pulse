@@ -1,10 +1,18 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readRuntimeArchive } from './runtime-archive.mjs';
 
-/** Launch the trusted seed's update core; do not depend on a healthy running server. */
-export function controlUpdate(installation, shellVersion, chromium, path, init = {}) {
-    const source = installation.source;
+/** Launch a verified local update core; do not depend on a healthy running server. */
+export async function controlUpdate(installation, shellVersion, chromium, path, init = {}) {
+    let source = installation.source;
+    // Archive bundles have no executable seed tree in resources. Prepare and
+    // use the verified runtime, including when the HTTP service is offline.
+    if (source && await readRuntimeArchive(source)) {
+        if (!installation.state.runtimeDirectory) await installation.prepare();
+        source = installation.state.runtimeDirectory;
+        if (!source) return { status: 503, body: { error: 'UPDATE_CONTROL_UNAVAILABLE' } };
+    }
     const node = source ? join(source, process.platform === 'win32' ? 'node.exe' : 'node') : installation.node;
     const entry = source ? join(source, 'app/node_modules/@hunterzhu/pulse-server/dist/updates/control.js') : fileURLToPath(new URL('../../server/dist/updates/control.js', import.meta.url));
     return new Promise(resolve => {

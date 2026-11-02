@@ -14,6 +14,7 @@
     "dist": "electron-builder"
   },
   "dependencies": {
+    "tar": "^7.5.22",
     "ws": "^8.21.3"
   },
   "devDependencies": {
@@ -21,6 +22,7 @@
     "electron-builder": "26.15.3"
   },
   "build": {
+    "afterPack": "../../scripts/desktop/archive-windows-runtime.mjs",
     "appId": "com.hunterzhu.pulse.desktop",
     "productName": "Pulse",
     "directories": {

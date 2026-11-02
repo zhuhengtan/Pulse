@@ -62,6 +62,8 @@ node scripts/desktop/runtime-smoke.mjs # 在仓库外隔离副本中验证内置
 
 `desktop:app:prepare` 只在桌面运行环境副本中裁剪：保留当前系统/CPU 的 PTY、桌面辅助程序及沙箱二进制，移除其他平台文件、第三方调试 source map 和重复依赖。依赖合并要求文件内容及完整依赖解析（含 peer/optional 依赖）等价；不同版本或解析环境继续隔离，不创建需要 Windows 特权的符号链接。内置 Chromium、文档解析 worker/字体和许可证保留。准备后扫描可执行文件头，拒绝其他操作系统的原生文件，明细写入 `artifacts/desktop-runtime/optimization.json`；通用 CLI 归档不做此平台裁剪。Mac 签名后还会刷新原生辅助程序及整个运行环境的校验清单。
 
+Windows 在 `afterPack` 阶段把完整校验过的运行环境封装成 `resources/runtime/runtime.tar`，保留独立清单、归档摘要和启动诊断模块。NSIS 不再逐层解压、复制深层 `node_modules`；首次启动由桌面端校验归档摘要、解包到用户运行目录，完整校验后才启用。损坏修复继续使用新的运行目录，不覆盖正在运行的版本。Windows CI 必须通过 `scripts/desktop/verify-windows-installer.ps1`：真实运行最终 `.exe` 安装程序，再使用安装后的 `Pulse.exe` 验证首启、关闭、重开、修复及数据保留。
+
 安装包默认使用 `~/.pulse/data`，不会自动选择仓库的开发目录。若该目录尚未迁移，桌面会明确提示「旧版数据」，不会尝试另起后台写入旧数据。通过菜单「Pulse → 数据目录…」选择已迁移的目录，选择会保存在当前桌面用户配置中；重启桌面后生效，已有后台任务继续运行。服务状态窗口同时显示实际数据目录和服务地址。
 
 本仓库 H5 开发数据位于 `.pulse-dev/h5/data`，已运行的开发后台为 7333 时，桌面会通过该目录的 `service.json` 复用它。首次从命令行启动也可指定：

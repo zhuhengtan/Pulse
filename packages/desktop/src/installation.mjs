@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readRuntimeManifest, verifyRuntime } from './runtime-manifest.mjs';
 import { selectedBackend } from './update-loader.mjs';
+import { readRuntimeArchive, extractRuntimeArchive } from './runtime-archive.mjs';
 
 const execute = promisify(execFile);
 const marker = 'Pulse Desktop managed launcher';
@@ -108,7 +109,8 @@ export class DesktopInstallation {
                 const selected = this.runtimePolicy === 'bundled' ? undefined : await selectedBackend(this.root, this.dataDirectory, this.shellVersion, this.chromium, full);
                 const seed = selected ?? this.source;
                 const manifest = await readRuntimeManifest(seed, this.platform, this.arch);
-                await verifyRuntime(seed, manifest);
+                const archive = selected ? undefined : await readRuntimeArchive(this.source);
+                if (!archive) await verifyRuntime(seed, manifest);
                 const release = `${manifest.version}-${manifest.buildId.slice(0, 16)}`;
                 const managed = join(this.root, 'desktop', 'runtimes');
                 let target = selected ?? (saved.buildId === manifest.buildId && typeof saved.runtimeDirectory === 'string' && dirname(saved.runtimeDirectory) === managed ? saved.runtimeDirectory : join(managed, release));
@@ -116,14 +118,17 @@ export class DesktopInstallation {
                 const healthy = await verifyRuntime(target, manifest, full).then(() => true, () => false);
                 if (!healthy) {
                     this.step('runtime', '准备 Pulse 运行环境', 'running', '正在校验内置文件');
-                    await verifyRuntime(this.source, manifest, true);
+                    if (!archive) await verifyRuntime(this.source, manifest, true);
                     // Never replace files beneath a running backend. A repair gets a fresh immutable directory.
                     if (await exists(target)) target = join(managed, `${release}-repair-${randomUUID()}`);
                     await mkdir(managed, { recursive: true });
                     const staging = join(managed, `.install-${randomUUID()}`);
                     try {
                         this.step('runtime', '准备 Pulse 运行环境', 'running', '正在复制到本地');
-                        await cp(this.source, staging, { recursive: true, dereference: false, verbatimSymlinks: true });
+                        if (archive) {
+                            await mkdir(staging);
+                            await extractRuntimeArchive(this.source, staging, archive, manifest);
+                        } else await cp(this.source, staging, { recursive: true, dereference: false, verbatimSymlinks: true });
                         this.step('runtime', '准备 Pulse 运行环境', 'running', '正在校验安装文件');
                         await verifyRuntime(staging, manifest, true); await rename(staging, target);
                     }

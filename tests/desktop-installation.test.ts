@@ -36,6 +36,7 @@ async function fixture() {
   'app/node_modules/@hunterzhu/pulse-cli/dist/bin.js': "console.log(JSON.stringify(process.argv.includes('--show-environment')?{config:process.env.PULSE_CONFIG,data:process.env.PULSE_DATA_DIR}:process.argv.slice(2)))",
   'app/node_modules/@hunterzhu/pulse-cli/dist/config.js': "import{mkdir,writeFile}from'node:fs/promises';import{dirname}from'node:path';export async function ensurePulseUserConfig(p){await mkdir(dirname(p),{recursive:true});await writeFile(p,'{\"activeModel\":\"mock\"}',{flag:'wx',mode:384}).catch(e=>{if(e.code!=='EEXIST')throw e})}",
   'app/node_modules/@hunterzhu/pulse-server/dist/index.js': '// bundled server',
+  'app/node_modules/@hunterzhu/pulse-server/dist/updates/control.js': 'console.log(JSON.stringify({status:200,body:{offlineControl:true}}))',
   'app/node_modules/@hunterzhu/pulse-server/dist/web/index.html': '<html>Bundled UI</html>',
  }
  for (const [name, text] of Object.entries(files)) { const path = join(source, name); await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, text, { mode: name === 'node' ? 0o755 : 0o644 }) }
@@ -164,3 +165,35 @@ it.runIf(process.platform !== 'win32')('binds a preview installation and CLI to 
   expect(JSON.parse(result.stdout)).toEqual({config:setup.state.configPath,data:f.options.dataDirectory});expect(await readFile(setup.state.cli.path,'utf8')).toContain('export PULSE_MANAGED=0')
  }finally{await rm(f.root,{recursive:true,force:true})}
 })
+
+it.runIf(process.platform !== 'win32')('installs and repairs an archive-only bundle without a source dependency tree', async () => {
+ const f = await fixture()
+ try {
+  const { createRequire } = await import('node:module')
+  const { c } = createRequire(new URL('../packages/desktop/package.json', import.meta.url))('tar')
+  const { fileDigest } = await import('../packages/desktop/src/runtime-manifest.mjs')
+  const archive = join(f.root, 'runtime.tar')
+  await c({ cwd: f.source, file: archive }, ['.'])
+  const manifest = await readFile(join(f.source, 'desktop-runtime.json'))
+  await rm(f.source, { recursive: true }); await mkdir(f.source)
+  const { copyFile } = await import('node:fs/promises')
+  await copyFile(archive, join(f.source, 'runtime.tar'))
+  await writeFile(join(f.source, 'desktop-runtime.json'), manifest)
+  await writeFile(join(f.source, 'runtime-archive.json'), JSON.stringify({ schema: 1, sha256: await fileDigest(archive) }))
+  const setup = new DesktopInstallation(f.options)
+  await setup.prepare()
+  expect(setup.state.phase).toBe('starting')
+  const original = setup.state.runtimeDirectory
+  await setup.prepare()
+  expect(setup.state.runtimeDirectory).toBe(original)
+  const { controlUpdate } = await import('../packages/desktop/src/update-control.mjs')
+  expect(await controlUpdate(setup, '0.11.0', 140, '/api/updates')).toEqual({ status: 200, body: { offlineControl: true } })
+  await rm(join(original, 'app/node_modules/@hunterzhu/pulse-server/dist/index.js'))
+  await setup.prepare({ full: true })
+  expect(setup.state.phase).toBe('starting')
+  expect(setup.state.runtimeDirectory).not.toBe(original)
+  expect(await readFile(join(setup.state.runtimeDirectory, 'app/node_modules/@hunterzhu/pulse-server/dist/index.js'), 'utf8')).toContain('bundled server')
+  // The old directory remains untouched; repair must not overwrite live files.
+  await expect(readFile(join(original, 'app/node_modules/@hunterzhu/pulse-server/dist/index.js'))).rejects.toMatchObject({ code: 'ENOENT' })
+ } finally { await rm(f.root, { recursive: true, force: true }) }
+}, 60000)
