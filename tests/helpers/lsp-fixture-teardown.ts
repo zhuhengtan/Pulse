@@ -5,9 +5,10 @@ import { syncBuiltinESMExports } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
 /** Observe only these fixtures' fixed LSP sidecars; never kill unrelated PIDs. */
-export function registerLspFixtureTeardown(roots: string[], controllers: AbortController[]): void {
+export function registerLspFixtureTeardown(roots: string[], controllers: AbortController[], lifecycle?: { beforeAbort(): Promise<void>; afterClose(): Promise<void> }): { waitForClose(): Promise<void> } {
   const worker = fileURLToPath(new URL('../../packages/server/src/lsp/worker.cjs', import.meta.url))
   const closing = new Set<Promise<void>>()
+  const waitForClose = async (): Promise<void> => { await Promise.all([...closing]) }
   let previous: typeof cp.spawn
   beforeEach(() => {
     previous = cp.spawn
@@ -24,18 +25,22 @@ export function registerLspFixtureTeardown(roots: string[], controllers: AbortCo
     syncBuiltinESMExports()
   })
   afterEach(async () => {
-    controllers.splice(0).forEach(controller => controller.abort())
     try {
+      await lifecycle?.beforeAbort()
+      controllers.splice(0).forEach(controller => controller.abort())
       // A fixed 150ms sleep is shorter than the Windows helper's 250ms grace.
       // Wait for actual close before removing a still-owned current directory.
       // Native ACL cleanup can exceed Vitest's 10s default; use the existing
       // Windows LSP fixture deadline, without changing any production deadline.
-      await Promise.all([...closing])
+      await waitForClose()
       expect(closing.size).toBe(0)
+      await lifecycle?.afterClose()
       await Promise.all(roots.splice(0).map(root => rm(root, { force: true, recursive: true, maxRetries: 5, retryDelay: 100 })))
     } finally {
+      controllers.splice(0).forEach(controller => controller.abort())
       cp.spawn = previous
       syncBuiltinESMExports()
     }
   }, process.platform === 'win32' ? 480000 : 10000)
+  return { waitForClose }
 }

@@ -1,5 +1,6 @@
-import { afterEach, expect, it } from 'vitest'
-import { mkdtemp, readFile, writeFile, rm, copyFile, unlink } from 'node:fs/promises'
+import { expect, it } from 'vitest'
+import { mkdtemp, readFile, writeFile, copyFile, unlink } from 'node:fs/promises'
+import { registerLspFixtureTeardown } from './helpers/lsp-fixture-teardown.js'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFile } from 'node:child_process'
@@ -30,12 +31,11 @@ async function ownedTree(pid: number): Promise<number[]> {
   return [...found]
 }
 const instanceId = (value: unknown) => /instance=([0-9a-f-]+)/.exec(JSON.stringify(value))?.[1]
-afterEach(async () => {
-  const owned = (await Promise.all(services.splice(0).flatMap(helperPids).map(ownedTree))).flat()
-  controllers.splice(0).forEach(controller => controller.abort())
-  await expect.poll(() => owned.every(pid => !alive(pid)), { timeout: 10000, interval: 50 }).toBe(true)
-  await Promise.all(roots.splice(0).map(root => rm(root, { force: true, recursive: true, maxRetries: 5, retryDelay: 100 })))
-}, 15000)
+let closingTree: number[] = []
+const helpers = registerLspFixtureTeardown(roots, controllers, {
+  async beforeAbort() { closingTree = (await Promise.all(services.splice(0).flatMap(helperPids).map(ownedTree))).flat() },
+  async afterClose() { await expect.poll(() => closingTree.every(pid => !alive(pid)), { timeout: 10000, interval: 50 }).toBe(true) },
+})
 
 function names(nodes: any[]): string[] {
   return nodes.flatMap(node => [node.name, ...names(node.children ?? [])])
@@ -135,6 +135,7 @@ it('retires a silent cancelled server and serves the next query from a new proce
   symbolsSignal.abort()
   const error = await settled
   expect(String((error as Error).message ?? error)).toMatch(/CANCELLED/)
+  await helpers.waitForClose()
   await expect.poll(() => owned.every(pid => !alive(pid)), { timeout: 10000, interval: 50 }).toBe(true)
   await unlink(f.hold)
   const next = await f.service.query('symbols', { path: 'a.ts' }, f.controller.signal)
