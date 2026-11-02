@@ -32,19 +32,24 @@ it('loads shared installed aliases in the actual sandbox while denying sibling s
   await symlink(resolve('packages/adapters/node_modules'), join(cwd, 'node_modules'))
   const forbiddenWrite = join(resolve('packages/adapters/node_modules'), `pulse-denied-${Date.now()}.txt`)
   const forbiddenOverwrite = `${forbiddenWrite}.existing`
-  const previousHome = process.env.HOME, previousProfile = process.env.USERPROFILE
+  const previousHome = process.env.HOME, previousProfile = process.env.USERPROFILE, previousTiming = process.env.PULSE_SANDBOX_TIMING
   process.env.HOME = privateHome
   process.env.USERPROFILE = privateHome
   if (homedir() !== privateHome) throw new Error('HOME_FIXTURE_NOT_VISIBLE')
+  if (process.platform === 'win32') process.env.PULSE_SANDBOX_TIMING = '1'
+  const began = Date.now()
   try {
     await writeFile(forbiddenOverwrite, 'original', { flag: 'wx' })
     const script = `import assert from 'node:assert/strict';import{readFileSync,writeFileSync}from'node:fs';await import('@anthropic-ai/sandbox-runtime');assert.throws(()=>readFileSync(${JSON.stringify(hostSource)}), 'host source read');assert.throws(()=>readFileSync(${JSON.stringify(join(base, 'private-config.json'))}), 'sibling credential read');assert.throws(()=>writeFileSync(${JSON.stringify(forbiddenWrite)},'must not write',{flag:'wx'}), 'dependency creation');assert.throws(()=>writeFileSync(${JSON.stringify(forbiddenOverwrite)},'must not overwrite'), 'dependency overwrite');console.log('DEPENDENCY_READ_ONLY_OK')`
     await writeFile(join(cwd, 'probe.mjs'), script)
     const result = await runShell('node', ['probe.mjs'], { cwd, env: { PATH: process.env.PATH }, timeoutMs: 30000 })
+    if (process.platform === 'win32') console.info('Dependency boundary fixture:', JSON.stringify({ elapsedMs: Date.now() - began, code: result.code, aborted: result.aborted, timedOut: result.timedOut }))
     expect(result.code, result.stderr + result.stdout).toBe(0)
     expect(result.stdout).toContain('DEPENDENCY_READ_ONLY_OK')
     expect(await readFile(forbiddenOverwrite, 'utf8')).toBe('original')
   } finally {
+    if (previousTiming === undefined) delete process.env.PULSE_SANDBOX_TIMING
+    else process.env.PULSE_SANDBOX_TIMING = previousTiming
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     if (previousProfile === undefined) delete process.env.USERPROFILE
