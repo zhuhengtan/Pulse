@@ -93,6 +93,7 @@ it('allows a workspace file named ..secret.ts and still rejects a parent segment
   await writeFile(join(f.root, '..secret.ts'), 'const a=1\n')
   const symbols = await f.service.query('symbols', { path: '..secret.ts' }, f.controller.signal)
   expect(JSON.stringify(symbols)).toContain('write=denied')
+  await expect(readFile(join(f.root, 'unauthorized.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
   const definition = await f.service.query('definition', { path: '..secret.ts', line: 1, column: 1 }, f.controller.signal)
   expect(definition.items).toEqual([expect.objectContaining({ path: '..secret.ts' })])
   await expect(f.service.query('symbols', { path: '..' }, f.controller.signal)).rejects.toThrow('CODE_PATH_OUTSIDE_WORKSPACE')

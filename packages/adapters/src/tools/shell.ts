@@ -486,7 +486,9 @@ async function sandboxConfig(cwd: string, allowedDomains: string[] = [], toolcha
       denyRead: process.platform === 'win32' ? await carveWindowsReadDenies([...denyRead], [...allowRead, ...dependencyRoots]) : [...denyRead],
       allowRead,
       allowWrite: [...(readOnlyWorkspace ? [] : [cwd]), ...(scratch ? [scratch] : [])],
-      denyWrite: process.platform === 'win32' ? await windowsToolchainWriteDenies([...toolchainRoots, ...dependencyRoots], [...(readOnlyWorkspace ? [] : [cwd]), ...(scratch ? [scratch] : [])]) : [],
+      // Omitting an allow-write grant does not remove inherited Users write
+      // rights on Windows (notably runner temp). Explicitly seal read-only cwd.
+      denyWrite: process.platform === 'win32' ? await windowsToolchainWriteDenies([...(readOnlyWorkspace ? [cwd] : []), ...toolchainRoots, ...dependencyRoots], [...(readOnlyWorkspace ? [] : [cwd]), ...(scratch ? [scratch] : [])]) : [],
     },
     ...(seccompPath ? { seccomp: { applyPath: seccompPath } } : {}),
     ...(process.platform === 'win32' ? { windows: { srtWin: { path: verifiedWindowsSrt() } } } : {}),

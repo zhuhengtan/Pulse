@@ -68,5 +68,8 @@ it('denies writes to shared read-only toolchains while retaining workspace and s
     expect(await windowsToolchainWriteDenies([deps], [workspace, scratch])).toEqual([deps])
     if (process.platform === 'win32') expect(await windowsToolchainWriteDenies([deps, deps.toUpperCase()], [workspace, scratch])).toEqual([deps])
     expect(await windowsToolchainWriteDenies([workspace], [workspace, scratch])).toEqual([])
+    // A read-only workspace needs an explicit deny even when Windows grants
+    // Users inherited write rights; scratch remains the only writable tree.
+    expect(await windowsToolchainWriteDenies([workspace, deps], [scratch])).toEqual([workspace, deps])
   } finally { await rm(root, { recursive: true, force: true }) }
 })

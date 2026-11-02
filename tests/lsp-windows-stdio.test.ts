@@ -53,6 +53,7 @@ it('keeps the Windows SRT prefix and replaces only the direct stdio command for 
     },
   })
   expect(result).toMatchObject({ code: 0, aborted: false })
-  const policy = initialize.mock.calls[0]![0] as { filesystem: { allowWrite: string[] } }
+  const policy = initialize.mock.calls[0]![0] as { filesystem: { allowWrite: string[]; denyWrite: string[] } }
   expect(policy.filesystem.allowWrite).not.toContain(root)
+  expect(policy.filesystem.denyWrite).toContain(root)
 })
