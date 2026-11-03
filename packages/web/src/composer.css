@@ -645,8 +645,8 @@
 .mention-chip{display:inline-flex;align-items:center;gap:4px;max-width:100%;vertical-align:baseline;padding:1px 6px;border-radius:6px;border:1px solid var(--line);background:var(--soft);font:inherit;font-size:.9em;line-height:1.5;white-space:normal;overflow-wrap:anywhere;}
 .reference-icon{font-size:.9em;opacity:.75;flex-shrink:0;user-select:none;}
 .composer-bubble{display:flex;align-items:center;gap:3px;padding:6px;border:1px solid var(--line);border-radius:14px;background:var(--panel,#fff);color:var(--ink);box-shadow:0 6px 24px #0002;max-width:calc(100vw - 24px);}
-.composer-bubble button,.composer-bubble select{border:0;border-radius:8px;background:transparent;color:inherit;min-width:34px;min-height:34px;font-size:16px;cursor:pointer;}
-.composer-bubble select{max-width:145px;padding:4px 8px;font-size:14px;}
+.composer-bubble button,.composer-bubble .composer-format-select{border:0;border-radius:8px;background:transparent;color:inherit;min-width:34px;min-height:34px;font-size:16px;cursor:pointer;}
+.composer-bubble .composer-format-select{width:125px;font-size:14px;}
 .composer-bubble button:hover,.composer-bubble button[aria-pressed=true]{background:var(--soft);}
 .composer-bubble :focus-visible{outline:2px solid var(--blue,#888888);outline-offset:1px;}
 .composer-link-dialog{position:absolute;z-index:30;bottom:48px;left:8px;right:8px;padding:12px;border:1px solid var(--line);border-radius:12px;box-shadow:0 6px 24px #0002;background:var(--panel,#fff);color:var(--ink);}
@@ -654,7 +654,7 @@
 .composer-link-dialog input{flex:1;min-width:100px;border:1px solid var(--line);border-radius:6px;background:var(--soft);color:inherit;padding:8px;}
 .composer-link-dialog button{padding:6px 10px;background:var(--soft);color:inherit;border:0;border-radius:6px;}
 .queue-edit .rich-composer{width:100%;}
-@media(max-width:767px){.composer-bubble button,.composer-bubble select{min-height:44px;min-width:40px;}.rich-document{font-size:16px;}}
+@media(max-width:767px){.composer-bubble button,.composer-bubble .composer-format-select{min-height:44px;min-width:40px;}.rich-document{font-size:16px;}}
 .attachment-cards{display:flex;flex-wrap:wrap;gap:8px;padding:4px 0;}
 .attachment-card-open{display:flex;align-items:center;gap:6px;min-width:0;border:0;padding:0;color:inherit;background:none;font:inherit;text-decoration:none;cursor:pointer;}
 

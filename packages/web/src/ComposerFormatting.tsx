@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Extension, type Editor } from '@tiptap/core'
 import Link from '@tiptap/extension-link'
+import { PulseSelect } from './PulseControls.js'
 import { BubbleMenu } from '@tiptap/react/menus'
 import { Plugin, type EditorState, type Transaction } from '@tiptap/pm/state'
 import { Fragment, Slice, type Node as PMNode } from '@tiptap/pm/model'
@@ -91,8 +92,11 @@ export function ComposerBubbleMenu({ editor }: { editor: Editor }) {
     return () => { editor.off('transaction', update); editor.off('mount', bind); dom?.removeEventListener('pulse-edit-link', openLink) }
   }, [editor])
   const shouldShow = useCallback(({ state }: { state: EditorState }) => editor.isEditable && !state.selection.empty && state.selection.$from.parent.type.name !== 'codeBlock' && !linkOpen, [editor, linkOpen])
+  const formatRange = useRef<{ from: number; to: number } | undefined>(undefined)
   const format = (kind: string) => {
     const chain = editor.chain().focus()
+    if (formatRange.current) chain.setTextSelection(formatRange.current)
+    formatRange.current = undefined
     if (kind === 'paragraph') chain.setParagraph().unsetBlockquote()
     else if (/^h[123]$/.test(kind)) chain.toggleHeading({ level: Number(kind[1]) as 1 | 2 | 3 })
     else if (kind === 'bulletList') chain.toggleBulletList()
@@ -107,13 +111,13 @@ export function ComposerBubbleMenu({ editor }: { editor: Editor }) {
   const active = editor.isActive('orderedList') ? 'orderedList' : editor.isActive('bulletList') ? 'bulletList' : editor.isActive('heading') ? `h${editor.getAttributes('heading').level}` : editor.isActive('blockquote') ? 'blockquote' : editor.isActive('codeBlock') ? 'codeBlock' : 'paragraph'
   return <>
     <BubbleMenu editor={editor} options={bubbleOptions} shouldShow={shouldShow}>
-      <div className="composer-bubble" role="toolbar" aria-label="文本格式" onMouseDown={event => { if ((event.target as HTMLElement).tagName !== 'SELECT') event.preventDefault() }}>
+      <div className="composer-bubble" role="toolbar" aria-label="文本格式" onMouseDown={event => event.preventDefault()}>
         <button type="button" title="链接 · Cmd/Ctrl+K" aria-label="添加或编辑链接" aria-pressed={editor.isActive('link')} onClick={openLink}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7 .1l3-3a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7-.1l-3 3a5 5 0 0 0 7 7l2-2"/></svg></button>
         <button type="button" title="粗体 · Cmd/Ctrl+B" aria-label="粗体" aria-pressed={editor.isActive('bold')} onClick={() => editor.chain().focus().toggleBold().run()}><b>B</b></button>
         <button type="button" title="斜体 · Cmd/Ctrl+I" aria-label="斜体" aria-pressed={editor.isActive('italic')} onClick={() => editor.chain().focus().toggleItalic().run()}><i>I</i></button>
-        <select aria-label="段落与列表格式" value={active} onChange={event => format(event.target.value)}>
+        <PulseSelect aria-label="段落与列表格式" className="composer-format-select" value={active} showSearch={false} onOpenChange={open => { if (open) formatRange.current = { from: editor.state.selection.from, to: editor.state.selection.to } }} onChange={format}>
           <option value="paragraph">正文</option><option value="h1">标题 1</option><option value="h2">标题 2</option><option value="h3">标题 3</option><option value="orderedList">编号列表</option><option value="bulletList">项目符号</option><option value="blockquote">引用</option><option value="strike">删除线</option><option value="code">行内代码</option><option value="codeBlock">代码块</option><option value="clear">清除格式</option>
-        </select>
+        </PulseSelect>
       </div>
     </BubbleMenu>
     {linkOpen && <div className="composer-link-dialog" role="dialog" aria-label="编辑链接" onKeyDown={event => { event.stopPropagation(); if (event.key === 'Escape') { setLinkOpen(false); editor.commands.focus() } }}>
