@@ -1,10 +1,10 @@
 import { createRequire } from 'node:module';
 import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { fileDigest, readRuntimeManifest, verifyRuntime } from '../../packages/desktop/src/runtime-manifest.mjs';
-import { archiveName, archiveMetadataName } from '../../packages/desktop/src/runtime-archive.mjs';
+import { fileDigest, readRuntimeManifest, verifyRuntime } from '../src/runtime-manifest.mjs';
+import { archiveName, archiveMetadataName } from '../src/runtime-archive.mjs';
 
-const { c } = createRequire(new URL('../../packages/desktop/package.json', import.meta.url))('tar');
+const { c } = createRequire(new URL('../package.json', import.meta.url))('tar');
 
 export async function archiveWindowsRuntime(source, destination, arch = process.arch) {
     const manifest = await readRuntimeManifest(source, 'win32', arch);

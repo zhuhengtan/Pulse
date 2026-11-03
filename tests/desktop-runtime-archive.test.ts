@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
-import { archiveWindowsRuntime } from '../scripts/desktop/archive-windows-runtime.mjs'
+import { archiveWindowsRuntime } from '../packages/desktop/scripts/archive-windows-runtime.mjs'
 import { archiveName, extractRuntimeArchive, readRuntimeArchive } from '../packages/desktop/src/runtime-archive.mjs'
 import { fileDigest, verifyRuntime, writeRuntimeManifest } from '../packages/desktop/src/runtime-manifest.mjs'
 const { c } = createRequire(new URL('../packages/desktop/package.json', import.meta.url))('tar')
