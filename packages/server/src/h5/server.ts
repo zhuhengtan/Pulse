@@ -2240,7 +2240,19 @@ export class H5Server {
             await active.submitHumanInput(text, undefined, { ...(requestId ? { requestId } : {}), ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}) })
             res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ runId: active.id })); return
           }
-          if (conversation.summary.activeRunId || [...this.activeRuns.values()].some(handle => handle.conversationId === convId)) throw new Error('CONVERSATION_BUSY')
+          if ([...this.activeRuns.values()].some(handle => handle.conversationId === convId)) throw new Error('CONVERSATION_BUSY')
+          // A new explicit message can start a fresh run after a stopped one.
+          // Reconciliation retains evidence and refuses unresolved side effects.
+          if (conversation.summary.activeRunId) {
+            try { await this.host.reconcileInactiveRun(convId, conversation.summary.activeRunId) }
+            catch (error) {
+              const message = error instanceof Error ? error.message : String(error)
+              if (message === 'CONVERSATION_BUSY' || message === 'RUN_AWAITING_APPROVAL' || message.startsWith('RECOVERY_')) {
+                res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: message })); return
+              }
+              throw error
+            }
+          }
         }
         const handle = await this.startConversationRun(convId, text, {
           ...(requestId ? { requestId } : {}),

@@ -237,3 +237,16 @@ it('keeps the original chat reference through offline retry and a restored queue
  const f=fixture(),ref={projectId:'p1',conversationId:'work-a'};const payload={text:'继续这个',assistantContext:ref};let failed=true;const received:any[]=[];f.adapter.send=async(_q,entry)=>{received.push(structuredClone(entry.payload));if(failed){failed=false;throw Error('connection lost')}return{runId:'same-run'}}
  await f.controller.enqueue('conversation','chat',payload);ref.conversationId='work-b';await f.controller.tick();f.controller.close();const restored=new MessageQueueController('service-one',f.store,f.adapter,()=>{});await restored.tick();expect(received).toHaveLength(2);expect(received.map(x=>x.assistantContext.conversationId)).toEqual(['work-a','work-a']);restored.close()
 })
+
+it('reconciles a terminal work busy marker before draining its queued message', async () => {
+  const paths: string[] = []
+  const transport: PulseWebTransport = { subscribe: () => () => {}, request: async (path) => {
+    paths.push(path)
+    if (path.endsWith('/state')) return Response.json({ state: 'succeeded', interactions: [] })
+    if (path.endsWith('/reconcile')) return Response.json({ cleared: true })
+    return Response.json({ activeRunId: 'stopped', runs: ['stopped'] })
+  } }
+  const state = await queueAdapter(transport).inspect({ key: 'k', scope: 's', surface: 'work', conversationId: 'conversation', entries: [], paused: false })
+  expect(state.activeRunId).toBeUndefined()
+  expect(paths.at(-1)).toBe('/api/conversations/conversation/runs/stopped/reconcile')
+})

@@ -646,7 +646,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       if (event.type === 'complete') {
         const outcome = event.data.status
         const label = presentRun({ state: outcome, completion: event.data }).label
-        setReviewNote('')
+        setReviewNote(''); setRunning(false)
         setStatus(current => replaceStatus(current.filter(item => item.kind !== 'interaction'), { kind: 'complete', label, outcome }))
       }
       if (event.type === 'error') setStatus(current => replaceStatus(current, { kind: 'complete', label: event.data.message, outcome: 'failed' }))
@@ -807,9 +807,8 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
 
     const sendEpoch = routeEpoch.current
     if (loading || loadError || stopping || stopLock.current) return false
-    const busy = Boolean(running || selected?.activeRunId)
-    const hasQueued = Boolean(currentQueue?.entries.length)
-    if (behavior === 'queue' && (busy || hasQueued) && selected?.id) {
+    const busy = running
+    if (behavior === 'queue' && busy && selected?.id) {
       if ((!text && !hasAttachments) || !paired || !serviceConnected || submitting) return false
       if (!messageQueue.controller) { setToast('本地队列尚未就绪，草稿已保留。'); return false }
       try {
@@ -875,8 +874,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       } finally { sendLock.current = false; setSubmitting(false) }
       return
     }
-    if ((!text && !hasAttachments) || submitting || resumingRunId || (behavior !== 'immediate' && selected?.activeRunId) || sendLock.current || !paired) {
-      if (selected?.activeRunId && !running && !resumingRunId) setToast('请先继续任务或结束这轮，再发送新消息。')
+    if ((!text && !hasAttachments) || submitting || resumingRunId || sendLock.current || !paired) {
       return false
     }
     sendLock.current = true; setSubmitting(true); setLoadError('')
@@ -929,6 +927,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         } catch { /* Restore the original draft if durable caching failed. */ }
       }
       restoreSubmittedDraft(requestId)
+      if (selectedIdRef.current === conversationId && sendEpoch === routeEpoch.current) setToast(error instanceof ApiError && error.detail?.startsWith('RECOVERY_') ? recoveryBlockerMessage(error.detail) : '消息未发送，草稿和附件已保留，请重试。')
       patchLocalMessage(conversationId ?? 'new', pendingId, { deliveryState: 'failed' })
       if (selectedIdRef.current === conversationId) setMessages(current => current.map(message => message.id === pendingId ? { ...message, deliveryState: 'failed' } : message))
       if (selectedIdRef.current === conversationId && error instanceof ApiError && error.status === 401) setLoadError('此设备授权已失效，请重新配对。')

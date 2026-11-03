@@ -91,6 +91,11 @@ export function queueAdapter(transport: PulseWebTransport, accepted?: QueueAdapt
       const runId = conversation.activeRunId ?? latestRunId ?? queue.awaitingRunId ?? queue.confirmedRunId
       if (!runId) return { waiting: false }
       const snapshot = await apiJson<WebRunSnapshot>(transport, `/api/runs/${encodeURIComponent(runId)}/state`)
+      if (queue.surface === 'work' && conversation.activeRunId === runId && snapshot.state !== 'running' && !snapshot.waiting && !snapshot.interactions?.length && !snapshot.releaseBlocked) {
+        const result = await apiJson<{ cleared: boolean; activeRunId?: string }>(transport, `/api/conversations/${encodeURIComponent(queue.conversationId)}/runs/${encodeURIComponent(runId)}/reconcile`, jsonRequest('POST'))
+        if (result.activeRunId) conversation.activeRunId = result.activeRunId
+        else delete conversation.activeRunId
+      }
       return { ...(conversation.activeRunId ? { activeRunId: conversation.activeRunId } : {}), runId, waiting: Boolean(snapshot.waiting || snapshot.interactions?.length), state: snapshot.state, ...(snapshot.releaseBlocked === 'RECOVERY_SIDE_EFFECT_UNKNOWN' ? { sideEffectUnknown: true } : {}) }
     },
     async send(queue, entry) {

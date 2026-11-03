@@ -7,6 +7,7 @@ import { RichComposer, emptyComposerDraft } from '../src/RichComposer.js'
 import { ChatSurface, deriveChatState } from '../src/ChatSurface.js'
 import { InteractionPanel, type PendingInteraction } from '../src/InteractionPanel.js'
 import { MessageQueuePanel } from '../src/MessageQueuePanel.js'
+import { IndexedMessageQueueStore } from '../src/MessageQueue.js'
 import type { ConversationQueue, MessageQueueController } from '../src/MessageQueue.js'
 import { PulseDesignSystem } from '../src/PulseDesignSystem.js'
 import { PulseApp } from '../src/PulseApp.js'
@@ -163,4 +164,26 @@ it.each(['chat', 'work'] as const)('keeps %s stop pending until acknowledgement,
 it('prioritizes stopping over pending interactions without conflating send and run states', () => {
   expect(deriveChatState({ running: true, stopping: true, submitting: false, interaction: approval, stopped: false })).toBe('stopping')
   expect(deriveChatState({ running: true, stopping: false, submitting: false, interaction: approval, stopped: false })).toBe('approval')
+})
+
+it('sends directly after an incomplete terminal event even before run_finished clears the busy marker', async () => {
+  vi.spyOn(IndexedMessageQueueStore.prototype, 'list').mockResolvedValue([])
+  const queueWrite = vi.spyOn(IndexedMessageQueueStore.prototype, 'update').mockRejectedValue(new Error('must not queue'))
+  const fixture = followupFixture('work'), original = fixture.transport.request
+  fixture.transport.request = async (path, init) => {
+    if (path.endsWith('/messages') && init?.method === 'POST') delete fixture.conversation.activeRunId
+    return original(path, init)
+  }
+  const router = createMemoryRouter([{ path: '*', element: <PulseApp transport={fixture.transport}/> }], { initialEntries: ['/work/busy'] })
+  const view = render(<PulseDesignSystem><RouterProvider router={router}/></PulseDesignSystem>)
+  try {
+    await view.findByText('正在执行的原始任务')
+    await waitFor(() => expect(fixture.subscriptions.get('run-fixture-initial')?.size).toBe(1))
+    act(() => fixture.subscriptions.get('run-fixture-initial')!.forEach(receive => receive({ type: 'complete', runId: 'run-fixture-initial', seq: 1, data: { status: 'succeeded', taskOutcome: { status: 'incomplete' } as any } })))
+    act(() => editorOf(view).commands.setContent('继续修复'))
+    fireEvent.click(view.getByRole('button', { name: '发送', exact: true }))
+    await waitFor(() => expect(fixture.calls.filter(call => call.path.endsWith('/messages'))).toHaveLength(1))
+    expect(queueWrite).not.toHaveBeenCalled()
+    expect(fixture.calls[0]!.body.text).toBe('继续修复')
+  } finally { router.dispose() }
 })
