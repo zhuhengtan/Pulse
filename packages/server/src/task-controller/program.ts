@@ -548,6 +548,29 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
       // Refresh the budget at the next controller boundary; provider admission
       // still checks the durable ledger for the summary request itself.
       if (durableScheduling && step.startsWith('$compact:')) return undefined
+      // shell.start settles its launch receipt before the command exits. Drain
+      // this lane's existing handles before any verifier uses their evidence,
+      // including handles retained across a human-input replan.
+      if (reviewRecovery && options.toolNames.includes('shell.poll') && ['verify-stage', 'progress-review', 'progress-review-worker', 'verify-task', 'verify-sources', 'verify-claims'].includes(step)) {
+        const refs = [...new Set([...ctx.history.flatMap(item => item.resultRefs), ...steeringState.tasks.flatMap(task => task.evidenceRefs), ...(steeringState.priorTasks ?? []).flatMap(task => task.evidenceRefs)])].sort((a, b) => Number(a.match(/(\d+)$/)?.[1] ?? 0) - Number(b.match(/(\d+)$/)?.[1] ?? 0))
+        const processes = new Map<string, { ref: string; offset: number }>()
+        for (const ref of refs) {
+          const meta = ctx.results.meta(ref)
+          if (!['shell.start', 'shell.poll'].includes(meta?.toolName ?? '') || meta?.outcomeStatus !== 'succeeded') continue
+          const summary = ctx.results.summary(ref)
+          const body = summary && typeof summary === 'object' && !Array.isArray(summary) && typeof summary.laneId === 'string' ? summary : ctx.results.read(ref)
+          if (!body || typeof body !== 'object' || Array.isArray(body) || body.laneId !== ctx.lane.id || typeof body.processId !== 'string' || !/^[a-f0-9]{64}$/.test(body.processId)) continue
+          if (body.status === 'running') processes.set(body.processId, { ref, offset: typeof body.nextOffset === 'number' ? body.nextOffset : 0 })
+          else processes.delete(body.processId)
+        }
+        if (processes.size) {
+          const locals = ctx.lane.resume.locals as Record<string, JsonValue>, round = Number(locals.shellSettleRound ?? 0) + 1
+          return { actions: [{ type: 'submit_effects', effects: [...processes].map(([processId, receipt], index) => {
+            const key = `shell-settle:${round}:${index}`
+            return { key, kind: 'tool', concurrencyClass: 'tool', derivedFrom: [receipt.ref], input: { name: 'shell.poll', arguments: { processId, offset: receipt.offset, waitMs: 30000 }, toolCallId: key } }
+          }), wait: { onUnsatisfied: 'resume_with_error' } }], next: 'shell-settle:collect', locals: { ...locals, shellSettleNext: step, shellSettleRound: round } }
+        }
+      }
       if (boundedTransitions && step === 'verify-stage') {
         const state = stateOf(ctx), task = state.tasks.find(t => t.id === state.activeId)!
         const checks = namedHostChecks(taskRecordFromGlobal(ctx.global as JsonValue), task).filter(c => task.hostCheckRefs?.[c.id] === undefined)
@@ -1235,6 +1258,16 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
         }
         return stageFailure(ctx, error.code, error.message)
       },
+    })
+    builder.addStep('shell-settle:collect', ctx => {
+      const state = stateOf(ctx), task = state.tasks.find(item => item.id === (workerTaskId(ctx) ?? state.activeId))
+      const refs = refsFromWait(ctx)
+      if (task) { task.evidenceRefs = [...new Set([...task.evidenceRefs, ...refs])]; save(ctx, state) }
+      const dependencies = ctx.resumeInput?.type === 'wait' ? Object.values(ctx.resumeInput.resolution.dependencies) : []
+      const failed = dependencies.find(item => item.state === 'settled' && item.outcome.status !== 'succeeded')
+      const { shellSettleNext, ...locals } = ctx.lane.resume.locals as Record<string, JsonValue>
+      if (failed?.state === 'settled') return { next: stageFailure(ctx, failed.outcome.error?.code ?? 'SHELL_PROCESS_STATE_UNKNOWN', failed.outcome.error?.message ?? 'The existing command could not be observed; retained evidence is not acceptance.'), locals }
+      return { next: typeof shellSettleNext === 'string' ? shellSettleNext : 'verify-stage', locals }
     })
     builder.addStep('stage-checks:collect', ctx => {
       const state = stateOf(ctx), task = state.tasks.find(t => t.id === state.activeId)!

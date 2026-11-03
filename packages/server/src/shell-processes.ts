@@ -62,6 +62,8 @@ export function summarizeShellProcess(value: unknown): Record<string, unknown> {
   }
   return {
     processId: record.processId, status: record.status,
+    ...(typeof record.agentId === 'string' ? { agentId: record.agentId } : {}),
+    ...(typeof record.laneId === 'string' ? { laneId: record.laneId } : {}),
     ...(typeof record.stdinReady === 'boolean' ? { stdinReady: record.stdinReady, inputUncertain: record.inputUncertain === true } : {}),
     ...(typeof record.code === 'number' || record.code === null ? { code: record.code, aborted: record.aborted, timedOut: record.timedOut } : {}),
     ...(record.output === undefined ? {} : { offset: record.offset, nextOffset: record.offset + bytes, output, truncated: record.truncated || output.length < record.output.length }),
