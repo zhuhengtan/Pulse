@@ -49,6 +49,11 @@ export function PulseDesignSystem({ children }: { children: ReactNode }) {
       Input: { controlHeight: 42, activeShadow: '0 0 0 3px rgba(127,127,127,.12)' },
       InputNumber: { controlHeight: 42, activeShadow: '0 0 0 3px rgba(127,127,127,.12)' },
       Select: { controlHeight: 42, optionSelectedBg: dark ? '#353535' : '#eeeeee' },
+      Switch: dark ? {
+        colorPrimary: '#22966b', colorPrimaryHover: '#29a477',
+        colorTextQuaternary: '#686868', colorTextTertiary: '#777777',
+        handleBg: '#ffffff',
+      } : {},
       Tabs: { itemSelectedColor: dark ? '#ededed' : '#202020', itemActiveColor: dark ? '#ededed' : '#202020', inkBarColor: dark ? '#ededed' : '#202020' },
       Card: { borderRadiusLG: 14 },
       Menu: { itemBorderRadius: 8, itemHeight: 42 },
