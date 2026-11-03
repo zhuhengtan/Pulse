@@ -366,7 +366,7 @@ export function RichComposer({
     sendingRef.current = true
     setSendError('')
     try {
-      if (await onSend(payload, behavior ?? followupBehavior)) {
+      if (await onSend(payload, surfaceMode === 'chat' ? 'immediate' : behavior ?? followupBehavior)) {
         onChange(current => current.revision === snapshotRevision ? { ...emptyComposerDraft(), revision: current.revision + 1 } : current)
         if (draftRef.current.revision === snapshotRevision && !editor?.isDestroyed) {
           editor?.commands.setContent('', { emitUpdate: false })
@@ -809,7 +809,7 @@ export function RichComposer({
           }}
         />
         <EditorContent editor={editor} id={composerId} />
-        {editor && <ComposerBubbleMenu editor={editor}/>}
+        {surfaceMode === 'work' && editor && <ComposerBubbleMenu editor={editor}/>}
       </div>
 
       {/* Bottom compact toolbar */}
@@ -838,7 +838,7 @@ export function RichComposer({
                 { key: 'attachment', icon: <Icon name="attachment" size={17} />, label: '添加附件或图片' },
                 { key: 'skill', icon: <Icon name="spark" size={17} />, label: 'Skill 技能', extra: '/' },
                 { key: 'file', icon: <Icon name="file" size={17} />, label: '引用项目文件', extra: '@', disabled: !projectId },
-              ],
+              ].filter(item => surfaceMode === 'work' || item.key === 'attachment'),
               onClick: ({ key }) => {
                 setToolsOpen(false)
                 if (key === 'attachment') fileInputRef.current?.click()
@@ -872,11 +872,11 @@ export function RichComposer({
 
           {(!running || hasContent || attachments.length > 0) && <button
             type="button" className={`composer-send-btn ${running ? 'is-followup' : ''}`} disabled={!canSubmit}
-            aria-label={submitLabel ?? (running ? followupBehavior === 'queue' ? '加入队列' : '立即发送' : '发送')}
-            title={running ? followupBehavior === 'queue' ? '排队发送 · Enter' : '立即发送 · Enter' : '发送 · Enter'}
+            aria-label={submitLabel ?? (surfaceMode === 'chat' ? '发送' : running ? followupBehavior === 'queue' ? '加入队列' : '立即发送' : '发送')}
+            title={surfaceMode === 'chat' ? '发送 · Enter' : running ? followupBehavior === 'queue' ? '排队发送 · Enter' : '立即发送 · Enter' : '发送 · Enter'}
             onClick={() => void handleSend()}
-          >{submitting ? <span className="spinner"/> : <>{running && <span>{followupBehavior === 'queue' ? '排队发送' : '立即发送'}</span>}<Icon name="up" size={18}/></>}</button>}
-          {running && (hasContent || attachments.length > 0) && <Dropdown trigger={['click']} placement="topRight" open={sendMenuOpen} onOpenChange={setSendMenuOpen} menu={{
+          >{submitting ? <span className="spinner"/> : <>{surfaceMode === 'work' && running && <span>{followupBehavior === 'queue' ? '排队发送' : '立即发送'}</span>}<Icon name="up" size={18}/></>}</button>}
+          {surfaceMode === 'work' && running && (hasContent || attachments.length > 0) && <Dropdown trigger={['click']} placement="topRight" open={sendMenuOpen} onOpenChange={setSendMenuOpen} menu={{
             items: [{ key: 'queue', label: '排队发送', extra: followupBehavior === 'queue' ? 'Enter' : '⌘/Ctrl Enter' }, { key: 'immediate', label: '立即发送', extra: followupBehavior === 'immediate' ? 'Enter' : '⌘/Ctrl Enter' }],
             onClick: ({ key }) => { setSendMenuOpen(false); void handleSend(key as FollowupBehavior) },
           }}><button type="button" className="composer-send-menu" aria-label="发送方式" aria-haspopup="menu" aria-expanded={sendMenuOpen} disabled={!canSubmit}><Icon name="down" size={12}/></button></Dropdown>}

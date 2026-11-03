@@ -12,7 +12,7 @@ import { useProjectDrag } from './useProjectDrag.js'
 import { useResizableHistory } from './useResizableHistory.js'
 import { InteractionPanel, type PendingInteraction } from './InteractionPanel.js'
 export { InteractionPanel } from './InteractionPanel.js'
-import { ChatSurface, ChatActionArea, deriveChatState } from './ChatSurface.js'
+import { ChatSurface, ChatActionArea, ChatTypingBubble, deriveChatState } from './ChatSurface.js'
 import { MessageQueuePanel, useMessageQueue } from './MessageQueuePanel.js'
 import type { FollowupBehavior } from './MessageQueue.js'
 import { ConversationCache } from './ConversationCache.js'
@@ -622,7 +622,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       if ((event.conversationId && event.conversationId !== conversationId) || event.runId !== runId || event.seq <= lastSeq) return
       lastSeq = event.seq
       if (selectedIdRef.current !== conversationId) return
-      if (isTraceEvent(event) && event.seq > traceSeq) queueTrace(runId, event)
+      if (conversationId !== assistantIdRef.current && isTraceEvent(event) && event.seq > traceSeq) queueTrace(runId, event)
       // The state snapshot already rendered these. Replaying them after a trace
       // rewind would put answered approvals and stale tool rows back on screen.
       if (event.seq <= after && (event.type === 'status' || event.type === 'tool' || event.type === 'lanes' || event.type === 'waiting' || event.type === 'interactions' || event.type === 'text')) return
@@ -642,7 +642,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         rememberMessage(conversationId, message)
         setMessages(current => [...current.filter(item => item.id !== message.id), message])
       }
-      if (event.type === 'text') setMessages(current => replaceRunMessage(current, runId, event.data))
+      if (event.type === 'text' && conversationId !== assistantIdRef.current) setMessages(current => replaceRunMessage(current, runId, event.data))
       if (event.type === 'complete') {
         const outcome = event.data.status
         const label = presentRun({ state: outcome, completion: event.data }).label
@@ -696,7 +696,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     }
   }, [transport, queueTrace])
 
-  const historicalTraceKey = selectedId
+  const historicalTraceKey = surfaceMode === 'work' && selectedId
     ? [...new Set(messages.flatMap(message => message.role === 'assistant' && message.runId ? [message.runId] : []))].join('\n')
     : ''
 
@@ -808,6 +808,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     const sendEpoch = routeEpoch.current
     if (loading || loadError || stopping || stopLock.current) return false
     const busy = running
+    if (surfaceMode === 'chat') behavior = 'immediate'
     if (behavior === 'queue' && busy && selected?.id) {
       if ((!text && !hasAttachments) || !paired || !serviceConnected || submitting) return false
       if (!messageQueue.controller) { setToast('本地队列尚未就绪，草稿已保留。'); return false }
@@ -1398,6 +1399,12 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const emptyConversation = messages.length === 0 && !recoveryVisible && !(surfaceMode === 'work' && (artifactIndex.artifacts.length > 0 || route.query.has('artifactRun')))
   const composerApproval = <ApprovalPolicySelect borderless value={approvalPolicy} unavailable={!approvalReady} onRetry={retryApprovalPolicy} disabled={approvalSaving || !sessionCapabilities.localAdmin} onChange={policy => { void setApprovalPolicy(policy) }} />
   const renderMessages = () => {
+    if (surfaceMode === 'chat') {
+      const items = messages.filter(message => !message.id.startsWith('stream-')).map(message => <MessageBubble key={`${selectedId}:${message.id}`} mode="chat" message={message} retry={retryBubble} onOpenWork={openBubbleWork} imageApi={resolveBubbleImage} onFileClick={openBubbleFile} transport={transport} conversationId={selectedId} />)
+      if ((running || submitting) && !activeInteraction && !stopping) items.push(<ChatTypingBubble key="chat-typing"/>)
+      if (completeItem && ['failed', 'interrupted', 'cancelled'].includes(completeItem.outcome)) items.push(<article key="chat-feedback" className="message message--chat assistant"><div className="message-bubble-row"><div className="bubble" role="status">{completeItem.outcome === 'cancelled' ? '回复已停止。' : completeItem.outcome === 'interrupted' ? '回复中断了，可以重新发送。' : '这次没能完成回复，请重试。'}</div></div></article>)
+      return items
+    }
     const shown = new Set<string>()
     const liveTraceId = running && activeRunId && !traces[activeRunId]?.outcome ? activeRunId : undefined
     let recoveryShown = false
@@ -1462,12 +1469,12 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         <div className="navbar-title">{!(mobileLayout && surfaceMode === 'work') && <ConnectionMark paired={paired} serviceConnected={serviceConnected} />}<span className="title-text" title={surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}>{surfaceMode === 'chat' ? 'Pulse 助理' : selected?.title ?? '新工作会话'}</span></div>
         {mobileLayout && surfaceMode === 'work' && <div className="navbar-status"><ConnectionMark paired={paired} serviceConnected={serviceConnected} /><CompactRunStatus label={phaseLabel} /></div>}
         <div className="navbar-actions">
-          {paired && <TaskNotificationInbox transport={transport} open={go}/>}
-          {!(mobileLayout && surfaceMode === 'work') && <CompactRunStatus label={phaseLabel} />}
+          {paired && surfaceMode === 'work' && <TaskNotificationInbox transport={transport} open={go}/>}
+          {surfaceMode === 'work' && !mobileLayout && <CompactRunStatus label={phaseLabel} />}
           {surfaceMode === 'work' ? <Dropdown open={moreOpen} onOpenChange={setMoreOpen} trigger={['click']} placement="bottomRight" menu={{ items: [...(latestProcessRunId ? [{ key: 'run-processes', label: '任务进程' }] : []), transfer.exportItem], onClick: ({ key }) => { setMoreOpen(false); if (key === 'run-processes') setProcessRunId(latestProcessRunId) } }}>
             <Tooltip title={moreOpen ? null : '更多'}><PulseButton className="navbar-tool" aria-label="更多" aria-haspopup="menu" aria-expanded={moreOpen}><Icon name="ellipsis" size={22}/></PulseButton></Tooltip>
           </Dropdown> : <Tooltip title="设置"><PulseButton className="navbar-tool" aria-label="设置" onClick={() => { openPage('/settings'); setDrawerOpen(false) }}><Icon name="settings" size={21}/></PulseButton></Tooltip>}
-          {mobileLayout ? detailsButton : <Popover open={detailsOpen} onOpenChange={setDetailsOpen} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}>{detailsButton}</Popover>}
+          {surfaceMode === 'work' && (mobileLayout ? detailsButton : <Popover open={detailsOpen} onOpenChange={setDetailsOpen} trigger="click" placement="bottomRight" content={detailsPanel} styles={{ container: { padding: 0 } }}>{detailsButton}</Popover>)}
           {surfaceMode === 'work' && <><span className="navbar-tool-separator" aria-hidden="true"/><Tooltip title={workbenchOpen ? '收起右侧面板' : '展开右侧面板'}><PulseButton className={`navbar-tool tabs-trigger ${workbenchOpen ? 'active' : ''}`} onClick={() => { patchQuery(workbenchOpen ? { workspace: undefined, artifact: undefined, artifactRun: undefined, file: undefined, automation: undefined, diff: undefined, staged: undefined, previewHidden: '1' } : { workspace: 'preview', previewHidden: undefined, details: undefined }) }} aria-label="标签页" aria-expanded={workbenchOpen}><Icon name="tabs" size={22}/></PulseButton></Tooltip></>}
         </div>
 
@@ -1477,7 +1484,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       {loadError && <div className="alert" role="alert"><span>{loadError}</span><PulseButton onClick={() => { if (paired) setRouteRevision(value => value + 1); else void bootstrap() }}>重试</PulseButton></div>}
       <section ref={messagesEl} className={`messages ${emptyConversation ? 'is-empty' : ''}`} aria-live="polite" aria-label="聊天消息" onScroll={event => { const el = event.currentTarget; const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 96; followBottom.current = bottom; setAtBottom(bottom) }}>
         {loading && <div className="empty"><span className="spinner" />正在加载对话…</div>}
-        {!loading && emptyConversation && paired && <div className="empty"><div className="empty-mark"><PulseBrand variant="mark" /></div><h1>我们要做什么？</h1><p>在 Pulse 工作区中提问或交代任务。</p></div>}
+        {!loading && emptyConversation && paired && <div className="empty"><div className="empty-mark"><PulseBrand variant="mark" /></div><h1>{surfaceMode === 'chat' ? '聊点什么？' : '我们要做什么？'}</h1><p>{surfaceMode === 'chat' ? '给 Pulse 发条消息。' : '在 Pulse 工作区中提问或交代任务。'}</p></div>}
       {olderCursor && <PulseButton onClick={() => void loadOlderMessages()} disabled={loadingOlder}>{loadingOlder ? '加载中…' : '加载更早消息'}</PulseButton>}
       <WindowedMessages items={renderMessages()} container={messagesEl} follow={followBottom} />
       </section>
@@ -1485,12 +1492,12 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       <ChatActionArea state={deriveChatState({ running, stopping, submitting, interaction: activeInteraction, stopped: status.some(item => item.kind === 'complete' && item.outcome === 'cancelled') })} stopError={stopError} onRetryStop={() => void stopRun()} className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${emptyConversation && !activeInteraction ? 'is-empty' : ''}`}>
         {notificationTarget && !activeInteraction && <div role="status">{loading ? '正在查找通知对应的问题…' : '通知对应的问题已处理或暂不可用，请查看任务记录。'}<PulseButton onClick={() => patchQuery({ notification: undefined })}>查看其他待办</PulseButton></div>}
         {activeInteraction && <InteractionPanel localAdmin={sessionCapabilities.localAdmin} notificationTarget={notificationTarget} key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={approvalPolicy === 'delegate'} onOpenConversation={activeInteraction.conversationId ? () => go(workUrl(activeInteraction.conversationId!)) : undefined} onOpenFile={path => { const conversationId = activeInteraction.conversationId ?? selected?.id; if (!conversationId) return; const query = new URLSearchParams({ workspace: 'preview', artifact: path, artifactRun: activeInteraction.runId }); go(`${workUrl(conversationId)}?${query}`) }} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} />}
-        <MessageQueuePanel key={`queue:${selectedId}`} queue={currentQueue} controller={messageQueue.controller} onError={setToast} editDisabled={submitting || Boolean(drafts[selectedId ?? 'new']?.processing)} onEdit={payload => {
+        {surfaceMode === 'work' && <MessageQueuePanel key={`queue:${selectedId}`} queue={currentQueue} controller={messageQueue.controller} onError={setToast} editDisabled={submitting || Boolean(drafts[selectedId ?? 'new']?.processing)} onEdit={payload => {
           const key = selectedId ?? 'new'
           updateDraft(key, current => ({ ...current, markdown: [payload.text, current.markdown].filter(Boolean).join('\n\n'), document: !current.markdown.trim() ? payload.richContent?.document : payload.richContent?.document && current.document ? { type: 'doc', content: [...(payload.richContent.document.content ?? []), ...(current.document.content ?? [])] } : undefined, attachments: [...(payload.attachments ?? []).map(item => ({ ...item, data: item.data ?? '', previewUrl: item.url })), ...current.attachments.filter(item => !payload.attachments?.some(other => other.id === item.id))], revision: current.revision + 1 }))
           requestAnimationFrame(() => document.querySelector<HTMLElement>('#composer .tiptap')?.focus())
-        }} />
-        <RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || !serviceConnected || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} followupBehavior={messageQueue.behavior} onSend={async (payload, behavior) => await send(payload, behavior) === true} onStop={() => void stopRun()} toolbarExtra={composerApproval} />
+        }} />}
+        <RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || !serviceConnected || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} followupBehavior={surfaceMode === 'chat' ? 'immediate' : messageQueue.behavior} onSend={async (payload, behavior) => await send(payload, behavior) === true} onStop={() => void stopRun()} toolbarExtra={surfaceMode === 'work' ? composerApproval : undefined} />
         <div className={`composer-meta ${route.newWork ? 'new-chat-tools' : ''}`}>
           {route.newWork ? <div className="new-conversation-project"><Icon name="folder"/><Select variant="borderless" aria-label="新对话所属项目" value={selectedProjectId ?? '__ungrouped__'} onChange={value => { const projectId = value === '__ungrouped__' ? undefined : value; patchQuery({ project: projectId }); setSelectedProjectId(projectId); if (projectId) window.localStorage.setItem('pulse-web-project', projectId); else window.localStorage.removeItem('pulse-web-project') }} options={[{ value: '__ungrouped__', label: '不归属项目' }, ...projects.map(project => ({ value: project.id, label: project.name }))]} popupMatchSelectWidth={false} /></div> : !activeInteraction && <div className="composer-hint">Pulse 可能会出错，请核对重要信息。</div>}
         </div>

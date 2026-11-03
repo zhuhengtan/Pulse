@@ -40,3 +40,9 @@ export function ChatActionArea({ state, stopError, onRetryStop, className, child
     {children}
   </footer>
 }
+
+export function ChatTypingBubble() {
+  return <article className="message message--chat assistant chat-typing" role="status" aria-label="Pulse 正在输入">
+    <div className="message-bubble-row"><div className="bubble"><span className="typing-dots" aria-hidden="true"><i/><i/><i/></span></div></div>
+  </article>
+}
