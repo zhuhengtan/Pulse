@@ -24,6 +24,14 @@ async function show(fixture = sidebarFixture()) {
 const pinnedSection = () => screen.getByRole('button', { name: '置顶', exact: true }).closest('section') as HTMLElement
 
 describe('conversation pinning', () => {
+  it('renders only one pin icon and marks the pin action selected', async () => {
+    await show()
+    const button = within(pinnedSection()).getByRole('button', { name: '取消置顶对话：优化侧边栏和主题' })
+    expect(button.getAttribute('aria-pressed')).toBe('true')
+    expect(button.querySelectorAll("svg")).toHaveLength(1)
+    expect(pinnedSection().querySelector('.history-pin')).toBeNull()
+  })
+
   it('folds the pin section independently of projects and remembers the choice after remount', async () => {
     const fixture=sidebarFixture(),view=await show(fixture)
     const button=screen.getByRole('button',{name:'置顶',exact:true})

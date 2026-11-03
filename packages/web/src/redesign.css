@@ -630,3 +630,6 @@ body, :root { color: var(--ink); background: var(--panel); }
 .history .project-row-actions { display:none; width:auto; }
 .history .project-nav-row:hover .project-row-actions,.history .project-nav-row:focus-within .project-row-actions,.history .project-nav-row.ant-dropdown-open .project-row-actions { display:flex; width:60px; }
 @media(hover:none),(max-width:767px){.history .project-row-actions { display:flex; width:60px; }}
+
+.history .history-row-actions .history-quick-action.is-pinned { color:var(--ink); background:var(--soft); }
+.history-quick-action.is-pinned svg { fill:currentColor; }
