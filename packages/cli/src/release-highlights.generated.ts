@@ -1,5 +1,11 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.11.3": [
+    {
+      "zh": "Windows 安装器改用原生进程检测，区分进程存在、未运行及检测错误，并保留配置与会话。",
+      "en": "Use native Windows installer process detection, distinguish running, absent, and inspection-error states, and retain configuration and conversations."
+    }
+  ],
   "0.11.2": [
     {
       "zh": "新增本地 Office 文档读取与生成、PDF 分页渲染及受限图片读取，支持 PPTX、DOCX、XLSX 与相关产物预览。",

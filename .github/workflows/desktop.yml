@@ -78,6 +78,9 @@ jobs:
         run: xvfb-run --auto-servernum pnpm desktop:app:install-smoke
       - name: Build native packages
         run: pnpm --filter @hunterzhu/pulse-desktop run dist --${{ matrix.arch }} --publish never
+      - name: Verify Windows installer process detection
+        if: runner.os == 'Windows'
+        run: node scripts/desktop/verify-windows-process-check.mjs
       - name: Verify final Windows NSIS installation, startup, reopen and repair
         if: runner.os == 'Windows'
         shell: pwsh

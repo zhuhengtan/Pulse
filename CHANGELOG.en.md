@@ -2,6 +2,12 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.11.3] - 2026-11-03
+
+### Fixed
+
+- Use native Windows installer process detection, distinguish running, absent, and inspection-error states, and retain configuration and conversations.
+
 ## [0.11.2] - 2026-11-03
 
 ### Added

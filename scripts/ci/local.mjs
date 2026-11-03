@@ -66,6 +66,7 @@ try {
   pnpm('eval:validate')
   pnpm('site:check')
   pnpm('release:check')
+  if (windows) node('scripts/desktop/verify-windows-process-check.mjs')
   pnpm('cli:build')
   node('packages/cli/scripts/postinstall.mjs')
   await access(env.PULSE_CONFIG)

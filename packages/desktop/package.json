@@ -1,6 +1,6 @@
 {
   "name": "@hunterzhu/pulse-desktop",
-  "version": "0.11.2",
+  "version": "0.11.3",
   "private": true,
   "type": "module",
   "main": "src/main.mjs",
@@ -80,6 +80,7 @@
       "packageName": "pulse"
     },
     "nsis": {
+      "include": "build/installer.nsh",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false
