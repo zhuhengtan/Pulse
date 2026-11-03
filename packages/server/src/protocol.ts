@@ -59,6 +59,8 @@ export interface WebAttachment {
 export interface AssistantContextReference { projectId?: string; conversationId?: string }
 
 export interface WebMessage {
+  messageKind?: 'pre_reply' | 'reply' | 'work_notice'
+
   assistantContext?: AssistantContextReference
   sequence?: number
   bodyTruncated?: boolean
@@ -96,6 +98,7 @@ export type WebTraceData =
   | { kind: 'reasoning' | 'note'; effectId?: string; laneId?: string; attemptId?: string; attemptNo?: number; task: string; modelId?: string; text: string }
 
 type WebRunEventPayload =
+  | { type: 'chat_message'; runId: string; seq: number; data: { message: WebMessage } }
   | { type: 'resync'; runId: string; seq: number; data: WebRunSnapshot }
   | { type: 'status'; runId: string; seq: number; data: { kind: 'working' | 'context'; label?: string } }
   | { type: 'input_response'; runId: string; seq: number; data: { messageId: string; text: string } }

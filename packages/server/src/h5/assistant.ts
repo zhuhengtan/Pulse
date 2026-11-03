@@ -8,6 +8,8 @@ import type { AssistantContextReference, WebAssistantMessageReceipt, WebAttachme
 
 export interface QueuedAssistantMessage extends WebAssistantMessageReceipt {
   text: string
+  chatPreReply?: boolean
+  pendingInput?: boolean
   assistantContext?: AssistantContextReference
   attachments?: WebAttachment[]
   skills?: string[]
@@ -44,7 +46,7 @@ export class AssistantConversationStore {
     return this.state.conversationId
   }
 
-  async enqueue(input: { requestId: string; text: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[]; assistantContext?: AssistantContextReference }): Promise<{ message: QueuedAssistantMessage; duplicate: boolean }> {
+  async enqueue(input: { chatPreReply?: boolean; requestId: string; text: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[]; assistantContext?: AssistantContextReference }): Promise<{ message: QueuedAssistantMessage; duplicate: boolean }> {
     if (input.richContent) input = { ...input, richContent: parseRichContent(input.richContent)! }
     return this.serial(async () => {
       const state = this.requireState()
@@ -55,6 +57,7 @@ export class AssistantConversationStore {
       }
       const now = new Date().toISOString()
       const message: QueuedAssistantMessage = {
+        chatPreReply: input.chatPreReply !== false,
         messageId: input.requestId,
         runId: `run-${randomUUID()}`,
         text: input.text,
@@ -71,12 +74,23 @@ export class AssistantConversationStore {
     })
   }
 
-  async acceptInput(input: { requestId: string; text: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[]; assistantContext?: AssistantContextReference }, runId: string): Promise<void> {
+  async acceptInput(input: { requestId: string; text: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[]; assistantContext?: AssistantContextReference }, runId: string, pendingInput = false): Promise<void> {
     await this.serial(async () => {
       const state = this.requireState()
       if (state.messages.some(message => message.messageId === input.requestId)) return
       const now = new Date().toISOString()
-      state.messages.push({ messageId: input.requestId, text: input.text, runId, state: state.messages.find(message => message.runId === runId)?.state ?? 'replying', createdAt: now, updatedAt: now, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), ...(input.assistantContext ? { assistantContext: structuredClone(input.assistantContext) } : {}) })
+      state.messages.push({ messageId: input.requestId, text: input.text, runId, ...(pendingInput ? { pendingInput: true } : {}), state: state.messages.find(message => message.runId === runId)?.state ?? 'replying', createdAt: now, updatedAt: now, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), ...(input.assistantContext ? { assistantContext: structuredClone(input.assistantContext) } : {}) })
+      await this.save()
+    })
+  }
+
+  pendingInputs(runId: string): QueuedAssistantMessage[] { return structuredClone(this.requireState().messages.filter(item => item.runId === runId && item.pendingInput)) }
+  async inputDelivered(messageId: string, retry = false): Promise<void> {
+    await this.serial(async () => {
+      const item = this.requireState().messages.find(message => message.messageId === messageId)
+      if (!item) return
+      delete item.pendingInput
+      if (retry) { item.runId = `run-${randomUUID()}`; item.state = 'queued' }
       await this.save()
     })
   }

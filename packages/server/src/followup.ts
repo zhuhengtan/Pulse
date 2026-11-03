@@ -16,6 +16,9 @@ export function createFollowupModel(options: {
   return {
     id: 'pulse.primary-followup',
     async decide(request, signal) {
+      const value = request.input.value
+      if (options.assistant && value && typeof value === 'object' && !Array.isArray(value) && value.chatSupplement === true) return { schemaVersion: 1, decisionId: request.decisionId, inputId: request.input.id, agentId: request.agentId, modelId: this.id, action: 'steer' }
+
       const result = await options.run([
         'You are the primary Pulse thread. Respond to this latest user input with priority while existing tasks may still be executing.',
         'Consider the conversation, original task, execution state and latest input. Do not assume every input changes or cancels the task.',

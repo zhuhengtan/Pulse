@@ -1,3 +1,4 @@
+import { startChatAcknowledgement } from './chat-acknowledgement.js'
 import { agentPtyShellOptions, assertAgentPtyAvailable } from './agent-pty.js'
 import { visibleModelOutput } from '@hunterzhu/pulse-runtime'
 import { adaptiveReadBytes, MAX_READ_BYTES, READ_SUMMARY_BYTES } from './adaptive-read.js'
@@ -256,6 +257,8 @@ export interface RunUsage {
 }
 export interface ConversationSummary { id: string; title: string; cwd: string; createdAt: string; updatedAt: string; activeRunId?: string; approvalPolicy?: 'manual' | 'delegate'; artifacts?: ArtifactSummary[]; projectId?: string; projectUnassigned?: boolean; origin?: 'assistant'; pinned?: boolean; archivedAt?: string }
 export interface UserMessageInput {
+  chatPreReply?: boolean
+
   text: string
   format?: 'text' | 'jsonl'
   continueTask?: boolean
@@ -318,6 +321,8 @@ export interface ConversationHandle { readonly id: string; readonly summary: Con
 
 interface Manifest extends ConversationSummary { schemaVersion: 1; runs: string[]; executionCwd?: string; jarvisWorkspace?: string }
 interface StoredMessage {
+  messageKind?: 'pre_reply' | 'reply' | 'work_notice'
+
   id: string
   role: 'user' | 'assistant' | 'system'
   text: string
@@ -1222,8 +1227,8 @@ function assistantToolsAlreadyUsed(ctx: StepContext): Set<string> {
 }
 
 /** Conversational turns do not use the task planner or acceptance verifier. */
-function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, conversation: ConversationMessage[], configuredMaxTurns = 12, version: '1' | '2' | '3' | '4' | '5' = '5', validateToolInput?: (name: string, input: JsonValue) => void, reference = '', adaptiveFileReads = false) {
-  const delegatedWork = version === '4' || version === '5'
+function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, conversation: ConversationMessage[], configuredMaxTurns = 12, version: '1' | '2' | '3' | '4' | '5' | '6' = '6', validateToolInput?: (name: string, input: JsonValue) => void, reference = '', adaptiveFileReads = false, latestInputs?: (agentId: string) => readonly import('@hunterzhu/pulse-runtime').HumanInputRecord[]) {
+  const delegatedWork = version === '4' || version === '5' || version === '6'
   const attachmentNames = conversation.filter(message => message.content.startsWith('[Conversation attachments;')).flatMap(message => {
     try { return (JSON.parse(message.content.slice(message.content.indexOf('\n') + 1)) as Array<{ name: string }>).map(item => item.name) }
     catch { return [] }
@@ -1243,7 +1248,7 @@ function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, co
       const requestedTools = assistantExplicitToolRequests(toolNames, currentGoal)
       const requestedJarvisTool = requestedTools.find((name) => name.startsWith('jarvis.'))
       const requestedWorkTools = requestedTools.filter((name) => name.startsWith('work.'))
-      const workStartRequested = requestedTools.includes('work.start') || delegatedWork && assistantWorkStartRequested(currentGoal, version === '5')
+      const workStartRequested = requestedTools.includes('work.start') || delegatedWork && assistantWorkStartRequested(currentGoal, (version === '5' || version === '6'))
       const fileReadRequested = !workStartRequested && toolNames.includes('fs.read') && (requestedTools.includes('fs.read') || assistantExplicitFileReadRequested(currentGoal))
       const requiredCalls = [
         ...(attachmentRequested ? ['Read the requested uploaded attachment contents using attachment.read before replying; use exact IDs from the index and continue across all requested attachments/windows.'] : []),
@@ -1258,7 +1263,9 @@ function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, co
     inputs: (ctx) => {
       const currentGoal = ctx.goal.startsWith('Human input: ') ? ctx.goal.slice('Human input: '.length) : ctx.goal
       const currentMessageIsPersisted = conversation.at(-1)?.role === 'user' && conversation.at(-1)?.content.trim() === currentGoal.trim()
-      const humanUpdates = (ctx.humanInputs ?? []).flatMap((input) => {
+      const allInputs = version === '6' ? latestInputs?.(ctx.lane.agentId) ?? ctx.humanInputs ?? [] : ctx.humanInputs ?? []
+      if (version === '6') ctx.mutateLane(draft => { (draft as Record<string, JsonValue>).chatCoveredInputs = allInputs.map(input => input.id) })
+      const humanUpdates = allInputs.flatMap((input) => {
         const value = input.value && typeof input.value === 'object' && !Array.isArray(input.value)
           ? (input.value as Record<string, JsonValue>).text
           : input.value
@@ -1282,8 +1289,14 @@ function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, co
     toolAllow: (ctx) => {
       const calledTools = assistantToolsAlreadyUsed(ctx)
       const currentGoal = ctx.goal.startsWith('Human input: ') ? ctx.goal.slice('Human input: '.length) : ctx.goal
-      return assistantChatAllowedToolNames(toolNames, currentGoal, calledTools, version !== '1', attachmentRequestedFor(currentGoal), delegatedWork, version === '5').filter(name => version !== '2' || !name.startsWith('attachment.') || !calledTools.has(name))
+      return assistantChatAllowedToolNames(toolNames, currentGoal, calledTools, version !== '1', attachmentRequestedFor(currentGoal), delegatedWork, (version === '5' || version === '6')).filter(name => version !== '2' || !name.startsWith('attachment.') || !calledTools.has(name))
     },
+    ...(version === '6' ? { onFinish: (ref: string, ctx: import('@hunterzhu/pulse-runtime').StepContext<JsonValue>) => {
+      const covered = asRecord(ctx.laneState as JsonValue)?.chatCoveredInputs
+      const inputs = latestInputs?.(ctx.lane.agentId) ?? []
+      if (inputs.some(input => !Array.isArray(covered) || !covered.includes(input.id))) return 'react'
+      return { complete: { value: { textRef: ref } } }
+    } } : {}),
     maxTurns: Math.max(1, Math.min(12, Math.floor(configuredMaxTurns))),
     maxToolsPerTurn: 4,
     historyCompaction: {
@@ -1926,6 +1939,7 @@ function snapshotHostOptions(source: LocalHostOptions): LocalHostOptions {
 }
 
 export class LocalHost {
+  private readonly chatAcknowledgements = new Map<string, () => Promise<void>>()
   private readonly manifestBaselines = new WeakMap<Manifest, Manifest>()
   readonly conversationData: ConversationData
   private readonly persistenceCache = new Map<string, Promise<import('@hunterzhu/pulse-runtime').RuntimePersistenceBackend>>()
@@ -2944,7 +2958,7 @@ export class LocalHost {
     } })
     const fingerprints = recoveryFingerprints(registry, { approvalMode: options.approvalMode ?? 'ask', allowNetwork: options.allowNetwork ?? false, networkHosts: options.networkHosts ?? [], contract: 2 })
     const runLlm = (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => runConfiguredApproval(options.approvalReview, modelBudget, () => runtimeRef, system, instruction, signal, maxOutputTokens)
-    const runtime = new PulseRuntime({ sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), programs: [], budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, ...(provider.adapter.id === 'mock' ? {} : { humanArbitration: { timeoutMs: 60_000, model: createFollowupModel({ assistant: assistantChat, context: async request => {
+    const runtime = new PulseRuntime({ sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), programs: [], budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, ...(provider.adapter.id === 'mock' && !assistantChat ? {} : { humanArbitration: { timeoutMs: 60_000, model: createFollowupModel({ assistant: assistantChat, context: async request => {
       const agent = runtimeRef?.state.agents.get(request.agentId)
       const global = agent?.globalVersions.get(agent.latestGlobalVersion)
       return { conversation: (await this.getConversationMessages(conversationId)).slice(-16).map(message => ({ role: message.role, text: message.text, ...(message.attachments ? { attachments: message.attachments } : {}) })), goal: agent?.goal, task: global && asRecord(global)?.taskRecord, controller: global && asRecord(global)?.taskController }
@@ -3368,7 +3382,7 @@ export class LocalHost {
     const legacyProgram = buildProgram([...new Set([...registry.list().map((tool) => tool.name), ...Object.keys(pluginToolIds)])], prompt, conversation, false, options.maxTurns ?? 32, '1')(options.approvalMode ?? 'ask')
     registry.register(defineTool({ name: 'fs.stage.capacity', description: 'Preflight new-file bytes against remaining actual model calls. Does not increase budgets. Choose chunks that fit the model output token limit.', tags: ['files', 'read'], input: z.object({ bytes: z.number().int().min(0).max(500_000) }), output: z.object({ chunkBytes: z.number(), toolSteps: z.number(), remainingCalls: z.number(), feasible: z.boolean() }), sideEffectPolicy: 'read', execute: async ({ bytes }) => { const chunkBytes = Math.min(STREAM_BYTES, Math.max(512, (provider.model.capabilities.maxOutputTokens ?? 4096) * 2)); const toolSteps = Math.max(1, Math.ceil(bytes / chunkBytes)) + 1; const remainingCalls = Math.max(0, (modelBudget?.limit ?? 256) - (modelBudget?.used ?? 0) - (modelBudget?.accounting.policy?.verificationReserve ?? 0)); return { chunkBytes, toolSteps, remainingCalls, feasible: toolSteps + 1 <= remainingCalls } } }))
     const correctedProgram = buildProgram(toolNames, prompt, conversation, false, savedMaxTurns, '4.1', undefined, createHostToolInputValidator(registry), fileSurfaceVersion === 3)(options.approvalMode ?? 'ask')
-    const assistantPrograms = assistantChat ? (['1', '2', '3', '4', '5'] as const).map(version => buildAssistantChatProgram(toolNames, prompt, conversation, savedMaxTurns, version, createHostToolInputValidator(registry), assistantReference, fileSurfaceVersion === 3)(options.approvalMode ?? 'ask')) : []
+    const assistantPrograms = assistantChat ? (['1', '2', '3', '4', '5', '6'] as const).map(version => buildAssistantChatProgram(toolNames, prompt, conversation, savedMaxTurns, version, createHostToolInputValidator(registry), assistantReference, fileSurfaceVersion === 3, agentId => runtimeRef?.humanInputsFor(agentId) ?? [])(options.approvalMode ?? 'ask')) : []
     const toolVersions = Object.fromEntries(registry.catalog().map((tool) => [tool.name, tool.version]))
     const savedControllerVersion = typeof savedInput.controllerVersion === 'string' ? savedInput.controllerVersion : undefined
     // The controller programs come from the run's own persisted mode, not the skill text: a
@@ -3393,7 +3407,7 @@ export class LocalHost {
     const runLlm = (system: string, instruction: string, signal: AbortSignal, maxOutputTokens: number) => runConfiguredApproval(options.approvalReview, modelBudget, () => runtimeRef, system, instruction, signal, maxOutputTokens)
     const controllerPrograms: ReturnType<typeof buildTaskControllerProgram>[] = (['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'] as const).map((version) => buildTaskControllerProgram({ ...(savedInput.contextProtocolVersion === 2 ? { contextProtocolVersion: 2 } : {}), adaptiveFileReads: fileSurfaceVersion === 3, contextWindowTokens: provider.model.capabilities.maxContextTokens, outputReserveTokens: provider.model.capabilities.maxOutputTokens ?? 4096, validateToolInput: (version === '28' || version === '29' || version === '30' || version === '31' || version === '32' || version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55' || (version === '56' || version === '57')))) ? taskToolInputValidator(registry, userIntent, version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55' || (version === '56' || version === '57'))), ['41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(version) ? (fileSurfaceVersion === 3 ? MAX_READ_BYTES : 3000) : undefined) : createHostToolInputValidator(registry), modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(savedReuse ? { resumePlan: savedReuse.controller, reusableIds: savedReuse.reusableIds } : {}), ...(['40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(version) && savedReuse ? { continuationCheckpoint: savedReuse } : {}), version, system: prompt, toolNames, ...(['39', '40', '41', '42', '43', '44', '45', '46', '47', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57'].includes(version) ? { readOnlyToolNames } : {}), conversation, approvalMode: options.approvalMode ?? 'ask', maxTurns: (version === '10' || version === '11' || version === '12' || version === '13' || version === '14' || version === '15' || version === '16' || version === '17' || version === '18' || version === '19' || version === '20' || version === '21' || version === '22' || version === '23' || version === '24' || version === '25' || version === '26' || version === '27' || version === '28' || version === '29' || version === '30' || version === '31' || version === '32' || version === '33' || version === '34' || version === '35' || (version === '36' || version === '37' || version === '38' || version === '39' || version === '40' || version === '41' || version === '42' || version === '43' || version === '44' || version === '45' || version === '46' || version === '47' || version === '48' || version === '49' || version === '50' || version === '51' || version === '52' || version === '53' || (version === '54' || version === '55' || (version === '56' || version === '57')))) ? modelEffectBudget ?? 256 : savedMaxTurns }))
     const recovery = await prepareRecovery(backend, this.runDir(conversationId, runId), fingerprints, options.recoveryBuildMigration)
-    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, programs: [legacyProgram, version2Program, program, correctedProgram, ...assistantPrograms, workerProgram, ...controllerPrograms], models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, ...(provider.adapter.id === 'mock' ? {} : { humanArbitration: { timeoutMs: 60_000, model: createFollowupModel({ assistant: assistantChat, context: async request => {
+    const runtime = await PulseRuntime.restore(backend, { sessionId: runId, clock: new MonotonicClock(), ...(options.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: options.maxRuntimeMs }), budget: { ...(options.maxCostByCurrency ? { maxCostByCurrency: options.maxCostByCurrency } : {}) }, programs: [legacyProgram, version2Program, program, correctedProgram, ...assistantPrograms, workerProgram, ...controllerPrograms], models, modelRouter: router, toolVersions, recoveryFingerprints: fingerprints, ...(options.recoveryBuildMigration ? { recoveryBuildMigration: options.recoveryBuildMigration } : {}), builtinHumanEffects: true, ...(provider.adapter.id === 'mock' && !assistantChat ? {} : { humanArbitration: { timeoutMs: 60_000, model: createFollowupModel({ assistant: assistantChat, context: async request => {
       const agent = runtimeRef?.state.agents.get(request.agentId)
       const global = agent?.globalVersions.get(agent.latestGlobalVersion)
       return { conversation: (await this.getConversationMessages(conversationId)).slice(-16).map(message => ({ role: message.role, text: message.text, ...(message.attachments ? { attachments: message.attachments } : {}) })), goal: agent?.goal, task: global && asRecord(global)?.taskRecord, controller: global && asRecord(global)?.taskController }
@@ -3456,6 +3470,7 @@ export class LocalHost {
     }
     const finish = (): Promise<Outcome & { text?: string }> => finalized ??= (async () => {
       const outcome = await session.outcome()
+      await this.chatAcknowledgements.get(runId)?.(); this.chatAcknowledgements.delete(runId)
       const writable = this.claimRunPersistence()
       try {
       if (!writable) return { ...outcome }
@@ -3614,7 +3629,7 @@ export class LocalHost {
         const id = stages.length ? `msg-final-${runId}` : `msg-${randomUUID()}`
         const existing = stages.length ? await this.conversationData.call<StoredMessage>('body', conversationId, id).catch(error => { if (error instanceof Error && error.message === 'MESSAGE_NOT_FOUND') return undefined; throw error }) : undefined
         // A persisted final message follows the reply selected for the current verdict. Same text is left in place; a contradictory one is revised and never copied back.
-        if (!existing) await this.appendMessage(conversationId, { id, role: 'assistant', text, runId, createdAt: new Date().toISOString(), displayVersion: 1 })
+        if (!existing) await this.appendMessage(conversationId, { id, role: 'assistant', text, runId, createdAt: new Date().toISOString(), messageKind: 'reply', displayVersion: 1 })
         else if (existing.text !== text) await this.conversationData.call('revise', conversationId, { ...existing, text })
       }
       const current = await this.readManifest(conversationId)
@@ -3855,7 +3870,7 @@ export class LocalHost {
       checkpointForUpdate: async () => { await runtime.checkpointForRestart(); await closeShellProcesses(this.runDir(conversationId, runId)) },
       usage: async () => { await finish(); return runUsage(runtime, activeEntry?.options.modelPricing ?? this.options.modelPricing, activeEntry?.modelBudget) },
       taskOutcome: async () => { await finish(); return finalTaskOutcome ?? currentTaskOutcome() },
-      cancel: async (reason = 'USER_REQUESTED') => { activeEntry?.capabilityController.abort(); await session.cancel(reason) },
+      cancel: async (reason = 'USER_REQUESTED') => { await this.chatAcknowledgements.get(runId)?.(); this.chatAcknowledgements.delete(runId); activeEntry?.capabilityController.abort(); await session.cancel(reason) },
       processes: () => this.listRunProcesses(conversationId, runId),
       pollProcess: (id, offset) => this.readRunProcess(conversationId, runId, id, offset),
       cancelProcess: id => this.cancelRunProcess(conversationId, runId, id),
@@ -3900,9 +3915,10 @@ export class LocalHost {
           const files = inputOptions.mentionedFiles?.length ? `[Mentioned files]\n${JSON.stringify(inputOptions.mentionedFiles)}` : ''
           const reference = inputOptions.assistantContext ? await assistantReferenceNotice(this.conversationData, assistantReferenceSchema.parse(inputOptions.assistantContext), this.assistantWorkTools?.list.bind(this.assistantWorkTools)) : ''
           const inputText = [reference, selectedSkills, text, index, files].filter(Boolean).join('\n')
-          if (!previous && finalized) throw new Error('CONVERSATION_BUSY')
+          if (!previous && (finalized || ['succeeded', 'failed', 'cancelled'].includes(runtime.state.agents.get(session.agentId)?.state ?? ''))) throw new Error('CONVERSATION_BUSY')
           // Admit synchronously before yielding, so root completion cannot race past this input.
-          const admitted = session.submitHumanInput(inputId, { text: inputText, modelFirst: true, ...(inputOptions.skills ? { skills: inputOptions.skills } : {}), ...(inputOptions.mentionedFiles ? { mentionedFiles: inputOptions.mentionedFiles } : {}) }, targetEffectId)
+          const chatSupplement = runtime.state.lanes.get(runtime.state.agents.get(session.agentId)!.rootLaneId)?.resume.programId === 'pulse.assistant-chat'
+          const admitted = session.submitHumanInput(inputId, { text: inputText, modelFirst: true, ...(chatSupplement ? { chatSupplement: true } : {}), ...(inputOptions.skills ? { skills: inputOptions.skills } : {}), ...(inputOptions.mentionedFiles ? { mentionedFiles: inputOptions.mentionedFiles } : {}) }, targetEffectId)
           if (!previous) await this.appendMessage(conversationId, { id: messageId, role: 'user', text, runId, createdAt: new Date().toISOString(), ...(inputOptions.assistantContext ? { assistantContext: inputOptions.assistantContext } : {}), ...(attachments ? { attachments } : {}), ...(inputOptions.skills ? { skills: inputOptions.skills } : {}), ...(inputOptions.mentionedFiles ? { mentionedFiles: inputOptions.mentionedFiles } : {}), ...(inputOptions.richContent ? { richContent: inputOptions.richContent } : {}) })
           await admitted
           await runtime.flushPersistence()
@@ -4017,6 +4033,12 @@ export class LocalHost {
         modelBudget = await ModelAttemptBudget.open(join(this.runDir(conversationId, runId), 'model-budget.json'), maxModelCalls, 0, { verificationReserve: runOptions.taskController === false || isPreImplementationConfirmationSkill(input.text) ? 0 : 2, ...(runOptions.maxCostByCurrency ? { maxCostByCurrency: runOptions.maxCostByCurrency } : {}), ...runOptions.modelBudgetPolicy })
         if (input.budgetRenewal) await modelBudget.inheritRemaining(join(this.runDir(conversationId, input.budgetRenewal.sourceRunId), 'model-budget.json'), input.budgetRenewal)
         await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal: input.text, maxModelCalls, cwd: executionCwd, provider: runOptions.provider?.provider ?? 'mock', createdAt: new Date().toISOString() }, null, 2))
+      }
+      if (input.assistantChat && input.chatPreReply !== false) {
+        const generate = runOptions.frontModel?.enabled ? (signal: AbortSignal) => processFrontModel(input.text, undefined, { ...runOptions.frontModel!, timeoutMs: 1100 }, [], [], async () => { await modelBudget?.reserve('front-model') }, usage => modelBudget?.recordUsage(usage) ?? Promise.resolve(), 'chat', signal).then(result => result.instantResponse) : undefined
+        this.chatAcknowledgements.set(runId, startChatAcknowledgement(async text => {
+          await this.appendMessage(conversationId, { id: `chat-ack-${runId}`, role: 'assistant', text, runId, createdAt: new Date().toISOString(), messageKind: 'pre_reply', displayVersion: 1 })
+        }, generate))
       }
       // Persist the single renewal identity before any front-model/compaction call.
       // Local manifest stays unchanged until normal continuation setup has read its parent.
@@ -4189,7 +4211,7 @@ export class LocalHost {
         initialTask.acceptanceChecks = retained
       }
       const lspSnapshot = runOptions.lsp === undefined ? undefined : parseLspConfig(runOptions.lsp)
-      const now = new Date().toISOString(); if (!input.userMessageRecorded) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal, ...(initialTask?.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 } : {}), capabilitySurface: 1, ...(runOptions.hooks?.enabled === true ? { hookSnapshot: { hash: runOptions.hooks.hash, directory: runOptions.hooks.directory } } : {}), codeSurfaceVersion: 1, ...(lspSnapshot ? { lsp: lspSnapshot } : {}), fileSurfaceVersion: 3, patchApplyVersion: 2, jarvisProtocol: runOptions.jarvis?.protocol ?? 'personal', currentUserText: input.text, ...(input.assistantChat ? {} : { shellSurfaceVersion: 1 }), providerApiModes: captureProviderApiModes(runOptions), planReviewVersion: 8, planDecisionVersion: controlled ? 3 : 2, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), assistantChat: input.assistantChat === true, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.assistantChat ? { assistantChatVersion: '5' } : {}), taskController: controlled, ...(controlled ? { contextProtocolVersion: 2, controllerVersion: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', taskControllerPolicy: runOptions.taskControllerPolicy ?? 'legacy' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), maxModelCalls, enabledCapabilityPacks: runOptions.enabledCapabilityPacks ?? [], maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel ?? runOptions.provider?.defaultModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
+      const now = new Date().toISOString(); if (!input.userMessageRecorded) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal, ...(initialTask?.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 } : {}), capabilitySurface: 1, ...(runOptions.hooks?.enabled === true ? { hookSnapshot: { hash: runOptions.hooks.hash, directory: runOptions.hooks.directory } } : {}), codeSurfaceVersion: 1, ...(lspSnapshot ? { lsp: lspSnapshot } : {}), fileSurfaceVersion: 3, patchApplyVersion: 2, jarvisProtocol: runOptions.jarvis?.protocol ?? 'personal', currentUserText: input.text, ...(input.assistantChat ? {} : { shellSurfaceVersion: 1 }), providerApiModes: captureProviderApiModes(runOptions), planReviewVersion: 8, planDecisionVersion: controlled ? 3 : 2, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), assistantChat: input.assistantChat === true, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.assistantChat ? { assistantChatVersion: '6' } : {}), taskController: controlled, ...(controlled ? { contextProtocolVersion: 2, controllerVersion: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', taskControllerPolicy: runOptions.taskControllerPolicy ?? 'legacy' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), maxModelCalls, enabledCapabilityPacks: runOptions.enabledCapabilityPacks ?? [], maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel ?? runOptions.provider?.defaultModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
       await new AttachmentStore(this.dataDir, conversationId).remember()
       const attachmentIndex = await new AttachmentStore(this.dataDir, conversationId).index(input.text)
       if (attachmentIndex) conversation.push({ role: 'user', content: attachmentIndex })
@@ -4259,7 +4281,7 @@ export class LocalHost {
       const toolNames = statusOnly ? [] : [...new Set([...registry.list().map((tool) => tool.name), ...Object.keys(pluginToolIds)])]
       const readOnlyToolNames = registry.list().filter((tool) => tool.sideEffectPolicy === 'read' && !tool.name.startsWith('task.')).map((tool) => tool.name)
       const program = input.assistantChat
-        ? buildAssistantChatProgram(toolNames, runPrompt, conversation, runOptions.maxTurns ?? 12, '5', createHostToolInputValidator(registry), referenceNotice, true)(runOptions.approvalMode ?? 'ask')
+        ? buildAssistantChatProgram(toolNames, runPrompt, conversation, runOptions.maxTurns ?? 12, '6', createHostToolInputValidator(registry), referenceNotice, true, agentId => runtime.humanInputsFor(agentId))(runOptions.approvalMode ?? 'ask')
         : controlled
           ? buildTaskControllerProgram({ contextProtocolVersion: 2, adaptiveFileReads: true, contextWindowTokens: controllerCapabilities.maxContextTokens, outputReserveTokens: controllerCapabilities.maxOutputTokens ?? 4096, version: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', validateToolInput: taskToolInputValidator(registry, goal, true, MAX_READ_BYTES), modelBudgetView: () => modelBudget?.schedulingView() ?? { limit: 256, used: 0, workAllowed: true, verificationAllowed: true, finalAllowed: true }, ...(reuse ? { resumePlan: reuse.controller, reusableIds: reuse.reusableIds, continuationCheckpoint: reuse } : {}), system: runPrompt, toolNames, readOnlyToolNames, conversation, approvalMode: runOptions.approvalMode ?? 'ask', maxTurns: maxModelCalls })
           : buildProgram(toolNames, runPrompt, conversation, true, runOptions.maxTurns ?? 32, '4.1', undefined, createHostToolInputValidator(registry), true)(runOptions.approvalMode ?? 'ask')
@@ -4277,6 +4299,7 @@ export class LocalHost {
       await this.saveManifest(manifest)
       return this.makeRunHandle(conversationId, runId, runtime, session, contextNotice, frontResult?.instantResponse)
     } catch (error) {
+      await this.chatAcknowledgements.get(runId)?.(); this.chatAcknowledgements.delete(runId)
       if (jarvis) {
         await jarvis.close(undefined, {
           result: 'failure',
@@ -4741,6 +4764,7 @@ export class LocalHost {
     }
   }
   async close(options?: { preserveHumanWaits?: boolean; preserveRuns?: boolean }): Promise<void> {
+    await Promise.all([...this.chatAcknowledgements.values()].map(stop => stop())); this.chatAcknowledgements.clear()
     await this.automationBroker.close()
     const running = [...this.active.values()]
     if (options?.preserveRuns) await Promise.all(running.map(active => active.runtime.checkpointForRestart()))

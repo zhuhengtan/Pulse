@@ -1,3 +1,4 @@
+import { readChatPreReply } from './chat-preferences.js'
 import { presentRun, shellProcessPending, type RunCompletion } from '@hunterzhu/pulse-server/run-presentation'
 import { compactRunLabel, CompactRunStatus, ConnectionMark, missingCompleteStatus } from './run-status.js'
 import { messagePayload, retryMessagePayload } from './message-payload.js'
@@ -637,6 +638,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
           return [...kept, ...groups]
         })
       }
+      if (event.type === 'chat_message') { rememberMessage(conversationId, event.data.message); setMessages(current => [...current.filter(item => item.id !== event.data.message.id), event.data.message]) }
       if (event.type === 'input_response') {
         const message: WebMessage = { id: event.data.messageId, role: 'assistant', text: event.data.text, runId, createdAt: new Date().toISOString() }
         rememberMessage(conversationId, message)
@@ -844,6 +846,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
           '/api/assistant/messages',
           jsonRequest('POST', {
             requestId: id,
+            chatPreReply: readChatPreReply(),
             delivery: behavior === 'immediate' ? 'immediate' : 'whenIdle',
             ...outgoing,
           })

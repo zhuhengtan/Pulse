@@ -140,7 +140,7 @@ describe('page navigation and recovery', () => {
     await waitFor(() => expect(screen.queryByText('正在加载对话…')).toBeNull())
     unavailable = false
     fireEvent.click(screen.getByRole('button', { name: '重试', exact: true }))
-    expect(await screen.findByText('我们要做什么？')).toBeTruthy()
+    expect(await screen.findByText('聊点什么？')).toBeTruthy()
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
@@ -151,7 +151,7 @@ describe('page navigation and recovery', () => {
     vi.spyOn(window, 'matchMedia').mockImplementation(query => query === '(max-width: 767px)' ? mobile as unknown as MediaQueryList : original(query))
     const fixture = sidebarFixture()
     const view = render(<PulseDesignSystem><PulseApp transport={fixture.transport}/></PulseDesignSystem>)
-    await screen.findByText('我们要做什么？')
+    await screen.findByText('聊点什么？')
     fireEvent.click(screen.getByRole('tab', { name: '工作' }))
     await waitFor(() => expect(screen.queryByText('正在加载对话…')).toBeNull())
     fireEvent.click(await screen.findByRole('button', { name: '历史对话', exact: true }))

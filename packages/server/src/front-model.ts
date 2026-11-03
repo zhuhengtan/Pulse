@@ -118,8 +118,10 @@ export async function processFrontModel(
   contextItems: FrontModelContextItem[] = [],
   beforeAttempt?: () => Promise<void>,
   afterAttempt?: (usage: LLMResult['usage']) => Promise<void>,
+  surface: 'work' | 'chat' = 'work',
+  signal?: AbortSignal,
 ): Promise<FrontModelResult> {
-  const defaultAck = heuristicFastAck(userInput)
+  const defaultAck = surface === 'chat' ? '收到，我整理一下。' : heuristicFastAck(userInput)
   if (!config?.enabled || !config.model?.trim()) {
     return { instantResponse: defaultAck }
   }
@@ -131,6 +133,7 @@ export async function processFrontModel(
   try {
     const prompt = `You are a real-time front desk AI assistant communicating directly with the user.
 This is an acknowledgement BEFORE any task execution. No files have been read, no tools have run, and no findings exist yet. Use future or in-progress wording only. Never claim work is done or invent findings, counts, results, or evidence. Do not answer the task itself.
+${surface === 'chat' ? 'This is ordinary chat, not project execution. Acknowledge naturally without promising tools, code changes, or completion.' : ''}
 Your goals:
 1. "instantResponse": Reply in Chinese with a warm, natural personal assistant tone (under 25 characters, e.g. "好的，我马上帮您梳理代码并处理").
 2. "brief": Structure user intent, concrete requirements, and relevant personal profile hints.
@@ -166,7 +169,7 @@ Strictly output one valid JSON object:
       const res = await fetch(`${baseURL}/api/generate`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
         body: JSON.stringify({
           model: config.model,
           stream: false,
@@ -200,7 +203,7 @@ Strictly output one valid JSON object:
       privacy: 'cloud_allowed', privacyRefs: [],
     } as unknown as LLMRequestProjection
     await beforeAttempt?.()
-    const result = await adapter.executeAttempt({ request, signal: AbortSignal.timeout(timeoutMs), model: config.model, maxOutputTokens: config.maxOutputTokens ?? 768, ...(beforeAttempt ? { beforeRetryAttempt: beforeAttempt } : {}) })
+    const result = await adapter.executeAttempt({ request, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs), model: config.model, maxOutputTokens: config.maxOutputTokens ?? 768, ...(beforeAttempt ? { beforeRetryAttempt: beforeAttempt } : {}) })
     await afterAttempt?.(result.usage)
     if (result.finishReason === 'length') return { instantResponse: defaultAck }
     const parsed = result.structured ?? (result.text ? JSON.parse(result.text) as unknown : undefined)

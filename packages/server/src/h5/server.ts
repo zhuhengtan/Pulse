@@ -560,6 +560,7 @@ export class H5Server {
           const handle = await this.host.sendMessage(conversationId, {
             text: message.text,
             assistantChat: true,
+            chatPreReply: message.chatPreReply !== false,
             runId: message.runId,
             requestId: message.messageId,
             userMessageRecorded: true,
@@ -568,6 +569,10 @@ export class H5Server {
             ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}), ...(message.assistantContext ? { assistantContext: message.assistantContext } : {}),
           })
           this.attachRun(handle, false)
+          for (const pending of this.assistantInbox.pendingInputs(handle.id)) {
+            try { await handle.submitHumanInput(pending.text, undefined, { requestId: pending.messageId, ...(pending.attachments ? { attachments: pending.attachments } : {}), ...(pending.skills ? { skills: pending.skills } : {}), ...(pending.richContent ? { richContent: pending.richContent } : {}), ...(pending.mentionedFiles ? { mentionedFiles: pending.mentionedFiles } : {}), ...(pending.assistantContext ? { assistantContext: pending.assistantContext } : {}) }); await this.assistantInbox.inputDelivered(pending.messageId) }
+            catch { await this.assistantInbox.inputDelivered(pending.messageId, true) }
+          }
           if (this.stopping) await (this.updateSuspendedRuns.has(handle.id) ? handle.shutdown?.({ preserveRuns: true }) ?? Promise.resolve() : handle.shutdown ? handle.shutdown() : handle.cancel('SERVER_STOPPED'))
           await this.consumeRun(message.runId, handle)
         } catch (error) {
@@ -1376,11 +1381,21 @@ export class H5Server {
         }
         const existing = this.assistantInbox.list().find(item => item.messageId === requestId)
         if (!active && [...this.activeRuns.values()].some(handle => handle.conversationId === conversationId)) throw new Error('CONVERSATION_BUSY')
-        if (!existing && (conversation.summary.activeRunId || this.assistantPendingRuns.size || this.assistantInbox.hasQueued())) throw new Error('CONVERSATION_BUSY')
+        if (!existing && body.delivery === 'immediate') {
+          const starting = this.assistantInbox.list().find(item => item.state === 'replying')
+          if (starting && !this.activeRuns.has(starting.runId)) {
+            const input = { requestId, text, ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}), ...(assistantContext ? { assistantContext } : {}) }
+            await this.assistantInbox.acceptInput(input, starting.runId, true)
+            await this.host.appendAssistantUserMessage(conversationId, { id: `msg-${requestId}`, runId: starting.runId, text, createdAt: new Date().toISOString(), ...(attachments.length ? { attachments } : {}), ...(skills ? { skills } : {}), ...(mentionedFiles ? { mentionedFiles } : {}), ...(richContent ? { richContent } : {}), ...(assistantContext ? { assistantContext } : {}) })
+            res.writeHead(202, { 'Content-Type': 'application/json' }).end(JSON.stringify({ conversationId, messageId: requestId, runId: starting.runId, state: 'replying' })); return
+          }
+        }
+        if (!existing && body.delivery === 'whenIdle' && (conversation.summary.activeRunId || this.assistantPendingRuns.size || this.assistantInbox.hasQueued())) throw new Error('CONVERSATION_BUSY')
       }
       const accepted = body.retry === true
         ? await this.assistantInbox.retry(requestId, text, attachments.length ? attachments : undefined, skills, mentionedFiles, richContent, assistantContext)
         : await this.assistantInbox.enqueue({
+            chatPreReply: body.chatPreReply !== false,
             requestId,
             text,
             ...(attachments.length ? { attachments } : {}),
@@ -2681,6 +2696,9 @@ export class H5Server {
       projected = { runId, conversationId: event.conversationId, seq: event.seq, type: 'lanes', data: enrichLanesFromSnapshot(runId, data, fact) }
     }
     if (projected) this.pushEvent(runId, projected)
+    if (event.type === 'text' && event.conversationId === this.assistantInbox.conversationId) {
+      for (const message of (await this.host.getMessagePage(event.conversationId)).items.filter(item => item.runId === runId && item.role === 'assistant')) this.pushEvent(runId, { type: 'chat_message', runId, seq: event.seq, data: { message } })
+    }
     if (event.type === 'waiting') void (async () => {
       const handle = this.activeRuns.get(runId)
       if (handle) {

@@ -1,3 +1,4 @@
+import { readChatPreReply, saveChatPreReply } from './chat-preferences.js'
 import { ExecPolicyEditor, execPolicyDraftValid } from './ExecPolicyEditor.js'
 import { BuiltinPlugins, pluginErrorText, pluginTitles, type HostPluginSurface } from './BuiltinPlugins.js'
 import { WebSearchSettings, webSearchError } from './WebSearchSettings.js'
@@ -131,6 +132,7 @@ export function SettingsPage({ transport, canEditConfig, onClose, onOpenArchive,
   useEffect(() => { onDirtyChange?.(formDirty || Boolean(advancedError)) }, [formDirty, advancedError, onDirtyChange])
   const contentEl = useRef<HTMLElement>(null)
   useEffect(() => { contentEl.current?.scrollTo({ top: 0 }) }, [categoryId, mobileDetail])
+  const [chatPreReply, setChatPreReply] = useState(readChatPreReply)
   const [followupBehavior, setFollowupBehavior] = useState(readFollowupBehavior)
   const [appearance, setAppearance] = useState(() => {
     try { return { ...defaultAppearance, ...JSON.parse(localStorage.getItem('pulse-web-appearance') ?? '{}') } }
@@ -249,7 +251,7 @@ export function SettingsPage({ transport, canEditConfig, onClose, onOpenArchive,
       {categoryId === 'updates' && <UpdateSettings transport={transport} canManage={canEditConfig} />}
       {categoryId === 'desktop' && (window.pulseDesktop?.installation ? <DesktopEnvironment transport={transport} onConfigureModels={() => selectCategory('models')} /> : <div className="settings-card">请在 Electron 客户端中查看和修复桌面环境。</div>)}
       {categoryId === 'devices' && <DeviceManagement transport={transport} localAdmin={canEditConfig} />}
-      {categoryId === 'messages' && <Card className="settings-card" variant="outlined"><SettingSelect label="任务执行时发送消息" value={followupBehavior} options={['queue', 'immediate']} labels={['加入队列', '立即发送']} onChange={value => { try { const next = value === 'immediate' ? 'immediate' : 'queue'; saveFollowupBehavior(next); setFollowupBehavior(next) } catch { setRequestError('设置未保存，请检查浏览器存储权限。') } }} /><p>队列逐条自动发送。立即发送会优先交给主线程，由模型决定如何处理正在执行的任务。ask 和审批答案单独提交。</p></Card>}
+      {categoryId === 'messages' && <Card className="settings-card" variant="outlined"><label className="toggle-control"><span><strong>聊天预回复</strong><small>需要等待时，先简短回应，再发送完整答案。</small></span><Switch checked={chatPreReply} onChange={enabled => { try { saveChatPreReply(enabled); setChatPreReply(enabled) } catch { setRequestError('设置未保存，请检查浏览器存储权限。') } }}/></label><SettingSelect label="任务执行时发送消息" value={followupBehavior} options={['queue', 'immediate']} labels={['加入队列', '立即发送']} onChange={value => { try { const next = value === 'immediate' ? 'immediate' : 'queue'; saveFollowupBehavior(next); setFollowupBehavior(next) } catch { setRequestError('设置未保存，请检查浏览器存储权限。') } }} /><p>队列逐条自动发送。立即发送会优先交给主线程，由模型决定如何处理正在执行的任务。ask 和审批答案单独提交。</p></Card>}
       {categoryId === 'appearance' && <Card className="settings-card" variant="outlined"><SettingSelect label="主题" value={appearance.theme} options={['system', 'light', 'dark']} labels={['跟随系统', '浅色', '深色']} onChange={value => setAppearanceValue('theme', value)} /><SettingSelect label="界面字号" value={appearance.interfaceScale} options={['compact', 'standard', 'large']} labels={['较小', '标准', '较大']} onChange={value => setAppearanceValue('interfaceScale', value)} /><SettingSelect label="代码字号" value={appearance.codeScale} options={['compact', 'standard', 'large']} labels={['较小', '标准', '较大']} onChange={value => setAppearanceValue('codeScale', value)} /></Card>}
       {categoryId === 'archive' && <Card className="settings-card" variant="outlined"><p>归档聊天可以恢复到原项目；永久删除不可撤销。</p><Button type="primary" onClick={onOpenArchive}>打开归档对话</Button></Card>}
       {categoryId !== 'appearance' && categoryId !== 'archive' && categoryId !== 'messages' && categoryId !== 'devices' && categoryId !== 'updates' && categoryId !== 'desktop' && !canEditConfig && <div className="settings-card">完整后台配置只在本机管理页开放。手机仍可更改外观并管理归档对话。</div>}
