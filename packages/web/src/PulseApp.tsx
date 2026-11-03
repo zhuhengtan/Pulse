@@ -68,7 +68,15 @@ type RunStatus =
 
 const historyStorageKey = 'pulse-web-conversation'
 
-export function PulseApp({ transport = browserTransport }: { transport?: PulseWebTransport }) {
+export function PulseApp({ transport: baseTransport = browserTransport }: { transport?: PulseWebTransport }) {
+  const workControlRef = useRef<{ id?: string | undefined; runId?: string | undefined; revision?: number | undefined }>({})
+  const transport = useMemo<PulseWebTransport>(() => ({ ...baseTransport, request: (path, init) => {
+    const control = workControlRef.current
+    if (control.revision !== undefined && init?.method && init.method !== 'GET' && (path.startsWith(`/api/conversations/${encodeURIComponent(control.id ?? '')}/`) || control.runId && path.startsWith(`/api/runs/${encodeURIComponent(control.runId)}/`))) {
+      const headers = new Headers(init.headers); headers.set('x-pulse-control-revision', String(control.revision)); return baseTransport.request(path, { ...init, headers })
+    }
+    return baseTransport.request(path, init)
+  } }), [baseTransport])
   const dialogs = usePulseDialogs()
   const { route, location, go, patchQuery, openPage, backToSource, backToSettings } = usePulseNavigation()
   const notificationId = new URLSearchParams(location.search).get('notification')
@@ -289,6 +297,17 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const selectedIdRef = useRef<string | undefined>(undefined)
   selectedIdRef.current = selectedId
   const selected = surfaceMode === 'chat' ? assistantConversation : conversations.find(item => item.id === selectedId)
+  const workReadOnly = surfaceMode === 'work' && selected?.control?.owner === 'assistant'
+  const [controlChanging, setControlChanging] = useState(false)
+  workControlRef.current = surfaceMode === 'work' ? { id: selected?.id, runId: selected?.activeRunId, revision: selected?.control?.revision } : {}
+  const changeWorkControl = async () => {
+    if (!selected?.control || controlChanging) return
+    const id = selected.id, control = selected.control
+    setControlChanging(true)
+    try { const result = await apiJson<{ control: NonNullable<WebConversation['control']> }>(transport, `/api/conversations/${encodeURIComponent(id)}/control`, jsonRequest('POST', { action: control.owner === 'assistant' ? 'takeover' : 'return', expectedRevision: control.revision })); setConversations(items => items.map(item => item.id === id ? { ...item, control: result.control } : item)) }
+    catch { setToast('控制权已变化或操作未完成，请刷新后重试。'); void apiJson<ConversationList>(transport, '/api/conversations').then(setConversations) }
+    finally { setControlChanging(false) }
+  }
   const artifactIndex = useConversationArtifacts(surfaceMode === 'work' && route.conversationId === selectedId ? selectedId : undefined, `${selected?.updatedAt}:${messages.length}:${running}`, transport)
   const selectedRunRef = useRef<{ conversationId?: string | undefined; runId?: string | undefined }>({})
   selectedRunRef.current = { conversationId: surfaceMode === 'work' ? selected?.id : undefined, runId: selected?.activeRunId }
@@ -808,7 +827,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     const hasAttachments = Boolean(attachments?.length)
 
     const sendEpoch = routeEpoch.current
-    if (loading || loadError || stopping || stopLock.current) return false
+    if (loading || loadError || stopping || stopLock.current || workReadOnly) return false
     const busy = running
     if (surfaceMode === 'chat') behavior = 'immediate'
     if (behavior === 'queue' && busy && selected?.id) {
@@ -1398,7 +1417,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const activeTrace = activeRunId ? traces[activeRunId] : undefined
   const traceSteps = activeTrace ? activeTrace.order.flatMap(id => activeTrace.lanes[id]?.steps ?? []) : []
   const phaseLabel = compactRunLabel({ running, ...(completeItem ? { completeLabel: completeItem.label } : {}), ...(interactionItem ? { interaction: interactionItem.interactionKind } : {}), steps: traceSteps, ...(latestTool?.processPending ? { latestToolPending: true } : {}) })
-  const recoveryVisible = Boolean(surfaceMode === 'work' && !running && recoveryRun && activeRunId && recoveryRun.conversationId === selected?.id && recoveryRun.runId === activeRunId)
+  const recoveryVisible = Boolean(surfaceMode === 'work' && !workReadOnly && !running && recoveryRun && activeRunId && recoveryRun.conversationId === selected?.id && recoveryRun.runId === activeRunId)
   const emptyConversation = messages.length === 0 && !recoveryVisible && !(surfaceMode === 'work' && (artifactIndex.artifacts.length > 0 || route.query.has('artifactRun')))
   const composerApproval = <ApprovalPolicySelect borderless value={approvalPolicy} unavailable={!approvalReady} onRetry={retryApprovalPolicy} disabled={approvalSaving || !sessionCapabilities.localAdmin} onChange={policy => { void setApprovalPolicy(policy) }} />
   const renderMessages = () => {
@@ -1451,7 +1470,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       if (artifactIndex.error) items.push(<p key="artifact-error" role="alert">{artifactIndex.error}</p>)
     }
     if (liveTraceId && traces[liveTraceId]) items.push(<RunTraceView key={`trace:${liveTraceId}`} trace={traces[liveTraceId]} running onDiffClick={surfaceMode === 'work' ? openBubbleDiff : undefined} />)
-    if (surfaceMode === 'work' && selected) items.push(<BudgetContinuationPrompt key={`budget:${selected.id}`} transport={transport} conversationId={selected.id} revision={`${activeRunId ?? ''}:${messages.length}`} running={running || loading} onContinued={runId => { if (selectedIdRef.current === selected.id) void openConversation({ ...selected, activeRunId: runId }) }} />)
+    if (surfaceMode === 'work' && selected) items.push(<BudgetContinuationPrompt key={`budget:${selected.id}`} transport={transport} conversationId={selected.id} revision={`${activeRunId ?? ''}:${messages.length}`} running={running || loading || workReadOnly} onContinued={runId => { if (selectedIdRef.current === selected.id) void openConversation({ ...selected, activeRunId: runId }) }} />)
     return items
   }
   return <main style={surfaceMode === 'work' ? historyLayout.style : { ...historyLayout.style, '--history-width': '0px' } as import('react').CSSProperties} data-history-dragging={historyLayout.dragging || undefined} className={`shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''} ${workbenchOpen ? 'workbench-open' : ''}`}>
@@ -1482,6 +1501,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
         </div>
 
       </header>
+      {surfaceMode === 'work' && selected?.control && <div className="work-control-bar" role="status"><span>{workReadOnly ? '聊天助理管理中 · 可查看执行详情' : '你正在接管此工作会话'}</span><PulseButton disabled={controlChanging} onClick={() => void changeWorkControl()}>{workReadOnly ? '接管' : '归还聊天助理'}</PulseButton></div>}
       {surfaceMode === 'chat' && chatReferenceFromQuery(route.query) && <div className="chat-reference" role="status"><span>引用：{conversations.find(item => item.id === route.query.get('referenceConversation'))?.title ?? projects.find(item => item.id === route.query.get('project'))?.name ?? '当前项目/会话'}</span><PulseButton onClick={() => patchQuery({ referenceConversation: undefined, project: undefined })}>清除引用</PulseButton></div>}
       {!serviceConnected && window.pulseDesktop && <div className="alert" role="status"><span>后台服务未连接，仍可浏览本地记录。</span><PulseButton onClick={() => { void apiJson(transport, '/api/desktop/reconnect', jsonRequest('POST')).then(() => bootstrap()).catch(() => setToast('暂时无法连接后台服务')) }}>重新连接</PulseButton></div>}
       {loadError && <div className="alert" role="alert"><span>{loadError}</span><PulseButton onClick={() => { if (paired) setRouteRevision(value => value + 1); else void bootstrap() }}>重试</PulseButton></div>}
@@ -1494,21 +1514,21 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       {!atBottom && <PulseButton className="jump-bottom" onClick={() => { followBottom.current = true; setAtBottom(true); messagesEl.current?.scrollTo({ top: messagesEl.current.scrollHeight, behavior: 'smooth' }) }}>回到底部 ↓</PulseButton>}
       <ChatActionArea state={deriveChatState({ running, stopping, submitting, interaction: activeInteraction, stopped: status.some(item => item.kind === 'complete' && item.outcome === 'cancelled') })} stopError={stopError} onRetryStop={() => void stopRun()} className={`composer-wrap ${activeInteraction ? 'has-interaction' : ''} ${emptyConversation && !activeInteraction ? 'is-empty' : ''}`}>
         {notificationTarget && !activeInteraction && <div role="status">{loading ? '正在查找通知对应的问题…' : '通知对应的问题已处理或暂不可用，请查看任务记录。'}<PulseButton onClick={() => patchQuery({ notification: undefined })}>查看其他待办</PulseButton></div>}
-        {activeInteraction && <InteractionPanel localAdmin={sessionCapabilities.localAdmin} notificationTarget={notificationTarget} key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={approvalPolicy === 'delegate'} onOpenConversation={activeInteraction.conversationId ? () => go(workUrl(activeInteraction.conversationId!)) : undefined} onOpenFile={path => { const conversationId = activeInteraction.conversationId ?? selected?.id; if (!conversationId) return; const query = new URLSearchParams({ workspace: 'preview', artifact: path, artifactRun: activeInteraction.runId }); go(`${workUrl(conversationId)}?${query}`) }} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} />}
-        {surfaceMode === 'work' && <MessageQueuePanel key={`queue:${selectedId}`} queue={currentQueue} controller={messageQueue.controller} onError={setToast} editDisabled={submitting || Boolean(drafts[selectedId ?? 'new']?.processing)} onEdit={payload => {
+        {activeInteraction && !workReadOnly && <InteractionPanel localAdmin={sessionCapabilities.localAdmin} notificationTarget={notificationTarget} key={`${activeInteraction.runId}:${activeInteraction.groupId}`} interaction={activeInteraction} context={activeInteraction.conversationId ? `${projects.find(project => project.id === activeInteraction.projectId)?.name ?? (activeInteraction.projectId ? '工作项目' : '未分组工作会话')} · ${activeInteraction.conversationTitle ?? '工作会话'}` : undefined} reviewNote={reviewNote} delegated={approvalPolicy === 'delegate'} onOpenConversation={activeInteraction.conversationId ? () => go(workUrl(activeInteraction.conversationId!)) : undefined} onOpenFile={path => { const conversationId = activeInteraction.conversationId ?? selected?.id; if (!conversationId) return; const query = new URLSearchParams({ workspace: 'preview', artifact: path, artifactRun: activeInteraction.runId }); go(`${workUrl(conversationId)}?${query}`) }} submit={answers => answer(activeInteraction.runId, activeInteraction.groupId, answers, activeInteraction.conversationId ?? selected?.id)} />}
+        {surfaceMode === 'work' && !workReadOnly && <MessageQueuePanel key={`queue:${selectedId}`} queue={currentQueue} controller={messageQueue.controller} onError={setToast} editDisabled={submitting || Boolean(drafts[selectedId ?? 'new']?.processing)} onEdit={payload => {
           const key = selectedId ?? 'new'
           updateDraft(key, current => ({ ...current, markdown: [payload.text, current.markdown].filter(Boolean).join('\n\n'), document: !current.markdown.trim() ? payload.richContent?.document : payload.richContent?.document && current.document ? { type: 'doc', content: [...(payload.richContent.document.content ?? []), ...(current.document.content ?? [])] } : undefined, attachments: [...(payload.attachments ?? []).map(item => ({ ...item, data: item.data ?? '', previewUrl: item.url })), ...current.attachments.filter(item => !payload.attachments?.some(other => other.id === item.id))], revision: current.revision + 1 }))
           requestAnimationFrame(() => document.querySelector<HTMLElement>('#composer .tiptap')?.focus())
         }} />}
-        <RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || !serviceConnected || loading || Boolean(loadError)} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} followupBehavior={surfaceMode === 'chat' ? 'immediate' : messageQueue.behavior} onSend={async (payload, behavior) => await send(payload, behavior) === true} onStop={() => void stopRun()} toolbarExtra={surfaceMode === 'work' ? composerApproval : undefined} />
+        <RichComposer key={selectedId ?? 'new'} id="composer" draft={drafts[selectedId ?? 'new'] ?? emptyComposerDraft()} onChange={update => updateDraft(selectedId ?? 'new', update)} placeholder={paired ? '给 Pulse 发送消息…' : '请先授权此设备'} disabled={!paired || !serviceConnected || loading || Boolean(loadError) || workReadOnly} submitting={submitting} running={running} stopping={stopping} surfaceMode={surfaceMode} projectId={selected?.projectId ?? selectedProjectId} transport={transport} followupBehavior={surfaceMode === 'chat' ? 'immediate' : messageQueue.behavior} onSend={async (payload, behavior) => await send(payload, behavior) === true} onStop={() => void stopRun()} toolbarExtra={surfaceMode === 'work' ? composerApproval : undefined} />
         <div className={`composer-meta ${route.newWork ? 'new-chat-tools' : ''}`}>
           {route.newWork ? <div className="new-conversation-project"><Icon name="folder"/><Select variant="borderless" aria-label="新对话所属项目" value={selectedProjectId ?? '__ungrouped__'} onChange={value => { const projectId = value === '__ungrouped__' ? undefined : value; patchQuery({ project: projectId }); setSelectedProjectId(projectId); if (projectId) window.localStorage.setItem('pulse-web-project', projectId); else window.localStorage.removeItem('pulse-web-project') }} options={[{ value: '__ungrouped__', label: '不归属项目' }, ...projects.map(project => ({ value: project.id, label: project.name }))]} popupMatchSelectWidth={false} /></div> : !activeInteraction && <div className="composer-hint">Pulse 可能会出错，请核对重要信息。</div>}
         </div>
       </ChatActionArea>
     </ChatSurface>
-    {workbenchOpen && <Suspense fallback={<div className="workbench-loading" role="status">正在打开标签页…</div>}><PreviewDock key={selectedId ?? selectedProjectId ?? 'unassigned'} scope={selectedId ?? selectedProjectId ?? 'unassigned'} conversationId={selectedId} projectId={selected?.projectId ?? selectedProjectId} project={projects.find(project => project.id === (selected?.projectId ?? selectedProjectId))} transport={transport} localAdmin={sessionCapabilities.localAdmin} canUseTerminal={sessionCapabilities.canUseTerminal} position={route.query} onNavigate={patchQuery} onClose={() => patchQuery({ workspace: undefined, artifact: undefined, artifactRun: undefined, file: undefined, automation: undefined, diff: undefined, staged: undefined, previewHidden: '1' })} /></Suspense>}
+    {workbenchOpen && <Suspense fallback={<div className="workbench-loading" role="status">正在打开标签页…</div>}><PreviewDock key={selectedId ?? selectedProjectId ?? 'unassigned'} scope={selectedId ?? selectedProjectId ?? 'unassigned'} conversationId={selectedId} projectId={selected?.projectId ?? selectedProjectId} project={projects.find(project => project.id === (selected?.projectId ?? selectedProjectId))} transport={transport} localAdmin={sessionCapabilities.localAdmin && !workReadOnly} canUseTerminal={sessionCapabilities.canUseTerminal && !workReadOnly} position={route.query} onNavigate={patchQuery} onClose={() => patchQuery({ workspace: undefined, artifact: undefined, artifactRun: undefined, file: undefined, automation: undefined, diff: undefined, staged: undefined, previewHidden: '1' })} /></Suspense>}
     {surfaceMode === 'work' && transfer.dialog}
-    {surfaceMode === 'work' && processRunId && <Suspense fallback={null}><RunProcessPanel key={processRunId} transport={transport} runId={processRunId} onClose={() => setProcessRunId(undefined)} /></Suspense>}
+    {surfaceMode === 'work' && processRunId && <Suspense fallback={null}><RunProcessPanel key={processRunId} transport={transport} runId={processRunId} readOnly={workReadOnly} onClose={() => setProcessRunId(undefined)} /></Suspense>}
     <FrontendUpdateNotice transport={transport} enabled={paired} refresh={refreshFrontend} />
     {toast && <PulseToast text={toast} />}
   </main>

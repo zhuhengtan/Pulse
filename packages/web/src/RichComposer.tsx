@@ -863,7 +863,7 @@ export function RichComposer({
               aria-label={stopping ? '正在停止' : '停止生成'}
               aria-busy={stopping}
               title={stopping ? '正在停止' : '停止生成'}
-              disabled={stopping}
+              disabled={stopping || disabled}
               onClick={onStop}
             >
               <span className={stopping ? 'spinner' : 'composer-stop-icon'} aria-hidden="true" />

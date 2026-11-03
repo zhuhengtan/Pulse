@@ -1,3 +1,4 @@
+import { checkWorkControl, withWorkActor } from './work-control.js'
 import { startChatAcknowledgement } from './chat-acknowledgement.js'
 import { agentPtyShellOptions, assertAgentPtyAvailable } from './agent-pty.js'
 import { visibleModelOutput } from '@hunterzhu/pulse-runtime'
@@ -255,7 +256,7 @@ export interface RunUsage {
   estimatedCost?: { currency: string; amount: number; pricingVersion: string }
   completeness: 'complete' | 'partial' | 'unavailable'
 }
-export interface ConversationSummary { id: string; title: string; cwd: string; createdAt: string; updatedAt: string; activeRunId?: string; approvalPolicy?: 'manual' | 'delegate'; artifacts?: ArtifactSummary[]; projectId?: string; projectUnassigned?: boolean; origin?: 'assistant'; pinned?: boolean; archivedAt?: string }
+export interface ConversationSummary { control?: import('./protocol.js').WorkControl; id: string; title: string; cwd: string; createdAt: string; updatedAt: string; activeRunId?: string; approvalPolicy?: 'manual' | 'delegate'; artifacts?: ArtifactSummary[]; projectId?: string; projectUnassigned?: boolean; origin?: 'assistant'; pinned?: boolean; archivedAt?: string }
 export interface UserMessageInput {
   chatPreReply?: boolean
 
@@ -2362,7 +2363,7 @@ export class LocalHost {
   }
   async listRunProcesses(conversationId: string, runId: string) { return (await this.runProcesses(conversationId, runId)).list() }
   async readRunProcess(conversationId: string, runId: string, id: string, offset = 0) { return (await this.runProcesses(conversationId, runId)).readForUser(id, offset) }
-  async cancelRunProcess(conversationId: string, runId: string, id: string) { return (await this.runProcesses(conversationId, runId)).cancelForUser(id) }
+  async cancelRunProcess(conversationId: string, runId: string, id: string) { await checkWorkControl(this.conversationData, conversationId, 'process'); return (await this.runProcesses(conversationId, runId)).cancelForUser(id) }
   async getConversation(id: string): Promise<ConversationHandle> { const manifest = await this.readManifest(id); return { id, summary: this.publicConversation(manifest) } }
   async setConversationExecutionWorkspace(id: string, executionCwd: string, jarvisWorkspace: string): Promise<void> {
     const lockId = `workspace-${randomUUID()}`
@@ -2809,6 +2810,7 @@ export class LocalHost {
     return this.options.systemPrompt
   }
   async compactConversation(id: string): Promise<{ text: string }> {
+    await checkWorkControl(this.conversationData, id, 'compact')
     const lockRunId = `compact-${randomUUID()}`
     await this.acquireConversationLock(id, lockRunId)
     try {
@@ -3870,12 +3872,13 @@ export class LocalHost {
       checkpointForUpdate: async () => { await runtime.checkpointForRestart(); await closeShellProcesses(this.runDir(conversationId, runId)) },
       usage: async () => { await finish(); return runUsage(runtime, activeEntry?.options.modelPricing ?? this.options.modelPricing, activeEntry?.modelBudget) },
       taskOutcome: async () => { await finish(); return finalTaskOutcome ?? currentTaskOutcome() },
-      cancel: async (reason = 'USER_REQUESTED') => { await this.chatAcknowledgements.get(runId)?.(); this.chatAcknowledgements.delete(runId); activeEntry?.capabilityController.abort(); await session.cancel(reason) },
+      cancel: async (reason = 'USER_REQUESTED') => { await checkWorkControl(this.conversationData, conversationId, 'cancel'); await this.chatAcknowledgements.get(runId)?.(); this.chatAcknowledgements.delete(runId); activeEntry?.capabilityController.abort(); await session.cancel(reason) },
       processes: () => this.listRunProcesses(conversationId, runId),
       pollProcess: (id, offset) => this.readRunProcess(conversationId, runId, id, offset),
       cancelProcess: id => this.cancelRunProcess(conversationId, runId, id),
-      reply: replyOne,
+      reply: async (effectId, value) => { await checkWorkControl(this.conversationData, conversationId, 'reply'); await replyOne(effectId, value) },
       replyBatch: async (groupId, answers) => {
+        await checkWorkControl(this.conversationData, conversationId, 'reply')
         const group = pendingInteractions(runtime, session).find((item) => item.groupId === groupId)
         if (!group || group.items.length !== answers.length || group.items.some((item) => !answers.some((answer) => answer.effectId === item.effectId))) throw new Error('INTERACTION_GROUP_MISMATCH')
         for (const answer of answers) {
@@ -3894,8 +3897,9 @@ export class LocalHost {
         }
       },
       pendingInteractions: async () => { const pending = pendingInteractions(runtime, session).map(group => ({ ...group, items: group.items.map(item => ({ ...item, input: relocation ? presentTransferredApproval(item.input, relocation) : item.input })) })); for (const group of pending) if (group.kind === 'approval') for (const item of group.items) item.input = await this.diagnosableApprovalInput(item.input, executionRoot, conversationId, runId, item.effectId); for (const group of pending) if (group.kind === 'ask') for (const item of group.items) await this.persistPlanPreview(conversationId, runId, runtime, item.effectId, item.input); return pending },
-      reviewApproval,
+      reviewApproval: async (effectId, signal) => { await checkWorkControl(this.conversationData, conversationId, 'review'); return reviewApproval(effectId, signal) },
       submitHumanInput: async (text, targetEffectId, inputOptions = {}) => {
+        await checkWorkControl(this.conversationData, conversationId, 'send')
         if (inputOptions.richContent) inputOptions = { ...inputOptions, richContent: parseRichContent(inputOptions.richContent)! }
         if (!text.trim() && !inputOptions.attachments?.length) throw new Error('MESSAGE_REQUIRED')
         const requestId = inputOptions.requestId ?? randomUUID()
@@ -3982,6 +3986,7 @@ export class LocalHost {
   }
 
   async sendMessage(conversationId: string, input: UserMessageInput): Promise<RunHandle> {
+    if (!input.assistantChat) await checkWorkControl(this.conversationData, conversationId, 'send')
     if (input.richContent) input = { ...input, richContent: parseRichContent(input.richContent)! }
     if (!input.text.trim() && !input.attachments?.length) throw new Error('MESSAGE_REQUIRED')
     if (Buffer.byteLength(JSON.stringify(input)) > MAX_ATTACHMENT_REQUEST) throw new Error('PAYLOAD_TOO_LARGE')
@@ -4360,6 +4365,7 @@ export class LocalHost {
     return describeRunRecovery(conversationId, runId, to, previous, policy);
   }
   async resumeRun(conversationId: string, authorization?: RunRecoveryAuthorization): Promise<RunHandle> {
+    await checkWorkControl(this.conversationData, conversationId, 'resume')
     const manifest = await this.readManifest(conversationId)
     const runId = manifest.activeRunId
     if (!runId) throw new Error('NO_ACTIVE_RUN')

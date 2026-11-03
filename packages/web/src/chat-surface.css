@@ -167,3 +167,5 @@
 .typing-dots i:nth-child(3) { animation-delay:.3s; }
 @keyframes chat-typing { 0%,60%,100% { transform:translateY(0); opacity:.5; } 30% { transform:translateY(-4px); opacity:1; } }
 @media (prefers-reduced-motion:reduce) { .typing-dots i { animation:none; opacity:.75; } }
+
+.work-control-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:6px 20px; border-bottom:1px solid var(--line); color:var(--muted); font-size:12px; }

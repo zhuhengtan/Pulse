@@ -91,6 +91,42 @@ export class ConversationDatabase {
             return this.changed(id, 'conversation', id);
         });
     }
+    initializeWorkControl(id, assistantConversationId) {
+        return this.transaction(() => {
+            const body = this.get(id);
+            if (body.control) return body.control;
+            if (body.origin !== 'assistant' || typeof assistantConversationId !== 'string') throw new Error('WORK_NOT_ASSISTANT_MANAGED');
+            body.control = { owner: 'assistant', revision: 0, assistantConversationId };
+            this.db.prepare('UPDATE conversations SET body=? WHERE id=?').run(JSON.stringify(body), id);
+            this.changed(id, 'control', id);
+            return body.control;
+        });
+    }
+    checkWorkControl(id, actor, operation) {
+        const control = this.get(id).control;
+        if (!control || actor?.kind === 'system') return control;
+        if (actor?.kind === 'policy' && ['reply', 'review'].includes(operation)) return control;
+        if (actor?.kind === 'approval' && operation === 'reply') return control;
+        if (actor?.revision !== undefined && actor.revision !== control.revision) throw new Error('WORK_CONTROL_STALE');
+        if (actor?.kind === 'assistant') {
+            if (control.owner !== 'assistant' || actor.assistantConversationId !== control.assistantConversationId) throw new Error('WORK_CONTROL_REQUIRED');
+        } else if (control.owner !== 'user') throw new Error('WORK_CONTROL_REQUIRED');
+        return control;
+    }
+    changeWorkControl(id, action, expectedRevision) {
+        return this.transaction(() => {
+            const body = this.get(id), control = body.control;
+            if (!control) throw new Error('WORK_NOT_ASSISTANT_MANAGED');
+            if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== control.revision) throw new Error('WORK_CONTROL_STALE');
+            if (!['takeover', 'return'].includes(action)) throw new Error('WORK_CONTROL_ACTION_INVALID');
+            const owner = action === 'takeover' ? 'user' : 'assistant';
+            if (control.owner === owner) return control;
+            body.control = { ...control, owner, revision: control.revision + 1 };
+            this.db.prepare('UPDATE conversations SET body=? WHERE id=?').run(JSON.stringify(body), id);
+            this.changed(id, 'control', id);
+            return body.control;
+        });
+    }
     remove(id) { return this.transaction(() => { this.db.prepare('DELETE FROM conversations WHERE id=?').run(id); return this.changed(id, 'deleted', id); }); }
     append(id, body) {
         if (!body || typeof body.id !== 'string' || typeof body.text !== 'string')
@@ -161,5 +197,5 @@ export class ConversationDatabase {
     revision() { return Number(this.db.prepare('SELECT coalesce(max(seq),0) AS seq FROM changes').get().seq); }
     changes(after = 0) { const min = Number(this.db.prepare('SELECT coalesce(min(seq),0) AS seq FROM changes').get().seq); return { reset: after > 0 && after < min - 1, revision: this.revision(), items: this.db.prepare('SELECT seq,conversation,kind,item FROM changes WHERE seq>? ORDER BY seq LIMIT 10000').all(after) }; }
 }
-export const readMethods = new Set(['assistantView', 'list', 'get', 'messages', 'page', 'body', 'search', 'searchPage', 'readState', 'revision', 'changes']);
-export const writeMethods = new Set(['save', 'patch', 'remove', 'append', 'revise', 'replace', 'saveState']);
+export const readMethods = new Set(['checkWorkControl', 'assistantView', 'list', 'get', 'messages', 'page', 'body', 'search', 'searchPage', 'readState', 'revision', 'changes']);
+export const writeMethods = new Set(['initializeWorkControl', 'changeWorkControl', 'save', 'patch', 'remove', 'append', 'revise', 'replace', 'saveState']);

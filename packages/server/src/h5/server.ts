@@ -1,3 +1,4 @@
+import { asChatWorkAgent, checkWorkControl, withWorkActor } from '../work-control.js'
 import { readState } from '../updates/store.js'
 import { releaseId } from '../updates/contracts.js'
 import { readUpdateResume, saveUpdateResume, type UpdateResumeJournal } from '../updates/resume.js'
@@ -252,9 +253,9 @@ export class H5Server {
       start: (projectId, task) => this.startWorkFromAssistant(projectId, task),
       list: projectId => this.listWorkSessions(projectId),
       status: conversationId => this.workStatus(conversationId),
-      send: (conversationId, text) => this.sendToWork(conversationId, text),
-      stop: conversationId => this.stopWork(conversationId),
-      resume: conversationId => this.resumeWork(conversationId),
+      send: (conversationId, text) => asChatWorkAgent(this.host.conversationData, conversationId, () => this.sendToWork(conversationId, text)),
+      stop: conversationId => asChatWorkAgent(this.host.conversationData, conversationId, () => this.stopWork(conversationId)),
+      resume: conversationId => asChatWorkAgent(this.host.conversationData, conversationId, () => this.resumeWork(conversationId)),
     })
   }
 
@@ -358,6 +359,7 @@ export class H5Server {
     for (const message of this.assistantInbox.transcript(true)) {
       await this.host.appendAssistantUserMessage(assistantId, { id: `msg-${message.requestId}`, runId: message.runId, text: message.text, createdAt: message.createdAt, ...(message.attachments ? { attachments: message.attachments } : {}), ...(message.skills ? { skills: message.skills } : {}), ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}), ...(message.assistantContext ? { assistantContext: message.assistantContext } : {}) })
     }
+    for (const work of await this.host.listConversations()) if (work.origin === 'assistant' && this.assistantInbox.workLink(work.id)) await this.host.conversationData.call('initializeWorkControl', work.id, assistantId)
     const initialConversations = (await this.host.listConversations()).filter(conversation => conversation.id !== assistantId)
     await this.projects.migrate(initialConversations)
     for (const conversation of initialConversations) if (!conversation.projectId && !conversation.projectUnassigned && !conversation.archivedAt) {
@@ -439,7 +441,7 @@ export class H5Server {
     this.chatSubscriptions.clear()
     for (const entry of this.bundleImports.values()) { clearTimeout(entry.timer); await rm(entry.bundle.directory, { recursive: true, force: true }) }
     this.bundleImports.clear()
-    await Promise.all([...this.activeRuns.values()].map(handle => (this.updateSuspendedRuns.has(handle.id) ? handle.shutdown?.({ preserveRuns: true }) ?? Promise.resolve() : handle.shutdown ? handle.shutdown() : handle.cancel('SERVER_STOPPED')).catch(() => undefined)))
+    await Promise.all([...this.activeRuns.values()].map(handle => (this.updateSuspendedRuns.has(handle.id) ? handle.shutdown?.({ preserveRuns: true }) ?? Promise.resolve() : handle.shutdown ? handle.shutdown() : withWorkActor({ kind: 'system' }, () => handle.cancel('SERVER_STOPPED'))).catch(() => undefined)))
     // A sendMessage call can still be starting and not yet appear in activeRuns.
     // The pump joins that launch and shuts it down without dispatching its queue.
     if (!this.restartingForUpdate) await this.assistantPump?.catch(() => undefined)
@@ -502,6 +504,7 @@ export class H5Server {
     await Promise.allSettled([...this.pendingWorkStarts].filter(([, id]) => !conversationId || id === conversationId).map(([promise]) => promise))
   }
   private async startConversationRun(conversationId: string, text: string, options?: { requestId?: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[]; budgetRenewal?: import('../model-budget.js').BudgetRenewalAuthorization }): Promise<RunHandle> {
+    await checkWorkControl(this.host.conversationData, conversationId, 'send')
     await this.host.listSkills()
     const key = options?.requestId ? `${conversationId}:${options.requestId}` : undefined
     const digest = createHash('sha256').update(JSON.stringify({ text, options })).digest('hex')
@@ -573,7 +576,7 @@ export class H5Server {
             try { await handle.submitHumanInput(pending.text, undefined, { requestId: pending.messageId, ...(pending.attachments ? { attachments: pending.attachments } : {}), ...(pending.skills ? { skills: pending.skills } : {}), ...(pending.richContent ? { richContent: pending.richContent } : {}), ...(pending.mentionedFiles ? { mentionedFiles: pending.mentionedFiles } : {}), ...(pending.assistantContext ? { assistantContext: pending.assistantContext } : {}) }); await this.assistantInbox.inputDelivered(pending.messageId) }
             catch { await this.assistantInbox.inputDelivered(pending.messageId, true) }
           }
-          if (this.stopping) await (this.updateSuspendedRuns.has(handle.id) ? handle.shutdown?.({ preserveRuns: true }) ?? Promise.resolve() : handle.shutdown ? handle.shutdown() : handle.cancel('SERVER_STOPPED'))
+          if (this.stopping) await (this.updateSuspendedRuns.has(handle.id) ? handle.shutdown?.({ preserveRuns: true }) ?? Promise.resolve() : handle.shutdown ? handle.shutdown() : withWorkActor({ kind: 'system' }, () => handle.cancel('SERVER_STOPPED')))
           await this.consumeRun(message.runId, handle)
         } catch (error) {
           const detail = error instanceof Error ? error.message : 'ASSISTANT_REPLY_FAILED'
@@ -601,7 +604,8 @@ export class H5Server {
     const title = task.trim().replace(/\s+/g, ' ').slice(0, 80) || 'Pulse 工作会话'
     const conversation = await this.host.createConversation({ title, cwd: project.cwd, projectId: project.id, origin: 'assistant' })
     await this.assistantInbox.linkWork(conversation.id, project.id, title)
-    queueMicrotask(() => { void this.startConversationRun(conversation.id, task).catch(async error => {
+    await this.host.conversationData.call('initializeWorkControl', conversation.id, this.assistantInbox.conversationId)
+    queueMicrotask(() => { void asChatWorkAgent(this.host.conversationData, conversation.id, () => this.startConversationRun(conversation.id, task)).catch(async error => {
       const detail = error instanceof Error ? error.message : 'WORK_START_FAILED'
       process.stderr.write(`[pulse] work start failed: ${detail.slice(0, 180)}\n`)
       await this.assistantInbox.addWorkNotice({ id: `work-start-${conversation.id}`, role: 'assistant', createdAt: new Date().toISOString(), text: `无法启动工作会话：${detail.slice(0, 160)}`, work: { conversationId: conversation.id, projectId: project.id, title, state: 'failed' } }).catch(() => undefined)
@@ -647,6 +651,7 @@ export class H5Server {
   }
 
   private async resumeConversationRun(conversationId: string, authorization?: RunRecoveryAuthorization): Promise<RunHandle> {
+    await checkWorkControl(this.host.conversationData, conversationId, 'resume')
     const binding = await this.host.getTransferBinding(conversationId)
     if (binding) {
       const conversation = await this.host.getConversation(conversationId)
@@ -1023,7 +1028,7 @@ export class H5Server {
           if (preflight.status === 'blocked') throw new Error(preflight.blockers[0] ?? 'RECOVERY_BLOCKED')
           const authorization = preflight.status === 'confirmation-required' ? { runId: item.runId, from: preflight.from!, to: preflight.to } : undefined
           item.status = 'resuming'; await saveUpdateResume(this.dataDir, journal)
-          await this.resumeConversationRun(item.conversationId, authorization)
+          await withWorkActor({ kind: 'system' }, () => this.resumeConversationRun(item.conversationId, authorization))
           if (this.assistantInbox.receiptByRun(item.runId)) await this.assistantInbox.update(item.runId, 'replying')
           item.status = 'resumed'; delete item.error
         } catch (error) { item.status = 'blocked'; item.error = error instanceof Error ? error.message.slice(0, 300) : 'UPDATE_RESUME_FAILED' }
@@ -1049,7 +1054,7 @@ export class H5Server {
       res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '2' }).end(JSON.stringify({ error: 'SERVICE_UPDATING' })); return
     }
     if (!exempt) this.updateRequests++
-    try { await this.handleRequestBody(req, res) } finally { if (!exempt) this.updateRequests-- }
+    try { const header = req.headers['x-pulse-control-revision']; const revision = typeof header === 'string' && /^\d+$/.test(header) ? Number(header) : undefined; await withWorkActor({ kind: 'user', ...(revision === undefined ? {} : { revision }) }, () => this.handleRequestBody(req, res)) } finally { if (!exempt) this.updateRequests-- }
   }
 
   private async handleRequestBody(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1194,6 +1199,14 @@ export class H5Server {
       let origin: string | undefined
       try { origin = typeof req.headers.origin === 'string' ? new URL(req.headers.origin).origin : undefined } catch { origin = undefined }
       return Boolean(origin && origin === `http://${hostHeader}`)
+    }
+
+    if (['POST', 'PATCH', 'DELETE'].includes(method)) {
+      const scopedConversation = pathname.match(/^\/api\/conversations\/([^/]+)(?:\/(.*))?$/)
+      const scopedRun = pathname.match(/^\/api\/runs\/([^/]+)\//)
+      const id = scopedConversation && scopedConversation[2] !== 'control' ? decodeURIComponent(scopedConversation[1]!) : scopedRun ? await this.host.findConversationByRunId(decodeURIComponent(scopedRun[1]!)) : undefined
+      if (id && (await this.host.getConversation(id).catch(() => undefined))?.summary.control) try { await checkWorkControl(this.host.conversationData, id, 'user-command') }
+      catch (error) { const code = error instanceof Error ? error.message : 'WORK_CONTROL_REQUIRED'; res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: code, control: (await this.host.getConversation(id)).summary.control })); return }
     }
 
     if (pathname === '/api/updates' && method === 'GET') {
@@ -1420,6 +1433,7 @@ export class H5Server {
       const conversationId = runId ? this.runConversations.get(runId) : undefined
       const handle = runId ? this.activeRuns.get(runId) : undefined
       if (!handle || conversationId !== this.assistantInbox.conversationId) { res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'ASSISTANT_REPLY_NOT_ACTIVE' })); return }
+      await checkWorkControl(this.host.conversationData, handle.conversationId, 'cancel')
       await handle.cancel('USER_REQUESTED')
       res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }))
       return
@@ -2235,6 +2249,17 @@ export class H5Server {
       return
     }
 
+    const workControlMatch = pathname.match(/^\/api\/conversations\/([^/]+)\/control$/)
+    if (workControlMatch && method === 'POST') {
+      if (!requireSameOrigin()) { res.writeHead(403).end(JSON.stringify({ error: 'SAME_ORIGIN_REQUIRED' })); return }
+      const body = await this.parseJsonBody(req), id = decodeURIComponent(workControlMatch[1]!)
+      try {
+        const control = await this.host.conversationData.call('changeWorkControl', id, body.action, body.expectedRevision)
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ control }))
+      } catch (error) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error instanceof Error ? error.message : 'WORK_CONTROL_FAILED', control: (await this.host.getConversation(id)).summary.control })) }
+      return
+    }
+
     const recoveryPreflightMatch = pathname.match(/^\/api\/conversations\/([^/]+)\/runs\/([^/]+)\/recovery$/)
     if (recoveryPreflightMatch && method === 'GET') {
       const preflight = await this.host.preflightRunRecovery(recoveryPreflightMatch[1]!, recoveryPreflightMatch[2]!)
@@ -2583,6 +2608,7 @@ export class H5Server {
         }
       }
       if (!handle) { res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'RUN_NOT_ACTIVE' })); return }
+      await checkWorkControl(this.host.conversationData, handle.conversationId, 'cancel')
       await handle.cancel('USER_REQUESTED')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ ok: true }))
@@ -2816,7 +2842,7 @@ export class H5Server {
           break
         }
         reviewed.add(next.effectId)
-        const result = await handle.reviewApproval(next.effectId, controller.signal).catch(() => ({ status: 'manual' as const, reason: 'review_failed' }))
+        const result = await withWorkActor({ kind: 'policy' }, () => handle.reviewApproval(next.effectId, controller.signal)).catch(() => ({ status: 'manual' as const, reason: 'review_failed' }))
         if (controller.signal.aborted) return
         if (result.status === 'manual') {
           const manual = this.manualApprovalEffects.get(runId) ?? new Set<string>()

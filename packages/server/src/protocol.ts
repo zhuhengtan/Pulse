@@ -1,6 +1,9 @@
+export interface WorkControl { owner: 'assistant' | 'user'; revision: number; assistantConversationId: string }
 import type { RichContent } from './rich-content.js'
 /** Browser-safe DTOs shared by the H5 server and independent Web client. */
 export interface WebConversation {
+  control?: WorkControl
+
   id: string
   title: string
   cwd: string

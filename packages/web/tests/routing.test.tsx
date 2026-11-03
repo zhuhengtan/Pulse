@@ -90,7 +90,7 @@ describe('explicit URL navigation', () => {
 
   it('normalizes the root and prefers an explicit conversation over saved preferences', async () => {
     const root = show('/')
-    await screen.findByText('我们要做什么？'); expect(address(root.router)).toBe('/chat')
+    await screen.findByText('聊点什么？'); expect(address(root.router)).toBe('/chat')
     root.unmount(); localStorage.setItem('pulse-web-conversation', 'old')
     const work = show('/work/pulse-chat')
     await screen.findByText('消息：pulse-chat')
@@ -210,7 +210,7 @@ describe('explicit URL navigation', () => {
   })
 
   it('blocks browser Back and page close for invalid JSON, preserving URL and text on cancel', async () => {
-    const view = show('/chat'); await screen.findByText('我们要做什么？')
+    const view = show('/chat'); await screen.findByText('聊点什么？')
     fireEvent.click(screen.getByRole('button', { name: '设置', exact: true }))
     fireEvent.click(await screen.findByRole('button', { name: '高级配置', exact: true }))
     const text = await screen.findByRole('textbox', { name: /完整配置/ })
@@ -224,7 +224,7 @@ describe('explicit URL navigation', () => {
     expect((await screen.findByRole('textbox', { name: /完整配置/ }) as HTMLTextAreaElement).value).toBe('{ invalid')
     fireEvent.click(screen.getAllByRole('button', { name: '返回聊天' })[0]!)
     fireEvent.click(await screen.findByRole('button', { name: '确认', exact: true }))
-    await screen.findByText('我们要做什么？'); expect(address(view.router)).toBe('/chat')
+    await screen.findByText('聊点什么？'); expect(address(view.router)).toBe('/chat')
   })
 
   it('opens legacy file links as document tabs and restores them through history without reloading messages', async () => {

@@ -1,3 +1,4 @@
+import { currentWorkActor, withWorkActor, type WorkActor } from '../work-control.js'
 import { waitForWorkerStop } from './worker-stop.js'
 import type { RunRecoveryAuthorization } from '../run-recovery-preflight.js'
 import type { RichContent } from '../rich-content.js'
@@ -10,9 +11,9 @@ import type { AssistantEvent, LocalHost, LocalHostOptions, RunHandle, RunUsage, 
 export const H5_WORKER_PROTOCOL_VERSION = 1 as const
 
 type WorkerPayload = { budgetRenewal?: import('../model-budget.js').BudgetRenewalAuthorization; recoveryAuthorization?: RunRecoveryAuthorization; requestId?: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[] }
-type WorkerStart = Omit<WorkerPayload, 'requestId'> & { messageRequestId?: string } & { schemaVersion: 1; type: 'start'; requestId: string; conversationId: string; text: string; resume: boolean }
+type WorkerStart = { controller?: WorkActor } & Omit<WorkerPayload, 'requestId'> & { messageRequestId?: string } & { schemaVersion: 1; type: 'start'; requestId: string; conversationId: string; text: string; resume: boolean }
 type WorkerConfigure = { schemaVersion: 1; type: 'configure'; runtimeOptions: WorkWorkerRuntimeOptions }
-type WorkerRpc = { schemaVersion: 1; type: 'rpc'; requestId: string; method: 'cancel' | 'reply' | 'replyBatch' | 'pendingInteractions' | 'reviewApproval' | 'submitHumanInput' | 'processes' | 'pollProcess' | 'cancelProcess' | 'checkpointForUpdate'; args: unknown[] }
+type WorkerRpc = { controller?: WorkActor; schemaVersion: 1; type: 'rpc'; requestId: string; method: 'cancel' | 'reply' | 'replyBatch' | 'pendingInteractions' | 'reviewApproval' | 'submitHumanInput' | 'processes' | 'pollProcess' | 'cancelProcess' | 'checkpointForUpdate'; args: unknown[] }
 type WorkerShutdown = { schemaVersion: 1; type: 'shutdown'; preserveRuns?: boolean }
 type ParentMessage = WorkerConfigure | WorkerStart | WorkerRpc | WorkerShutdown
 
@@ -191,7 +192,7 @@ class RemoteWorkRun {
       await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'configure', runtimeOptions })
       await this.configured
       const requestId = this.startRequestId
-      await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'start', requestId, conversationId: this.conversationId, text, resume, ...(input.budgetRenewal ? { budgetRenewal: input.budgetRenewal } : {}), ...(input.requestId ? { messageRequestId: input.requestId } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), ...(input.recoveryAuthorization ? { recoveryAuthorization: input.recoveryAuthorization } : {}) })
+      await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'start', controller: currentWorkActor(), requestId, conversationId: this.conversationId, text, resume, ...(input.budgetRenewal ? { budgetRenewal: input.budgetRenewal } : {}), ...(input.requestId ? { messageRequestId: input.requestId } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), ...(input.recoveryAuthorization ? { recoveryAuthorization: input.recoveryAuthorization } : {}) })
       const started = await this.started
       this.runId = started.runId
     } catch (error) {
@@ -241,7 +242,7 @@ class RemoteWorkRun {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pendingRpc.delete(requestId); reject(new Error('WORKER_RPC_TIMEOUT')) }, timeoutMs)
       this.pendingRpc.set(requestId, { resolve, reject, timer })
-      this.child.send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'rpc', requestId, method, args } satisfies WorkerRpc, error => {
+      this.child.send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'rpc', controller: currentWorkActor(), requestId, method, args } satisfies WorkerRpc, error => {
         if (error) {
           clearTimeout(timer)
           this.pendingRpc.delete(requestId)
@@ -310,7 +311,7 @@ export async function runH5WorkWorker(host: LocalHost, conversationId: string): 
 
   let handle: RunHandle
   try {
-    handle = start.resume ? await host.resumeRun(conversationId, start.recoveryAuthorization) : await host.sendMessage(conversationId, { text: start.text, ...(start.budgetRenewal ? { budgetRenewal: start.budgetRenewal, continueTask: true } : {}), ...(start.messageRequestId ? { requestId: start.messageRequestId } : {}), ...(start.attachments ? { attachments: start.attachments } : {}), ...(start.skills ? { skills: start.skills } : {}), ...(start.mentionedFiles ? { mentionedFiles: start.mentionedFiles } : {}), ...(start.richContent ? { richContent: start.richContent } : {}) })
+    handle = await withWorkActor(start.controller ?? { kind: 'user' }, async () => start.resume ? await host.resumeRun(conversationId, start.recoveryAuthorization) : await host.sendMessage(conversationId, { text: start.text, ...(start.budgetRenewal ? { budgetRenewal: start.budgetRenewal, continueTask: true } : {}), ...(start.messageRequestId ? { requestId: start.messageRequestId } : {}), ...(start.attachments ? { attachments: start.attachments } : {}), ...(start.skills ? { skills: start.skills } : {}), ...(start.mentionedFiles ? { mentionedFiles: start.mentionedFiles } : {}), ...(start.richContent ? { richContent: start.richContent } : {}) }))
     await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'started', requestId: start.requestId, runId: handle.id, conversationId })
   } catch (error) {
     await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'fatal', message: errorText(error).slice(0, 400) }).catch(() => undefined)
@@ -338,7 +339,7 @@ export async function runH5WorkWorker(host: LocalHost, conversationId: string): 
     }
     if (suspending || !isObject(raw) || raw.schemaVersion !== H5_WORKER_PROTOCOL_VERSION || raw.type !== 'rpc' || typeof raw.requestId !== 'string' || typeof raw.method !== 'string' || !Array.isArray(raw.args)) return
     const request = raw as WorkerRpc
-    void (async () => {
+    void withWorkActor(request.controller ?? { kind: 'user' }, async () => {
       try {
         let value: unknown
         switch (request.method) {
@@ -359,7 +360,7 @@ export async function runH5WorkWorker(host: LocalHost, conversationId: string): 
         const code = (error as { code?: unknown })?.code
         await send({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'rpcResult', requestId: request.requestId, ok: false, error: errorText(error).slice(0, 400), ...(typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(code) ? { code } : {}) }).catch(() => undefined)
       }
-    })()
+    })
   })
 
   try {

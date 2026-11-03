@@ -10,7 +10,7 @@ const label = (process: Process) => process.status === 'unknown' ? '状态未知
 const plain = (text: string) => text.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
 
 /** Read-only Agent process output. There is deliberately no keyboard/stdin channel. */
-export function RunProcessPanel({ transport, runId, onClose }: { transport: PulseWebTransport; runId: string; onClose(): void }) {
+export function RunProcessPanel({ transport, runId, readOnly = false, onClose }: { transport: PulseWebTransport; runId: string; readOnly?: boolean; onClose(): void }) {
   const base = `/api/runs/${encodeURIComponent(runId)}/processes`
   const [items, setItems] = useState<Process[]>([])
   const [selected, setSelected] = useState('')
@@ -64,7 +64,7 @@ export function RunProcessPanel({ transport, runId, onClose }: { transport: Puls
     {!loading && !items.length && <p>此任务没有已记录的进程。</p>}
     <div className="run-process-list" role="list" aria-label="任务进程列表">{items.map(item => <div key={item.processId} role="listitem"><PulseButton aria-pressed={selected === item.processId} onClick={() => setSelected(item.processId)}><strong>{item.command.command}</strong>{item.command.pty ? ' · PTY' : ''}<span>{label(item)}</span></PulseButton></div>)}</div>
     {current && <section aria-label="进程详情"><p role="status">{label(current)}{current.inputUncertain ? ' · 输入送达状态未知，验收仍被阻止' : current.stdinReady ? ' · 可申请交互输入' : ''}</p>
-      <PulseButton disabled={current.status !== 'running' || stopping} onClick={() => void stop()}>{stopping ? '正在停止…' : '停止进程'}</PulseButton>
+      <PulseButton disabled={readOnly || current.status !== 'running' || stopping} onClick={() => void stop()}>{stopping ? '正在停止…' : '停止进程'}</PulseButton>
       <pre className="run-process-output" aria-label="只读进程输出" tabIndex={0}>{output || '暂无输出'}</pre>
       <p className="setting-note">最多保留最近 64K 字符；完整日志保存在原任务记录中。</p>
     </section>}

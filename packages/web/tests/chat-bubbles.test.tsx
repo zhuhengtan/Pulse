@@ -37,3 +37,33 @@ it('keeps chat to bubbles and one typing indicator, hides intermediate output an
   act(() => fixture.finish())
   await waitFor(() => expect(ui.queryByLabelText('Pulse 正在输入')).toBeNull())
 })
+it('opens delegated work read-only, takes control explicitly and returns it without cancelling execution', async () => {
+  const { routingFixture } = await import('./fixtures/routing.js')
+  const fixture = routingFixture(), original = fixture.transport.request
+  let control = { owner: 'assistant' as 'assistant' | 'user', revision: 0, assistantConversationId: 'assistant' }
+  const transfers: any[] = []
+  fixture.transport.request = async (path, init) => {
+    if (path === '/api/conversations/pulse-chat/control') {
+      const body = JSON.parse(String(init?.body)); transfers.push(body)
+      expect(new Headers(init?.headers).get('x-pulse-control-revision')).toBe(String(control.revision))
+      control = { ...control, owner: body.action === 'takeover' ? 'user' : 'assistant', revision: control.revision + 1 }
+      return Response.json({ control })
+    }
+    const response = await original(path, init)
+    if (path === '/api/conversations') return Response.json((await response.json()).map((item: any) => item.id === 'pulse-chat' ? { ...item, control } : item))
+    if (path === '/api/conversations/pulse-chat') return Response.json({ ...await response.json(), control })
+    return response
+  }
+  const router = createMemoryRouter([{ path: '*', element: <PulseApp transport={fixture.transport}/> }], { initialEntries: ['/work/pulse-chat'] })
+  const ui = render(<PulseDesignSystem><RouterProvider router={router}/></PulseDesignSystem>)
+  const takeover = await ui.findByRole('button', { name: '接管', exact: true })
+  await waitFor(() => expect(ui.container.querySelector('.tiptap')?.getAttribute('contenteditable')).toBe('false'))
+  fireEvent.click(takeover)
+  await ui.findByRole('button', { name: '归还聊天助理', exact: true })
+  await waitFor(() => expect(ui.container.querySelector('.tiptap')?.getAttribute('contenteditable')).toBe('true'))
+  fireEvent.click(ui.getByRole('button', { name: '归还聊天助理', exact: true }))
+  await ui.findByRole('button', { name: '接管', exact: true })
+  await waitFor(() => expect(ui.container.querySelector('.tiptap')?.getAttribute('contenteditable')).toBe('false'))
+  expect(transfers).toEqual([{ action: 'takeover', expectedRevision: 0 }, { action: 'return', expectedRevision: 1 }])
+  expect(fixture.calls.some(call => call.path.endsWith('/cancel'))).toBe(false)
+})
