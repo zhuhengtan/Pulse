@@ -310,8 +310,9 @@ export interface RunHandle {
   /** Submit a human message while this run is active. */
   submitHumanInput(text: string, targetEffectId?: string, options?: HumanInputOptions): Promise<void>
   /** Gracefully stop an isolated host process when its supervising server shuts down. */
-  shutdown?(): Promise<void>
+  shutdown?(options?: { preserveRuns?: boolean }): Promise<void>
   isActive?(): boolean
+  checkpointForUpdate?(): Promise<void>
 }
 export interface ConversationHandle { readonly id: string; readonly summary: ConversationSummary }
 
@@ -3851,6 +3852,7 @@ export class LocalHost {
       events,
       outcome: finish,
       isActive: () => this.active.has(runId),
+      checkpointForUpdate: async () => { await runtime.checkpointForRestart(); await closeShellProcesses(this.runDir(conversationId, runId)) },
       usage: async () => { await finish(); return runUsage(runtime, activeEntry?.options.modelPricing ?? this.options.modelPricing, activeEntry?.modelBudget) },
       taskOutcome: async () => { await finish(); return finalTaskOutcome ?? currentTaskOutcome() },
       cancel: async (reason = 'USER_REQUESTED') => { activeEntry?.capabilityController.abort(); await session.cancel(reason) },
@@ -4738,12 +4740,13 @@ export class LocalHost {
       yield { schemaVersion: 1, type: 'error', conversationId, runId, seq: seq + 1, data: String(error) }
     }
   }
-  async close(options?: { preserveHumanWaits?: boolean }): Promise<void> {
+  async close(options?: { preserveHumanWaits?: boolean; preserveRuns?: boolean }): Promise<void> {
     await this.automationBroker.close()
     const running = [...this.active.values()]
+    if (options?.preserveRuns) await Promise.all(running.map(active => active.runtime.checkpointForRestart()))
     for (const active of running) active.capabilityController.abort()
     await Promise.allSettled(running.map(async (active) => {
-      const preserved = options?.preserveHumanWaits === true && await active.runtime.checkpointHumanWait()
+      const preserved = options?.preserveRuns === true || options?.preserveHumanWaits === true && await active.runtime.checkpointHumanWait()
       if (!preserved) await active.runtime.shutdown()
       const root = active.runtime.state.agents.get(active.session.agentId)
       if (!preserved && root && ['succeeded', 'failed', 'cancelled'].includes(root.state ?? '')) {
@@ -4757,6 +4760,7 @@ export class LocalHost {
       }
       await this.hookServices.get(`${active.conversationId}:${active.runId}`)?.dispose()
       if (!preserved && root && ['succeeded', 'failed', 'cancelled'].includes(root.state ?? '')) await this.hookServices.get(`${active.conversationId}:${active.runId}`)?.stop()
+      if (options?.preserveRuns) await closeShellProcesses(this.runDir(active.conversationId, active.runId))
       await active.capabilities.dispose()
     }))
     this.active.clear()

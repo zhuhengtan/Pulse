@@ -32,7 +32,7 @@ export async function runUpdateCommand(args: string[], options: Record<string, s
   }
   if (action === 'check') await manager.check()
   if (action === 'download') await manager.download(true)
-  if (action === 'apply' || action === 'rollback') await manager.requestApply(action === 'rollback')
+  if (action === 'apply' || action === 'rollback') await manager.requestApply(action === 'rollback', options.force === true)
   if (action === 'auto-download') { if (!['on', 'off'].includes(args[1] ?? '')) throw new Error('Usage: pulse update auto-download on|off'); await manager.settings(args[1] === 'on') }
   const status = await manager.status()
   process.stdout.write(JSON.stringify(status, null, 2) + '\n')

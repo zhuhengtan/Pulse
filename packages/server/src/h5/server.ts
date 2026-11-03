@@ -1,3 +1,6 @@
+import { readState } from '../updates/store.js'
+import { releaseId } from '../updates/contracts.js'
+import { readUpdateResume, saveUpdateResume, type UpdateResumeJournal } from '../updates/resume.js'
 import { scheduledWorkActive } from '../updates/liveness.js'
 import { runCompletion } from '../run-presentation.js'
 import { withConfigFileLock } from '../config-write-lock.js'
@@ -174,6 +177,7 @@ export class H5Server {
   private server: Server | undefined = undefined
   private readonly activeRuns = new Map<string, RunHandle>()
   private readonly runConsumers = new Set<Promise<void>>()
+  private readonly runConsumerRuns = new Map<Promise<void>, string>()
   private readonly runConversations = new Map<string, string>()
   private readonly runEventBuffers = new Map<string, AssistantEvent[]>()
   private readonly runSseClients = new Map<string, Set<SseClient>>()
@@ -193,7 +197,11 @@ export class H5Server {
   private maintenance = process.env.PULSE_UPDATE_MAINTENANCE === '1'
   private updateRequests = 0
   private updateTransition = false
-  private updateMessages = (message: unknown) => { if ((message as { type?: string })?.type === 'update-resume') { this.maintenance = false; this.updateTransition = false; void this.pumpAssistantInbox() } }
+  private updateAttempt: Promise<void> | undefined
+  private updateRecovery: Promise<void> | undefined
+  private readonly updateSuspendedRuns = new Set<string>()
+  get restartingForUpdate(): boolean { return this.updateSuspendedRuns.size > 0 }
+  private updateMessages = (message: unknown) => { if ((message as { type?: string })?.type === 'update-resume') { this.updateTransition = false; void this.resumeUpdatedRuns() } }
   private stopPluginRecovery: (() => void) | undefined
   private stopping = false
   private jarvisSyncTimer: NodeJS.Timeout | undefined
@@ -394,7 +402,7 @@ export class H5Server {
     this.dataChanged = this.host.conversationData.onChange(revision => {
       for (const client of this.chatSockets.clients) this.sendChat(client, { type: 'changed', revision })
     })
-    if (!this.maintenance) void this.pumpAssistantInbox()
+    if (!this.maintenance) { const journal = await readUpdateResume(this.dataDir).catch(() => undefined); if (journal?.runs.some(run => ['pending', 'resuming'].includes(run.status))) await this.resumeUpdatedRuns(); else void this.pumpAssistantInbox() }
     void this.host.retryJarvisSync()
     this.jarvisSyncTimer = setInterval(() => { void this.host.retryJarvisSync() }, 15_000)
 
@@ -431,11 +439,11 @@ export class H5Server {
     this.chatSubscriptions.clear()
     for (const entry of this.bundleImports.values()) { clearTimeout(entry.timer); await rm(entry.bundle.directory, { recursive: true, force: true }) }
     this.bundleImports.clear()
-    await Promise.all([...this.activeRuns.values()].map(handle => (handle.shutdown ? handle.shutdown() : handle.cancel('SERVER_STOPPED')).catch(() => undefined)))
+    await Promise.all([...this.activeRuns.values()].map(handle => (this.updateSuspendedRuns.has(handle.id) ? handle.shutdown?.({ preserveRuns: true }) ?? Promise.resolve() : handle.shutdown ? handle.shutdown() : handle.cancel('SERVER_STOPPED')).catch(() => undefined)))
     // A sendMessage call can still be starting and not yet appear in activeRuns.
     // The pump joins that launch and shuts it down without dispatching its queue.
-    await this.assistantPump?.catch(() => undefined)
-    await Promise.allSettled([...this.runConsumers])
+    if (!this.restartingForUpdate) await this.assistantPump?.catch(() => undefined)
+    await Promise.allSettled([...this.runConsumers].filter(consumer => !this.updateSuspendedRuns.has(this.runConsumerRuns.get(consumer) ?? '')))
     await Promise.allSettled([...this.runSnapshots].map(([runId, snapshot]) => this.host.conversationData.call('saveState', `run:${runId}`, snapshot)))
     await this.taskNotices.list().catch(() => undefined)
     await this.assistantInbox.close()
@@ -532,6 +540,7 @@ export class H5Server {
       while (!this.stopping && !this.maintenance) {
         const message = await this.assistantInbox.next()
         if (!message) return
+        if (this.maintenance) { await this.assistantInbox.update(message.runId, 'queued'); return }
         if (this.stopping) { await this.assistantInbox.update(message.runId, 'interrupted', 'Server stopped before launch'); return }
         this.assistantPendingRuns.add(message.runId)
         this.runConversations.set(message.runId, conversationId)
@@ -559,7 +568,7 @@ export class H5Server {
             ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}), ...(message.assistantContext ? { assistantContext: message.assistantContext } : {}),
           })
           this.attachRun(handle, false)
-          if (this.stopping) await (handle.shutdown ? handle.shutdown() : handle.cancel('SERVER_STOPPED'))
+          if (this.stopping) await (this.updateSuspendedRuns.has(handle.id) ? handle.shutdown?.({ preserveRuns: true }) ?? Promise.resolve() : handle.shutdown ? handle.shutdown() : handle.cancel('SERVER_STOPPED'))
           await this.consumeRun(message.runId, handle)
         } catch (error) {
           const detail = error instanceof Error ? error.message : 'ASSISTANT_REPLY_FAILED'
@@ -922,25 +931,101 @@ export class H5Server {
     return new AttachmentStore(this.dataDir, conversationId).save(attachments)
   }
 
-  private async tryApplyUpdate(): Promise<void> {
+  private tryApplyUpdate(): Promise<void> {
+    return this.updateAttempt ??= this.prepareApplyUpdate().finally(() => { this.updateAttempt = undefined })
+  }
+
+  private async prepareApplyUpdate(): Promise<void> {
     if (this.updateTransition || this.stopping) return
     if (await this.updates.applyFrontend()) return
     for (const [runId, handle] of this.activeRuns) if (handle.isActive?.() === false) this.finishStream(runId)
-    const reasons = this.updateBlockers()
+    const update = await readState(this.updates.root, this.dataDir)
+    const forced = update.pending && update.force === true
+    const reasons = forced ? [] : this.updateBlockers()
     if (reasons.length) { await this.updates.recordBlocked(reasons); return }
     if (!process.send || process.env.PULSE_UPDATE_CHILD !== '1') { await this.updates.recordBlocked(['MANAGED_SERVICE_REQUIRED']); return }
     // No await between this final test and closing admission.
-    if (this.updateBlockers().length) return
+    if (!forced && this.updateBlockers().length) return
     this.maintenance = true; this.updateTransition = true
     try {
+      if (forced) {
+        const deadline = Date.now() + 5000
+        while (this.updateRequests && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
+        if (this.updateRequests) throw new Error('DATA_REQUESTS_ACTIVE')
+        await this.checkpointUpdateRuns(update)
+      }
       const schedules = await readFile(join(this.dataDir, 'scheduled-tasks.json'), 'utf8').then(JSON.parse).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error })
-      if (scheduledWorkActive(schedules?.tasks ?? [])) throw new Error('SCHEDULED_TASK_ACTIVE')
+      if (!forced && scheduledWorkActive(schedules?.tasks ?? [])) throw new Error('SCHEDULED_TASK_ACTIVE')
       await this.host.conversationData.call('acquireUpdateLease', Number(process.env.PULSE_UPDATE_OWNER), process.env.PULSE_UPDATE_TOKEN)
       process.send({ type: 'update-ready' })
     } catch (error) {
-      this.maintenance = false; this.updateTransition = false
+      this.maintenance = this.restartingForUpdate; this.updateTransition = false
       await this.updates.recordBlocked([error instanceof Error ? error.message : 'UPDATE_DATA_BUSY'])
+      if (!this.maintenance) void this.pumpAssistantInbox()
     }
+  }
+
+  private async checkpointUpdateRuns(update: Awaited<ReturnType<typeof readState>>): Promise<void> {
+    if (!update.staged?.backend) throw new Error('UPDATE_NOT_DOWNLOADED')
+    for (const item of Object.values(update.staged)) await this.updates.verifyInstalled(item)
+    await Promise.allSettled([...this.pendingWorkStarts.keys()])
+    const deadline = Date.now() + 5000
+    const assistantStarting = () => this.assistantInbox.list().some(message => message.state === 'replying' && this.assistantPendingRuns.has(message.runId) && !this.activeRuns.has(message.runId))
+    while (assistantStarting() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+    if (assistantStarting()) throw new Error('UPDATE_TASK_STARTING')
+    const handles = [...this.activeRuns.values()]
+    const prior = await readUpdateResume(this.dataDir)
+    const journal: UpdateResumeJournal = prior?.targetBackend === releaseId(update.staged.backend.manifest) && prior.runs.some(run => ['pending', 'resuming'].includes(run.status)) ? prior : {
+      schema: 1, id: randomUUID(), fromVersion: this.updates.options.backendVersion, toVersion: update.staged.backend.manifest.version, targetBackend: releaseId(update.staged.backend.manifest),
+      runs: handles.map(handle => ({ conversationId: handle.conversationId, runId: handle.id, status: 'pending' })),
+    }
+    // A prior handoff may have been interrupted before installation. Include
+    // work admitted after that service restarted as well as its retained runs.
+    for (const handle of handles) if (!journal.runs.some(run => run.conversationId === handle.conversationId && run.runId === handle.id)) journal.runs.push({ conversationId: handle.conversationId, runId: handle.id, status: 'pending' })
+    await saveUpdateResume(this.dataDir, journal)
+    for (const handle of handles) {
+      if (!handle.checkpointForUpdate) throw new Error('UPDATE_CHECKPOINT_UNAVAILABLE')
+      this.updateSuspendedRuns.add(handle.id)
+      await handle.checkpointForUpdate()
+      await handle.shutdown?.({ preserveRuns: true })
+    }
+    for (const terminal of this.terminals.values()) { for (const client of terminal.clients) client.close(1001, 'Service updating'); try { terminal.process.kill() } catch {} }
+    this.terminals.clear()
+    await this.host.automation.close()
+    await Promise.allSettled([...this.runConsumers].filter(consumer => !this.updateSuspendedRuns.has(this.runConsumerRuns.get(consumer) ?? '')))
+    for (const timer of this.projectionTimers.values()) clearTimeout(timer)
+    this.projectionTimers.clear()
+    await Promise.allSettled([...this.projectionWrites.values()])
+    for (const handle of handles) { const snapshot = this.runSnapshots.get(handle.id); if (snapshot) await this.host.conversationData.call('saveState', `run:${handle.id}`, { ...snapshot, state: 'interrupted' }) }
+  }
+
+  private resumeUpdatedRuns(): Promise<void> {
+    return this.updateRecovery ??= this.restoreUpdatedRuns().finally(() => { this.updateRecovery = undefined })
+  }
+  private async restoreUpdatedRuns(): Promise<void> {
+    this.maintenance = true
+    try {
+      const journal = await readUpdateResume(this.dataDir)
+      if (!journal) return
+      const state = await readState(this.updates.root, this.dataDir)
+      const selected = state.active.backend ? releaseId(state.active.backend.manifest) : undefined
+      if (!(selected === journal.targetBackend && this.updates.options.backendVersion === journal.toVersion) && !(state.phase === 'failed' && this.updates.options.backendVersion === journal.fromVersion)) return
+      for (const item of journal.runs.filter(run => ['pending', 'resuming'].includes(run.status))) {
+        try {
+          const conversation = await this.host.getConversation(item.conversationId)
+          if (conversation.summary.activeRunId !== item.runId) { item.status = 'finished'; await saveUpdateResume(this.dataDir, journal); continue }
+          const preflight = await this.host.preflightRunRecovery(item.conversationId, item.runId)
+          if (preflight.status === 'blocked') throw new Error(preflight.blockers[0] ?? 'RECOVERY_BLOCKED')
+          const authorization = preflight.status === 'confirmation-required' ? { runId: item.runId, from: preflight.from!, to: preflight.to } : undefined
+          item.status = 'resuming'; await saveUpdateResume(this.dataDir, journal)
+          await this.resumeConversationRun(item.conversationId, authorization)
+          if (this.assistantInbox.receiptByRun(item.runId)) await this.assistantInbox.update(item.runId, 'replying')
+          item.status = 'resumed'; delete item.error
+        } catch (error) { item.status = 'blocked'; item.error = error instanceof Error ? error.message.slice(0, 300) : 'UPDATE_RESUME_FAILED' }
+        await saveUpdateResume(this.dataDir, journal)
+      }
+    } catch (error) { process.stderr.write(`[pulse] update recovery: ${error instanceof Error ? error.message : 'UPDATE_RESUME_FAILED'}\n`) }
+    finally { this.maintenance = false; if (!this.stopping) void this.pumpAssistantInbox() }
   }
 
   private updateBlockers(): string[] {
@@ -1115,7 +1200,7 @@ export class H5Server {
       try {
         if (action === 'check') void this.updates.check().catch(() => {})
         else if (action === 'download') void this.updates.download(true).catch(() => {})
-        else if (action === 'apply' || action === 'rollback') await this.updates.requestApply(action === 'rollback')
+        else if (action === 'apply' || action === 'rollback') { const body = await this.parseJsonBody(req); await this.updates.requestApply(action === 'rollback', body.force === true) }
         else if (action === 'settings') { const body = await this.parseJsonBody(req); if (typeof body.autoDownload !== 'boolean') throw new Error('UPDATE_SETTINGS_INVALID'); await this.updates.settings(body.autoDownload) }
         else { res.writeHead(404).end(); return }
         res.writeHead(action === 'check' || action === 'download' ? 202 : 200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(await this.updates.status(true)))
@@ -2527,8 +2612,8 @@ export class H5Server {
 
   private consumeRun(runId: string, handle: RunHandle): Promise<void> {
     const consuming = this.consumeRunEvents(runId, handle)
-    this.runConsumers.add(consuming)
-    void consuming.finally(() => this.runConsumers.delete(consuming)).catch(() => undefined)
+    this.runConsumers.add(consuming); this.runConsumerRuns.set(consuming, runId)
+    void consuming.finally(() => { this.runConsumers.delete(consuming); this.runConsumerRuns.delete(consuming) }).catch(() => undefined)
     return consuming
   }
 
@@ -2538,9 +2623,10 @@ export class H5Server {
       for await (const event of handle.events) await this.publish(runId, event)
       outcome = await handle.outcome()
     } catch (error) {
-      process.stderr.write(`[pulse] run stream failed: ${String(error).slice(0, 180)}\n`)
+      if (!this.updateSuspendedRuns.has(runId)) process.stderr.write(`[pulse] run stream failed: ${String(error).slice(0, 180)}\n`)
     } finally {
       try {
+      if (this.updateSuspendedRuns.has(runId)) return
       const receipt = this.assistantInbox.receiptByRun(runId)
       if (receipt) await this.assistantInbox.update(runId, outcome?.status === 'succeeded' ? 'completed' : outcome?.status === 'cancelled' ? 'failed' : 'failed', outcome?.status === 'cancelled' ? '回复已停止' : outcome?.status === 'failed' ? '回复失败' : outcome ? undefined : '回复状态未能确认').catch(() => undefined)
       const conversationId = this.runConversations.get(runId)

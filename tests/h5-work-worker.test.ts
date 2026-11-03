@@ -13,7 +13,7 @@ afterEach(async () => {
 })
 
 describe('H5 work worker IPC', () => {
-  it.each(['approval', 'choice'] as const)('retains a real worker %s wait across shutdown and resumes the same run and budget', async waitKind => {
+  it.each([['approval', false], ['choice', false], ['approval', true], ['choice', true]] as const)('retains a real worker %s wait across shutdown (update=%s) and resumes the same run and budget', async (waitKind, updating) => {
     const dir = await mkdtemp(join(tmpdir(), 'pulse-worker-cold-'))
     temporaryDirectories.push(dir)
     const configPath = join(dir, 'config.json')
@@ -31,7 +31,8 @@ describe('H5 work worker IPC', () => {
       const runDir = join(dir, 'conversations', conversation.id, 'runs', first.id)
       const before = JSON.parse(await readFile(join(runDir, 'model-budget.json'), 'utf8'))
       expect(before.purposes?.['front-model']).toBeUndefined()
-      await first.shutdown!()
+      if (updating) await first.checkpointForUpdate!()
+      await first.shutdown!(updating ? { preserveRuns: true } : undefined)
       await expect(first.outcome()).rejects.toThrow('WORKER_EXITED')
       expect((await host.getConversation(conversation.id)).summary.activeRunId).toBe(first.id)
       await expect(access(join(runDir, 'task-outcome.json'))).rejects.toThrow()

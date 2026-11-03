@@ -35,7 +35,7 @@ export type UpdateState = {
   progress?: { component: string; received: number; total: number };
   downloadId?: string;
   shell?: { version: string; chromium: number };
-  active: Selection; previous?: Selection; staged?: Selection; pending: boolean;
+  active: Selection; previous?: Selection; staged?: Selection; pending: boolean; force?: boolean;
   lastBackend?: InstalledComponent;
   lastFailure?: { version: string; code: string; at: string };
   failed: string[]; blocked: string[]; available: ComponentMetadata[];

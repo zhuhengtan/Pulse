@@ -1,3 +1,4 @@
+import { readUpdateResume } from './resume.js'
 import { DownloadProgressWriter, readDownloadProgress } from './progress.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { access, mkdir, readFile, rename, rm } from 'node:fs/promises'
@@ -43,7 +44,7 @@ export class UpdateManager {
     const frontend = state.active.frontend
     const publicState = { frontend: frontend ? releaseId(frontend.manifest) : 'bundled', frontendVersion: frontend?.manifest.version ?? await bundledFrontendVersion(this.options.frontendDirectory), protocols: { http: 1, events: 1 } }
     if (!local) return publicState
-    return { ...state, ...publicState, progress: await readDownloadProgress(this.root, this.options.dataDir, state.downloadId, state.phase),
+    return { ...state, ...publicState, recovery: (await readUpdateResume(this.options.dataDir).catch(() => undefined))?.runs, progress: await readDownloadProgress(this.root, this.options.dataDir, state.downloadId, state.phase),
       lastBackend: state.lastBackend ? { version: state.lastBackend.manifest.version } : undefined,
       running: { backend: this.options.backendVersion, shell: this.options.shellVersion ?? state.shell?.version, runtimeDirectory: this.options.runtimeDirectory },
       modules: await (this.moduleVersions ??= backendModuleVersions()),
@@ -151,7 +152,7 @@ export class UpdateManager {
       finally { await progress.finish(); delete state.downloadId; delete state.progress }
     })
   }
-  async requestApply(rollback = false): Promise<void> {
+  async requestApply(rollback = false, force = false): Promise<void> {
     await this.mutate(async state => {
       if (rollback) {
         if (!state.previous) throw new Error('UPDATE_NO_PREVIOUS_VERSION')
@@ -161,7 +162,7 @@ export class UpdateManager {
       }
       if (!state.staged) throw new Error('UPDATE_NOT_DOWNLOADED')
       for (const item of Object.values(state.staged)) if (compatible(item.manifest, this.context(state.staged.backend?.manifest.version, state.shell)).length) throw new Error('UPDATE_INCOMPATIBLE')
-      state.pending = true; state.phase = 'waiting'
+      state.pending = true; state.force = force; state.phase = 'waiting'
     })
   }
   async recordBlocked(reasons: string[]): Promise<void> {
@@ -173,7 +174,7 @@ export class UpdateManager {
     await this.mutate(async state => {
       if (!state.pending || !state.staged || state.staged.backend?.directory !== state.active.backend?.directory) return
       for (const item of Object.values(state.staged)) { await this.verifyInstalled(item); if (compatible(item.manifest, this.context(state.staged.backend?.manifest.version, state.shell)).length) throw new Error('UPDATE_INCOMPATIBLE') }
-      state.previous = state.active; state.active = state.staged; delete state.staged; state.pending = false; state.phase = 'idle'; state.blocked = []; applied = true
+      state.previous = state.active; state.active = state.staged; delete state.staged; state.pending = false; delete state.force; state.phase = 'idle'; state.blocked = []; applied = true
     })
     return applied
   }

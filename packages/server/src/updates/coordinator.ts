@@ -1,3 +1,4 @@
+import { readUpdateResume } from './resume.js'
 import { readFileSync } from 'node:fs'
 import { randomUUID, createHash } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -93,12 +94,12 @@ export async function supervise(spec: ServiceSpec, verificationKeys?: Record<str
             const health = await launch(true)
             if (health.version !== (target.backend?.manifest.version ?? await versionOf(join(baseRuntime!, 'app/node_modules/@hunterzhu/pulse-cli/dist/bin.js')))) throw new Error('UPDATE_HEALTH_VERSION_INVALID')
             if (before.backend && before.backend.directory !== target.backend?.directory) state.lastBackend = before.backend
-            state.active = target; state.previous = before; delete state.staged; state.pending = false; state.phase = 'idle'; state.blocked = []; delete state.error
+            state.active = target; state.previous = before; delete state.staged; state.pending = false; delete state.force; state.phase = 'idle'; state.blocked = []; delete state.error
             await atomicJson(statePath(spec.root, spec.dataDir), state)
             await releaseLease(); child?.send({ type: 'update-resume' })
           } catch (error) {
             await stopChild(); await waitWriter(); runtime = oldRuntime
-            state.active = before; state.pending = false; state.phase = 'failed'; state.error = error instanceof Error ? error.message : 'UPDATE_APPLY_FAILED'
+            state.active = before; state.pending = false; delete state.force; state.phase = 'failed'; state.error = error instanceof Error ? error.message : 'UPDATE_APPLY_FAILED'
             state.lastFailure = { version: target.backend?.manifest.version ?? 'bundled', code: state.error, at: new Date().toISOString() }
             state.failed = [...new Set([...state.failed, ...(target.backend ? [releaseId(target.backend.manifest)] : [])])]; delete state.staged
             await atomicJson(statePath(spec.root, spec.dataDir), state)
@@ -107,11 +108,14 @@ export async function supervise(spec: ServiceSpec, verificationKeys?: Record<str
           }
         })
       } catch (error) {
-        await releaseLease(); child?.send({ type: 'update-resume' })
+        await releaseLease()
         await withUpdateLock(spec.root, async () => {
           const state = await readState(spec.root, spec.dataDir)
-          if (state.pending) { state.pending = false; state.phase = 'failed'; state.error = error instanceof Error ? error.message : 'UPDATE_APPLY_FAILED'; state.lastFailure = { version: state.staged?.backend?.manifest.version ?? 'bundled', code: state.error, at: new Date().toISOString() }; if (state.staged?.backend) state.failed.push(releaseId(state.staged.backend.manifest)); delete state.staged; await atomicJson(statePath(spec.root, spec.dataDir), state) }
+          if (state.pending) { state.pending = false; delete state.force; state.phase = 'failed'; state.error = error instanceof Error ? error.message : 'UPDATE_APPLY_FAILED'; state.lastFailure = { version: state.staged?.backend?.manifest.version ?? 'bundled', code: state.error, at: new Date().toISOString() }; if (state.staged?.backend) state.failed.push(releaseId(state.staged.backend.manifest)); delete state.staged; await atomicJson(statePath(spec.root, spec.dataDir), state) }
         }).catch(() => {})
+        try { if ((await readUpdateResume(spec.dataDir).catch(() => undefined))?.runs.some(run => ['pending', 'resuming'].includes(run.status)) && child && !stopping) { await stopChild(); await waitWriter(); await launch(true) } }
+        catch { resolveExit(1); return }
+        child?.send({ type: 'update-resume' })
         process.stderr.write(`Pulse update: ${error instanceof Error ? error.message : 'UPDATE_FAILED'}\n`)
         if (!child && !stopping) resolveExit(1)
       }
@@ -122,7 +126,7 @@ export async function supervise(spec: ServiceSpec, verificationKeys?: Record<str
         await withUpdateLock(spec.root, async () => {
           const recovery = await readState(spec.root, spec.dataDir)
           if (recovery.staged?.backend) recovery.failed.push(releaseId(recovery.staged.backend.manifest))
-          recovery.active = recovery.previous ?? {}; delete recovery.staged; recovery.pending = false; recovery.phase = 'failed'; recovery.error = 'UPDATE_INTERRUPTED_ROLLED_BACK'
+          recovery.active = recovery.previous ?? {}; delete recovery.staged; recovery.pending = false; delete recovery.force; recovery.phase = 'failed'; recovery.error = 'UPDATE_INTERRUPTED_ROLLED_BACK'
           await atomicJson(statePath(spec.root, spec.dataDir), recovery)
         })
       }
@@ -131,7 +135,7 @@ export async function supervise(spec: ServiceSpec, verificationKeys?: Record<str
         try { await manager.verifyInstalled(active); runtime = { node: join(active.directory, process.platform === 'win32' ? 'node.exe' : 'node'), entry: join(active.directory, 'app/node_modules/@hunterzhu/pulse-cli/dist/bin.js'), directory: active.directory } }
         catch (error) {
           await withUpdateLock(spec.root, async () => {
-            const state = await readState(spec.root, spec.dataDir); state.failed.push(releaseId(active.manifest)); state.active = state.previous ?? {}; state.pending = false; delete state.staged; state.phase = 'failed'; state.error = 'UPDATE_DAMAGED_ROLLED_BACK'
+            const state = await readState(spec.root, spec.dataDir); state.failed.push(releaseId(active.manifest)); state.active = state.previous ?? {}; state.pending = false; delete state.force; delete state.staged; state.phase = 'failed'; state.error = 'UPDATE_DAMAGED_ROLLED_BACK'
             let previous = state.active.backend
             if (previous?.directory === active.directory) previous = state.lastBackend
             if (previous && await manager.verifyInstalled(previous).then(() => true, () => false)) { state.active.backend = previous; runtime = { node: join(previous.directory, process.platform === 'win32' ? 'node.exe' : 'node'), entry: join(previous.directory, 'app/node_modules/@hunterzhu/pulse-cli/dist/bin.js'), directory: previous.directory } }

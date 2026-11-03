@@ -11,7 +11,7 @@ async function main(): Promise<void> {
     const action = path.slice('/api/updates/'.length)
     if (action === 'check') await manager.check()
     else if (action === 'download') await manager.download(true)
-    else if (action === 'apply' || action === 'rollback') await manager.requestApply(action === 'rollback')
+    else if (action === 'apply' || action === 'rollback') await manager.requestApply(action === 'rollback', JSON.parse(body).force === true)
     else if (action === 'settings') { const settings = JSON.parse(body) as { autoDownload?: unknown }; if (typeof settings.autoDownload !== 'boolean') throw new Error('UPDATE_SETTINGS_INVALID'); await manager.settings(settings.autoDownload) }
     else throw new Error('UPDATE_CONTROL_PATH_INVALID')
   } else throw new Error('UPDATE_CONTROL_PATH_INVALID')

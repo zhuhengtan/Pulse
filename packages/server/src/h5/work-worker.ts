@@ -12,8 +12,8 @@ export const H5_WORKER_PROTOCOL_VERSION = 1 as const
 type WorkerPayload = { budgetRenewal?: import('../model-budget.js').BudgetRenewalAuthorization; recoveryAuthorization?: RunRecoveryAuthorization; requestId?: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[] }
 type WorkerStart = Omit<WorkerPayload, 'requestId'> & { messageRequestId?: string } & { schemaVersion: 1; type: 'start'; requestId: string; conversationId: string; text: string; resume: boolean }
 type WorkerConfigure = { schemaVersion: 1; type: 'configure'; runtimeOptions: WorkWorkerRuntimeOptions }
-type WorkerRpc = { schemaVersion: 1; type: 'rpc'; requestId: string; method: 'cancel' | 'reply' | 'replyBatch' | 'pendingInteractions' | 'reviewApproval' | 'submitHumanInput' | 'processes' | 'pollProcess' | 'cancelProcess'; args: unknown[] }
-type WorkerShutdown = { schemaVersion: 1; type: 'shutdown' }
+type WorkerRpc = { schemaVersion: 1; type: 'rpc'; requestId: string; method: 'cancel' | 'reply' | 'replyBatch' | 'pendingInteractions' | 'reviewApproval' | 'submitHumanInput' | 'processes' | 'pollProcess' | 'cancelProcess' | 'checkpointForUpdate'; args: unknown[] }
+type WorkerShutdown = { schemaVersion: 1; type: 'shutdown'; preserveRuns?: boolean }
 type ParentMessage = WorkerConfigure | WorkerStart | WorkerRpc | WorkerShutdown
 
 type WorkerReady = { schemaVersion: 1; type: 'ready' } | { schemaVersion: 1; type: 'configured' }
@@ -173,8 +173,9 @@ class RemoteWorkRun {
         return await this.rpc('reviewApproval', [effectId]) as Awaited<ReturnType<RunHandle['reviewApproval']>>
       },
       submitHumanInput: async (text, targetEffectId, options) => { await this.rpc('submitHumanInput', [text, targetEffectId, options]) },
-      shutdown: async () => {
-        if (!this.settledValue && this.child.connected) await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'shutdown' }).catch(() => undefined)
+      checkpointForUpdate: async () => { await this.rpc('checkpointForUpdate', []) },
+      shutdown: async (options) => {
+        if (!this.settledValue && this.child.connected) await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'shutdown', ...(options?.preserveRuns ? { preserveRuns: true } : {}) }).catch(() => undefined)
         await waitForWorkerStop(this.child, this.closed)
       },
     }
@@ -332,7 +333,7 @@ export async function runH5WorkWorker(host: LocalHost, conversationId: string): 
       if (suspending || settled) return
       suspending = true
       settled = true // Parent disconnect is expected after the checkpoint closes.
-      void host.close({ preserveHumanWaits: true }).then(() => process.exit(0), () => process.exit(1))
+      void host.close({ preserveHumanWaits: true, preserveRuns: raw.preserveRuns === true }).then(() => process.exit(0), () => process.exit(1))
       return
     }
     if (suspending || !isObject(raw) || raw.schemaVersion !== H5_WORKER_PROTOCOL_VERSION || raw.type !== 'rpc' || typeof raw.requestId !== 'string' || typeof raw.method !== 'string' || !Array.isArray(raw.args)) return
@@ -341,6 +342,7 @@ export async function runH5WorkWorker(host: LocalHost, conversationId: string): 
       try {
         let value: unknown
         switch (request.method) {
+          case 'checkpointForUpdate': await host.close({ preserveRuns: true }); break
           case 'cancel': await handle.cancel(typeof request.args[0] === 'string' ? request.args[0] : undefined); break
           case 'processes': if (!handle.processes) throw new Error('WORKER_PROCESS_CONTROLS_UNAVAILABLE'); value = await handle.processes(); break
           case 'pollProcess': if (!handle.pollProcess) throw new Error('WORKER_PROCESS_CONTROLS_UNAVAILABLE'); value = await handle.pollProcess(String(request.args[0] ?? ''), Number(request.args[1] ?? 0)); break

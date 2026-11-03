@@ -337,7 +337,7 @@ WantedBy=default.target
       }
       shuttingDown = true
       const done = () => { process.off('disconnect', shutdown); if (process.env.PULSE_UPDATE_CHILD === '1' && process.connected) process.disconnect(); resolve() }
-      void server.stop().then(() => host.close()).then(done, done)
+      void server.stop().then(() => host.close({ preserveRuns: server.restartingForUpdate })).then(done, done)
     }
     process.once('SIGINT', shutdown)
     process.once('SIGTERM', shutdown)

@@ -539,6 +539,8 @@ export class PulseRuntime {
     },
   }
   private shuttingDown = false
+  private restartPaused = false
+  private restartSealed = false
   private readonly telemetryExporter: RuntimeTelemetryExporter | undefined
   private readonly auditLogSink: RuntimeLogSink | undefined
   private readonly auditLogPrivacy: PrivacyLabel | undefined
@@ -1431,6 +1433,7 @@ export class PulseRuntime {
   }
 
   private enqueueFact(fact: RuntimeFact, eventId: string, urgent = false): boolean {
+    if (this.restartSealed) return false
     const candidateInbox = FactInbox.fromSnapshot<RuntimeFact>(this.factInbox.snapshot(), this.factInboxDedupeArchive ? { dedupeArchive: this.factInboxDedupeArchive } : {})
     if (!(urgent ? candidateInbox.enqueueUrgent(fact, eventId) : candidateInbox.enqueue(fact, eventId))) return false
     const candidatePolicy = this.storagePolicy.clone()
@@ -1471,6 +1474,7 @@ export class PulseRuntime {
   }
 
   private scheduleWake(force = false): void {
+    if (this.restartSealed) return
     if (this.inDrain) {
       if (force) this.wakeAfterDrain = true
       return
@@ -1635,6 +1639,7 @@ export class PulseRuntime {
   }
 
   tick(): number {
+    if (this.restartSealed) return 0
     this.wakeError = undefined
     this.assertRecoveryPrograms()
     this.state.now = this.clock.now()
@@ -1788,6 +1793,12 @@ export class PulseRuntime {
         throw cause
       }
       tickOperations++
+    }
+    if (this.restartPaused) {
+      if (this.mutationLog.lastSequence !== mutationSequenceBeforeTick) { this.syncStoragePolicy(); this.schedulePersistence() }
+      this.tickBudget = undefined
+      this.notifyActivity()
+      return 0
     }
     if (this.maxRuntimeAt !== undefined) for (const agent of this.state.agents.values()) if (agent.state === 'running' && this.state.now >= this.maxRuntimeAt) this.cancelAgent(agent.id, 'TIMEOUT')
     for (const agent of this.state.agents.values()) if (agent.state === 'running' && agent.deadlineAt !== undefined && this.state.now >= agent.deadlineAt) this.cancelAgent(agent.id, 'TIMEOUT')
@@ -1969,6 +1980,7 @@ export class PulseRuntime {
     const agent = this.state.agents.get(agentId)
     if (!agent) throw new Error(`UNKNOWN_AGENT:${agentId}`)
     for (let tick = 0; tick < maxTicks; tick++) {
+      if (this.restartPaused) await new Promise<void>(() => {})
       const work = this.tick()
       await this.flushPersistence()
       if (this.executionYieldPending.size) { this.executionYieldPending.clear(); await new Promise<void>((resolve) => setImmediate(resolve)) }
@@ -2021,6 +2033,26 @@ export class PulseRuntime {
       else if (this.hasQueuedEffects() || this.hasDueTimer()) await new Promise<void>((resolve) => setImmediate(resolve))
     }
     await this.flushPersistence()
+  }
+
+  /** Stop admission without cancelling agents. Restore handles unfinished effects
+   * through the existing crash-recovery/reconciliation contract. */
+  async checkpointForRestart(drainMs = 1000): Promise<void> {
+    if (this.restartSealed) return
+    this.restartPaused = true
+    this.schedulerDecisionCoordinator?.cancel()
+    this.humanArbitrationCoordinator?.cancel()
+    const deadline = Date.now() + drainMs
+    while ((this.executions.size || this.preparingLLMs.size || this.factInbox.size) && Date.now() < deadline) {
+      this.tick()
+      await new Promise<void>(resolve => setTimeout(resolve, 10))
+    }
+    this.tick()
+    await this.flushPersistence()
+    // Freeze the durable boundary before aborting transient requests. Late
+    // completions cannot overwrite this checkpoint with cancellation outcomes.
+    this.restartSealed = true
+    for (const execution of this.executions.values()) execution.controller.abort()
   }
 
   /** A restart may retain a durable human wait, never an executing write or model call. */
