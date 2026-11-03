@@ -1400,6 +1400,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
   const composerApproval = <ApprovalPolicySelect borderless value={approvalPolicy} unavailable={!approvalReady} onRetry={retryApprovalPolicy} disabled={approvalSaving || !sessionCapabilities.localAdmin} onChange={policy => { void setApprovalPolicy(policy) }} />
   const renderMessages = () => {
     const shown = new Set<string>()
+    const liveTraceId = running && activeRunId && !traces[activeRunId]?.outcome ? activeRunId : undefined
     let recoveryShown = false
     const recoveryCard = (runId?: string) => {
       if (!recoveryVisible || !recoveryRun || recoveryShown || runId !== recoveryRun.runId) return null
@@ -1416,7 +1417,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
     const items = messages.flatMap((message, index) => {
       const out: ReactElement[] = []
       const runId = message.runId
-      if (message.role === 'assistant' && runId && !shown.has(runId)) {
+      if (message.role === 'assistant' && runId && runId !== liveTraceId && !shown.has(runId)) {
         shown.add(runId)
         const live = traces[runId]
         if (live) out.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} onDiffClick={surfaceMode === 'work' ? openBubbleDiff : undefined} />)
@@ -1427,7 +1428,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       if (surfaceMode === 'work' && runId && lastMessage.get(runId) === index) { const card = deliveries(runId); if (card) out.push(card) }
       return out
     })
-    for (const [runId, live] of Object.entries(traces)) if (!shown.has(runId)) {
+    for (const [runId, live] of Object.entries(traces)) if (runId !== liveTraceId && !shown.has(runId)) {
       items.push(<RunTraceView key={`trace:${runId}`} trace={live} running={running && activeRunId === runId} onDiffClick={surfaceMode === 'work' ? openBubbleDiff : undefined} />)
       const card = recoveryCard(runId); if (card) items.push(card)
       if (!deliveriesShown.has(runId)) { const card = deliveries(runId); if (card) items.push(card) }
@@ -1440,6 +1441,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
       for (const runId of runIds) if (!deliveriesShown.has(runId)) { const card = deliveries(runId); if (card) items.push(card) }
       if (artifactIndex.error) items.push(<p key="artifact-error" role="alert">{artifactIndex.error}</p>)
     }
+    if (liveTraceId && traces[liveTraceId]) items.push(<RunTraceView key={`trace:${liveTraceId}`} trace={traces[liveTraceId]} running onDiffClick={surfaceMode === 'work' ? openBubbleDiff : undefined} />)
     if (surfaceMode === 'work' && selected) items.push(<BudgetContinuationPrompt key={`budget:${selected.id}`} transport={transport} conversationId={selected.id} revision={`${activeRunId ?? ''}:${messages.length}`} running={running || loading} onContinued={runId => { if (selectedIdRef.current === selected.id) void openConversation({ ...selected, activeRunId: runId }) }} />)
     return items
   }

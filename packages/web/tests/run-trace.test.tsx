@@ -232,6 +232,20 @@ async function openWork(transport: PulseWebTransport) {
 }
 
 describe('active work trace recovery', () => {
+  it('keeps the live process after immediate replies and restores its historical position on completion', async () => {
+    const fixture = workFixture(async () => response({ events: [model(1, 'A', 1)], seq: 1 }))
+    await openWork(fixture.transport)
+    await waitFor(() => expect(fixture.subscriptions).toHaveLength(1))
+    act(() => fixture.emit({ type: 'input_response', runId: 'run-busy', seq: 3, data: { messageId: 'reply', text: '收到补充，继续执行' } }))
+    const reply = await screen.findByText('收到补充，继续执行')
+    const trace = document.querySelector('.run-trace')!
+    expect(reply.compareDocumentPosition(trace) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(document.querySelectorAll('.run-trace')).toHaveLength(1)
+    act(() => fixture.emit({ type: 'complete', runId: 'run-busy', seq: 4, data: { status: 'succeeded' } }))
+    await waitFor(() => expect(document.querySelector('.run-trace.is-finished')).toBeTruthy())
+    expect(document.querySelector('.run-trace')!.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
   it('hydrates the prefix and appends later SSE events once, even when the trace is newer than the state snapshot', async () => {
     const fixture = workFixture(async () => response({ events: [model(1, 'A', 1), reasoning(2, '历史思考'), reasoning(3, '加载期间思考')], seq: 3 }))
     await openWork(fixture.transport)
