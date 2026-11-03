@@ -1,3 +1,4 @@
+import { waitForWorkerStop } from './worker-stop.js'
 import type { RunRecoveryAuthorization } from '../run-recovery-preflight.js'
 import type { RichContent } from '../rich-content.js'
 import type { WebAttachment } from '../protocol.js'
@@ -148,6 +149,7 @@ class RemoteWorkRun {
     this.handle = {
       get id() { return self.runId },
       conversationId,
+      isActive: () => this.child.exitCode === null && this.child.signalCode === null,
       events: this.events,
       outcome: async () => {
         const settled = await this.settled
@@ -173,10 +175,7 @@ class RemoteWorkRun {
       submitHumanInput: async (text, targetEffectId, options) => { await this.rpc('submitHumanInput', [text, targetEffectId, options]) },
       shutdown: async () => {
         if (!this.settledValue && this.child.connected) await this.sendParent({ schemaVersion: H5_WORKER_PROTOCOL_VERSION, type: 'shutdown' }).catch(() => undefined)
-        const timer = setTimeout(() => {
-          if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGTERM')
-        }, 10_000)
-        try { await this.closed } finally { clearTimeout(timer) }
+        await waitForWorkerStop(this.child, this.closed)
       },
     }
     this.runId = ''

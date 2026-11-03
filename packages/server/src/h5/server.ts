@@ -1,3 +1,4 @@
+import { scheduledWorkActive } from '../updates/liveness.js'
 import { runCompletion } from '../run-presentation.js'
 import { withConfigFileLock } from '../config-write-lock.js'
 import { parseExecPolicy, mergeExecPolicies, sourceExecPolicy } from '../exec-policy.js'
@@ -924,6 +925,7 @@ export class H5Server {
   private async tryApplyUpdate(): Promise<void> {
     if (this.updateTransition || this.stopping) return
     if (await this.updates.applyFrontend()) return
+    for (const [runId, handle] of this.activeRuns) if (handle.isActive?.() === false) this.finishStream(runId)
     const reasons = this.updateBlockers()
     if (reasons.length) { await this.updates.recordBlocked(reasons); return }
     if (!process.send || process.env.PULSE_UPDATE_CHILD !== '1') { await this.updates.recordBlocked(['MANAGED_SERVICE_REQUIRED']); return }
@@ -932,7 +934,7 @@ export class H5Server {
     this.maintenance = true; this.updateTransition = true
     try {
       const schedules = await readFile(join(this.dataDir, 'scheduled-tasks.json'), 'utf8').then(JSON.parse).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error })
-      if (schedules?.tasks?.some((task: { run?: unknown }) => task.run)) throw new Error('SCHEDULED_TASK_ACTIVE')
+      if (scheduledWorkActive(schedules?.tasks ?? [])) throw new Error('SCHEDULED_TASK_ACTIVE')
       await this.host.conversationData.call('acquireUpdateLease', Number(process.env.PULSE_UPDATE_OWNER), process.env.PULSE_UPDATE_TOKEN)
       process.send({ type: 'update-ready' })
     } catch (error) {

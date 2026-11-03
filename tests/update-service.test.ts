@@ -66,6 +66,18 @@ describe('update service admission', () => {
     expect((server as any).maintenance).toBe(false)
     ;(server as any).pendingWorkStarts.clear(); (server as any).terminals.clear(); (server as any).updateRequests = 0
   })
+  it('does not keep a dead run handle busy merely because its stream left a map entry', async () => {
+    const f = await fixture(), host = createLocalHost({ cwd: f.root, dataDir: f.dataDir, mockResponse: 'fixture', jarvis: { enabled: false } })
+    const server = new H5Server(host, { dataDir: f.dataDir, port: 0, host: '127.0.0.1', updates: { root: f.root, development: true } })
+    await server.start(); server.updates.stop(); cleanup.push(async () => { await server.stop(); await host.close() })
+    const state = await readState(f.root, f.dataDir), manifest = await f.add('0.9.0', 'backend', {})
+    state.staged = { backend: { directory: '/not-executed', manifest } }; state.pending = true
+    await atomicJson(statePath(f.root, f.dataDir), state)
+    ;(server as any).activeRuns.set('dead', { isActive: () => false })
+    await (server as any).tryApplyUpdate()
+    expect((server as any).activeRuns.has('dead')).toBe(false)
+    expect((await readState(f.root, f.dataDir)).blocked).not.toContain('TASKS_OR_MESSAGES_ACTIVE')
+  })
   it('uses a writer lease to stop CLI writes during the actual handoff', async () => {
     const f = await fixture(), a = new ConversationData(f.dataDir), b = new ConversationData(f.dataDir), token = randomUUID()
     cleanup.push(async () => { await rm(join(f.dataDir, '.update-maintenance.json'), { force: true }); await b.close(); await a.close() })

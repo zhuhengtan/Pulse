@@ -311,6 +311,7 @@ export interface RunHandle {
   submitHumanInput(text: string, targetEffectId?: string, options?: HumanInputOptions): Promise<void>
   /** Gracefully stop an isolated host process when its supervising server shuts down. */
   shutdown?(): Promise<void>
+  isActive?(): boolean
 }
 export interface ConversationHandle { readonly id: string; readonly summary: ConversationSummary }
 
@@ -3849,6 +3850,7 @@ export class LocalHost {
       conversationId,
       events,
       outcome: finish,
+      isActive: () => this.active.has(runId),
       usage: async () => { await finish(); return runUsage(runtime, activeEntry?.options.modelPricing ?? this.options.modelPricing, activeEntry?.modelBudget) },
       taskOutcome: async () => { await finish(); return finalTaskOutcome ?? currentTaskOutcome() },
       cancel: async (reason = 'USER_REQUESTED') => { activeEntry?.capabilityController.abort(); await session.cancel(reason) },
@@ -3922,6 +3924,7 @@ export class LocalHost {
       conversationId,
       events,
       outcome: finish,
+      isActive: () => this.active.has(runId),
       usage: async () => usage,
       taskOutcome: async () => undefined,
       cancel: async () => undefined,
