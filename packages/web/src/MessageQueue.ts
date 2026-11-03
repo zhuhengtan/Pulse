@@ -135,6 +135,17 @@ export class MessageQueueController {
   async remove(conversationId: string, requestId: string): Promise<void> {
     await this.change(conversationId, queue => ({ ...queue, entries: queue.entries.filter(item => item.requestId !== requestId || item.sending) }))
   }
+  async takeForEdit(conversationId: string, requestId: string): Promise<ComposerPayload> {
+    let payload: ComposerPayload | undefined
+    await this.store.update(this.key(conversationId), queue => {
+      const entry = queue?.entries.find(item => item.requestId === requestId)
+      if (!queue || !entry || entry.sending) throw new Error('消息已经开始发送，无法编辑。')
+      payload = structuredClone(entry.payload)
+      return { ...queue, entries: queue.entries.filter(item => item.requestId !== requestId) }
+    })
+    await this.refresh().catch(() => undefined)
+    return payload!
+  }
   async edit(conversationId: string, requestId: string, update: string | ComposerPayload): Promise<void> {
     await this.change(conversationId, queue => {
       const entry = queue.entries.find(item => item.requestId === requestId)

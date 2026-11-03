@@ -39,6 +39,14 @@ describe('durable frontend message queue', () => {
     f.state({ state: 'succeeded', waiting: false }); await f.controller.tick()
     expect(f.sent.map(item => item.payload.text)).toEqual(['first', 'second'])
   })
+  it('atomically takes an editable message out of the queue with all its content', async () => {
+    const f = fixture(), payload = { text: '**内容**', skills: ['keep'], mentionedFiles: ['file.ts'] }
+    await f.controller.enqueue('conversation', 'work', payload)
+    const id = f.queue().entries[0]!.requestId
+    expect(await f.controller.takeForEdit('conversation', id)).toEqual(payload)
+    expect(f.queue().entries).toEqual([])
+    await expect(f.controller.takeForEdit('conversation', id)).rejects.toThrow()
+  })
   it('atomically replaces rich content, serialized text and references during queue edits', async () => {
     const f = fixture()
     await f.controller.enqueue('conversation', 'work', { text: 'old', skills: ['old-skill'], mentionedFiles: ['old.ts'] })
@@ -90,6 +98,7 @@ describe('durable frontend message queue', () => {
     const sending = f.controller.tick(); while (!release) await Promise.resolve()
     const other = new MessageQueueController('service-one', f.store, f.adapter, () => {})
     await expect(other.edit('conversation', requestId, 'late edit')).rejects.toThrow()
+    await expect(other.takeForEdit('conversation', requestId)).rejects.toThrow()
     expect(f.queue().entries[0]?.payload).toEqual({ text: 'original', skills: ['keep'] })
     release(); await sending
     await expect(other.edit('conversation', requestId, 'missing')).rejects.toThrow()

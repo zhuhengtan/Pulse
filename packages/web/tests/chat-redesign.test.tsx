@@ -105,22 +105,30 @@ it('restores a single question draft and submits directly without a review page'
   await waitFor(() => expect(submit).toHaveBeenCalledWith([{ effectId: 'question', value: { text: '原来的答案' } }]))
 })
 const queue: ConversationQueue = { key: 'queue', scope: 'fixture', conversationId: 'conversation', surface: 'work', paused: true, entries: Array.from({ length: 5 }, (_, i) => ({ requestId: `q${i}`, payload: { text: `待发 ${i}`, skills: ['keep'], mentionedFiles: ['keep.ts'] }, createdAt: new Date().toISOString() })) }
-it('limits the queue to three rows and retains an unsaved edit when persistence fails', async () => {
-  const edit = vi.fn().mockRejectedValueOnce(new Error('quota')).mockResolvedValue(undefined)
-  const controller = { edit, pause: vi.fn(), remove: vi.fn(), sendNow: vi.fn() } as unknown as MessageQueueController
-  const view = render(<PulseDesignSystem><ChatSurface><MessageQueuePanel queue={queue} controller={controller} onError={() => {}}/></ChatSurface></PulseDesignSystem>)
+it('limits the queue and restores a message to the main composer only after durable removal', async () => {
+  const takeForEdit = vi.fn().mockRejectedValueOnce(new Error('quota')).mockResolvedValue(queue.entries[0]!.payload)
+  const onEdit = vi.fn()
+  const controller = { takeForEdit, pause: vi.fn(), remove: vi.fn(), sendNow: vi.fn() } as unknown as MessageQueueController
+  const view = render(<PulseDesignSystem><ChatSurface><MessageQueuePanel queue={queue} controller={controller} onEdit={onEdit} onError={() => {}}/></ChatSurface></PulseDesignSystem>)
   expect(view.queryByText('待发 4')).toBeNull()
   fireEvent.click(view.getByRole('button', { name: /另有 2 条/ }))
   expect(view.container.querySelectorAll('.queue-row')).toHaveLength(5)
-  fireEvent.click(view.getAllByRole('button', { name: '消息操作' })[0]!)
-  fireEvent.click(await view.findByRole('menuitem', { name: '编辑' }))
-  act(() => editorOf(view).commands.setContent('修改后'))
-  fireEvent.click(view.getByRole('button', { name: '保存待发消息' }))
+  const edit = async () => { fireEvent.click(view.getAllByRole('button', { name: '消息操作' })[0]!); fireEvent.click(await view.findByRole('menuitem', { name: '编辑' })) }
+  await edit()
   await view.findByRole('alert')
-  expect(editorOf(view).getText()).toBe('修改后')
-  fireEvent.click(view.getByRole('button', { name: '保存待发消息' }))
-  await waitFor(() => expect(view.queryByRole('textbox')).toBeNull())
-  expect(edit).toHaveBeenLastCalledWith('conversation', 'q0', expect.objectContaining({ text: '修改后', richContent: expect.objectContaining({ version: 1 }) }))
+  expect(onEdit).not.toHaveBeenCalled()
+  expect(view.container.querySelector('.rich-composer')).toBeNull()
+  await edit()
+  await waitFor(() => expect(onEdit).toHaveBeenCalledWith(queue.entries[0]!.payload))
+})
+it('previews an image attachment in a queued message', async () => {
+  const image = { id: 'image', name: 'queued.png', type: 'image' as const, size: 1, mediaType: 'image/png', data: 'data:image/png;base64,eA==' }
+  const view = render(<MessageQueuePanel queue={{ ...queue, entries: [{ ...queue.entries[0]!, payload: { text: '图片', attachments: [image] } }] }} controller={{} as MessageQueueController} onError={() => {}}/>)
+  fireEvent.click(view.container.querySelector('summary')!)
+  fireEvent.click(view.getByRole('button', { name: '预览 queued.png' }))
+  expect(view.getByRole('dialog', { name: '图片预览' }).querySelector('img')?.src).toBe(image.data)
+  fireEvent.click(view.getByRole('button', { name: '关闭预览' }))
+  expect(view.queryByRole('dialog')).toBeNull()
 })
 it.each(['chat', 'work'] as const)('keeps %s stop pending until acknowledgement, allows retry and preserves the draft', async surface => {
   const fixture = followupFixture(surface), original = fixture.transport.request
