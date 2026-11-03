@@ -88,7 +88,7 @@ describe('message presentation and copying', () => {
   it('does not offer message copying for empty work-only cards', () => {
     show({ ...message, text: '', work: { conversationId: 'work-1', title: '任务', state: 'running' } })
     expect(screen.queryByRole('button', { name: '复制回复' })).toBeNull()
-    expect(screen.getByRole('button', { name: /查看工作会话/ })).not.toBeNull()
+    expect(screen.getByRole('button', { name: /查看工作(?:会话|对话)/ })).not.toBeNull()
   })
 })
 

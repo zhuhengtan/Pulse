@@ -61,7 +61,10 @@ export interface WebAttachment {
 /** Exact navigation references; never an instruction or permission grant. */
 export interface AssistantContextReference { projectId?: string; conversationId?: string }
 
+export interface ChatWorkAction { callbackId: string; conversationId: string; runId: string; controlRevision: number; fingerprint: string; interaction: WebPendingInteraction; state?: 'pending' | 'answered' | 'obsolete' }
 export interface WebMessage {
+  workAction?: ChatWorkAction
+
   messageKind?: 'pre_reply' | 'reply' | 'work_notice'
 
   assistantContext?: AssistantContextReference

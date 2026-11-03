@@ -581,7 +581,7 @@ describe('H5Server End-to-End', () => {
       const assistant = await fetch(`${baseUrl}/api/assistant`, { headers: { Cookie: cookie } }).then(response => response.json()) as { messages: Array<{ id: string; work?: { conversationId: string; title: string; state: string } }>; workInteractions: Array<{ runId: string; conversationId: string; title: string; approvalPolicy: string; kind: string; items: Array<{ input: Record<string, unknown> }> }> }
       if (assistantOrigin) {
         expect(assistant.workInteractions).toEqual([expect.objectContaining({ runId, conversationId: conversation.id, title: 'Start work and ask me a question.', approvalPolicy: 'manual', kind: 'ask', items: [expect.objectContaining({ input: expect.objectContaining({ prompt: 'Choose a mode' }) })] })])
-        expect(assistant.messages.find(message => message.id === `work-live-${runId}`)?.work).toMatchObject({ conversationId: conversation.id, state: 'waiting' })
+        expect(assistant.messages.find(message => message.id === `work-live-${runId}`)).toBeUndefined() // Natural callbacks replace live progress cards in chat.
       } else {
         expect(assistant.workInteractions).toEqual([])
         expect(assistant.messages.filter(message => message.work)).toEqual([])

@@ -1,9 +1,8 @@
-import {cleanup,fireEvent,render,waitFor} from '@testing-library/react'
+import {act,cleanup,fireEvent,render,waitFor} from '@testing-library/react'
 import {afterEach,beforeAll,expect,it,vi} from 'vitest'
 import {createMemoryRouter,RouterProvider} from 'react-router'
 import {PulseApp} from '../src/PulseApp.js'
 import {PulseDesignSystem} from '../src/PulseDesignSystem.js'
-import {IndexedMessageQueueStore} from '../src/MessageQueue.js'
 import {routingFixture} from './fixtures/routing.js'
 const rich={version:1,document:{type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'review retry',marks:[{type:'bold'}]}]}]}}
 vi.mock('../src/RichComposer.js',()=>({emptyComposerDraft:()=>({markdown:'',attachments:[],processing:0,revision:0}),RichComposer:({onSend}:any)=><button onClick={()=>onSend({text:'review retry',attachments:[{id:'attachment-fixture',name:'fixture.txt',type:'file',size:4,mediaType:'text/plain',data:'data:text/plain;base64,dGVzdA=='}],skills:['fixture-skill'],richContent:{version:1,document:{type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'review retry',marks:[{type:'bold'}]}]}]}}})}>fixture-send</button>}))
@@ -20,7 +19,7 @@ it.each(['chat','work'])('%s manual retry preserves the full original payload an
  const initial=mode==='chat'?'/chat?project=pulse&referenceConversation=pulse-chat':'/work/pulse-chat';
  const router=createMemoryRouter([{path:'*',element:<PulseApp transport={f.transport}/>}],{initialEntries:[initial]});routers.push(router);
  const ui=render(<PulseDesignSystem><RouterProvider router={router}/></PulseDesignSystem>);
- if(mode==='chat'){await ui.findByRole('button',{name:'清除引用'});await ui.findByText('我们要做什么？');}else await ui.findByText('消息：pulse-chat');
+ if(mode==='chat'){await ui.findByRole('button',{name:'清除引用'});await ui.findByText(/^(?:我们要做什么？|聊点什么？)$/);}else await ui.findByText('消息：pulse-chat');
  fireEvent.click(ui.getByRole('button',{name:'fixture-send'}));
  fireEvent.click(await ui.findByRole('button',{name:'发送失败，重新发送'}));
  fireEvent.click(await ui.findByRole('button',{name:'确认',exact:true}));
@@ -31,14 +30,16 @@ it.each(['chat','work'])('%s manual retry preserves the full original payload an
  expect(posts[1].requestId).toBe(posts[0].requestId);expect(posts[1].attachments).toEqual(posts[0].attachments);expect(posts[1].skills).toEqual(posts[0].skills);
 })
 
-it('a busy-response queue keeps the frozen navigation reference when the user changes projects',async()=>{
- const values=new Map<string,any>();vi.spyOn(IndexedMessageQueueStore.prototype,'list').mockImplementation(async scope=>[...values.values()].filter(v=>v.scope===scope));vi.spyOn(IndexedMessageQueueStore.prototype,'update').mockImplementation(async(key,change)=>{const value=change(values.get(key));values.set(key,value);return value});
+it('a rejected immediate chat preserves the frozen reference for an explicit retry after navigation',async()=>{
  const f=routingFixture(),original=f.transport.request,posts:any[]=[];
- f.transport.request=async(path,init)=>{if(path==='/api/assistant/messages'&&init?.method==='POST'){const body=JSON.parse(String(init.body));posts.push(body);return posts.length===1?Response.json({error:'CONVERSATION_BUSY'},{status:409}):Response.json({conversationId:'assistant',messageId:body.requestId,runId:'queued-run',state:'completed'})}return original(path,init)};
+ f.transport.request=async(path,init)=>{if(path==='/api/assistant/messages'&&init?.method==='POST'){const body=JSON.parse(String(init.body));posts.push(body);return posts.length===1?Response.json({error:'CONVERSATION_BUSY'},{status:409}):Response.json({conversationId:'assistant',messageId:body.requestId,runId:'retry-run',state:'completed'})}return original(path,init)};
  const router=createMemoryRouter([{path:'*',element:<PulseApp transport={f.transport}/>}],{initialEntries:['/chat?project=pulse&referenceConversation=pulse-chat']});routers.push(router);
- const ui=render(<PulseDesignSystem><RouterProvider router={router}/></PulseDesignSystem>);await ui.findByText('我们要做什么？');await ui.findByRole('button',{name:'清除引用'});
- fireEvent.click(ui.getByRole('button',{name:'fixture-send'}));await waitFor(()=>expect(values.size).toBe(1));
- const queued=[...values.values()][0].entries[0];expect(posts[0].assistantContext).toEqual({projectId:'pulse',conversationId:'pulse-chat'});expect(queued.payload.assistantContext).toEqual(posts[0].assistantContext);expect(queued.payload.richContent).toEqual(posts[0].richContent);await router.navigate('/chat?project=jarvis&referenceConversation=jarvis-chat');window.dispatchEvent(new Event('online'));await waitFor(()=>expect(posts).toHaveLength(2));expect(posts[1].assistantContext).toEqual(posts[0].assistantContext);expect(posts[1].requestId).toBe(posts[0].requestId);expect(posts[1].attachments).toEqual(posts[0].attachments);expect(posts[1].skills).toEqual(posts[0].skills);expect(posts[1].richContent).toEqual(posts[0].richContent);
+ const ui=render(<PulseDesignSystem><RouterProvider router={router}/></PulseDesignSystem>);await ui.findByText('聊点什么？');await ui.findByRole('button',{name:'清除引用'});
+ fireEvent.click(ui.getByRole('button',{name:'fixture-send'}));await ui.findByRole('button',{name:'发送失败，重新发送'});
+ expect(posts[0].delivery).toBe('immediate');expect(posts[0].assistantContext).toEqual({projectId:'pulse',conversationId:'pulse-chat'});
+ await act(async()=>{await router.navigate('/chat?project=jarvis&referenceConversation=jarvis-chat')});
+ fireEvent.click(await ui.findByRole('button',{name:'发送失败，重新发送'}));fireEvent.click(await ui.findByRole('button',{name:'确认',exact:true}));
+ await waitFor(()=>expect(posts).toHaveLength(2));expect(posts[1].assistantContext).toEqual(posts[0].assistantContext);expect(posts[1].requestId).toBe(posts[0].requestId);expect(posts[1].attachments).toEqual(posts[0].attachments);expect(posts[1].skills).toEqual(posts[0].skills);expect(posts[1].richContent).toEqual(posts[0].richContent);
 })
 it.each([false,true])('retrying a reloaded long chat uses full canonical content; expanded=%s',async expanded=>{
  const full='x'.repeat(8500)+'尾部纠正',preview=full.slice(0,8000),now=new Date().toISOString(),f=routingFixture(),original=f.transport.request,posts:any[]=[];

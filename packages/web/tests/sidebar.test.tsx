@@ -14,7 +14,7 @@ afterEach(cleanup)
 async function show() {
   const fixture = sidebarFixture()
   const view = render(<PulseDesignSystem><PulseApp transport={fixture.transport}/></PulseDesignSystem>)
-  await screen.findByText('我们要做什么？')
+  await screen.findByText(/^(?:我们要做什么？|聊点什么？)$/)
   fireEvent.click(screen.getByRole('tab', { name: '工作' }))
   await screen.findByRole('button', { name: '这个项目还是需要帮我加个自动审核' })
   return { ...view, ...fixture }
@@ -42,7 +42,7 @@ describe('project sidebar', () => {
   it('opens settings directly from chat and returns without changing mode', async () => {
     const { transport } = sidebarFixture()
     render(<PulseDesignSystem><PulseApp transport={transport}/></PulseDesignSystem>)
-    await screen.findByText('我们要做什么？')
+    await screen.findByText(/^(?:我们要做什么？|聊点什么？)$/)
     const tabs = screen.getByRole('tablist', { name: 'Pulse 工作模式' })
     expect(tabs.compareDocumentPosition(screen.getByText('Pulse 助理')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '设置' }))

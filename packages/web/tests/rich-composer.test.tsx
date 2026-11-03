@@ -90,14 +90,14 @@ it('updates placeholder after authorization', async () => {
   await waitFor(() => expect(view.container.querySelector('[data-placeholder]')?.getAttribute('data-placeholder')).toBe('给 Pulse 发送消息…'))
   expect(view.container.querySelector('.tiptap')?.getAttribute('contenteditable')).toBe('true')
 })
-it.each(['chat', 'work'] as const)('allows busy follow-ups in %s with queue as default', async mode => {
+it.each(['chat', 'work'] as const)('uses the intended busy follow-up behavior in %s', async mode => {
   const send = vi.fn(async () => true)
   const view = render(<Harness send={send} running mode={mode} />)
   act(() => editorOf(view).commands.insertContent('第二条消息'))
   if (mode === 'work') expect(view.queryByRole('button', { name: '发送' })).toBeNull()
   fireEvent.keyDown(view.container.querySelector('.tiptap')!, { key: 'Enter' })
   await waitFor(() => expect(send).toHaveBeenCalledTimes(1))
-  expect(send.mock.calls[0]).toEqual([expect.objectContaining({ text: '第二条消息', richContent: expect.objectContaining({ version: 1 }) }), 'queue'])
+  expect(send.mock.calls[0]).toEqual([expect.objectContaining({ text: '第二条消息', richContent: expect.objectContaining({ version: 1 }) }), mode === 'chat' ? 'immediate' : 'queue'])
 })
 
 it.each(['paste', 'drop'])('handles actual editor %s events as attachments instead of editor text', async action => {

@@ -1,3 +1,4 @@
+import { ChatWorkPrompt } from './ChatInteraction.js'
 import { AttachmentCards } from './AttachmentCards.js'
 import { RichMessage } from './RichMessage.js'
 import { PulseButton, usePulseDialogs } from './PulseControls.js'
@@ -16,13 +17,14 @@ type BodyIdentity = { conversationId: string; id: string; bodyHash?: string; tex
 const bodyVersion = (identity: BodyIdentity) => identity.bodyHash ? `${identity.conversationId}\0${identity.id}\0${identity.bodyHash}` : `${identity.conversationId}\0${identity.id}\0${identity.text}\0${identity.bodyLength ?? ''}\0${identity.bodyTruncated ? 1 : 0}`
 const sameBody = (left: BodyIdentity, right: BodyIdentity) => bodyVersion(left) === bodyVersion(right)
 
-export const MessageBubble = memo(function MessageBubble({ message, mode, retry, imageApi, onOpenWork, onFileClick, onDiffClick, transport = browserTransport, conversationId }: {
+export const MessageBubble = memo(function MessageBubble({ message, mode, retry, imageApi, onOpenWork, onFileClick, onDiffClick, transport = browserTransport, conversationId, notificationTarget }: {
   message: WebMessage
   imageApi?: ((source: string, runId?: string) => string | undefined) | undefined
   mode: 'chat' | 'work'
   retry: (message: WebMessage, mode: 'chat' | 'work') => void
   transport?: PulseWebTransport
   conversationId?: string | undefined
+  notificationTarget?: string | undefined
   onOpenWork: (conversationId: string) => void
   onFileClick?: ((path: string, runId?: string) => void) | undefined
   onDiffClick?: ((path: string) => void) | undefined
@@ -134,6 +136,7 @@ export const MessageBubble = memo(function MessageBubble({ message, mode, retry,
         {message.role === 'user' && <AttachmentCards items={message.attachments ?? []} onPreview={setPreviewImage}/>}
         {message.text.trim() && (message.role === 'user' ? <RichMessage content={message.richContent} fallback={text} onFileClick={onFileClick ? scopedFileClick : undefined} onDiffClick={onDiffClick}/> : <Markdown text={text} imageApi={imageApi ? scopedImageApi : undefined} transport={transport} onFileClick={onFileClick ? scopedFileClick : undefined} onDiffClick={onDiffClick} />)}
         {message.bodyTruncated && expandedText === undefined && <div><PulseButton onClick={() => void loadBody()} disabled={bodyLoading}>{bodyLoading ? '加载中…' : '展开完整消息'}</PulseButton>{bodyError && <span role="alert">{bodyError}</span>}</div>}
+        {mode === 'chat' && message.workAction && <ChatWorkPrompt action={message.workAction} transport={transport} notificationTarget={notificationTarget}/>}
         {message.role !== 'user' && <AttachmentCards items={message.attachments ?? []} onPreview={setPreviewImage}/>}
 
         {actions.menuOpen && <Popover trigger="click" visible onVisibleChange={actions.setMenuOpen} destroyOnHide placement={message.role === 'user' ? 'top-end' : 'top-start'} className="message-mobile-popover" content={<div>{validTime && <time className="message-menu-time" dateTime={sentAt.toISOString()} title={timeTitle}>{timeLabel}</time>}<div role="menu" aria-label="消息操作"><PulseButton type="button" role="menuitem" disabled={copying} onClick={() => void copy()}><Icon name="copy"/><span>复制</span></PulseButton></div></div>}>

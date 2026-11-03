@@ -1,3 +1,4 @@
+import { callbackWorkState, agentAnswerableQuestion, interactionFingerprint, workCallback, type WorkCallback } from '../work-callback.js'
 import { asChatWorkAgent, checkWorkControl, withWorkActor } from '../work-control.js'
 import { readState } from '../updates/store.js'
 import { releaseId } from '../updates/contracts.js'
@@ -256,6 +257,7 @@ export class H5Server {
       send: (conversationId, text) => asChatWorkAgent(this.host.conversationData, conversationId, () => this.sendToWork(conversationId, text)),
       stop: conversationId => asChatWorkAgent(this.host.conversationData, conversationId, () => this.stopWork(conversationId)),
       resume: conversationId => asChatWorkAgent(this.host.conversationData, conversationId, () => this.resumeWork(conversationId)),
+      answer: (conversationId, groupId, answers, expectedRevision) => asChatWorkAgent(this.host.conversationData, conversationId, async () => { const work = await this.host.getConversation(conversationId); const handle = work.summary.activeRunId ? this.activeRuns.get(work.summary.activeRunId) : undefined; const group = (await handle?.pendingInteractions())?.find(item => item.groupId === groupId); if (!handle || !group || group.kind !== 'ask' || group.items.some(item => !agentAnswerableQuestion(item.input))) throw new Error('WORK_QUESTION_REQUIRED'); await handle.replyBatch(groupId, answers); for (const callback of this.assistantInbox.callbacks().filter(item => item.runId === handle.id && item.interaction?.groupId === groupId)) await this.assistantInbox.updateCallback(callback.id, { answered: true }); await this.pushInteractionSnapshot(handle.id, (this.runSnapshots.get(handle.id)?.seq ?? 0) + 1) }, expectedRevision),
     })
   }
 
@@ -404,7 +406,7 @@ export class H5Server {
     this.dataChanged = this.host.conversationData.onChange(revision => {
       for (const client of this.chatSockets.clients) this.sendChat(client, { type: 'changed', revision })
     })
-    if (!this.maintenance) { const journal = await readUpdateResume(this.dataDir).catch(() => undefined); if (journal?.runs.some(run => ['pending', 'resuming'].includes(run.status))) await this.resumeUpdatedRuns(); else void this.pumpAssistantInbox() }
+    if (!this.maintenance) { const journal = await readUpdateResume(this.dataDir).catch(() => undefined); if (journal?.runs.some(run => ['pending', 'resuming'].includes(run.status))) await this.resumeUpdatedRuns(); else { await this.reconcileWorkCallbacks(); void this.pumpAssistantInbox() } }
     void this.host.retryJarvisSync()
     this.jarvisSyncTimer = setInterval(() => { void this.host.retryJarvisSync() }, 15_000)
 
@@ -542,7 +544,7 @@ export class H5Server {
       const conversationId = this.assistantInbox.conversationId
       while (!this.stopping && !this.maintenance) {
         const message = await this.assistantInbox.next()
-        if (!message) return
+        if (!message) { const callback = await this.assistantInbox.nextCallback(); if (!callback) return; if (this.maintenance || this.stopping) { await this.assistantInbox.updateCallback(callback.id, { state: 'queued' }); return } await this.processWorkCallback(callback); continue }
         if (this.maintenance) { await this.assistantInbox.update(message.runId, 'queued'); return }
         if (this.stopping) { await this.assistantInbox.update(message.runId, 'interrupted', 'Server stopped before launch'); return }
         this.assistantPendingRuns.add(message.runId)
@@ -598,6 +600,82 @@ export class H5Server {
     return this.assistantPump
   }
 
+  private async queueWorkCallback(input: Omit<WorkCallback, 'id' | 'state' | 'createdAt' | 'fingerprint' | 'controlRevision'>): Promise<void> {
+    const work = await this.host.getConversation(input.conversationId)
+    if (!work.summary.control || !this.assistantInbox.workLink(input.conversationId)) return
+    const group = input.interaction && ['approval', 'question'].includes(input.kind) ? (await this.activeRuns.get(input.runId)?.pendingInteractions())?.find(item => item.groupId === input.interaction!.groupId) : undefined
+    await this.assistantInbox.addCallback(workCallback({ ...input, ...(group ? { fingerprint: interactionFingerprint(group) } : {}), controlRevision: work.summary.control.revision }))
+    queueMicrotask(() => { void this.pumpAssistantInbox().catch(() => undefined) })
+  }
+
+  /** Recover facts committed before a crash but not yet copied into the inbox. */
+  private async reconcileWorkCallbacks(): Promise<void> {
+    for (const summary of await this.host.listConversations()) {
+      const link = this.assistantInbox.workLink(summary.id)
+      if (!link || !summary.control) continue
+      try {
+        const manifest = await this.host.conversationData.call<{ runs: string[] }>('get', summary.id)
+        for (const runId of manifest.runs.slice(-1)) {
+          if (this.assistantInbox.workNotices().some(notice => notice.id === `work-${runId}`)) continue
+          if (this.activeRuns.has(runId) || this.assistantInbox.callbacks().some(callback => callback.conversationId === summary.id && callback.runId === runId && ['succeeded', 'failed', 'cancelled', 'interrupted', 'pending', 'conflict'].includes(callback.kind))) continue
+          const result = await readFile(join(this.dataDir, 'conversations', summary.id, 'runs', runId, 'outcome.json'), 'utf8').then(JSON.parse).catch(() => undefined)
+          if (result) {
+            // A runtime success alone does not prove that workspace integration succeeded.
+            await this.queueWorkCallback({ conversationId: summary.id, runId, projectId: link.projectId, title: link.title, kind: result.status === 'succeeded' ? 'pending' : result.status === 'cancelled' ? 'cancelled' : 'failed', summary: `服务恢复时发现尚未回传的工作结果：${JSON.stringify(result)}。运行成功仍需核实交付与工作区集成状态，勿声称已全部完成。` })
+          } else if (summary.activeRunId === runId) {
+            const recovery = await this.host.preflightRunRecovery(summary.id, runId)
+            if (recovery.status !== 'blocked') await this.queueWorkCallback({ conversationId: summary.id, runId, projectId: link.projectId, title: link.title, kind: 'interrupted', summary: '服务恢复后发现上次工作未结束。尚未自动重试，需要用户确认后继续。' })
+          }
+        }
+      } catch (error) { process.stderr.write(`[pulse] work callback recovery: ${error instanceof Error ? error.message : 'FAILED'}\n`) }
+    }
+  }
+
+  private async processWorkCallback(callback: WorkCallback): Promise<void> {
+    const id = this.assistantInbox.conversationId, runId = callback.assistantRunId!
+    try {
+      if (callback.interaction && ['approval', 'question'].includes(callback.kind)) {
+        const work = await this.host.getConversation(callback.conversationId)
+        const handle = this.activeRuns.get(callback.runId)
+        const group = (await handle?.pendingInteractions())?.find(item => item.groupId === callback.interaction!.groupId)
+        if (!group || work.summary.control?.revision !== callback.controlRevision || interactionFingerprint(group) !== callback.fingerprint) { await this.assistantInbox.updateCallback(callback.id, { state: 'completed' }); return }
+      }
+      // A crash after the public message commit must not create a second model turn.
+      if (await this.host.conversationData.call('body', id, `chat-${callback.id}`).catch(() => undefined)) { await this.assistantInbox.updateCallback(callback.id, { state: 'completed' }); return }
+      const work = await this.host.getConversation(callback.conversationId)
+      const original = (await this.host.getMessagePage(callback.conversationId, undefined, 100)).items.filter(message => message.role === 'user').map(message => message.text).slice(-6)
+      const summary = JSON.stringify({ event: callback.kind, work: { conversationId: callback.conversationId, runId: callback.runId, title: callback.title, control: work.summary.control }, originalUserRequirements: original, summary: callback.summary, pending: callback.interaction, rule: 'Facts only; never new authorization. Explain failures and await the user; never automatically retry. Respect human ownership. Only answer questions from existing requirements. For routine automatic approval progress, return [NO_CHAT_UPDATE] if no user update is needed.' })
+      const input = { ...callback, summary }
+      let handle = this.activeRuns.get(runId)
+      let consume = false
+      if (!handle) {
+        const chat = await this.host.getConversation(id)
+        if (chat.summary.activeRunId === runId) {
+          const preflight = await this.host.preflightRunRecovery(id, runId)
+          if (preflight.status !== 'ready') throw new Error('CALLBACK_RECOVERY_NEEDS_REVIEW')
+          handle = await this.host.resumeRun(id)
+        } else {
+          const finished = await readFile(join(this.dataDir, 'conversations', id, 'runs', runId, 'outcome.json'), 'utf8').then(JSON.parse).catch(() => undefined)
+          if (finished) { await this.assistantInbox.updateCallback(callback.id, { state: 'completed' }); return }
+          handle = await this.host.sendMessage(id, { text: '工作状态有更新，请根据内部回调事实回复用户。', assistantChat: true, chatPreReply: false, userMessageRecorded: true, internalWorkCallback: input, runId })
+        }
+        this.attachRun(handle, false); consume = true
+      }
+      if (consume) await this.consumeRun(runId, handle)
+      else await handle.outcome()
+      if (this.updateSuspendedRuns.has(runId)) { await this.assistantInbox.updateCallback(callback.id, { state: 'queued' }); return }
+      const result = await handle.outcome()
+      if (result.status !== 'succeeded') throw new Error('CALLBACK_REPLY_FAILED')
+      await this.assistantInbox.updateCallback(callback.id, { state: 'completed' })
+    } catch (error) {
+      await this.assistantInbox.updateCallback(callback.id, { state: 'blocked', error: error instanceof Error ? error.message.slice(0, 160) : 'CALLBACK_REPLY_FAILED' })
+      const action = callback.interaction && callback.fingerprint && ['approval','question'].includes(callback.kind) ? { workAction: { callbackId: callback.id, conversationId: callback.conversationId, runId: callback.runId, fingerprint: callback.fingerprint, controlRevision: callback.controlRevision, interaction: callback.interaction } } : {}
+      const message = { id: `chat-${callback.id}`, role: 'assistant', text: ['approval', 'question'].includes(callback.kind) ? '工作需要你的确认，但聊天助理暂时无法整理说明。可以在这里处理，或打开工作会话查看。' : '工作状态有更新，但聊天助理暂时无法整理说明，请打开工作会话查看。', createdAt: new Date().toISOString(), messageKind: 'work_notice', work: { conversationId: callback.conversationId, title: callback.title, state: callbackWorkState(callback.kind) }, ...action }
+      const existing = await this.host.conversationData.call('body', id, message.id).catch(() => undefined)
+      if (!existing) await this.host.conversationData.call('append', id, message)
+    }
+  }
+
   private async startWorkFromAssistant(projectId: string, task: string): Promise<{ conversationId: string; projectId: string; title: string }> {
     const project = await this.projects.get(projectId)
     if (!project || !project.available) throw new Error('PROJECT_NOT_AVAILABLE')
@@ -608,7 +686,7 @@ export class H5Server {
     queueMicrotask(() => { void asChatWorkAgent(this.host.conversationData, conversation.id, () => this.startConversationRun(conversation.id, task)).catch(async error => {
       const detail = error instanceof Error ? error.message : 'WORK_START_FAILED'
       process.stderr.write(`[pulse] work start failed: ${detail.slice(0, 180)}\n`)
-      await this.assistantInbox.addWorkNotice({ id: `work-start-${conversation.id}`, role: 'assistant', createdAt: new Date().toISOString(), text: `无法启动工作会话：${detail.slice(0, 160)}`, work: { conversationId: conversation.id, projectId: project.id, title, state: 'failed' } }).catch(() => undefined)
+      await this.queueWorkCallback({ conversationId: conversation.id, runId: `start-${conversation.id}`, projectId: project.id, title, kind: 'failed', summary: `无法启动工作会话：${detail.slice(0, 160)}` }).catch(() => undefined)
     }) })
     return { conversationId: conversation.id, projectId: project.id, title }
   }
@@ -627,7 +705,7 @@ export class H5Server {
     const conversation = await this.host.getConversation(conversationId)
     const handle = conversation.summary.activeRunId ? this.activeRuns.get(conversation.summary.activeRunId) : undefined
     const messages = await this.host.getConversationMessages(conversationId)
-    return { conversationId, title: conversation.summary.title, projectId: conversation.summary.projectId, state: handle ? 'running' : conversation.summary.activeRunId ? 'interrupted' : 'idle', pending: handle ? await handle.pendingInteractions() : [], latestMessage: messages.at(-1)?.text.slice(0, 2_000) }
+    return { conversationId, control: conversation.summary.control, title: conversation.summary.title, projectId: conversation.summary.projectId, state: handle ? 'running' : conversation.summary.activeRunId ? 'interrupted' : 'idle', pending: handle ? await handle.pendingInteractions() : [], latestMessage: messages.at(-1)?.text.slice(0, 2_000) }
   }
 
   private async sendToWork(conversationId: string, text: string): Promise<void> {
@@ -764,7 +842,7 @@ export class H5Server {
           }
           if (frame.type !== 'request' || typeof frame.id !== 'string' || frame.id.length > 128 || typeof frame.path !== 'string' || inFlight >= 32) throw new Error('CHAT_REQUEST_INVALID')
           const path = new URL(frame.path, 'http://pulse.local')
-          const allowed = path.pathname === '/api/assistant' || path.pathname === '/api/assistant/messages' || /^\/api\/assistant\/runs\/[^/]+\/cancel$/.test(path.pathname) || /^\/api\/data\/conversations\/[^/]+\/(messages|body|search)$/.test(path.pathname) || path.pathname === '/api/conversations'
+          const allowed = path.pathname === '/api/assistant' || path.pathname === '/api/assistant/messages' || /^\/api\/assistant\/runs\/[^/]+\/cancel$/.test(path.pathname) || /^\/api\/data\/conversations\/[^/]+\/(messages|body|search)$/.test(path.pathname) || path.pathname === '/api/conversations' || /^\/api\/assistant\/work\/[^/]+\/replies$/.test(path.pathname)
           if (!allowed || !['GET','POST'].includes(frame.method ?? 'GET')) throw new Error('CHAT_METHOD_INVALID')
           inFlight++
           try {
@@ -1035,7 +1113,7 @@ export class H5Server {
         await saveUpdateResume(this.dataDir, journal)
       }
     } catch (error) { process.stderr.write(`[pulse] update recovery: ${error instanceof Error ? error.message : 'UPDATE_RESUME_FAILED'}\n`) }
-    finally { this.maintenance = false; if (!this.stopping) void this.pumpAssistantInbox() }
+    finally { this.maintenance = false; if (!this.stopping) { await this.reconcileWorkCallbacks(); void this.pumpAssistantInbox() } }
   }
 
   private updateBlockers(): string[] {
@@ -1359,6 +1437,38 @@ export class H5Server {
       const view = await this.assistantView(url.searchParams.get('before') ?? undefined)
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
       res.end(JSON.stringify(view))
+      return
+    }
+
+    const chatWorkReply = pathname.match(/^\/api\/assistant\/work\/([^/]+)\/replies$/)
+    if (chatWorkReply && method === 'POST') {
+      if (!requireSameOrigin()) { res.writeHead(403).end(JSON.stringify({ error: 'SAME_ORIGIN_REQUIRED' })); return }
+      const body = await this.parseJsonBody(req), conversationId = decodeURIComponent(chatWorkReply[1]!)
+      const callbackId = typeof body.callbackId === 'string' ? body.callbackId : ''
+      const key = `chat-reply:${callbackId}`
+      let previous: Promise<void> | undefined; while ((previous = this.batchReplyLocks.get(key))) await previous
+      let release!: () => void
+      const lock = new Promise<void>(resolve => { release = resolve }); this.batchReplyLocks.set(key, lock)
+      try {
+        const callback = this.assistantInbox.callbacks().find(item => item.id === callbackId && item.conversationId === conversationId)
+        if (!callback?.interaction || !callback.fingerprint || !['approval','question'].includes(callback.kind) || body.fingerprint !== callback.fingerprint || !Array.isArray(body.answers)) throw new Error('CHAT_APPROVAL_INVALID')
+        const answers = body.answers.map(item => { const value = item && typeof item === 'object' ? item as Record<string, unknown> : {}; const normalized = value.value && typeof value.value === 'object' ? h5ReplyValue(value.value as Record<string, unknown>) : undefined; if (typeof value.effectId !== 'string' || !normalized || typeof normalized !== 'object' || Array.isArray(normalized) || 'remember' in normalized) throw new Error('CHAT_REPLY_INVALID'); return { effectId: value.effectId, value: normalized as unknown as JsonValue } })
+        if (callback.interaction.kind === 'approval' && answers.some(answer => typeof (answer.value as Record<string, unknown>).approved !== 'boolean' || Object.keys(answer.value as object).some(key => key !== 'approved'))) throw new Error('CHAT_APPROVAL_INVALID')
+        if (answers.length !== callback.interaction.items.length || new Set(answers.map(item => item.effectId)).size !== answers.length || callback.interaction.items.some(item => !answers.some(answer => answer.effectId === item.effectId))) throw new Error('INTERACTION_GROUP_MISMATCH')
+        const decision = JSON.stringify([...answers].sort((a,b) => a.effectId.localeCompare(b.effectId)))
+        if (callback.answered) { if (callback.decision !== decision) throw new Error('CHAT_REPLY_ALREADY_HANDLED'); res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, duplicate: true })); return }
+        const work = await this.host.getConversation(conversationId)
+        if (work.summary.control?.revision !== callback.controlRevision) throw new Error('WORK_CONTROL_STALE')
+        const handle = this.activeRuns.get(callback.runId)
+        const pending = (await handle?.pendingInteractions())?.find(group => group.groupId === callback.interaction!.groupId)
+        if (!handle || handle.conversationId !== conversationId || !pending || interactionFingerprint(pending) !== callback.fingerprint) throw new Error('CHAT_REPLY_STALE')
+        await withWorkActor({ kind: 'approval', revision: callback.controlRevision }, () => handle.replyBatch(pending.groupId, answers))
+        await this.assistantInbox.updateCallback(callback.id, { answered: true, decision })
+        await this.pushInteractionSnapshot(handle.id, (this.runSnapshots.get(handle.id)?.seq ?? 0) + 1)
+        if (pending.kind === 'approval') await this.queueWorkCallback({ conversationId, runId: callback.runId, title: callback.title, ...(callback.projectId ? { projectId: callback.projectId } : {}), kind: 'approval_resolved', summary: answers.every(item => (item.value as Record<string, JsonValue>).approved === true) ? '用户已明确同意这次操作。' : '用户已拒绝这次操作，不得绕过或自动改写后重试。', interaction: { groupId: `answered:${pending.groupId}`, kind: 'approval', items: [] } })
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }))
+      } catch (error) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error instanceof Error ? error.message : 'CHAT_REPLY_FAILED' })) }
+      finally { release(); if (this.batchReplyLocks.get(key) === lock) this.batchReplyLocks.delete(key) }
       return
     }
 
@@ -2255,6 +2365,8 @@ export class H5Server {
       const body = await this.parseJsonBody(req), id = decodeURIComponent(workControlMatch[1]!)
       try {
         const control = await this.host.conversationData.call('changeWorkControl', id, body.action, body.expectedRevision)
+        const link = this.assistantInbox.workLink(id), work = await this.host.getConversation(id)
+        if (link) { if (work.summary.activeRunId) await this.pushInteractionSnapshot(work.summary.activeRunId, (this.runSnapshots.get(work.summary.activeRunId)?.seq ?? 0) + 1); if (body.action === 'return') await this.queueWorkCallback({ conversationId: id, runId: work.summary.activeRunId ?? 'inactive', title: link.title, projectId: link.projectId, kind: 'returned', summary: '用户已归还控制权。先核对当前状态；失败或中断的任务仍需用户明确要求才能重试。' }) }
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ control }))
       } catch (error) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error instanceof Error ? error.message : 'WORK_CONTROL_FAILED', control: (await this.host.getConversation(id)).summary.control })) }
       return
@@ -2672,6 +2784,7 @@ export class H5Server {
       if (receipt) await this.assistantInbox.update(runId, outcome?.status === 'succeeded' ? 'completed' : outcome?.status === 'cancelled' ? 'failed' : 'failed', outcome?.status === 'cancelled' ? '回复已停止' : outcome?.status === 'failed' ? '回复失败' : outcome ? undefined : '回复状态未能确认').catch(() => undefined)
       const conversationId = this.runConversations.get(runId)
       const link = conversationId ? this.assistantInbox.workLink(conversationId) : undefined
+      if (conversationId && !outcome && link) await this.queueWorkCallback({ conversationId, runId, projectId: link.projectId, title: link.title, kind: 'interrupted', summary: '工作连接意外中断；尚未确认完成，未自动重试。' }).catch(() => undefined)
       if (conversationId && outcome) {
         let workspaceResult: Awaited<ReturnType<H5WorkspaceManager['finish']>> | undefined
         const conversation = await this.host.getConversation(conversationId).catch(() => undefined)
@@ -2691,11 +2804,7 @@ export class H5Server {
           const artifacts = await this.host.listArtifacts(conversationId).catch(() => [])
           const locations = artifacts.filter(item => item.workspaceState === 'isolated').slice(-10).map(item => `${item.path}（实际位置：${item.absolutePath}）`).join('\n')
           const suffix = (state === 'conflict' ? '\n\n工作区结果已保留，但与项目最新修改有冲突，需要人工处理。' : state === 'pending' ? '\n\n工作结果已保留，验收未通过或状态不完整，尚未合入项目。' : '') + (locations ? `\n\n以下文件保存在本次工作目录，尚未合入项目；打开工作会话可查看或下载：\n${locations}` : '')
-          await this.assistantInbox.addWorkNotice({
-            id: `work-${runId}`, role: 'assistant', runId, createdAt: new Date().toISOString(),
-            text: `${answer || (outcome.status === 'succeeded' ? '工作会话已完成。' : '工作会话已结束，请查看运行记录。')}${suffix}`,
-            work: { conversationId, projectId: link.projectId, title: link.title, state },
-          }).catch(() => undefined)
+          await this.queueWorkCallback({ conversationId, runId, projectId: link.projectId, title: link.title, kind: state, summary: `${answer || '工作会话已结束，请查看运行记录。'}${suffix}` }).catch(() => undefined)
         }
       }
       } catch (error) {
@@ -2791,6 +2900,8 @@ export class H5Server {
     if (!handle) return
     const interactions = await this.visiblePendingInteractions(runId, await handle.pendingInteractions())
     this.pushEvent(runId, { runId, conversationId: handle.conversationId, seq, type: 'interactions', data: { interactions, ...(this.reviewNotes.has(runId) ? { reviewNote: this.reviewNotes.get(runId)! } : {}) } })
+    const link = this.assistantInbox.workLink(handle.conversationId)
+    if (link) for (const interaction of interactions) await this.queueWorkCallback({ conversationId: handle.conversationId, runId, projectId: link.projectId, title: link.title, kind: interaction.kind === 'ask' ? 'question' : 'approval', summary: interaction.items.map(item => String(item.input.prompt ?? '工作需要确认')).join('\n'), interaction })
   }
 
   private async globalApprovalPolicy(): Promise<'manual' | 'delegate'> {
@@ -2844,6 +2955,8 @@ export class H5Server {
         reviewed.add(next.effectId)
         const result = await withWorkActor({ kind: 'policy' }, () => handle.reviewApproval(next.effectId, controller.signal)).catch(() => ({ status: 'manual' as const, reason: 'review_failed' }))
         if (controller.signal.aborted) return
+        const link = this.assistantInbox.workLink(handle.conversationId)
+        if (link && result.status === 'approved') await this.queueWorkCallback({ conversationId: handle.conversationId, runId, title: link.title, projectId: link.projectId, kind: 'approval_resolved', summary: '现有自动审核策略已批准本次操作，无需用户再次确认。', interaction: publicInteraction({ groupId: `approved:${next.effectId}`, kind: 'approval', items: [] }) })
         if (result.status === 'manual') {
           const manual = this.manualApprovalEffects.get(runId) ?? new Set<string>()
           manual.add(next.effectId)

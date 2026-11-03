@@ -33,7 +33,7 @@ describe('browser transport connection mark', () => {
       return base.request(path + new URL(String(input)).search, init)
     }, events.create)
     render(<PulseDesignSystem><PulseApp transport={transport} /></PulseDesignSystem>)
-    await screen.findByText('我们要做什么？')
+    await screen.findByText(/^(?:我们要做什么？|聊点什么？)$/)
     fireEvent.click(screen.getByRole('tab', { name: '工作' }))
     fireEvent.click(await screen.findByRole('button', { name: /^正在执行的任务/ }))
     await waitFor(() => expect(events.source?.onerror).toBeTypeOf('function'))

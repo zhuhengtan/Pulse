@@ -100,7 +100,7 @@ describe('paired phone project registration', () => {
       return sidebar.transport.request(path, init)
     } }
     render(<PulseDesignSystem><PulseApp transport={transport} /></PulseDesignSystem>)
-    await screen.findByText('我们要做什么？'); fireEvent.click(screen.getByRole('tab', { name: '工作' }))
+    await screen.findByText(/^(?:我们要做什么？|聊点什么？)$/); fireEvent.click(screen.getByRole('tab', { name: '工作' }))
     fireEvent.click(await screen.findByRole('button', { name: '添加电脑项目' })); await screen.findByText('当前文件夹：/host')
     fireEvent.click(screen.getByRole('button', { name: '取消', exact: true })); expect(registered).toEqual([])
     fireEvent.click(screen.getByRole('button', { name: '添加电脑项目' })); await screen.findByText('当前文件夹：/host')

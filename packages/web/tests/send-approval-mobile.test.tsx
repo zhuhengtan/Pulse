@@ -19,7 +19,7 @@ async function open(mode: 'chat' | 'work' | 'new', custom?: (path: string, init?
   fixture.transport.request = (path, init) => custom?.(path, init) ?? original(path, init)
   const router = createMemoryRouter([{ path: '*', element: <PulseApp transport={fixture.transport} /> }], { initialEntries: [mode === 'chat' ? '/chat' : mode === 'new' ? '/work/new' : '/work/pulse-chat'] })
   const view = render(<PulseDesignSystem><RouterProvider router={router} /></PulseDesignSystem>)
-  await view.findByText(mode === 'work' ? '消息：pulse-chat' : '我们要做什么？')
+  await view.findByText(mode === 'work' ? '消息：pulse-chat' : mode === 'chat' ? '聊点什么？' : '我们要做什么？')
   const editor = () => (view.container.querySelector('.tiptap') as HTMLElement & { editor: Editor }).editor
   return { fixture, router, view, editor }
 }
@@ -78,7 +78,7 @@ it('restores only the origin draft after switching sessions while a request is p
     act(() => app.editor().commands.insertContent('原会话消息'))
     fireEvent.click(app.view.getByRole('button', { name: '发送', exact: true })); await waitFor(() => expect(posted).toBe(true))
     expect(app.editor().getText()).toBe('')
-    await act(async () => { await app.router.navigate('/work/new') }); await app.view.findByText('我们要做什么？')
+    await act(async () => { await app.router.navigate('/work/new') }); await app.view.findByText(/^(?:我们要做什么？|聊点什么？)$/)
     act(() => app.editor().commands.insertContent('另一个会话的草稿'))
     await act(async () => finish(Response.json({ error: 'OFFLINE' }, { status: 503 })))
     expect(app.editor().getText()).toBe('另一个会话的草稿')
@@ -164,7 +164,8 @@ it('persists approval globally across new, existing and chat conversations and r
     await app.view.findByRole('button', { name: '审核模式：自动审核' })
     for (const path of ['/work/pulse-chat', '/chat', '/work/new']) {
       await act(async () => { await app.router.navigate(path) })
-      expect(await app.view.findByRole('button', { name: '审核模式：自动审核' })).toBeTruthy()
+      if (path === '/chat') { await app.view.findByText('聊点什么？'); expect(app.view.queryByRole('button', { name: /审核模式/ })).toBeNull() }
+      else expect(await app.view.findByRole('button', { name: '审核模式：自动审核' })).toBeTruthy()
     }
     app.view.unmount(); app.router.dispose()
     const router = createMemoryRouter([{ path: '*', element: <PulseApp transport={app.fixture.transport} /> }], { initialEntries: ['/work/new'] })

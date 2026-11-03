@@ -20,15 +20,18 @@ function show(target: string, assistantTarget = false) {
   const fixture = routingFixture(), request = fixture.transport.request, posts: Array<{ path: string; body: any }> = []
   const question = (id: string) => ({ groupId: id, kind: 'ask', items: [{ effectId: `effect-${id}`, input: { type: 'input', prompt: `问题 ${id}` } }] })
   let groups = ['A', 'B']
+  const changed = new Set<() => void>()
+  fixture.transport.onChange = listener => { changed.add(listener); return () => { changed.delete(listener) } }
   fixture.transport.request = async (path, init) => {
     if (path === '/api/assistant') return Response.json({
-      conversation: { id: 'assistant', title: 'Pulse 助理', cwd: '/example', createdAt: '2026-10-25', updatedAt: '2026-10-25' }, messages: [],
+      conversation: { id: 'assistant', title: 'Pulse 助理', cwd: '/example', createdAt: '2026-10-25', updatedAt: '2026-10-25' }, messages: groups.filter(id => !assistantTarget || id !== 'B').map(id => ({ id: `callback-${id}`, role: 'assistant', text: `任务 ${id} 有个问题`, createdAt: '2026-10-25', workAction: { callbackId: `callback-${id}`, conversationId: `conversation-${id}`, runId: `run-${id}`, controlRevision: 0, fingerprint: `hash-${id}`, interaction: question(id) } })),
       receipts: assistantTarget ? [{ messageId: 'message', runId: 'run-B', state: 'replying' }] : [],
       workInteractions: groups.filter(id => !assistantTarget || id !== 'B').map(id => ({ ...question(id), runId: `run-${id}`, conversationId: `conversation-${id}`, title: `任务 ${id}` })),
     })
     if (path === '/api/runs/run-B/state' && assistantTarget) return Response.json({ runId: 'run-B', state: 'running', seq: 0, activities: [], interactions: groups.includes('B') ? [question('B')] : [] })
     if (path.endsWith('/replies')) {
-      const body = JSON.parse(String(init?.body)); posts.push({ path, body }); groups = groups.filter(id => id !== body.groupId)
+      const body = JSON.parse(String(init?.body)); posts.push({ path, body }); groups = groups.filter(id => id !== (body.groupId ?? body.callbackId?.replace('callback-', '')))
+      queueMicrotask(() => changed.forEach(listener => listener()))
       return Response.json({ ok: true })
     }
     return request(path, init)
@@ -47,7 +50,7 @@ it.each([false, true])('selects notification B ahead of pending work A (assistan
   fireEvent.change(view.getByRole('textbox', { name: '你的答案' }), { target: { value: '回答 B' } })
   fireEvent.click(view.getByRole('button', { name: '提交回答' }))
   await waitFor(() => expect(view.posts).toHaveLength(1))
-  expect(view.posts[0]).toMatchObject({ path: '/api/runs/run-B/replies', body: { groupId: 'B', conversationId: assistantTarget ? 'assistant' : 'conversation-B', answers: [{ effectId: 'effect-B', value: { text: '回答 B' } }] } })
+  expect(view.posts[0]).toMatchObject(assistantTarget ? { path: '/api/runs/run-B/replies', body: { groupId: 'B', conversationId: 'assistant', answers: [{ effectId: 'effect-B', value: { text: '回答 B' } }] } } : { path: '/api/assistant/work/conversation-B/replies', body: { callbackId: 'callback-B', fingerprint: 'hash-B', answers: [{ effectId: 'effect-B', value: { text: '回答 B' } }] } })
   await view.findByText('通知对应的问题已处理或暂不可用，请查看任务记录。')
   expect(view.queryByRole('heading', { name: '问题 A' })).toBeNull()
 })

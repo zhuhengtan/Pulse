@@ -15,7 +15,7 @@ afterEach(cleanup)
 
 async function show(fixture = sidebarFixture()) {
   const view = render(<PulseDesignSystem><PulseApp transport={fixture.transport}/></PulseDesignSystem>)
-  await screen.findByText('我们要做什么？')
+  await screen.findByText(/^(?:我们要做什么？|聊点什么？)$/)
   fireEvent.click(screen.getByRole('tab', { name: '工作' }))
   await screen.findByRole('button', { name: '这个项目还是需要帮我加个自动审核' })
   return { ...view, ...fixture }

@@ -49,11 +49,11 @@ it.each(['chat', 'work'] as const)('renders one %s reply when the saved answer a
   expect(view.getByText('已从归档恢复答案')).toBeTruthy()
 })
 
-it('replaces a streamed reply with its canonical record when local data changes', async () => {
+it('shows a chat reply only when its canonical record arrives', async () => {
   const records: WebMessage[] = []
   const { view, emit, notify } = await open('chat', records)
   act(() => emit('Desktop socket reply'))
-  expect(view.getAllByText('Desktop socket reply', { exact: true })).toHaveLength(1)
+  expect(view.queryByText('Desktop socket reply', { exact: true })).toBeNull()
   records.push(answer())
   act(notify)
   await view.findByText('已从归档恢复答案')
@@ -61,13 +61,13 @@ it('replaces a streamed reply with its canonical record when local data changes'
 })
 
 it.each(['ask-question-fixture', 'input-response-fixture', 'plan-preview-fixture'])('retains %s separately from the final reply', async id => {
-  const { view, emit } = await open('chat', [answer({ id })])
+  const { view, emit } = await open('work', [answer({ id })])
   act(() => emit('Desktop socket reply'))
   expect(view.getAllByText('Desktop socket reply', { exact: true })).toHaveLength(2)
 })
 
 it('retains identical replies from different runs and distinct child replies in one run', async () => {
-  const { view, emit } = await open('chat', [answer({ runId: 'older-run' }), answer({ id: 'msg-child-answer', text: 'Independent child answer' })])
+  const { view, emit } = await open('work', [answer({ runId: 'older-run' }), answer({ id: 'msg-child-answer', text: 'Independent child answer' })])
   act(() => emit('Desktop socket reply'))
   expect(view.getAllByText('Desktop socket reply', { exact: true })).toHaveLength(2)
   expect(view.getByText('Independent child answer')).toBeTruthy()

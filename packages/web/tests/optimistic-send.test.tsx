@@ -28,7 +28,7 @@ it.each(['chat', 'work'] as const)('keeps optimistic %s payload and requires con
   const router = createMemoryRouter([{ path: '*', element: <PulseApp transport={fixture.transport} /> }], { initialEntries: [mode === 'chat' ? '/chat' : '/work/pulse-chat'] })
   const view = render(<PulseDesignSystem><RouterProvider router={router} /></PulseDesignSystem>)
   try {
-    await view.findByText(mode === 'chat' ? '我们要做什么？' : '消息：pulse-chat')
+    await view.findByText(mode === 'chat' ? '聊点什么？' : '消息：pulse-chat')
     const editor = (view.container.querySelector('.tiptap') as HTMLElement & { editor: Editor }).editor
     act(() => editor.commands.insertContent([{ type: 'text', text: '完整原始需求 ' }, { type: 'skillChip', attrs: { id: 'grill-and-plan', label: 'grill-and-plan' } }, { type: 'text', text: ' ' }, { type: 'fileChip', attrs: { id: '中文目录/a.ts', label: '中文目录/a.ts' } }]))
     fireEvent.change(view.container.querySelector('input[type=file]')!, { target: { files: [new File(['附件内容'], 'notes.txt', { type: 'text/plain' })] } })

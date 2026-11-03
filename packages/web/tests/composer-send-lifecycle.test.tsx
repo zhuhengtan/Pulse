@@ -45,7 +45,7 @@ async function openFixture(mode: 'chat' | 'work', failFirst = false) {
   }
   const router = createMemoryRouter([{ path:'*', element:<TestApp transport={fixture.transport}/> }], {initialEntries:[mode === 'chat' ? '/chat' : '/work/new']})
   const view = render(<PulseDesignSystem><RouterProvider router={router}/></PulseDesignSystem>)
-  await view.findByText('我们要做什么？')
+  await view.findByText(/^(?:我们要做什么？|聊点什么？)$/)
   const getEditor = () => (view.container.querySelector('.tiptap') as HTMLElement & {editor:Editor}).editor
   return {view, router, getEditor,fixture}
 }
@@ -58,7 +58,7 @@ it('new work draft remains isolated from the created conversation', async () => 
     await waitFor(()=>expect(getEditor().getText()).toBe(''))
     await act(async()=>{await router.navigate('/work/new')})
     await waitFor(()=>expect(view.getByTestId('rendered-route').textContent).toBe('/work/new'))
-    await view.findByText('我们要做什么？')
+    await view.findByText(/^(?:我们要做什么？|聊点什么？)$/)
     await waitFor(()=>expect(view.container.querySelector('.tiptap')).not.toBeNull())
     act(()=>getEditor().commands.insertContent('另一会话的新草稿'))
     await act(async()=>{await router.navigate('/work/created')})

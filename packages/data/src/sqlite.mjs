@@ -32,12 +32,24 @@ export class ConversationDatabase {
         const conversation = this.get(inbox.conversationId), page = this.page(conversation.id, before);
         const receiptById = new Map(inbox.messages.map(item => [item.messageId, item]));
         const receipts = inbox.messages.filter((item, index) => index >= inbox.messages.length - 200 || ['queued', 'replying'].includes(item.state)).map(({ text, ...receipt }) => receipt);
-        const decorate = message => { const receipt = message.role === 'user' && message.id.startsWith('msg-') ? receiptById.get(message.id.slice(4)) : undefined; return !receipt ? message : { ...message, runId: receipt.runId, ...(receipt.state === 'completed' ? {} : { requestId: receipt.messageId, deliveryState: receipt.state }) }; };
+        for (const callback of inbox.callbacks ?? []) if (callback.state === 'processing' && callback.assistantRunId) receipts.push({ messageId: callback.id, runId: callback.assistantRunId, state: 'replying', createdAt: callback.createdAt, updatedAt: callback.createdAt });
+        const decorate = message => {
+            const receipt = message.role === 'user' && message.id.startsWith('msg-') ? receiptById.get(message.id.slice(4)) : undefined;
+            let result = !receipt ? message : { ...message, runId: receipt.runId, ...(receipt.state === 'completed' ? {} : { requestId: receipt.messageId, deliveryState: receipt.state }) };
+            if (message.workAction) {
+                const action = message.workAction, callback = inbox.callbacks?.find(item => item.id === action.callbackId);
+                let current;
+                try { current = this.get(action.conversationId) } catch {}
+                const pending = this.readState(`run:${action.runId}`)?.interactions?.find(group => group.groupId === action.interaction.groupId);
+                result = { ...result, workAction: { ...action, state: callback?.answered ? 'answered' : current?.control?.revision !== action.controlRevision || !pending ? 'obsolete' : 'pending' } };
+            }
+            return result;
+        };
         const messages = page.items.map(decorate), seen = new Set(messages.map(message => message.id));
         for (const item of inbox.messages)
             if (item.state !== 'completed' && !seen.has(`msg-${item.messageId}`))
                 messages.push({ id: `msg-${item.messageId}`, runId: item.runId, role: 'user', text: item.text, createdAt: item.createdAt, deliveryState: item.state, requestId: item.messageId, ...(item.attachments ? { attachments: item.attachments } : {}), ...(item.skills ? { skills: item.skills } : {}), ...(item.mentionedFiles ? { mentionedFiles: item.mentionedFiles } : {}), ...(item.richContent ? { richContent: item.richContent } : {}), ...(item.assistantContext ? { assistantContext: item.assistantContext } : {}) });
-        const workInteractions = [], live = [];
+        const workInteractions = [];
         for (const work of this.list()) {
             if (work.id !== conversation.id && work.origin !== 'assistant' || work.archivedAt || !work.activeRunId)
                 continue;
@@ -46,11 +58,10 @@ export class ConversationDatabase {
                 workInteractions.push({ ...interaction, runId: work.activeRunId, conversationId: work.id, title: work.title, ...(work.projectId ? { projectId: work.projectId } : {}), approvalPolicy: work.approvalPolicy ?? 'manual' });
             if (work.id === conversation.id)
                 continue;
-            const lane = state?.laneState?.lanes.find(item => ['running', 'waiting'].includes(item.status));
-            live.push({ id: `work-live-${work.activeRunId}`, role: 'assistant', text: '', createdAt: work.updatedAt, work: { conversationId: work.id, title: work.title, state: state?.state === 'running' ? (pending.length ? 'waiting' : 'running') : 'interrupted', ...(work.projectId ? { projectId: work.projectId } : {}), ...(lane ? { progress: (lane.activity ?? lane.label).slice(0, 200) } : {}) } });
+
         }
         const assistantWorkIds = new Set(this.list().filter(item => item.origin === 'assistant').map(item => item.id));
-        const combined = [...messages, ...(before ? [] : (inbox.notices ?? []).filter(item => item.work && assistantWorkIds.has(item.work.conversationId)).slice(-50)), ...(before ? [] : live)].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        const combined = [...messages, ...(before ? [] : (inbox.notices ?? []).filter(item => item.work && assistantWorkIds.has(item.work.conversationId)).slice(-50))].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
         const { executionCwd, jarvisWorkspace, ...summary } = conversation;
         return { conversation: { ...summary, kind: 'assistant' }, messages: combined, receipts, workInteractions, ...(page.before ? { before: page.before } : {}), revision: page.revision };
     }
@@ -106,8 +117,8 @@ export class ConversationDatabase {
         const control = this.get(id).control;
         if (!control || actor?.kind === 'system') return control;
         if (actor?.kind === 'policy' && ['reply', 'review'].includes(operation)) return control;
-        if (actor?.kind === 'approval' && operation === 'reply') return control;
         if (actor?.revision !== undefined && actor.revision !== control.revision) throw new Error('WORK_CONTROL_STALE');
+        if (actor?.kind === 'approval' && operation === 'reply') return control;
         if (actor?.kind === 'assistant') {
             if (control.owner !== 'assistant' || actor.assistantConversationId !== control.assistantConversationId) throw new Error('WORK_CONTROL_REQUIRED');
         } else if (control.owner !== 'user') throw new Error('WORK_CONTROL_REQUIRED');

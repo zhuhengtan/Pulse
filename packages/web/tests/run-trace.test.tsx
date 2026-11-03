@@ -226,7 +226,7 @@ function workFixture(traceResponse: () => Promise<Response>) {
 
 async function openWork(transport: PulseWebTransport) {
   render(<PulseDesignSystem><PulseApp transport={transport} /></PulseDesignSystem>)
-  await screen.findByText('我们要做什么？')
+  await screen.findByText(/^(?:我们要做什么？|聊点什么？)$/)
   fireEvent.click(screen.getByRole('tab', { name: '工作' }))
   fireEvent.click(await screen.findByRole('button', { name: /^正在执行的任务/ }))
 }

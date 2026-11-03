@@ -169,3 +169,11 @@
 @media (prefers-reduced-motion:reduce) { .typing-dots i { animation:none; opacity:.75; } }
 
 .work-control-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:6px 20px; border-bottom:1px solid var(--line); color:var(--muted); font-size:12px; }
+
+.chat-approval { max-width:100%; }
+.chat-approval pre { max-width:100%; max-height:220px; overflow:auto; font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.chat-approval-actions { display:flex; gap:8px; margin-top:10px; }
+.message--chat .interaction-panel { border:0; background:transparent; padding:0; max-width:100%; }
+
+.chat-approval-actions .pulse-button { min-height:32px; padding:4px 12px; border:1px solid var(--line); border-radius:8px; background:var(--soft); }
+.chat-approval-actions .pulse-button:last-child { background:var(--chat-action-bg); color:var(--chat-action-fg); border-color:var(--chat-action-bg); }

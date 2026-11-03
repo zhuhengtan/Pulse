@@ -9,8 +9,8 @@ export function withWorkActor<T>(actor: WorkActor, work: () => T): T { return co
 export async function checkWorkControl(data: ConversationData, id: string, operation: string): Promise<WorkControl | undefined> {
   return data.call('checkWorkControl', id, currentWorkActor(), operation)
 }
-export async function asChatWorkAgent<T>(data: ConversationData, id: string, work: () => Promise<T>): Promise<T> {
+export async function asChatWorkAgent<T>(data: ConversationData, id: string, work: () => Promise<T>, expectedRevision?: number): Promise<T> {
   const conversation = await data.call<{ control?: WorkControl }>('get', id)
   if (!conversation.control) throw new Error('WORK_NOT_ASSISTANT_MANAGED')
-  return withWorkActor({ kind: 'assistant', revision: conversation.control.revision, assistantConversationId: conversation.control.assistantConversationId }, async () => { await checkWorkControl(data, id, 'agent'); return work() })
+  return withWorkActor({ kind: 'assistant', revision: expectedRevision ?? conversation.control.revision, assistantConversationId: conversation.control.assistantConversationId }, async () => { await checkWorkControl(data, id, 'agent'); return work() })
 }

@@ -92,7 +92,7 @@ describe('compact run status', () => {
       subscribe(_path, onEvent) { receive = onEvent; return () => { receive = undefined } },
     }
     render(<PulseDesignSystem><PulseApp transport={transport} /></PulseDesignSystem>)
-    await screen.findByText('我们要做什么？')
+    await screen.findByText(/^(?:我们要做什么？|聊点什么？)$/)
     expect(screen.getByRole('status', { name: '服务已连接' })).toBeTruthy()
     fireEvent.click(screen.getByRole('tab', { name: '工作' }))
     fireEvent.click(await screen.findByRole('button', { name: /^正在执行的任务/ }))

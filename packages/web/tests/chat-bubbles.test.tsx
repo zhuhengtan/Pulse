@@ -67,3 +67,27 @@ it('opens delegated work read-only, takes control explicitly and returns it with
   expect(transfers).toEqual([{ action: 'takeover', expectedRevision: 0 }, { action: 'return', expectedRevision: 1 }])
   expect(fixture.calls.some(call => call.path.endsWith('/cancel'))).toBe(false)
 })
+it('keeps work confirmation inside an assistant bubble and submits one exact decision', async () => {
+  const { MessageBubble } = await import('../src/MessageBubble.js')
+  const fixture = followupFixture('chat'), request = vi.fn(async (_path: string, _init?: RequestInit) => Response.json({ ok: true }))
+  fixture.transport.request = request
+  const action = { callbackId: 'callback-approval', conversationId: 'work', runId: 'work-run', controlRevision: 3, fingerprint: 'operation-hash', interaction: { groupId: 'g', kind: 'approval' as const, items: [{ effectId: 'e', input: { tools: [{ toolName: 'fs.write', details: { path: 'report.txt' } }] } }] } }
+  const ui = render(<PulseDesignSystem><MessageBubble retry={() => {}} mode="chat" message={{ id: 'reply', role: 'assistant', text: '需要写入报告，请确认。', createdAt: new Date().toISOString(), workAction: action }} transport={fixture.transport} onOpenWork={() => {}} /></PulseDesignSystem>)
+  expect(ui.getByLabelText('聊天审批').closest('.bubble')?.textContent).toContain('需要写入报告')
+  fireEvent.click(ui.getByText('查看操作详情（1 项）'))
+  expect(ui.getByText(/report.txt/)).toBeTruthy()
+  const agree = ui.getByRole('button', { name: '同意', exact: true })
+  fireEvent.click(agree); fireEvent.click(agree)
+  await ui.findByText('此事项已处理')
+  expect(request).toHaveBeenCalledTimes(1)
+  expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({ callbackId: action.callbackId, fingerprint: action.fingerprint, answers: [{ effectId: 'e', value: { approved: true } }] })
+})
+it('disables obsolete chat approvals after a change of owner or operation', async () => {
+  const { ChatWorkPrompt } = await import('../src/ChatInteraction.js')
+  const fixture = followupFixture('chat'), request = vi.fn()
+  fixture.transport.request = request
+  const ui = render(<ChatWorkPrompt transport={fixture.transport} action={{ callbackId: 'old', conversationId: 'work', runId: 'run', controlRevision: 0, fingerprint: 'old', state: 'obsolete', interaction: { groupId: 'g', kind: 'approval', items: [] } }}/>)
+  expect(ui.getByText('此事项已变化，可打开工作对话查看。')).toBeTruthy()
+  expect(ui.queryByRole('button')).toBeNull()
+  expect(request).not.toHaveBeenCalled()
+})

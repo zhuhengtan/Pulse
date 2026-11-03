@@ -1,3 +1,4 @@
+import type { WorkCallback } from '../work-callback.js'
 import { parseRichContent, type RichContent } from '../rich-content.js'
 import { ConversationData } from '@hunterzhu/pulse-data'
 import { randomUUID } from 'node:crypto'
@@ -16,7 +17,7 @@ export interface QueuedAssistantMessage extends WebAssistantMessageReceipt {
   richContent?: RichContent
   mentionedFiles?: string[]
 }
-interface AssistantQueueFile { schemaVersion: 1; conversationId: string; messages: QueuedAssistantMessage[]; notices?: WebMessage[]; workLinks?: Record<string, { projectId: string; title: string }> }
+interface AssistantQueueFile { callbacks?: WorkCallback[]; schemaVersion: 1; conversationId: string; messages: QueuedAssistantMessage[]; notices?: WebMessage[]; workLinks?: Record<string, { projectId: string; title: string }> }
 
 /** Durable inbox for the single assistant conversation. Entries marked replying at
  * process startup are interrupted rather than replayed because a tool may have run. */
@@ -36,6 +37,7 @@ export class AssistantConversationStore {
         : { schemaVersion: 1, conversationId: await createConversation(), messages: [] }
       let changed = false
       for (const message of this.state.messages) if (message.state === 'replying') { message.state = 'interrupted'; message.error = '服务在回复期间停止；未自动重试'; message.updatedAt = new Date().toISOString(); changed = true }
+      for (const callback of this.state.callbacks ?? []) if (callback.state === 'processing') { callback.state = 'queued'; changed = true }
       if (!saved || changed) await this.save()
     }
     return this.state.conversationId
@@ -143,7 +145,7 @@ export class AssistantConversationStore {
     })
   }
 
-  hasQueued(): boolean { return this.requireState().messages.some(message => message.state === 'queued') }
+  hasQueued(): boolean { return this.requireState().messages.some(message => message.state === 'queued') || Boolean(this.requireState().callbacks?.some(item => item.state === 'queued')) }
 
   async update(runId: string, state: WebAssistantMessageReceipt['state'], error?: string): Promise<void> {
     await this.serial(async () => {
@@ -158,7 +160,7 @@ export class AssistantConversationStore {
   }
 
   list(): WebAssistantMessageReceipt[] {
-    return this.requireState().messages.map(({ text: _text, ...message }) => structuredClone(message))
+    return [...this.requireState().messages.map(({ text: _text, ...message }) => structuredClone(message)), ...this.callbacks().filter(item => item.state === 'processing' && item.assistantRunId).map(item => ({ messageId: item.id, runId: item.assistantRunId!, state: 'replying' as const, createdAt: item.createdAt, updatedAt: item.createdAt }))]
   }
 
   transcript(pendingOnly = false): Array<{ requestId: string; runId: string; text: string; createdAt: string; attachments?: WebAttachment[]; skills?: string[]; richContent?: RichContent; mentionedFiles?: string[]; assistantContext?: AssistantContextReference }> {
@@ -171,6 +173,28 @@ export class AssistantConversationStore {
       ...(message.skills ? { skills: message.skills } : {}),
       ...(message.mentionedFiles ? { mentionedFiles: message.mentionedFiles } : {}), ...(message.richContent ? { richContent: message.richContent } : {}), ...(message.assistantContext ? { assistantContext: message.assistantContext } : {}),
     }))
+  }
+
+  callbacks(): WorkCallback[] { return structuredClone(this.requireState().callbacks ?? []) }
+  async addCallback(callback: WorkCallback): Promise<void> {
+    await this.serial(async () => {
+      const callbacks = this.requireState().callbacks ??= []
+      if (callbacks.some(item => item.id === callback.id)) return
+      // A terminal fact supersedes unprocessed non-terminal notices for this run.
+      if (['succeeded', 'failed', 'cancelled', 'interrupted', 'pending', 'conflict'].includes(callback.kind)) for (const item of callbacks) if (item.runId === callback.runId && item.state === 'queued') item.state = 'completed'
+      callbacks.push(structuredClone(callback)); await this.save()
+    })
+  }
+  async nextCallback(): Promise<WorkCallback | undefined> {
+    return this.serial(async () => {
+      const callback = this.requireState().callbacks?.find(item => item.state === 'queued')
+      if (!callback) return undefined
+      callback.state = 'processing'; callback.assistantRunId ??= `run-${randomUUID()}`
+      await this.save(); return structuredClone(callback)
+    })
+  }
+  async updateCallback(id: string, update: Partial<Pick<WorkCallback, 'state' | 'error' | 'answered' | 'decision'>>): Promise<void> {
+    await this.serial(async () => { const callback = this.requireState().callbacks?.find(item => item.id === id); if (callback) { Object.assign(callback, update); await this.save() } })
   }
 
   async addWorkNotice(message: WebMessage): Promise<void> {
