@@ -29,7 +29,7 @@
 .chat-surface .message-bubble-row { width:100%; }
 .chat-surface .message.user .message-bubble-row { width:auto; }
 .chat-surface .run-trace { width:100%; margin:0; }
-.chat-surface .run-trace-head { min-height:32px; padding:4px 0; font-size:13px; }
+.chat-surface .run-trace-head { justify-content:flex-start; min-height:32px; padding:4px 0; font-size:13px; }
 .chat-surface .run-trace-head strong { font-weight:500; }
 .chat-surface .run-trace-body { border-left:1px solid var(--line); margin:6px 0 8px 4px; padding-left:12px; }
 .chat.chat-surface[data-chat-theme] .composer-wrap { position:relative; width:min(848px,100%); padding:8px 24px max(16px,env(safe-area-inset-bottom)); display:flex; flex-direction:column; gap:8px; min-height:0; max-height:calc(100dvh - 100px); flex:0 1 auto; border:0; background:var(--panel); }
