@@ -671,3 +671,8 @@
 .suggestion-enter:hover { background:var(--line); color:var(--ink); }
 .suggestion-hint { flex:none; border-top:1px solid var(--line); padding:8px 8px 2px; font-size:10px; color:var(--muted); }
 :root[data-theme] .suggestion-item.is-selected,:root[data-theme] .suggestion-item:hover { color:var(--ink); }
+
+/* Keep the destructive stop secondary while composing a follow-up. */
+.composer-tools-right .composer-stop-btn.is-secondary { background:transparent; color:var(--muted); border:1px solid var(--line); }
+.composer-tools-right .composer-send-btn.is-followup { width:auto; border-radius:20px; padding:0 12px; gap:6px; font-size:13px; }
+.composer-tools-right .composer-send-menu { display:grid; place-items:center; width:28px; height:32px; padding:0; border:0; border-radius:8px; color:var(--muted); background:transparent; }

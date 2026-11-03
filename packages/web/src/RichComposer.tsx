@@ -859,7 +859,7 @@ export function RichComposer({
           {running && (
             <PulseButton
               type="button"
-              className="composer-stop-btn"
+              className={`composer-stop-btn ${hasContent || attachments.length ? 'is-secondary' : ''}`}
               aria-label={stopping ? '正在停止' : '停止生成'}
               aria-busy={stopping}
               title={stopping ? '正在停止' : '停止生成'}
@@ -869,16 +869,17 @@ export function RichComposer({
               <span className={stopping ? 'spinner' : 'composer-stop-icon'} aria-hidden="true" />
             </PulseButton>
           )}
+
+          {(!running || hasContent || attachments.length > 0) && <button
+            type="button" className={`composer-send-btn ${running ? 'is-followup' : ''}`} disabled={!canSubmit}
+            aria-label={submitLabel ?? (running ? followupBehavior === 'queue' ? '加入队列' : '立即发送' : '发送')}
+            title={running ? followupBehavior === 'queue' ? '排队发送 · Enter' : '立即发送 · Enter' : '发送 · Enter'}
+            onClick={() => void handleSend()}
+          >{submitting ? <span className="spinner"/> : <>{running && <span>{followupBehavior === 'queue' ? '排队发送' : '立即发送'}</span>}<Icon name="up" size={18}/></>}</button>}
           {running && (hasContent || attachments.length > 0) && <Dropdown trigger={['click']} placement="topRight" open={sendMenuOpen} onOpenChange={setSendMenuOpen} menu={{
             items: [{ key: 'queue', label: '排队发送', extra: followupBehavior === 'queue' ? 'Enter' : '⌘/Ctrl Enter' }, { key: 'immediate', label: '立即发送', extra: followupBehavior === 'immediate' ? 'Enter' : '⌘/Ctrl Enter' }],
             onClick: ({ key }) => { setSendMenuOpen(false); void handleSend(key as FollowupBehavior) },
           }}><button type="button" className="composer-send-menu" aria-label="发送方式" aria-haspopup="menu" aria-expanded={sendMenuOpen} disabled={!canSubmit}><Icon name="down" size={12}/></button></Dropdown>}
-          {(!running || hasContent || attachments.length > 0) && <button
-            type="button" className="composer-send-btn" disabled={!canSubmit}
-            aria-label={submitLabel ?? (running ? followupBehavior === 'queue' ? '加入队列' : '立即发送' : '发送')}
-            title={running ? followupBehavior === 'queue' ? '排队发送 · Enter' : '立即发送 · Enter' : '发送 · Enter'}
-            onClick={() => void handleSend()}
-          >{submitting ? <span className="spinner"/> : <Icon name="up" size={18}/>}</button>}
         </div>
       </div>
     </div>
