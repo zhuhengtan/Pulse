@@ -1,9 +1,11 @@
+import { RequestDiagnostics } from './request-diagnostics.js'
 import type { JsonValue, LLMRequestProjection, LLMResult } from '@hunterzhu/pulse-runtime'
 import { consumeProviderSse, normalizeOpenAIResponse, parseProviderJson, providerHttpErrorFromResponse, providerNetworkError, providerResponseError } from './normalize.js'
 import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
 import { adaptCanonicalRequest, DynamicCapabilityProbe, lowerProjectionToCanonical, parseOpenAISseEvents, resolveModelCapability, toOpenAIPayload } from './canonical/index.js'
 
 export class OpenAICompatibleAdapter implements ProviderAdapter {
+  private readonly diagnostics = new RequestDiagnostics()
   readonly name = 'OpenAI Compatible'
   private readonly baseURL: string
   private readonly probe = new DynamicCapabilityProbe()
@@ -17,7 +19,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
     this.baseURL = baseURL
   }
-  async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; onReasoning?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number; reasoningEffort?: 'low'; beforeRetryAttempt?: () => Promise<void> }): Promise<LLMResult> {
+  async executeAttempt(params: Parameters<ProviderAdapter['executeAttempt']>[0]): Promise<LLMResult> {
     const streaming = params.onObservation !== undefined
     const { canonical, toolNameAliases } = lowerProjectionToCanonical({
       request: params.request,
@@ -33,6 +35,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const { request: adapted } = adaptCanonicalRequest(canonical, capability, this.probe, toolNameAliases)
     const sentReasoning = Boolean(adapted.reasoning?.effort)
     const body = toOpenAIPayload(adapted, capability, this.config.provider)
+    params.onRequest?.(this.diagnostics.measure(params.connectionKey ?? 'direct', body))
 
     try {
       const response = await fetch(`${this.baseURL.replace(/\/$/, '')}/chat/completions`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { authorization: `Bearer ${this.config.apiKey}` } : {}), ...(this.config.extraHeaders ?? {}) }, body: JSON.stringify(body) })

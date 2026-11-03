@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import type { StepContext, JsonValue } from '@hunterzhu/pulse-runtime'
+import { contentHash, type StepContext, type JsonValue } from '@hunterzhu/pulse-runtime'
 import type { ControlledTask, PlannedTask } from './state.js'
 
 /** Dependency-connected work stays on one context line. Disconnected deliveries may fork. */
@@ -27,12 +27,18 @@ export const deliverySchema = z.object({
   lookup: z.object({ tool: z.literal('task.delivery'), stageId: z.string().max(64) }),
   evidence: z.array(z.object({ ref: z.string().max(80), tool: z.string().max(80).optional(), hash: z.string().max(128).optional(), path: z.string().max(512).optional(), offset: z.number().optional(), nextOffset: z.number().nullable().optional(), exitCode: z.number().optional() })).max(12),
   evidenceCount: z.number().int().min(0), omitted: z.number().int().min(0),
+  handoff: z.object({
+    goal: z.string(), check: z.string(), nextAction: z.string().optional(), unresolved: z.string().optional(),
+    dependencies: z.array(z.object({ stageId: z.string(), status: z.string(), attempt: z.number(), fingerprint: z.string(), evidenceRefs: z.array(z.string()) })),
+  }).optional(),
 })
 export type StageDelivery = z.infer<typeof deliverySchema>
-export function stageDelivery(ctx: StepContext<JsonValue>, task: ControlledTask): StageDelivery {
+export function stageDelivery(ctx: StepContext<JsonValue>, task: ControlledTask, options?: { contextProtocolVersion?: 1 | 2 | undefined; tasks: readonly ControlledTask[] }): StageDelivery {
   const refs = [...new Set([...task.evidenceRefs, ...(task.contextRefs ?? [])])]
   const evidence: StageDelivery['evidence'] = []
-  const base = { version: 1 as const, stageId: task.id, ownerLaneId: task.ownerLaneId ?? ctx.lane.id, status: task.status === 'passed' ? 'passed' as const : 'blocked' as const, lookup: { tool: 'task.delivery' as const, stageId: task.id }, summary: (task.note ?? task.status).slice(0, 200), evidenceCount: refs.length }
+  const base = { version: 1 as const, stageId: task.id, ownerLaneId: task.ownerLaneId ?? ctx.lane.id, status: task.status === 'passed' ? 'passed' as const : 'blocked' as const, lookup: { tool: 'task.delivery' as const, stageId: task.id }, summary: (task.note ?? task.status).slice(0, 200), evidenceCount: refs.length,
+    ...(options?.contextProtocolVersion === 2 ? { handoff: { goal: task.goal, check: task.check, ...(task.nextAction ? { nextAction: task.nextAction } : {}), ...(task.status !== 'passed' && task.note ? { unresolved: task.note } : {}), dependencies: options.tasks.filter(dependency => task.dependsOn.includes(dependency.id)).map(dependency => ({ stageId: dependency.id, status: dependency.status, attempt: dependency.attempts, fingerprint: contentHash({ goal: dependency.goal, check: dependency.check, status: dependency.status, attempt: dependency.attempts, evidenceRefs: dependency.evidenceRefs }), evidenceRefs: [...dependency.evidenceRefs] })) } } : {}),
+  }
   for (const ref of refs) {
     const meta = ctx.results.meta(ref), body = ctx.results.read(ref)
     const value = body && typeof body === 'object' && !Array.isArray(body) ? body : {}

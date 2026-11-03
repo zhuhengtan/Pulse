@@ -61,6 +61,13 @@ export function toAnthropicPayload(
 
   const system = systemParts.join('\n')
   const maxTokens = canonical.maxTokens ?? 4096
+  // Cache a completed request boundary as well as static tools/system. Future
+  // append-only requests can reuse this prefix. Never mark a thinking block.
+  if (isAnthropicCache && canonical.contextProtocolVersion === 2) {
+    const last = messages.at(-1)?.content
+    const boundary = last?.findLast(block => block.type !== 'thinking' && block.type !== 'redacted_thinking')
+    if (boundary) Object.assign(boundary, { cache_control: { type: 'ephemeral' } })
+  }
 
   const body: Record<string, unknown> = {
     ...(canonical.model ? { model: canonical.model } : {}),

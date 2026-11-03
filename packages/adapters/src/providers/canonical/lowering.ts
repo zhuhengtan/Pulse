@@ -28,6 +28,7 @@ export function lowerProjectionToCanonical(params: LoweringParams): LoweringResu
   const messages = extractCanonicalMessages(request)
 
   const canonical: CanonicalLLMRequest = {
+    ...(request.contextSpec?.contextProtocolVersion === 2 ? { contextProtocolVersion: 2 } : {}),
     ...(params.model ? { model: params.model } : {}),
     messages,
     ...(tools.length ? { tools } : {}),
@@ -54,6 +55,9 @@ function extractCanonicalMessages(request: LLMRequestProjection): CanonicalMessa
   const messages: CanonicalMessage[] = []
 
   for (const block of request.blocks) {
+    // Protocol 2 supplies schemas once through native tools. Protocol 1 keeps
+    // its historical wire representation for persisted runs.
+    if (request.contextSpec?.contextProtocolVersion === 2 && block.kind === 'tools') continue
     const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
 
     if (block.kind === 'conversation' && Array.isArray(block.content)) {
@@ -79,7 +83,7 @@ function extractCanonicalMessages(request: LLMRequestProjection): CanonicalMessa
     if (block.kind === 'provider_history' && request.contextSpec.providerHistory !== undefined) {
       for (const item of request.contextSpec.providerHistory) {
         if (item.role === 'user') {
-          messages.push({ role: 'user', content: item.content })
+          messages.push({ role: 'user', content: item.content, ...(item.name ? { name: item.name } : {}) })
         } else if (item.role === 'assistant') {
           messages.push({
             role: 'assistant',

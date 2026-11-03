@@ -26,7 +26,7 @@ afterEach(async () => {
 async function directory() { const p = await mkdtemp(join(tmpdir(), 'pulse-continuous-')); directories.push(p); return p }
 const globalState = (r: PulseRuntime): any => { const agent = [...r.state.agents.values()][0]!; return agent.globalVersions.get(agent.latestGlobalVersion) }
 
-async function scenario(options: { rounds: number; version?: '56' | '57'; pause?: boolean; summariesInvalid?: number; category?: string }) {
+async function scenario(options: { rounds: number; version?: '56' | '57'; contextProtocolVersion?: 2; pause?: boolean; summariesInvalid?: number; category?: string }) {
   const dir = await directory(), ledgerPath = join(dir, 'model-budget.json')
   let ledger = await ModelAttemptBudget.open(ledgerPath, 256)
   let runtime: PulseRuntime, reads = 0, writes = 0, summaries = 0, work = 0, reviews = 0
@@ -35,7 +35,7 @@ async function scenario(options: { rounds: number; version?: '56' | '57'; pause?
   const timing = (phase: string) => { if (nativeTiming) console.info('CONTINUOUS_TIMING ' + JSON.stringify({ phase, elapsedMs: Date.now() - began, reads, writes, summaries, work, used: ledger.used, ledgerMs, effects: runtime?.state.effects.size })) }
   const owners = new Set<string>(), calls: string[] = []
   const stage = { id: 'deliver', kind: 'edit', goal: 'Read the required local fixtures and create result.txt', check: 'result.txt contains the requested result', criterionIds: ['result'], dependsOn: [] }
-  const program = buildTaskControllerProgram({ version: options.version ?? '57', system: 'Offline scripted test', toolNames: ['fs.read', 'fs.write', 'ask.choice'], readOnlyToolNames: ['fs.read'], approvalMode: 'auto', maxTurns: 256, modelBudgetView: () => ledger.schedulingView() })
+  const program = buildTaskControllerProgram({ ...(options.contextProtocolVersion ? { contextProtocolVersion: options.contextProtocolVersion } : {}), version: options.version ?? '57', system: 'Offline scripted test', toolNames: ['fs.read', 'fs.write', 'ask.choice'], readOnlyToolNames: ['fs.read'], approvalMode: 'auto', maxTurns: 256, modelBudgetView: () => ledger.schedulingView() })
   const execute: EffectExecutor = async effect => {
     calls.push(effect.key ?? '')
     if (calls.length > 350) throw new Error('SIMULATION_EFFECT_LIMIT')
@@ -113,6 +113,16 @@ it('resumes a 100-round chain with the original durable budget and no repeated w
   expect(globalState(result.runtime).taskOutcome.status).toBe('accepted')
   expect(result.reads).toBe(100); expect(result.writes).toBe(1); expect(result.owners.size).toBe(1)
   expect(result.used).toBe(result.calls.filter(k => !k.includes('-tool-')).length)
+}, 240000)
+
+it.each([false, true])('keeps protocol 2 stable for 100 rounds and one write (restore=%s)', async pause => {
+  const result = await scenario({ rounds: 100, contextProtocolVersion: 2, pause })
+  expect(result.outcome.status, JSON.stringify(result.outcome)).toBe('succeeded')
+  expect(globalState(result.runtime).taskOutcome.status).toBe('accepted')
+  expect(result.reads).toBe(100); expect(result.writes).toBe(1); expect(result.owners.size).toBe(1)
+  expect(result.summaries).toBeGreaterThan(1)
+  expect(result.used).toBeLessThan(256)
+  expect(globalThis.fetch).not.toHaveBeenCalled()
 }, 240000)
 
 it.each(['coding', 'research', 'document', 'file-organization', 'browser-fixture', 'multi-tool'])('continues necessary discovery for %s without a progress-review detour', async category => {

@@ -1,3 +1,4 @@
+import { RequestDiagnostics } from './request-diagnostics.js'
 import { ResponsesWebSocketPool } from './responses-websocket.js'
 import { createHash, randomUUID as randomConnectionKey } from 'node:crypto'
 import type { JsonValue, LLMResult } from '@hunterzhu/pulse-runtime'
@@ -14,6 +15,7 @@ const digest = (value: unknown): string => createHash('sha256').update(JSON.stri
 
 /** Explicit stateless Responses protocol. Never retries using another endpoint or protocol. */
 export class ResponsesAdapter implements ProviderAdapter {
+  private readonly diagnostics = new RequestDiagnostics()
   readonly name = 'OpenAI Responses'
   private readonly endpoint: string
   private readonly sockets = new ResponsesWebSocketPool()
@@ -41,6 +43,7 @@ export class ResponsesAdapter implements ProviderAdapter {
     const { request: adapted } = adaptCanonicalRequest(canonical, capability, this.probe, toolNameAliases)
     const scope = this.scope(canonical.model)
     const body = responsesPayload(adapted, scope, capability)
+    params.onRequest?.(this.diagnostics.measure(params.connectionKey ?? 'direct', body))
     if (this.config.responsesTransport === 'websocket') {
       const connectionKey = params.connectionKey ?? randomConnectionKey()
       try {

@@ -28,6 +28,24 @@ function compactionPressure(state: RuntimeState, lane: LaneRecord, options: Hist
   const nextRound = Math.ceil(Buffer.byteLength(stableSerialize(lane.context.history.at(-1) ?? {}), 'utf8') / 4)
   return estimate + nextRound > Math.max(1, options.maxContextTokens - (options.outputReserveTokens ?? 4096)) * 0.8
 }
+
+/** Whole rounds only. Under pressure, reduce the retained tail to leave headroom
+ * for the checkpoint and the next tool batch instead of repeatedly compressing.
+ */
+function compactionRetention(ctx: StepContext, options: HistoryCompactionOptions, protocol?: 1 | 2): number {
+  const keep = Math.max(0, Math.floor(options.keepRecentRounds))
+  if (protocol !== 2 || !options.maxContextTokens) return keep
+  const available = Math.max(1, options.maxContextTokens - (options.outputReserveTokens ?? 4096))
+  let retained = 0, bytes = 0
+  const seen = new Set<string>()
+  for (const record of ctx.lane.context.history.slice(-keep).reverse()) {
+    const receiptBytes = record.resultRefs.filter(ref => !seen.has(ref) && ctx.results.meta(ref)?.effectKind === 'tool').reduce((total, ref) => { seen.add(ref); return total + Math.min(ctx.results.meta(ref)?.sizeBytes ?? 0, 4096) }, 0)
+    const size = Buffer.byteLength(stableSerialize(record), 'utf8') + receiptBytes
+    if ((bytes + size) / 4 > available * 0.3) break
+    bytes += size; retained++
+  }
+  return retained
+}
 export interface HistoryRecordMeta { seq: number; hash: string; effectId?: string; resultRefs: ResultRef[]; resultSelection?: Array<{ ref: ResultRef; rule: string; hash: string }>; result?: ResultRef; findings?: ResultRef[]; privacy: PrivacyLabel; privacyTaints?: import('../core/types.js').PrivacyTaint[] }
 export interface ResultMeta { effectKind?: string; outcomeStatus?: string; sideEffectPolicy?: 'none' | 'read' | 'write' | 'external'; toolName?: string; toolArguments?: JsonValue; humanQuestion?: JsonValue; toolCommand?: string; toolExitCode?: number; ref: ResultRef; privacy: PrivacyLabel; derivedFrom: ProvenanceRef[]; sizeBytes: number; hash: string; producer: { kind: 'lane' | 'effect'; id: string }; summary?: JsonValue }
 export interface StepContext<TState = JsonValue> {
@@ -93,11 +111,11 @@ function scalarProjection(value: unknown): JsonValue {
 function boundedInstruction(value: string): string {
   return assertDslInstructionSize(value)
 }
-function programLLMInput(config: { system?: string; explicitContext?: boolean; includeLaneHistory?: boolean; nativeToolHistory?: boolean; requestOutputReserveTokens?: number; toolSet?: string }, input: Record<string, JsonValue>): Record<string, JsonValue> {
+function programLLMInput(config: { system?: string; explicitContext?: boolean; includeLaneHistory?: boolean; nativeToolHistory?: boolean; contextProtocolVersion?: 1 | 2; requestOutputReserveTokens?: number; toolSet?: string }, input: Record<string, JsonValue>): Record<string, JsonValue> {
   const isolated = input.isolateVerification === true
   const source: Record<string, JsonValue> = { ...input }
   delete source.isolateVerification
-  const merged: Record<string, JsonValue> = { ...source, ...(config.requestOutputReserveTokens ? { requirements: { ...callInput(source.requirements ?? {}), maxOutputTokens: config.requestOutputReserveTokens } } : {}), ...(config.explicitContext ? { explicitContext: true } : {}), ...(config.includeLaneHistory ? { includeLaneHistory: true } : {}), ...(config.nativeToolHistory ? { nativeToolHistory: true } : {}), ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSetId: config.toolSet }) }
+  const merged: Record<string, JsonValue> = { ...source, ...(config.contextProtocolVersion === 2 ? { contextProtocolVersion: 2 } : {}), ...(config.requestOutputReserveTokens ? { requirements: { ...callInput(source.requirements ?? {}), maxOutputTokens: config.requestOutputReserveTokens } } : {}), ...(config.explicitContext ? { explicitContext: true } : {}), ...(config.includeLaneHistory ? { includeLaneHistory: true } : {}), ...(config.nativeToolHistory ? { nativeToolHistory: true } : {}), ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSetId: config.toolSet }) }
   if (!isolated) return merged
   return { ...merged, explicitContext: true, includeLaneHistory: false, nativeToolHistory: false, system: 'You are an isolated verifier. The visible content must be one JSON object matching the schema. Do not call tools. Private reasoning and provider continuation are not results. Whitespace-only content is invalid.', tools: { tools: [] }, toolSetId: 'pulse.verify.isolated' }
 }
@@ -651,7 +669,7 @@ export class StepBuilder<TState = JsonValue> {
   private readonly compactionBoundaries = new Set<string>()
   private boundaryHandler?: ErrorBoundaryHandler<TState>
   private checkpointHandler?: (ctx: StepContext<TState>, step: string) => ReturnType<Handler> | undefined
-  constructor(readonly config: { id: string; version: string; system?: string; explicitContext?: boolean; includeLaneHistory?: boolean; nativeToolHistory?: boolean; requestOutputReserveTokens?: number; modelRetryPolicy?: EffectSubmission['retryPolicy']; toolSet?: string; state?: z.ZodType<TState>; historyCompaction?: HistoryCompactionOptions }) {}
+  constructor(readonly config: { id: string; version: string; system?: string; explicitContext?: boolean; includeLaneHistory?: boolean; nativeToolHistory?: boolean; contextProtocolVersion?: 1 | 2; requestOutputReserveTokens?: number; modelRetryPolicy?: EffectSubmission['retryPolicy']; toolSet?: string; state?: z.ZodType<TState>; historyCompaction?: HistoryCompactionOptions }) {}
   addStep(name: string, handler: Handler): this { this.handlers.set(name, handler); this.compactionBoundaries.add(name); return this }
   /** Runs before any step can dispatch effects, including queued tools and approvals. */
   beforeStep(handler: (ctx: StepContext<TState>, step: string) => ReturnType<Handler> | undefined): this { this.checkpointHandler = handler; return this }
@@ -1547,17 +1565,21 @@ export class StepBuilder<TState = JsonValue> {
     const compactSummarize = '$compact:summarize'
     const compactApply = '$compact:apply'
     if (compaction) {
-      const keepRecentRounds = Math.max(0, Math.floor(compaction.keepRecentRounds))
       this.handlers.set(compactSummarize, (ctx) => {
         const retainedPrefix = sdkLocals(ctx.lane.resume.locals).compactUpToSeq
-        const candidates = typeof retainedPrefix === 'number' ? ctx.history.filter(h => h.seq <= retainedPrefix) : ctx.history.slice(0, Math.max(0, ctx.history.length - keepRecentRounds))
+        const keep = compactionRetention(ctx as StepContext, compaction, this.config.contextProtocolVersion)
+        const candidates = typeof retainedPrefix === 'number' ? ctx.history.filter(h => h.seq <= retainedPrefix) : ctx.history.slice(0, Math.max(0, ctx.history.length - keep))
         const upToSeq = candidates.at(-1)?.seq
         const locals = ordinaryLocals(ctx.lane.resume.locals)
         const sdk = sdkLocals(ctx.lane.resume.locals)
         const returnStep = typeof sdk.compactReturnStep === 'string' ? sdk.compactReturnStep : ctx.lane.resume.step
         if (upToSeq === undefined) return { next: returnStep === compactSummarize ? entry : returnStep, locals: { ...locals, $sdk: sdk } }
+        const checkpointContext = this.config.contextProtocolVersion === 2 ? { conversation: [{ role: 'user', content: `Original lane goal: ${ctx.goal}. Preserve requirements, subsequent corrections, settled evidence references, uncertain operations and next action.` }] } : undefined
+        const available = compaction.maxContextTokens === undefined ? undefined : Math.max(1, compaction.maxContextTokens - (compaction.outputReserveTokens ?? 4096))
+        const summaryConfig = this.config.contextProtocolVersion === 2 && available !== undefined ? { ...this.config, requestOutputReserveTokens: Math.max(64, Math.min(2048, compaction.outputReserveTokens ?? 4096, Math.floor(available * 0.2))) } : this.config
+        if (this.config.contextProtocolVersion === 2) ctx.trace({ kind: 'context.compaction', data: { upToSeq, keepRecentRounds: keep, targetInputRatio: 0.6, summaryOutputReserve: summaryConfig.requestOutputReserveTokens ?? null } })
         return {
-          actions: [{ type: 'submit_effects', effects: [{ key: '$compact-summary', kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(this.config, { task: compaction.summarizeTask, instruction: `${compaction.instruction ?? 'Summarize the older history.'}\nReturn a nonempty plain-text summary only. This request cannot execute tools. Preserve settled receipts and unresolved work; a proposed tool call is not an executed operation or a created file. Do not continue the old task or emit tool calls.`, explicitContext: true, includeLaneHistory: true, tools: { tools: [] }, historySeqs: candidates.map((record) => record.seq), upToSeq }) }], wait: { onUnsatisfied: 'resume_with_error' } }],
+          actions: [{ type: 'submit_effects', effects: [{ key: '$compact-summary', kind: 'llm', concurrencyClass: 'llm', input: programLLMInput(summaryConfig, { task: compaction.summarizeTask, instruction: `${compaction.instruction ?? 'Summarize the older history.'}\nReturn a nonempty plain-text summary only. This request cannot execute tools. Preserve settled receipts and unresolved work; a proposed tool call is not an executed operation or a created file. Do not continue the old task or emit tool calls.`, ...(checkpointContext ? { inputs: checkpointContext } : {}), explicitContext: true, includeLaneHistory: true, tools: { tools: [] }, historySeqs: candidates.map((record) => record.seq), upToSeq }) }], wait: { onUnsatisfied: 'resume_with_error' } }],
           next: compactApply,
           locals: { ...locals, $sdk: { ...sdk, compactPending: true, compactReturnStep: returnStep, compactUpToSeq: upToSeq } },
         }
@@ -1657,7 +1679,7 @@ export class StepBuilder<TState = JsonValue> {
   }
 }
 
-export function defineLaneProgram<TState = JsonValue>(config: { id: string; version: string; system?: string; explicitContext?: boolean; includeLaneHistory?: boolean; nativeToolHistory?: boolean; requestOutputReserveTokens?: number; modelRetryPolicy?: EffectSubmission['retryPolicy']; toolSet?: string; state?: z.ZodType<TState>; historyCompaction?: HistoryCompactionOptions }, define: (builder: StepBuilder<TState>) => void): LaneProgramDefinition { const builder = new StepBuilder(config); define(builder); return builder.build() }
+export function defineLaneProgram<TState = JsonValue>(config: { id: string; version: string; system?: string; explicitContext?: boolean; includeLaneHistory?: boolean; nativeToolHistory?: boolean; contextProtocolVersion?: 1 | 2; requestOutputReserveTokens?: number; modelRetryPolicy?: EffectSubmission['retryPolicy']; toolSet?: string; state?: z.ZodType<TState>; historyCompaction?: HistoryCompactionOptions }, define: (builder: StepBuilder<TState>) => void): LaneProgramDefinition { const builder = new StepBuilder(config); define(builder); return builder.build() }
 
 function pureStepViolation(api: string): never {
   throw Object.assign(new Error(`Pure Step attempted to access ${api}. Use StepContext.now or ctx.trace().`), { code: 'PURE_STEP_VIOLATION' })

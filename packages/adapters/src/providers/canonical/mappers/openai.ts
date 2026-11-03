@@ -121,9 +121,10 @@ export function parseOpenAISseEvents(raw: unknown): CanonicalStreamEvent[] {
         ...(typeof (u.completion_tokens_details as any)?.reasoning_tokens === 'number'
           ? { reasoningTokens: (u.completion_tokens_details as any).reasoning_tokens }
           : {}),
-        ...(typeof (u.prompt_tokens_details as any)?.cached_tokens === 'number'
-          ? { cachedInputTokens: (u.prompt_tokens_details as any).cached_tokens }
+        ...(typeof ((u.prompt_tokens_details as any)?.cached_tokens ?? u.prompt_cache_hit_tokens) === 'number'
+          ? { cachedInputTokens: ((u.prompt_tokens_details as any)?.cached_tokens ?? u.prompt_cache_hit_tokens) as number }
           : {}),
+        ...(typeof u.prompt_cache_miss_tokens === 'number' ? { uncachedInputTokens: u.prompt_cache_miss_tokens } : {}),
       },
     })
   }

@@ -11,6 +11,7 @@ export interface ModelUsage {
   /** Count of visible response characters, measured by the adapter. */
   visibleOutputChars?: number
   cachedInputTokens?: number
+  cacheWriteInputTokens?: number
   uncachedInputTokens?: number
   latencyMs?: number
   cost?: { amount: number; currency: string; source: 'reported' | 'estimated'; pricingVersion?: string }
@@ -75,7 +76,7 @@ export class InMemoryModelRegistry implements ModelRegistry {
 
 /** Conservative admission estimate used before a provider attempt is started. */
 export function estimateProjectionTokens(projection: LLMRequestProjection): number {
-  return Math.ceil(Buffer.byteLength(JSON.stringify(projection.blocks), 'utf8') / 4) + (projection.images?.length ?? 0) * 4096
+  return Math.ceil(Buffer.byteLength(JSON.stringify(projection.blocks), 'utf8') / 4) + (projection.images?.length ?? 0) * 4096 + (projection.inputOverheadTokens ?? 0)
 }
 
 export class ModelRouter {
@@ -352,7 +353,7 @@ function validateUsage(usage: unknown): void {
   if (usage === undefined) return
   if (!usage || typeof usage !== 'object' || Array.isArray(usage)) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Provider usage must be an object')
   const value = usage as Record<string, unknown>
-  for (const key of ['inputTokens', 'outputTokens', 'cachedInputTokens', 'uncachedInputTokens', 'reasoningTokens', 'visibleOutputChars']) if (value[key] !== undefined && (!Number.isInteger(value[key]) || !validNonNegativeMetric(value[key]))) throw new OutputValidationError('adapter', 'INVALID_USAGE', `Provider usage ${key} must be a non-negative integer`)
+  for (const key of ['inputTokens', 'outputTokens', 'cachedInputTokens', 'cacheWriteInputTokens', 'uncachedInputTokens', 'reasoningTokens', 'visibleOutputChars']) if (value[key] !== undefined && (!Number.isInteger(value[key]) || !validNonNegativeMetric(value[key]))) throw new OutputValidationError('adapter', 'INVALID_USAGE', `Provider usage ${key} must be a non-negative integer`)
   if (value.latencyMs !== undefined && !validNonNegativeMetric(value.latencyMs)) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Provider usage latencyMs must be non-negative')
   if (value.inputTokens !== undefined && value.cachedInputTokens !== undefined && (value.cachedInputTokens as number) > (value.inputTokens as number)) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Cached input tokens cannot exceed input tokens')
   if (value.inputTokens !== undefined && value.uncachedInputTokens !== undefined && (value.uncachedInputTokens as number) > (value.inputTokens as number)) throw new OutputValidationError('adapter', 'INVALID_USAGE', 'Uncached input tokens cannot exceed input tokens')

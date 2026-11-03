@@ -467,6 +467,7 @@ function derivedPrivacy(state: RuntimeState, lane: LaneRecord, refs: ProvenanceR
 function prepareLLMInput(state: RuntimeState, lane: LaneRecord, submission: SubmitEffectsAction['effects'][number]): { input?: JsonValue; error?: string } {
   if (submission.kind !== 'llm' || !submission.input || typeof submission.input !== 'object' || Array.isArray(submission.input)) return { input: submission.input }
   const input = submission.input as Record<string, JsonValue>
+  if (input.contextProtocolVersion !== undefined && input.contextProtocolVersion !== 1 && input.contextProtocolVersion !== 2) return { error: 'INVALID_CONTEXT_PROTOCOL_VERSION' }
   if (input.request !== undefined) return { input: submission.input }
   if (typeof input.task !== 'string') return { input: submission.input }
   const instruction = typeof input.instruction === 'string' ? input.instruction : input.task
@@ -484,10 +485,19 @@ function prepareLLMInput(state: RuntimeState, lane: LaneRecord, submission: Subm
   const artifactInputs = readRefs('artifacts')
   const eventInputs = readRefs('events')
   const rawConversation = rawInputs.conversation
-  const conversation = rawConversation === undefined ? [] : Array.isArray(rawConversation) && rawConversation.every((item) => item && typeof item === 'object' && !Array.isArray(item) && (item as Record<string, JsonValue>).role !== undefined && ['system', 'user', 'assistant'].includes(String((item as Record<string, JsonValue>).role)) && typeof (item as Record<string, JsonValue>).content === 'string')
+  let conversation = rawConversation === undefined ? [] : Array.isArray(rawConversation) && rawConversation.every((item) => item && typeof item === 'object' && !Array.isArray(item) && (item as Record<string, JsonValue>).role !== undefined && ['system', 'user', 'assistant'].includes(String((item as Record<string, JsonValue>).role)) && typeof (item as Record<string, JsonValue>).content === 'string')
     ? rawConversation as unknown as import('../core/types.js').ConversationMessage[]
     : undefined
   const conversationError = rawConversation !== undefined && conversation === undefined ? 'INVALID_LLM_CONVERSATION' : undefined
+  if (input.contextProtocolVersion === 2 && submission.key === '$compact-summary') {
+    const previous = [...lane.context.history].reverse().flatMap(record => {
+      const effect = record.effectId ? state.effects.get(record.effectId) : undefined
+      const request = effect?.input && typeof effect.input === 'object' && !Array.isArray(effect.input) ? effect.input.request as unknown as import('../core/types.js').LLMRequestProjection | undefined : undefined
+      return request?.contextSpec.journal ? [request.contextSpec.journal.conversation] : []
+    })[0]
+    if (previous && conversation) conversation = [...structuredClone(previous), ...conversation]
+  }
+
   const historySeqs = input.historySeqs
   if (historySeqs !== undefined && (!Array.isArray(historySeqs) || historySeqs.some(seq => typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 1))) return { error: 'INVALID_LLM_HISTORY_SELECTION' }
   const inputError = resultInputs.error ?? findingInputs.error ?? rejectedInputs.error ?? artifactInputs.error ?? eventInputs.error ?? conversationError
@@ -497,7 +507,8 @@ function prepareLLMInput(state: RuntimeState, lane: LaneRecord, submission: Subm
   try {
     const agent = state.agents.get(lane.agentId)
     if (!agent) return { error: 'UNKNOWN_AGENT' }
-    const projection = new ContextBuilder(state).build({ agent, lane, explicitContext: input.explicitContext === true, nativeToolHistory: input.nativeToolHistory === true, includeLaneHistory: input.includeLaneHistory === true, ...(Array.isArray(historySeqs) ? { historySeqs: historySeqs as number[] } : {}), resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: eventInputs.refs ?? [], ...(conversation === undefined || conversation.length === 0 ? {} : { conversation }), instruction, ...(typeof input.system === 'string' ? { system: input.system } : {}), ...(input.policy === undefined ? {} : { policy: input.policy }), ...(input.tools === undefined ? {} : { tools: input.tools }), toolSetId: typeof input.toolSetId === 'string' ? input.toolSetId : 'default' })
+    const projection = new ContextBuilder(state).build({ agent, lane, ...(input.contextProtocolVersion === 2 ? { contextProtocolVersion: 2 as const, contextStream: submission.key.replace(/-turn-\d+$/, '').replace(/-correct-\d+$/, '-llm') } : {}), explicitContext: input.explicitContext === true, nativeToolHistory: input.nativeToolHistory === true, includeLaneHistory: input.includeLaneHistory === true, ...(Array.isArray(historySeqs) ? { historySeqs: historySeqs as number[] } : {}), resultRefs, ...(artifactRefs.length ? { artifactRefs } : {}), eventIds: eventInputs.refs ?? [], ...(conversation === undefined || conversation.length === 0 ? {} : { conversation }), instruction, ...(typeof input.system === 'string' ? { system: input.system } : {}), ...(input.policy === undefined ? {} : { policy: input.policy }), ...(input.tools === undefined ? {} : { tools: input.tools }), toolSetId: typeof input.toolSetId === 'string' ? input.toolSetId : 'default' })
+    if (input.contextProtocolVersion === 2 && input.outputSchema !== undefined) projection.inputOverheadTokens = Math.ceil(Buffer.byteLength(stableSerialize(input.outputSchema), 'utf8') / 4)
     return { input: { ...input, request: projection as unknown as JsonValue } }
   } catch (cause) {
     return { error: cause instanceof Error ? cause.message : 'INVALID_LLM_CONTEXT' }

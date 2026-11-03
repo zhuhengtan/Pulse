@@ -251,6 +251,7 @@ function stageFailure(ctx: Context, code: string, message: string): string {
 }
 
 export interface TaskControllerProgramOptions {
+  contextProtocolVersion?: 1 | 2
   system: string
   version?: '5' | '6' | '7' | '8' | '9' | '10' | '11' | '12' | '13' | '14' | '15' | '16' | '17' | '18' | '19' | '20' | '21' | '22' | '23' | '24' | '25' | '26' | '27' | '28' | '29' | '30' | '31' | '32' | '33' | '34' | '35' | '36' | '37' | '38' | '39' | '40' | '41' | '42' | '43' | '44' | '45' | '46' | '47' | '48' | '49' | '50' | '51' | '52' | '53' | '54' | '55' | '56' | '57'
   continuationCheckpoint?: Checkpoint
@@ -508,7 +509,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
     save(ctx, state)
     return { actions: [], next: 'work' }
   }
-  return defineLaneProgram({ id: 'pulse.assistant', version: programVersion, ...(modelRetryPolicy ? { modelRetryPolicy } : {}), explicitContext: programVersion !== '5', ...(continuous ? { includeLaneHistory: true } : {}), ...(continuousExecution ? { nativeToolHistory: true, requestOutputReserveTokens: options.outputReserveTokens ?? 4096 } : {}), system: options.system, toolSet: 'pulse.default', historyCompaction: { summarizeTask: 'reason', keepRecentRounds: 4, ...(continuousExecution ? { maxSummaryRetries: 2, ...(options.contextWindowTokens ? { maxContextTokens: options.contextWindowTokens } : {}), ...(options.outputReserveTokens ? { outputReserveTokens: options.outputReserveTokens } : {}) } : {}), instruction: continuousExecution ? 'Preserve original requirements, current goal, next action, settled evidence references and uncertain operations; do not turn blocked operations into completed work.' : 'Summarize completed evidence and constraints; do not turn blocked operations into completed work.' } }, (builder) => {
+  return defineLaneProgram({ id: 'pulse.assistant', version: programVersion, ...(options.contextProtocolVersion === 2 ? { contextProtocolVersion: 2 } : {}), ...(modelRetryPolicy ? { modelRetryPolicy } : {}), explicitContext: programVersion !== '5', ...(continuous ? { includeLaneHistory: true } : {}), ...(continuousExecution ? { nativeToolHistory: true, requestOutputReserveTokens: options.outputReserveTokens ?? 4096 } : {}), system: options.system, toolSet: 'pulse.default', historyCompaction: { summarizeTask: 'reason', keepRecentRounds: 4, ...(continuousExecution || options.contextProtocolVersion === 2 ? { maxSummaryRetries: 2, ...(options.contextWindowTokens ? { maxContextTokens: options.contextWindowTokens } : {}), ...(options.outputReserveTokens ? { outputReserveTokens: options.outputReserveTokens } : {}) } : {}), instruction: continuousExecution ? 'Preserve original requirements, current goal, next action, settled evidence references and uncertain operations; do not turn blocked operations into completed work.' : 'Summarize completed evidence and constraints; do not turn blocked operations into completed work.' } }, (builder) => {
     // Safe checkpoints include tool queue continuations and approval responses.
     // No in-flight write is replayed or assumed cancelled: this runs after settlement.
     builder.beforeStep((ctx, step) => {
@@ -760,6 +761,14 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
     if (continuous) builder.addStep('chain-start', ctx => {
       const ids = ctx.lane.resume.locals as { stageIds?: string[] }
       const root = controllerFromGlobal(ctx.global)!
+      if (options.contextProtocolVersion === 2) {
+        const tasks = root.tasks.filter(task => ids.stageIds?.includes(task.id))
+        if (!ids.stageIds?.length || tasks.length !== ids.stageIds.length) return { next: { fail: { code: 'HANDOFF_STAGE_UNAVAILABLE', message: 'The committed delivery-chain stages do not match the delegated stage IDs.', retryable: false } } }
+        const missing = tasks.flatMap(task => [...task.evidenceRefs, ...(task.contextRefs ?? []), ...(task.candidateRef ? [task.candidateRef] : [])]).filter(ref => ctx.results.meta(ref) === undefined)
+        if (missing.length) return { next: { fail: { code: 'HANDOFF_EVIDENCE_UNAVAILABLE', message: `Delegated evidence is unavailable or not visible: ${[...new Set(missing)].join(', ')}`, retryable: false } } }
+        const invalid = tasks.flatMap(task => task.dependsOn).find(id => !ids.stageIds!.includes(id) && !root.tasks.some(task => task.id === id && task.status === 'passed'))
+        if (invalid) return { next: { fail: { code: 'HANDOFF_DEPENDENCY_UNSATISFIED', message: `Dependency ${invalid} has no committed passing state.`, retryable: false } } }
+      }
       const state = initialController(budget)
       const recoveryContext = completeEvidence && root.goalRecoveries > 0 ? [...new Set(root.tasks.filter(t => t.status === 'passed').flatMap(t => [...t.evidenceRefs, ...(t.contextRefs ?? [])]))].filter(ref => ctx.results.meta(ref) !== undefined).slice(-32) : []
       state.tasks = root.tasks.filter(t => ids.stageIds?.includes(t.id)).map(t => ({ ...t, status: t.status === 'passed' ? 'passed' : 'pending', ...(recoveryContext.length ? { contextRefs: [...new Set([...(t.contextRefs ?? []), ...recoveryContext])] } : {}) }))
@@ -1382,7 +1391,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
         }
         if (passed && reuseEvidence) task.contextRefs = [...new Set([...(task.contextRefs ?? []), ...task.evidenceRefs.filter(ref => completeEvidence && settledDecision(ctx, ref) || ctx.results.meta(ref)?.toolName === 'fs.read' && ctx.results.meta(ref)?.outcomeStatus === 'succeeded' || committedFileEdit(ctx, ref))])].slice(-128)
         if (passed) task.evidenceRefs = refs.length ? refs : [task.candidateRef!]
-        if (continuous && task.status !== 'pending') task.delivery = stageDelivery(ctx, task)
+        if (continuous && task.status !== 'pending') task.delivery = stageDelivery(ctx, task, { contextProtocolVersion: options.contextProtocolVersion, tasks: state.tasks })
         delete state.activeId; save(ctx, state)
         return 'dispatch'
       },
@@ -1641,7 +1650,7 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
     }
     builder.addStep('report', (ctx) => {
       const state = stateOf(ctx, options.readOnlyToolNames ?? [])
-      if (continuous && chainState(ctx)) return { next: { complete: { value: json({ version: 1, type: 'delivery-chain', stages: state.tasks.map(t => t.delivery ?? stageDelivery(ctx, t)) }), derivedFrom: [...new Set(state.tasks.flatMap(t => t.evidenceRefs))] } } }
+      if (continuous && chainState(ctx)) return { next: { complete: { value: json({ version: 1, type: 'delivery-chain', stages: state.tasks.map(t => t.delivery ?? stageDelivery(ctx, t, { contextProtocolVersion: options.contextProtocolVersion, tasks: state.tasks })) }), derivedFrom: [...new Set(state.tasks.flatMap(t => t.evidenceRefs))] } } }
       const record = taskRecordFromGlobal(ctx.global as JsonValue)
       if (!record) return { next: { fail: { code: 'TASK_RECORD_MISSING', message: 'Original task record is missing.' } } }
       const refusal = durableScheduling ? state.tasks.find(task => (/^(?:APPROVAL_DENIED|AI_APPROVAL_DENIED|AI_APPROVAL_UNAVAILABLE|TOOL_CANCELLED):/.test(task.note ?? '') || generalRecovery && /^(?:VISION_MODEL_REQUIRED|AUTOMATION_CAPABILITY_DISABLED|NATIVE_BROWSER_REQUIRED):/.test(task.note ?? ''))) : undefined

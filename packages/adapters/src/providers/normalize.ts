@@ -159,7 +159,7 @@ export function normalizeOpenAIResponse(response: any, toolNameAliases?: Readonl
   }
   const rawUsage = root.usage === undefined ? undefined : providerRecord(root.usage, 'OpenAI usage')
   const promptDetails = rawUsage?.prompt_tokens_details === undefined ? undefined : providerRecord(rawUsage.prompt_tokens_details, 'OpenAI prompt token details')
-  const usage = normalizeUsage(rawUsage === undefined ? undefined : { ...rawUsage, cached_tokens: rawUsage.cached_tokens ?? promptDetails?.cached_tokens ?? rawUsage.cache_read_input_tokens, reasoning_tokens: rawUsage.completion_tokens_details?.reasoning_tokens ?? rawUsage.reasoning_tokens }, { input: 'prompt_tokens', output: 'completion_tokens', cached: 'cached_tokens', reasoning: 'reasoning_tokens' }, 'OpenAI')
+  const usage = normalizeUsage(rawUsage === undefined ? undefined : { ...rawUsage, cached_tokens: rawUsage.cached_tokens ?? promptDetails?.cached_tokens ?? rawUsage.prompt_cache_hit_tokens ?? rawUsage.cache_read_input_tokens, uncached_tokens: rawUsage.prompt_cache_miss_tokens, reasoning_tokens: rawUsage.completion_tokens_details?.reasoning_tokens ?? rawUsage.reasoning_tokens }, { input: 'prompt_tokens', output: 'completion_tokens', cached: 'cached_tokens', reasoning: 'reasoning_tokens' }, 'OpenAI')
   const reasoningContent = typeof message.reasoning_content === 'string' ? message.reasoning_content : undefined
   const toolExtras = Object.fromEntries((Array.isArray(message.tool_calls) ? message.tool_calls : []).flatMap((call: any) => {
     const signature = call.extra_content?.google?.thought_signature
@@ -400,7 +400,12 @@ export function normalizeAnthropicResponse(response: any, aliases: ReadonlyMap<s
   const refusal = refusalBlock?.text as string | undefined
   const finishReason = normalizeAnthropicFinishReason(root.stop_reason, refusal, toolCalls.length > 0)
   const thinkingBlocks = blocks.filter((block: any) => block.type === 'thinking' && typeof block.thinking === 'string' && typeof block.signature === 'string' || block.type === 'redacted_thinking' && typeof block.data === 'string')
-  const usage = normalizeUsage(root.usage, { input: 'input_tokens', output: 'output_tokens', cached: 'cache_read_input_tokens' }, 'Anthropic')
+  const rawUsage = root.usage === undefined ? undefined : providerRecord(root.usage, 'Anthropic usage')
+  // Anthropic input_tokens excludes both cache reads and cache creation.
+  const fresh = rawUsage === undefined ? undefined : providerMetric(rawUsage.input_tokens, 'Anthropic input tokens')
+  const reads = rawUsage === undefined ? undefined : providerMetric(rawUsage.cache_read_input_tokens, 'Anthropic cache read tokens')
+  const writes = rawUsage === undefined ? undefined : providerMetric(rawUsage.cache_creation_input_tokens, 'Anthropic cache write tokens')
+  const usage = normalizeUsage(rawUsage === undefined ? undefined : { ...rawUsage, input_tokens: fresh === undefined ? undefined : fresh + (reads ?? 0) + (writes ?? 0), uncached_tokens: fresh === undefined ? undefined : fresh + (writes ?? 0) }, { input: 'input_tokens', output: 'output_tokens', cached: 'cache_read_input_tokens' }, 'Anthropic')
   const measuredUsage = usage === undefined ? undefined : { ...usage, visibleOutputChars: text.length }
   return { text, ...(parseStructured(text) === undefined ? {} : { structured: parseStructured(text) }), toolCalls, ...(refusal === undefined ? {} : { refusal }), finishReason, ...(measuredUsage === undefined ? {} : { usage: measuredUsage }), ...(thinkingBlocks.length ? { providerContinuation: { provider: 'anthropic', metadata: { thinkingBlocks } } } : {}) }
 }
@@ -437,10 +442,13 @@ function normalizeUsage(raw: unknown, fields: { input: string; output: string; c
   const inputTokens = providerMetric(value[fields.input], `${provider} input tokens`)
   const outputTokens = providerMetric(value[fields.output], `${provider} output tokens`)
   const cachedInputTokens = providerMetric(value[fields.cached], `${provider} cached input tokens`)
+  const uncachedInputTokens = providerMetric(value.uncached_tokens, `${provider} uncached input tokens`)
+  const cacheWriteInputTokens = providerMetric(value.cache_creation_input_tokens, `${provider} cache write input tokens`)
   const reasoningTokens = fields.reasoning === undefined ? undefined : providerMetric(value[fields.reasoning], `${provider} reasoning tokens`)
   if (inputTokens !== undefined && cachedInputTokens !== undefined && cachedInputTokens > inputTokens) throw providerResponseError(`${provider} cached input tokens exceed input tokens`)
+  if (inputTokens !== undefined && uncachedInputTokens !== undefined && (uncachedInputTokens > inputTokens || cachedInputTokens !== undefined && cachedInputTokens + uncachedInputTokens !== inputTokens)) throw providerResponseError(`${provider} cache token counts disagree with input tokens`)
   const cost = value.cost === undefined ? undefined : normalizeCost(value.cost, provider)
-  return { ...(inputTokens === undefined ? {} : { inputTokens }), ...(outputTokens === undefined ? {} : { outputTokens }), ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }), ...(reasoningTokens === undefined ? {} : { reasoningTokens }), ...(inputTokens !== undefined && cachedInputTokens !== undefined ? { uncachedInputTokens: inputTokens - cachedInputTokens } : {}), ...(cost === undefined ? {} : { cost }) }
+  return { ...(inputTokens === undefined ? {} : { inputTokens }), ...(outputTokens === undefined ? {} : { outputTokens }), ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }), ...(cacheWriteInputTokens === undefined ? {} : { cacheWriteInputTokens }), ...(reasoningTokens === undefined ? {} : { reasoningTokens }), ...(uncachedInputTokens !== undefined ? { uncachedInputTokens } : inputTokens !== undefined && cachedInputTokens !== undefined ? { uncachedInputTokens: inputTokens - cachedInputTokens } : {}), ...(cost === undefined ? {} : { cost }) }
 }
 
 function normalizeCost(raw: unknown, provider: string): NonNullable<LLMResult['usage']>['cost'] {

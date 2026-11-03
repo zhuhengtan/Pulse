@@ -6,7 +6,7 @@ import { mediaKinds, pluginFor, type MediaKind, type PluginId } from './config.j
 import { pluginError } from './http.js'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import type { EffectRecord, JsonValue, LLMRequestProjection } from '@hunterzhu/pulse-runtime'
+import { contentHash, stableSerialize, type EffectRecord, type JsonValue, type LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 import { AttachmentStore } from '../attachments.js'
 import { readFile } from 'node:fs/promises'
 
@@ -25,8 +25,15 @@ export function refreshPluginProjection(effect: EffectRecord, registry: ToolRegi
     const tools = query && typeof query === 'object' && !Array.isArray(query)
       ? registry.discover(query as any).map(({ manifest }) => ({ name: manifest.name, description: manifest.description, inputSchema: manifest.inputSchema }))
       : Array.isArray(current.tools) ? current.tools.filter(t => t && typeof t === 'object' && !Array.isArray(t) && typeof t.name === 'string' && registry.isAllowed(t.name)) : []
+    if (request.contextSpec?.contextProtocolVersion === 2) tools.sort((a, b) => String((a as Record<string, JsonValue>).name).localeCompare(String((b as Record<string, JsonValue>).name), 'en'))
     return { ...block, content: { tools } as unknown as JsonValue }
   })
+  if (request.contextSpec?.contextProtocolVersion === 2) {
+    if (stableSerialize(blocks) === stableSerialize(request.blocks)) return effect
+    const prefix = blocks.filter(block => ['system', 'policy', 'tools'].includes(block.kind))
+    const hash = contentHash(prefix), journal = request.contextSpec.journal
+    return { ...effect, input: { ...input, request: { ...request, blocks, contextSpec: { ...request.contextSpec, ...(journal ? { journal: { ...journal, segment: contentHash([journal.segment, hash]), fingerprint: hash, reason: 'tools-changed-at-admission' } } : {}) }, projectionHash: contentHash(blocks), prefixHash: hash, toolSetVersion: contentHash(blocks.find(block => block.kind === 'tools')?.content ?? {}) } as unknown as JsonValue } }
+  }
   const hash = createHash('sha256').update(JSON.stringify(blocks)).digest('hex')
   return { ...effect, input: { ...input, request: { ...request, blocks, projectionHash: hash, prefixHash: hash, toolSetVersion: hash } as unknown as JsonValue } }
 }

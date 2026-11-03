@@ -451,6 +451,20 @@ export interface LaneStepOutput {
 }
 
 export interface LLMContextSpec {
+  contextProtocolVersion?: 1 | 2
+  /** Durable projection cursor. Reuses committed Effect inputs, not another execution log. */
+  journal?: {
+    segment: string
+    stream: string
+    throughSeq: number
+    fingerprint: string
+    checkpoint: string
+    conversation: ConversationMessage[]
+    instruction: string
+    sourceRefs: ResultRef[]
+    artifactRefs: ArtifactRef[]
+    reason: string
+  }
   globalSnapshotVersion: ContextVersion
   laneSnapshotVersion: ContextVersion
   resultRefs: ResultRef[]
@@ -472,11 +486,13 @@ export interface ConversationMessage {
 }
 
 export type ProviderHistoryMessage =
-  | { role: 'user'; content: string }
+  | { role: 'user'; content: string; name?: string }
   | { role: 'assistant'; content: string | null; continuationProvider?: string; reasoningContent?: string; providerMetadata?: JsonValue; toolCalls?: Array<{ id: string; name: string; arguments: string }> }
   | { role: 'tool'; toolCallId: string; name: string; content: string; resultRef: ResultRef }
 
 export interface LLMRequestProjection {
+  /** Additional input such as a native response schema, outside message blocks. */
+  inputOverheadTokens?: number
   /** Resolved, visible image artifacts. Never serialize these into text history. */
   images?: Array<{ ref: ArtifactRef; mediaType: 'image/png' | 'image/jpeg'; data?: string }>
   contextSpec: LLMContextSpec

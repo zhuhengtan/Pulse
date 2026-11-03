@@ -1,3 +1,4 @@
+import { RequestDiagnostics } from './request-diagnostics.js'
 import type { JsonValue, LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 import { consumeProviderSse, normalizeAnthropicResponse, parseProviderJson, providerHttpErrorFromResponse, providerNetworkError, providerResponseError } from './normalize.js'
 import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
@@ -12,13 +13,15 @@ function anthropicThinking(effort: ProviderPresetConfig['reasoningEffort'], maxT
 }
 
 export class AnthropicAdapter implements ProviderAdapter {
+  private readonly diagnostics = new RequestDiagnostics()
   readonly name = 'Anthropic Messages'
   constructor(readonly id: string, private readonly config: ProviderPresetConfig) {}
-  async executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; onReasoning?: (chunk: string) => void; outputSchema?: JsonValue; model?: string; maxOutputTokens?: number; reasoningEffort?: 'low' }) {
+  async executeAttempt(params: Parameters<ProviderAdapter['executeAttempt']>[0]) {
     const streaming = params.onObservation !== undefined
     const maxTokens = params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096
     const lowered = lowerProjectionToCanonical({ ...params, model: params.model ?? this.config.defaultModel, maxOutputTokens: maxTokens, toolChoice: this.config.toolChoice, stream: streaming })
     const body = { ...toAnthropicPayload(lowered.canonical, resolveModelCapability(lowered.canonical.model, 'anthropic', this.config.capabilityProfile, this.config.baseURL)), ...anthropicThinking(params.reasoningEffort ?? this.config.reasoningEffort, maxTokens) }
+    params.onRequest?.(this.diagnostics.measure(params.connectionKey ?? 'direct', body))
     try {
       const response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
       if (!response.ok) throw await providerHttpErrorFromResponse(response)

@@ -6,6 +6,7 @@ import type { ZodTypeAny } from 'zod'
 export interface ProgramRef { programId: string; programVersion: string; step?: string; locals?: JsonValue }
 
 export interface ReActLaneConfig {
+  contextProtocolVersion?: 1 | 2
   id: string
   version?: string
   system?: string
@@ -47,7 +48,7 @@ export interface ReActLaneConfig {
 }
 
 export function defineReActLane(config: ReActLaneConfig): LaneProgramDefinition {
-  return defineLaneProgram({ id: config.id, version: config.version ?? '1', ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSet: config.toolSet }), ...(config.historyCompaction === undefined ? {} : { historyCompaction: config.historyCompaction }) }, (builder) => {
+  return defineLaneProgram({ id: config.id, version: config.version ?? '1', ...(config.contextProtocolVersion === 2 ? { contextProtocolVersion: 2, includeLaneHistory: true, explicitContext: true } : {}), ...(config.system === undefined ? {} : { system: config.system }), ...(config.toolSet === undefined ? {} : { toolSet: config.toolSet }), ...(config.historyCompaction === undefined ? {} : { historyCompaction: config.historyCompaction }) }, (builder) => {
     const onFinish = config.onFinish ?? (config.outputSchema === undefined
       ? { text: (resultRef: string) => ({ complete: { value: { textRef: resultRef } } }) }
       : { text: (resultRef: string) => ({ complete: { value: { textRef: resultRef } } }), structured: { schema: config.outputSchema, onParsed: (value: unknown) => ({ complete: { value: value as JsonValue } }) } })

@@ -59,6 +59,7 @@ export interface CanonicalReasoningConfig {
 }
 
 export interface CanonicalLLMRequest {
+  contextProtocolVersion?: 1 | 2
   model?: string
   messages: CanonicalMessage[]
   tools?: CanonicalToolDefinition[]
@@ -77,7 +78,7 @@ export type CanonicalStreamEvent =
   | { type: 'reasoning_delta'; text: string }
   | { type: 'tool_call_delta'; index: number; id?: string; name?: string; argumentsDelta: string }
   | { type: 'refusal_delta'; refusal: string }
-  | { type: 'usage'; usage: { inputTokens?: number; outputTokens?: number; reasoningTokens?: number; cachedInputTokens?: number } }
+  | { type: 'usage'; usage: { inputTokens?: number; outputTokens?: number; reasoningTokens?: number; cachedInputTokens?: number; uncachedInputTokens?: number; cacheWriteInputTokens?: number } }
   | { type: 'finish'; reason: string }
 
 export type StructuredOutputCapability = 'native_strict' | 'native_loose' | 'json_object_only' | 'unsupported'

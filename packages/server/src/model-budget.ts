@@ -32,7 +32,7 @@ function isMissing(error: unknown): boolean {
 }
 
 export interface ModelBudgetPolicy { verificationReserve?: number; maxTokens?: number; maxCostByCurrency?: Record<string, number>; unknownUsage?: 'stop' | 'allow' }
-export const usageMetricNames = ['inputTokens', 'outputTokens', 'cachedInputTokens', 'uncachedInputTokens', 'reasoningTokens', 'visibleOutputChars', 'latencyMs'] as const
+export const usageMetricNames = ['inputTokens', 'outputTokens', 'cachedInputTokens', 'cacheWriteInputTokens', 'uncachedInputTokens', 'reasoningTokens', 'visibleOutputChars', 'latencyMs'] as const
 export type UsageMetric = typeof usageMetricNames[number]
 type UsageMetrics = Partial<Record<UsageMetric, { total: number; known: number }>>
 
