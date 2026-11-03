@@ -1,8 +1,9 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { replaceStateFile } from '../packages/server/src/atomic-file.js'
+import { atomicWrite } from '../packages/server/src/updates/store.js'
 
 const faults = vi.hoisted(() => ({ remaining: 0, code: 'EPERM', attempts: 0, prior: [] as string[] }))
 vi.mock('node:fs/promises', async importOriginal => {
@@ -39,6 +40,20 @@ it.each(['EPERM', 'EACCES', 'EBUSY'])('preserves the readable prior state across
   expect(faults.prior).toEqual(['old state', 'old state'])
   expect(await readFile(target, 'utf8')).toBe('new state')
   await expect(readFile(source)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it('retries a transient Windows sharing violation when writing update state', async () => {
+  const { target } = await fixture('win32', 'EPERM', 2)
+  await atomicWrite(target, 'updated state')
+  expect(faults.prior).toEqual(['old state', 'old state'])
+  expect(await readFile(target, 'utf8')).toBe('updated state')
+})
+
+it('preserves the update state and cleans its temporary file when replacement stays blocked', async () => {
+  const { source, target } = await fixture('win32', 'EPERM', 100)
+  await expect(atomicWrite(target, 'updated state')).rejects.toMatchObject({ code: 'EPERM' })
+  expect(await readFile(target, 'utf8')).toBe('old state')
+  expect((await readdir(roots.at(-1)!)).sort()).toEqual([source.split(/[\\/]/).pop(), 'state.json'].sort())
 })
 
 it('bounds Windows sharing retries and preserves both files on permanent failure', async () => {

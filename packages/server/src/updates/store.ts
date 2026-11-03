@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { readJson } from './security.js'
 import type { UpdateState } from './contracts.js'
+import { replaceStateFile } from '../atomic-file.js'
 
 export const updateRoot = (): string => resolve(process.env.PULSE_HOME ?? join(homedir(), '.pulse'))
 export const scopeId = (directory: string): string => createHash('sha256').update(resolve(directory)).digest('hex').slice(0, 32)
@@ -14,7 +15,7 @@ export async function atomicWrite(path: string, value: string | Uint8Array): Pro
   try {
     const file = await open(temp, 'wx', 0o600)
     try { await file.writeFile(value); await file.sync() } finally { await file.close() }
-    await rename(temp, path)
+    await replaceStateFile(temp, path)
   } finally { await rm(temp, { force: true }) }
 }
 export async function atomicJson(path: string, value: unknown): Promise<void> { await atomicWrite(path, JSON.stringify(value)) }
