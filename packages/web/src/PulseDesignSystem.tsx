@@ -19,6 +19,9 @@ export function PulseDesignSystem({ children }: { children: ReactNode }) {
     return () => { observer.disconnect(); media.removeEventListener('change', sync) }
   }, [])
 
+  const overlay = window.pulseDesktop?.windowControlsOverlay
+  useEffect(() => { if (overlay) window.pulseDesktop?.titlebarTheme?.(dark) }, [overlay, dark])
+
   const theme = useMemo(() => ({
     algorithm: dark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
     token: {
@@ -54,6 +57,6 @@ export function PulseDesignSystem({ children }: { children: ReactNode }) {
   }), [dark])
 
   return <StyleProvider layer><ConfigProvider locale={zhCN} theme={theme} button={{ autoInsertSpace: false }}>
-    <AntdApp className="pulse-ant-app">{children}</AntdApp>
+    <AntdApp className="pulse-ant-app">{overlay ? <><div className="desktop-titlebar" aria-label="Pulse 窗口拖动区域"><span>Pulse</span></div><div className="desktop-window-content">{children}</div></> : children}</AntdApp>
   </ConfigProvider></StyleProvider>
 }

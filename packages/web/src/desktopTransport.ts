@@ -2,6 +2,8 @@ export interface NativeBrowserState { id: string; tabs: { revision: string; item
 import type { PulseWebTransport, WebRunEvent, WebMessage } from './transport.js';
 interface DesktopBridge {
     installation?: boolean;
+    windowControlsOverlay?: boolean;
+    titlebarTheme?(dark: boolean): void;
     protocols?: { bridge: number; nativeBrowser: number; reader: number };
     capabilities?: { updates: boolean; versionedFrontend: boolean };
     nativeBrowser?: boolean;

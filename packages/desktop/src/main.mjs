@@ -1,3 +1,4 @@
+import { windowChrome, configureWindowChrome } from './window-chrome.mjs';
 import { createTrayIcon } from './tray-icon.mjs';
 import { shouldRevealMain } from './desktop-activation.mjs';
 import { QuestionWindows } from './question-windows.mjs';
@@ -364,6 +365,7 @@ else {
             headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self' http://127.0.0.1:* http://localhost:*; object-src 'none'");
             return new Response(response.body, { status: response.status, headers });
         });
+        ipcMain.on('pulse:titlebar-theme', (event, dark) => { trusted(event); if (process.platform === 'win32' && typeof dark === 'boolean') window?.setTitleBarOverlay(windowChrome('win32', dark).titleBarOverlay); });
         ipcMain.handle('pulse:request', async (event, path, init = {}) => {
             trusted(event);
             allowedPath(path);
@@ -510,7 +512,8 @@ else {
         ipcMain.handle('pulse:unsubscribe', (event, id) => { trusted(event); const sub = subscriptions.get(id); sub?.controller.abort(); subscriptions.delete(id); if (sub?.kind === 'chat' && chat?.readyState === WebSocket.OPEN)
             chat.send(JSON.stringify({ type: 'unsubscribe', runId: sub.runId })); });
         function createWindow(show = true) {
-            window = new BrowserWindow({ show, width: pageUrl.startsWith('http:') ? 1440 : 1200, height: pageUrl.startsWith('http:') ? 950 : 850, minWidth: 390, minHeight: 600, title: pageUrl.startsWith('http:') ? 'Pulse · 开发预览' : 'Pulse', icon: appIcon, webPreferences: { preload: fileURLToPath(new URL('./preload.cjs', import.meta.url)), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+            window = new BrowserWindow({ ...windowChrome(process.platform), show, width: pageUrl.startsWith('http:') ? 1440 : 1200, height: pageUrl.startsWith('http:') ? 950 : 850, minWidth: 390, minHeight: 600, title: pageUrl.startsWith('http:') ? 'Pulse · 开发预览' : 'Pulse', icon: appIcon, webPreferences: { preload: fileURLToPath(new URL('./preload.cjs', import.meta.url)), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+            configureWindowChrome(window, process.platform);
             window.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//.test(url))
                 void shell.openExternal(url); return { action: 'deny' }; });
             window.webContents.on('did-start-loading', () => browser.hideAll());
@@ -547,7 +550,7 @@ else {
             lastTraySignature = signature;
             tray.setToolTip(`Pulse · ${status}`);
             const pendingSignature = JSON.stringify([...notifications.pending.keys()]);
-            if (appMenuReady && pendingSignature !== appPendingSignature) { appPendingSignature = pendingSignature; Menu.setApplicationMenu(buildAppMenu()); }
+            if (appMenuReady && pendingSignature !== appPendingSignature) { appPendingSignature = pendingSignature; Menu.setApplicationMenu(process.platform === 'win32' ? null : buildAppMenu()); }
             tray.setContextMenu(Menu.buildFromTemplate([
                 { label: `Pulse · ${status}`, enabled: false },
                 { label: '打开桌面端', click: () => showDesktop() },
@@ -579,7 +582,7 @@ else {
             { label: '打开 H5', click: () => { if (base) void shell.openExternal(base + '/chat'); } },
             { type: 'separator' }, { label: '退出托盘（保留后台服务）', click: () => app.quit() },
         ] }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' }]); }
-        Menu.setApplicationMenu(buildAppMenu()); appMenuReady = true;
+        Menu.setApplicationMenu(process.platform === 'win32' ? null : buildAppMenu()); appMenuReady = true;
         createWindow(!notificationLaunch && (!process.argv.includes('--background') || !tray));
         void prepareDesktop().then(async () => {
             updateTray();

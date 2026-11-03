@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 const subscribe = (channel, listener) => { const receive = (_event, value) => listener(value); ipcRenderer.on(channel, receive); return () => ipcRenderer.removeListener(channel, receive); };
 contextBridge.exposeInMainWorld('pulseDesktop', {
     installation: true,
+    windowControlsOverlay: process.platform === 'win32',
+    titlebarTheme: dark => ipcRenderer.send('pulse:titlebar-theme', dark),
     protocols: Object.freeze({ bridge: 1, nativeBrowser: 1, reader: 1 }),
     capabilities: Object.freeze({ updates: true, versionedFrontend: true }),
     nativeBrowser: true,
