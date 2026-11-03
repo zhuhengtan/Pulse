@@ -536,7 +536,7 @@ export function PulseApp({ transport = browserTransport }: { transport?: PulseWe
 
   const switchMode = (mode: 'chat' | 'work') => {
     if (surfaceMode === mode) return
-    go(mode === 'chat' ? chatModePath(route.conversationId, route.newWork ? route.query.get('project') ?? undefined : conversations.find(item => item.id === route.conversationId)?.projectId) : '/work')
+    go(mode === 'chat' ? chatModePath() : '/work')
   }
 
   useEffect(() => {
