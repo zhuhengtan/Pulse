@@ -1,5 +1,39 @@
 // Generated from CHANGELOG.md and CHANGELOG.en.md by scripts/release/sync-cli-highlights.mjs. Do not edit manually.
 export const releaseHighlights: Record<string, Array<{ zh: string; en: string }>> = {
+  "0.12.0": [
+    {
+      "zh": "聊天模式使用简洁气泡和输入动画，可先发送简短回复，再给出详细答复。工作任务可通过聊天回报进度，等待确认时可直接在聊天中处理。",
+      "en": "Chat uses simple message bubbles and a typing indicator, with an optional short reply before the full answer. Work tasks can report progress and receive decisions in chat."
+    },
+    {
+      "zh": "供应商可设置默认上下文长度，模型可单独覆盖。模型路由的首选和回退候选可分别设置原生思考深度，任务恢复时保留启动时的选择。",
+      "en": "Set a provider context-window default and override it per model. Choose native reasoning effort for each primary and fallback route candidate, with the choice retained when a task resumes."
+    },
+    {
+      "zh": "支持立即安装后台更新，重启后自动恢复被更新中断的任务。异常终止的会话不再阻塞重启和更新。",
+      "en": "Install backend updates immediately and automatically resume interrupted tasks on restart. Abnormally terminated sessions no longer block restarts or updates."
+    },
+    {
+      "zh": "分离聊天与工作模式。修复重复置顶图标、规划状态位置和执行中补充消息的显示顺序。",
+      "en": "Separate chat from work. Fix duplicate pin icons, planning-status alignment, and the order of updates after a follow-up message."
+    },
+    {
+      "zh": "待发消息可预览图片并回到主输入框编辑，任务终止后可直接发送新消息。",
+      "en": "Preview images in queued messages and return drafts to the main composer for editing. Send new messages directly after a work run ends."
+    },
+    {
+      "zh": "整理任务验证前仍在运行的后台命令，减少因遗留进程导致的验证失败。",
+      "en": "Settle background commands before task verification to reduce failures caused by lingering processes."
+    },
+    {
+      "zh": "Windows 桌面使用与应用同色的沉浸式标题栏，保留系统窗口按钮，并为底部输入区和设置入口留出完整空间。",
+      "en": "Use a theme-matched Windows title bar, retain native window controls, and leave room for the composer and Settings entry at the bottom."
+    },
+    {
+      "zh": "提高深色主题开关的区分度，更新工作侧栏按钮图标，并统一输入框格式菜单及思考深度选中态。",
+      "en": "Improve dark-theme switch contrast, clarify the work sidebar icon, and refine the composer formatting menu and reasoning selection state."
+    }
+  ],
   "0.11.3": [
     {
       "zh": "Windows 安装器改用原生进程检测，区分进程存在、未运行及检测错误，并保留配置与会话。",

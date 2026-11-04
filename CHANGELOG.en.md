@@ -2,6 +2,22 @@
 
 This file records Pulse release notes in English and is the source for `pulse --version` highlights. See [CHANGELOG.md](CHANGELOG.md) for Chinese. Historical entries are reconstructed from Git tags and commits; early releases use high-level summaries.
 
+## [0.12.0] - 2026-11-04
+
+### Added
+
+- Chat uses simple message bubbles and a typing indicator, with an optional short reply before the full answer. Work tasks can report progress and receive decisions in chat.
+- Set a provider context-window default and override it per model. Choose native reasoning effort for each primary and fallback route candidate, with the choice retained when a task resumes.
+- Install backend updates immediately and automatically resume interrupted tasks on restart. Abnormally terminated sessions no longer block restarts or updates.
+
+### Fixed
+
+- Separate chat from work. Fix duplicate pin icons, planning-status alignment, and the order of updates after a follow-up message.
+- Preview images in queued messages and return drafts to the main composer for editing. Send new messages directly after a work run ends.
+- Settle background commands before task verification to reduce failures caused by lingering processes.
+- Use a theme-matched Windows title bar, retain native window controls, and leave room for the composer and Settings entry at the bottom.
+- Improve dark-theme switch contrast, clarify the work sidebar icon, and refine the composer formatting menu and reasoning selection state.
+
 ## [0.11.3] - 2026-11-03
 
 ### Fixed
