@@ -20,7 +20,7 @@ try{
  desktopProcess=desktop.process()
  const exited=new Promise(resolve=>desktopProcess.once('exit',(code,signal)=>{processExit={code,signal};resolve(processExit)}))
  page=await step('first-window',()=>desktop.firstWindow({timeout:15000}))
- await step('ready-heading',()=>page.getByRole('heading',{name:'我们要做什么？'}).waitFor({timeout:15000}),17000)
+ await step('chat-ready',()=>page.waitForFunction(()=>{const editor=document.querySelector('#composer [contenteditable="true"]');return location.pathname==='/chat'&&document.querySelector('h1')?.textContent==='聊点什么？'&&editor?.isContentEditable===true},{timeout:15000}),17000)
  const descriptor=JSON.parse(await readFile(join(data,'service.json'),'utf8'));ownedPid=descriptor.pid
  if(descriptor.protocol!==1||!Number.isInteger(ownedPid)||ownedPid===process.pid)throw new Error('INVALID_BACKGROUND_SERVICE')
  await step('close-window-to-tray',()=>closeToTray(desktop))

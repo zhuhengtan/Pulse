@@ -87,7 +87,7 @@ try {
         assert.ok(shellResult.stdout.includes(first.cli.path));
     }
     await step('first:enter', () => page.getByRole('button', { name: '稍后配置，进入 Pulse' }).click());
-    await step('first:home', () => page.getByRole('heading', { name: '我们要做什么？' }).waitFor());
+    await step('first:chat-ready', () => page.waitForFunction(() => { const editor = document.querySelector('#composer [contenteditable="true"]'); return location.pathname === '/chat' && document.querySelector('h1')?.textContent === '聊点什么？' && editor?.isContentEditable === true; }));
     const device = await request(page, '/api/session');
     const project = await request(page, '/api/projects', { name: 'Clean install fixture', cwd: root });
     const conversation = await request(page, '/api/conversations', { title: 'Preserve installed history', projectId: project.id });

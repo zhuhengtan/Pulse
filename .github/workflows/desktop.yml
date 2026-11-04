@@ -64,7 +64,10 @@ jobs:
         with:
           ref: ${{ github.sha }}
           path: .release-controller
-          sparse-checkout: scripts/desktop/smoke.mjs
+          sparse-checkout: |
+            scripts/desktop/smoke.mjs
+            scripts/desktop/startup-smoke.mjs
+            scripts/desktop/install-smoke.mjs
           sparse-checkout-cone-mode: false
           persist-credentials: false
       - name: Use maintained desktop acceptance script without changing release packages
@@ -81,7 +84,9 @@ jobs:
           test "$(git -C .release-controller rev-parse HEAD)" = "$ACCEPTANCE_SHA"
           tagged_head="$(git rev-parse "$TAGGED_REF^{commit}")"
           test "$(git rev-parse HEAD)" = "$tagged_head"
-          cp .release-controller/scripts/desktop/smoke.mjs scripts/desktop/smoke.mjs
+          for file in smoke.mjs startup-smoke.mjs install-smoke.mjs; do
+            cp ".release-controller/scripts/desktop/$file" "scripts/desktop/$file"
+          done
           test "$(git rev-parse HEAD)" = "$tagged_head"
           git diff --exit-code -- packages
       - name: Native desktop chat smoke
