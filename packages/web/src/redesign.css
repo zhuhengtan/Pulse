@@ -638,6 +638,12 @@ body, :root { color: var(--ink); background: var(--panel); }
 .desktop-window-content { height:calc(100% - env(titlebar-area-height,36px)); min-height:0; }
 .route-row.route-row-with-effort { grid-template-columns:48px minmax(0,1fr) minmax(110px,140px) 36px 36px auto; }
 .route-effort { min-width:0; }
+.reasoning-depth-menu.ant-select-dropdown { background:var(--surface-raised); }
+.reasoning-depth-menu .ant-select-item-option { color:var(--ink); }
+.reasoning-depth-menu .ant-select-item-option-disabled { color:var(--muted); }
+.reasoning-depth-menu .ant-select-item-option-active:not(.ant-select-item-option-disabled) { background:color-mix(in srgb,var(--ink) 5%,var(--surface-raised)); }
+.reasoning-depth-menu .ant-select-item-option-selected:not(.ant-select-item-option-disabled) { background:color-mix(in srgb,var(--ink) 9%,var(--surface-raised)); }
+.reasoning-depth-menu .ant-select-item-option-state { color:var(--ink); margin-inline-start:8px; }
 @media (max-width:767px) {
   .route-row.route-row-with-effort { grid-template-columns:44px minmax(0,1fr) 34px 34px; }
   .route-row-with-effort .route-effort { grid-column:2/-1; grid-row:2; }

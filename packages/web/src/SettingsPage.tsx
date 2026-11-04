@@ -13,6 +13,7 @@ import { readFollowupBehavior, saveFollowupBehavior } from './MessageQueue.js'
 import { PulseButton, PulseDisclosure, PulseInput, PulseSelect, PulseTextArea, usePulseDialogs } from './PulseControls.js'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Card, Drawer, Input, InputNumber, Select, Switch } from 'antd'
+import { CheckOutlined } from '@ant-design/icons'
 import { ApiError, apiJson, jsonRequest } from './transport.js'
 import { Icon } from './Icon.js'
 import type { PulseWebTransport } from './transport.js'
@@ -371,7 +372,7 @@ const effortLabels: Record<ReasoningEffort, string> = { none: '关闭', minimal:
 function ReasoningSelect({ label, provider, model, value, onChange, disabled = false }: { label: string; provider: Obj; model: Obj; value?: ReasoningEffort | undefined; onChange(value: ReasoningEffort | undefined): void; disabled?: boolean }) {
   const support = resolveReasoningSupport(provider.provider ?? 'openai-compatible', model.modelCode ?? '', model.discovery?.supportedReasoningEfforts)
   return <label className="field-control route-effort"><span>思考深度</span>
-    <PulseSelect aria-label={label} value={value ?? 'default'} disabled={disabled} onChange={next => onChange(next === 'default' ? undefined : next as ReasoningEffort)}>
+    <PulseSelect aria-label={label} value={value ?? 'default'} disabled={disabled} classNames={{ popup: { root: 'reasoning-depth-menu' } }} menuItemSelectedIcon={<CheckOutlined aria-hidden />} onChange={next => onChange(next === 'default' ? undefined : next as ReasoningEffort)}>
       <option value="default">默认</option>
       {reasoningEfforts.map(effort => {
         const supported = support.levels.includes(effort)
