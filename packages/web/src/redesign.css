@@ -635,7 +635,13 @@ body, :root { color: var(--ink); background: var(--panel); }
 .history-quick-action.is-pinned svg { fill:currentColor; }
 
 .desktop-titlebar { height:36px; height:env(titlebar-area-height,36px); margin-left:env(titlebar-area-x,0px); width:env(titlebar-area-width,100%); display:flex; align-items:center; padding:0 16px; background:var(--panel); color:var(--muted); font-size:12px; user-select:none; -webkit-app-region:drag; }
-.desktop-window-content { height:calc(100% - env(titlebar-area-height,36px)); min-height:0; }
+.desktop-window-content { height:calc(100dvh - env(titlebar-area-height,36px)); min-height:0; }
+.desktop-window-content > :is(.shell,.settings-shell,.archive-shell),
+.desktop-window-content .shell > :is(.desktop-history,.chat),
+.desktop-window-content .desktop-history > .history { height:100%; min-height:0; }
+@media (max-width:767px) {
+  .desktop-window-content > .settings-shell { position:relative; inset:auto; }
+}
 .route-row.route-row-with-effort { grid-template-columns:48px minmax(0,1fr) minmax(110px,140px) 36px 36px auto; }
 .route-effort { min-width:0; }
 .reasoning-depth-menu.ant-select-dropdown { background:var(--surface-raised); }
