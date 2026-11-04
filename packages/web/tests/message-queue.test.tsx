@@ -238,15 +238,55 @@ it('keeps the original chat reference through offline retry and a restored queue
  await f.controller.enqueue('conversation','chat',payload);ref.conversationId='work-b';await f.controller.tick();f.controller.close();const restored=new MessageQueueController('service-one',f.store,f.adapter,()=>{});await restored.tick();expect(received).toHaveLength(2);expect(received.map(x=>x.assistantContext.conversationId)).toEqual(['work-a','work-a']);restored.close()
 })
 
-it('reconciles a terminal work busy marker before draining its queued message', async () => {
+it('keeps an interrupted work run on inspect and reconciles only a confirmed terminal marker when sending', async () => {
   const paths: string[] = []
-  const transport: PulseWebTransport = { subscribe: () => () => {}, request: async (path) => {
-    paths.push(path)
-    if (path.endsWith('/state')) return Response.json({ state: 'succeeded', interactions: [] })
+  const bodies: unknown[] = []
+  let snapshot: { state: string; waiting?: boolean; interactions?: unknown[]; releaseBlocked?: string } = { state: 'interrupted', interactions: [] }
+  const transport: PulseWebTransport = { subscribe: () => () => {}, request: async (path, init) => {
+    paths.push(`${init?.method ?? 'GET'} ${path}`)
+    if (init?.body) bodies.push(JSON.parse(String(init.body)))
+    if (path.endsWith('/state')) return Response.json(snapshot)
     if (path.endsWith('/reconcile')) return Response.json({ cleared: true })
-    return Response.json({ activeRunId: 'stopped', runs: ['stopped'] })
+    if (init?.method === 'POST' && path.endsWith('/messages')) return Response.json({ runId: 'next' })
+    return Response.json({ id: 'conversation', activeRunId: 'stopped', runs: ['stopped'] })
   } }
-  const state = await queueAdapter(transport).inspect({ key: 'k', scope: 's', surface: 'work', conversationId: 'conversation', entries: [], paused: false })
-  expect(state.activeRunId).toBeUndefined()
-  expect(paths.at(-1)).toBe('/api/conversations/conversation/runs/stopped/reconcile')
+  const store = new MemoryStore()
+  const controller = new MessageQueueController('service-one', store, queueAdapter(transport), () => {})
+  await controller.enqueue('conversation', 'work', { text: 'next' })
+  const requestId = store.values.get(controller.key('conversation'))!.entries[0]!.requestId
+  await controller.tick()
+  expect(paths.some(path => path.includes('/reconcile'))).toBe(false)
+  expect(paths.some(path => path.endsWith('/messages'))).toBe(false)
+  expect(store.values.get(controller.key('conversation'))!.paused).toBe(true)
+  expect(store.values.get(controller.key('conversation'))!.entries).toHaveLength(1)
+  paths.length = 0
+  snapshot = { state: 'succeeded', waiting: true, interactions: [{ id: 'ask' }] }
+  await controller.pause('conversation', false)
+  await controller.tick()
+  expect(paths.some(path => path.includes('/reconcile'))).toBe(false)
+  expect(paths.some(path => path.endsWith('/messages'))).toBe(false)
+  paths.length = 0
+  snapshot = { state: 'interrupted', interactions: [], releaseBlocked: 'RECOVERY_SIDE_EFFECT_UNKNOWN' }
+  await controller.pause('conversation', false)
+  await controller.tick()
+  expect(paths.some(path => path.includes('/reconcile'))).toBe(false)
+  expect(store.values.get(controller.key('conversation'))!.paused).toBe(true)
+  paths.length = 0
+  bodies.length = 0
+  snapshot = { state: 'interrupted', interactions: [] }
+  await controller.pause('conversation', false)
+  await controller.tick()
+  expect(paths.findIndex(path => path.includes('/reconcile'))).toBeLessThan(paths.findIndex(path => path.endsWith('/messages')))
+  expect(bodies.at(-1)).toMatchObject({ text: 'next', requestId, delivery: 'whenIdle' })
+  expect(paths.filter(path => path.endsWith('/messages'))).toHaveLength(1)
+  controller.close()
+  paths.length = 0
+  snapshot = { state: 'succeeded', interactions: [] }
+  const drained = new MessageQueueController('service-one', new MemoryStore(), queueAdapter(transport), () => {})
+  await drained.enqueue('conversation', 'work', { text: 'after success' })
+  await drained.tick()
+  expect(paths.findIndex(path => path.includes('/reconcile'))).toBeGreaterThan(-1)
+  expect(paths.findIndex(path => path.includes('/reconcile'))).toBeLessThan(paths.findIndex(path => path.endsWith('/messages')))
+  expect(paths.filter(path => path.endsWith('/messages'))).toHaveLength(1)
+  drained.close()
 })

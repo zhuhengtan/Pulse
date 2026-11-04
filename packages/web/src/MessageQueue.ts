@@ -78,6 +78,8 @@ export class IndexedMessageQueueStore implements QueueStore {
 export interface QueueRunState { activeRunId?: string; runId?: string; waiting: boolean; state?: WebRunSnapshot['state']; sideEffectUnknown?: boolean }
 export interface QueueAdapter {
   inspect(queue: ConversationQueue): Promise<QueueRunState>
+  /** Clear a confirmed terminal busy marker only after the next message is allowed to send. */
+  reconcile?(queue: ConversationQueue, runId: string): Promise<boolean>
   send(queue: ConversationQueue, entry: QueueEntry): Promise<{ runId: string }>
   accepted?(queue: ConversationQueue, entry: QueueEntry, runId: string): void
 }
@@ -91,12 +93,12 @@ export function queueAdapter(transport: PulseWebTransport, accepted?: QueueAdapt
       const runId = conversation.activeRunId ?? latestRunId ?? queue.awaitingRunId ?? queue.confirmedRunId
       if (!runId) return { waiting: false }
       const snapshot = await apiJson<WebRunSnapshot>(transport, `/api/runs/${encodeURIComponent(runId)}/state`)
-      if (queue.surface === 'work' && conversation.activeRunId === runId && snapshot.state !== 'running' && !snapshot.waiting && !snapshot.interactions?.length && !snapshot.releaseBlocked) {
-        const result = await apiJson<{ cleared: boolean; activeRunId?: string }>(transport, `/api/conversations/${encodeURIComponent(queue.conversationId)}/runs/${encodeURIComponent(runId)}/reconcile`, jsonRequest('POST'))
-        if (result.activeRunId) conversation.activeRunId = result.activeRunId
-        else delete conversation.activeRunId
-      }
       return { ...(conversation.activeRunId ? { activeRunId: conversation.activeRunId } : {}), runId, waiting: Boolean(snapshot.waiting || snapshot.interactions?.length), state: snapshot.state, ...(snapshot.releaseBlocked === 'RECOVERY_SIDE_EFFECT_UNKNOWN' ? { sideEffectUnknown: true } : {}) }
+    },
+    async reconcile(queue, runId) {
+      if (queue.surface !== 'work') return false
+      const result = await apiJson<{ cleared: boolean; activeRunId?: string }>(transport, `/api/conversations/${encodeURIComponent(queue.conversationId)}/runs/${encodeURIComponent(runId)}/reconcile`, jsonRequest('POST'))
+      return result.cleared === true && result.activeRunId === undefined
     },
     async send(queue, entry) {
       return apiJson(transport, queue.surface === 'chat' ? '/api/assistant/messages' : `/api/conversations/${encodeURIComponent(queue.conversationId)}/messages`, jsonRequest('POST', {
@@ -191,15 +193,39 @@ export class MessageQueueController {
       if (!entry.immediate && !entry.sending) {
         const state = await this.adapter.inspect(claim)
         const inspectedRun = state.runId ?? state.activeRunId ?? claim.awaitingRunId
-        const confirmedThisTerminal = Boolean(claim.confirmedRunId && inspectedRun === claim.confirmedRunId && state.state && ['failed', 'cancelled', 'interrupted'].includes(state.state) && !state.sideEffectUnknown && !state.activeRunId && !state.waiting)
-        if (state.sideEffectUnknown || (state.state && ['failed', 'cancelled', 'interrupted'].includes(state.state) && !confirmedThisTerminal)) {
+        const terminal = Boolean(state.state && ['failed', 'cancelled', 'interrupted'].includes(state.state))
+        const explicitlyConfirmed = Boolean(claim.confirmedRunId && inspectedRun === claim.confirmedRunId && terminal && !state.sideEffectUnknown && !state.waiting)
+        if (state.sideEffectUnknown || (terminal && !explicitlyConfirmed)) {
           await this.change(claim.conversationId, queue => {
             const { confirmedRunId: _confirmed, ...rest } = queue
             return { ...rest, paused: true, ...(inspectedRun ? { awaitingRunId: inspectedRun } : {}), error: state.sideEffectUnknown ? '存在执行结果未知的工具操作，队列已暂停。' : '上轮未成功完成，队列已暂停。' }
           }); return
         }
-        if (state.activeRunId || state.waiting || state.state === 'running') {
+        if (state.waiting || state.state === 'running') {
           if (state.activeRunId && state.activeRunId !== claim.awaitingRunId) await this.change(claim.conversationId, queue => ({ ...queue, awaitingRunId: state.activeRunId! }))
+          return
+        }
+        const releasable = Boolean(state.activeRunId && (state.state === 'succeeded' || explicitlyConfirmed))
+        if (releasable) {
+          if (!this.adapter.reconcile) {
+            if (state.activeRunId !== claim.awaitingRunId) await this.change(claim.conversationId, queue => ({ ...queue, awaitingRunId: state.activeRunId! }))
+            return
+          }
+          try {
+            const cleared = await this.adapter.reconcile(claim, state.activeRunId!)
+            if (!cleared) {
+              if (state.activeRunId !== claim.awaitingRunId) await this.change(claim.conversationId, queue => ({ ...queue, awaitingRunId: state.activeRunId! }))
+              return
+            }
+          } catch (error) {
+            if (error instanceof ApiError && (error.detail === 'CONVERSATION_BUSY' || error.detail === 'RUN_AWAITING_APPROVAL' || (error.detail?.startsWith('RECOVERY_') ?? false))) {
+              if (error.detail !== 'CONVERSATION_BUSY') await this.change(claim.conversationId, queue => ({ ...queue, paused: true, error: error.detail === 'RUN_AWAITING_APPROVAL' ? '上轮未成功完成，队列已暂停。' : '存在执行结果未知的工具操作，队列已暂停。' }))
+              return
+            }
+            throw error
+          }
+        } else if (state.activeRunId) {
+          if (state.activeRunId !== claim.awaitingRunId) await this.change(claim.conversationId, queue => ({ ...queue, awaitingRunId: state.activeRunId! }))
           return
         }
         if (claim.awaitingRunId && state.state !== 'succeeded' && claim.confirmedRunId !== claim.awaitingRunId) {
