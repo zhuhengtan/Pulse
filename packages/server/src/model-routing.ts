@@ -1,4 +1,4 @@
-import { routeEntry, routeModelId, resolveReasoningSupport, type ModelRouteEntry, type ReasoningEffort } from './model-settings.js'
+import { candidateOutputTokens, routeEntry, routeModelId, resolveReasoningSupport, type ModelRouteEntry, type ReasoningEffort } from './model-settings.js'
 import { InMemoryModelRegistry, ModelRouter, type ModelCandidate } from '@hunterzhu/pulse-runtime'
 import { createProviderAdapter, type ProviderAdapter, type ProviderPresetConfig } from '@hunterzhu/pulse-adapters'
 
@@ -58,7 +58,7 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
     }
     const isActive = displayName === options.activeModel && selection.provider === activeCode
     const maxContextTokens = selection.maxContextTokens ?? profile.maxContextTokens ?? 32_000
-    const maxOutputTokens = selection.maxOutputTokens ?? profile.maxOutputTokens ?? options.activeProvider.maxOutputTokens ?? 4_096
+    const maxOutputTokens = candidateOutputTokens(selection.maxOutputTokens ?? profile.maxOutputTokens ?? options.activeProvider.maxOutputTokens, maxContextTokens)
     const reasoningEffort = selection.reasoningEffort ?? profile.reasoningEffort
     const support = resolveReasoningSupport(profile.provider, selection.model, selection.supportedReasoningEfforts)
     const reasoning = support.verified ? support.levels.some(level => level === 'high' || level === 'xhigh' || level === 'max') ? 'high' : support.levels.includes('medium') ? 'medium' : 'low' : 'medium'
@@ -75,7 +75,7 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
         structuredOutput: true,
         reasoning,
         maxContextTokens,
-        maxOutputTokens,
+        ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
         local: selection.remote !== true && isLocalModelProvider(profile, selection.model),
       },
     })

@@ -1,5 +1,5 @@
 import { captureRunModelRouting, restoreRunModelRouting } from './run-model-routing.js'
-import { routeModelId, type ModelRouteEntry, type ReasoningEffort } from './model-settings.js'
+import { candidateOutputTokens, historyBudget, routeModelId, type ModelRouteEntry, type ReasoningEffort } from './model-settings.js'
 import { callbackWorkState, type WorkCallback } from './work-callback.js'
 import { checkWorkControl, withWorkActor } from './work-control.js'
 import { startChatAcknowledgement } from './chat-acknowledgement.js'
@@ -1321,13 +1321,6 @@ function buildAssistantChatProgram(toolNames: string[], systemPrompt: string, co
   })
 }
 
-function historyBudget(capabilities: ModelCapabilities): { historySoftTokens: number; historyHardTokens: number } {
-  const maxOutput = capabilities.maxOutputTokens ?? 4_096
-  const usable = Math.max(2_000, capabilities.maxContextTokens - maxOutput)
-  const historyHardTokens = Math.max(2_000, Math.floor(usable / 2))
-  return { historyHardTokens, historySoftTokens: Math.max(1_000, Math.floor(historyHardTokens / 2)) }
-}
-
 function legacyModelCalls(runtime: PulseRuntime): number {
   // Older snapshots have no ledger. Include admitted attempts whose response
   // metadata was lost at shutdown, rather than granting those calls again.
@@ -1467,7 +1460,9 @@ function providerFromOptions(options: LocalHostOptions): { adapter: ProviderAdap
   }
   const local = isLocalModelProvider(config)
   const reasoning = config.reasoningEffort === 'none' || config.reasoningEffort === 'minimal' || config.reasoningEffort === 'low' ? 'low' : config.reasoningEffort && config.reasoningEffort !== 'medium' ? 'high' : 'medium'
-  return { adapter, model: { id: config.defaultModel ?? `${config.provider}-default`, providerId: adapter.id, tasks: ['reason', 'plan', 'merge', 'verify'], priority: 10, capabilities: { toolCalling: true, structuredOutput: true, reasoning, maxContextTokens: config.maxContextTokens ?? 32_000, maxOutputTokens: config.maxOutputTokens ?? 4_096, local }, adapter } }
+  const maxContextTokens = config.maxContextTokens ?? 32_000
+  const maxOutputTokens = candidateOutputTokens(config.maxOutputTokens, maxContextTokens)
+  return { adapter, model: { id: config.defaultModel ?? `${config.provider}-default`, providerId: adapter.id, tasks: ['reason', 'plan', 'merge', 'verify'], priority: 10, capabilities: { toolCalling: true, structuredOutput: true, reasoning, maxContextTokens, ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }), local }, adapter } }
 }
 
 /** Accept only a reply whose entire trimmed text is the allow token. */

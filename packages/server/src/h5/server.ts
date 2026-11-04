@@ -28,6 +28,7 @@ import { createServer, IncomingMessage, type Server, ServerResponse } from 'node
 import { createReadStream } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { normalizeModelConfig, parseModelSelectionId } from '../model-config.js'
+import { validateContextSettings } from '../model-settings.js'
 import { providerPresets } from '../providers/catalog.js'
 import { ProviderCredentialStore } from '../providers/credentials.js'
 import { ProviderOnboarding, mergeDiscoveredModels, normalizeDiscoveredModel, providerErrorCode } from '../providers/onboarding.js'
@@ -288,6 +289,9 @@ export class H5Server {
     const search = webSearchDraft(config.webSearch)
     const plugins = pluginDraft(config.builtinPlugins)
     const normalizedConfig: Record<string, unknown> = normalizeModelConfig({ ...config, ...(plugins.config ? { builtinPlugins: plugins.config } : {}), ...(search.config ? { webSearch: search.config } : {}) })
+    for (const [id, provider] of Object.entries((normalizedConfig.providers ?? {}) as Record<string, unknown>)) {
+      if (provider && typeof provider === 'object') validateContextSettings(provider as Parameters<typeof validateContextSettings>[0], id)
+    }
     parseExecPolicy(normalizedConfig.execPolicy)
     parseBuiltinPlugins(normalizedConfig.builtinPlugins, normalizedConfig)
     for (const source of Object.values(normalizedConfig.providers ?? {}) as Array<Record<string, unknown>>) {

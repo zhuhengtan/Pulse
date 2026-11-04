@@ -163,7 +163,7 @@ export function normalizeModelConfig<T extends Record<string, any>>(input: T): T
   }
 
   for (const [id, provider] of Object.entries(providers) as Array<[string, ProviderDefinition]>) {
-    validateContextSettings(provider, id)
+    validateContextSettings(provider, id, 'load')
     if (provider.reasoningEffort !== undefined && !isReasoningEffort(provider.reasoningEffort)) throw new Error(`MODEL_REASONING_EFFORT_INVALID:${id}`)
     for (const [modelId, model] of Object.entries(provider.models ?? {})) if (model.reasoningEffort !== undefined && !isReasoningEffort(model.reasoningEffort)) throw new Error(`MODEL_REASONING_EFFORT_INVALID:${id}/${modelId}`)
   }
