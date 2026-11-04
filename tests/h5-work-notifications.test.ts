@@ -8,14 +8,15 @@ import { createLocalHost, H5Server } from '../packages/server/src/index.js'
 import { AssistantConversationStore } from '../packages/server/src/h5/assistant.js'
 
 const exec = promisify(execFile)
-it.each([false, true])('finishes project work independently of chat notifications (assistant origin: %s)', async assistantOrigin => {
+it.each([false, true])('finishes project work independently of chat notifications (chat start: %s)', async chatStart => {
   const root = await mkdtemp(join(tmpdir(), 'pulse-work-notification-'))
   const projectRoot = join(root, 'project'), dataDir = join(root, 'data')
   await mkdir(projectRoot)
   const git = (...args: string[]) => exec('git', args, { cwd: projectRoot })
   await git('init', '--quiet'); await git('config', 'user.name', 'Pulse Test'); await git('config', 'user.email', 'pulse-test@localhost')
   await writeFile(join(projectRoot, 'base.txt'), 'base\n'); await git('add', '.'); await git('commit', '--quiet', '-m', 'baseline')
-  const options = { cwd: projectRoot, dataDir, approvalMode: 'auto' as const, mockToolCalls: [{ name: 'fs.write', input: { path: 'notes.txt', content: 'hello' } }], mockAfterToolResponse: 'Created notes.txt with hello.', mockTaskAssessments: [{ criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: ['AUTO'], rationale: 'File write completed.' }] }] }
+  const profile = { provider: 'mock' as const, defaultModel: 'mock' }
+  const options = { cwd: projectRoot, dataDir, approvalMode: 'auto' as const, provider: profile, providerProfiles: { mock: profile }, providerModels: { mock: { provider: 'mock', model: 'mock' } }, activeModel: 'mock', assistantModel: 'mock', jarvis: { enabled: false }, mockResponse: '工作已完成并合入。', mockToolCalls: [{ name: 'fs.write', input: { path: 'notes.txt', content: 'hello' } }], mockAfterToolResponse: 'Created notes.txt with hello.', mockTaskAssessments: [{ criteria: [{ criterionId: 'criterion-1', status: 'passed', evidenceRefs: ['AUTO'], rationale: 'File write completed.' }] }] }
   let host = createLocalHost(options), server = new H5Server(host, { dataDir, host: '127.0.0.1', port: 0 })
   try {
     let base = `http://127.0.0.1:${(await server.start()).port}`
@@ -25,29 +26,47 @@ it.each([false, true])('finishes project work independently of chat notification
     }
     let headers = await authorize()
     const project = await fetch(`${base}/api/projects`, { method: 'POST', headers, body: JSON.stringify({ cwd: projectRoot, name: 'Fixture project' }) }).then(response => response.json()) as { id: string }
-    const work = await host.createConversation({ title: 'Create notes', cwd: projectRoot, projectId: project.id, ...(assistantOrigin ? { origin: 'assistant' as const } : {}) })
-    const sent = await fetch(`${base}/api/conversations/${work.id}/messages`, { method: 'POST', headers, body: JSON.stringify({ text: 'Create notes.txt with the exact content hello.' }) }).then(response => response.json()) as { runId: string }
+    const task = 'Create notes.txt with the exact content hello.'
+    const workId = chatStart
+      ? (await (server as unknown as { startWorkFromAssistant(projectId: string, task: string): Promise<{ conversationId: string }> }).startWorkFromAssistant(project.id, task)).conversationId
+      : (await host.createConversation({ title: 'Create notes', cwd: projectRoot, projectId: project.id })).id
+    if (!chatStart) await fetch(`${base}/api/conversations/${workId}/messages`, { method: 'POST', headers, body: JSON.stringify({ text: task }) })
+    if (chatStart) {
+      expect((await host.getConversation(workId)).summary.control).toMatchObject({ owner: 'assistant' })
+      expect((server as unknown as { assistantInbox: AssistantConversationStore }).assistantInbox.workLink(workId)).toMatchObject({ projectId: project.id })
+    }
     await vi.waitFor(async () => {
-      const record = JSON.parse(await readFile(join(dataDir, 'workspaces', 'records', `${work.id}.json`), 'utf8'))
+      const record = JSON.parse(await readFile(join(dataDir, 'workspaces', 'records', `${workId}.json`), 'utf8'))
       expect(record.status).toBe('merged')
-    }, { timeout: 10_000, interval: 40 })
+    }, { timeout: 15_000, interval: 40 })
     expect(await readFile(join(projectRoot, 'notes.txt'), 'utf8')).toBe('hello')
-    const view = async () => await fetch(`${base}/api/assistant`, { headers }).then(response => response.json()) as { messages: Array<{ id: string; work?: { conversationId: string } }> }
-    await vi.waitFor(async () => expect((await view()).messages.some(message => message.id === `work-${sent.runId}`)).toBe(assistantOrigin))
+    type AssistantMessage = { id: string; messageKind?: string; work?: { conversationId: string; state?: string } }
+    const view = async () => await fetch(`${base}/api/assistant`, { headers }).then(response => response.json()) as { messages: AssistantMessage[] }
+    const noticesFor = (messages: AssistantMessage[]) => messages.filter(message => message.messageKind === 'work_notice' && message.work?.conversationId === workId)
+    let noticeId: string | undefined
+    await vi.waitFor(async () => {
+      const notices = noticesFor((await view()).messages)
+      expect(notices).toHaveLength(chatStart ? 1 : 0)
+      if (chatStart) {
+        expect(notices[0]).toMatchObject({ work: { conversationId: workId, state: 'succeeded' } })
+        expect(notices[0]?.id.startsWith('chat-')).toBe(true)
+        noticeId = notices[0]?.id
+      }
+    }, { timeout: 15_000, interval: 40 })
     await server.stop(); await host.close()
-    // Legacy links/notices alone do not establish that a task originated in chat.
-    if (!assistantOrigin) {
+    // A stored link or an old manual notice does not authorize a chat work card.
+    if (!chatStart) {
       const store = new AssistantConversationStore(dataDir)
       try {
         await store.init(async () => { throw new Error('Expected existing assistant') })
-        await store.linkWork(work.id, project.id, 'Old manual task')
-        await store.addWorkNotice({ id: 'legacy-manual-notice', role: 'assistant', text: 'Old manual result', createdAt: new Date().toISOString(), work: { conversationId: work.id, projectId: project.id, title: 'Old manual task', state: 'succeeded' } })
+        await store.linkWork(workId, project.id, 'Old manual task')
+        await store.addWorkNotice({ id: 'legacy-manual-notice', role: 'assistant', text: 'Old manual result', createdAt: new Date().toISOString(), messageKind: 'work_notice', work: { conversationId: workId, projectId: project.id, title: 'Old manual task', state: 'succeeded' } })
       } finally { await store.close() }
     }
     host = createLocalHost(options); server = new H5Server(host, { dataDir, host: '127.0.0.1', port: 0 })
     base = `http://127.0.0.1:${(await server.start()).port}`; headers = await authorize()
-    expect((await host.getConversation(work.id)).summary.origin).toBe(assistantOrigin ? 'assistant' : undefined)
-    const restored = (await view()).messages.filter(message => message.work?.conversationId === work.id)
-    expect(restored.length).toBe(assistantOrigin ? 1 : 0)
+    expect((await host.getConversation(workId)).summary.origin).toBe(chatStart ? 'assistant' : undefined)
+    const restored = noticesFor((await view()).messages)
+    expect(restored.map(message => message.id)).toEqual(chatStart ? [noticeId] : [])
   } finally { await server.stop(); await host.close(); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
-}, 20_000)
+}, 30_000)
