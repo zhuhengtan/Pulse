@@ -7,15 +7,24 @@ import { buildTaskControllerProgram } from '../packages/server/src/task-controll
 import { summarizeShellProcess } from '../packages/server/src/shell-processes.js'
 import { initialController } from '../packages/server/src/task-controller/state.js'
 import { createLocalHost } from '../packages/server/src/index.js'
-import { runShell } from '../packages/adapters/src/tools/shell.js'
+import { resolveShellIdentity, runShell } from '../packages/adapters/src/tools/shell.js'
 import { currentRequestText, suppliedRequestResults } from './helpers/provider-request.js'
 
 vi.mock('../packages/adapters/src/tools/shell.js', async original => ({ ...await original<typeof import('../packages/adapters/src/tools/shell.js')>(), runShell: vi.fn() }))
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 it.each([0, 1])('waits for the original background check and collects its exit code %s before verification', async exitCode => {
   const cwd = await mkdtemp(join(tmpdir(), 'pulse-work-shell-settle-'))
-  let finish!: () => void, workerCalls = 0, reviews = 0
-  vi.mocked(runShell).mockReset().mockImplementation(async (_command, _args, options) => {
+  // windows-launch-delay-repro.log: delaying only the 3rd ExecPolicyHost.authorize
+  // by 2500ms reproduces finish is not a function. That call is inside executeShell
+  // after ShellProcesses has persisted the running intent, so shell.poll can be
+  // submitted before this mock is entered. Delaying the 2nd authorize does not.
+  // A Windows path mismatch is unproven; this uses the passing canonical node rule.
+  const identity = await resolveShellIdentity('node', ['--version'], cwd)
+  let finish: (() => void) | undefined, entered = false, workerCalls = 0, reviews = 0
+  vi.mocked(runShell).mockReset().mockImplementation(async (command, args, options) => {
+    entered = true
+    expect(command).toBe('node')
+    expect(args).toEqual(['--version'])
     options?.onOutput?.('stdout', Buffer.from('check started\n'))
     await new Promise<void>(resolve => { finish = resolve; options?.signal?.addEventListener('abort', () => resolve(), { once: true }) })
     return { code: exitCode, stdout: 'check finished', stderr: '', timedOut: false, aborted: false, truncated: false }
@@ -33,20 +42,28 @@ it.each([0, 1])('waits for the original background check and collects its exit c
       return chat(JSON.stringify({ status: exitCode ? 'blocked' : 'passed', evidenceRefs: refs, note: exitCode ? 'The check exited with failure.' : 'The check exited successfully.' }))
     }
     if (text.includes('Independently verify every ORIGINAL')) return chat(JSON.stringify({ criteria: [{ criterionId: 'criterion-1', status: exitCode ? 'unverifiable' : 'passed', evidenceRefs: refs, rationale: 'Observed the final check result.' }] }))
-    if (++workerCalls === 1) return chat({ content: '', tool_calls: [{ id: 'start', function: { name: 'shell_start', arguments: JSON.stringify({ command: process.execPath, args: ['--version'] }) } }] })
+    if (++workerCalls === 1) return chat({ content: '', tool_calls: [{ id: 'start', function: { name: 'shell_start', arguments: JSON.stringify({ command: 'node', args: ['--version'] }) } }] })
     return chat('The command has started; inspect its result.')
   }))
-  const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, taskController: true, jarvis: { enabled: false }, approvalMode: 'auto', execPolicy: { rules: [{ pattern: [process.execPath, '--version'], decision: 'allow' }] }, maxModelCalls: 24 })
+  const host = createLocalHost({ cwd, dataDir: join(cwd, 'data'), provider: { provider: 'openai-compatible', defaultModel: 'fixture' }, taskController: true, jarvis: { enabled: false }, approvalMode: 'auto', execPolicy: { rules: [{ pattern: [identity.path, '--version'], decision: 'allow' }] }, maxModelCalls: 24 })
   try {
     const conversation = await host.createConversation(), run = await host.sendMessage(conversation.id, { text: 'Run the existing local check and report whether it passes.' })
     const dir = join(cwd, 'data/conversations', conversation.id, 'runs', run.id)
+    const runtimeState = async () => JSON.parse(await readFile(join(dir, 'runtime.json'), 'utf8')).state.state
     await vi.waitFor(async () => {
-      const saved = JSON.parse(await readFile(join(dir, 'runtime.json'), 'utf8')).state.state
+      const saved = await runtimeState()
       expect(saved.effects.some(([, effect]: any) => effect.input?.name === 'shell.poll')).toBe(true)
-    }, { timeout: 4000 })
+      expect(entered).toBe(true)
+      expect(vi.mocked(runShell)).toHaveBeenCalledTimes(1)
+      expect(finish).toBeTypeOf('function')
+    }, { timeout: 8000 })
     expect(reviews).toBe(0)
-    finish()
+    finish!()
     const outcome = await run.outcome()
+    const settled = await runtimeState()
+    const pollIds = new Set(settled.effects.filter(([, effect]: any) => effect.input?.name === 'shell.poll').map(([id]: [string]) => id))
+    const receipt = settled.results.map(([, result]: any) => result).find((result: any) => pollIds.has(result.effectId) && result.summary?.status === 'exited')
+    expect(receipt?.summary).toMatchObject({ status: 'exited', code: exitCode })
     expect(reviews).toBeGreaterThan(0)
     expect(reviews).toBeLessThanOrEqual(2)
     expect(await run.taskOutcome(), outcome.text).toMatchObject({ status: exitCode ? 'incomplete' : 'accepted' })
