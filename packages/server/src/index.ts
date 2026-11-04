@@ -482,6 +482,7 @@ function parseStoredMessages(content: string): StoredMessage[] {
         ...(Array.isArray(value.skills) ? { skills: value.skills as string[] } : {}),
         ...(richContent ? { richContent } : {}),
         ...(Array.isArray(value.mentionedFiles) ? { mentionedFiles: value.mentionedFiles as string[] } : {}),
+        ...(value.role === 'assistant' && value.messageKind === 'reply' ? { messageKind: 'reply' as const } : {}),
       })
     } catch {
       continue

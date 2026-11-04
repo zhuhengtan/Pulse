@@ -175,7 +175,10 @@ describe('work conversation transfer', () => {
     const result = await target.importConversationBundle(staged, { id: 'target-project', cwd: fixture.target })
     expect(result.blockedReasons).toEqual([])
     expect(result.conversation).toMatchObject({ id: fixture.conversation.id, cwd: fixture.target, projectId: 'target-project', approvalPolicy: 'manual' })
-    expect(await target.getConversationMessages(result.conversation.id)).toEqual(await fixture.original.getConversationMessages(fixture.conversation.id))
+    const importedMessages = await target.getConversationMessages(result.conversation.id)
+    expect(importedMessages).toEqual(await fixture.original.getConversationMessages(fixture.conversation.id))
+    expect(importedMessages.some(message => message.role === 'assistant' && message.messageKind === 'reply')).toBe(true)
+    expect(importedMessages.every(message => message.messageKind !== 'work_notice' && message.messageKind !== 'pre_reply' && message.work === undefined && message.workAction === undefined && message.assistantContext === undefined)).toBe(true)
     expect(await readFile(join(fixture.targetData, 'conversations', fixture.conversation.id, 'attachments', fixture.attachments[0]!.id), 'utf8')).toBe('payload')
     const runtime = await readBundleRuntime(join(fixture.targetData, 'conversations', fixture.conversation.id), fixture.run.id)
     expect(runtime.restored.state.results.size).toBeGreaterThan(0)
@@ -185,6 +188,38 @@ describe('work conversation transfer', () => {
     expect(await readConversationFixture(join(fixture.targetData, 'conversations', existing.id, 'manifest.json'))).toEqual(before)
     const next = await target.sendMessage(fixture.conversation.id, { text: '继续新消息' })
     await expect(next.outcome()).resolves.toMatchObject({ status: 'succeeded' })
+  }, 30_000)
+
+  it('keeps only an assistant reply marker when rebuilding an exported work transcript', async () => {
+    const fixture = await completed('json')
+    const target = host(fixture.target, fixture.targetData)
+    const staged = await stage(fixture.exported.path, fixture.targetData)
+    const messagesPath = join(staged.directory, 'content/conversation/messages.jsonl')
+    const exported = await readFile(messagesPath, 'utf8')
+    expect(exported).toContain('"messageKind":"reply"')
+    expect(exported).not.toContain('"messageKind":"work_notice"')
+    expect(exported).not.toContain('"messageKind":"pre_reply"')
+    expect(exported).not.toContain('"work":')
+    expect(exported).not.toContain('"workAction":')
+    expect(exported).not.toContain('"assistantContext":')
+    await writeFile(messagesPath, exported.trimEnd() + '\n' + [
+      { id: 'work-notice', role: 'assistant', text: 'notice', createdAt: new Date(0).toISOString(), messageKind: 'work_notice', work: { conversationId: 'chat', title: 'hidden', state: 'running' }, workAction: { callbackId: 'cb', conversationId: 'chat', runId: 'run', controlRevision: 4, fingerprint: 'fp', interaction: { kind: 'approval' } }, assistantContext: { conversationId: 'chat', controlRevision: 4 } },
+      { id: 'pre-reply', role: 'assistant', text: 'ack', createdAt: new Date(0).toISOString(), messageKind: 'pre_reply' },
+      { id: 'user-reply', role: 'user', text: 'control', createdAt: new Date(0).toISOString(), messageKind: 'reply', assistantContext: { conversationId: 'chat', controlRevision: 4 } },
+    ].map(message => JSON.stringify(message)).join('\n') + '\n')
+    const result = await target.importConversationBundle(staged, { id: 'target-project', cwd: fixture.target })
+    const imported = await target.getConversationMessages(result.conversation.id)
+    expect(imported.find(message => message.text === 'read complete')).toMatchObject({ role: 'assistant', messageKind: 'reply' })
+    const notice = imported.find(message => message.id === 'work-notice')!
+    expect(notice).toMatchObject({ role: 'assistant', text: 'notice' })
+    expect(notice.messageKind).toBeUndefined()
+    expect(notice.work).toBeUndefined()
+    expect(notice.workAction).toBeUndefined()
+    expect(notice.assistantContext).toBeUndefined()
+    expect(imported.find(message => message.id === 'pre-reply')!.messageKind).toBeUndefined()
+    const user = imported.find(message => message.id === 'user-reply')!
+    expect(user.messageKind).toBeUndefined()
+    expect(user.assistantContext).toBeUndefined()
   }, 30_000)
 
   it.each(['json', 'sqlite', 'external-files', 'h5-isolated'] as const)('resumes the same interrupted %s run at its approval boundary on another workspace', async mode => {
