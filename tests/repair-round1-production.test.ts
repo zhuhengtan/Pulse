@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { defineLaneProgram } from '@hunterzhu/pulse-runtime'
+import { defineLaneProgram, InMemoryModelRegistry, ModelRouter } from '@hunterzhu/pulse-runtime'
+import type { ProviderAdapter } from '../packages/adapters/src/providers/types.js'
 import { createModelEffectExecutor } from '../packages/adapters/src/providers/runtime-executor.js'
 import { McpStdioClient } from '../packages/adapters/src/mcp/stdio.js'
 import { resolveModelCapability } from '../packages/adapters/src/providers/canonical/capabilities.js'
@@ -221,16 +222,24 @@ describe('repair round 1 production paths', () => {
   })
 
   it('selects the vision route when the request contains images', async () => {
-    const seen: Array<{ task: unknown; imageInput: boolean; model?: string }> = []
-    const execute = createModelEffectExecutor({
-      router: { diagnostics: () => [], routeProjection: (task: unknown, _projection: unknown, requirements: { imageInput?: boolean }) => { seen.push({ task, imageInput: requirements.imageInput === true }); return [{ id: task === 'vision' ? 'vision-model' : 'reason-model', providerId: 'mock' }] }, recordFeedback: () => undefined } as never,
-      providers: new Map([['mock', { executeAttempt: async (params: { model?: string }) => { seen.push({ task: 'provider', imageInput: false, model: params.model }); return { text: 'seen', toolCalls: [], finishReason: 'stop' } } } as never]]),
-    })
+    const models = new InMemoryModelRegistry()
+    for (const id of ['vision-model', 'reason-model']) {
+      models.register({ id, providerId: 'mock', priority: 1, tasks: ['reason', 'vision'], capabilities: { imageInput: true, local: true, maxContextTokens: 16_384 } })
+    }
+    const router = new ModelRouter(models)
+    router.register({ task: 'reason', candidates: ['reason-model'] })
+    router.register({ task: 'vision', candidates: ['vision-model'], reasoningEfforts: { 'vision-model': 'xhigh' } })
+    const routeProjection = vi.spyOn(router, 'routeProjection')
+    const provider: ProviderAdapter = {
+      id: 'mock', name: 'Mock',
+      executeAttempt: vi.fn(async () => ({ text: 'seen', toolCalls: [], finishReason: 'stop' as const })),
+    }
+    const execute = createModelEffectExecutor({ router, providers: new Map([['mock', provider]]) })
     const projection = { images: [{ ref: 'artifact-1', mediaType: 'image/png', data: 'aGk=' }], contextSpec: { artifactRefs: [] }, blocks: [{ kind: 'instruction', content: 'look' }], prefixHash: 'a', projectionHash: 'b', builderVersion: '1', policyVersion: '1', toolSetVersion: '1', privacy: 'local_only', privacyRefs: [] }
     const result = await execute({ id: 'effect-1', kind: 'llm', attemptNo: 1, agentId: 'agent', key: 'work', input: { request: projection, task: 'reason' } } as never, new AbortController().signal)
-    expect(result.status).not.toBe('failed')
-    expect(seen).toContainEqual({ task: 'vision', imageInput: true })
-    expect(seen).toContainEqual({ task: 'provider', imageInput: false, model: 'vision-model' })
+    expect(result.status, JSON.stringify(result.error)).not.toBe('failed')
+    expect(routeProjection).toHaveBeenCalledWith('vision', expect.anything(), expect.objectContaining({ imageInput: true }))
+    expect(provider.executeAttempt).toHaveBeenCalledWith(expect.objectContaining({ model: 'vision-model', reasoningEffort: 'xhigh', strictReasoning: true }))
   })
 
   it('blocks continuous writes and acceptance for running or unknown shells, and leaves legacy programs alone', async () => {
