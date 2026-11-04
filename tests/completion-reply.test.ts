@@ -232,13 +232,13 @@ it('publishes the current verdict when a stored final message still says the old
   const start = source.indexOf('      if (text !== undefined) {', source.indexOf('text = (await cachedCompletionReply'))
   const end = source.indexOf('      const current =', start)
   const actual = source.slice(start, end).replace('.call<StoredMessage>(', '.call(')
-  const execute = new Function('text', 'stages', 'runId', 'conversationId', 'randomUUID', `return (async () => { ${actual}; return text }).call(this)`) as (this: { conversationData: { call: (...args: unknown[]) => Promise<unknown> }; appendMessage: () => Promise<void> }, text: string, stages: unknown[], runId: string, conversationId: string, randomUUID: () => string) => Promise<string>
+  const execute = new Function('text', 'stages', 'runId', 'conversationId', 'randomUUID', 'savedCallback', `return (async () => { ${actual}; return text }).call(this)`) as (this: { conversationData: { call: (...args: unknown[]) => Promise<unknown> }; appendMessage: () => Promise<void> }, text: string, stages: unknown[], runId: string, conversationId: string, randomUUID: () => string, savedCallback: unknown) => Promise<string>
   const revised: unknown[] = []
   const host = {
     conversationData: { call: async (...args: unknown[]) => { if (args[0] === 'revise') revised.push(args[2]); return { text: stored } } },
     appendMessage: async () => { throw new Error('should not append') },
   }
-  const published = await execute.call(host, selected, [{}], 'run-review', 'conversation-review', () => 'uuid')
+  const published = await execute.call(host, selected, [{}], 'run-review', 'conversation-review', () => 'uuid', undefined)
   expect(published).toContain('环境不可用')
   expect(published).not.toContain('已修复')
   expect(revised).toEqual([{ text: selected }])
