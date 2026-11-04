@@ -1,3 +1,4 @@
+import { routeEntry, routeModelId, resolveReasoningSupport, type ModelRouteEntry, type ReasoningEffort } from './model-settings.js'
 import { InMemoryModelRegistry, ModelRouter, type ModelCandidate } from '@hunterzhu/pulse-runtime'
 import { createProviderAdapter, type ProviderAdapter, type ProviderPresetConfig } from '@hunterzhu/pulse-adapters'
 
@@ -9,8 +10,8 @@ export interface HostModelRouteOptions {
   activeProvider: ProviderPresetConfig
   providerProfiles?: Record<string, ProviderPresetConfig>
   providerModels?: Record<string, { provider: string; model: string; remote?: boolean; tools?: 'supported' | 'unsupported' | 'unknown'; structuredOutput?: 'supported' | 'unsupported' | 'unknown'; maxContextTokens?: number; maxOutputTokens?: number; imageInput?: 'supported' | 'unsupported' | 'unknown'
-  reasoningEffort?: 'low' | 'medium' | 'high' }>
-  taskRouting?: Partial<Record<HostModelTask, string[]>>
+  reasoningEffort?: ReasoningEffort; supportedReasoningEfforts?: ReasoningEffort[] }>
+  taskRouting?: Partial<Record<HostModelTask, ModelRouteEntry[]>>
   /** Reuse the active provider instance (notably the scripted Mock adapter). */
   activeAdapter?: ProviderAdapter
 }
@@ -58,17 +59,21 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
     const isActive = displayName === options.activeModel && selection.provider === activeCode
     const maxContextTokens = selection.maxContextTokens ?? profile.maxContextTokens ?? 32_000
     const maxOutputTokens = selection.maxOutputTokens ?? profile.maxOutputTokens ?? options.activeProvider.maxOutputTokens ?? 4_096
-    const requestedReasoning = selection.reasoningEffort ?? profile.reasoningEffort ?? 'medium'
+    const reasoningEffort = selection.reasoningEffort ?? profile.reasoningEffort
+    const support = resolveReasoningSupport(profile.provider, selection.model, selection.supportedReasoningEfforts)
+    const reasoning = support.verified ? support.levels.some(level => level === 'high' || level === 'xhigh' || level === 'max') ? 'high' : support.levels.includes('medium') ? 'medium' : 'low' : 'medium'
     candidates.push({
       id: displayName,
       providerId: selection.provider,
       tasks: ['reason', 'plan', 'merge', 'verify', 'vision'],
       priority: isActive ? 100 : 10,
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+      ...(selection.supportedReasoningEfforts === undefined ? {} : { supportedReasoningEfforts: selection.supportedReasoningEfforts }),
       capabilities: {
         imageInput: selection.imageInput === 'supported',
         toolCalling: selection.tools !== 'unsupported',
         structuredOutput: true,
-        reasoning: requestedReasoning === 'none' ? 'low' : requestedReasoning,
+        reasoning,
         maxContextTokens,
         maxOutputTokens,
         local: selection.remote !== true && isLocalModelProvider(profile, selection.model),
@@ -115,11 +120,20 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
   const routes = options.taskRouting ?? {}
   for (const task of ['reason', 'plan', 'merge', 'verify', 'vision'] as const) {
     const configured = routes[task]
-    const route = configured === undefined ? [options.activeModel] : [...configured]
+    const entries = configured === undefined ? [options.activeModel] : configured.map(item => routeEntry(item, model => model))
+    const route = entries.map(routeModelId)
     if (route.length === 0) throw new Error(`EMPTY_MODEL_ROUTE:${task}`)
     if (new Set(route).size !== route.length) throw new Error(`DUPLICATE_MODEL_ROUTE_CANDIDATE:${task}`)
-    for (const model of route) if (!modelCodeById.has(model)) throw new Error(`UNKNOWN_MODEL_ROUTE_CANDIDATE:${task}:${model}`)
-    router.register({ task, candidates: route })
+    const reasoningEfforts: Record<string, ReasoningEffort> = Object.create(null)
+    for (const entry of entries) {
+      const id = routeModelId(entry), selected = providerModels[id]
+      if (!selected || !modelCodeById.has(id)) throw new Error(`UNKNOWN_MODEL_ROUTE_CANDIDATE:${task}:${id}`)
+      if (typeof entry === 'string' || entry.reasoningEffort === undefined) continue
+      const support = resolveReasoningSupport(profiles[selected.provider]!.provider, selected.model, selected.supportedReasoningEfforts)
+      if (!support.levels.includes(entry.reasoningEffort)) throw new Error(`MODEL_ROUTE_REASONING_UNSUPPORTED:${task}:${id}:${entry.reasoningEffort}`)
+      reasoningEfforts[id] = entry.reasoningEffort
+    }
+    router.register({ task, candidates: route, reasoningEfforts })
   }
   return { models, router, providers, candidates }
 }

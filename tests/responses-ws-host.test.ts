@@ -51,3 +51,29 @@ it('old snapshots cannot inherit a newly selected websocket transport',()=>{
  expect(()=>createProviderAdapter({...provider,responsesTransport:'invalid' as any})).toThrow('PROVIDER_RESPONSES_TRANSPORT_INVALID');
  expect(()=>createProviderAdapter({...provider,apiMode:'chat-completions'})).toThrow('PROVIDER_RESPONSES_TRANSPORT_UNSUPPORTED');
 });
+
+it('classifies an explicit WebSocket effort rejection without resending the request', async () => {
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await once(server, 'listening')
+  const payloads: unknown[] = []
+  server.on('connection', (socket: { on(event: 'message', handler: (bytes: Buffer) => void): void; send(data: string): void }) => {
+    socket.on('message', bytes => {
+      payloads.push(JSON.parse(String(bytes)))
+      socket.send(JSON.stringify({ type: 'error', code: 'unsupported_value', param: 'reasoning.effort', message: 'Unsupported reasoning effort.' }))
+    })
+  })
+  const adapter = createProviderAdapter({ provider: 'openai-compatible', apiMode: 'responses', responsesTransport: 'websocket', baseURL: `http://127.0.0.1:${server.address().port}/v1` })
+  try {
+    await expect(adapter.executeAttempt({
+      model: 'fixture', reasoningEffort: 'max', strictReasoning: true, signal: new AbortController().signal,
+      request: {
+        contextSpec: { globalSnapshotVersion: 0, laneSnapshotVersion: 0, resultRefs: [], eventIds: [], toolSetId: 'fixture', instruction: 'Reply briefly', privacy: 'cloud_allowed', privacyRefs: [] },
+        blocks: [{ kind: 'instruction', content: 'Reply briefly' }], prefixHash: 'prefix', projectionHash: 'fixture', builderVersion: '2', policyVersion: '1', toolSetVersion: '1', privacy: 'cloud_allowed', privacyRefs: [],
+      },
+    })).rejects.toMatchObject({ code: 'PROVIDER_REASONING_UNSUPPORTED', retryable: true })
+    expect(payloads).toEqual([expect.objectContaining({ reasoning: expect.objectContaining({ effort: 'max' }) })])
+  } finally {
+    adapter.dispose?.()
+    await new Promise<void>(done => server.close(() => done()))
+  }
+})

@@ -1,3 +1,4 @@
+import type { ReasoningEffort } from '@hunterzhu/pulse-runtime'
 import type { JsonValue, LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 import type { ProviderToolChoice } from '../types.js'
 import type {
@@ -12,7 +13,7 @@ export interface LoweringParams {
   model?: string | undefined
   outputSchema?: JsonValue | undefined
   maxOutputTokens?: number | undefined
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'none' | undefined
+  reasoningEffort?: ReasoningEffort | undefined
   toolChoice?: ProviderToolChoice | undefined
   stream?: boolean | undefined
 }

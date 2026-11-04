@@ -1,3 +1,5 @@
+import { reasoningRequestError, rejectedReasoningParameter, resolveReasoningSupport } from './reasoning-effort.js'
+import type { ReasoningEffort } from '@hunterzhu/pulse-runtime'
 import { RequestDiagnostics } from './request-diagnostics.js'
 import { ResponsesWebSocketPool } from './responses-websocket.js'
 import { createHash, randomUUID as randomConnectionKey } from 'node:crypto'
@@ -29,19 +31,25 @@ export class ResponsesAdapter implements ProviderAdapter {
     if (!['openai', 'openai-compatible'].includes(config.provider)) throw new Error('PROVIDER_RESPONSES_UNSUPPORTED')
     this.endpoint = `${(config.baseURL ?? 'https://api.openai.com/v1').replace(/\/$/, '')}/responses`
   }
-  private scope(model: string | undefined): string {
+  private scope(model: string | undefined, effort?: ReasoningEffort): string {
     // Only this digest is persisted. Neither credentials nor arbitrary headers enter continuation metadata.
     const { responsesTransport, ...rest } = this.config
-    return digest([CONTINUATION, this.id, this.endpoint, model, responsesTransport === 'websocket' ? this.config : rest])
+    const identity = [CONTINUATION, this.id, this.endpoint, model, responsesTransport === 'websocket' ? this.config : rest]
+    if (effort !== undefined) identity.push(effort)
+    return digest(identity)
   }
   async executeAttempt(params: Parameters<ProviderAdapter['executeAttempt']>[0]): Promise<LLMResult> {
     const streaming = params.onObservation !== undefined || params.onReasoning !== undefined
     const { canonical, toolNameAliases } = lowerProjectionToCanonical({ request: params.request, model: params.model ?? this.config.defaultModel, outputSchema: params.outputSchema, maxOutputTokens: params.maxOutputTokens ?? this.config.maxOutputTokens, reasoningEffort: params.reasoningEffort ?? this.config.reasoningEffort, toolChoice: this.config.toolChoice, stream: streaming })
+    const effort = canonical.reasoning?.effort
+    const strict = params.strictReasoning === true && effort !== undefined
+    const provider = this.config.provider, model = canonical.model ?? ''
+    if (strict && !resolveReasoningSupport(provider, model, params.supportedReasoningEfforts).levels.includes(effort)) throw reasoningRequestError(provider, model, effort)
     const capability = resolveModelCapability(canonical.model, this.config.provider, this.config.capabilityProfile, this.config.baseURL)
     // This adapter never probes by retrying. Chat capability rejection caches
     // must not suppress features on an explicitly selected Responses service.
-    const { request: adapted } = adaptCanonicalRequest(canonical, capability, this.probe, toolNameAliases)
-    const scope = this.scope(canonical.model)
+    const { request: adapted } = adaptCanonicalRequest(canonical, capability, this.probe, toolNameAliases, strict)
+    const scope = this.scope(canonical.model, strict ? effort : undefined)
     const body = responsesPayload(adapted, scope, capability)
     params.onRequest?.(this.diagnostics.measure(params.connectionKey ?? 'direct', body))
     if (this.config.responsesTransport === 'websocket') {
@@ -58,6 +66,9 @@ export class ResponsesAdapter implements ProviderAdapter {
         })
         params.signal.throwIfAborted()
         return normalizeResponses(terminal, toolNameAliases, scope)
+      } catch (cause) {
+        if (strict && rejectedReasoningParameter(cause)) throw reasoningRequestError(provider, model, effort)
+        throw cause
       } finally { if (params.connectionKey === undefined) this.sockets.releaseOwner(connectionKey) }
     }
     try {
@@ -87,6 +98,7 @@ export class ResponsesAdapter implements ProviderAdapter {
       return normalizeResponses(terminal, toolNameAliases, scope)
     } catch (cause) {
       if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
+      if (strict && rejectedReasoningParameter(cause)) throw reasoningRequestError(provider, model, effort)
       if (cause instanceof Error && 'code' in cause && 'retryable' in cause) throw cause
       throw providerNetworkError(cause)
     }

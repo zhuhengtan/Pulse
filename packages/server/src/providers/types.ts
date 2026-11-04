@@ -1,9 +1,11 @@
+import type { ReasoningEffort } from '@hunterzhu/pulse-runtime'
 export type CapabilityStatus = 'supported' | 'unsupported' | 'unknown'
 export interface DiscoveredModel {
   purposes?: import('../model-config.js').ModelDefinition['purposes']
   modelCode: string
   displayName: string
   maxContextTokens?: number
+  supportedReasoningEfforts?: ReasoningEffort[]
   maxOutputTokens?: number
   imageInput: CapabilityStatus
   tools: CapabilityStatus

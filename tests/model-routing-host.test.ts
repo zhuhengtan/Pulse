@@ -40,7 +40,8 @@ describe('host model routing', () => {
       taskRouting: { verify: ['Accurate', 'Quick'] },
     })
     expect(routing.router.route('verify', 'cloud_allowed').map((model) => model.id)).toEqual(['Accurate', 'Quick'])
-    expect(routing.candidates.find((candidate) => candidate.id === 'Accurate')?.capabilities).toMatchObject({ maxContextTokens: 128_000, maxOutputTokens: 16_000, reasoning: 'high' })
+    expect(routing.candidates.find((candidate) => candidate.id === 'Accurate')?.capabilities).toMatchObject({ maxContextTokens: 128_000, maxOutputTokens: 16_000, reasoning: 'medium' })
+    expect(routing.candidates.find(candidate => candidate.id === 'Accurate')?.reasoningEffort).toBe('high')
 
     expect(() => createHostModelRouting({
       activeModel: 'Quick',

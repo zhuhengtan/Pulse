@@ -35,6 +35,7 @@ export function adaptCanonicalRequest(
   capability: ModelCapabilityProfile,
   probe: DynamicCapabilityProbe = globalProbe,
   toolNameAliases: ReadonlyMap<string, string> = new Map(),
+  strictReasoning = false,
 ): AdaptedCanonicalRequest {
   const messages: CanonicalMessage[] = [...original.messages.map((m) => ({ ...m }))]
   const request: CanonicalLLMRequest = {
@@ -73,7 +74,7 @@ export function adaptCanonicalRequest(
 
   // 2. Reasoning / Thinking Adaptation
   const reasoningDisabled =
-    probe.isReasoningUnsupported(capability.provider, request.model) ||
+    (!strictReasoning && probe.isReasoningUnsupported(capability.provider, request.model)) ||
     capability.reasoning === 'unsupported'
 
   if (reasoningDisabled || !request.reasoning?.effort) {

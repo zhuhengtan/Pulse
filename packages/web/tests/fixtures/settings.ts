@@ -1,7 +1,7 @@
 import type { PulseWebTransport } from '../../src/transport.js'
 
 /** Safe sample configuration. No real credentials, processes, or configuration writes. */
-export function settingsFixture() {
+export function settingsFixture(routeReasoningEffort = true) {
   const config = {
     providers: {
       sample: { name: '示例服务商', provider: 'openai-compatible', baseURL: 'https://example.com/v1', apiKeyEnv: 'SAMPLE_API_KEY', models: { chat: { displayName: '示例模型', modelCode: 'sample-chat', maxContextTokens: 256000, maxOutputTokens: 16384, pricing: { inputPerMillion: 0.25, outputPerMillion: 1, currency: 'USD' } } } },
@@ -27,7 +27,7 @@ export function settingsFixture() {
       if (path === '/api/pair/qr') return response({ qrSvg: '<svg xmlns="http://www.w3.org/2000/svg"/>', pairUrl: 'http://example.local/?code=fixture', expiresAt: Date.now() + 300000 })
       if (path === '/api/devices') return response([])
       if (path === '/api/session') return response({ deviceId: 'fixture-local', localAdmin: true })
-      if (path === '/api/config') return response({ path: '/example/config.json', config, version: 'fixture', sources: {}, environment: { SAMPLE_API_KEY: true }, backupAvailable: true, active: { provider: 'sample', model: 'sample/chat' } })
+      if (path === '/api/config') return response({ path: '/example/config.json', config, version: 'fixture', ...(routeReasoningEffort ? { features: { routeReasoningEffort: true } } : {}), sources: {}, environment: { SAMPLE_API_KEY: true }, backupAvailable: true, active: { provider: 'sample', model: 'sample/chat' } })
       if (path === '/api/config/validate') return response({ valid: true, restartRequired: [] })
       if (path === '/api/automation/vision-probe') return response({ error: 'FIXTURE_PROBE_FAILURE' }, 400)
       if (path === '/api/conversations?archived=1') return response([{ id: 'audit-archived', title: '示例归档对话：检查长标题在手机上的显示效果', cwd: '/example/project-with-a-long-directory-name/workspace', createdAt: '2026-10-18T00:00:00Z', updatedAt: '2026-10-18T00:00:00Z' }])

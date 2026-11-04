@@ -30,5 +30,18 @@
   },
   "devDependencies": {
     "@types/ws": "8.18.2"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./reasoning-effort": {
+      "types": "./dist/providers/reasoning-effort.d.ts",
+      "import": "./dist/providers/reasoning-effort.js"
+    },
+    "./package.json": "./package.json",
+    "./dist/*": "./dist/*"
   }
 }

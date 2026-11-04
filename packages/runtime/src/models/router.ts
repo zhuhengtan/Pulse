@@ -1,6 +1,7 @@
 import type { JsonValue, LLMRequestProjection, PrivacyLabel, ProvenanceRef } from '../core/types.js'
 
 export type ReasoningLevel = 'low' | 'medium' | 'high'
+export type ReasoningEffort = ReasoningLevel | 'none' | 'minimal' | 'xhigh' | 'max'
 export interface ModelCapabilities { imageInput?: boolean; toolCalling?: boolean; structuredOutput?: boolean; reasoning?: ReasoningLevel; maxContextTokens: number; maxOutputTokens?: number; local?: boolean }
 export interface ModelRouteRequirements extends Partial<ModelCapabilities> { contextSize?: number }
 export interface ModelUsage {
@@ -19,10 +20,10 @@ export interface ModelUsage {
 export interface ModelAdapter {
   executeAttempt(params: { request: LLMRequestProjection; signal: AbortSignal; onObservation?: (chunk: string) => void; onReasoning?: (chunk: string) => void; model?: string; outputSchema?: JsonValue; maxOutputTokens?: number }): Promise<LLMResult>
 }
-export interface ModelCandidate { id: string; providerId: string; tasks: string[]; capabilities: ModelCapabilities; priority: number; adapter?: ModelAdapter }
+export interface ModelCandidate { id: string; providerId: string; tasks: string[]; capabilities: ModelCapabilities; priority: number; reasoningEffort?: ReasoningEffort; supportedReasoningEfforts?: ReasoningEffort[]; adapter?: ModelAdapter }
 export interface ModelRouteDiagnostic { id: string; providerId: string; accepted: boolean; reasons: string[] }
 export interface ModelRegistry { register(candidate: ModelCandidate): void; list(): ModelCandidate[] }
-export interface ModelRoute { task: string; candidates: string[] }
+export interface ModelRoute { task: string; candidates: string[]; reasoningEfforts?: Record<string, ReasoningEffort> }
 export interface ModelHostPolicy { allowCloud?: boolean }
 export interface ModelRouteFeedback {
   modelId: string
@@ -81,6 +82,7 @@ export function estimateProjectionTokens(projection: LLMRequestProjection): numb
 
 export class ModelRouter {
   private readonly routes = new Map<string, string[]>()
+  private readonly routeEfforts = new Map<string, ReadonlyMap<string, ReasoningEffort>>()
   readonly hostPolicy: Required<ModelHostPolicy>
 
   constructor(public readonly registry: ModelRegistry, hostPolicy: ModelHostPolicy = {}) {
@@ -90,7 +92,10 @@ export class ModelRouter {
   register(route: ModelRoute): void {
     if (!route || typeof route.task !== 'string' || !route.task || !Array.isArray(route.candidates) || route.candidates.length === 0 || route.candidates.some((candidate) => typeof candidate !== 'string' || !candidate) || new Set(route.candidates).size !== route.candidates.length) throw new Error('INVALID_MODEL_ROUTE')
     this.routes.set(route.task, [...new Set(route.candidates)])
+    this.routeEfforts.set(route.task, new Map(Object.entries(route.reasoningEfforts ?? {})))
   }
+
+  reasoningEffort(task: string, model: string): ReasoningEffort | undefined { return this.routeEfforts.get(task)?.get(model) }
 
   route(task: string, privacy: PrivacyLabel, requirements: ModelRouteRequirements = {}): ModelCandidate[] { return this.rankCandidates(this.candidates(task, privacy, requirements), this.routes.get(task)) }
   routeProjection(task: string, projection: LLMRequestProjection, requirements: ModelRouteRequirements = {}): ModelCandidate[] {

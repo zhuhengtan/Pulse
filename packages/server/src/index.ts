@@ -1,3 +1,5 @@
+import { captureRunModelRouting, restoreRunModelRouting } from './run-model-routing.js'
+import { routeModelId, type ModelRouteEntry, type ReasoningEffort } from './model-settings.js'
 import { callbackWorkState, type WorkCallback } from './work-callback.js'
 import { checkWorkControl, withWorkActor } from './work-control.js'
 import { startChatAcknowledgement } from './chat-acknowledgement.js'
@@ -177,10 +179,10 @@ export interface LocalHostOptions {
   /** Named provider profiles used by the interactive `/model` selector. */
   providerProfiles?: Record<string, ProviderPresetConfig>
   providerModels?: Record<string, { provider: string; model: string; remote?: boolean; tools?: 'supported' | 'unsupported' | 'unknown'; structuredOutput?: 'supported' | 'unsupported' | 'unknown'; maxContextTokens?: number; maxOutputTokens?: number; imageInput?: 'supported' | 'unsupported' | 'unknown'
-  reasoningEffort?: 'low' | 'medium' | 'high' }>
+  reasoningEffort?: ReasoningEffort; supportedReasoningEfforts?: ReasoningEffort[] }>
   modelPricing?: Record<string, { currency: string; inputPerMillion: number; outputPerMillion: number; version: string }>
   /** Ordered model display names per task; later entries are bounded fallbacks. */
-  taskRouting?: Partial<Record<HostModelTask, string[]>>
+  taskRouting?: Partial<Record<HostModelTask, ModelRouteEntry[]>>
   /** Trusted, host-installed code extensions; workspace files cannot register packs. */
   capabilityPacks?: CapabilityPack[]
   /** Capability IDs explicitly enabled for new and restored Runs. */
@@ -1464,7 +1466,7 @@ function providerFromOptions(options: LocalHostOptions): { adapter: ProviderAdap
     }
   }
   const local = isLocalModelProvider(config)
-  const reasoning = config.reasoningEffort === 'none' ? 'low' : config.reasoningEffort ?? 'medium'
+  const reasoning = config.reasoningEffort === 'none' || config.reasoningEffort === 'minimal' || config.reasoningEffort === 'low' ? 'low' : config.reasoningEffort && config.reasoningEffort !== 'medium' ? 'high' : 'medium'
   return { adapter, model: { id: config.defaultModel ?? `${config.provider}-default`, providerId: adapter.id, tasks: ['reason', 'plan', 'merge', 'verify'], priority: 10, capabilities: { toolCalling: true, structuredOutput: true, reasoning, maxContextTokens: config.maxContextTokens ?? 32_000, maxOutputTokens: config.maxOutputTokens ?? 4_096, local }, adapter } }
 }
 
@@ -2650,10 +2652,16 @@ export class LocalHost {
     const value = await readPreviewFile(root, path, artifact.hash)
     return { ...value, root }
   }
-  setReasoningEffort(effort?: 'low' | 'medium' | 'high'): void {
+  setReasoningEffort(effort?: ReasoningEffort): void {
     if (!this.options.provider) this.options.provider = { provider: 'mock' }
     if (effort) this.options.provider.reasoningEffort = effort
     else delete this.options.provider.reasoningEffort
+    const model = this.options.activeModel ?? this.activeModelName
+    const selection = model ? this.options.providerModels?.[model] : undefined
+    if (selection) {
+      if (effort) selection.reasoningEffort = effort
+      else delete selection.reasoningEffort
+    }
   }
   setModel(model: string): void {
     const normalized = model.trim()
@@ -2809,10 +2817,7 @@ export class LocalHost {
     const result = await createProviderAdapter(profile).executeAttempt({ request, model: model.model, signal: AbortSignal.timeout(30000), maxOutputTokens: 256 })
     return { model: reference, accepted: !result.refusal, response: result.text.slice(0, 300) }
   }
-  getReasoningEffort(): 'low' | 'medium' | 'high' | undefined {
-    const effort = this.options.provider?.reasoningEffort
-    return effort === 'none' ? 'low' : effort
-  }
+  getReasoningEffort(): ReasoningEffort | undefined { return this.options.provider?.reasoningEffort }
   setSystemPrompt(prompt?: string): void {
     const normalized = prompt?.trim()
     if (normalized) {
@@ -2912,7 +2917,7 @@ export class LocalHost {
     const hooks = new HookService(cwd, join(this.runDir(conversationId, runId), 'hooks'), { conversationId, runId }, persistedSurface.hookSnapshot as HookSnapshot | undefined, options.hooks)
     const fileSurfaceVersion: 1 | 2 | 3 = persistedSurface.fileSurfaceVersion === 3 ? 3 : persistedSurface.fileSurfaceVersion === 2 ? 2 : 1
     const fileSnapshots = new FileSnapshotManager(cwd, new FilesystemTool(cwd))
-    const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(id => options.providerModels?.[id]?.imageInput === 'supported')
+    const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(entry => options.providerModels?.[routeModelId(entry)]?.imageInput === 'supported')
     let runtimeRef: PulseRuntime | undefined
     const builtInSurface: BuiltInSurface = { ...(!assistantChat && persistedSurface.shellSurfaceVersion === 1 ? { shellVersion: 1 as const } : {}), patchApplyVersion: persistedSurface.patchApplyVersion === 2 ? 2 : 1, version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId, execPolicy: { authorize: (args, id) => this.authorizeExec(args, cwd, conversationId, runId, id), identity: id => this.execPolicy.identity(conversationId, runId, id) } }
     await this.seedPlanGate(conversationId, runId, !assistantChat && (isPreImplementationConfirmationSkill(skillInput) || requiresExplicitPlanConfirmation(skillInput)), options.approvalMode === 'read-only' ? undefined : cwd)
@@ -3338,7 +3343,7 @@ export class LocalHost {
     registerPluginTools(registry, this.builtinPluginJobs, cwd, runId, this.options.builtinPluginConfigPath, conversationId)
     const fileSurfaceVersion: 1 | 2 | 3 = savedInput.fileSurfaceVersion === 3 ? 3 : savedInput.fileSurfaceVersion === 2 ? 2 : 1
     const fileSnapshots = new FileSnapshotManager(cwd, new FilesystemTool(cwd))
-    const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(id => options.providerModels?.[id]?.imageInput === 'supported')
+    const visionAvailable = (options.taskRouting?.vision ?? [options.activeModel ?? '']).some(entry => options.providerModels?.[routeModelId(entry)]?.imageInput === 'supported')
     let runtimeRef: PulseRuntime | undefined
     const builtInSurface: BuiltInSurface = { ...(!assistantChat && savedInput.shellSurfaceVersion === 1 ? { shellVersion: 1 as const } : {}), patchApplyVersion: savedInput.patchApplyVersion === 2 ? 2 : 1, version: fileSurfaceVersion, getRuntime: () => runtimeRef, visionAvailable, snapshots: fileSnapshots, conversationId, execPolicy: { authorize: (args, id) => this.authorizeExec(args, cwd, conversationId, runId, id), identity: id => this.execPolicy.identity(conversationId, runId, id) } }
     if (assistantChat) {
@@ -4240,7 +4245,7 @@ export class LocalHost {
         initialTask.acceptanceChecks = retained
       }
       const lspSnapshot = runOptions.lsp === undefined ? undefined : parseLspConfig(runOptions.lsp)
-      const now = new Date().toISOString(); if (!input.userMessageRecorded && !input.internalWorkCallback) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal, ...(initialTask?.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 } : {}), capabilitySurface: 1, ...(runOptions.hooks?.enabled === true ? { hookSnapshot: { hash: runOptions.hooks.hash, directory: runOptions.hooks.directory } } : {}), codeSurfaceVersion: 1, ...(lspSnapshot ? { lsp: lspSnapshot } : {}), fileSurfaceVersion: 3, patchApplyVersion: 2, jarvisProtocol: runOptions.jarvis?.protocol ?? 'personal', currentUserText: input.text, ...(input.assistantChat ? {} : { shellSurfaceVersion: 1 }), providerApiModes: captureProviderApiModes(runOptions), planReviewVersion: 8, planDecisionVersion: controlled ? 3 : 2, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), assistantChat: input.assistantChat === true, ...(input.internalWorkCallback ? { workCallback: input.internalWorkCallback } : {}), ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.assistantChat ? { assistantChatVersion: '6' } : {}), taskController: controlled, ...(controlled ? { contextProtocolVersion: 2, controllerVersion: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', taskControllerPolicy: runOptions.taskControllerPolicy ?? 'legacy' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), maxModelCalls, enabledCapabilityPacks: runOptions.enabledCapabilityPacks ?? [], maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel ?? runOptions.provider?.defaultModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
+      const now = new Date().toISOString(); if (!input.userMessageRecorded && !input.internalWorkCallback) await this.appendMessage(conversationId, { id: input.requestId ? `msg-${input.requestId}` : `msg-${randomUUID()}`, role: 'user', text: input.text, runId, createdAt: now, ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}) }); await mkdir(this.runDir(conversationId, runId), { recursive: true }); await writeFile(join(this.runDir(conversationId, runId), 'input.json'), JSON.stringify({ schemaVersion: 1, conversationId, runId, goal, ...(initialTask?.criteriaParsingVersion === 2 ? { criteriaParsingVersion: 2 } : {}), capabilitySurface: 1, ...(runOptions.hooks?.enabled === true ? { hookSnapshot: { hash: runOptions.hooks.hash, directory: runOptions.hooks.directory } } : {}), codeSurfaceVersion: 1, ...(lspSnapshot ? { lsp: lspSnapshot } : {}), fileSurfaceVersion: 3, patchApplyVersion: 2, jarvisProtocol: runOptions.jarvis?.protocol ?? 'personal', currentUserText: input.text, ...(input.assistantChat ? {} : { shellSurfaceVersion: 1 }), providerApiModes: captureProviderApiModes(runOptions), modelRouting: captureRunModelRouting(runOptions), planReviewVersion: 8, planDecisionVersion: controlled ? 3 : 2, ...(input.attachments ? { attachments: input.attachments } : {}), ...(input.skills ? { skills: input.skills } : {}), ...(input.mentionedFiles ? { mentionedFiles: input.mentionedFiles } : {}), ...(input.richContent ? { richContent: input.richContent } : {}), assistantChat: input.assistantChat === true, ...(input.internalWorkCallback ? { workCallback: input.internalWorkCallback } : {}), ...(input.assistantContext ? { assistantContext: input.assistantContext } : {}), ...(input.assistantChat ? { assistantChatVersion: '6' } : {}), taskController: controlled, ...(controlled ? { contextProtocolVersion: 2, controllerVersion: runOptions.taskControllerPolicy === 'continuous' ? '57' : '56', taskControllerPolicy: runOptions.taskControllerPolicy ?? 'legacy' } : {}), ...(input.assistantChat ? {} : { deliveryProtocol: 1 }), maxModelCalls, enabledCapabilityPacks: runOptions.enabledCapabilityPacks ?? [], maxTurns: runOptions.maxTurns ?? 32, cwd: executionCwd, ...(input.assistantChat ? {} : { jarvisWorkspace }), provider: runOptions.provider?.provider ?? 'mock', model: runOptions.activeModel ?? runOptions.provider?.defaultModel, approvalMode: runOptions.approvalMode ?? 'ask', createdAt: now }, null, 2))
       await new AttachmentStore(this.dataDir, conversationId).remember()
       const attachmentIndex = await new AttachmentStore(this.dataDir, conversationId).index(input.text)
       if (attachmentIndex) conversation.push({ role: 'user', content: attachmentIndex })
@@ -4407,6 +4412,7 @@ export class LocalHost {
       const conversation = (await this.getConversationMessages(conversationId)).map((message): ConversationMessage => ({ role: message.role, content: message.text }))
       const lastUserMsg = conversation.filter((m) => m.role === 'user').at(-1)?.content
       const savedInput = JSON.parse(await readFile(join(this.runDir(conversationId, runId), 'input.json'), 'utf8').catch(() => '{}')) as Record<string, unknown>
+      runOptions = restoreRunModelRouting(runOptions, savedInput.modelRouting)
       const assistantChat = savedInput.assistantChat === true
       if (assistantChat && runOptions.approvalReview) runOptions = { ...runOptions, approvalReview: { ...runOptions.approvalReview, manualOnRejection: true } }
       const jarvis = runJarvisClient && savedInput.jarvisProtocol !== 'personal'

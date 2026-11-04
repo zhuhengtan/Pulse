@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolveContextTokens } from '@hunterzhu/pulse-server/model-settings'
+import { isReasoningEffort, resolveContextTokens, routeEntry, routeModelId } from '@hunterzhu/pulse-server/model-settings'
 import { runHooksCommand } from './hooks.js'
 import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
@@ -255,7 +255,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   }
   const configuredContextTokens = parsePositiveInteger(contextTokens) ?? resolveContextTokens(modelSelection, profile)
   const configuredMaxOutputTokens = parsePositiveInteger(maxOutputTokens) ?? modelSelection.maxOutputTokens ?? profile.maxOutputTokens
-  const configuredReasoningEffort = reasoningEffort === 'low' || reasoningEffort === 'medium' || reasoningEffort === 'high' ? reasoningEffort : modelSelection.reasoningEffort ?? profile.reasoningEffort
+  const configuredReasoningEffort = isReasoningEffort(reasoningEffort) ? reasoningEffort : modelSelection.reasoningEffort ?? profile.reasoningEffort
   const configuredToolChoice = profile.toolChoice
   const configuredMaxTurns = parsePositiveInteger(maxTurns) ?? config.maxTurns
   const configuredMaxModelCalls = parsePositiveInteger(maxModelCalls) ?? config.maxModelCalls ?? 256
@@ -303,6 +303,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
       ...(model.tools === undefined ? {} : { tools: model.tools }),
       ...(model.structuredOutput === undefined ? {} : { structuredOutput: model.structuredOutput }),
       maxContextTokens: resolveContextTokens(model, effectiveProviders[providerId]),
+      ...(model.discovery?.supportedReasoningEfforts === undefined ? {} : { supportedReasoningEfforts: model.discovery.supportedReasoningEfforts }),
       ...(model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens }),
       ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
     }]))
@@ -311,16 +312,17 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
   const activeCandidate = providerModels[activeModelName]!
   if (parsePositiveInteger(contextTokens) !== undefined) activeCandidate.maxContextTokens = configuredContextTokens!
   if (parsePositiveInteger(maxOutputTokens) !== undefined) activeCandidate.maxOutputTokens = configuredMaxOutputTokens!
-  if (reasoningEffort === 'low' || reasoningEffort === 'medium' || reasoningEffort === 'high') activeCandidate.reasoningEffort = reasoningEffort
+  if (isReasoningEffort(reasoningEffort)) activeCandidate.reasoningEffort = reasoningEffort
   const assistantModelName = config.assistantModel ? resolveModelReference(catalog, config.assistantModel) : activeModelName
   if (!providerModels[assistantModelName]) throw new Error(`UNKNOWN_ASSISTANT_MODEL:${assistantModelName}`)
-  const taskRouting = config.taskRouting && Object.fromEntries(Object.entries(config.taskRouting).map(([task, route]) => [task, Array.isArray(route) ? route.map(item => resolveModelReference(catalog, item)) : route])) as PulseCliConfig['taskRouting']
+  const taskRouting = config.taskRouting && Object.fromEntries(Object.entries(config.taskRouting).map(([task, route]) => [task, Array.isArray(route) ? route.map(item => routeEntry(item, ref => resolveModelReference(catalog, ref))) : route])) as PulseCliConfig['taskRouting']
   for (const [task, models] of Object.entries(taskRouting ?? {})) {
-    if (Array.isArray(models) && models.some(model => selections.find(item => item.id === model)?.model.tools === 'unsupported')) throw new Error('MODEL_AGENT_TOOLS_UNSUPPORTED')
-    if (!Array.isArray(models) || models.length === 0 || models.some((model) => typeof model !== 'string' || !providerModels[model])) {
+    const ids = Array.isArray(models) ? models.map(routeModelId) : []
+    if (ids.some(model => selections.find(item => item.id === model)?.model.tools === 'unsupported')) throw new Error('MODEL_AGENT_TOOLS_UNSUPPORTED')
+    if (!ids.length || ids.some(model => !providerModels[model])) {
       throw new Error(`INVALID_TASK_MODEL_ROUTE:${task}`)
     }
-    if (new Set(models).size !== models.length) throw new Error(`DUPLICATE_TASK_MODEL_ROUTE_CANDIDATE:${task}`)
+    if (new Set(ids).size !== ids.length) throw new Error(`DUPLICATE_TASK_MODEL_ROUTE_CANDIDATE:${task}`)
   }
   const cwd = requestedCwd ?? expandHome(config.cwd)
   const dataDir = expandHome(option(parsed.options, 'data-dir') ?? process.env.PULSE_DATA_DIR ?? config.dataDir)
@@ -557,7 +559,8 @@ export async function main(): Promise<number> {
     if (parsed.positionals[0] !== 'doctor') throw new Error('Usage: pulse automation doctor|permissions')
     if (parsed.options.live === true) {
       const host = createLocalHost(options)
-      try { process.stdout.write(JSON.stringify(await host.probeVisionModel(option(parsed.options, 'model') ?? options.taskRouting?.vision?.[0] ?? options.activeModel ?? ''), null, 2) + '\n'); return 0 } finally { await host.close() }
+      const vision = options.taskRouting?.vision?.[0]
+      try { process.stdout.write(JSON.stringify(await host.probeVisionModel(option(parsed.options, 'model') ?? (vision === undefined ? options.activeModel ?? '' : routeModelId(vision))), null, 2) + '\n'); return 0 } finally { await host.close() }
     }
     const report = await automationDoctor(options.automation)
     process.stdout.write(JSON.stringify(report, null, 2) + '\n')

@@ -87,6 +87,8 @@ class Connection {
                         if (!responseId && frame.type !== 'error') throw error('PROVIDER_WS_RESPONSE_ID_INVALID');
                         if (frame.response_id !== undefined && responseId !== undefined && frame.response_id !== responseId)
                             throw error('PROVIDER_WS_RESPONSE_ID_MISMATCH');
+                        if (!responseId && frame.type === 'error' && typeof frame.param === 'string' && /^reasoning(?:\.effort)?$/.test(frame.param))
+                            throw error('PROVIDER_WS_REASONING_REJECTED');
                         if (['error', 'response.failed', 'response.cancelled'].includes(frame.type))
                             throw error('PROVIDER_WS_OUTCOME_UNKNOWN');
                         cb.event(frame);

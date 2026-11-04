@@ -1,4 +1,4 @@
-import { contextSource } from '../model-settings.js'
+import { contextSource, isReasoningEffort, reasoningEfforts } from '../model-settings.js'
 import { createHash } from 'node:crypto'
 import { createProviderAdapter } from '@hunterzhu/pulse-adapters'
 import type { JsonValue, LLMRequestProjection, ProviderHistoryMessage } from '@hunterzhu/pulse-runtime'
@@ -43,6 +43,11 @@ export function normalizeDiscoveredModel(raw: unknown): DiscoveredModel | undefi
   }
   const context = positive(item.context_length ?? item.context_window ?? item.maxContextTokens)
   const output = positive(object(item.top_provider).max_completion_tokens ?? item.max_output_tokens ?? item.maxOutputTokens)
+  const reasoning = object(item.reasoning)
+  const metadata = reasoning.supported_efforts === null ? reasoningEfforts : reasoning.supported_efforts ?? item.supportedReasoningEfforts
+  const supportedReasoningEfforts = Array.isArray(metadata)
+    ? [...new Set(metadata.filter(isReasoningEffort))].filter(effort => effort !== 'none' || reasoning.mandatory !== true)
+    : undefined
   const params = item.supported_parameters
   const inputModalities = architecture.input_modalities ?? item.input_modalities
   const imageInput = Array.isArray(inputModalities) ? inputModalities.includes('image') ? 'supported' : 'unsupported' : capability(item.imageInput ?? object(caps.vision).supported)
@@ -50,6 +55,7 @@ export function normalizeDiscoveredModel(raw: unknown): DiscoveredModel | undefi
     ...(item.remote === true ? { remote: true } : {}),
     tools: !purposes.includes('chat') ? 'unsupported' : Array.isArray(params) ? params.includes('tools') ? 'supported' : 'unsupported' : capability(item.tools ?? object(caps.tool_use).supported),
     structuredOutput: Array.isArray(params) ? params.includes('response_format') || params.includes('structured_outputs') ? 'supported' : 'unsupported' : capability(item.structuredOutput),
+    ...(supportedReasoningEfforts ? { supportedReasoningEfforts } : {}),
     ...(context ? { maxContextTokens: context } : {}), ...(output ? { maxOutputTokens: output } : {}) }
 }
 

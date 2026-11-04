@@ -1,3 +1,4 @@
+import { reasoningRequestError, rejectedReasoningParameter, resolveReasoningSupport } from './reasoning-effort.js'
 import { RequestDiagnostics } from './request-diagnostics.js'
 import type { JsonValue, LLMRequestProjection, LLMResult } from '@hunterzhu/pulse-runtime'
 import { consumeProviderSse, normalizeOpenAIResponse, parseProviderJson, providerHttpErrorFromResponse, providerNetworkError, providerResponseError } from './normalize.js'
@@ -31,10 +32,24 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       stream: streaming,
     })
 
-    const capability = resolveModelCapability(canonical.model, this.config.provider, this.config.capabilityProfile ?? (this.config.remote && this.config.provider === 'ollama' ? { structuredOutput: 'unsupported' } : undefined), this.baseURL)
-    const { request: adapted } = adaptCanonicalRequest(canonical, capability, this.probe, toolNameAliases)
+    const effort = canonical.reasoning?.effort
+    const strict = params.strictReasoning === true && effort !== undefined
+    const provider = this.config.provider, model = canonical.model ?? ''
+    if (strict && !resolveReasoningSupport(provider, model, params.supportedReasoningEfforts).levels.includes(effort)) throw reasoningRequestError(provider, model, effort)
+    const baseCapability = resolveModelCapability(canonical.model, this.config.provider, this.config.capabilityProfile ?? (this.config.remote && this.config.provider === 'ollama' ? { structuredOutput: 'unsupported' } : undefined), this.baseURL)
+    const capability = strict ? { ...baseCapability, reasoning: 'effort_param' as const } : baseCapability
+    const { request: adapted } = adaptCanonicalRequest(canonical, capability, this.probe, toolNameAliases, strict)
     const sentReasoning = Boolean(adapted.reasoning?.effort)
-    const body = toOpenAIPayload(adapted, capability, this.config.provider)
+    const body = toOpenAIPayload(adapted, capability, provider)
+    if (strict && provider === 'deepseek') {
+      body.thinking = { type: effort === 'none' ? 'disabled' : 'enabled' }
+      if (effort === 'none') delete body.reasoning_effort
+    }
+    if (strict && provider === 'openrouter') {
+      delete body.reasoning_effort
+      body.reasoning = { effort }
+      body.provider = { require_parameters: true }
+    }
     params.onRequest?.(this.diagnostics.measure(params.connectionKey ?? 'direct', body))
 
     try {
@@ -79,7 +94,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       return normalizeOpenAIResponse({ choices: [{ message: { content: content.join('') || null, ...(reasoningContent.length ? { reasoning_content: reasoningContent.join('') } : {}), ...(reasoningDetails.size ? { reasoning_details: [...reasoningDetails.values()] } : {}), ...(refusals.length ? { refusal: refusals.join('') } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => ({ id: call.id, ...(call.extra_content ? { extra_content: call.extra_content } : {}), function: { name: call.name, arguments: call.arguments } })) } : {}) }, finish_reason: finishReason }], ...(usage === undefined ? {} : { usage }) }, toolNameAliases, this.config.provider)
     } catch (cause) {
       if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
-      if (sentReasoning && this.probe.reasoningParameterRejected(cause)) {
+      if (strict && rejectedReasoningParameter(cause)) throw reasoningRequestError(provider, model, effort)
+      if (!strict && sentReasoning && this.probe.reasoningParameterRejected(cause)) {
         this.probe.markReasoningUnsupported(this.config.provider, canonical.model)
         await params.beforeRetryAttempt?.()
         return this.executeAttempt(params)

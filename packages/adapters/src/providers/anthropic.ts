@@ -1,3 +1,4 @@
+import { reasoningRequestError, rejectedReasoningParameter, resolveReasoningSupport } from './reasoning-effort.js'
 import { RequestDiagnostics } from './request-diagnostics.js'
 import type { JsonValue, LLMRequestProjection } from '@hunterzhu/pulse-runtime'
 import { consumeProviderSse, normalizeAnthropicResponse, parseProviderJson, providerHttpErrorFromResponse, providerNetworkError, providerResponseError } from './normalize.js'
@@ -5,7 +6,7 @@ import type { ProviderAdapter, ProviderPresetConfig } from './types.js'
 import { lowerProjectionToCanonical, resolveModelCapability, toAnthropicPayload } from './canonical/index.js'
 
 function anthropicThinking(effort: ProviderPresetConfig['reasoningEffort'], maxTokens: number): { thinking?: { type: 'enabled'; budget_tokens: number } } {
-  if (!effort) return {}
+  if (!effort || effort === 'none') return {}
   const requested = effort === 'high' ? 8_000 : effort === 'medium' ? 2_048 : 1_024
   const budget = Math.min(requested, maxTokens - 1_024)
   if (budget < 1_024 || budget >= maxTokens) return {}
@@ -20,7 +21,25 @@ export class AnthropicAdapter implements ProviderAdapter {
     const streaming = params.onObservation !== undefined
     const maxTokens = params.maxOutputTokens ?? this.config.maxOutputTokens ?? 4096
     const lowered = lowerProjectionToCanonical({ ...params, model: params.model ?? this.config.defaultModel, maxOutputTokens: maxTokens, toolChoice: this.config.toolChoice, stream: streaming })
-    const body = { ...toAnthropicPayload(lowered.canonical, resolveModelCapability(lowered.canonical.model, 'anthropic', this.config.capabilityProfile, this.config.baseURL)), ...anthropicThinking(params.reasoningEffort ?? this.config.reasoningEffort, maxTokens) }
+    const effort = params.reasoningEffort ?? this.config.reasoningEffort
+    const strict = params.strictReasoning === true && effort !== undefined
+    const model = lowered.canonical.model ?? ''
+    const capability = resolveModelCapability(model, 'anthropic', this.config.capabilityProfile, this.config.baseURL)
+    const body = toAnthropicPayload(lowered.canonical, capability)
+    if (strict) {
+      const support = resolveReasoningSupport('anthropic', model, params.supportedReasoningEfforts)
+      if (!support.levels.includes(effort)) throw reasoningRequestError('anthropic', model, effort)
+      if (effort === 'none') body.thinking = { type: 'disabled' }
+      else if (support.protocol === 'anthropic-adaptive') {
+        body.thinking = { type: 'adaptive' }
+        body.output_config = { effort }
+      } else {
+        const budget = effort === 'high' ? 8000 : effort === 'medium' ? 2048 : 1024
+        if (budget >= maxTokens) throw reasoningRequestError('anthropic', model, effort, 'OUTPUT_BUDGET')
+        body.thinking = { type: 'enabled', budget_tokens: budget }
+      }
+      if (effort !== 'none') delete body.temperature
+    } else Object.assign(body, anthropicThinking(effort, maxTokens))
     params.onRequest?.(this.diagnostics.measure(params.connectionKey ?? 'direct', body))
     try {
       const response = await fetch(`${(this.config.baseURL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/messages`, { method: 'POST', signal: params.signal, headers: { 'content-type': 'application/json', ...(this.config.apiKey ? { 'x-api-key': this.config.apiKey } : {}), 'anthropic-version': '2023-06-01' }, body: JSON.stringify(body) })
@@ -63,6 +82,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       return normalizeAnthropicResponse({ content, stop_reason: stopReason, ...(Object.keys(usage).length ? { usage } : {}) }, lowered.toolNameAliases)
     } catch (cause) {
       if (params.signal.aborted) throw Object.assign(new Error('Provider request was cancelled.'), { code: 'PROVIDER_REQUEST_CANCELLED', retryable: false, cause })
+      if (strict && rejectedReasoningParameter(cause)) throw reasoningRequestError('anthropic', model, effort)
       if (cause instanceof Error && 'code' in cause && typeof (cause as { code?: unknown }).code === 'string' && 'retryable' in cause && typeof (cause as { retryable?: unknown }).retryable === 'boolean') throw cause
       throw providerNetworkError(cause)
     }

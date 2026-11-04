@@ -1,3 +1,4 @@
+import type { ReasoningEffort } from '@hunterzhu/pulse-runtime'
 import type { JsonValue } from '@hunterzhu/pulse-runtime'
 import type { ProviderToolChoice } from '../types.js'
 
@@ -53,7 +54,7 @@ export interface CanonicalStructuredOutput {
 }
 
 export interface CanonicalReasoningConfig {
-  effort?: 'low' | 'medium' | 'high' | 'none'
+  effort?: ReasoningEffort
   budgetTokens?: number
   enabled?: boolean
 }

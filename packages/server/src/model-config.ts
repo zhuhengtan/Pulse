@@ -1,4 +1,4 @@
-import { validateContextSettings } from './model-settings.js'
+import { isReasoningEffort, resolveReasoningSupport, routeEntry, validateContextSettings, type ReasoningEffort } from './model-settings.js'
 export interface ModelDefinition {
   /** Missing means legacy chat model; input vision is a separate capability. */
   purposes?: Array<'chat' | 'image' | 'video' | 'speech' | 'music' | 'sound'> | undefined
@@ -13,7 +13,7 @@ export interface ModelDefinition {
   maxContextTokensSource?: 'manual' | 'discovery'
   maxOutputTokens?: number
   imageInput?: 'supported' | 'unsupported' | 'unknown'
-  reasoningEffort?: 'low' | 'medium' | 'high'
+  reasoningEffort?: ReasoningEffort
   pricing?: { currency: string; inputPerMillion: number; outputPerMillion: number; version: string }
 }
 
@@ -30,7 +30,7 @@ export interface ProviderDefinition {
   maxContextTokens?: number
   maxOutputTokens?: number
   imageInput?: 'supported' | 'unsupported' | 'unknown'
-  reasoningEffort?: 'low' | 'medium' | 'high'
+  reasoningEffort?: ReasoningEffort
   toolChoice?: unknown
   models?: Record<string, ModelDefinition>
   [key: string]: unknown
@@ -94,7 +94,7 @@ export function normalizeModelConfig<T extends Record<string, any>>(input: T): T
         modelCode,
         ...(typeof raw.maxContextTokens === 'number' ? { maxContextTokens: raw.maxContextTokens } : {}),
         ...(typeof raw.maxOutputTokens === 'number' ? { maxOutputTokens: raw.maxOutputTokens } : {}),
-        ...(raw.reasoningEffort === 'low' || raw.reasoningEffort === 'medium' || raw.reasoningEffort === 'high' ? { reasoningEffort: raw.reasoningEffort } : {}),
+        ...(isReasoningEffort(raw.reasoningEffort) ? { reasoningEffort: raw.reasoningEffort } : {}),
         ...(raw.imageInput === 'supported' || raw.imageInput === 'unsupported' || raw.imageInput === 'unknown' ? { imageInput: raw.imageInput } : {}),
         ...(raw.pricing && typeof raw.pricing === 'object' ? { pricing: raw.pricing as ModelDefinition['pricing'] } : {}),
       }
@@ -120,7 +120,18 @@ export function normalizeModelConfig<T extends Record<string, any>>(input: T): T
   config.activeModel = resolve(config.activeModel)
   config.assistantModel = resolve(config.assistantModel)
   if (config.taskRouting && typeof config.taskRouting === 'object') {
-    for (const [task, route] of Object.entries(config.taskRouting)) if (Array.isArray(route)) config.taskRouting[task] = route.map(item => resolve(item) ?? item)
+    for (const [task, route] of Object.entries(config.taskRouting)) {
+      if (route === undefined) continue
+      if (!Array.isArray(route) || !route.length) throw new Error(`INVALID_TASK_MODEL_ROUTE:${task}`)
+      config.taskRouting[task] = route.map(item => routeEntry(item, model => resolve(model) ?? model))
+      for (const entry of config.taskRouting[task]) {
+        if (typeof entry === 'string' || !entry.reasoningEffort) continue
+        const selection = resolveModelSelection(config, entry.model)
+        if (!selection) continue
+        const support = resolveReasoningSupport(selection.provider.provider, selection.model.modelCode, selection.model.discovery?.supportedReasoningEfforts)
+        if (!support.levels.includes(entry.reasoningEffort)) throw new Error(`MODEL_ROUTE_REASONING_UNSUPPORTED:${task}:${entry.model}:${entry.reasoningEffort}`)
+      }
+    }
   }
 
   for (const key of ['frontModel', 'approvalReview'] as const) {
@@ -153,6 +164,8 @@ export function normalizeModelConfig<T extends Record<string, any>>(input: T): T
 
   for (const [id, provider] of Object.entries(providers) as Array<[string, ProviderDefinition]>) {
     validateContextSettings(provider, id)
+    if (provider.reasoningEffort !== undefined && !isReasoningEffort(provider.reasoningEffort)) throw new Error(`MODEL_REASONING_EFFORT_INVALID:${id}`)
+    for (const [modelId, model] of Object.entries(provider.models ?? {})) if (model.reasoningEffort !== undefined && !isReasoningEffort(model.reasoningEffort)) throw new Error(`MODEL_REASONING_EFFORT_INVALID:${id}/${modelId}`)
   }
   delete config.models
   return config as T

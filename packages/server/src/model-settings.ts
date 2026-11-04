@@ -1,3 +1,8 @@
+import type { ReasoningEffort } from '@hunterzhu/pulse-runtime'
+import { isReasoningEffort } from '@hunterzhu/pulse-adapters/reasoning-effort'
+export { isReasoningEffort, reasoningEfforts, resolveReasoningSupport } from '@hunterzhu/pulse-adapters/reasoning-effort'
+export type { ReasoningEffort } from '@hunterzhu/pulse-runtime'
+
 /** Shared, browser-safe model settings. Discovery is evidence, never a user override. */
 export interface ContextSettings {
   maxContextTokens?: number | undefined
@@ -25,4 +30,16 @@ export function validateContextSettings(provider: ContextSettings & { models?: R
     if (model.maxContextTokensSource !== undefined && !['manual', 'discovery'].includes(model.maxContextTokensSource)) throw new Error(`MODEL_CONTEXT_SOURCE_INVALID:${id}/${key}`)
     if ((manualContextTokens(model) !== undefined || provider.maxContextTokens !== undefined) && (model.maxOutputTokens ?? provider.maxOutputTokens ?? 4096) >= resolveContextTokens(model, provider)) throw new Error(`MODEL_CONTEXT_OUTPUT_CONFLICT:${id}/${key}`)
   }
+}
+
+export type ModelRouteEntry = string | { model: string; reasoningEffort?: ReasoningEffort }
+export function routeModelId(entry: ModelRouteEntry): string { return typeof entry === 'string' ? entry : typeof entry?.model === 'string' ? entry.model : '' }
+export function routeEntry(entry: unknown, resolve: (model: string) => string): ModelRouteEntry {
+  if (typeof entry === 'string' && entry.trim()) return resolve(entry)
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('MODEL_ROUTE_ENTRY_INVALID')
+  const { model, reasoningEffort } = entry as Record<string, unknown>
+  if (typeof model !== 'string' || !model.trim()) throw new Error('MODEL_ROUTE_ENTRY_INVALID')
+  if (reasoningEffort === undefined) return resolve(model)
+  if (!isReasoningEffort(reasoningEffort)) throw new Error('MODEL_REASONING_EFFORT_INVALID')
+  return { model: resolve(model), reasoningEffort }
 }

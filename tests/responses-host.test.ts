@@ -39,7 +39,8 @@ it.each(['same', 'changed-config', 'legacy-input'] as const)('keeps the actual C
   const config = { cwd: root, dataDir, jarvis: { enabled: false }, taskController: false, approvalMode: 'ask', capabilities: { enabled: [] }, activeModel: 'fixture/model', providers: { fixture: { provider: 'openai-compatible', apiMode: 'responses', baseURL: local.baseURL, maxContextTokens: 65536, models: { model: { modelCode: 'local-model' } } } } }
   let first: ReturnType<typeof createLocalHost> | undefined, second: ReturnType<typeof createLocalHost> | undefined
   try {
-    await writeFile(configPath, JSON.stringify(config))
+    const routed = { ...config, taskRouting: { reason: [{ model: 'fixture/model', reasoningEffort: 'xhigh' }], verify: [{ model: 'fixture/model', reasoningEffort: 'high' }] } }
+    await writeFile(configPath, JSON.stringify(routed))
     const options = await hostOptions(parse(['--config', configPath, '--no-task-controller']))
     expect(options.provider).toMatchObject({ apiMode: 'responses', continuationNamespace: 'fixture' })
     expect(options.providerProfiles?.fixture).toMatchObject({ apiMode: 'responses', continuationNamespace: 'fixture' })
@@ -50,6 +51,7 @@ it.each(['same', 'changed-config', 'legacy-input'] as const)('keeps the actual C
     for await (const event of run.events) { events.push(event); if (event.type === 'waiting') break }
     expect(local.requests).toHaveLength(1)
     expect(local.requests[0]!.path).toBe('/v1/responses')
+    expect(local.requests[0]!.body.reasoning?.effort).toBe('xhigh')
     const runId = (await first.getConversation(conversation.id)).summary.activeRunId!
     const inputPath = join(options.dataDir!, 'conversations', conversation.id, 'runs', runId, 'input.json')
     const saved = JSON.parse(await readFile(inputPath, 'utf8'))
@@ -60,7 +62,8 @@ it.each(['same', 'changed-config', 'legacy-input'] as const)('keeps the actual C
     await first.close()
     if (variant === 'changed-config') {
       config.providers.fixture.apiMode = 'chat-completions'
-      await writeFile(configPath, JSON.stringify(config))
+      routed.taskRouting.reason[0]!.reasoningEffort = 'low'
+      await writeFile(configPath, JSON.stringify(routed))
     }
     if (variant === 'legacy-input') { delete saved.providerApiModes; await writeFile(inputPath, JSON.stringify(saved)) }
     second = createLocalHost(await hostOptions(parse(['--config', configPath, '--no-task-controller'])))
@@ -76,6 +79,7 @@ it.each(['same', 'changed-config', 'legacy-input'] as const)('keeps the actual C
     expect(local.requests).toHaveLength(4)
     expect(local.requests[0]!.body.tools.length).toBeGreaterThan(0)
     expect(local.requests[1]!.body.tools.length).toBeGreaterThan(0)
+    expect(local.requests[1]!.body.reasoning?.effort ?? local.requests[1]!.body.reasoning_effort).toBe('xhigh')
     expect(local.requests[2]!.body.tools.length).toBeGreaterThan(0)
     expect(local.requests[3]!.body.tools).toBeUndefined()
     expect(local.requests.slice(1).map(row => row.path)).toEqual(Array(3).fill(variant === 'legacy-input' ? '/v1/chat/completions' : '/v1/responses'))

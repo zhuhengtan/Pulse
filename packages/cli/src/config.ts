@@ -1,3 +1,4 @@
+import type { ModelRouteEntry, ReasoningEffort } from '@hunterzhu/pulse-server/model-settings'
 import { mergeExecPolicies, workspaceExecPolicy, sourceExecPolicy, overlayBuiltinPlugins, readMergedHostConfig, parseLspConfig, type ModelDefinition } from '@hunterzhu/pulse-server'
 import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -18,7 +19,7 @@ export interface PulseCliProviderProfile {
   maxContextTokens?: number
   maxOutputTokens?: number
   imageInput?: 'supported' | 'unsupported' | 'unknown'
-  reasoningEffort?: 'low' | 'medium' | 'high'
+  reasoningEffort?: ReasoningEffort
   toolChoice?: 'auto' | 'required' | 'none' | { type: 'function'; function: { name: string } }
   /** Models served by this provider. The provider plus map key is the model identity. */
   models?: Record<string, Omit<PulseCliModel, 'provider'>>
@@ -34,7 +35,7 @@ export interface PulseCliModel extends ModelDefinition {
   maxContextTokens?: number
   maxOutputTokens?: number
   imageInput?: 'supported' | 'unsupported' | 'unknown'
-  reasoningEffort?: 'low' | 'medium' | 'high'
+  reasoningEffort?: ReasoningEffort
   pricing?: { currency: string; inputPerMillion: number; outputPerMillion: number; version: string }
 }
 
@@ -82,7 +83,7 @@ export interface PulseCliConfig {
   /** Dedicated model for the persistent Pulse assistant chat; defaults to activeModel. */
   assistantModel?: string
   /** Ordered providerId/modelId references per task; later entries act as fallbacks. */
-  taskRouting?: Partial<Record<PulseModelTask, string[]>>
+  taskRouting?: Partial<Record<PulseModelTask, ModelRouteEntry[]>>
   capabilities?: PulseCliCapabilities
   execPolicy?: import('@hunterzhu/pulse-server').ExecPolicyConfig
   approvalMode?: 'read-only' | 'ask' | 'auto'

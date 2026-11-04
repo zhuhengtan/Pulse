@@ -166,6 +166,10 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
         const hydrated = images === undefined ? projection : { ...projection, images }
         signal.throwIfAborted()
         await config.beforeProviderAttempt?.(purpose)
+        const override = config.router.reasoningEffort(task, attempt.candidate.id)
+        const configuredEffort = override ?? attempt.candidate.reasoningEffort
+        const reasoningEffort = configuredEffort ?? (dynamicRequirements.reasoningEffort === 'low' ? 'low' : undefined)
+        const maxOutputTokens = routeRequirements.maxOutputTokens ?? attempt.candidate.capabilities.maxOutputTokens
         providerStartedAt = Date.now()
         providerAttempts++
         const budget = config.modelBudget?.()
@@ -175,7 +179,7 @@ export function createModelEffectExecutor(config: { resolveImage?: (ref: string,
           const observation = { type: 'trace' as const, data: { kind: 'context.request', protocol: projection.contextSpec?.contextProtocolVersion ?? 1, segment: projection.contextSpec?.journal?.segment ?? null, reason: projection.contextSpec?.journal?.reason ?? null, ...diagnostic } }
           if (emitObservation) emitObservation(observation); else observations.push(observation)
           if (projection.contextSpec?.contextProtocolVersion === 2 && diagnostic.estimatedInputTokens + (diagnostic.outputReserveTokens ?? routeRequirements.maxOutputTokens ?? 4096) > attempt.candidate.capabilities.maxContextTokens) throw Object.assign(new Error('Prepared provider payload exceeds the model context budget. Checkpoint and settled receipts are retained.'), { code: 'CONTEXT_BUDGET_EXCEEDED', retryable: false })
-        }, ...(dynamicRequirements.reasoningEffort === 'low' ? { reasoningEffort: 'low' as const } : {}), ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(typeof routeRequirements.maxOutputTokens === 'number' ? { maxOutputTokens: routeRequirements.maxOutputTokens } : {}), onObservation, ...(onReasoning === undefined ? {} : { onReasoning }), ...(config.beforeProviderAttempt === undefined ? {} : { beforeRetryAttempt: async () => {
+        }, ...(reasoningEffort === undefined ? {} : { reasoningEffort }), ...(configuredEffort === undefined ? {} : { strictReasoning: true }), ...(attempt.candidate.supportedReasoningEfforts === undefined ? {} : { supportedReasoningEfforts: attempt.candidate.supportedReasoningEfforts }), ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }), ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }), onObservation, ...(onReasoning === undefined ? {} : { onReasoning }), ...(config.beforeProviderAttempt === undefined ? {} : { beforeRetryAttempt: async () => {
           await config.beforeProviderAttempt!(purpose)
           providerAttempts++
           if (!streamAttempt.emitted) return
