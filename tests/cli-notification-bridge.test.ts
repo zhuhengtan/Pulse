@@ -8,14 +8,28 @@ import type { LocalHost, RunHandle } from '../packages/server/src/index.js'
 function fixture() {
   const values = new Map<string, any>(), changes: Array<{ seq: number; kind: string; item: string }> = []
   let time = 100_000
-  const runId = 'run-cli12345678', conversationId = 'conv-cli12345678'
+  const runId = 'run-cli12345678', conversationId = 'conv-11111111-1111-4111-8111-111111111111'
   const group = { groupId: 'group-original', kind: 'ask' as const, items: [{ effectId: 'effect-original', input: { kind: 'ask', type: 'input', prompt: 'CLI question' } }] }
+  const conversation = { id: conversationId, updatedAt: '2026-10-25', runs: [runId], activeRunId: runId }
   let groups: any[] = [group]
   const call = vi.fn(async (method: string, ...args: any[]) => {
     if (method === 'readState') return structuredClone(values.get(args[0]))
     if (method === 'saveState') { values.set(args[0], structuredClone(args[1])); changes.push({ seq: changes.length + 1, kind: 'state', item: args[0] }); return }
-    if (method === 'list') return [{ id: conversationId, updatedAt: '2026-10-25', runs: [runId], activeRunId: runId }]
+    if (method === 'list') return [structuredClone(conversation)]
     if (method === 'changes') return { reset: false, revision: changes.length, items: changes.filter(item => item.seq > args[0]) }
+    if (method === 'checkWorkControl') {
+      const [id, actor, operation] = args
+      if (id !== conversation.id) throw new Error('CONVERSATION_NOT_FOUND')
+      const control = (conversation as { control?: { owner?: string; revision?: number; assistantConversationId?: string } }).control
+      if (!control || actor?.kind === 'system') return control
+      if (actor?.kind === 'policy' && ['reply', 'review'].includes(operation)) return control
+      if (actor?.revision !== undefined && actor.revision !== control.revision) throw new Error('WORK_CONTROL_STALE')
+      if (actor?.kind === 'approval' && operation === 'reply') return control
+      if (actor?.kind === 'assistant') {
+        if (control.owner !== 'assistant' || actor.assistantConversationId !== control.assistantConversationId) throw new Error('WORK_CONTROL_REQUIRED')
+      } else if (control.owner !== 'user') throw new Error('WORK_CONTROL_REQUIRED')
+      return control
+    }
     throw new Error('Unexpected store method: ' + method)
   })
   const store = { call } as LocalHost['conversationData']
@@ -126,6 +140,7 @@ describe('CLI notification bridge without a server or socket', () => {
     // Retain a batch fetched before the handover, then apply it afterwards.
     const staleBatch = await server.cliNotices.sync()
     await server.resumeConversationRun(f.run.conversationId)
+    expect(f.store.call).toHaveBeenCalledWith('checkWorkControl', f.run.conversationId, { kind: 'user' }, 'resume')
     expect(await server.cliNotices.snapshot(f.run.id)).toBeUndefined()
     const old = f.values.get(`cli-notice:${f.run.id}`)
     expect(old).toMatchObject({ supersededBy: 'h5', snapshot: { state: 'interrupted' } })
