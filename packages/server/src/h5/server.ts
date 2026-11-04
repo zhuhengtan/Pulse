@@ -202,6 +202,9 @@ export class H5Server {
   private updateAttempt: Promise<void> | undefined
   private updateRecovery: Promise<void> | undefined
   private readonly updateSuspendedRuns = new Set<string>()
+  private readonly retiredHandles = new WeakSet<RunHandle>()
+  private readonly retireRun = new WeakMap<RunHandle, () => void>()
+  private readonly retiredConsumers = new WeakMap<RunHandle, Promise<void>>()
   get restartingForUpdate(): boolean { return this.updateSuspendedRuns.size > 0 }
   private updateMessages = (message: unknown) => { if ((message as { type?: string })?.type === 'update-resume') { this.updateTransition = false; void this.resumeUpdatedRuns() } }
   private stopPluginRecovery: (() => void) | undefined
@@ -1047,9 +1050,29 @@ export class H5Server {
       await this.host.conversationData.call('acquireUpdateLease', Number(process.env.PULSE_UPDATE_OWNER), process.env.PULSE_UPDATE_TOKEN)
       process.send({ type: 'update-ready' })
     } catch (error) {
-      this.maintenance = this.restartingForUpdate; this.updateTransition = false
-      await this.updates.recordBlocked([error instanceof Error ? error.message : 'UPDATE_DATA_BUSY'])
-      if (!this.maintenance) void this.pumpAssistantInbox()
+      const message = error instanceof Error ? error.message : 'UPDATE_DATA_BUSY'
+      const suspended = [...this.updateSuspendedRuns]
+      this.updateTransition = false
+      if (suspended.length) {
+        try {
+          await this.updates.abortPendingApply(message)
+          for (const runId of suspended) {
+            const handle = this.activeRuns.get(runId)
+            if (handle) { this.retiredHandles.add(handle); this.retireRun.get(handle)?.() }
+            const conversationId = handle?.conversationId ?? this.runConversations.get(runId)
+            if (handle) await this.retiredConsumers.get(handle)?.catch(() => undefined)
+            if (conversationId) await this.host.releaseCheckpointedRun(conversationId, runId)
+          }
+        } finally {
+          this.updateSuspendedRuns.clear()
+          this.maintenance = false
+        }
+        await this.resumeUpdatedRuns()
+      } else {
+        this.maintenance = false
+        await this.updates.recordBlocked([message])
+        if (!this.stopping) void this.pumpAssistantInbox()
+      }
     }
   }
 
@@ -1097,7 +1120,11 @@ export class H5Server {
       if (!journal) return
       const state = await readState(this.updates.root, this.dataDir)
       const selected = state.active.backend ? releaseId(state.active.backend.manifest) : undefined
-      if (!(selected === journal.targetBackend && this.updates.options.backendVersion === journal.toVersion) && !(state.phase === 'failed' && this.updates.options.backendVersion === journal.fromVersion)) return
+      const version = this.updates.options.backendVersion
+      const installedTarget = selected === journal.targetBackend && version === journal.toVersion
+      const recoverOriginal = !installedTarget && version === journal.fromVersion && selected !== journal.targetBackend && (state.phase === 'failed' || state.phase === 'waiting')
+      if (!installedTarget && !recoverOriginal) return
+      if (recoverOriginal && (state.pending || state.phase === 'waiting')) await this.updates.abortPendingApply(state.error ?? 'UPDATE_ABORTED_BEFORE_INSTALL')
       for (const item of journal.runs.filter(run => ['pending', 'resuming'].includes(run.status))) {
         try {
           const conversation = await this.host.getConversation(item.conversationId)
@@ -2776,22 +2803,33 @@ export class H5Server {
   }
 
   private consumeRun(runId: string, handle: RunHandle): Promise<void> {
-    const consuming = this.consumeRunEvents(runId, handle)
+    let retire!: () => void
+    const retired = new Promise<void>(resolve => { retire = resolve })
+    this.retireRun.set(handle, retire)
+    const consuming = this.consumeRunEvents(runId, handle, retired)
+    this.retiredConsumers.set(handle, consuming)
     this.runConsumers.add(consuming); this.runConsumerRuns.set(consuming, runId)
     void consuming.finally(() => { this.runConsumers.delete(consuming); this.runConsumerRuns.delete(consuming) }).catch(() => undefined)
     return consuming
   }
 
-  private async consumeRunEvents(runId: string, handle: RunHandle): Promise<void> {
+  private async consumeRunEvents(runId: string, handle: RunHandle, retired: Promise<void>): Promise<void> {
     let outcome: Awaited<ReturnType<RunHandle['outcome']>> | undefined
     try {
-      for await (const event of handle.events) await this.publish(runId, event)
+      const iterator = handle.events[Symbol.asyncIterator]()
+      while (!this.retiredHandles.has(handle)) {
+        const next = await Promise.race([iterator.next().then(result => ({ result })), retired.then(() => ({ retired: true as const }))])
+        if ('retired' in next || this.retiredHandles.has(handle)) return
+        if (next.result.done) break
+        await this.publish(runId, next.result.value)
+      }
+      if (this.retiredHandles.has(handle)) return
       outcome = await handle.outcome()
     } catch (error) {
       if (!this.updateSuspendedRuns.has(runId)) process.stderr.write(`[pulse] run stream failed: ${String(error).slice(0, 180)}\n`)
     } finally {
       try {
-      if (this.updateSuspendedRuns.has(runId)) return
+      if (this.updateSuspendedRuns.has(runId) || this.retiredHandles.has(handle)) return
       const receipt = this.assistantInbox.receiptByRun(runId)
       if (receipt) await this.assistantInbox.update(runId, outcome?.status === 'succeeded' ? 'completed' : outcome?.status === 'cancelled' ? 'failed' : 'failed', outcome?.status === 'cancelled' ? '回复已停止' : outcome?.status === 'failed' ? '回复失败' : outcome ? undefined : '回复状态未能确认').catch(() => undefined)
       const conversationId = this.runConversations.get(runId)
@@ -2823,6 +2861,7 @@ export class H5Server {
         process.stderr.write(`[pulse] run finalization failed: ${error instanceof Error ? error.message.slice(0, 180) : 'unknown'}\n`)
         this.pushEvent(runId, { type: 'error', runId, seq: (this.runEventBuffers.get(runId)?.at(-1)?.seq ?? 0) + 0.5, data: { message: '工作收尾未完成，请检查运行记录。' } })
       } finally {
+      if (this.retiredHandles.has(handle)) { this.inhibitor.release(); return }
       this.assistantPendingRuns.delete(runId)
       this.finishStream(runId)
       this.inhibitor.release()

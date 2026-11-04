@@ -4799,6 +4799,27 @@ export class LocalHost {
       yield { schemaVersion: 1, type: 'error', conversationId, runId, seq: seq + 1, data: String(error) }
     }
   }
+  /** Drop a sealed in-memory run after its restart checkpoint. The snapshot and active marker stay for recovery. */
+  async releaseCheckpointedRun(conversationId: string, runId: string): Promise<void> {
+    const active = this.active.get(runId)
+    if (active) {
+      active.capabilityController.abort()
+      await this.hookServices.get(`${conversationId}:${runId}`)?.dispose().catch(() => undefined)
+      this.hookServices.delete(`${conversationId}:${runId}`)
+      await closeShellProcesses(this.runDir(conversationId, runId)).catch(() => undefined)
+      await active.capabilities.dispose().catch(() => undefined)
+      this.active.delete(runId)
+      this.planGates.delete(runId)
+      this.surfaceConversations.delete(runId)
+      await this.releaseConversationLock(conversationId)
+    }
+    const key = `${conversationId}:${runId}:${this.options.persistenceBackend ?? ''}`
+    const pending = this.persistenceCache.get(key)
+    if (!pending) return
+    this.persistenceCache.delete(key)
+    const backend = await pending.catch(() => undefined)
+    if (backend) { this.runBackends.delete(backend); await backend.close?.().catch(() => undefined) }
+  }
   async close(options?: { preserveHumanWaits?: boolean; preserveRuns?: boolean }): Promise<void> {
     await Promise.all([...this.chatAcknowledgements.values()].map(stop => stop())); this.chatAcknowledgements.clear()
     await this.automationBroker.close()

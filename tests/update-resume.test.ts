@@ -140,3 +140,154 @@ it('joins an assistant launch before collecting update checkpoints and keeps lat
     expect((server as any).assistantInbox.list().find((message: any) => message.messageId === 'update-later').state).toBe('queued')
   } finally { release(); end(); await saving?.catch(() => undefined); await server.stop(); await host.close(); send.mockRestore(); await f.close(); await rm(f.root, { recursive: true, force: true }) }
 })
+
+it('resumes the original run when the install lease fails after a forced checkpoint', async () => {
+  const f = await updateFixture()
+  const nativeFetch = globalThis.fetch
+  vi.stubGlobal('fetch', async (input: any, init: any) => {
+    if (!String(input).startsWith('http://127.0.0.1:12345/')) return nativeFetch(input, init)
+    const written = await readFile(join(f.root, 'retained.txt'), 'utf8').then(value => value === 'one write', () => false)
+    const message = written ? { content: 'done' } : { content: '', tool_calls: [{ id: 'write', function: { name: 'fs_write', arguments: JSON.stringify({ path: 'retained.txt', content: 'one write' }) } }] }
+    return Response.json({ choices: [{ message, finish_reason: written ? 'stop' : 'tool_calls' }] })
+  })
+  const options = { cwd: f.root, dataDir: f.dataDir, taskController: false, jarvis: { enabled: false }, approvalMode: 'ask' as const, provider: { provider: 'openai-compatible' as const, baseURL: 'http://127.0.0.1:12345/v1', defaultModel: 'fixture' } }
+  const host = createLocalHost(options)
+  const server = new H5Server(host, { dataDir: f.dataDir, host: '127.0.0.1', port: 0, updates: { root: f.root, development: true, indexUrl: f.base + 'index.json', keys: f.keys } })
+  const previousSend = process.send, previousChild = process.env.PULSE_UPDATE_CHILD
+  const sent: unknown[] = []
+  try {
+    await f.add('9.9.9', 'backend', await serviceRuntime(join(f.root, 'lease-candidate'), '9.9.9')); f.index()
+    const started = await server.start(); server.updates.stop()
+    await server.updates.check(); await server.updates.download()
+    const conversation = await host.createConversation()
+    const handle = await host.sendMessage(conversation.id, { text: 'Write retained.txt after approval' })
+    ;(server as any).attachRun(handle)
+    await vi.waitFor(async () => expect((await handle.pendingInteractions()).length).toBe(1))
+    await server.updates.requestApply(false, true)
+    const call = host.conversationData.call.bind(host.conversationData)
+    vi.spyOn(host.conversationData, 'call').mockImplementation((async (method: string, ...args: unknown[]) => {
+      if (method === 'acquireUpdateLease') throw new Error('UPDATE_OTHER_DATA_CLIENTS')
+      return call(method, ...args)
+    }) as typeof host.conversationData.call)
+    process.env.PULSE_UPDATE_CHILD = '1'
+    process.send = ((message: unknown) => { sent.push(message); return true }) as NonNullable<typeof process.send>
+    await (server as any).tryApplyUpdate()
+    const state = await readState(f.root, f.dataDir)
+    expect(state.pending).toBe(false)
+    expect(state.force).toBeUndefined()
+    expect(state.phase).toBe('failed')
+    expect(state.error).toContain('UPDATE_OTHER_DATA_CLIENTS')
+    expect(state.lastFailure?.code).toContain('UPDATE_OTHER_DATA_CLIENTS')
+    expect(state.staged?.backend).toBeTruthy()
+    expect(sent).toEqual([])
+    expect((await readUpdateResume(f.dataDir))?.runs.map(run => run.status)).toEqual(['resumed'])
+    const resumed = (server as any).activeRuns.get(handle.id)
+    const pending = await resumed.pendingInteractions()
+    expect(pending).toHaveLength(1)
+    await expect(readFile(join(f.root, 'retained.txt'), 'utf8')).rejects.toThrow()
+    const status = await fetch(`http://127.0.0.1:${started.port}/api/conversations`)
+    expect(status.status).not.toBe(503)
+    await resumed.reply(pending[0]!.items[0]!.effectId, { approved: true })
+    await resumed.outcome()
+    expect(await readFile(join(f.root, 'retained.txt'), 'utf8')).toBe('one write')
+    const snapshot = JSON.parse(await readFile(join(f.dataDir, 'conversations', conversation.id, 'runs', handle.id, 'runtime.json'), 'utf8')).state.state
+    expect(snapshot.effects.filter(([, effect]: any) => effect.input?.name === 'fs.write')).toHaveLength(1)
+  } finally {
+    if (previousSend) process.send = previousSend
+    else delete (process as { send?: unknown }).send
+    if (previousChild === undefined) delete process.env.PULSE_UPDATE_CHILD
+    else process.env.PULSE_UPDATE_CHILD = previousChild
+    await server.stop(); await host.close(); await f.close(); await rm(f.root, { recursive: true, force: true }); vi.unstubAllGlobals()
+  }
+}, 30000)
+
+it('recovers a waiting journal when the original version starts again', async () => {
+  const f = await updateFixture()
+  const nativeFetch = globalThis.fetch
+  vi.stubGlobal('fetch', async (input: any, init: any) => {
+    if (!String(input).startsWith('http://127.0.0.1:12345/')) return nativeFetch(input, init)
+    return Response.json({ choices: [{ message: { content: '', tool_calls: [{ id: 'write', function: { name: 'fs_write', arguments: JSON.stringify({ path: 'retained.txt', content: 'one write' }) } }] }, finish_reason: 'tool_calls' }] })
+  })
+  const options = { cwd: f.root, dataDir: f.dataDir, taskController: false, jarvis: { enabled: false }, approvalMode: 'ask' as const, provider: { provider: 'openai-compatible' as const, baseURL: 'http://127.0.0.1:12345/v1', defaultModel: 'fixture' } }
+  const host = createLocalHost(options)
+  const updates = { root: f.root, development: true, indexUrl: f.base + 'index.json', keys: f.keys }
+  const server = new H5Server(host, { dataDir: f.dataDir, host: '127.0.0.1', port: 0, updates })
+  let started: H5Server | undefined
+  let startedHost: ReturnType<typeof createLocalHost> | undefined
+  try {
+    await f.add('9.9.9', 'backend', await serviceRuntime(join(f.root, 'waiting-candidate'), '9.9.9')); f.index()
+    await server.start(); server.updates.stop()
+    await server.updates.check(); await server.updates.download()
+    const conversation = await host.createConversation()
+    const handle = await host.sendMessage(conversation.id, { text: 'Write retained.txt after approval' })
+    ;(server as any).attachRun(handle)
+    await vi.waitFor(async () => expect((await handle.pendingInteractions()).length).toBe(1))
+    const pending = await handle.pendingInteractions()
+    await server.updates.requestApply(false, true)
+    await (server as any).checkpointUpdateRuns(await readState(f.root, f.dataDir))
+    await server.stop(); await host.close({ preserveRuns: true })
+    expect((await readState(f.root, f.dataDir)).phase).toBe('waiting')
+    startedHost = createLocalHost(options)
+    await startedHost.init()
+    started = new H5Server(startedHost, { dataDir: f.dataDir, host: '127.0.0.1', port: 0, updates })
+    const port = (await started.start()).port; started.updates.stop()
+    expect((await readUpdateResume(f.dataDir))?.runs.map(run => run.status)).toEqual(['resumed'])
+    const recovered = await readState(f.root, f.dataDir)
+    expect(recovered.phase).toBe('failed')
+    expect(recovered.pending).toBe(false)
+    expect(recovered.error).toBe('UPDATE_ABORTED_BEFORE_INSTALL')
+    const resumed = (started as any).activeRuns.get(handle.id)
+    expect(await resumed.pendingInteractions()).toMatchObject([{ groupId: pending[0]!.groupId }])
+    await expect(readFile(join(f.root, 'retained.txt'), 'utf8')).rejects.toThrow()
+    expect((await fetch(`http://127.0.0.1:${port}/api/conversations`)).status).not.toBe(503)
+  } finally {
+    await started?.stop(); await startedHost?.close(); await server.stop(); await host.close(); await f.close(); await rm(f.root, { recursive: true, force: true }); vi.unstubAllGlobals()
+  }
+}, 30000)
+
+it('keeps a waiting journal suspended during maintenance and resumes it from the coordinator message', async () => {
+  const f = await updateFixture()
+  const nativeFetch = globalThis.fetch
+  vi.stubGlobal('fetch', async (input: any, init: any) => {
+    if (!String(input).startsWith('http://127.0.0.1:12345/')) return nativeFetch(input, init)
+    return Response.json({ choices: [{ message: { content: '', tool_calls: [{ id: 'write', function: { name: 'fs_write', arguments: JSON.stringify({ path: 'retained.txt', content: 'one write' }) } }] }, finish_reason: 'tool_calls' }] })
+  })
+  const options = { cwd: f.root, dataDir: f.dataDir, taskController: false, jarvis: { enabled: false }, approvalMode: 'ask' as const, provider: { provider: 'openai-compatible' as const, baseURL: 'http://127.0.0.1:12345/v1', defaultModel: 'fixture' } }
+  const host = createLocalHost(options)
+  const updates = { root: f.root, development: true, indexUrl: f.base + 'index.json', keys: f.keys }
+  const server = new H5Server(host, { dataDir: f.dataDir, host: '127.0.0.1', port: 0, updates })
+  let maintained: H5Server | undefined, maintainedHost: ReturnType<typeof createLocalHost> | undefined
+  const previousMaintenance = process.env.PULSE_UPDATE_MAINTENANCE
+  try {
+    await f.add('9.9.9', 'backend', await serviceRuntime(join(f.root, 'ipc-candidate'), '9.9.9')); f.index()
+    await server.start(); server.updates.stop()
+    await server.updates.check(); await server.updates.download()
+    const conversation = await host.createConversation()
+    const handle = await host.sendMessage(conversation.id, { text: 'Write retained.txt after approval' })
+    ;(server as any).attachRun(handle)
+    await vi.waitFor(async () => expect((await handle.pendingInteractions()).length).toBe(1))
+    await server.updates.requestApply(false, true)
+    await (server as any).checkpointUpdateRuns(await readState(f.root, f.dataDir))
+    await server.stop(); await host.close({ preserveRuns: true })
+    process.env.PULSE_UPDATE_MAINTENANCE = '1'
+    maintainedHost = createLocalHost(options)
+    await maintainedHost.init()
+    maintained = new H5Server(maintainedHost, { dataDir: f.dataDir, host: '127.0.0.1', port: 0, updates })
+    delete process.env.PULSE_UPDATE_MAINTENANCE
+    const port = (await maintained.start()).port; maintained.updates.stop()
+    expect((await readUpdateResume(f.dataDir))?.runs[0]?.status).toBe('pending')
+    expect((await readState(f.root, f.dataDir)).phase).toBe('waiting')
+    ;(maintained as any).updateMessages({ type: 'update-resume' })
+    await vi.waitFor(async () => expect((await readUpdateResume(f.dataDir))?.runs[0]?.status).toBe('resumed'))
+    const recovered = await readState(f.root, f.dataDir)
+    expect(recovered.phase).toBe('failed')
+    expect(recovered.pending).toBe(false)
+    expect(await (maintained as any).activeRuns.get(handle.id).pendingInteractions()).toHaveLength(1)
+    await expect(readFile(join(f.root, 'retained.txt'), 'utf8')).rejects.toThrow()
+    expect((await fetch(`http://127.0.0.1:${port}/api/conversations`)).status).not.toBe(503)
+  } finally {
+    if (previousMaintenance === undefined) delete process.env.PULSE_UPDATE_MAINTENANCE
+    else process.env.PULSE_UPDATE_MAINTENANCE = previousMaintenance
+    await maintained?.stop(); await maintainedHost?.close(); await server.stop(); await host.close(); await f.close(); await rm(f.root, { recursive: true, force: true }); vi.unstubAllGlobals()
+  }
+}, 30000)

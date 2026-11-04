@@ -165,6 +165,19 @@ export class UpdateManager {
       state.pending = true; state.force = force; state.phase = 'waiting'
     })
   }
+  /** Installation never started. Keep the staged package, but stop retrying and make the failure visible. */
+  async abortPendingApply(reason: string): Promise<void> {
+    const code = reason.slice(0, 300) || 'UPDATE_ABORTED_BEFORE_INSTALL'
+    await this.mutate(async state => {
+      if (!state.pending && state.phase !== 'waiting') return
+      state.pending = false
+      delete state.force
+      state.phase = 'failed'
+      state.error = code
+      state.blocked = [code]
+      state.lastFailure = { version: state.staged?.backend?.manifest.version ?? state.active.backend?.manifest.version ?? 'bundled', code, at: new Date().toISOString() }
+    })
+  }
   async recordBlocked(reasons: string[]): Promise<void> {
     const state = await readState(this.root, this.options.dataDir)
     if (state.pending && JSON.stringify(state.blocked) !== JSON.stringify(reasons)) await this.mutate(async state => { state.blocked = reasons })
