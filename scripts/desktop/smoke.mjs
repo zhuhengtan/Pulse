@@ -1,4 +1,4 @@
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -65,17 +65,45 @@ try {
     await page.waitForFunction(() => typeof window.pulseDesktop?.events === 'function', undefined, { timeout: 10000 });
     await page.evaluate(() => {
         window.__pulseTextRuns = [];
-        window.pulseDesktop.events(({ event }) => { if (event.type === 'text') window.__pulseTextRuns.push(event.runId); });
+        window.__pulseRunEvents = [];
+        window.pulseDesktop.events(({ event }) => {
+            if (event.type === 'text') window.__pulseTextRuns.push(event.runId);
+            if (event.type === 'complete' || event.type === 'run_finished') window.__pulseRunEvents.push({ type: event.type, runId: event.runId, status: event.data && event.data.status });
+        });
     });
+    // Chat hides its run trace. Success is the same run's complete/succeeded event,
+    // the following run_finished, and the persisted outcome. Work still shows the trace.
+    const settledRun = async (previousTextEvents) => {
+        const handle = await page.waitForFunction(previous => {
+            const runId = window.__pulseTextRuns[previous];
+            if (!runId) return false;
+            const events = window.__pulseRunEvents.filter(item => item.runId === runId);
+            const succeeded = events.some(item => item.type === 'complete' && item.status === 'succeeded');
+            const finished = events.some(item => item.type === 'run_finished');
+            return succeeded && finished ? runId : false;
+        }, previousTextEvents, { timeout: 10000 });
+        return handle.jsonValue();
+    };
+    const assertPersistedSuccess = async (conversationId, runId) => {
+        const outcome = JSON.parse(await readFile(join(directory, 'conversations', conversationId, 'runs', runId, 'outcome.json'), 'utf8'));
+        if (outcome.status !== 'succeeded') throw new Error(`RUN_NOT_PERSISTED:${outcome.status}`);
+        const saved = await host.getConversationMessages(conversationId);
+        if (saved.filter(message => message.role === 'assistant' && message.runId === runId && message.text === 'Desktop socket reply').length !== 1) throw new Error('PERSISTED_REPLY_COUNT');
+        return saved;
+    };
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.getByText('Local history 119', { exact: true }).waitFor({ timeout: 20000 });
     if (await page.locator('.message').count() > 60)
         throw new Error('HISTORY_NOT_PAGINATED');
+    const chatEvents = await page.evaluate(() => window.__pulseTextRuns.length);
     await page.locator('[contenteditable=true]').fill('Desktop socket message');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await page.getByText('Desktop socket reply', { exact: true }).waitFor({ timeout: 10000 });
-    await page.locator('.run-trace.outcome-succeeded').first().waitFor({ timeout: 10000 });
+    const chatRunId = await settledRun(chatEvents);
+    await assertPersistedSuccess(inbox.conversationId, chatRunId);
+    if (await page.locator('.run-trace').count() !== 0) throw new Error('CHAT_RUN_TRACE_VISIBLE');
+    if (await page.getByText('Desktop socket reply', { exact: true }).count() !== 1) throw new Error('DUPLICATE_SAVED_AND_STREAMED_REPLY');
     if (!reconciledReply) throw new Error('REPLY_RECONCILIATION_NOT_EXERCISED');
     await page.screenshot({ path: join(tmpdir(), 'pulse-desktop-chat.png') });
     await page.evaluate(id => { history.pushState(null, '', `/work/${id}`); dispatchEvent(new PopStateEvent('popstate')); }, work.id);
@@ -117,10 +145,13 @@ try {
     // Navigation is asynchronous: an editor from the previous conversation can
     // still be present until the target history and its draft finish loading.
     await page.getByRole('heading', { name: '我们要做什么？', exact: true }).waitFor({ timeout: 10000 });
+    const workEvents = await page.evaluate(() => window.__pulseTextRuns.length);
     await page.locator('[contenteditable=true]').fill('Show a short status');
     await page.getByRole('button', { name: '发送', exact: true }).click();
     await page.getByText('Desktop socket reply', { exact: true }).waitFor({ timeout: 10000 });
+    const workRunId = await settledRun(workEvents);
     await page.locator('.run-trace.outcome-succeeded').first().waitFor({ timeout: 10000 });
+    await assertPersistedSuccess(execution.id, workRunId);
     const saved = await host.getConversationMessages(execution.id);
     if (!saved.some(message => message.role === 'user' && message.text === 'Show a short status') || !saved.some(message => message.role === 'assistant'))
         throw new Error('DESKTOP_WORK_NOT_PERSISTED');
@@ -133,7 +164,9 @@ try {
     desktop = await _electron.launch({ executablePath: process.env.PULSE_DESKTOP_EXECUTABLE ?? electronPath, args: process.env.PULSE_DESKTOP_EXECUTABLE ? [] : [fileURLToPath(new URL('../../packages/desktop', import.meta.url))], env, timeout: 20000 });
     page = await desktop.firstWindow();
     await page.getByText('Desktop socket reply', { exact: true }).waitFor({ timeout: 10000 });
-    await page.locator('.run-trace.outcome-succeeded').first().waitFor({ timeout: 10000 });
+    if (await page.getByText('Desktop socket reply', { exact: true }).count() !== 1) throw new Error('REOPENED_CHAT_REPLY_DUPLICATED');
+    if ((await host.getConversationMessages(inbox.conversationId)).filter(message => message.role === 'assistant' && message.runId === chatRunId && message.text === 'Desktop socket reply').length !== 1) throw new Error('REOPENED_CHAT_REPLY_DUPLICATED');
+    if (await page.locator('.run-trace').count() !== 0) throw new Error('CHAT_RUN_TRACE_VISIBLE');
     await page.evaluate(id => { history.pushState(null, '', `/work/${id}`); dispatchEvent(new PopStateEvent('popstate')); }, work.id);
     await page.getByText('Work history 9999', { exact: true }).waitFor({ timeout: 10000 });
     await server.stop();

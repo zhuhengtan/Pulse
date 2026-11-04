@@ -58,6 +58,32 @@ jobs:
         run: node scripts/desktop/runtime-smoke.mjs
       - name: Verify storage and chat protocol
         run: pnpm exec vitest run tests/conversation-data.test.ts tests/data-migration.test.ts tests/chat-websocket.test.ts
+      - name: Load maintained desktop acceptance script
+        if: github.event_name == 'workflow_dispatch' && startsWith(inputs.ref || '', 'refs/tags/shell-v')
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-controller
+          sparse-checkout: scripts/desktop/smoke.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Use maintained desktop acceptance script without changing release packages
+        if: github.event_name == 'workflow_dispatch' && startsWith(inputs.ref || '', 'refs/tags/shell-v')
+        shell: bash
+        env:
+          ACCEPTANCE_SHA: ${{ github.sha }}
+          TAGGED_REF: ${{ inputs.ref }}
+        run: |
+          case "$ACCEPTANCE_SHA" in
+            *[!0-9a-f]*|'') echo "ACCEPTANCE_SHA_NOT_EXACT" >&2; exit 1 ;;
+          esac
+          test "${#ACCEPTANCE_SHA}" -eq 40
+          test "$(git -C .release-controller rev-parse HEAD)" = "$ACCEPTANCE_SHA"
+          tagged_head="$(git rev-parse "$TAGGED_REF^{commit}")"
+          test "$(git rev-parse HEAD)" = "$tagged_head"
+          cp .release-controller/scripts/desktop/smoke.mjs scripts/desktop/smoke.mjs
+          test "$(git rev-parse HEAD)" = "$tagged_head"
+          git diff --exit-code -- packages
       - name: Native desktop chat smoke
         if: runner.os != 'Linux'
         run: pnpm desktop:app:smoke
