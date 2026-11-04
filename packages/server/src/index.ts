@@ -2662,7 +2662,12 @@ export class LocalHost {
     if (selection) {
       if (selection.tools === 'unsupported') throw new Error('MODEL_AGENT_TOOLS_UNSUPPORTED')
       this.setProvider(selection.provider, selection.model)
-      if (this.options.provider) { if (selection.remote) this.options.provider.remote = true; else delete this.options.provider.remote }
+      if (this.options.provider) {
+        if (selection.remote) this.options.provider.remote = true
+        else delete this.options.provider.remote
+        if (selection.maxContextTokens !== undefined) this.options.provider.maxContextTokens = selection.maxContextTokens
+        if (selection.maxOutputTokens !== undefined) this.options.provider.maxOutputTokens = selection.maxOutputTokens
+      }
       this.activeModelName = normalized
       return
     }

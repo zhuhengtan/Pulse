@@ -26,6 +26,10 @@
     "./run-presentation": {
       "types": "./dist/run-presentation.d.ts",
       "import": "./dist/run-presentation.js"
+    },
+    "./model-settings": {
+      "types": "./dist/model-settings.d.ts",
+      "import": "./dist/model-settings.js"
     }
   },
   "main": "dist/index.js",

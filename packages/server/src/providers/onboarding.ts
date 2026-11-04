@@ -1,3 +1,4 @@
+import { contextSource } from '../model-settings.js'
 import { createHash } from 'node:crypto'
 import { createProviderAdapter } from '@hunterzhu/pulse-adapters'
 import type { JsonValue, LLMRequestProjection, ProviderHistoryMessage } from '@hunterzhu/pulse-runtime'
@@ -13,6 +14,7 @@ export function providerErrorCode(error: unknown): string {
   const code = object(error).code
   if (typeof code === 'string' && /^(?:PROVIDER|INVALID_TOOL|NETWORK|HTTP|ECONN|ENOTFOUND|ETIMEDOUT)[A-Z0-9_]*$/.test(code)) return code
   const message = error instanceof Error ? error.message : ''
+  if (/^MODEL_(?:TOKEN_LIMIT_INVALID|CONTEXT_OUTPUT_CONFLICT|CONTEXT_SOURCE_INVALID):/.test(message)) return message
   return /^(?:PROVIDER|CONFIG|MODEL)_[A-Z0-9_]+$/.test(message) ? message : 'PROVIDER_REQUEST_FAILED'
 }
 export function normalizeDiscoveredModel(raw: unknown): DiscoveredModel | undefined {
@@ -180,13 +182,14 @@ export function mergeDiscoveredModels(existing: Record<string, ModelDefinition>,
     const priorId = Object.keys(merged).find(id => merged[id]!.modelCode === model.modelCode)
     const prior = priorId ? merged[priorId] : undefined
     const id = priorId ?? model.modelCode
-    const next: ModelDefinition = { ...model, ...prior, discovery: model, ...(verification?.modelCode === model.modelCode ? { verification: { ...verification, checkedAt: new Date().toISOString() } } : {}) }
+    const next: ModelDefinition = { ...model, ...prior, maxContextTokensSource: prior ? contextSource(prior) : 'discovery', discovery: model, ...(verification?.modelCode === model.modelCode ? { verification: { ...verification, checkedAt: new Date().toISOString() } } : {}) }
     if (prior?.discovery) for (const key of ['displayName', 'purposes', 'maxContextTokens', 'maxOutputTokens', 'imageInput', 'tools', 'structuredOutput'] as const) {
-      if (prior[key] === prior.discovery[key]) {
+      if (key === 'maxContextTokens' ? contextSource(prior) === 'discovery' : prior[key] === prior.discovery[key]) {
         if (model[key] === undefined) delete next[key]
         else Object.assign(next, { [key]: model[key] })
       }
     }
+    if (prior?.maxContextTokens === undefined) next.maxContextTokensSource = 'discovery'
     if (verification?.modelCode === model.modelCode) {
       if (verification.tools.status === 'passed') next.tools = 'supported'
       if (verification.structuredOutput.status === 'passed' && next.structuredOutput !== 'unsupported') next.structuredOutput = 'supported'

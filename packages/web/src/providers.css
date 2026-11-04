@@ -22,3 +22,8 @@
 .provider-wizard-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 22px; border-top: 1px solid var(--line); padding: 14px 0 0; position: sticky; bottom: 0; background: var(--panel); z-index: 1; }
 .provider-wizard-actions > span { margin-right: auto; opacity: .65; }
 @media (max-width: 600px) { .provider-model-toolbar { flex-direction: column; } .provider-model-list li { grid-template-columns: minmax(0, 1fr); } .provider-model-list small { grid-column: 1; grid-row: auto; } }
+.context-presets { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
+.context-presets .pulse-button { font-size:12px; min-height:26px; padding:2px 8px; }
+.context-length-control .number-control { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.provider-model-context { grid-column:1 / -1; }
+.provider-model-context > summary { cursor:pointer; font-size:12px; }

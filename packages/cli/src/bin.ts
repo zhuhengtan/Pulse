@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { resolveContextTokens } from '@hunterzhu/pulse-server/model-settings'
 import { runHooksCommand } from './hooks.js'
 import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
@@ -252,7 +253,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
     const parsed = Number(value)
     return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
   }
-  const configuredContextTokens = parsePositiveInteger(contextTokens) ?? modelSelection.maxContextTokens ?? profile.maxContextTokens
+  const configuredContextTokens = parsePositiveInteger(contextTokens) ?? resolveContextTokens(modelSelection, profile)
   const configuredMaxOutputTokens = parsePositiveInteger(maxOutputTokens) ?? modelSelection.maxOutputTokens ?? profile.maxOutputTokens
   const configuredReasoningEffort = reasoningEffort === 'low' || reasoningEffort === 'medium' || reasoningEffort === 'high' ? reasoningEffort : modelSelection.reasoningEffort ?? profile.reasoningEffort
   const configuredToolChoice = profile.toolChoice
@@ -301,7 +302,7 @@ export async function hostOptions(parsed: Parsed): Promise<LocalHostOptions> {
       ...(model.imageInput === undefined ? {} : { imageInput: model.imageInput }),
       ...(model.tools === undefined ? {} : { tools: model.tools }),
       ...(model.structuredOutput === undefined ? {} : { structuredOutput: model.structuredOutput }),
-      ...(model.maxContextTokens === undefined ? {} : { maxContextTokens: model.maxContextTokens }),
+      maxContextTokens: resolveContextTokens(model, effectiveProviders[providerId]),
       ...(model.maxOutputTokens === undefined ? {} : { maxOutputTokens: model.maxOutputTokens }),
       ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
     }]))

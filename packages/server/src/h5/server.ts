@@ -1661,6 +1661,18 @@ export class H5Server {
             const providerId = input.providerId ?? `${input.presetId}-${randomUUID().slice(0, 8)}`
             const previous = current.providers?.[providerId]
             const provider = { ...previous, ...connection.provider, models: mergeDiscoveredModels(previous?.models ?? {}, models as NonNullable<typeof models[number]>[], input.modelCode ? onboarding.verification(connection.provider, connection.apiKey, input.modelCode) : undefined) }
+            for (const key of ['maxContextTokens', 'maxOutputTokens'] as const) if (Object.prototype.hasOwnProperty.call(body, key)) {
+              if (body[key] === null) delete provider[key]
+              else provider[key] = body[key] as number
+            }
+            for (const [code, override] of Object.entries(input.modelOverrides ?? {})) {
+              const model = Object.values(provider.models as Record<string, ModelDefinition>).find(item => item.modelCode === code)
+              if (!model || !override || typeof override !== 'object') throw new Error('PROVIDER_MODEL_OVERRIDE_INVALID')
+              if (override.maxContextTokens === null) { delete model.maxContextTokens; model.maxContextTokensSource = 'discovery' }
+              else if (override.maxContextTokens !== undefined) { model.maxContextTokens = override.maxContextTokens; model.maxContextTokensSource = 'manual' }
+              if (override.maxOutputTokens === null) delete model.maxOutputTokens
+              else if (override.maxOutputTokens !== undefined) model.maxOutputTokens = override.maxOutputTokens
+            }
             if (body.setDefault === true) {
               const selected = Object.entries(provider.models as Record<string, ModelDefinition>).find(([, value]) => value.modelCode === input.modelCode)
               if (!selected || selected[1].tools === 'unsupported' || selected[1].purposes && !selected[1].purposes.includes('chat')) throw new Error('PROVIDER_AGENT_MODEL_REQUIRED')

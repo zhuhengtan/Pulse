@@ -162,6 +162,27 @@ describe('provider management HTTP API', () => {
     const stale = await api.post('/api/providers/connect', input)
     expect(stale.status).toBe(409)
   })
+  it('persists context overrides through discovery refresh and supports explicit clearing', async () => {
+    const api = await management(), initial = await api.get()
+    const input = { presetId: 'minimax', connectionVariant: 'cn-api', apiKey: 'fixture-key', models: [{ modelCode: 'one', maxContextTokens: 128000 }], version: initial.version, maxContextTokens: 64000, modelOverrides: { one: { maxContextTokens: 128000 } } }
+    const first = await api.post('/api/providers/connect', input)
+    expect(first.status).toBe(200)
+    const saved = await first.json(), providerId = saved.providerId
+    const refresh = { presetId: input.presetId, connectionVariant: input.connectionVariant, providerId, models: [{ modelCode: 'one', maxContextTokens: 256000 }], version: saved.version }
+    const second = await api.post('/api/providers/connect', refresh)
+    expect(second.status).toBe(200)
+    const next = await second.json()
+    expect(next.config.providers[providerId]).toMatchObject({ maxContextTokens: 64000, models: { one: { maxContextTokens: 128000, maxContextTokensSource: 'manual', discovery: { maxContextTokens: 256000 } } } })
+    const cleared = await api.post('/api/providers/connect', { ...refresh, version: next.version, maxContextTokens: null, modelOverrides: { one: { maxContextTokens: null } } })
+    expect(cleared.status).toBe(200)
+    const reloaded = (await api.get()).config.providers[providerId]
+    expect(reloaded).not.toHaveProperty('maxContextTokens')
+    expect(reloaded.models.one).not.toHaveProperty('maxContextTokens')
+    expect(reloaded.models.one.discovery.maxContextTokens).toBe(256000)
+    const bad = await api.post('/api/providers/connect', { ...refresh, version: (await api.get()).version, maxContextTokens: 1000 })
+    expect(bad.status).toBe(400)
+    expect((await bad.json()).error).toContain('MODEL_CONTEXT_OUTPUT_CONFLICT')
+  })
   it('cleans newly written credentials on validation failure and preserves the config', async () => {
     const api = await management(), before = await api.get(), text = await readFile(api.path, 'utf8'); api.fail()
     const response = await api.post('/api/providers/connect', { presetId: 'minimax', connectionVariant: 'cn-api', apiKey: 'must-rollback', version: before.version, models: [{ modelCode: 'one' }] })

@@ -56,7 +56,7 @@ export function createHostModelRouting(options: HostModelRouteOptions): HostMode
       providers.set(selection.provider, adapter)
     }
     const isActive = displayName === options.activeModel && selection.provider === activeCode
-    const maxContextTokens = selection.maxContextTokens ?? profile.maxContextTokens ?? options.activeProvider.maxContextTokens ?? 32_000
+    const maxContextTokens = selection.maxContextTokens ?? profile.maxContextTokens ?? 32_000
     const maxOutputTokens = selection.maxOutputTokens ?? profile.maxOutputTokens ?? options.activeProvider.maxOutputTokens ?? 4_096
     const requestedReasoning = selection.reasoningEffort ?? profile.reasoningEffort ?? 'medium'
     candidates.push({

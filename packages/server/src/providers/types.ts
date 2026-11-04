@@ -40,6 +40,9 @@ export interface ProviderDiscovery {
   authenticated: boolean
 }
 export interface ProviderConnectionInput {
+  maxContextTokens?: number | null
+  maxOutputTokens?: number | null
+  modelOverrides?: Record<string, { maxContextTokens?: number | null; maxOutputTokens?: number | null }>
   remote?: boolean
   structuredOutput?: CapabilityStatus
   presetId: string

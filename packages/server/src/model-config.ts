@@ -1,3 +1,4 @@
+import { validateContextSettings } from './model-settings.js'
 export interface ModelDefinition {
   /** Missing means legacy chat model; input vision is a separate capability. */
   purposes?: Array<'chat' | 'image' | 'video' | 'speech' | 'music' | 'sound'> | undefined
@@ -9,6 +10,7 @@ export interface ModelDefinition {
   displayName?: string
   modelCode: string
   maxContextTokens?: number
+  maxContextTokensSource?: 'manual' | 'discovery'
   maxOutputTokens?: number
   imageInput?: 'supported' | 'unsupported' | 'unknown'
   reasoningEffort?: 'low' | 'medium' | 'high'
@@ -149,6 +151,9 @@ export function normalizeModelConfig<T extends Record<string, any>>(input: T): T
     delete feature.baseURL
   }
 
+  for (const [id, provider] of Object.entries(providers) as Array<[string, ProviderDefinition]>) {
+    validateContextSettings(provider, id)
+  }
   delete config.models
   return config as T
 }

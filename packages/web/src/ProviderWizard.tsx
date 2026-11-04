@@ -1,3 +1,6 @@
+import { ContextLengthControl } from './ContextLengthControl.js'
+import { manualContextTokens, resolveContextTokens } from '@hunterzhu/pulse-server/model-settings'
+import { InputNumber } from 'antd'
 import { useEffect, useMemo, useState } from 'react'
 import { Modal } from 'antd'
 import type { DiscoveredModel, ProviderDiscovery, ProviderPreset, ProviderProbe } from '@hunterzhu/pulse-server/protocol'
@@ -10,6 +13,7 @@ const statusLabels = { passed: '通过', failed: '失败', skipped: '未验证',
 export function providerFailure(error: unknown): string {
   const code = error instanceof ApiError ? String(error.detail ?? '') : ''
   if (error instanceof ApiError && error.status === 409) return '配置已被其他操作修改，请关闭向导并重新加载设置。'
+  if (/MODEL_(?:TOKEN_LIMIT_INVALID|CONTEXT_OUTPUT_CONFLICT)/.test(code)) return '上下文长度和输出上限必须为正整数，且上下文长度必须大于输出上限。'
   if (code.includes('401')) return 'Key 无效，请检查站点、套餐和密钥是否匹配。'
   if (code.includes('403')) return '当前 Key 没有访问权限，请检查账号和套餐。'
   if (code.includes('429')) return '服务商限流或额度不足，请稍后重试。'
@@ -29,6 +33,9 @@ export function ProviderWizard({ transport, version, config, providerId, onClose
   const [apiKey, setApiKey] = useState('')
   const [baseURL, setBaseURL] = useState<string>(existing?.baseURL ?? '')
   const [models, setModels] = useState<DiscoveredModel[]>(() => Object.values(existing?.models ?? {}).map((raw: any) => ({ modelCode: raw.modelCode, displayName: raw.displayName ?? raw.modelCode, imageInput: raw.imageInput ?? 'unknown', tools: raw.tools ?? 'unknown', structuredOutput: raw.structuredOutput ?? 'unknown', ...raw })))
+  const [defaultContext, setDefaultContext] = useState<number | undefined>(existing?.maxContextTokens)
+  const [defaultOutput, setDefaultOutput] = useState<number | undefined>(existing?.maxOutputTokens)
+  const [modelOverrides, setModelOverrides] = useState<Record<string, { maxContextTokens?: number | null; maxOutputTokens?: number | null }>>({})
   const [discovery, setDiscovery] = useState<ProviderDiscovery>()
   const [modelCode, setModelCode] = useState('')
   const [probe, setProbe] = useState<ProviderProbe>()
@@ -57,7 +64,16 @@ export function ProviderWizard({ transport, version, config, providerId, onClose
   const maxPage = Math.max(0, Math.ceil(filtered.length / 15) - 1)
   const currentPage = Math.min(page, maxPage)
   const input = () => ({ presetId, connectionVariant: variantId, ...(models.some(item => item.modelCode === modelCode && item.remote) ? { remote: true } : {}), ...(models.some(item => item.modelCode === modelCode && item.structuredOutput === 'unsupported') ? { structuredOutput: 'unsupported' } : {}), ...(providerId ? { providerId } : {}), ...(name.trim() ? { name: name.trim() } : {}), ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}), ...(editableEndpoint ? { baseURL } : {}), ...(modelCode ? { modelCode } : {}) })
-  const resetConnection = () => { setModels([]); setDiscovery(undefined); setProbe(undefined); setModelCode(''); setError(''); setPage(0) }
+  const existingModel = (item: DiscoveredModel) => (Object.values(existing?.models ?? {}) as Obj[]).find(raw => raw.modelCode === item.modelCode)
+  const modelContextValue = (item: DiscoveredModel) => {
+    const override = modelOverrides[item.modelCode]?.maxContextTokens
+    return override === undefined ? manualContextTokens(existingModel(item) ?? {}) : override ?? undefined
+  }
+  const modelOutputValue = (item: DiscoveredModel) => {
+    const override = modelOverrides[item.modelCode]?.maxOutputTokens
+    return override === undefined ? existingModel(item)?.maxOutputTokens ?? item.maxOutputTokens : override ?? undefined
+  }
+  const resetConnection = () => { setModels([]); setDiscovery(undefined); setProbe(undefined); setModelCode(''); setError(''); setPage(0); setModelOverrides({}) }
   const run = async (action: string, operation: () => Promise<void>) => { setBusy(action); setError(''); try { await operation() } catch (error) { setError(providerFailure(error)) } finally { setBusy('') } }
   const discover = () => run('discover', async () => {
     const result = await apiJson<ProviderDiscovery>(transport, '/api/providers/discover', jsonRequest('POST', input()))
@@ -66,7 +82,7 @@ export function ProviderWizard({ transport, version, config, providerId, onClose
   })
   const verify = () => run('probe', async () => { setProbe(undefined); setProbe(await apiJson<ProviderProbe>(transport, '/api/providers/probe', jsonRequest('POST', input()))) })
   const connect = () => run('connect', async () => {
-    const result = await apiJson<{ applied?: boolean; restartRequired?: string[] }>(transport, '/api/providers/connect', jsonRequest('POST', { ...input(), version, models, setDefault }))
+    const result = await apiJson<{ applied?: boolean; restartRequired?: string[] }>(transport, '/api/providers/connect', jsonRequest('POST', { ...input(), version, models, setDefault, maxContextTokens: defaultContext ?? null, maxOutputTokens: defaultOutput ?? null, modelOverrides: Object.fromEntries(Object.entries(modelOverrides).filter(([code]) => models.some(item => item.modelCode === code))) }))
     setApiKey(''); await onConnected(); onClose()
     window.dispatchEvent(new CustomEvent('pulse-toast', { detail: result.applied ? '服务商已接入，新任务可以使用。' : '接入配置已保存，重启后台后生效。' }))
   })
@@ -74,7 +90,7 @@ export function ProviderWizard({ transport, version, config, providerId, onClose
     <p>选择服务商，自动配置服务地址和模型。本机 Ollama 无需 Key。</p>
     {error && <div className="settings-alert" role="alert">{error}{!presets.length && <PulseButton onClick={() => setReload(value => value + 1)}>重新加载厂商</PulseButton>}</div>}
     <fieldset disabled={Boolean(busy)}>
-      {!providerId && <div className="provider-preset-grid">{(['official', 'aggregator', 'custom'] as const).map(category => <section key={category}><h3>{category === 'official' ? '官方厂商' : category === 'aggregator' ? '中间商' : '自定义'}</h3><div>{presets.filter(item => item.category === category).map(item => <PulseButton type="button" key={item.id} aria-pressed={item.id === presetId} className={item.id === presetId ? 'selected' : ''} onClick={() => { setPresetId(item.id); setVariantId(item.variants.find(value => value.available !== false)?.id ?? ''); setName(item.name); setApiKey(''); setBaseURL(item.variants.find(value => value.available !== false)?.baseURL ?? ''); resetConnection() }}>{item.name}</PulseButton>)}</div></section>)}</div>}
+      {!providerId && <div className="provider-preset-grid">{(['official', 'aggregator', 'custom'] as const).map(category => <section key={category}><h3>{category === 'official' ? '官方厂商' : category === 'aggregator' ? '中间商' : '自定义'}</h3><div>{presets.filter(item => item.category === category).map(item => <PulseButton type="button" key={item.id} aria-pressed={item.id === presetId} className={item.id === presetId ? 'selected' : ''} onClick={() => { setPresetId(item.id); setVariantId(item.variants.find(value => value.available !== false)?.id ?? ''); setName(item.name); setDefaultContext(undefined); setDefaultOutput(undefined); setModelOverrides({}); setApiKey(''); setBaseURL(item.variants.find(value => value.available !== false)?.baseURL ?? ''); resetConnection() }}>{item.name}</PulseButton>)}</div></section>)}</div>}
       {preset && <>
         <div className="field-grid">
           <label className="field-control"><span>接入名称</span><PulseInput aria-label="接入名称" value={name} maxLength={100} onChange={event => setName(event.target.value)} /></label>
@@ -82,6 +98,8 @@ export function ProviderWizard({ transport, version, config, providerId, onClose
           <label className="field-control" hidden={auth === 'none'}><span>API Key{auth === 'optional' && '（可选）'} {preset.keyURL && <a href={preset.keyURL} target="_blank" rel="noreferrer">获取 Key ↗</a>}</span><PulseInput aria-label="API Key" type="password" autoComplete="off" value={apiKey} placeholder={existing?.credentialRef || existing?.apiKeyEnv ? '留空继续使用已保存凭据' : auth === 'optional' ? '网关要求鉴权时填写' : '粘贴 API Key'} onChange={event => { setApiKey(event.target.value); setProbe(undefined); setDiscovery(undefined) }} /></label>
           <label className="field-control"><span>服务地址</span><PulseInput aria-label="服务地址" placeholder="https://ollama.example.com/v1" value={editableEndpoint ? baseURL : variant?.baseURL ?? ''} disabled={!editableEndpoint} onChange={event => { setBaseURL(event.target.value); resetConnection() }} /></label>
         </div>
+        <ContextLengthControl label="默认上下文长度" value={defaultContext} disabled={Boolean(busy)} onChange={setDefaultContext}/>
+        <label className="field-control"><span>默认输出上限</span><InputNumber<number> aria-label="默认输出上限" value={defaultOutput ?? null} placeholder="自动（4096）" min={1} precision={0} onChange={value => setDefaultOutput(value ?? undefined)}/></label>
         {preset.variants.some(item => item.available === false) && <p className="field-note">{preset.variants.filter(item => item.available === false).map(item => item.unavailableReason).join(' ')}</p>}
         <p className="field-note">{auth === 'none' ? '连接本机已运行的 Ollama，无需 Key。只读取已有模型，不自动下载模型。' : auth === 'optional' ? '填写远程 Ollama 地址；网关需要鉴权时再填写 Key。远程服务按云端模型处理。' : 'Key 保存在本机独立凭据文件，不写入配置 JSON。套餐验证失败时不会切换到按量计费接口。'}</p>
         <PulseButton type="button" className="settings-primary" disabled={!variant || variant.available === false || Boolean(busy) || keyMissing || endpointMissing} onClick={() => void discover()}>{busy === 'discover' ? '正在获取模型…' : '获取全部模型'}</PulseButton>
@@ -89,7 +107,7 @@ export function ProviderWizard({ transport, version, config, providerId, onClose
         <div className="provider-manual"><PulseInput aria-label="手动模型代码" value={manualModel} placeholder="需要时手动补充模型代码" onChange={event => setManualModel(event.target.value)} maxLength={250} /><PulseButton type="button" disabled={!manualModel.trim() || Boolean(busy)} onClick={() => { const code = manualModel.trim(); if (!models.some(item => item.modelCode === code)) setModels(items => [...items, { modelCode: code, displayName: code, tools: 'unknown', structuredOutput: 'unknown', imageInput: 'unknown' }]); setModelCode(code); setManualModel('') }}>添加模型</PulseButton></div>
         {models.length > 0 && <>
           <div className="provider-model-toolbar"><PulseInput aria-label="搜索接入模型" placeholder="搜索模型名称或代码" value={search} onChange={event => { setSearch(event.target.value); setPage(0) }} /><PulseSelect aria-label="筛选模型能力" value={capability} onChange={value => { setCapability(value); setPage(0) }}><option value="all">全部模型</option><option value="tools">支持工具</option><option value="vision">支持图像输入</option><option value="unknown">工具待验证</option></PulseSelect></div>
-          <ul className="provider-model-list">{filtered.slice(currentPage * 15, (currentPage + 1) * 15).map(item => <li key={item.modelCode}><strong>{item.displayName}</strong><code>{item.modelCode}</code><small>{item.purposes?.some(p => p !== 'chat') && !item.purposes.includes('chat') ? item.purposes.join(' / ') : item.tools === 'supported' ? '支持工具' : item.tools === 'unsupported' ? '仅聊天' : '工具待验证'} · {probe?.modelCode === item.modelCode ? '已检测，见下方结果' : '未验证'}</small></li>)}</ul>
+          <ul className="provider-model-list">{filtered.slice(currentPage * 15, (currentPage + 1) * 15).map(item => <li key={item.modelCode}><strong>{item.displayName}</strong><code>{item.modelCode}</code><small>{item.purposes?.some(p => p !== 'chat') && !item.purposes.includes('chat') ? item.purposes.join(' / ') : item.tools === 'supported' ? '支持工具' : item.tools === 'unsupported' ? '仅聊天' : '工具待验证'} · {probe?.modelCode === item.modelCode ? '已检测，见下方结果' : '未验证'}</small><details className="provider-model-context"><summary>上下文设置</summary><ContextLengthControl label={`上下文长度 · ${item.displayName}`} disabled={Boolean(busy)} value={modelContextValue(item)} automatic={resolveContextTokens({ discovery: (item as DiscoveredModel & { discovery?: DiscoveredModel }).discovery ?? item }, { maxContextTokens: defaultContext })} onChange={value => setModelOverrides(current => ({ ...current, [item.modelCode]: { ...current[item.modelCode], maxContextTokens: value ?? null } }))}/><label className="field-control"><span>输出上限</span><InputNumber<number> aria-label={`输出上限 · ${item.displayName}`} value={modelOutputValue(item) ?? null} placeholder="自动" min={1} precision={0} onChange={value => setModelOverrides(current => ({ ...current, [item.modelCode]: { ...current[item.modelCode], maxOutputTokens: value } }))}/></label></details></li>)}</ul>
           <div className="provider-pagination"><span>共 {filtered.length} 个 · 第 {currentPage + 1}/{maxPage + 1} 页</span><PulseButton type="button" disabled={currentPage === 0 || Boolean(busy)} onClick={() => setPage(currentPage - 1)}>上一页</PulseButton><PulseButton type="button" disabled={currentPage >= maxPage || Boolean(busy)} onClick={() => setPage(currentPage + 1)}>下一页</PulseButton></div>
           <label className="field-control"><span>测试模型{setDefault && ' / 默认模型'}</span><PulseSelect aria-label="测试模型" showSearch optionFilterProp="label" value={modelCode} disabled={Boolean(busy)} onChange={value => { setModelCode(value); setProbe(undefined) }}>{(setDefault ? eligible : models).map(item => <option key={item.modelCode} value={item.modelCode}>{item.displayName} · {item.modelCode}</option>)}</PulseSelect></label>
           <p className="field-note">{selectedMedia ? '媒体模型请保存后到“内置插件”试生成；此处只验证聊天模型。' : '只对所选模型执行最多三次低 Token 调用，可能产生少量费用；其他模型保持未验证。'}</p>
