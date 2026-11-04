@@ -40,12 +40,12 @@ describe('ensurePulseUserConfig', () => {
     const path = join(directory, 'config.json')
     await writeFile(path, JSON.stringify({ providers: { local: { provider: 'mock', models: {
       active: { modelCode: 'wire-active', maxContextTokens: 100000, maxOutputTokens: 64000, reasoningEffort: 'high' },
-      other: { modelCode: 'wire-other', maxOutputTokens: 32000, reasoningEffort: 'high' },
+      other: { modelCode: 'wire-other', maxContextTokens: 64000, maxOutputTokens: 32000, reasoningEffort: 'high' },
     } } }, activeModel: 'local/active' }))
     const options = await hostOptions(parse(['--config', path, '--context-tokens', '32000', '--max-output-tokens', '4096', '--reasoning-effort', 'low']))
     const routing = createHostModelRouting({ activeModel: options.activeModel!, activeProviderCode: options.activeProviderCode!, activeProvider: options.provider!, providerProfiles: options.providerProfiles!, providerModels: options.providerModels! })
-    expect(routing.candidates.find((c) => c.id === 'local/active')?.capabilities).toMatchObject({ maxContextTokens: 32000, maxOutputTokens: 4096, reasoning: 'low' })
-    expect(routing.candidates.find((c) => c.id === 'local/other')?.capabilities).toMatchObject({ maxOutputTokens: 32000, reasoning: 'high' })
+    expect(routing.candidates.find((c) => c.id === 'local/active')).toMatchObject({ reasoningEffort: 'low', capabilities: { maxContextTokens: 32000, maxOutputTokens: 4096, reasoning: 'high' } })
+    expect(routing.candidates.find((c) => c.id === 'local/other')).toMatchObject({ reasoningEffort: 'high', capabilities: { maxContextTokens: 64000, maxOutputTokens: 32000, reasoning: 'high' } })
   })
   it('overlays one explicit plugin without disabling another inherited plugin', () => {
     const merged = mergePulseConfigs([
@@ -139,7 +139,7 @@ describe('ensurePulseUserConfig', () => {
       expect(options.activeModel).toBe('deepseek/gpt5.6-b')
       expect(options.activeProviderCode).toBe('deepseek')
       expect(options.provider).toMatchObject({ provider: 'deepseek', defaultModel: 'deepseek-chat' })
-      expect(options.providerModels).toEqual({ 'deepseek/gpt5.6-b': { provider: 'deepseek', model: 'deepseek-chat' } })
+      expect(options.providerModels).toEqual({ 'deepseek/gpt5.6-b': { provider: 'deepseek', model: 'deepseek-chat', maxContextTokens: 32000 } })
       expect(options.taskRouting).toEqual({ plan: ['deepseek/gpt5.6-b'], verify: ['deepseek/gpt5.6-b'] })
       expect(options.maxModelCalls).toBe(48)
       expect(options).not.toHaveProperty('executionMode')
