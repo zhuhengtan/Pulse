@@ -564,11 +564,20 @@ export function buildTaskControllerProgram(options: TaskControllerProgramOptions
           else processes.delete(body.processId)
         }
         if (processes.size) {
-          const locals = ctx.lane.resume.locals as Record<string, JsonValue>, round = Number(locals.shellSettleRound ?? 0) + 1
+          const locals = ctx.lane.resume.locals as Record<string, JsonValue>, round = Number(locals.shellSettleRound ?? 0)
+          const shellSettleLimit = 2
+          if (round >= shellSettleLimit) {
+            const state = stateOf(ctx)
+            const task = state.tasks.find(item => item.id === (workerTaskId(ctx) ?? state.activeId))
+            if (task) task.evidenceRefs = [...new Set([...task.evidenceRefs, ...[...processes.values()].map(item => item.ref)])]
+            save(ctx, state)
+            return { actions: [], next: stageFailure(ctx, 'SHELL_STILL_RUNNING', 'Background command still running after bounded wait; retained evidence is not acceptance.'), locals }
+          }
+          const nextRound = round + 1
           return { actions: [{ type: 'submit_effects', effects: [...processes].map(([processId, receipt], index) => {
-            const key = `shell-settle:${round}:${index}`
+            const key = `shell-settle:${nextRound}:${index}`
             return { key, kind: 'tool', concurrencyClass: 'tool', derivedFrom: [receipt.ref], input: { name: 'shell.poll', arguments: { processId, offset: receipt.offset, waitMs: 30000 }, toolCallId: key } }
-          }), wait: { onUnsatisfied: 'resume_with_error' } }], next: 'shell-settle:collect', locals: { ...locals, shellSettleNext: step, shellSettleRound: round } }
+          }), wait: { onUnsatisfied: 'resume_with_error' } }], next: 'shell-settle:collect', locals: { ...locals, shellSettleNext: step, shellSettleRound: nextRound } }
         }
       }
       if (boundedTransitions && step === 'verify-stage') {

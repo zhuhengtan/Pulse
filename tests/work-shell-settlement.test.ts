@@ -85,3 +85,37 @@ it.each(['56', '57'] as const)('retains a background handle across a v%s replan 
   receipt(1, 'running', 'foreign-lane')
   expect(program.step({ lane, state: runtime.state, now: 0 }).next.step).not.toBe('shell-settle:collect')
 })
+
+it('stops a still-running background command after a bounded wait and leaves older programs unchanged', () => {
+  const program = buildTaskControllerProgram({ version: '57', system: 'fixture', toolNames: ['shell.start', 'shell.poll'], approvalMode: 'auto', maxTurns: 24 })
+  const controller = initialController(24)
+  const current = { id: 'check', kind: 'verify' as const, goal: 'Inspect current output', check: 'Read observed output', criterionIds: ['criterion-1'], dependsOn: [], status: 'verifying' as const, attempts: 1, evidenceRefs: ['result-1'] }
+  controller.activeId = current.id
+  controller.tasks = [current]
+  const runtime = new PulseRuntime(), { laneId, agentId } = runtime.createAgent({ goal: 'Inspect output', program, initialGlobal: { taskController: JSON.parse(JSON.stringify(controller)) } as any })
+  const lane = runtime.state.lanes.get(laneId)!, processId = 'b'.repeat(64)
+  lane.resume.step = 'verify-stage'
+  lane.resume.locals = { shellSettleRound: 2, shellSettleNext: 'verify-stage' }
+  const body = { processId, agentId, laneId, status: 'running', offset: 0, nextOffset: 8, output: 'still running' }
+  lane.visibleResultRefs?.add('result-1')
+  runtime.state.effects.set('effect-1', { id: 'effect-1', agentId, ownerLaneId: laneId, kind: 'tool', input: { name: 'shell.start' }, outcome: { status: 'succeeded', resultRef: 'result-1' } } as any)
+  runtime.state.results.set('result-1', { id: 'result-1', privacy: 'public', producer: { kind: 'effect', id: 'effect-1' }, derivedFrom: [], summary: summarizeShellProcess(body), value: body } as any)
+  const agent = runtime.state.agents.get(agentId)!
+  agent.globalVersions.set(agent.latestGlobalVersion, { taskController: JSON.parse(JSON.stringify(controller)) } as any)
+  const stopped = program.step({ lane, state: runtime.state, now: 0 })
+  expect(stopped.actions).toEqual([])
+  expect(stopped.next.step).toBe('dispatch')
+  const saved = (stopped.contextDelta?.ops ?? []).filter((item: { op?: string; path?: string[] }) => item.op === 'set' && item.path?.[0] === 'taskController').at(-1) as { value?: { tasks: Array<{ status: string; note?: string; evidenceRefs: string[] }> } } | undefined
+  expect(saved?.value?.tasks[0]?.status).toBe('blocked')
+  expect(saved?.value?.tasks[0]?.note).toContain('SHELL_STILL_RUNNING')
+  expect(saved?.value?.tasks[0]?.evidenceRefs).toContain('result-1')
+  const legacy = buildTaskControllerProgram({ version: '55', system: 'fixture', toolNames: ['shell.start', 'shell.poll'], approvalMode: 'auto', maxTurns: 24 })
+  const legacyRuntime = new PulseRuntime(), created = legacyRuntime.createAgent({ goal: 'Inspect output', program: legacy, initialGlobal: { taskController: JSON.parse(JSON.stringify(controller)) } as any })
+  const legacyLane = legacyRuntime.state.lanes.get(created.laneId)!
+  legacyLane.resume.step = 'verify-stage'
+  legacyLane.visibleResultRefs?.add('result-1')
+  legacyRuntime.state.effects.set('effect-1', runtime.state.effects.get('effect-1')!)
+  legacyRuntime.state.results.set('result-1', runtime.state.results.get('result-1')!)
+  legacyRuntime.state.agents.get(created.agentId)!.globalVersions.set(legacyRuntime.state.agents.get(created.agentId)!.latestGlobalVersion, { taskController: JSON.parse(JSON.stringify(controller)) } as any)
+  expect(legacy.step({ lane: legacyLane, state: legacyRuntime.state, now: 0 }).next.step).not.toBe('shell-settle:collect')
+})
